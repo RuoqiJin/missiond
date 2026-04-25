@@ -8,7 +8,7 @@
 
 (pillar flow
   :version "v0.7"
-  :status "phase-C recursive architecture contract 2026-04-25 — trigger/state → ordered cross-pillar stages → egress; directive/incident/methodology/capability-usage flows + project-root spawn cwd contract designed; F-intent-alignment-plan-execution-loop promoted to MissionD canonical unified entry pipeline (message → alignment → plan → execution → workflow, architecture-designed; manager surfaces partial; runner/distiller actors pending); F-workstation-dispatch-policy (resident-lisp / fresh-code-alignment / agent-team / spawn-over-prompt / project-root-cwd) operational-practice + architecture-designed, plan-runner auto-selection code-alignment pending"
+  :status "phase-C recursive architecture contract 2026-04-25 — trigger/state → ordered cross-pillar stages → egress; directive/incident/methodology/capability-usage flows + project-root spawn cwd contract designed; F-intent-alignment-plan-execution-loop unified entry pipeline manager + actor v0 已 code-aligned partial (directive-compiler v0 / plan-compiler v0 / plan-runner v0 internal mode + dispatch_strategy + evidence sidecar / workflow-distiller v0 / methodology compiler v0 deterministic); F-capability-usage-monitoring semantic evidence v1 已 code-aligned partial (5 sources + lisp hint merge candidate); F-workstation-dispatch-policy operational-practice + code-aligned partial (companion log meta dispatch_strategy 已落); 自动选路 / auto QuestionEvent gate / semantic compiler / ExecutionEvent dispatch metadata 仍 code-alignment pending"
   :predecessor "drafts/gptpro/intent-flow.lisp (179 行 starter) + v2/intent.lisp flow pillar 详细 catalog"
   :target-path ".missiond/v2/intent-flow.lisp"
 
@@ -862,28 +862,34 @@
 
     (flow F-capability-usage-monitoring
       :desc "tool / flow 调用热度监控 → 落灰/替代/合并候选 → 人工治理决策"
-      :status "code-aligned partial; mission_capability_usage snapshot/report/candidates/mark/ack + ObservabilityEvent emission implemented, event_log/workflow-stats/semantic-merge deferred"
+      :status "code-aligned partial — semantic evidence v1 已落地: 5 sources (conversation_tool_calls / board_tasks_flow_template / event_log_flow_events read-only probe / lisp_semantic_hints / review_sidecar) + merge-candidate 由 lisp 显式 hints (replacement / moved-to / preferred / supersedes / consolidated) 保守生成 + ObservabilityEvent emission; semantic merge 自动决策 / event_log 全量聚合写入 / workflow stats 仍 code-alignment pending"
       :triggers
         ["periodic daily/weekly monitor tick"
          "mission_capability_usage(action=snapshot|report|candidates|mark|ack)"
          "manual architecture cleanup review before removing/merging tools or flows"]
       :ingress
         (entry "monitor request with window={7d|30d|90d|all}, scope={tool|flow|both}, project_id?, include_protected?")
+      :implementation-targets
+        ["crates/missiond-mcp/src/tools/comm/capability_usage.rs (schema + replacement_target field)"
+         "crates/missiond-daemon/src/handlers/comm/capability_usage.rs (5-source coverage + HintIndex 解析 .missiond/v2/intent-{tools,flow,intent-layer}.lisp + probe_event_log_flows + ReviewState sidecar)"]
       (logic-core
         (step s1 "collect-tool-usage: read memory :: system-support :: capability-usage-read-model over conversation_tool_calls")
-        (step s2 "collect-flow-usage: implemented source is board_tasks.flow_template + YAML flow registry; event_log/workflow stats deferred")
+        (step s2 "collect-flow-usage: board_tasks.flow_template + YAML flow registry + event_log_flow_events read-only probe (board::task_created since 90d, payload.flow_template 抽取); workflow stats 仍 deferred")
         (step s3 "normalize-capabilities: map MCP registry ids, deprecated names, consolidated dispatchers, and tool-backed flow refs into canonical capability ids")
-        (step s4 "join-architecture-index: read intent-tools current/future registry and intent-flow tool-backed-flows-index to know declared purpose and replacement hints")
-        (step s5 "classify-usage: active / quiet / stale / never-used / protected / shadowed-by-better-capability / merge-candidate")
+        (step s4 "join-architecture-index: HintIndex 扫 intent-tools.lisp + intent-flow.lisp + intent-intent-layer.lisp, 解析 :replacement / :moved-to / :supersedes / :status \"deprecated-*\" / consolidated-keep")
+        (step s5 "classify-usage: active / quiet / stale / never-used / protected / shadowed-by-better-capability / merge-candidate (merge-candidate 仅在 hint token ∈ {deprecated, moved-to, replacement, supersedes} 且 target 解析为已注册 tool/flow 时给出; consolidated-keep token 显式压制 merge)")
         (step s6 "score-candidates: combine count, recency, success rate, criticality, age since introduction, and explicit replacement link")
         (step s7 "emit-review-report: produce evidence-first report; do not delete, hide, or mutate tools/flows")
         (step s8 "governance-decision: intent-layer may mark keep / consolidate / deprecate / remove-after-compat-window")
         (step s9 "follow-up-implementation: approved changes become Lisp edits first, then Forge/ClaudeCode code-alignment tasks"))
       :egress
-        (writes ["capability-usage-review.json sidecar for mark/ack" "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate" "future review note / board task"])
-        (reads ["conversation_tool_calls" "board_tasks.flow_template" "MCP tool registry" "YAML flow registry" "intent-tools registry" "intent-flow index"])
-        (returns "capability usage snapshot + candidate governance actions with evidence")
+        (writes [".missiond/v2/capability-usage-review.json sidecar (mark/ack/merge with replacement_target)" "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate" "future review note / board task"])
+        (reads ["conversation_tool_calls" "board_tasks.flow_template" "event_log (board::task_created)" "MCP tool registry" "YAML flow registry" "intent-tools/intent-flow/intent-intent-layer lisp hints"])
+        (returns "capability usage snapshot + candidate governance actions with evidence (sources[5])")
         (downstream ["intent-layer :: capability-evolution-governance" "tools :: mission_capability_usage" "memory :: capability-usage-read-model"]))
+      :pending ["semantic merge 自动决策 (即使 hint 完整, 也只产候选, 不动 registry)"
+                "workflow stats / success rate 进 read-model"
+                "event_log 之外的事件 source (DispatcherEvent / WorkerEvent / ExecutionEvent) 聚合"]
       :tools-backref ["mission_audit" "mission_timeline" "mission_codex_ops" "mission_capability_usage"])
 
     (flow F9-project-init
@@ -1008,7 +1014,7 @@
 
     (flow F-directive-plan-workflow-compile
       :desc "user utterance / directive request → directive record → approved plan → optional execution bridge → reusable workflow template"
-      :status "code-aligned partial; directive/plan/workflow MCP manager surfaces implemented, LLM compiler/distiller actors pending"
+      :status "code-aligned partial — manager surfaces implemented + directive-compiler actor v0 (compiler_mode=sonnet) + plan-compiler actor v0 (compiler_mode=sonnet) + plan-runner v0 (execute_mode=internal) + workflow-distiller actor v0 (distill_mode=sonnet) all code-aligned; 自动选 compiler/distiller mode + auto QuestionEvent gates 仍 code-alignment pending"
       :triggers
         ["mission_directive(action=compile|approve|list|get|archive|version_chain)"
          "mission_plan(action=compile|approve|mark|supersede|execute|record_evidence)"
@@ -1021,9 +1027,9 @@
             :at "intent-layer pillar :: directive-plan-workflow-chain"
             :action "collect utterance/system instruction/MCP request with project, conversation, constraints, and references")
          (s2 directive-compile
-            :at "intent-layer pillar :: actor directive-compiler"
-            :action "LLM-assisted compile to directive sexp; compute version/provenance"
-            :code-alignment "actor pending; mission_directive(action=compile) currently dry-run preview, persist=true writes draft row")
+            :at "intent-layer pillar :: actor directive-compiler v0"
+            :action "compiler_mode=sonnet 调 SonnetGateway interactive lane 编译 directive sexp; 校验 fenced block / parens / allowed top-level head; 写 compiler_model + references_json"
+            :code-alignment "actor v0 code-aligned; compiler_mode=dry_run 默认仍是 preview; compiler_mode=sonnet 真实编译; persist=true 写 draft row 待 review")
          (s3 directive-store
             :at "memory pillar :: directive-layer :: directive table"
             :writes "directive_insert(status=draft/refining, compiler_model, references_json, sexp_hash)")
@@ -1031,10 +1037,10 @@
             :at "intent-layer + tools manager surface"
             :action "approve/refine/archive through policy or human gate; future QuestionEvent when confirmation needed")
          (s5 plan-compile
-            :at "intent-layer pillar :: actor plan-compiler"
-            :condition "directive status=approved"
-            :action "generate executable plan sexp DAG/FSM; select execution surface: board/flow-engine-v2/skill/pty/mixed"
-            :code-alignment "actor pending; mission_plan(action=compile) currently dry-run preview, persist=true writes draft row")
+            :at "intent-layer pillar :: actor plan-compiler v0"
+            :condition "directive status=approved 或 board task context 提供"
+            :action "compiler_mode=sonnet 从 approved directive / board task 编译 plan sexp DAG/FSM; compiled_from = directive/<id>:<version> 或 board_task/<id>"
+            :code-alignment "actor v0 code-aligned; compiler_mode=dry_run 默认 preview; compiler_mode=sonnet 真实编译; persist=true 写 awaiting_approval (不自动 approve)")
          (s6 plan-store-and-bind
             :at "memory pillar :: directive-layer + board"
             :writes ["plan table with status=draft/awaiting_approval" "optional board_tasks.source_directive_id / plan binding"])
@@ -1042,14 +1048,14 @@
             :at "memory pillar :: DirectiveLayerStore"
             :action "approve plan, mark executing/succeeded/failed, or supersede old active plan for same board_task")
          (s8 execution-bridge
-            :at "flow pillar dispatch boundary"
-            :action "route approved plan to F1 board lifecycle, F5 flow-engine-v2, F-skill-workflow-execution, or F-workflow-slot-full-lifecycle"
-            :code-alignment "mission_plan(action=execute) returns next_call descriptor for mission_execution / mission_task_delegate / mission_flow_run; caller executes next step")
+            :at "flow pillar dispatch boundary / plan-runner v0 internal mode"
+            :action "route approved plan via execute_mode=bridge (next_call descriptor) 或 execute_mode=internal (plan-runner 直接 dispatch 到 mission_execution / mission_task_delegate / mission_flow_run; downstream 落到 F1 board lifecycle / F5 flow-engine-v2 / F-skill-workflow-execution / F-workflow-slot-full-lifecycle / F-execution-log-governance)"
+            :code-alignment "execute_mode=bridge 仍返回 next_call (向后兼容); execute_mode=internal code-aligned: plan-runner 内部 dispatch + 写 evidence sidecar plan_runner_dispatch entry + 推 plan 状态 executing (status update failure 暴露 partial); dispatch_strategy 进入 response + sidecar + (target=mission_execution) 转发到 companion log meta; 'PLAN.lisp DAG 自动选 target / dispatch_strategy / target_project' 仍 code-alignment pending")
          (s9 workflow-distill
-            :at "intent-layer pillar :: actor workflow-distiller"
+            :at "intent-layer pillar :: actor workflow-distiller v0"
             :condition "plan status=succeeded or successful execution evidence provided"
-            :action "normalize plan, derive match_rules, upsert reusable workflow or record execution"
-            :code-alignment "actor pending; mission_workflow(action=distill) dry-run preview or writes draft template with persist=true")
+            :action "distill_mode=sonnet 读 succeeded plan + evidence sidecar 生成 workflow sexp + match_rules JSON; persist=true 写 draft/template"
+            :code-alignment "actor v0 code-aligned; distill_mode=dry_run 默认 preview; distill_mode=sonnet 真实蒸馏; 高阶 semantic lifting / 自动 record_execution 关联仍 code-alignment pending")
          (s10 workflow-match-apply
             :at "memory pillar :: directive-layer :: workflow table"
             :action "workflow_find_by_match / workflow_list_top_n provides hints or reusable plan candidates for future directives")
@@ -1065,7 +1071,7 @@
 
     (flow F-intent-alignment-plan-execution-loop
       :desc "MissionD 统一入口 canonical pipeline: message → intent-alignment.lisp → review → PLAN.lisp → review → MissionD-internal execution → evidence → workflow.lisp distillation"
-      :status "architecture-designed canonical unified entry; manager surfaces (mission_directive/mission_plan/mission_workflow/mission_execution) code-aligned partial; alignment-author / plan-runner / evidence-collector / workflow-distiller actors code-alignment pending"
+      :status "code-aligned partial — directive-compiler actor v0 (mission_directive compiler_mode=sonnet) / plan-compiler actor v0 (mission_plan compiler_mode=sonnet) / plan-runner v0 + auto-selection v1 (mission_plan execute_mode=internal + dispatch_strategy + plan sexp hint parsing + evidence sidecar) / workflow-distiller actor v0 (mission_workflow distill_mode=sonnet) / methodology compiler v0 (mission_workflow compile_mode=deterministic + run_methodology) / generated flow loader (mission_flow_run discoverability) all code-aligned; full PLAN DAG scheduler / arbitrary semantic interpretation / file-first .lisp writer-sync / alignment/plan auto QuestionEvent gates / methodology semantic lifting / forge compiler / ExecutionEvent dispatch metadata 仍 code-alignment pending"
       :role "MissionD 长期运作的主线 — 不是 client 直连工位, 而是文件优先 + DB 镜像 + 双 review gate + MissionD plan-runner 内部调度 + 证据收集 + 沉淀复用"
       :rationale "把当前'你我改 Lisp,再交给 ClaudeCode 实现'的人工闭环,升级成 MissionD 内部可自动化、可 flow 化、可复用的 directive/plan/workflow pipeline; 不依赖某个交互 client 私有调度能力"
       :triggers
@@ -1102,16 +1108,26 @@
         ((s1 message-intake
             :at "tools pillar :: mission_directive (action=compile, source=message|architecture_lisp_delta|user_request) + intent-layer pillar :: message-intake-manager"
             :reads ["user message / external MCP request / board_task ingestion" ".missiond/v2/*.lisp diff (when source=architecture_lisp_delta)" "project registry" "kb context"]
-            :writes ["directive draft row (when persist=true) or file-first alignment request stub"]
-            :code-alignment "manager surface partial via mission_directive(action=compile); compile is dry-run / draft persistence — directive-compiler actor pending"
+            :writes ["directive draft row (when persist=true)" "file-first alignment request stub"]
+            :code-alignment "manager surface code-aligned via mission_directive(action=compile); compiler_mode=dry_run 默认仍是 dry-run preview, compiler_mode=sonnet 已 code-aligned (directive-compiler actor v0 走 SonnetGateway interactive lane, 校验 fenced block / parens / allowed top-level head); persist=true 写 draft 行等待 review/approve"
+            :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/directive.rs (schema)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/directive.rs (handler — action=compile dispatch + compiler_mode 校验)"]
+            :pending ["设计的 message-intake-manager 自主路由 — 当前由 caller 显式给 source/topic"
+                      "directive-compiler 自动多轮 review/refine 收敛 — 仅 v0 单次编译"]
             :decision "选择 alignment topic + project_id; 决定走 file-first 还是 directive-mirror"
             :no-new-tool "本阶段不引入 mission_message / mission_invoke; 统一入口由 mission_directive 充当管理面")
          (s2 intent-alignment-authoring
-            :at "intent-layer pillar :: alignment-author (mode A: direct LLM, mode B: resident ClaudeCode lisp-architect slot)"
+            :at "intent-layer pillar :: alignment-author (mode A: direct LLM via mission_directive compiler_mode=sonnet, mode B: resident ClaudeCode lisp-architect slot)"
             :reads ["directive draft" "user message" ".missiond/v2/*.lisp diff" "kb hints" "previous alignment topics"]
-            :writes [".missiond/alignment/<topic>/intent-alignment.lisp (status=draft)"]
-            :status "architecture-designed; code-alignment pending"
-            :note "alignment-author actor pending; 当前由 ClaudeCode 主会话或外部 LLM 手工产出 .missiond/alignment/<topic>/intent-alignment.lisp"
+            :architecture-writes [".missiond/alignment/<topic>/intent-alignment.lisp (file-first SSOT, status=draft)" "directive table draft mirror"]
+            :code-aligned-writes ["directive sexp + references_json + directive table draft (mission_directive compiler_mode=sonnet, persist=true)"]
+            :status "code-aligned partial — directive-compiler actor v0 已实现 directive sexp/references_json/DB draft 写入; 但 file-first .missiond/alignment/<topic>/intent-alignment.lisp 自动写入仍 pending; mode B 自动 dispatch 仍 pending"
+            :implementation-targets ["crates/missiond-daemon/src/handlers/knowledge/directive.rs (action=compile sonnet branch — SonnetGateway interactive call + sexp validation)"
+                                     "crates/missiond-daemon/src/llm/sonnet_gateway.rs (LLM call substrate)"]
+            :pending ["file-first .missiond/alignment/<topic>/intent-alignment.lisp 自动写入 / 与 directive 表双向同步 — 当前由人工产出"
+                      "mode B (resident ClaudeCode lisp-architect slot) 自动 dispatch — 当前需人工把任务挂到既有 slot"
+                      "alignment-author actor 自主决定 mode A vs mode B 与多轮收敛"]
+            :note "compiler_mode=dry_run 默认行为不调 LLM, 仅返回 preview; compiler_mode=sonnet 真实调用 SonnetGateway, 失败时 suggestion 明确说明可退回 dry_run 或启动 sonnet gateway"
             :workstation-preference "Lisp 架构改动优先复用常驻 ClaudeCode lisp-architect slot (resident-lisp-architect-session policy); 上下文 asset 已经预热, 不为单轮 alignment 重开 fresh session"
             :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration :: policy resident-lisp-architect-session")
          (s3 alignment-review-gate
@@ -1119,30 +1135,59 @@
             :reads [".missiond/alignment/<topic>/intent-alignment.lisp" "directive row mirror"]
             :writes [".missiond/alignment/<topic>/intent-alignment.lisp (status: draft → reviewing → approved | rejected | superseded)" "directive table status update"]
             :gate-rule "未通过 approval gate 不允许进入 plan-authoring; LLM 产物不能直接进 plan"
-            :code-alignment "manager surface partial via mission_directive(action=approve|archive|version_chain); auto QuestionEvent 触发待 actor")
+            :code-alignment "manager surface code-aligned via mission_directive(action=approve|archive|version_chain); auto QuestionEvent 触发 仍 code-alignment pending"
+            :implementation-targets ["crates/missiond-daemon/src/handlers/knowledge/directive.rs (approve/archive/version_chain branches)"
+                                     "crates/missiond-core/src/db/pg/directive.rs (DirectiveLayerStore impl)"]
+            :pending ["自动 QuestionEvent 把人工 review 转入事件循环"
+                      "review history 与 multi-reviewer aggregation"])
          (s4 plan-authoring
-            :at "intent-layer pillar :: plan-compiler (LLM planner — direct LLM 或 resident planning slot)"
+            :at "intent-layer pillar :: plan-compiler (LLM planner via mission_plan compiler_mode=sonnet, 或 resident planning slot)"
             :condition "intent-alignment.lisp status=approved"
-            :reads [".missiond/alignment/<topic>/intent-alignment.lisp (approved)" "repo state summary" "relevant Lisp snippets" "kb context"]
-            :writes [".missiond/plans/<topic>/PLAN.lisp (status=draft)" "optional plan draft row via mission_plan(action=compile, persist=true)"]
-            :model-policy "provider alias configurable (例: OPUS-4.7-class planner); 不硬编码可用性"
-            :status "architecture-designed; mission_plan(action=compile) currently dry-run/draft — 真正 LLM planner code-alignment pending"
+            :reads [".missiond/alignment/<topic>/intent-alignment.lisp (approved)" "approved directive (source_directive_id) / board task context" "repo state summary" "relevant Lisp snippets" "kb context"]
+            :architecture-writes [".missiond/plans/<topic>/PLAN.lisp (file-first SSOT, status=draft)" "plan table draft/awaiting_approval mirror"]
+            :code-aligned-writes ["plan sexp + plan table draft/awaiting_approval row (mission_plan compiler_mode=sonnet, persist=true)"]
+            :model-policy "provider alias configurable (例: OPUS-4.7-class planner / planner-class model); 不硬编码可用性; current code-aligned v0 uses claude-sonnet"
+            :status "code-aligned partial — plan-compiler actor v0 已实现 plan sexp / plan table 写入 (mission_plan(action=compile, compiler_mode=sonnet); persist=true 写 awaiting_approval, 不自动 approve; compiled_from = directive/<id>:<version> 或 board_task/<id>); 但 file-first .missiond/plans/<topic>/PLAN.lisp 自动写入/同步仍 pending; 自动 plan 节点 :dispatch-strategy 由 LLM 直接产出仍依赖人工 review"
+            :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/plan.rs (schema)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan.rs (action=compile sonnet branch)"
+                                     "crates/missiond-daemon/src/llm/sonnet_gateway.rs"]
+            :pending ["file-first .missiond/plans/<topic>/PLAN.lisp 自动写入/与 plan 表双向同步"
+                      "plan-compiler 自动从 PLAN.lisp DAG 推断 :dispatch-strategy / :target_project 字段 — 当前由 LLM 自由生成, 仍需人工审核"
+                      "alignment 多轮 refine 后的增量 re-compile"
+                      "planner-class model alias 切换 (例: opus planner) — 现仅 sonnet 可用"]
             :workstation-preference "若 PLAN 跨多文件且需要 cumulative repo 知识 → resident planning slot; 若单一目标项目可直接 fresh slot 草拟"
             :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration"
-            :plan-must-record "PLAN.lisp 节点应显式标记 :dispatch-strategy 字段 ∈ {resident-lisp / fresh-code-alignment / agent-team / prompt-fallback / mixed} 与 :target_project, 供 s6 plan-runner 直接消费")
+            :plan-must-record "PLAN.lisp 节点应显式标记 :dispatch-strategy 字段 ∈ {resident-lisp / fresh-code-alignment / agent-team / prompt-fallback / mixed | unknown} 与 :target_project, 供 s6 plan-runner 直接消费; 当前 sonnet 编译产物的字段写入由 LLM 产生, 仍需人工审核")
          (s5 plan-review-gate
             :at "human/Codex review loop + intent-layer pillar :: plan-review-gate"
             :reads [".missiond/plans/<topic>/PLAN.lisp" "plan row mirror"]
             :writes [".missiond/plans/<topic>/PLAN.lisp (status: draft → reviewing → approved | rejected | superseded)" "plan table status update via mission_plan(action=approve|mark|supersede)"]
             :gate-rule "未通过 approval gate 不允许进入 execution-runner"
-            :code-alignment "manager surface code-aligned via mission_plan; auto QuestionEvent 待 actor")
+            :code-alignment "manager surface code-aligned via mission_plan; auto QuestionEvent gate 仍 code-alignment pending"
+            :implementation-targets ["crates/missiond-daemon/src/handlers/knowledge/plan.rs (action=approve|mark|supersede branches)"
+                                     "crates/missiond-core/src/db/pg/directive.rs (plan FSM transitions)"]
+            :pending ["自动 QuestionEvent 触发 (人工 review 转入事件循环)"
+                      "review history 留痕"])
          (s6 execution-runner
-            :at "MissionD plan-runner (architecture-designed) :: 内部消费 mission_execution / mission_task_delegate / mission_flow_run / mission_compute_slot / mission_pty_spawn"
+            :at "MissionD plan-runner v0 + auto-selection v1 :: 内部消费 mission_execution / mission_task_delegate / mission_flow_run / mission_compute_slot / mission_pty_spawn"
             :condition "PLAN.lisp status=approved"
             :principle "不是 client 直接调工位, 而是 MissionD plan-runner 内部调度 — alignment 与 plan 的 review gate 已经把 LLM 产物收敛到可执行边界"
-            :current-implementation "mission_plan(action=execute) 当前只返回 next_call descriptor; plan-runner 自动 dispatch 待代码对齐 (architecture-designed; code-alignment pending)"
+            :current-implementation "mission_plan(action=execute) bridge 模式默认返回 next_call descriptor (向后兼容); execute_mode=internal 已 code-aligned (plan-runner v0), 直接 dispatch 到 mission_execution / mission_task_delegate / mission_flow_run, 写 evidence sidecar 并把 plan 状态推进到 executing; status update failure 会暴露 partial; dispatch_strategy 进入 response + sidecar + (当 target=mission_execution) 转发到 mission_execution(action=open) 的 companion log meta; auto-selection v1 已 code-aligned: target/dispatch_strategy 缺省时, runner 从 plan.sexp_text 保守解析 :target / :target-tool / :tool / :flow-id / :dispatch-strategy / :parallelism / :target-project / :requested-cwd / :objective / :summary 等 hints"
+            :code-alignment "code-aligned partial — execute_mode=internal + dispatch_strategy + auto-selection v1 完成; explicit args 仍优先, 缺省时按保守 hint 推断, 无法安全推断时返回 MISSING_PARAM 结构化错误; 完整 PLAN DAG scheduler / 多节点 dependency 执行 / arbitrary semantic interpretation 仍 code-alignment pending"
+            :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/plan.rs (schema: execute_mode + dispatch_strategy + auto-selection 描述)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan.rs (action=execute internal branch + auto-selection v1 sexp hint parser + dispatch + sidecar + plan FSM)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (mission_execution forwarding)"
+                                     "crates/missiond-daemon/src/handlers/compute/task_delegate.rs (task_delegate forwarding)"]
+            :auto-selection-precedence ["explicit_arg" "plan_hint (:target / :dispatch-strategy / :parallelism mapping)" "default 'unknown' (dispatch_strategy) / MISSING_PARAM (target)"]
+            :auto-selection-response-fields ["target_source ∈ {explicit_arg, plan_hint, missing}" "dispatch_strategy_source ∈ {explicit_arg, plan_hint, default}" "plan_hint_summary"]
+            :agent-team-substrate-injection "auto-selection v1: 当 dispatch_strategy 解析为 agent-team 且 target=mission_task_delegate 时, runner 向 objective 注入字面提示 '使用 agent-team提高效率' (幂等, 已注入则不重复)"
+            :pending ["完整 PLAN DAG scheduler — 多节点 dependency 执行 / 并发 dispatch"
+                      "arbitrary PLAN.lisp 语义解释 (超出保守 key/value hints 的 phase / DAG / branch 语义)"
+                      "auto QuestionEvent gates"
+                      "ExecutionEvent 扩展 dispatch metadata — 当前仅 companion log 持久"
+                      "file-first PLAN.lisp writer/sync — 仍人工"]
             :substrate "execution substrate = mission_execution 12-action manager (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair, F-execution-log-governance)"
-            :options-before-runner ["manual ClaudeCode handoff" "mission_execution + mission_task_delegate + mission_flow_run combination 由人工或上层 actor 拼"]
+            :options-before-runner ["bridge mode 仍可用 (caller 自行执行 next_call)" "internal mode 由 plan-runner 直接 dispatch + 写 evidence + 推 plan FSM"]
             :dispatch-strategy
               ((case lisp-only-architecture-task
                   :strategy "resident-lisp-architect-session"
@@ -1173,16 +1218,28 @@
          (s7 evidence-collection
             :at "intent-layer pillar :: evidence-collector + memory/event-bus pillars"
             :reads ["tool_calls" "event_log (DomainEvent stream)" "board_tasks" "execution companion log" "ExecutionEvent stream" "git diff" "test outputs"]
-            :writes [".missiond/v2/plans/<plan_id>.evidence.json (via mission_plan action=record_evidence — code-aligned)" "future plan_evidence DB JSONB"]
-            :status "architecture-designed; partial sidecar via mission_plan(record_evidence); auto evidence-collector actor pending"
+            :writes [".missiond/v2/plans/<plan_id>.evidence.json (via mission_plan action=record_evidence — code-aligned + plan-runner v0 internal mode 自动追加 plan_runner_dispatch entry, 含 dispatch_strategy / target_project / requested_cwd / target / inner result)" "future plan_evidence DB JSONB"]
+            :status "code-aligned partial — plan-runner v0 internal mode 已自动落 evidence sidecar (含 dispatch metadata); 全自动 evidence-collector actor (除 plan-runner 路径以外的事件聚合) 仍 code-alignment pending"
+            :implementation-targets ["crates/missiond-daemon/src/handlers/knowledge/plan.rs (record_evidence action + plan-runner internal mode auto-append)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (companion log meta dispatch_strategy)"]
+            :pending ["全自动 evidence-collector actor (聚合 git diff / event_log / ExecutionEvent / test outputs 到 sidecar)"
+                      "evidence sidecar 升级到 plan_evidence DB JSONB"
+                      "ExecutionEvent dispatch metadata 字段 — 当前仅 companion log durable"]
             :purpose "为 workflow-distillation 与 retrospective 提供输入")
          (s8 workflow-distillation
-            :at "intent-layer pillar :: workflow-distiller"
+            :at "intent-layer pillar :: workflow-distiller via mission_workflow(action=distill, distill_mode=sonnet)"
             :condition "plan status=succeeded 多次或 human 显式标 reusable"
-            :reads ["plan row + plan evidence sidecar" "successful plan history"]
-            :writes [".missiond/workflows/<topic>.lisp (file-first SSOT)" "workflow table mirror via mission_workflow(action=distill, persist=true)"]
-            :status "architecture-designed; mission_workflow(action=distill) currently dry-run preview — distiller actor code-alignment pending"
-            :downstream "machine execution 走 F-methodology-to-executable-compile → YAML → mission_flow_run"))
+            :reads ["plan row + plan evidence sidecar (.missiond/v2/plans/<plan_id>.evidence.json)" "successful plan history"]
+            :architecture-writes [".missiond/workflows/<topic>.lisp (file-first SSOT)" "workflow table draft/template mirror"]
+            :code-aligned-writes ["workflow sexp + match_rules JSON + workflow table draft/template (mission_workflow distill_mode=sonnet, persist=true)"]
+            :status "code-aligned partial — workflow-distiller actor v0 已实现 workflow sexp / match_rules / workflow 表 draft/template 写入 (distill_mode=sonnet 读 succeeded plan + evidence sidecar); 但 file-first .missiond/workflows/<topic>.lisp 自动写入/同步仍 pending; 高阶 semantic lifting / 自动 record_execution 关联 仍 code-alignment pending"
+            :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/workflow.rs (schema: distill_mode)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/workflow.rs (action=distill sonnet branch + match_rules JSON 生成)"]
+            :pending ["file-first .missiond/workflows/<topic>.lisp 自动写入/与 workflow 表双向同步"
+                      "distiller 高阶 semantic lifting (phase / anti-pattern / authority 边界) — 当前只产 sexp + 简单 match_rules"
+                      "成功 plan 自动触发 distill (无需 caller 主动调) — 当前手动"
+                      "record_execution 与 distill 双向自动联动"]
+            :downstream "machine execution 走 F-methodology-to-executable-compile (compile_mode=deterministic + run_methodology) → compiled YAML → flow-engine-v2 runner path; mission_flow_run discoverability / generated flow loader 是后续独立 code-alignment"))
       :egress
         (writes [".missiond/alignment/<topic>/intent-alignment.lisp"
                  ".missiond/plans/<topic>/PLAN.lisp"
@@ -1195,15 +1252,17 @@
          returns "reviewed alignment + reviewed plan + execution evidence + distilled reusable workflow")
       :review-gates ["alignment-review-gate (s3)" "plan-review-gate (s5)"]
       :file-vs-db-contract "file-first SSOT — alignment/plan/workflow .lisp 是 human/agent 真正 review 边界; directive/plan/workflow DB 行是可查询镜像 + 状态管理面"
+      :file-first-writer-status "code-alignment pending — directive/plan/workflow sexp + DB row 已 code-aligned; 但自动同步到 .missiond/alignment/<topic>/intent-alignment.lisp / .missiond/plans/<topic>/PLAN.lisp / .missiond/workflows/<topic>.lisp 文件 仍未实现, 当前由人工产出"
+      :implementation-target-policy "本 flow 各 stage 的 :implementation-targets 命名 *current code-aligned entry points*, 不是最终 module boundaries; future code-convergence 可能把现有大 handler 文件按 Lisp 声明拆分成更细的 module / actor"
       :no-new-tool-decision "当前不新增 mission_message / mission_invoke; mission_directive(action=compile) 已是充分管理入口, 详 future-flows :: unified-entry-future-candidates"
-      :tools-backref ["mission_directive (statement intake + alignment管理面)"
-                      "mission_plan (PLAN.lisp 管理面 + execute bridge + record_evidence)"
-                      "mission_workflow (distill / methodology compile 管理面)"
-                      "mission_execution (execution substrate, 12-action coordination)"])
+      :tools-backref ["mission_directive (message intake + directive-compiler v0 via compiler_mode=sonnet)"
+                      "mission_plan (PLAN.lisp 管理面 + plan-compiler v0 via compiler_mode=sonnet + plan-runner v0 via execute_mode=internal + dispatch_strategy + record_evidence)"
+                      "mission_workflow (distiller v0 via distill_mode=sonnet + methodology compiler v0 via compile_mode=deterministic + run_methodology)"
+                      "mission_execution (execution substrate, 12-action coordination, dispatch_strategy/target_project/requested_cwd 持久化到 companion log meta)"])
 
     (flow F-workstation-dispatch-policy
       :desc "MissionD 调度 ClaudeCode 工位的策略选择 — unified-entry pipeline s6 execution-runner 的子策略 narrative; 不重复 slot lifecycle 全文, 仅描述策略选择 → 派工口径"
-      :status "operational-practice (人工已用) + architecture-designed (Lisp 已声明); plan-runner 自动选路 code-alignment pending"
+      :status "operational-practice + code-aligned partial — dispatch_strategy 字段已贯穿 mission_plan(execute internal) → mission_execution(open) → companion log meta → evidence sidecar; plan-runner 自动从 PLAN.lisp DAG 推断 strategy/target/target_project 仍 code-alignment pending; ExecutionEvent 扩展 dispatch metadata 仍 code-alignment pending"
       :role "把 worker pillar :: section claudecode-workstation-orchestration 的 5 条 policy 与 unified-entry pipeline 的 stage s2/s4/s6 连成一条 narrative; 是 cross-ref 中枢, 不是新执行路径"
       :triggers
         ["F-intent-alignment-plan-execution-loop :: s2 alignment-authoring (Lisp 改动)"
@@ -1231,10 +1290,15 @@
             :enforcement "spawner::spawn_tracked_slot 强制 cwd = target_project_root; existing slot 复用前校验 slot.project_root == target_project_root"
             :code-alignment "code-aligned for spawn cwd; 自动 mismatch detection 已存在")
          (s4 record-strategy
-            :at "tools pillar :: mission_execution(action=open) (architecture-designed; schema 暂未含 dispatch_strategy 字段)"
-            :writes ["execution.dispatch_strategy" "execution companion log"]
+            :at "tools pillar :: mission_execution(action=open) — dispatch_strategy/target_project/requested_cwd 已写入 companion log meta"
+            :writes ["companion log meta :dispatch-strategy / :target-project / :requested-cwd" "evidence sidecar plan_runner_dispatch entry"]
             :consumer "evidence-collector 落 evidence sidecar; capability-usage-monitor 后续统计策略命中率"
-            :status "architecture-designed; mission_execution schema 加 dispatch_strategy 字段待 code-alignment")
+            :status "code-aligned partial — companion log meta 持久化已实现, plan-runner internal mode 自动转发也已实现; ExecutionEvent 扩展 dispatch metadata 仍 code-alignment pending (companion-log durable only / event metadata future)"
+            :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (open schema: dispatch_strategy/target_project/requested_cwd)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (action_open meta render + list/status meta read + legacy log graceful read)"
+                                     "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — dispatch metadata 仍未扩展)"]
+            :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd 字段"
+                      "list/status 读路径之外的查询面 (例如 timeline 查询) 暴露 dispatch_strategy"])
          (s5 dispatch-and-monitor
             :at "tools/worker pillars"
             :substrate ["mission_pty_spawn / mission_pty_send / mission_pty_read"
@@ -1264,8 +1328,16 @@
 
     (flow F-methodology-to-executable-compile
       :desc "methodology Lisp SSOT → executable YAML artifact → flow-engine-v2 run"
-      :status "architecture-designed; code-alignment pending"
+      :status "code-aligned partial — methodology compiler v0 (mission_workflow compile_mode=deterministic + run_methodology) 已实现 (paren-validate + (step ...) 提取 + executable YAML 生成 + run_methodology 解析 / would_run / 复用 flow-engine-v2 runner path 执行 compiled YAML); generated flow loader / mission_flow_run discoverability 已 code-aligned partial (search order: explicit flow_path > <project_root>/.missiond/generated/flows/<flow_id>.yaml > $MISSIOND_HOME/flows/<flow_id>.yaml; list/run 暴露 flow_source / flow_path / searched_paths / project_root_status); 高阶 forge compiler / semantic phase / anti-pattern lifting / longest-prefix cwd resolver / record_execution-distill 联动 仍 code-alignment pending"
       :architecture-decision "不先新增 direct mission_workflow_execute; methodology Lisp 保持人类/agent SSOT, 机器执行先编译为 YAML 再走既有 mission_flow_run"
+      :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/workflow.rs (schema: compile_mode + run_methodology params)"
+                               "crates/missiond-daemon/src/handlers/knowledge/workflow.rs (action_compile_methodology deterministic + action_run_methodology)"
+                               "crates/missiond-daemon/src/engine/flow/loader.rs (generated flow loader: GENERATED_FLOWS_REL + searched_paths)"
+                               "crates/missiond-daemon/src/handlers/compute/flow_run.rs (mission_flow_run discoverability: flow_source / project_root_status)"
+                               "crates/missiond-mcp/src/tools/compute/flow_run.rs (schema: project/target_project/cwd + list dedupe)"]
+      :pending ["forge compiler / 高阶 semantic lifting (phases / anti-patterns / authority) — v0 仅做 paren-validate + (step …) 抽取"
+                "richer project-root resolution via longest-prefix cwd resolver"
+                "automatic record_execution / distill feedback link (s7 feedback-and-distill 仍未自动联动)"]
       :triggers
         ["mission_workflow(action=compile_methodology|run_methodology)"
          "mission_forge_build / mission_forge_lint extension"
@@ -1278,21 +1350,26 @@
             :source ".missiond/workflows/<name>.lisp"
             :action "read methodology source, resolve project/global workflow search path, compute source_hash")
          (s2 parse-methodology-contract
-            :at "intent-layer pillar :: workflow compiler (future actor)"
-            :action "extract phases, ordered steps, gates, anti-patterns, authority, required inputs, and expected artifacts")
+            :at "intent-layer pillar :: workflow compiler v0 (deterministic) — phases / anti-pattern semantic lifting still future"
+            :action "compile_mode=deterministic 校验括号 + 提取 (step ...); 高阶 phases/gates/anti-patterns/authority lifting 仍 code-alignment pending"
+            :code-alignment "deterministic v0 code-aligned; semantic lifting pending")
          (s3 map-to-flow-definition
             :at "intent-layer + worker flow schema boundary"
-            :action "map methodology steps to FlowDefinition nodes: LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks")
+            :action "map methodology steps to FlowDefinition nodes: LlmCall / SlotTask / McpTool / DaemonAction / ParallelSlotTasks"
+            :code-alignment "v0 仅生成 (step …) 对应的简单节点; 全 5 类型映射 / 变量引用校验仍 pending")
          (s4 lint-generated-flow
             :at "intent-layer forge lint + worker flow loader"
-            :action "validate node schema, tool names, params, variable references, slot requirements, and unsafe operations")
+            :action "validate node schema, tool names, params, variable references, slot requirements, and unsafe operations"
+            :code-alignment "v0 暂不做完整 lint, 由后续 forge_lint extension 补; pending")
          (s5 write-executable-yaml
-            :at "memory/filesystem boundary :: $MISSIOND_HOME/flows"
-            :writes "$MISSIOND_HOME/flows/<name>.yaml"
-            :metadata ["source_lisp" "source_hash" "compiler_version" "generated_at" "manual_review_required?"])
+            :at "memory/filesystem boundary :: <project_root>/.missiond/generated/flows"
+            :writes "<project_root>/.missiond/generated/flows/<flow_id>.yaml (默认 flow_id=methodology-<stem>-v0)"
+            :metadata ["source_lisp" "source_hash" "compiler_version" "generated_at" "manual_review_required?"]
+            :code-alignment "compile_mode=deterministic + persist=true 已写; mission_flow_run 已 code-aligned partial 自动发现 (search order: explicit flow_path > <project_root>/.missiond/generated/flows/<flow_id>.yaml > $MISSIOND_HOME/flows/<flow_id>.yaml; action=list 合并 generated + core, generated 优先去重; response 暴露 flow_source / searched_paths / project_root_status); longest-prefix cwd resolver 仍 pending")
          (s6 dry-run-or-run
-            :at "tools pillar :: mission_flow_run → worker pillar :: flow-engine-v2"
-            :action "dry-run returns compiled plan; run delegates to F5-flow-engine-v2-node-execution")
+            :at "tools pillar :: mission_workflow(action=run_methodology) → worker pillar :: flow-engine-v2 runner path"
+            :action "dry-run returns compiled plan; run 复用 flow-engine-v2 runner 执行 compiled YAML"
+            :code-alignment "run_methodology 解析 flow_id|flow_path|name 找 compiled YAML; dry_run=true 返 would_run; dry_run=false 复用 flow-engine-v2 runner path 执行; mission_flow_run discoverability / generated-flow-loader 是后续独立 code-alignment 任务")
          (s7 feedback-and-distill
             :at "intent-layer pillar :: workflow-distiller"
             :action "record compile/run feedback for future workflow template improvement"))
@@ -2100,7 +2177,7 @@
       (mission_task_query          :flow "F-task-legacy-queue-control :: status/list/ack/track")
       (mission_task_cancel         :flow "F-task-legacy-queue-control :: cancel")
       (mission_task_delegate       :flow "F-task-delegate-autoprovision / F-workstation-dispatch-policy :: s2 resident-lisp resume substrate (把任务挂到既有 slot)")
-      (mission_flow_run            :flow "F5-flow-engine-v2-node-execution (primary)")
+      (mission_flow_run            :flow "F5-flow-engine-v2-node-execution (primary) / F-methodology-to-executable-compile :: s5+s6 (generated flow loader code-aligned partial — search <project_root>/.missiond/generated/flows + $MISSIOND_HOME/flows; flow_source / searched_paths 暴露)")
       (mission_forge_build         :flow "F-forge-build")
       (mission_forge_lint          :flow "F-forge-lint")
 
@@ -2147,11 +2224,11 @@
       (mission_job_poll            :flow "trivial-single-step")
       (mission_agent               :flow "F-daemon-bootstrap 类 (spawn)")
       (mission_codex_ops           :flow "trivial-single-step (recent/thread/tool_stats read model over codex_ingestion 产出)")
-      (mission_execution           :flow "F-execution-log-governance (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair; code-aligned) — unified pipeline 的 execution substrate (s6 execution-runner)")
-      (mission_capability_usage    :flow "F-capability-usage-monitoring (snapshot/report/candidates/mark/ack; code-aligned partial)")
-      (mission_directive           :flow "F-intent-alignment-plan-execution-loop :: s1 message-intake + s3 alignment-review-gate (statement intake + alignment 管理面) / F-directive-plan-workflow-compile :: directive branch (manager surface code-aligned partial; compiler actor pending)")
-      (mission_plan                :flow "F-intent-alignment-plan-execution-loop :: s4 plan-authoring + s5 plan-review-gate + s6 execution-runner bridge + s7 evidence sidecar (manager surface code-aligned partial; compiler/runner actor pending; execute returns next_call) / F-directive-plan-workflow-compile :: plan branch")
-      (mission_workflow            :flow "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation 管理面 / F-directive-plan-workflow-compile :: workflow branch + F-methodology-to-executable-compile (manager surface code-aligned partial; distiller/compiler actors pending)")
+      (mission_execution           :flow "F-execution-log-governance (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair; code-aligned + dispatch_strategy/target_project/requested_cwd 已写入 companion log meta) — unified pipeline 的 execution substrate (s6 execution-runner)")
+      (mission_capability_usage    :flow "F-capability-usage-monitoring (snapshot/report/candidates/mark/ack; code-aligned partial — semantic evidence v1: 5 sources + lisp hint merge-candidate)")
+      (mission_directive           :flow "F-intent-alignment-plan-execution-loop :: s1 message-intake + s3 alignment-review-gate (statement intake + alignment 管理面; directive-compiler v0 via compiler_mode=sonnet code-aligned, persist=true 写 draft) / F-directive-plan-workflow-compile :: directive branch")
+      (mission_plan                :flow "F-intent-alignment-plan-execution-loop :: s4 plan-authoring (plan-compiler v0 via compiler_mode=sonnet code-aligned) + s5 plan-review-gate + s6 execution-runner (plan-runner v0 via execute_mode=internal + dispatch_strategy code-aligned, bridge mode 仍向后兼容) + s7 evidence sidecar / F-directive-plan-workflow-compile :: plan branch")
+      (mission_workflow            :flow "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation (workflow-distiller v0 via distill_mode=sonnet code-aligned) / F-directive-plan-workflow-compile :: workflow branch + F-methodology-to-executable-compile (methodology compiler v0 via compile_mode=deterministic + run_methodology code-aligned partial)")
       (mission_global_instruction  :flow "trivial-single-step read/edit/manual-reload (code-aligned; reload returns manual-reload-required)"))
 
     (future-flow-mapping
@@ -2169,7 +2246,8 @@
       :sixth-wave-refined "v0.6 补 capability usage monitoring,用于 tool/flow 调用热度治理与删合并候选生成"
       :seventh-wave-refined "v0.7 补 directive/plan/workflow manager surfaces: compile/distill dry-run + read/control full + plan execute bridge"
       :eighth-wave-refined "v0.7 标定 F-intent-alignment-plan-execution-loop 为 MissionD 统一入口 canonical pipeline (message → alignment → plan → execution → workflow); 8 stages + 双 review gate + plan-runner 内部调度 + evidence sidecar + workflow distillation; 不新增 tool"
-      :ninth-wave-refined "v0.7 补 F-workstation-dispatch-policy: ClaudeCode 工位调度策略 (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd-contract); operational-practice + architecture-designed; 不新增 tool — 全部复用现有 mission_pty_* / mission_compute_slot / mission_task_delegate / mission_execution / mission_plan")
+      :ninth-wave-refined "v0.7 补 F-workstation-dispatch-policy: ClaudeCode 工位调度策略 (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd-contract); operational-practice + architecture-designed; 不新增 tool — 全部复用现有 mission_pty_* / mission_compute_slot / mission_task_delegate / mission_execution / mission_plan"
+      :tenth-wave-refined "v0.7 status backfill (commits 0a3ffe0 / 46a9453 / 3ed14fc + working-tree parallels: plan-runner-auto-selection-v1 + generated-flow-loader): directive-compiler v0 / plan-compiler v0 / plan-runner v0 internal mode + dispatch_strategy / plan-runner auto-selection v1 (sexp hint parsing) / workflow-distiller v0 / methodology compiler v0 deterministic / generated flow loader (mission_flow_run discoverability) / capability_usage semantic evidence v1 (5 sources + lisp hint merge-candidate) / mission_execution dispatch_strategy companion log meta — 全部从 'actor pending / dry-run / pending' 升级为 code-aligned partial; full PLAN DAG scheduler / file-first .lisp writer / auto QuestionEvent gate / semantic lifting / forge compiler / ExecutionEvent metadata 明确仍 pending")
 
   ;; ══════════════════════════════════════════════════════════
   ;; Future Flows (未来补充)

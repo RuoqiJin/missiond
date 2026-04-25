@@ -1,98 +1,499 @@
-use anyhow::{anyhow, Result};
-use missiond_mcp::tools::ToolResult;
-use serde_json::json;
-use tracing::{info, error};
+use std::path::{Path, PathBuf};
 
+use anyhow::{anyhow, Result};
+use missiond_core::types::SharedProjectRegistry;
+use missiond_mcp::tools::ToolResult;
+use serde::Serialize;
+use serde_json::{json, Value};
+use tracing::{error, info};
+
+use crate::engine::flow::loader;
 use crate::state::AppState;
 
-pub(crate) async fn handle(state: &AppState, _name: &str, args: serde_json::Value) -> Result<ToolResult> {
+pub(crate) async fn handle(
+    state: &AppState,
+    _name: &str,
+    args: serde_json::Value,
+) -> Result<ToolResult> {
     let action = args.get("action").and_then(|v| v.as_str()).unwrap_or("run");
 
     match action {
-        "list" => {
-            let flows = crate::engine::flow::loader::list_flows()?;
-            Ok(ToolResult::json_pretty(&json!({ "flows": flows, "count": flows.len() })))
+        "list" => action_list(state, &args).await,
+        "status" => action_status(state, &args).await,
+        "run" => action_run(state, &args).await,
+        other => Ok(ToolResult::error(format!(
+            "Unknown action: {}. Use: run, list, status",
+            other
+        ))),
+    }
+}
+
+async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let project = resolve_project_root_from_args(args, &state.project_registry).await;
+    let list = loader::list_flows_with_project(project.root.as_deref())?;
+
+    Ok(ToolResult::json_pretty(&json!({
+        "flows": list.merged_ids,
+        "count": list.merged_ids.len(),
+        "core": entries_to_json(&list.core),
+        "generated": entries_to_json(&list.generated),
+        "searched_paths": paths_to_strings(&list.searched_paths),
+        "project_root": project.root_display(),
+        "project_root_status": project.status.as_str(),
+        "project_root_source": project.source.as_str(),
+        "project_root_diagnostic": project.diagnostic,
+    })))
+}
+
+async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let task_id = args
+        .get("task_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| anyhow!("'task_id' required for status"))?;
+    let task = state
+        .store
+        .get_board_task(task_id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+        .ok_or_else(|| anyhow!("Task '{}' not found", task_id))?;
+    let ctx: Option<crate::engine::flow::FlowContext> = task
+        .flow_context
+        .as_ref()
+        .and_then(|s| serde_json::from_str(s).ok());
+    Ok(ToolResult::json_pretty(&json!({
+        "task_id": task_id,
+        "flow_phase": task.flow_phase,
+        "status": task.status.as_str(),
+        "context": ctx,
+    })))
+}
+
+async fn action_run(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let project = resolve_project_root_from_args(args, &state.project_registry).await;
+    let flow_id_arg = args.get("flow_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let flow_path_arg = args
+        .get("flow_path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    if flow_id_arg.is_none() && flow_path_arg.is_none() {
+        return Err(anyhow!(
+            "'flow_id' or 'flow_path' required for run"
+        ));
+    }
+
+    let loaded = match flow_path_arg {
+        Some(raw) => {
+            let resolved = resolve_flow_path_arg(raw, project.root.as_deref())?;
+            loader::load_flow_from_path(&resolved)?
         }
-        "status" => {
-            let task_id = args.get("task_id").and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("'task_id' required for status"))?;
-            let task = state.store.get_board_task(task_id).await
-                .map_err(|e| anyhow!("DB error: {}", e))?
-                .ok_or_else(|| anyhow!("Task '{}' not found", task_id))?;
-            let ctx: Option<crate::engine::flow::FlowContext> = task.flow_context
-                .as_ref().and_then(|s| serde_json::from_str(s).ok());
-            Ok(ToolResult::json_pretty(&json!({
-                "task_id": task_id,
-                "flow_phase": task.flow_phase,
-                "status": task.status.as_str(),
-                "context": ctx,
-            })))
+        None => {
+            let id = flow_id_arg.expect("checked above");
+            loader::load_flow_with_project(id, project.root.as_deref())?
         }
-        "run" => {
-            let flow_id = args.get("flow_id").and_then(|v| v.as_str())
-                .ok_or_else(|| anyhow!("'flow_id' required"))?;
+    };
 
-            let flow = crate::engine::flow::loader::load_flow(flow_id)?;
+    let flow = &loaded.definition;
 
-            // Create Board Task to track
-            let input = missiond_core::types::CreateBoardTaskInput {
-                title: format!("Flow: {}", flow.name),
-                category: Some("flow".to_string()),
-                description: Some(format!("Flow v2: '{}'", flow.id)),
-                flow_template: Some(flow.id.clone()),
-                ..Default::default()
-            };
-            let task = state.store.create_board_task(&input).await
-                .map_err(|e| anyhow!("DB: {}", e))?;
-            let task_id = task.id.to_string();
+    let input = missiond_core::types::CreateBoardTaskInput {
+        title: format!("Flow: {}", flow.name),
+        category: Some("flow".to_string()),
+        description: Some(format!("Flow v2: '{}'", flow.id)),
+        flow_template: Some(flow.id.clone()),
+        ..Default::default()
+    };
+    let task = state
+        .store
+        .create_board_task(&input)
+        .await
+        .map_err(|e| anyhow!("DB: {}", e))?;
+    let task_id = task.id.to_string();
 
-            // Init FlowContext with user params
-            let mut ctx = crate::engine::flow::FlowContext::new();
-            if let Some(params) = args.get("params").and_then(|v| v.as_object()) {
-                for (k, v) in params {
-                    ctx.set(k.clone(), v.as_str().unwrap_or(&v.to_string()));
-                }
-            }
+    let mut ctx = crate::engine::flow::FlowContext::new();
+    if let Some(params) = args.get("params").and_then(|v| v.as_object()) {
+        for (k, v) in params {
+            ctx.set(k.clone(), v.as_str().unwrap_or(&v.to_string()));
+        }
+    }
 
-            // Persist initial context
-            let _ = state.store.update_board_task(&task_id, &missiond_core::types::UpdateBoardTaskInput {
+    let _ = state
+        .store
+        .update_board_task(
+            &task_id,
+            &missiond_core::types::UpdateBoardTaskInput {
                 flow_phase: Some("running".to_string()),
                 flow_context: Some(serde_json::to_string(&ctx).unwrap_or_default()),
                 status: Some("running".to_string()),
                 ..Default::default()
-            }).await;
+            },
+        )
+        .await;
 
-            // Execute flow inline (blocks MCP call until completion).
-            // Background spawn deferred: requires resolving Send bounds across
-            // the dispatch_tool → run_flow → execute_node → dispatch_tool chain.
-            info!(flow_id = %flow.id, task_id = %task_id, "Flow: executing");
-            let result = crate::engine::flow::runner::run_flow(state, &flow, &mut ctx, &task_id).await;
+    info!(
+        flow_id = %flow.id,
+        task_id = %task_id,
+        flow_source = loaded.source.as_str(),
+        flow_path = %loaded.path.display(),
+        "Flow: executing"
+    );
+    let result = crate::engine::flow::runner::run_flow(state, flow, &mut ctx, &task_id).await;
 
-            match result {
-                Ok(()) => {
-                    let _ = state.store.update_board_task(&task_id, &missiond_core::types::UpdateBoardTaskInput {
+    match result {
+        Ok(()) => {
+            let _ = state
+                .store
+                .update_board_task(
+                    &task_id,
+                    &missiond_core::types::UpdateBoardTaskInput {
                         flow_phase: Some("completed".to_string()),
                         status: Some("done".to_string()),
                         ..Default::default()
-                    }).await;
-                    Ok(ToolResult::json_pretty(&json!({
-                        "task_id": task_id,
-                        "flow_id": flow_id,
-                        "status": "completed",
-                        "completed_nodes": ctx.completed_nodes,
-                    })))
-                }
-                Err(e) => {
-                    error!(task_id = %task_id, error = %e, "Flow: failed");
-                    let _ = state.store.update_board_task(&task_id, &missiond_core::types::UpdateBoardTaskInput {
+                    },
+                )
+                .await;
+            Ok(ToolResult::json_pretty(&json!({
+                "task_id": task_id,
+                "flow_id": flow.id,
+                "status": "completed",
+                "completed_nodes": ctx.completed_nodes,
+                "flow_source": loaded.source.as_str(),
+                "flow_path": loaded.path.display().to_string(),
+                "project_root": project.root_display(),
+                "project_root_status": project.status.as_str(),
+            })))
+        }
+        Err(e) => {
+            error!(task_id = %task_id, error = %e, "Flow: failed");
+            let _ = state
+                .store
+                .update_board_task(
+                    &task_id,
+                    &missiond_core::types::UpdateBoardTaskInput {
                         flow_phase: Some("failed".to_string()),
                         status: Some("failed".to_string()),
                         ..Default::default()
-                    }).await;
-                    Err(e)
-                }
-            }
+                    },
+                )
+                .await;
+            Err(e)
         }
-        _ => Ok(ToolResult::error(format!("Unknown action: {}. Use: run, list, status", action))),
+    }
+}
+
+fn entries_to_json(entries: &[loader::FlowEntry]) -> Value {
+    Value::Array(
+        entries
+            .iter()
+            .map(|e| {
+                json!({
+                    "id": e.id,
+                    "path": e.path.display().to_string(),
+                    "source": e.source.as_str(),
+                })
+            })
+            .collect(),
+    )
+}
+
+fn paths_to_strings(paths: &[PathBuf]) -> Vec<String> {
+    paths.iter().map(|p| p.display().to_string()).collect()
+}
+
+fn resolve_flow_path_arg(raw: &str, project_root: Option<&Path>) -> Result<PathBuf> {
+    let candidate = PathBuf::from(raw);
+    if candidate.is_absolute() {
+        return Ok(candidate);
+    }
+    let Some(root) = project_root else {
+        return Err(anyhow!(
+            "relative flow_path `{}` requires resolved project_root; pass an absolute flow_path or project/target_project/cwd",
+            raw
+        ));
+    };
+    Ok(root.join(candidate))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// project root resolution — pure-ish helpers exposed for unit tests.
+// ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ProjectRootStatus {
+    /// Caller did not pass project / target_project / cwd.
+    NotRequested,
+    /// Caller asked for a project but we could not pin it to a path on disk
+    /// (unregistered id and no path-like signal).
+    Unresolved,
+    /// We resolved a directory and used it for search.
+    Resolved,
+}
+
+impl ProjectRootStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            ProjectRootStatus::NotRequested => "not_requested",
+            ProjectRootStatus::Unresolved => "unresolved",
+            ProjectRootStatus::Resolved => "resolved",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectRootSource {
+    None,
+    ExplicitPath,
+    RegistryId,
+}
+
+impl ProjectRootSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            ProjectRootSource::None => "none",
+            ProjectRootSource::ExplicitPath => "explicit_path",
+            ProjectRootSource::RegistryId => "registry_id",
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectRoot {
+    pub root: Option<PathBuf>,
+    pub status: ProjectRootStatus,
+    pub source: ProjectRootSource,
+    pub diagnostic: Option<String>,
+}
+
+impl ProjectRoot {
+    fn root_display(&self) -> Option<String> {
+        self.root.as_ref().map(|p| p.display().to_string())
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ProjectRootArgs {
+    pub project: Option<String>,
+    pub target_project: Option<String>,
+    pub cwd: Option<String>,
+}
+
+impl ProjectRootArgs {
+    pub fn from_value(v: &Value) -> Self {
+        let s = |key: &str| {
+            v.get(key)
+                .and_then(|x| x.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        };
+        Self {
+            project: s("project"),
+            target_project: s("target_project"),
+            cwd: s("cwd"),
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.project.is_none() && self.target_project.is_none() && self.cwd.is_none()
+    }
+}
+
+async fn resolve_project_root_from_args(
+    args: &Value,
+    registry: &SharedProjectRegistry,
+) -> ProjectRoot {
+    let raw = ProjectRootArgs::from_value(args);
+    if raw.is_empty() {
+        return ProjectRoot {
+            root: None,
+            status: ProjectRootStatus::NotRequested,
+            source: ProjectRootSource::None,
+            diagnostic: None,
+        };
+    }
+
+    // Resolution order: cwd → project → target_project, each tried as a
+    // path-first, then as a registry id. Paths win because they are
+    // unambiguous; registry ids exist for callers without a usable cwd.
+    let mut diagnostics: Vec<String> = Vec::new();
+    let try_path = |raw: &str| -> Option<PathBuf> {
+        let p = PathBuf::from(raw);
+        if p.is_absolute() && p.exists() {
+            Some(canonicalize_or_self(&p))
+        } else {
+            None
+        }
+    };
+
+    for (label, value) in [
+        ("cwd", raw.cwd.as_deref()),
+        ("project", raw.project.as_deref()),
+        ("target_project", raw.target_project.as_deref()),
+    ] {
+        let Some(v) = value else { continue };
+        if let Some(p) = try_path(v) {
+            return ProjectRoot {
+                root: Some(p),
+                status: ProjectRootStatus::Resolved,
+                source: ProjectRootSource::ExplicitPath,
+                diagnostic: None,
+            };
+        } else {
+            diagnostics.push(format!("{}={} not an absolute existing path", label, v));
+        }
+    }
+
+    let reg = registry.read().await;
+    for (label, value) in [
+        ("project", raw.project.as_deref()),
+        ("target_project", raw.target_project.as_deref()),
+    ] {
+        let Some(v) = value else { continue };
+        if let Some(p) = reg.get(v) {
+            return ProjectRoot {
+                root: Some(PathBuf::from(&p.path)),
+                status: ProjectRootStatus::Resolved,
+                source: ProjectRootSource::RegistryId,
+                diagnostic: None,
+            };
+        } else {
+            diagnostics.push(format!("{}={} not registered", label, v));
+        }
+    }
+
+    ProjectRoot {
+        root: None,
+        status: ProjectRootStatus::Unresolved,
+        source: ProjectRootSource::None,
+        diagnostic: Some(diagnostics.join("; ")),
+    }
+}
+
+fn canonicalize_or_self(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use missiond_core::types::{ProjectConfig, ProjectRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn registry_with(projects: Vec<ProjectConfig>) -> SharedProjectRegistry {
+        Arc::new(RwLock::new(ProjectRegistry::new(projects)))
+    }
+
+    fn project(id: &str, path: &str) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            intent_path: None,
+            active: true,
+            slots: vec![],
+            github_url: None,
+            kind: "managed".to_string(),
+            vault_path: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn no_args_marks_not_requested() {
+        let reg = registry_with(vec![]);
+        let r = resolve_project_root_from_args(&json!({}), &reg).await;
+        assert_eq!(r.status, ProjectRootStatus::NotRequested);
+        assert!(r.root.is_none());
+    }
+
+    #[tokio::test]
+    async fn explicit_existing_path_wins_over_registry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().to_path_buf();
+        let reg = registry_with(vec![project("missiond", "/totally/elsewhere")]);
+        let r = resolve_project_root_from_args(
+            &json!({ "cwd": p.display().to_string() }),
+            &reg,
+        )
+        .await;
+        assert_eq!(r.status, ProjectRootStatus::Resolved);
+        assert_eq!(r.source, ProjectRootSource::ExplicitPath);
+        assert_eq!(
+            r.root.unwrap().canonicalize().unwrap(),
+            p.canonicalize().unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn registry_id_resolves_when_no_path_works() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = registry_with(vec![project("missiond", &tmp.path().display().to_string())]);
+        let r = resolve_project_root_from_args(&json!({ "project": "missiond" }), &reg).await;
+        assert_eq!(r.status, ProjectRootStatus::Resolved);
+        assert_eq!(r.source, ProjectRootSource::RegistryId);
+    }
+
+    #[tokio::test]
+    async fn unknown_signals_mark_unresolved_with_diagnostic() {
+        let reg = registry_with(vec![]);
+        let r = resolve_project_root_from_args(
+            &json!({ "project": "ghost", "cwd": "relative/dir" }),
+            &reg,
+        )
+        .await;
+        assert_eq!(r.status, ProjectRootStatus::Unresolved);
+        assert!(r.diagnostic.is_some());
+        let diag = r.diagnostic.unwrap();
+        assert!(diag.contains("ghost"));
+        assert!(diag.contains("relative/dir"));
+    }
+
+    #[tokio::test]
+    async fn relative_cwd_does_not_silently_resolve_to_process_cwd() {
+        // Guard against accidentally resolving "./foo" via process cwd —
+        // that would let a misconfigured caller leak the daemon's cwd into
+        // flow search. We only accept absolute existing paths.
+        let reg = registry_with(vec![]);
+        let r = resolve_project_root_from_args(&json!({ "cwd": "./relative" }), &reg).await;
+        assert_eq!(r.status, ProjectRootStatus::Unresolved);
+    }
+
+    #[test]
+    fn project_root_args_filters_empty_strings() {
+        let v = json!({ "project": "", "target_project": "  ", "cwd": "/tmp" });
+        let r = ProjectRootArgs::from_value(&v);
+        assert!(r.project.is_none());
+        assert!(r.target_project.is_none());
+        assert_eq!(r.cwd.as_deref(), Some("/tmp"));
+        assert!(!r.is_empty());
+    }
+
+    #[test]
+    fn relative_flow_path_requires_project_root() {
+        let err = resolve_flow_path_arg(".missiond/generated/flows/x.yaml", None)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("requires resolved project_root"));
+    }
+
+    #[test]
+    fn relative_flow_path_resolves_under_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let resolved = resolve_flow_path_arg(
+            ".missiond/generated/flows/x.yaml",
+            Some(tmp.path()),
+        )
+        .unwrap();
+        assert_eq!(
+            resolved,
+            tmp.path().join(".missiond/generated/flows/x.yaml")
+        );
+    }
+
+    #[test]
+    fn absolute_flow_path_does_not_require_project_root() {
+        let resolved = resolve_flow_path_arg("/tmp/x.yaml", None).unwrap();
+        assert_eq!(resolved, PathBuf::from("/tmp/x.yaml"));
     }
 }

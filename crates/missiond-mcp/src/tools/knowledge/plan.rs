@@ -18,10 +18,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
          dispatch_strategy ∈ {resident-lisp|fresh-code-alignment|agent-team|mixed|prompt-fallback|unknown}\
          （未知值归一化为 unknown，记入响应 + sidecar，且在 internal target=mission_execution 时\
          转发给 mission_execution(action=open) 持久化进 companion log）。\
+         plan-runner auto-selection v1: target 可省略，runner 从 plan.sexp_text 解析\
+         :target / :target-tool / :tool / :flow-id / :dispatch-strategy / :parallelism /\
+         :target-project / :requested-cwd / :objective / :summary 等 hint；解析优先级 explicit_arg > plan_hint > default(unknown)；\
+         响应新增 target_source ∈ {explicit_arg, plan_hint, missing}、dispatch_strategy_source ∈ {explicit_arg, plan_hint, default}、\
+         plan_hint_summary（仅含解析到的字段）；当 parallelism=agent-team（或 hint 解析为 agent-team）且 target=mission_task_delegate 时，\
+         runner 在 objective 中注入字面提示「使用 agent-team提高效率」（已含则不重复）；\
+         dispatch_strategy 关键字映射：agent-team→agent-team、code-alignment/fresh-session→fresh-code-alignment、lisp/architecture/resident→resident-lisp，未识别归一化 unknown 不硬失败；\
+         若 parser 无法导出安全 target 且 caller 未传，仍返回原 MISSING_PARAM 结构化错误（suggestion 提示新增 target arg 或 PLAN hint）。\
          record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`。\
-         Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract \
+         Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \
+         + intent-flow.lisp :: F-workstation-dispatch-policy \
+         + intent-worker.lisp :: claudecode-workstation-orchestration \
          + intent-memory.lisp :: directive-layer :: file-first-artifacts :: plan-lisp。",
         json!({
             "type": "object",
@@ -67,7 +77,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "parallelism": {
                     "type": "string",
-                    "description": "[compile sonnet] hint for the planner: e.g. `serial`, `agent-team`, `mixed`. Surfaced inside the Sonnet prompt only."
+                    "description": "[compile sonnet | execute] for compile sonnet this is a hint for the planner (e.g. `serial`, `agent-team`, `mixed`) surfaced inside the Sonnet prompt. For execute (auto-selection v1) it is also consumed by the plan-runner: value `agent-team` (also resolvable from plan.sexp_text :parallelism hint) maps dispatch_strategy to `agent-team` (lower precedence than explicit dispatch_strategy arg or :dispatch-strategy hint), and when the resolved target is `mission_task_delegate` the runner injects the literal「使用 agent-team提高效率」hint into the delegated objective (no-duplicate)."
                 },
                 "acceptance": {
                     "description": "[compile sonnet] string or array of acceptance criteria woven into the planner prompt."
@@ -99,7 +109,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "target": {
                     "type": "string",
                     "enum": ["mission_execution", "mission_task_delegate", "mission_flow_run"],
-                    "description": "[execute] routing target — bridge mode hands back next_call; internal mode dispatches inside MissionD"
+                    "description": "[execute] routing target — bridge mode hands back next_call; internal mode dispatches inside MissionD. OPTIONAL under plan-runner auto-selection v1: when omitted, runner scans plan.sexp_text for :target / :target-tool / :tool hints (case-insensitive substring: `mission_execution`/`execution`→mission_execution; `task_delegate`/`claudecode`/`code-alignment`→mission_task_delegate; `flow_run`/`flow` + a resolvable :flow-id→mission_flow_run). Source-resolution precedence is explicit_arg > plan_hint > missing; the response surfaces target_source. If parser cannot derive a safe target and caller didn't pass one, the existing MISSING_PARAM structured error is returned with a suggestion to add `target` arg or PLAN hint fields."
                 },
                 "execute_mode": {
                     "type": "string",
@@ -116,11 +126,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "prompt-fallback",
                         "unknown"
                     ],
-                    "description": "[execute] workstation-dispatch-record strategy. Surfaced in the response and the plan_runner_dispatch evidence entry. Unknown values are normalised to `unknown`. Internal mode forwards dispatch_strategy to mission_execution(action=open), where the companion log now persists this field."
+                    "description": "[execute] workstation-dispatch-record strategy. Surfaced in the response and the plan_runner_dispatch evidence entry. Unknown values are normalised to `unknown`. Internal mode forwards dispatch_strategy to mission_execution(action=open), where the companion log now persists this field. Auto-selection v1 precedence: explicit_arg > plan_hint :dispatch-strategy > :parallelism mapping > default `unknown`; keyword mapping (case-insensitive substring): `agent-team`→agent-team, `code-alignment`/`fresh-session`→fresh-code-alignment, `lisp`/`architecture`/`resident`→resident-lisp, anything else→unknown (never hard-fails). Response surfaces dispatch_strategy_source ∈ {explicit_arg, plan_hint, default}."
                 },
                 "target_project": {
                     "type": "string",
-                    "description": "[execute] registered project id OR project root path. For mission_execution it is forwarded as `project`; for mission_task_delegate it is treated as cwd if it looks like a path."
+                    "description": "[execute] registered project id OR project root path. For mission_execution it is forwarded as `project`; for mission_task_delegate it is treated as cwd if it looks like a path. Auto-selection v1: when omitted, runner extracts from plan.sexp_text :target-project / :target_project / :project hints; explicit arg still wins."
                 },
                 "cwd": {
                     "type": "string",
@@ -128,11 +138,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "requested_cwd": {
                     "type": "string",
-                    "description": "[execute internal mission_execution] working directory metadata persisted on the companion log when present (workstation-dispatch-record :requested-cwd)"
+                    "description": "[execute internal mission_execution] working directory metadata persisted on the companion log when present (workstation-dispatch-record :requested-cwd). Auto-selection v1: when omitted, runner extracts from plan.sexp_text :requested-cwd / :requested_cwd / :cwd hints; explicit arg still wins."
                 },
                 "objective": {
                     "type": "string",
-                    "description": "[execute internal mission_task_delegate] override the auto-derived objective; absent → derived from the first non-empty line of plan.sexp_text"
+                    "description": "[execute internal mission_task_delegate] override the auto-derived objective. Auto-selection v1 derivation order when omitted: plan.sexp_text :objective hint > :summary hint > first non-empty line of plan.sexp_text. When dispatch_strategy resolves to agent-team under target=mission_task_delegate, the runner additionally injects the literal Chinese hint「使用 agent-team提高效率」into the delegated objective (without duplicating if already present)."
                 },
                 "intent": {
                     "type": "string",
@@ -157,7 +167,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "flow_id": {
                     "type": "string",
-                    "description": "[execute internal mission_flow_run] required — plan.sexp_text → flow YAML compilation is future, so caller must provide an existing flow id"
+                    "description": "[execute internal mission_flow_run] existing flow id. Auto-selection v1: when omitted, runner extracts it from plan.sexp_text :flow-id / :flow_id hints; explicit arg still wins. plan.sexp_text → flow YAML compilation is still future, so the caller (or PLAN hint) must point at an already-registered flow id."
                 },
                 "params": {
                     "type": "object",

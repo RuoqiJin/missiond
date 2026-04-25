@@ -818,6 +818,309 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// plan-runner auto-selection v1
+//
+// When `mission_plan(action=execute)` is called without `target` (or other
+// dispatch knobs), a small conservative parser extracts hints from
+// `plan.sexp_text` so the runner can route on its own. Explicit args still
+// win; this is purely a fallback so PLAN.lisp can speak for itself.
+//
+// Lisp authority:
+//   intent-flow.lisp        :: F-intent-alignment-plan-execution-loop ::
+//                                s6 execution-runner
+//   intent-flow.lisp        :: F-workstation-dispatch-policy
+//   intent-intent-layer.lisp :: section unified-entry-pipeline ::
+//                                role plan-runner
+//   intent-worker.lisp      :: claudecode-workstation-orchestration
+//   intent-tools.lisp       :: mission_plan :: :dispatch-strategy-consumer
+// ───────────────────────────────────────────────────────────────────────
+
+const AGENT_TEAM_OBJECTIVE_HINT: &str = "使用 agent-team提高效率";
+
+#[derive(Debug, Default, Clone)]
+struct ParsedPlanHints {
+    target: Option<String>,
+    flow_id: Option<String>,
+    dispatch_strategy: Option<String>,
+    parallelism: Option<String>,
+    target_project: Option<String>,
+    requested_cwd: Option<String>,
+    objective: Option<String>,
+    summary: Option<String>,
+}
+
+impl ParsedPlanHints {
+    fn to_summary_json(&self) -> Value {
+        let mut map = serde_json::Map::new();
+        let mut put = |k: &str, v: &Option<String>| {
+            if let Some(s) = v {
+                map.insert(k.to_string(), Value::String(s.clone()));
+            }
+        };
+        put("target", &self.target);
+        put("flow_id", &self.flow_id);
+        put("dispatch_strategy", &self.dispatch_strategy);
+        put("parallelism", &self.parallelism);
+        put("target_project", &self.target_project);
+        put("requested_cwd", &self.requested_cwd);
+        put("objective", &self.objective);
+        put("summary", &self.summary);
+        Value::Object(map)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedExec {
+    target: &'static str,
+    target_source: &'static str,
+    dispatch_strategy: &'static str,
+    dispatch_strategy_source: &'static str,
+    plan_hint_summary: Value,
+}
+
+/// Parse a PLAN.lisp s-expression for known runner hints. This is NOT a full
+/// Lisp interpreter; it scans `:keyword value` pairs at any depth and keeps
+/// the first occurrence per keyword. Conservative on purpose: anything that
+/// doesn't look like a simple keyword/value pair is silently skipped.
+fn parse_plan_hints(sexp: &str) -> ParsedPlanHints {
+    let mut h = ParsedPlanHints::default();
+
+    fn store_first(slot: &mut Option<String>, value: &str) {
+        if slot.is_none() {
+            let v = value.trim();
+            if !v.is_empty() {
+                *slot = Some(v.to_string());
+            }
+        }
+    }
+
+    for (raw_key, value) in scan_keyword_pairs(sexp) {
+        let key = raw_key.to_ascii_lowercase();
+        match key.as_str() {
+            "target" | "target-tool" | "tool" => store_first(&mut h.target, &value),
+            "flow-id" | "flow_id" => store_first(&mut h.flow_id, &value),
+            "dispatch-strategy" | "dispatch_strategy" => {
+                store_first(&mut h.dispatch_strategy, &value)
+            }
+            "parallelism" => store_first(&mut h.parallelism, &value),
+            "target-project" | "target_project" | "project" => {
+                store_first(&mut h.target_project, &value)
+            }
+            "requested-cwd" | "requested_cwd" | "cwd" => {
+                store_first(&mut h.requested_cwd, &value)
+            }
+            "objective" => store_first(&mut h.objective, &value),
+            "summary" => store_first(&mut h.summary, &value),
+            _ => {}
+        }
+    }
+    h
+}
+
+/// Scan a string for `:keyword value` pairs. Two value shapes are recognised:
+///   * double-quoted string literal — handles `\\` and `\"` escapes
+///   * bareword — terminates on whitespace / `(` / `)` / `"`
+/// List values (`:k (...)`), bare `:k` with no value, and `:k :next-key`
+/// patterns are skipped so the parser stays conservative.
+fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
+    let chars: Vec<char> = sexp.chars().collect();
+    let n = chars.len();
+    let mut out = Vec::new();
+    let mut i = 0;
+    let mut in_string = false;
+    let mut esc = false;
+    while i < n {
+        let c = chars[i];
+        if in_string {
+            if esc {
+                esc = false;
+                i += 1;
+                continue;
+            }
+            if c == '\\' {
+                esc = true;
+                i += 1;
+                continue;
+            }
+            if c == '"' {
+                in_string = false;
+            }
+            i += 1;
+            continue;
+        }
+        if c == '"' {
+            in_string = true;
+            i += 1;
+            continue;
+        }
+        if c != ':' {
+            i += 1;
+            continue;
+        }
+        let key_start = i + 1;
+        let mut j = key_start;
+        while j < n {
+            let cj = chars[j];
+            if cj.is_whitespace() || cj == '(' || cj == ')' || cj == '"' || cj == ':' {
+                break;
+            }
+            j += 1;
+        }
+        if j == key_start {
+            i += 1;
+            continue;
+        }
+        let key: String = chars[key_start..j].iter().collect();
+        let mut k = j;
+        while k < n && chars[k].is_whitespace() {
+            k += 1;
+        }
+        if k >= n {
+            break;
+        }
+        let next = chars[k];
+        match next {
+            '"' => {
+                let mut m = k + 1;
+                let mut value = String::new();
+                let mut esc2 = false;
+                while m < n {
+                    let cm = chars[m];
+                    if esc2 {
+                        value.push(cm);
+                        esc2 = false;
+                        m += 1;
+                        continue;
+                    }
+                    if cm == '\\' {
+                        esc2 = true;
+                        m += 1;
+                        continue;
+                    }
+                    if cm == '"' {
+                        m += 1;
+                        break;
+                    }
+                    value.push(cm);
+                    m += 1;
+                }
+                out.push((key, value));
+                i = m;
+            }
+            '(' | ')' | ':' => {
+                i = k;
+            }
+            _ => {
+                let mut m = k;
+                while m < n {
+                    let cm = chars[m];
+                    if cm.is_whitespace() || cm == '(' || cm == ')' || cm == '"' {
+                        break;
+                    }
+                    m += 1;
+                }
+                if m > k {
+                    let value: String = chars[k..m].iter().collect();
+                    out.push((key, value));
+                    i = m;
+                } else {
+                    i = k;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Map a free-form target string from a plan hint to the canonical 3-target
+/// surface. `flow_id_present` gates `mission_flow_run` because the inner
+/// dispatcher refuses to run without a flow_id.
+fn normalize_target(raw: &str, flow_id_present: bool) -> Option<&'static str> {
+    let lower = raw.to_ascii_lowercase();
+    // task_delegate keywords are most specific — check first so a plan hint
+    // like "claudecode" or "code-alignment" doesn't get swallowed by the
+    // generic "execution" branch.
+    if lower.contains("mission_task_delegate")
+        || lower.contains("task_delegate")
+        || lower.contains("task-delegate")
+        || lower.contains("claudecode")
+        || lower.contains("code-alignment")
+    {
+        return Some("mission_task_delegate");
+    }
+    if flow_id_present
+        && (lower.contains("mission_flow_run")
+            || lower.contains("flow_run")
+            || lower.contains("flow-run")
+            || lower.contains("flow"))
+    {
+        return Some("mission_flow_run");
+    }
+    if lower.contains("mission_execution") || lower.contains("execution") {
+        return Some("mission_execution");
+    }
+    None
+}
+
+/// Map a free-form strategy hint to one of `VALID_DISPATCH_STRATEGIES`.
+/// `unknown` is treated as "no signal" so callers can fall back to the next
+/// priority source. Returns `None` when the string carries no usable hint.
+fn canonicalize_strategy(raw: &str) -> Option<&'static str> {
+    let lower = raw.to_ascii_lowercase();
+    for &valid in VALID_DISPATCH_STRATEGIES {
+        if lower == valid {
+            if valid == "unknown" {
+                return None;
+            }
+            return Some(valid);
+        }
+    }
+    if lower.contains("agent-team") || lower.contains("agent_team") {
+        return Some("agent-team");
+    }
+    if lower.contains("code-alignment")
+        || lower.contains("code_alignment")
+        || lower.contains("fresh")
+    {
+        return Some("fresh-code-alignment");
+    }
+    if lower.contains("resident") || lower.contains("lisp-architect") || lower.contains("architect")
+    {
+        return Some("resident-lisp");
+    }
+    if lower.contains("mixed") {
+        return Some("mixed");
+    }
+    if lower.contains("prompt") || lower.contains("fallback") {
+        return Some("prompt-fallback");
+    }
+    None
+}
+
+/// Resolve the dispatch strategy with source-tracking precedence:
+///   explicit arg > plan hint :dispatch-strategy > plan hint :parallelism > default unknown
+fn resolve_dispatch_strategy(
+    explicit: Option<&str>,
+    hints: &ParsedPlanHints,
+) -> (&'static str, &'static str) {
+    if let Some(s) = explicit {
+        let canonical = canonicalize_strategy(s).unwrap_or("unknown");
+        return (canonical, "explicit_arg");
+    }
+    if let Some(s) = hints.dispatch_strategy.as_deref() {
+        if let Some(c) = canonicalize_strategy(s) {
+            return (c, "plan_hint");
+        }
+    }
+    if let Some(p) = hints.parallelism.as_deref() {
+        if let Some(c) = canonicalize_strategy(p) {
+            return (c, "plan_hint");
+        }
+    }
+    ("unknown", "default")
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // execute — plan-runner v0
 //
 // execute_mode=bridge (default): return next_call descriptor, do NOT dispatch.
@@ -839,21 +1142,6 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
 
 async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "plan_id")?;
-    let target = match args.get("target").and_then(|v| v.as_str()) {
-        Some(s) if !s.is_empty() => s,
-        _ => {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(
-                    error_codes::MISSING_PARAM,
-                    "execute requires `target` (mission_execution|mission_task_delegate|mission_flow_run)",
-                )
-                .with_suggestion(
-                    "execute_mode=bridge default returns a next_call descriptor; \
-                     execute_mode=internal dispatches the chosen target inside MissionD",
-                ),
-            ))
-        }
-    };
 
     let execute_mode = args
         .get("execute_mode")
@@ -866,30 +1154,6 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
                 format!("execute_mode `{}` not supported", execute_mode),
             )
             .with_suggestion("execute_mode ∈ {bridge, internal}; default is bridge"),
-        ));
-    }
-
-    let dispatch_strategy_raw = args
-        .get("dispatch_strategy")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-    let dispatch_strategy = if VALID_DISPATCH_STRATEGIES.contains(&dispatch_strategy_raw) {
-        dispatch_strategy_raw
-    } else {
-        // Don't reject: future strategies may be added in Lisp before code
-        // catches up. Just normalise so evidence stays clean.
-        "unknown"
-    };
-
-    if !matches!(target, "mission_execution" | "mission_task_delegate" | "mission_flow_run") {
-        return Ok(ToolResult::structured_error(
-            ToolError::new(
-                error_codes::INVALID_PARAM,
-                format!("execute target `{}` is not supported", target),
-            )
-            .with_suggestion(
-                "supported targets: mission_execution | mission_task_delegate | mission_flow_run",
-            ),
         ));
     }
 
@@ -918,15 +1182,74 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
+    // plan-runner auto-selection v1: parse hints up front so caller-omitted
+    // target / dispatch knobs can be derived from PLAN.lisp itself.
+    let hints = parse_plan_hints(&plan.sexp_text);
+
+    let explicit_target = args
+        .get("target")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let (target, target_source): (&'static str, &'static str) = if let Some(s) = explicit_target {
+        match s {
+            "mission_execution" => ("mission_execution", "explicit_arg"),
+            "mission_task_delegate" => ("mission_task_delegate", "explicit_arg"),
+            "mission_flow_run" => ("mission_flow_run", "explicit_arg"),
+            _ => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!("execute target `{}` is not supported", s),
+                    )
+                    .with_suggestion(
+                        "supported targets: mission_execution | mission_task_delegate | mission_flow_run",
+                    ),
+                ));
+            }
+        }
+    } else if let Some(t) = hints
+        .target
+        .as_deref()
+        .and_then(|s| normalize_target(s, hints.flow_id.is_some()))
+    {
+        (t, "plan_hint")
+    } else {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::MISSING_PARAM,
+                "execute requires `target` (mission_execution|mission_task_delegate|mission_flow_run); \
+                 plan.sexp_text did not contain a usable :target / :target-tool / :tool hint",
+            )
+            .with_suggestion(
+                "pass `target` explicitly, or add a :target hint (and :flow-id when targeting flow_run) to PLAN.lisp",
+            ),
+        ));
+    };
+
+    let explicit_ds = args
+        .get("dispatch_strategy")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let (dispatch_strategy, dispatch_strategy_source) =
+        resolve_dispatch_strategy(explicit_ds, &hints);
+
+    let resolved = ResolvedExec {
+        target,
+        target_source,
+        dispatch_strategy,
+        dispatch_strategy_source,
+        plan_hint_summary: hints.to_summary_json(),
+    };
+
     if execute_mode == "bridge" {
-        return Ok(action_execute_bridge(&plan, target, dispatch_strategy));
+        return Ok(action_execute_bridge(&plan, &resolved));
     }
 
-    action_execute_internal(state, args, &plan, target, dispatch_strategy).await
+    action_execute_internal(state, args, &plan, &resolved, &hints).await
 }
 
-fn action_execute_bridge(plan: &Plan, target: &str, dispatch_strategy: &str) -> ToolResult {
-    let next_call = match target {
+fn action_execute_bridge(plan: &Plan, resolved: &ResolvedExec) -> ToolResult {
+    let next_call = match resolved.target {
         "mission_execution" => json!({
             "tool": "mission_execution",
             "action": "open",
@@ -952,8 +1275,11 @@ fn action_execute_bridge(plan: &Plan, target: &str, dispatch_strategy: &str) -> 
         "runner_status": "bridge_only",
         "plan_id": plan.id,
         "board_task_id": plan.board_task_id,
-        "target_tool": target,
-        "dispatch_strategy": dispatch_strategy,
+        "target_tool": resolved.target,
+        "target_source": resolved.target_source,
+        "dispatch_strategy": resolved.dispatch_strategy,
+        "dispatch_strategy_source": resolved.dispatch_strategy_source,
+        "plan_hint_summary": resolved.plan_hint_summary,
         "next_call": next_call,
         "note": "manager returns the next-call descriptor; caller invokes the target tool directly. \
                  Pass execute_mode=\"internal\" to have MissionD dispatch the target inside the daemon.",
@@ -964,12 +1290,18 @@ async fn action_execute_internal(
     state: &AppState,
     args: &Value,
     plan: &Plan,
-    target: &str,
-    dispatch_strategy: &str,
+    resolved: &ResolvedExec,
+    hints: &ParsedPlanHints,
 ) -> Result<ToolResult> {
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let inner_args = match build_internal_dispatch_args(args, plan, target, dispatch_strategy) {
+    let inner_args = match build_internal_dispatch_args(
+        args,
+        plan,
+        resolved.target,
+        resolved.dispatch_strategy,
+        hints,
+    ) {
         Ok(v) => v,
         Err(err_result) => return Ok(err_result),
     };
@@ -981,13 +1313,16 @@ async fn action_execute_internal(
             "runner_status": "dry_run_no_dispatch",
             "plan_id": plan.id,
             "board_task_id": plan.board_task_id,
-            "target_tool": target,
-            "dispatch_strategy": dispatch_strategy,
+            "target_tool": resolved.target,
+            "target_source": resolved.target_source,
+            "dispatch_strategy": resolved.dispatch_strategy,
+            "dispatch_strategy_source": resolved.dispatch_strategy_source,
+            "plan_hint_summary": resolved.plan_hint_summary,
             "would_dispatch": inner_args,
         })));
     }
 
-    let inner_result = match target {
+    let inner_result = match resolved.target {
         "mission_execution" => {
             super::agent_execution::handle(state, "mission_execution", inner_args.clone()).await?
         }
@@ -1018,22 +1353,31 @@ async fn action_execute_internal(
             "runner_status": "inner_returned_error",
             "plan_id": plan.id,
             "board_task_id": plan.board_task_id,
-            "target_tool": target,
-            "dispatch_strategy": dispatch_strategy,
+            "target_tool": resolved.target,
+            "target_source": resolved.target_source,
+            "dispatch_strategy": resolved.dispatch_strategy,
+            "dispatch_strategy_source": resolved.dispatch_strategy_source,
+            "plan_hint_summary": resolved.plan_hint_summary,
             "inner_result": inner_payload,
         })));
     }
 
     // Successful dispatch — append evidence then transition plan to executing.
+    // Project resolution for evidence sidecar placement: explicit args first,
+    // then plan-hint :target-project, then CWD fallback inside the appender.
     let project_arg = args
         .get("target_project")
         .or_else(|| args.get("project"))
-        .and_then(|v| v.as_str());
+        .and_then(|v| v.as_str())
+        .or(hints.target_project.as_deref());
     let evidence_entry = json!({
         "kind": "plan_runner_dispatch",
         "execute_mode": "internal",
-        "target_tool": target,
-        "dispatch_strategy": dispatch_strategy,
+        "target_tool": resolved.target,
+        "target_source": resolved.target_source,
+        "dispatch_strategy": resolved.dispatch_strategy,
+        "dispatch_strategy_source": resolved.dispatch_strategy_source,
+        "plan_hint_summary": resolved.plan_hint_summary.clone(),
         "inner_result": inner_payload.clone(),
     });
     let (evidence_path, evidence_error) =
@@ -1068,8 +1412,7 @@ async fn action_execute_internal(
 
     Ok(build_internal_dispatch_success_response(
         plan,
-        target,
-        dispatch_strategy,
+        resolved,
         inner_payload,
         evidence_path,
         evidence_error,
@@ -1092,8 +1435,7 @@ async fn action_execute_internal(
 /// `evidence_error` and `status_update_error` together.
 fn build_internal_dispatch_success_response(
     plan: &Plan,
-    target: &str,
-    dispatch_strategy: &str,
+    resolved: &ResolvedExec,
     inner_payload: Value,
     evidence_path: Option<String>,
     evidence_error: Option<String>,
@@ -1111,8 +1453,11 @@ fn build_internal_dispatch_success_response(
         "runner_status": runner_status,
         "plan_id": plan.id,
         "board_task_id": plan.board_task_id,
-        "target_tool": target,
-        "dispatch_strategy": dispatch_strategy,
+        "target_tool": resolved.target,
+        "target_source": resolved.target_source,
+        "dispatch_strategy": resolved.dispatch_strategy,
+        "dispatch_strategy_source": resolved.dispatch_strategy_source,
+        "plan_hint_summary": resolved.plan_hint_summary,
         "evidence_path": evidence_path,
         "inner_result": inner_payload,
     });
@@ -1133,11 +1478,16 @@ fn build_internal_dispatch_success_response(
 /// (one of `VALID_DISPATCH_STRATEGIES`, defaulted to `"unknown"`). It is
 /// forwarded into the `mission_execution(action=open)` inner JSON so the
 /// companion log can persist `:dispatch-strategy`. Other targets ignore it.
+///
+/// `hints` are the parsed PLAN.lisp keyword/value pairs. Each per-target
+/// branch falls back to the relevant hint when the caller omitted the
+/// corresponding arg. Caller-supplied args ALWAYS win.
 fn build_internal_dispatch_args(
     args: &Value,
     plan: &Plan,
     target: &str,
     dispatch_strategy: &str,
+    hints: &ParsedPlanHints,
 ) -> std::result::Result<Value, ToolResult> {
     match target {
         "mission_execution" => {
@@ -1175,35 +1525,60 @@ fn build_internal_dispatch_args(
                 "owner": owner,
                 "dispatch_strategy": dispatch_strategy,
             });
-            // project is the canonical key for mission_execution; target_project
-            // is accepted as an alias and resolved to project here.
-            if let Some(p) = args.get("target_project").or_else(|| args.get("project")) {
-                if let Some(s) = p.as_str() {
-                    inner["project"] = json!(s);
-                }
+            // project: explicit args first, else parsed plan hint.
+            let project_value = args
+                .get("target_project")
+                .or_else(|| args.get("project"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| hints.target_project.clone());
+            if let Some(s) = project_value {
+                inner["project"] = json!(s);
             }
-            // Also forward the original target_project string (when present) so
-            // mission_execution can persist it verbatim alongside `project` —
-            // the companion log records it as `:target-project` per
-            // intent-tools.lisp :: workstation-dispatch-record.
-            if let Some(s) = args.get("target_project").and_then(|v| v.as_str()) {
+            // Forward target_project verbatim (companion log persists it as
+            // :target-project per intent-tools.lisp ::
+            // workstation-dispatch-record). Explicit arg first, else hint.
+            let target_project_str = args
+                .get("target_project")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| hints.target_project.clone());
+            if let Some(s) = target_project_str {
                 inner["target_project"] = json!(s);
             }
-            // requested_cwd is metadata only (used by mission_execution for
-            // workstation-dispatch-record :requested-cwd persistence).
-            if let Some(s) = args.get("requested_cwd").and_then(|v| v.as_str()) {
+            // requested_cwd: explicit arg first, else parsed plan hint.
+            let requested_cwd = args
+                .get("requested_cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| hints.requested_cwd.clone());
+            if let Some(s) = requested_cwd {
                 inner["requested_cwd"] = json!(s);
             }
             Ok(inner)
         }
         "mission_task_delegate" => {
+            // Objective precedence: explicit arg > :objective hint > :summary
+            // hint > derived first non-empty line of plan.sexp_text.
             let objective_in = args
                 .get("objective")
                 .and_then(|v| v.as_str())
                 .filter(|s| !s.trim().is_empty())
-                .map(|s| s.to_string());
-            let objective = objective_in
+                .map(|s| s.to_string())
+                .or_else(|| hints.objective.clone())
+                .or_else(|| hints.summary.clone());
+            let mut objective = objective_in
                 .unwrap_or_else(|| derive_objective_from_plan(plan, DERIVED_OBJECTIVE_MAX));
+
+            // agent-team hint injection: when the resolved dispatch_strategy is
+            // agent-team and the target is task_delegate, append the literal
+            // Chinese hint so the delegated agent picks up the parallelism
+            // intent. Idempotent — skipped if already present.
+            if dispatch_strategy == "agent-team" && !objective.contains(AGENT_TEAM_OBJECTIVE_HINT)
+            {
+                objective.push('\n');
+                objective.push_str(AGENT_TEAM_OBJECTIVE_HINT);
+            }
 
             let intent = args.get("intent").and_then(|v| v.as_str());
             if let Some(i) = intent {
@@ -1232,17 +1607,34 @@ fn build_internal_dispatch_args(
                     format!("board_task:{}", plan.board_task_id),
                 ],
             });
-            // task_delegate accepts cwd as a path; target_project (registry id)
-            // is not directly understood downstream, so we map only the path.
-            if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
-                inner["cwd"] = json!(cwd);
-            } else if let Some(tp) = args.get("target_project").and_then(|v| v.as_str()) {
-                // Only forward as cwd if it looks like a filesystem path; bare
-                // project ids cannot resolve in task_delegate. Heuristic: '/'
-                // present.
-                if tp.contains('/') {
-                    inner["cwd"] = json!(tp);
-                }
+            // cwd precedence:
+            //   explicit args.cwd
+            //   > args.target_project (only if path-like)
+            //   > hints.requested_cwd
+            //   > hints.target_project (only if path-like)
+            // task_delegate accepts cwd as a filesystem path; bare project ids
+            // cannot resolve downstream, so we use the '/' heuristic for the
+            // target_project alias.
+            let cwd = args
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    args.get("target_project")
+                        .and_then(|v| v.as_str())
+                        .filter(|tp| tp.contains('/'))
+                        .map(|s| s.to_string())
+                })
+                .or_else(|| hints.requested_cwd.clone())
+                .or_else(|| {
+                    hints
+                        .target_project
+                        .as_deref()
+                        .filter(|tp| tp.contains('/'))
+                        .map(|s| s.to_string())
+                });
+            if let Some(c) = cwd {
+                inner["cwd"] = json!(c);
             }
             if let Some(p) = args.get("priority").and_then(|v| v.as_str()) {
                 inner["priority"] = json!(p);
@@ -1253,17 +1645,24 @@ fn build_internal_dispatch_args(
             Ok(inner)
         }
         "mission_flow_run" => {
-            let flow_id = match args.get("flow_id").and_then(|v| v.as_str()) {
+            // flow_id precedence: explicit arg > :flow-id / :flow_id plan hint.
+            let flow_id = args
+                .get("flow_id")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| hints.flow_id.clone());
+            let flow_id = match flow_id {
                 Some(s) if !s.is_empty() => s,
                 _ => {
                     return Err(ToolResult::structured_error(
                         ToolError::new(
                             error_codes::MISSING_PARAM,
-                            "execute_mode=internal target=mission_flow_run requires `flow_id`",
+                            "execute_mode=internal target=mission_flow_run requires `flow_id` (arg or :flow-id PLAN hint)",
                         )
                         .with_suggestion(
                             "plan.sexp_text 自动编译为 flow YAML 仍是未来工作 \
-                             (intent-flow.lisp :: workflow-distiller); 当前必须显式传入 flow_id",
+                             (intent-flow.lisp :: workflow-distiller); 当前必须显式传入 flow_id 或在 PLAN.lisp 写 :flow-id",
                         ),
                     ));
                 }
@@ -1527,10 +1926,28 @@ mod tests {
         assert!(!out.contains("(next ..."));
     }
 
+    /// Build a ResolvedExec for tests. Defaults `target_source="explicit_arg"`
+    /// and `dispatch_strategy_source="explicit_arg"` since most legacy tests
+    /// exercise the explicit-arg precedence path.
+    fn fixture_resolved(target: &'static str, dispatch_strategy: &'static str) -> ResolvedExec {
+        ResolvedExec {
+            target,
+            target_source: "explicit_arg",
+            dispatch_strategy,
+            dispatch_strategy_source: "explicit_arg",
+            plan_hint_summary: json!({}),
+        }
+    }
+
+    fn empty_hints() -> ParsedPlanHints {
+        ParsedPlanHints::default()
+    }
+
     #[test]
     fn bridge_response_includes_plan_runner_v0_fields() {
         let plan = fixture_plan("(plan)");
-        let result = action_execute_bridge(&plan, "mission_execution", "fresh-code-alignment");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let result = action_execute_bridge(&plan, &resolved);
         assert!(result.is_error.is_none());
         let text = match result.content.first() {
             Some(ToolContent::Text { text }) => text.clone(),
@@ -1540,7 +1957,10 @@ mod tests {
         assert_eq!(v["execute_mode"], "bridge");
         assert_eq!(v["runner_status"], "bridge_only");
         assert_eq!(v["target_tool"], "mission_execution");
+        assert_eq!(v["target_source"], "explicit_arg");
         assert_eq!(v["dispatch_strategy"], "fresh-code-alignment");
+        assert_eq!(v["dispatch_strategy_source"], "explicit_arg");
+        assert!(v.get("plan_hint_summary").is_some());
         assert_eq!(v["next_call"]["tool"], "mission_execution");
         assert_eq!(v["next_call"]["action"], "open");
     }
@@ -1549,8 +1969,14 @@ mod tests {
     fn build_internal_args_for_mission_execution_defaults() {
         let plan = fixture_plan("(plan)");
         let args = json!({});
-        let inner = build_internal_dispatch_args(&args, &plan, "mission_execution", "unknown")
-            .expect("default args build");
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_execution",
+            "unknown",
+            &empty_hints(),
+        )
+        .expect("default args build");
         assert_eq!(inner["action"], "open");
         assert_eq!(inner["execution_id"], format!("plan-{}", plan.id));
         assert_eq!(inner["parent_design"], format!("plan/{}", plan.id));
@@ -1578,6 +2004,7 @@ mod tests {
             &plan,
             "mission_execution",
             "fresh-code-alignment",
+            &empty_hints(),
         )
         .expect("strategy forward");
         assert_eq!(inner["dispatch_strategy"], "fresh-code-alignment");
@@ -1590,9 +2017,14 @@ mod tests {
             "target_project": "missiond",
             "requested_cwd": "/abs/path/missiond",
         });
-        let inner =
-            build_internal_dispatch_args(&args, &plan, "mission_execution", "agent-team")
-                .expect("forward target_project and requested_cwd");
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_execution",
+            "agent-team",
+            &empty_hints(),
+        )
+        .expect("forward target_project and requested_cwd");
         // canonical project key gets the alias value
         assert_eq!(inner["project"], "missiond");
         // and the original alias is preserved verbatim for companion-log
@@ -1611,8 +2043,14 @@ mod tests {
         // some other default).
         let plan = fixture_plan("(plan)");
         let args = json!({});
-        let inner = build_internal_dispatch_args(&args, &plan, "mission_execution", "unknown")
-            .expect("normalised default");
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_execution",
+            "unknown",
+            &empty_hints(),
+        )
+        .expect("normalised default");
         assert_eq!(inner["dispatch_strategy"], "unknown");
     }
 
@@ -1620,9 +2058,14 @@ mod tests {
     fn build_internal_args_for_task_delegate_derives_objective() {
         let plan = fixture_plan("(plan-draft :goal :align)\n");
         let args = json!({});
-        let inner =
-            build_internal_dispatch_args(&args, &plan, "mission_task_delegate", "unknown")
-                .expect("default task_delegate args");
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "unknown",
+            &empty_hints(),
+        )
+        .expect("default task_delegate args");
         let obj = inner["objective"].as_str().unwrap();
         assert!(obj.starts_with(&format!("Plan {}", plan.id)));
         assert!(obj.contains("(plan-draft"));
@@ -1650,6 +2093,7 @@ mod tests {
             &plan,
             "mission_task_delegate",
             "unknown",
+            &empty_hints(),
         )
         .expect_err("unknown intent should be rejected");
         assert_eq!(err.is_error, Some(true));
@@ -1659,8 +2103,14 @@ mod tests {
     fn build_internal_args_for_flow_run_requires_flow_id() {
         let plan = fixture_plan("(plan)");
         let args = json!({});
-        let err = build_internal_dispatch_args(&args, &plan, "mission_flow_run", "unknown")
-            .expect_err("missing flow_id should be MISSING_PARAM");
+        let err = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_flow_run",
+            "unknown",
+            &empty_hints(),
+        )
+        .expect_err("missing flow_id should be MISSING_PARAM");
         assert_eq!(err.is_error, Some(true));
         let text = match err.content.first() {
             Some(ToolContent::Text { text }) => text.clone(),
@@ -1676,8 +2126,14 @@ mod tests {
             "flow_id": "F-demo",
             "params": { "k": "v" },
         });
-        let inner = build_internal_dispatch_args(&args, &plan, "mission_flow_run", "unknown")
-            .expect("flow_run with flow_id");
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_flow_run",
+            "unknown",
+            &empty_hints(),
+        )
+        .expect("flow_run with flow_id");
         assert_eq!(inner["action"], "run");
         assert_eq!(inner["flow_id"], "F-demo");
         assert_eq!(inner["params"]["k"], "v");
@@ -1696,10 +2152,10 @@ mod tests {
     #[test]
     fn success_response_clean_path_is_executing() {
         let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
         let result = build_internal_dispatch_success_response(
             &plan,
-            "mission_execution",
-            "fresh-code-alignment",
+            &resolved,
             json!({"ok": true}),
             Some("/tmp/sidecar.json".to_string()),
             None,
@@ -1712,17 +2168,19 @@ mod tests {
         assert!(v.get("evidence_error").is_none());
         assert!(v.get("status_update_error").is_none());
         assert_eq!(v["target_tool"], "mission_execution");
+        assert_eq!(v["target_source"], "explicit_arg");
         assert_eq!(v["dispatch_strategy"], "fresh-code-alignment");
+        assert_eq!(v["dispatch_strategy_source"], "explicit_arg");
         assert_eq!(v["inner_result"]["ok"], true);
     }
 
     #[test]
     fn success_response_evidence_failure_keeps_dispatched_but_exposes_error() {
         let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "agent-team");
         let result = build_internal_dispatch_success_response(
             &plan,
-            "mission_task_delegate",
-            "agent-team",
+            &resolved,
             json!({"task_id": "btk-9"}),
             None,
             Some("mkdir failed: read-only fs".to_string()),
@@ -1741,10 +2199,10 @@ mod tests {
     #[test]
     fn success_response_status_update_failure_does_not_claim_executing() {
         let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "resident-lisp");
         let result = build_internal_dispatch_success_response(
             &plan,
-            "mission_execution",
-            "resident-lisp",
+            &resolved,
             json!({"execution_id": "plan-x"}),
             Some("/tmp/sidecar.json".to_string()),
             None,
@@ -1971,10 +2429,10 @@ mod tests {
     #[test]
     fn success_response_status_and_evidence_failure_combined() {
         let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_flow_run", "mixed");
         let result = build_internal_dispatch_success_response(
             &plan,
-            "mission_flow_run",
-            "mixed",
+            &resolved,
             json!({"flow_id": "F-demo"}),
             None,
             Some("disk full".to_string()),
@@ -1986,5 +2444,421 @@ mod tests {
         assert_eq!(v["evidence_error"], "disk full");
         assert_eq!(v["status_update_error"], "DB error: timeout");
         assert!(v["evidence_path"].is_null());
+    }
+
+    // ── plan-runner auto-selection v1 ──────────────────────────────────
+
+    #[test]
+    fn parse_plan_hints_extracts_string_and_bareword_values() {
+        let sexp = r#"
+            (plan
+              :board_task_id "btk-1"
+              :target "mission_task_delegate"
+              :flow-id F-demo
+              :dispatch-strategy "agent-team"
+              :parallelism agent-team
+              :target-project "missiond"
+              :requested-cwd "/abs/path"
+              :objective "ship plan-runner v1"
+              :summary "auto-selection v1")
+        "#;
+        let h = parse_plan_hints(sexp);
+        assert_eq!(h.target.as_deref(), Some("mission_task_delegate"));
+        assert_eq!(h.flow_id.as_deref(), Some("F-demo"));
+        assert_eq!(h.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert_eq!(h.parallelism.as_deref(), Some("agent-team"));
+        assert_eq!(h.target_project.as_deref(), Some("missiond"));
+        assert_eq!(h.requested_cwd.as_deref(), Some("/abs/path"));
+        assert_eq!(h.objective.as_deref(), Some("ship plan-runner v1"));
+        assert_eq!(h.summary.as_deref(), Some("auto-selection v1"));
+    }
+
+    #[test]
+    fn parse_plan_hints_skips_list_values_and_keeps_first_occurrence() {
+        // First :target wins; second :target inside a nested phase is ignored
+        // by "store_first" semantics. List values are silently skipped, so the
+        // :tasks (...) form below must NOT pollute the hint slots.
+        let sexp = r#"
+            (plan :target "mission_execution"
+                  :tasks (s1 :objective "phase 1")
+                  (phase :target "mission_flow_run"))
+        "#;
+        let h = parse_plan_hints(sexp);
+        assert_eq!(h.target.as_deref(), Some("mission_execution"));
+    }
+
+    #[test]
+    fn parse_plan_hints_ignores_keywords_inside_string_literals() {
+        // ":target" embedded inside a quoted note must not look like a real
+        // keyword/value pair.
+        let sexp = r#"(plan :note ":target faux" :objective "real one")"#;
+        let h = parse_plan_hints(sexp);
+        assert!(h.target.is_none());
+        assert_eq!(h.objective.as_deref(), Some("real one"));
+    }
+
+    #[test]
+    fn parse_plan_hints_accepts_underscore_aliases() {
+        let sexp = r#"(plan :flow_id F-y :target_project missiond :requested_cwd /tmp)"#;
+        let h = parse_plan_hints(sexp);
+        assert_eq!(h.flow_id.as_deref(), Some("F-y"));
+        assert_eq!(h.target_project.as_deref(), Some("missiond"));
+        assert_eq!(h.requested_cwd.as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn parse_plan_hints_empty_when_no_hints_present() {
+        let sexp = "(plan :board_task_id \"btk-x\" :goal :ship)";
+        let h = parse_plan_hints(sexp);
+        assert!(h.target.is_none());
+        assert!(h.flow_id.is_none());
+        assert!(h.dispatch_strategy.is_none());
+        assert!(h.parallelism.is_none());
+    }
+
+    #[test]
+    fn normalize_target_maps_keywords_to_canonical_targets() {
+        assert_eq!(
+            normalize_target("mission_execution", false),
+            Some("mission_execution")
+        );
+        assert_eq!(normalize_target("EXECUTION", false), Some("mission_execution"));
+        assert_eq!(
+            normalize_target("mission_task_delegate", false),
+            Some("mission_task_delegate")
+        );
+        assert_eq!(
+            normalize_target("claudecode workstation", false),
+            Some("mission_task_delegate")
+        );
+        assert_eq!(
+            normalize_target("code-alignment session", false),
+            Some("mission_task_delegate")
+        );
+        // flow_run gated by flow_id presence
+        assert_eq!(normalize_target("mission_flow_run", false), None);
+        assert_eq!(normalize_target("flow", false), None);
+        assert_eq!(
+            normalize_target("mission_flow_run", true),
+            Some("mission_flow_run")
+        );
+        assert_eq!(normalize_target("flow", true), Some("mission_flow_run"));
+        // unknown text yields None
+        assert_eq!(normalize_target("nothing here", true), None);
+    }
+
+    #[test]
+    fn canonicalize_strategy_returns_known_or_none() {
+        assert_eq!(canonicalize_strategy("agent-team"), Some("agent-team"));
+        assert_eq!(canonicalize_strategy("AGENT_TEAM"), Some("agent-team"));
+        assert_eq!(
+            canonicalize_strategy("fresh-code-alignment"),
+            Some("fresh-code-alignment")
+        );
+        assert_eq!(
+            canonicalize_strategy("fresh code alignment"),
+            Some("fresh-code-alignment")
+        );
+        assert_eq!(
+            canonicalize_strategy("resident-lisp"),
+            Some("resident-lisp")
+        );
+        assert_eq!(canonicalize_strategy("lisp-architect"), Some("resident-lisp"));
+        assert_eq!(canonicalize_strategy("mixed"), Some("mixed"));
+        assert_eq!(
+            canonicalize_strategy("prompt-fallback"),
+            Some("prompt-fallback")
+        );
+        // explicit "unknown" is treated as no signal so callers can fall back
+        assert_eq!(canonicalize_strategy("unknown"), None);
+        assert_eq!(canonicalize_strategy("nope"), None);
+    }
+
+    #[test]
+    fn resolve_dispatch_strategy_explicit_arg_wins() {
+        let mut hints = ParsedPlanHints::default();
+        hints.dispatch_strategy = Some("agent-team".to_string());
+        let (v, src) = resolve_dispatch_strategy(Some("resident-lisp"), &hints);
+        assert_eq!(v, "resident-lisp");
+        assert_eq!(src, "explicit_arg");
+    }
+
+    #[test]
+    fn resolve_dispatch_strategy_falls_back_to_plan_hint() {
+        let mut hints = ParsedPlanHints::default();
+        hints.dispatch_strategy = Some("agent-team".to_string());
+        let (v, src) = resolve_dispatch_strategy(None, &hints);
+        assert_eq!(v, "agent-team");
+        assert_eq!(src, "plan_hint");
+    }
+
+    #[test]
+    fn resolve_dispatch_strategy_uses_parallelism_when_dispatch_absent() {
+        let mut hints = ParsedPlanHints::default();
+        hints.parallelism = Some("agent-team".to_string());
+        let (v, src) = resolve_dispatch_strategy(None, &hints);
+        assert_eq!(v, "agent-team");
+        assert_eq!(src, "plan_hint");
+    }
+
+    #[test]
+    fn resolve_dispatch_strategy_default_when_no_signal() {
+        let (v, src) = resolve_dispatch_strategy(None, &ParsedPlanHints::default());
+        assert_eq!(v, "unknown");
+        assert_eq!(src, "default");
+    }
+
+    #[test]
+    fn resolve_dispatch_strategy_explicit_unknown_normalises_to_unknown() {
+        // An explicit "unknown" arg still wins over the default branch and
+        // does NOT cascade into plan hints — explicit means explicit.
+        let mut hints = ParsedPlanHints::default();
+        hints.dispatch_strategy = Some("agent-team".to_string());
+        let (v, src) = resolve_dispatch_strategy(Some("unknown"), &hints);
+        assert_eq!(v, "unknown");
+        assert_eq!(src, "explicit_arg");
+    }
+
+    #[test]
+    fn build_internal_args_for_mission_execution_uses_plan_hints() {
+        // Caller omits both target_project and requested_cwd; parser supplies
+        // them and the inner JSON must include both.
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let mut hints = ParsedPlanHints::default();
+        hints.target_project = Some("missiond".to_string());
+        hints.requested_cwd = Some("/abs/path/missiond".to_string());
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_execution",
+            "fresh-code-alignment",
+            &hints,
+        )
+        .expect("hints should backfill");
+        assert_eq!(inner["project"], "missiond");
+        assert_eq!(inner["target_project"], "missiond");
+        assert_eq!(inner["requested_cwd"], "/abs/path/missiond");
+        assert_eq!(inner["dispatch_strategy"], "fresh-code-alignment");
+    }
+
+    #[test]
+    fn build_internal_args_explicit_arg_overrides_plan_hint_for_mission_execution() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({
+            "target_project": "explicit-project",
+            "requested_cwd": "/explicit/cwd",
+        });
+        let mut hints = ParsedPlanHints::default();
+        hints.target_project = Some("hint-project".to_string());
+        hints.requested_cwd = Some("/hint/cwd".to_string());
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_execution",
+            "unknown",
+            &hints,
+        )
+        .expect("explicit arg wins");
+        assert_eq!(inner["project"], "explicit-project");
+        assert_eq!(inner["target_project"], "explicit-project");
+        assert_eq!(inner["requested_cwd"], "/explicit/cwd");
+    }
+
+    #[test]
+    fn task_delegate_receives_agent_team_objective_hint() {
+        let plan = fixture_plan("(plan-draft :goal :ship)");
+        let args = json!({});
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "agent-team",
+            &empty_hints(),
+        )
+        .expect("agent-team injection");
+        let obj = inner["objective"].as_str().unwrap();
+        assert!(
+            obj.contains(AGENT_TEAM_OBJECTIVE_HINT),
+            "objective should carry agent-team hint, got: {obj}"
+        );
+    }
+
+    #[test]
+    fn task_delegate_does_not_duplicate_agent_team_hint_when_present() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({
+            "objective": format!("manual: {AGENT_TEAM_OBJECTIVE_HINT}"),
+        });
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "agent-team",
+            &empty_hints(),
+        )
+        .expect("agent-team idempotent");
+        let obj = inner["objective"].as_str().unwrap();
+        // Exactly one occurrence — no duplication.
+        assert_eq!(
+            obj.matches(AGENT_TEAM_OBJECTIVE_HINT).count(),
+            1,
+            "should not duplicate hint, got: {obj}"
+        );
+    }
+
+    #[test]
+    fn task_delegate_objective_falls_back_to_plan_hint() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let mut hints = ParsedPlanHints::default();
+        hints.objective = Some("hint objective text".to_string());
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "unknown",
+            &hints,
+        )
+        .expect("hint objective wins");
+        assert_eq!(inner["objective"], "hint objective text");
+    }
+
+    #[test]
+    fn task_delegate_objective_falls_back_to_summary_hint_when_no_objective() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let mut hints = ParsedPlanHints::default();
+        hints.summary = Some("summary fallback".to_string());
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "unknown",
+            &hints,
+        )
+        .expect("summary fallback");
+        assert_eq!(inner["objective"], "summary fallback");
+    }
+
+    #[test]
+    fn task_delegate_cwd_uses_hint_when_arg_missing() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let mut hints = ParsedPlanHints::default();
+        hints.requested_cwd = Some("/from/hint".to_string());
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "unknown",
+            &hints,
+        )
+        .expect("hint cwd backfill");
+        assert_eq!(inner["cwd"], "/from/hint");
+    }
+
+    #[test]
+    fn task_delegate_cwd_uses_target_project_hint_only_when_path_like() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let mut hints = ParsedPlanHints::default();
+        hints.target_project = Some("missiond".to_string()); // bare id, no '/'
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "unknown",
+            &hints,
+        )
+        .expect("bare project id should not become cwd");
+        assert!(inner.get("cwd").is_none());
+
+        let mut hints2 = ParsedPlanHints::default();
+        hints2.target_project = Some("/abs/missiond".to_string());
+        let inner2 = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "unknown",
+            &hints2,
+        )
+        .expect("path-like target_project becomes cwd");
+        assert_eq!(inner2["cwd"], "/abs/missiond");
+    }
+
+    #[test]
+    fn flow_run_uses_plan_hint_flow_id_when_arg_missing() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let mut hints = ParsedPlanHints::default();
+        hints.flow_id = Some("F-from-plan".to_string());
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_flow_run",
+            "unknown",
+            &hints,
+        )
+        .expect("flow_id from hint");
+        assert_eq!(inner["flow_id"], "F-from-plan");
+    }
+
+    #[test]
+    fn flow_run_explicit_arg_overrides_plan_hint() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({ "flow_id": "F-explicit" });
+        let mut hints = ParsedPlanHints::default();
+        hints.flow_id = Some("F-from-plan".to_string());
+
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_flow_run",
+            "unknown",
+            &hints,
+        )
+        .expect("explicit flow_id wins");
+        assert_eq!(inner["flow_id"], "F-explicit");
+    }
+
+    #[test]
+    fn bridge_response_carries_plan_hint_summary_and_sources() {
+        let plan = fixture_plan("(plan)");
+        let mut hints_summary = serde_json::Map::new();
+        hints_summary.insert("target".to_string(), json!("mission_task_delegate"));
+        hints_summary.insert("parallelism".to_string(), json!("agent-team"));
+        let resolved = ResolvedExec {
+            target: "mission_task_delegate",
+            target_source: "plan_hint",
+            dispatch_strategy: "agent-team",
+            dispatch_strategy_source: "plan_hint",
+            plan_hint_summary: Value::Object(hints_summary),
+        };
+        let result = action_execute_bridge(&plan, &resolved);
+        let v = parse_payload(&result);
+        assert_eq!(v["target_tool"], "mission_task_delegate");
+        assert_eq!(v["target_source"], "plan_hint");
+        assert_eq!(v["dispatch_strategy"], "agent-team");
+        assert_eq!(v["dispatch_strategy_source"], "plan_hint");
+        assert_eq!(v["plan_hint_summary"]["target"], "mission_task_delegate");
+        assert_eq!(v["plan_hint_summary"]["parallelism"], "agent-team");
+    }
+
+    #[test]
+    fn parsed_plan_hints_summary_omits_absent_fields() {
+        let mut h = ParsedPlanHints::default();
+        h.target = Some("mission_execution".to_string());
+        let summary = h.to_summary_json();
+        let obj = summary.as_object().expect("summary is object");
+        assert_eq!(obj.len(), 1, "only :target should appear");
+        assert_eq!(obj.get("target"), Some(&json!("mission_execution")));
     }
 }

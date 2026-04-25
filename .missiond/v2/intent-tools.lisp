@@ -11,7 +11,7 @@
 
 (pillar tools
   :version "v0.7"
-  :status "phase-C recursive architecture contract 2026-04-25 — 83 actual endpoints; execution/capability usage/directive-plan-workflow/global-instruction surfaces code-aligned; project-root spawn cwd contract aligned; mission_pty_spawn / mission_pty_send / mission_compute_slot / mission_task_delegate marked as preferred workstation dispatch substrate for unified-entry pipeline (resident-lisp / fresh-code-alignment / agent-team / spawn-over-prompt); 不新增 tool"
+  :status "phase-C recursive architecture contract 2026-04-25 — 83 actual endpoints; project-root spawn cwd contract aligned; mission_pty_spawn / mission_pty_send / mission_compute_slot / mission_task_delegate marked as preferred workstation dispatch substrate for unified-entry pipeline; mission_directive (compiler_mode=sonnet directive-compiler v0) / mission_plan (compiler_mode=sonnet plan-compiler v0 + execute_mode=internal plan-runner v0 + auto-selection v1 sexp hint parsing) / mission_workflow (distill_mode=sonnet workflow-distiller v0 + compile_mode=deterministic methodology compiler v0) / mission_execution (12-action manager + dispatch_strategy companion log meta) / mission_capability_usage (semantic evidence v1: 5 sources + lisp hint merge-candidate) / mission_flow_run (generated flow loader discoverability) all code-aligned partial; auto-selection 完整 PLAN DAG / file-first .lisp writer / auto QuestionEvent gate / semantic lifting / forge compiler / ExecutionEvent dispatch metadata / planner-class model alias 仍 code-alignment pending; 不新增 tool"
   :predecessor "drafts/gptpro/intent-tools.lisp (239 行 starter)"
   :target-path ".missiond/v2/intent-tools.lisp"
 
@@ -974,26 +974,30 @@
         :desc "Flow Engine v2 declarative YAML → node-sequence 执行器"
         :actions ["run" "list" "status"]
         :required ["flow_id"]
-        :optional ["params" "action" "task_id"]
+        :optional ["params" "action" "task_id" "flow_path" "project" "target_project" "cwd"]
         (ingress
-          :schema "action defaults run; run requires flow_id; status requires task_id; list requires no effective flow_id in handler"
-          :callers ["intent-layer" "external MCP client" "board-frontend"])
+          :schema "action defaults run; run requires flow_id 或 flow_path; status requires task_id; list 合并 generated + core flows; project/target_project/cwd 用于解析 <project_root>/.missiond/generated/flows/"
+          :callers ["intent-layer" "external MCP client" "board-frontend" "mission_workflow run_methodology (复用 flow-engine-v2 runner path)"])
         (logic-core
-          (step s1 "list: loader::list_flows returns available definitions")
+          (step s1 "list: loader 合并 <project_root>/.missiond/generated/flows + $MISSIOND_HOME/flows, generated 优先去重")
           (step s2 "status: load board task and parse flow_context")
-          (step s3 "run: load flow definition by flow_id")
+          (step s3 "run: load flow definition; search order = explicit flow_path > <project_root>/.missiond/generated/flows/<flow_id>.yaml > $MISSIOND_HOME/flows/<flow_id>.yaml")
           (step s4 "run: create tracking board task with flow_template")
           (step s5 "run: initialize FlowContext from params and persist running status/phase/context")
           (step s6 "run: execute runner::run_flow inline")
           (step s7 "on success set phase=completed/status=done; on error set phase=failed/status=failed"))
         (egress
-          :reads ["$MISSIOND_HOME/flows/*.yaml" "board_tasks for status"]
+          :reads ["<project_root>/.missiond/generated/flows/*.yaml" "$MISSIOND_HOME/flows/*.yaml" "board_tasks for status"]
           :writes ["board_tasks" "flow_context" "flow_phase" "status"]
-          :returns "flow list/status/run result")
-        :dispatches-to-worker "section engine-cluster :: subsection flow-engine-v2 (3 path: load/dispatch/persist)"
+          :returns "flow list/status/run result; response 暴露 flow_source / flow_path / searched_paths / project_root_status")
+        :dispatches-to-worker "section engine-cluster :: subsection flow-engine-v2 (load/dispatch/persist)"
         :memory-cross-ref ["board (board_tasks.flow_context / flow_phase / status)"]
-        :flow-ref "F5-flow-engine-v2-node-execution"
-        :called-by ["intent-layer" "external MCP client" "board-frontend"]
+        :flow-ref "F5-flow-engine-v2-node-execution / F-methodology-to-executable-compile :: s5 write-executable-yaml + s6 dry-run-or-run (generated flow loader code-aligned partial)"
+        :implementation-targets ["crates/missiond-daemon/src/engine/flow/loader.rs (GENERATED_FLOWS_REL + searched_paths)"
+                                 "crates/missiond-daemon/src/handlers/compute/flow_run.rs (flow_source / project_root_status)"
+                                 "crates/missiond-mcp/src/tools/compute/flow_run.rs (schema: project/target_project/cwd + list dedupe)"]
+        :called-by ["intent-layer" "external MCP client" "board-frontend" "mission_workflow(action=run_methodology dry_run=false)"]
+        :pending ["longest-prefix cwd resolver (project_root_status 当前依赖显式 project_id/cwd)"]
         :necessity-pending-review false
         :note "此 tool 是 tools → flow → worker 完整 5 跳链路的唯一模板, 其他 77 tools 将来借鉴其模式"))
 
@@ -2761,7 +2765,7 @@
   ;; 3.6 MCP Surface Lifecycle — promoted implementations + future backlog
   ;; ══════════════════════════════════════════════════════════
   (section mcp-surface-lifecycle
-    :status "mission_execution + mission_capability_usage + mission_directive/plan/workflow + mission_global_instruction promoted to implemented; future backlog currently empty; unified-entry-pipeline 复用 mission_directive/plan/workflow/execution 既有 surface, 不新增 tool; workstation dispatch 全程复用 mission_pty_*/mission_compute_slot/mission_task_delegate, 不新增 tool"
+    :status "mission_execution + mission_capability_usage + mission_directive/plan/workflow + mission_global_instruction promoted to implemented; future backlog currently empty; unified-entry-pipeline actor v0 全部 code-aligned partial (directive-compiler / plan-compiler / plan-runner + auto-selection v1 / workflow-distiller / methodology compiler / generated flow loader / dispatch_strategy companion log / capability_usage semantic evidence v1); workstation dispatch 全程复用 mission_pty_*/mission_compute_slot/mission_task_delegate, 不新增 tool; file-first .lisp writer / 完整 PLAN DAG / auto QuestionEvent / semantic lifting / forge compiler / ExecutionEvent dispatch metadata 仍 code-alignment pending"
     :actual-count 83
     :future-count 0
     :promotion-rule "实现任一 future surface 前, 先更新 mcp-defs / mcp-dispatch / tools count / flow index, 再写 handler code"
@@ -2769,60 +2773,82 @@
     :workstation-dispatch-tool-policy "F-workstation-dispatch-policy 不引入新 tool; resident-lisp 复用 mission_pty_send/mission_task_delegate; fresh-code-alignment 走 mission_pty_spawn/mission_compute_slot; execution coordination 仍是 mission_execution; agent-team 是任务 .md 文字提示, 不需要 daemon side tool"
 
     (implemented-surface mission_execution
-      :status "code-aligned; 12-action manager + ExecutionEvent emission implemented"
+      :status "code-aligned; 12-action manager + ExecutionEvent emission + dispatch_strategy companion log meta 已实现 (open 接收并归一化 dispatch_strategy ∈ {resident-lisp, fresh-code-alignment, agent-team, mixed, prompt-fallback, unknown}, 未知值归一化为 unknown; 写 :dispatch-strategy / 可选 :target-project / :requested-cwd 进 meta block; list/status 读取并对 legacy logs graceful); ExecutionEvent::Opened 仍只携带 {execution_id, parent_design, scope, owner, path}, dispatch metadata 入 ExecutionEvent 仍 code-alignment pending"
       :actions ["open" "list" "claim" "heartbeat" "release" "deviate" "decide" "issue" "complete" "status" "audit" "repair"]
       :owner-boundary "tools owns schema; worker owns manager mechanics; memory owns execution protocol/file shape"
-      :unified-pipeline-role "MissionD 统一入口 execution substrate — F-intent-alignment-plan-execution-loop :: s6 execution-runner 的底层协调面 (未来 plan-runner 内部消费; 当前由人/上层 actor 调用)"
-      :workstation-dispatch-record "execution coordination 可记录本次 PLAN 节点选用的工位策略: dispatch_strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback}; 写入由 plan-runner(open) 时附带, 供 evidence-collector 与 capability-usage-monitor 事后回放"
+      :unified-pipeline-role "MissionD 统一入口 execution substrate — F-intent-alignment-plan-execution-loop :: s6 execution-runner 的底层协调面 (plan-runner v0 internal mode 已自动 forward dispatch_strategy)"
+      :workstation-dispatch-record "execution coordination 已记录本次 PLAN 节点的工位策略: dispatch_strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback / unknown}; 写入由 plan-runner(execute internal) 在调 open 时附带, 持久到 companion log meta; evidence-collector / capability-usage-monitor 可事后回放; ExecutionEvent metadata 扩展仍 pending"
       :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration :: execution-strategy-record + flow pillar :: F-workstation-dispatch-policy :: s4 record-strategy"
-      :dispatch-strategy-field-status "architecture-designed; mission_execution schema 暂未含 dispatch_strategy 字段, 待 code-alignment 时补 (向后兼容默认 unknown)"
+      :dispatch-strategy-field-status "code-aligned partial — companion log meta 持久化已 code-aligned (mission_execution schema open 接受 dispatch_strategy/target_project/requested_cwd; list/status 读取); ExecutionEvent::Opened 扩展 dispatch metadata 仍 code-alignment pending (companion log durable only / event metadata future)"
       :code ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"]
+      :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (schema: open 接受 dispatch_strategy/target_project/requested_cwd)"
+                               "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (open meta render + list/status meta read + legacy log graceful)"
+                               "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — 当前未携带 dispatch metadata; 扩展 pending)"]
       (ingress
-        :schema "action required; execution_id required except open/list; scope/phase/claimer fields per action; future open 接受 dispatch_strategy"
-        :callers ["multi-agent code/lisp alignment sessions" "intent-layer manager UI" "external MCP client" "unified entry pipeline plan-runner (future internal caller)"])
+        :schema "action required; execution_id required except open/list; scope/phase/claimer fields per action; open 接受 dispatch_strategy/target_project/requested_cwd 写入 companion log meta"
+        :callers ["multi-agent code/lisp alignment sessions" "intent-layer manager UI" "external MCP client" "unified entry pipeline plan-runner v0 internal mode"])
       (logic-core
-        (step s1 "validate action + required fields; normalize execution_id/parent_design/scope")
+        (step s1 "validate action + required fields; normalize execution_id/parent_design/scope; normalize dispatch_strategy (未知值 → unknown)")
         (step s2 "dispatch to worker :: agent-execution-manager-interface")
-        (step s3 "manager reads/writes memory :: agent-execution-coordination slots")
-        (step s4 "status/audit/repair return structured reports; mutating actions return receipt + allocated id/claim"))
+        (step s3 "manager reads/writes memory :: agent-execution-coordination slots; open 写 meta 含 dispatch_strategy 等")
+        (step s4 "status/audit/repair return structured reports; list 读出 dispatch_strategy (legacy logs without meta 返空字符串/unknown)"))
       (egress
-        :writes ["*-execution.lisp via manager" "tool_calls audit"]
+        :writes ["*-execution.lisp via manager (含 :dispatch-strategy / :target-project / :requested-cwd meta)" "tool_calls audit"]
         :reads ["execution companion logs" "parent design Lisp"]
         :flow-ref "F-execution-log-governance / F-intent-alignment-plan-execution-loop :: s6 execution-runner substrate / F-workstation-dispatch-policy :: s4 record-strategy"
-        :event-bus "ExecutionEvent::* emitted for mutating/audit/repair actions"
-        :returns "mission_execution action JSON"))
+        :event-bus "ExecutionEvent::* emitted for mutating/audit/repair actions; dispatch metadata 入 ExecutionEvent 仍 pending"
+        :returns "mission_execution action JSON; list 行含 dispatch_strategy 字段")
+      :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd 字段"
+                "timeline 等其他查询面暴露 dispatch_strategy"])
 
     (implemented-surface mission_directive
-      :status "code-aligned partial; management surface implemented; compile is dry-run until directive-compiler actor exists"
+      :status "code-aligned partial — manager surface + directive-compiler actor v0 已实现 (compiler_mode=sonnet via SonnetGateway interactive lane + sexp validation); compiler_mode=dry_run 默认仍是 preview; auto multi-round refine / file-first .missiond/alignment/<topic>/intent-alignment.lisp 自动写入 仍 pending"
       :actions ["compile" "list" "get" "approve" "archive" "version_chain"]
       :owner-boundary "tools owns schema; intent-layer owns directive-compiler; memory directive-layer owns store"
       :unified-pipeline-role "MissionD 统一入口 message intake / alignment 管理面 — F-intent-alignment-plan-execution-loop :: s1 message-intake + s3 alignment-review-gate (file-first SSOT 是 .missiond/alignment/<topic>/intent-alignment.lisp; directive 表是 DB 镜像)"
       :code ["crates/missiond-mcp/src/tools/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"]
+      :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/directive.rs (schema: action + compiler_mode + persist)"
+                               "crates/missiond-daemon/src/handlers/knowledge/directive.rs (action=compile sonnet branch, approve/archive/version_chain)"
+                               "crates/missiond-daemon/src/llm/sonnet_gateway.rs (interactive lane substrate)"]
       (ingress
-        :schema "action required; compile takes utterance/source/conversation_id?; approve/archive take directive_id; source ∈ {message, architecture_lisp_delta, user_request} for unified intake"
+        :schema "action required; compile takes utterance/source/conversation_id?/compiler_mode/persist; approve/archive take directive_id; source ∈ {message, architecture_lisp_delta, user_request} for unified intake; compiler_mode ∈ {dry_run (default), sonnet}"
         :callers ["Claude Code user utterance capture" "intent-layer actor" "external MCP client" "unified entry pipeline message intake (s1)"])
       (logic-core
         (step s1 "validate action and source utterance or directive_id")
-        (step s2 "compile returns dry-run compiled directive preview; persist=true writes draft row until directive-compiler actor exists")
+        (step s2 "compiler_mode=dry_run 返回 preview; compiler_mode=sonnet 调 SonnetGateway interactive lane 编译 directive sexp + 校验 fenced block / parens / allowed top-level head; persist=true 写 draft row")
         (step s3 "read/control actions call DirectiveLayerStore directive_* APIs")
         (step s4 "list/get/approve/archive/version_chain are full manager actions over directive rows")
-        (step s5 "approval gates can emit QuestionEvent in future when human confirmation is required"))
+        (step s5 "approval gates 仍人工; 自动 QuestionEvent 触发 pending"))
       (egress
         :writes ["directive table when compile persist=true / approve / archive"]
         :reads ["directive table" "version chain"]
-        :flow-ref "F-intent-alignment-plan-execution-loop :: s1 message-intake + s3 alignment-review-gate (unified pipeline 主入口) / F-directive-plan-workflow-compile :: directive branch (management surface code-aligned; compiler actor pending)"
-        :returns "directive id/status/compiled sexp/version chain"))
+        :flow-ref "F-intent-alignment-plan-execution-loop :: s1 message-intake + s3 alignment-review-gate (unified pipeline 主入口) / F-directive-plan-workflow-compile :: directive branch"
+        :returns "directive id/status/compiled sexp/version chain")
+      :pending ["file-first .missiond/alignment/<topic>/intent-alignment.lisp 自动写入/同步"
+                "compiler 多轮 refine / 自主 mode 选择"
+                "auto QuestionEvent gate"])
 
     (implemented-surface mission_plan
-      :status "code-aligned partial; management surface implemented; compile is dry-run and execute is bridge descriptor until plan-compiler/execution actor exists"
+      :status "code-aligned partial — manager surface + plan-compiler actor v0 (compiler_mode=sonnet) + plan-runner v0 + auto-selection v1 (sexp hint parsing) 已实现; compiler_mode=dry_run 默认仍是 preview; execute_mode=bridge 默认返回 next_call (向后兼容), execute_mode=internal 直接 dispatch + 写 evidence sidecar + 推 plan FSM; file-first .missiond/plans/<topic>/PLAN.lisp 自动写入 / 完整 PLAN DAG scheduler / 任意语义解析 / planner-class model alias 切换 仍 pending"
       :actions ["compile" "list" "get" "by_task" "approve" "mark" "supersede" "execute" "record_evidence"]
       :owner-boundary "tools owns schema; intent-layer owns plan-compiler; memory directive-layer owns plan store; board links task execution"
       :unified-pipeline-role "MissionD 统一入口 plan 管理面 — F-intent-alignment-plan-execution-loop :: s4 plan-authoring + s5 plan-review-gate + s6 execution-runner bridge + s7 evidence sidecar (file-first SSOT 是 .missiond/plans/<topic>/PLAN.lisp; plan 表是 DB 镜像)"
-      :execute-contract "execute 返回 next_call descriptor 是临时管理面契约; 未来由 MissionD plan-runner 内部 dispatch (architecture-designed); 不允许 client 把 next_call 私有解析当作长期方案"
-      :dispatch-strategy-consumer "未来 plan-runner 在 execute 时读取 PLAN.lisp 节点的 :dispatch-strategy + :target_project, 按 dispatch-decision-matrix 选 resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback; 当前 next_call descriptor 不携带此信息, 由 caller 自行解读"
+      :execute-contract "execute 返回 next_call descriptor 是 bridge 模式 (向后兼容); execute_mode=internal 时 plan-runner 内部 dispatch + 写 evidence; auto-selection v1: target/dispatch_strategy 缺省时, runner 从 plan.sexp_text 保守解析 :target / :target-tool / :tool / :flow-id / :dispatch-strategy / :parallelism / :target-project / :requested-cwd / :objective / :summary 等 hints; explicit args 仍优先, 无法安全推断时返回 MISSING_PARAM 结构化错误"
+      :dispatch-strategy-consumer "auto-selection v1 已 code-aligned: explicit_arg > plan_hint :dispatch-strategy > :parallelism mapping > default 'unknown'; agent-team 解析时向 mission_task_delegate objective 注入字面 '使用 agent-team提高效率' 提示 (幂等); 响应 surfaces target_source / dispatch_strategy_source / plan_hint_summary"
       :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration :: dispatch-decision-matrix + flow pillar :: F-workstation-dispatch-policy"
+      :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/plan.rs (schema: compile + execute_mode + dispatch_strategy + auto-selection 描述)"
+                               "crates/missiond-daemon/src/handlers/knowledge/plan.rs (action=compile sonnet branch + action=execute internal + auto-selection v1 sexp hint parser + sidecar)"
+                               "crates/missiond-daemon/src/llm/sonnet_gateway.rs"
+                               "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (mission_execution forwarding when target=mission_execution)"
+                               "crates/missiond-daemon/src/handlers/compute/task_delegate.rs (mission_task_delegate forwarding)"]
+      :pending ["file-first .missiond/plans/<topic>/PLAN.lisp 自动写入/同步"
+                "完整 PLAN DAG scheduler — 多节点 dependency / 并发 dispatch"
+                "arbitrary PLAN.lisp 语义解释 (超出保守 key/value hints)"
+                "planner-class model alias 切换 (例: opus planner) — 现仅 sonnet"
+                "auto QuestionEvent gate"
+                "status update failure 时事务性回滚"]
       :code ["crates/missiond-mcp/src/tools/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
       (ingress
@@ -2842,27 +2868,36 @@
         :returns "plan id/status/DAG summary/supersede chain/next_call bridge descriptor"))
 
     (implemented-surface mission_workflow
-      :status "code-aligned partial; list/get/match/record_execution implemented; apply read-only; distill/compile_methodology dry-run; run_methodology not implemented"
+      :status "code-aligned partial — manager surface + workflow-distiller actor v0 (distill_mode=sonnet) + methodology compiler v0 (compile_mode=deterministic) + run_methodology + generated flow loader (mission_flow_run discoverability) 已 code-aligned; distill_mode=dry_run / compile_mode=dry_run 默认仍是 preview; file-first .missiond/workflows/<topic>.lisp 自动写入 / 高阶 semantic lifting / forge compiler / 自动 record_execution-distill 联动 / longest-prefix cwd resolver 仍 pending"
       :actions ["list" "get" "match" "apply" "distill" "record_execution" "compile_methodology" "run_methodology"]
       :owner-boundary "tools owns schema; intent-layer owns workflow-distiller; memory directive-layer owns workflow store"
       :unified-pipeline-role "MissionD 统一入口 workflow distillation 管理面 — F-intent-alignment-plan-execution-loop :: s8 workflow-distillation (file-first SSOT 是 .missiond/workflows/<topic>.lisp; workflow 表是 DB 镜像)"
       :code ["crates/missiond-mcp/src/tools/knowledge/workflow.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"]
+      :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/workflow.rs (schema: distill_mode + compile_mode + run_methodology params)"
+                               "crates/missiond-daemon/src/handlers/knowledge/workflow.rs (action=distill sonnet + match_rules JSON + action_compile_methodology deterministic + action_run_methodology)"
+                               "crates/missiond-daemon/src/engine/flow/loader.rs (generated flow loader)"
+                               "crates/missiond-daemon/src/handlers/compute/flow_run.rs (mission_flow_run discoverability)"]
       (ingress
-        :schema "action required; match/apply take intent/context; distill takes plan_id or successful execution ref; compile/run_methodology take workflow_path/name + params"
+        :schema "action required; match/apply take intent/context; distill takes plan_id + distill_mode (dry_run|sonnet); compile_methodology takes workflow_path|name + compile_mode (dry_run|deterministic); run_methodology 解析 flow_id|flow_path|name 找 compiled YAML, dry_run=true 返 would_run / dry_run=false 复用 flow-engine-v2 runner path"
         :callers ["intent-layer reuse engine" "skill/flow authoring loop" "external MCP client" "unified entry pipeline workflow-distillation stage"])
       (logic-core
         (step s1 "list/get/match read workflow templates and match_rules")
         (step s2 "apply returns a candidate reusable workflow without executing it directly")
-        (step s3 "distill returns dry-run preview or writes draft template with persist=true until workflow-distiller actor exists")
+        (step s3 "distill: dry_run 返 preview; sonnet 读 succeeded plan + evidence sidecar 生成 workflow sexp + match_rules JSON; persist=true 写 draft/template")
         (step s4 "record_execution updates workflow usage stats and success/failure feedback")
-        (step s5 "compile_methodology reads .missiond/workflows/<name>.lisp and returns preview; YAML emitter actor pending")
-        (step s6 "run_methodology returns next-step pointer to compile_methodology + mission_flow_run; it does not execute directly"))
+        (step s5 "compile_methodology: dry_run 返 lint preview; deterministic 校验括号 + 抽 (step …) + 写 <project_root>/.missiond/generated/flows/<flow_id>.yaml")
+        (step s6 "run_methodology 解析 flow_id|flow_path|name 找 compiled YAML; dry_run=true 返 would_run; dry_run=false 复用 flow-engine-v2 runner path; mission_flow_run 已 code-aligned partial 自动发现 generated YAML"))
       (egress
-        :writes ["workflow table" "workflow execution stats"]
-        :reads ["workflow table" "plan/directive evidence"]
-        :flow-ref "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation / F-directive-plan-workflow-compile :: workflow distill/match branch code-aligned partial / F-methodology-to-executable-compile :: compile/run methodology branch compiler pending"
-        :returns "workflow template/match/apply/distill result"))
+        :writes ["workflow table" "workflow execution stats" "<project_root>/.missiond/generated/flows/<flow_id>.yaml"]
+        :reads ["workflow table" "plan/directive evidence" ".missiond/workflows/*.lisp"]
+        :flow-ref "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation / F-directive-plan-workflow-compile :: workflow distill/match branch / F-methodology-to-executable-compile :: compile/run methodology branch"
+        :returns "workflow template/match/apply/distill result + compile_methodology compiled flow_id + run_methodology would_run/run receipt")
+      :pending ["file-first .missiond/workflows/<topic>.lisp 自动写入/同步"
+                "distiller 高阶 semantic lifting (phase / anti-pattern / authority)"
+                "forge compiler 接管 methodology → flow 编译"
+                "longest-prefix cwd resolver"
+                "成功 plan 自动 record_execution + distill 联动"])
 
     (implemented-surface mission_global_instruction
       :status "code-aligned; read/edit full; reload returns manual-reload-required because Claude Code owns session bootstrap"
@@ -2886,26 +2921,36 @@
         :returns "content / dry-run preview / write receipt / manual reload receipt"))
 
     (implemented-surface mission_capability_usage
-      :status "code-aligned partial; c55fd61 implements 5 actions; event emission and semantic merge detection deferred"
+      :status "code-aligned partial — semantic evidence v1 已落 (commit 3ed14fc): 5 sources (conversation_tool_calls / board_tasks_flow_template / event_log_flow_events read-only probe / lisp_semantic_hints / review_sidecar) + merge-candidate 由 lisp 显式 hints (replacement / moved-to / preferred / supersedes / consolidated) 保守生成 + replacement_target 字段 + non-destructive mark/ack/merge; semantic merge 自动决策 / event_log 之外的事件 source 聚合 / workflow stats 仍 pending"
       :actions ["snapshot" "report" "candidates" "mark" "ack"]
       :owner-boundary "tools owns MCP schema; memory owns read-model; flow owns monitoring choreography; intent-layer owns lifecycle decision"
       :code ["crates/missiond-mcp/src/tools/comm/capability_usage.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"]
+      :implementation-targets ["crates/missiond-mcp/src/tools/comm/capability_usage.rs (schema + replacement_target field for merge)"
+                               "crates/missiond-daemon/src/handlers/comm/capability_usage.rs (HintIndex 解析 .missiond/v2/intent-{tools,flow,intent-layer}.lisp + probe_event_log_flows + ReviewState sidecar + protected source/target rejection)"]
+      :semantic-evidence-v1
+        ["sources[5]: conversation_tool_calls / board_tasks_flow_template / event_log_flow_events (board::task_created since 90d) / lisp_semantic_hints (扫 3 文件) / review_sidecar"
+         "merge-candidate: 仅在 hint token ∈ {deprecated, moved-to, replacement, supersedes} 且 target 解析为已注册 tool/flow 且 target ≠ source 且 target 非 protected 时给出"
+         "consolidated-keep token 显式压制 merge-candidate"
+         "mark/ack/merge non-destructive — 仅写 .missiond/v2/capability-usage-review.json sidecar, 不动 registry"]
       (ingress
-        :schema "action required; window? default 30d; scope=tool|flow|both; project?; candidate_id? for mark/ack; dry_run optional for mark"
+        :schema "action required; window? default 30d; scope=tool|flow|both; project?; candidate_id? for mark/ack; replacement_target? optional for merge decisions; dry_run optional for mark"
         :callers ["architecture cleanup review" "intent-layer governance" "external MCP client"])
       (logic-core
         (step s1 "validate action/window/scope and refuse destructive action; mark/ack only records review status")
-        (step s2 "snapshot/report/candidates call F-capability-usage-monitoring and memory capability-usage-read-model")
-        (step s3 "candidates returns evidence-ranked active/quiet/stale/never-used/shadowed/protected buckets; merge-candidate bucket present but semantic parser deferred")
-        (step s4 "mark records human decision intent to sidecar but does not edit tool registry or flow catalog")
+        (step s2 "snapshot/report/candidates call F-capability-usage-monitoring; 5 sources 联合查询")
+        (step s3 "candidates returns evidence-ranked active/quiet/stale/never-used/shadowed/protected/merge-candidate buckets")
+        (step s4 "mark records human decision intent to sidecar; merge 必须 replacement_target 显式或 hint target 解析得到, 否则拒绝")
         (step s5 "ack closes a report item only after follow_up_ref points to PLAN.lisp / mission_execution / board task"))
       (egress
-        :writes ["<project_root>/.missiond/v2/capability-usage-review.json for mark/ack" "no daemon_state JSON cache because daemon_state is i64-only"]
-        :reads ["conversation_tool_calls" "board_tasks.flow_template" "MCP registry" "YAML flow registry" "review sidecar"]
-        :flow-ref "F-capability-usage-monitoring (code-aligned partial)"
+        :writes [".missiond/v2/capability-usage-review.json sidecar (mark/ack/merge with replacement_target)" "no daemon_state JSON cache because daemon_state is i64-only"]
+        :reads ["conversation_tool_calls" "board_tasks.flow_template" "event_log (board::task_created)" "MCP registry" "YAML flow registry" "intent-tools/intent-flow/intent-intent-layer lisp hints" "review sidecar"]
+        :flow-ref "F-capability-usage-monitoring (code-aligned partial — semantic evidence v1)"
         :event-bus "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate emitted after snapshot/candidates computation"
-        :returns "usage snapshot / candidate report / review receipt")))
+        :returns "usage snapshot (含 source_coverage.sources[5]) / candidate report / review receipt")
+      :pending ["semantic merge 自动决策 (即使 hint 完整, 也只产候选, 不动 registry)"
+                "DispatcherEvent / WorkerEvent / ExecutionEvent 等 event source 聚合"
+                "workflow stats / success rate 进 read-model"]))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 3.7 Tool Governance — schema / audit / reload

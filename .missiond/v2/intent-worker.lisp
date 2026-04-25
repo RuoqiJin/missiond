@@ -7,7 +7,7 @@
 
 (pillar worker
   :version "v0.5"
-  :status "phase-C recursive architecture contract 2026-04-25 — runtime path → ordered mechanics → explicit egress; project-root spawn cwd contract added; claudecode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd) operational-practice + architecture-designed; auto-selection by plan-runner code-alignment pending"
+  :status "phase-C recursive architecture contract 2026-04-25 — runtime path → ordered mechanics → explicit egress; project-root spawn cwd contract added; claudecode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd) operational-practice + architecture-designed; mission_execution dispatch_strategy companion log meta 已 code-aligned partial; plan-runner v0 + auto-selection v1 已 code-aligned partial (sexp hint parsing); ExecutionEvent dispatch metadata 扩展 / 完整 PLAN DAG scheduler 仍 code-alignment pending"
   :predecessor "v0.2 2026-04-21 (integrated by 主 Claude)"
   :target-path ".missiond/v2/intent-worker.lisp"
   :integration-notes
@@ -1880,8 +1880,11 @@
 
     (path agent-execution-manager-interface
       :lifecycle-style "on-demand-manager"
-      :status "code-aligned; mission_execution handler/tool wiring + ExecutionEvent live projection implemented"
+      :status "code-aligned; mission_execution handler/tool wiring + ExecutionEvent live projection implemented + dispatch_strategy/target_project/requested_cwd 写入 companion log meta (open) + list/status graceful read; ExecutionEvent dispatch metadata 扩展 仍 code-alignment pending (companion log durable only)"
       :boundary "memory pillar owns protocol/schema; worker pillar owns runtime manager mechanics; tools pillar owns MCP surface"
+      :implementation-targets ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (open meta render + list/status meta read + legacy log graceful)"
+                               "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (schema: dispatch_strategy/target_project/requested_cwd)"
+                               "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — dispatch metadata 扩展 pending)"]
       (ingress
         :source "mission_execution(action=...) MCP tool / internal multi-agent execution coordinator"
         :entry-components
@@ -2069,10 +2072,17 @@
 
     (execution-strategy-record
       :desc "把 plan-runner 选择的策略写进 mission_execution 协调面, 让 evidence-collector 与 capability-usage-monitor 能事后回放"
-      :field "execution.dispatch_strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / prompt-fallback / mixed}"
-      :writer "mission_execution(action=open) 时由 plan-runner 写入"
-      :consumer "evidence-collector 落到 evidence sidecar; capability-usage-monitor 统计各策略命中率"
-      :status "architecture-designed; mission_execution schema 暂未含此字段, 需 code-alignment 时补"))
+      :field "execution.dispatch_strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback / unknown} (companion log meta) — 未知值归一化为 unknown"
+      :writer "mission_execution(action=open) 接收 dispatch_strategy/target_project/requested_cwd 写入 companion log meta; 由 plan-runner v0 (mission_plan execute_mode=internal target=mission_execution) 自动转发"
+      :consumer "evidence-collector 落到 evidence sidecar plan_runner_dispatch entry; mission_execution(list/status) 暴露给 capability-usage-monitor 与回放"
+      :status "code-aligned partial — mission_execution schema 已含 dispatch_strategy/target_project/requested_cwd 字段, 写 companion log meta + list/status graceful read; ExecutionEvent::Opened 扩展 dispatch metadata 仍 code-alignment pending (companion log durable only)"
+      :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (open schema)"
+                               "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (action_open meta render + list/status graceful)"
+                               "crates/missiond-daemon/src/handlers/knowledge/plan.rs (execute_mode=internal forwarding to mission_execution)"
+                               "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — 字段扩展 pending)"]
+      :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd"
+                "timeline / 其他查询面暴露 dispatch_strategy"
+                "plan-runner 自动从 PLAN.lisp DAG 推断 strategy (auto-selection v1 已支持保守 hint, 完整推断 pending)"]))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 2.8 Worker-side Computation (retrieval + forge)
