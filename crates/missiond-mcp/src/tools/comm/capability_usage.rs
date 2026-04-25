@@ -62,6 +62,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "type": "string",
                     "description": "[mark] 自由文本解释,鼓励引用证据"
                 },
+                "replacement_target": {
+                    "type": "string",
+                    "description": "[mark] decision=merge 必填 (operator override). 若未提供,会自动从 .missiond/v2 lisp 提示 (deprecated/moved-to/replacement/supersedes) 解析. 必须存在于 MCP/flow 注册表;不能 == candidate_id;不能指向 protected 项."
+                },
                 "ack_by": {
                     "type": "string",
                     "description": "[ack] 确认人"

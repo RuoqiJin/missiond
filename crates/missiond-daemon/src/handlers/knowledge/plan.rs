@@ -969,7 +969,7 @@ async fn action_execute_internal(
 ) -> Result<ToolResult> {
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    let inner_args = match build_internal_dispatch_args(args, plan, target) {
+    let inner_args = match build_internal_dispatch_args(args, plan, target, dispatch_strategy) {
         Ok(v) => v,
         Err(err_result) => return Ok(err_result),
     };
@@ -1128,10 +1128,16 @@ fn build_internal_dispatch_success_response(
 /// Build the argument JSON for the inner target handler. Returns
 /// `Err(structured_error_result)` on caller-facing validation failures so the
 /// outer handler can return them verbatim.
+///
+/// `dispatch_strategy` is the already-normalised value from `action_execute`
+/// (one of `VALID_DISPATCH_STRATEGIES`, defaulted to `"unknown"`). It is
+/// forwarded into the `mission_execution(action=open)` inner JSON so the
+/// companion log can persist `:dispatch-strategy`. Other targets ignore it.
 fn build_internal_dispatch_args(
     args: &Value,
     plan: &Plan,
     target: &str,
+    dispatch_strategy: &str,
 ) -> std::result::Result<Value, ToolResult> {
     match target {
         "mission_execution" => {
@@ -1167,11 +1173,26 @@ fn build_internal_dispatch_args(
                 "parent_design": parent_design,
                 "scope": scope,
                 "owner": owner,
+                "dispatch_strategy": dispatch_strategy,
             });
+            // project is the canonical key for mission_execution; target_project
+            // is accepted as an alias and resolved to project here.
             if let Some(p) = args.get("target_project").or_else(|| args.get("project")) {
                 if let Some(s) = p.as_str() {
                     inner["project"] = json!(s);
                 }
+            }
+            // Also forward the original target_project string (when present) so
+            // mission_execution can persist it verbatim alongside `project` —
+            // the companion log records it as `:target-project` per
+            // intent-tools.lisp :: workstation-dispatch-record.
+            if let Some(s) = args.get("target_project").and_then(|v| v.as_str()) {
+                inner["target_project"] = json!(s);
+            }
+            // requested_cwd is metadata only (used by mission_execution for
+            // workstation-dispatch-record :requested-cwd persistence).
+            if let Some(s) = args.get("requested_cwd").and_then(|v| v.as_str()) {
+                inner["requested_cwd"] = json!(s);
             }
             Ok(inner)
         }
@@ -1528,7 +1549,7 @@ mod tests {
     fn build_internal_args_for_mission_execution_defaults() {
         let plan = fixture_plan("(plan)");
         let args = json!({});
-        let inner = build_internal_dispatch_args(&args, &plan, "mission_execution")
+        let inner = build_internal_dispatch_args(&args, &plan, "mission_execution", "unknown")
             .expect("default args build");
         assert_eq!(inner["action"], "open");
         assert_eq!(inner["execution_id"], format!("plan-{}", plan.id));
@@ -1538,14 +1559,70 @@ mod tests {
             .as_str()
             .unwrap()
             .contains(&plan.board_task_id));
+        // workstation-dispatch-record: even when caller omits dispatch_strategy
+        // the outer handler normalises to "unknown" before reaching this fn,
+        // and we always forward it so mission_execution can persist the field.
+        assert_eq!(inner["dispatch_strategy"], "unknown");
+        // No target_project / requested_cwd in args → inner must not invent
+        // them (legacy callers stay byte-identical apart from dispatch_strategy).
+        assert!(inner.get("target_project").is_none());
+        assert!(inner.get("requested_cwd").is_none());
+    }
+
+    #[test]
+    fn mission_execution_inner_includes_dispatch_strategy() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let inner = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_execution",
+            "fresh-code-alignment",
+        )
+        .expect("strategy forward");
+        assert_eq!(inner["dispatch_strategy"], "fresh-code-alignment");
+    }
+
+    #[test]
+    fn mission_execution_inner_propagates_target_project_and_cwd() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({
+            "target_project": "missiond",
+            "requested_cwd": "/abs/path/missiond",
+        });
+        let inner =
+            build_internal_dispatch_args(&args, &plan, "mission_execution", "agent-team")
+                .expect("forward target_project and requested_cwd");
+        // canonical project key gets the alias value
+        assert_eq!(inner["project"], "missiond");
+        // and the original alias is preserved verbatim for companion-log
+        // persistence (workstation-dispatch-record :target-project)
+        assert_eq!(inner["target_project"], "missiond");
+        assert_eq!(inner["requested_cwd"], "/abs/path/missiond");
+        assert_eq!(inner["dispatch_strategy"], "agent-team");
+    }
+
+    #[test]
+    fn mission_execution_inner_default_dispatch_when_caller_omits() {
+        // action_execute normalises a missing/empty dispatch_strategy to
+        // "unknown" before reaching build_internal_dispatch_args. This test
+        // pins the contract: when the outer normalised string is "unknown",
+        // inner["dispatch_strategy"] must be "unknown" (never absent, never
+        // some other default).
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let inner = build_internal_dispatch_args(&args, &plan, "mission_execution", "unknown")
+            .expect("normalised default");
+        assert_eq!(inner["dispatch_strategy"], "unknown");
     }
 
     #[test]
     fn build_internal_args_for_task_delegate_derives_objective() {
         let plan = fixture_plan("(plan-draft :goal :align)\n");
         let args = json!({});
-        let inner = build_internal_dispatch_args(&args, &plan, "mission_task_delegate")
-            .expect("default task_delegate args");
+        let inner =
+            build_internal_dispatch_args(&args, &plan, "mission_task_delegate", "unknown")
+                .expect("default task_delegate args");
         let obj = inner["objective"].as_str().unwrap();
         assert!(obj.starts_with(&format!("Plan {}", plan.id)));
         assert!(obj.contains("(plan-draft"));
@@ -1559,14 +1636,22 @@ mod tests {
             .collect();
         assert!(hints.iter().any(|h| h.starts_with("plan:")));
         assert!(hints.iter().any(|h| h.starts_with("board_task:")));
+        // task_delegate path must NOT receive dispatch_strategy — that field
+        // belongs to the mission_execution companion log only.
+        assert!(inner.get("dispatch_strategy").is_none());
     }
 
     #[test]
     fn build_internal_args_for_task_delegate_rejects_unknown_intent() {
         let plan = fixture_plan("(plan)");
         let args = json!({ "intent": "cosmic" });
-        let err = build_internal_dispatch_args(&args, &plan, "mission_task_delegate")
-            .expect_err("unknown intent should be rejected");
+        let err = build_internal_dispatch_args(
+            &args,
+            &plan,
+            "mission_task_delegate",
+            "unknown",
+        )
+        .expect_err("unknown intent should be rejected");
         assert_eq!(err.is_error, Some(true));
     }
 
@@ -1574,7 +1659,7 @@ mod tests {
     fn build_internal_args_for_flow_run_requires_flow_id() {
         let plan = fixture_plan("(plan)");
         let args = json!({});
-        let err = build_internal_dispatch_args(&args, &plan, "mission_flow_run")
+        let err = build_internal_dispatch_args(&args, &plan, "mission_flow_run", "unknown")
             .expect_err("missing flow_id should be MISSING_PARAM");
         assert_eq!(err.is_error, Some(true));
         let text = match err.content.first() {
@@ -1591,11 +1676,13 @@ mod tests {
             "flow_id": "F-demo",
             "params": { "k": "v" },
         });
-        let inner = build_internal_dispatch_args(&args, &plan, "mission_flow_run")
+        let inner = build_internal_dispatch_args(&args, &plan, "mission_flow_run", "unknown")
             .expect("flow_run with flow_id");
         assert_eq!(inner["action"], "run");
         assert_eq!(inner["flow_id"], "F-demo");
         assert_eq!(inner["params"]["k"], "v");
+        // flow_run must not pick up dispatch_strategy either.
+        assert!(inner.get("dispatch_strategy").is_none());
     }
 
     fn parse_payload(result: &ToolResult) -> Value {

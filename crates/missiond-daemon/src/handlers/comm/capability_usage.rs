@@ -8,6 +8,12 @@
 //!   - intent-intent-layer.lisp :: capability-evolution-governance
 //!   - intent-tools.lisp :: future-surface mission_capability_usage
 //!
+//! v0.5.5 semantic-evidence: classify_* now carries explicit lisp hints
+//! (deprecated / moved-to / replacement / supersedes) into the merge-candidate
+//! bucket, plus a read-only event_log probe that surfaces flow_template
+//! references in board::task_created payloads. No DB migrations; new lanes
+//! are reported under `source_coverage.sources`.
+//!
 //! ObservabilityEvent::CapabilityUsageSnapshot is emitted by snapshot/report/
 //! candidates after the read-model finishes computing. CapabilityStaleCandidate
 //! fans out per non-active, non-protected row from `action=candidates` so
@@ -122,6 +128,14 @@ struct CapabilityRow {
     protected: bool,
     classification: String,
     evidence: Vec<String>,
+    /// When classification == "merge-candidate", names the resolved target
+    /// capability id (must exist in the registry; never the row's own id).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merge_target: Option<String>,
+    /// Compact references to the lisp anchors that drove the classification
+    /// (e.g. ["intent-tools.lisp:732 deprecated -> mission_sonnet_process"]).
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    hint_evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -196,9 +210,6 @@ async fn collect_tool_usage(
     state: &AppState,
     windows: &[WindowSpec],
 ) -> Result<HashMap<String, ToolStats>> {
-    // First pass: query each window. We iterate windows so each row carries
-    // counts per window. PG query is one aggregation per window — for missiond
-    // local-first scale this is fine.
     let mut acc: HashMap<String, ToolStats> = HashMap::new();
     for w in windows {
         let since_iso = w.since.map(iso);
@@ -210,8 +221,6 @@ async fn collect_tool_usage(
         for (tool_name, total, last_ts, ok, err) in rows {
             let entry = acc.entry(tool_name).or_insert_with(ToolStats::default);
             entry.counts_by_window.insert(w.label.clone(), total);
-            // last_used_at + success/error reflect the widest window seen.
-            // We also accept smaller windows superseding when fresher.
             if w.label == "all" {
                 entry.last_used_at = last_ts.clone();
                 entry.success = ok;
@@ -234,12 +243,6 @@ struct ToolStats {
 }
 
 async fn collect_flow_usage(state: &AppState) -> Result<HashMap<String, FlowStats>> {
-    // board_tasks.flow_template carries the executable flow id when the task
-    // came from F9 / autopilot / mission_flow_run. We aggregate by template name
-    // across all tasks (status agnostic; success/failure derived from
-    // BoardTaskStatus). This matches intent-flow.lisp F-capability-usage-monitoring
-    // step s2's "board_tasks.flow_template / flow_context, workflow execution
-    // stats" instruction.
     let tasks = state
         .store
         .list_board_tasks(None, true)
@@ -273,6 +276,10 @@ struct FlowStats {
     failed: i64,
     running: i64,
     last_used_at: Option<String>,
+    /// Cross-source: number of board::task_created events in event_log
+    /// whose payload referenced this flow_template. Distinct from `total`
+    /// (which counts board_tasks rows directly).
+    event_log_observed: i64,
 }
 
 fn registered_tools() -> Vec<String> {
@@ -349,7 +356,6 @@ fn classify_flow(stats: &FlowStats, registered: bool, protected: bool) -> (Strin
         evidence.push("registered YAML but never instantiated as board_task".to_string());
         return ("never-used".to_string(), evidence);
     }
-    // Recency check uses last_used_at against now.
     let now = Utc::now();
     if let Some(last) = stats.last_used_at.as_deref().and_then(parse_iso_loose) {
         let age = now - last;
@@ -368,9 +374,6 @@ fn classify_flow(stats: &FlowStats, registered: bool, protected: bool) -> (Strin
 }
 
 fn parse_iso_loose(s: &str) -> Option<DateTime<Utc>> {
-    // board_tasks.updated_at is text; PG default uses "YYYY-MM-DD HH:MM:SS"
-    // (no offset). conversation_tool_calls.timestamp typically holds RFC3339.
-    // Try RFC3339 first, then a relaxed parse via NaiveDateTime.
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&Utc));
     }
@@ -384,25 +387,38 @@ async fn build_capability_rows(
     state: &AppState,
     windows: &[WindowSpec],
     scope: &str,
-) -> Result<(Vec<CapabilityRow>, SourceCoverage)> {
+    project_root: &Path,
+) -> Result<(Vec<CapabilityRow>, SourceCoverage, HintIndex, EventLogFlowProbe)> {
     let mut rows: Vec<CapabilityRow> = Vec::new();
     let mut coverage = SourceCoverage::default();
+    let registered_tools_set: BTreeSet<String> = registered_tools().into_iter().collect();
+    let registered_flows_set: BTreeSet<String> = registered_flows().into_iter().collect();
+    let hint_index = HintIndex::from_project_root(project_root);
+    coverage.lisp_files_read = hint_index.files_read.clone();
 
     if scope == "tool" || scope == "both" {
         let tool_stats = collect_tool_usage(state, windows).await?;
-        let registered: BTreeSet<String> = registered_tools().into_iter().collect();
-        coverage.tool_registry_count = registered.len();
+        coverage.tool_registry_count = registered_tools_set.len();
         coverage.tool_observed_count = tool_stats.len();
 
-        let mut all_ids: BTreeSet<String> = registered.clone();
+        let mut all_ids: BTreeSet<String> = registered_tools_set.clone();
         for k in tool_stats.keys() {
             all_ids.insert(k.clone());
         }
         for id in all_ids {
             let stats = tool_stats.get(&id).cloned().unwrap_or_default();
-            let registered_flag = registered.contains(&id);
+            let registered_flag = registered_tools_set.contains(&id);
             let protected = is_protected_tool(&id);
-            let (classification, evidence) = classify_tool(&stats, registered_flag, protected);
+            let (base_class, base_evidence) = classify_tool(&stats, registered_flag, protected);
+            let hints = hint_index.for_source("tool", &id);
+            let (classification, evidence, merge_target, hint_evidence) = apply_hint_overlay(
+                &base_class,
+                base_evidence,
+                &id,
+                &hints,
+                &registered_tools_set,
+                &registered_flows_set,
+            );
             let total = stats.success + stats.error;
             let success_rate = if total > 0 {
                 Some(stats.success as f64 / total as f64)
@@ -421,28 +437,56 @@ async fn build_capability_rows(
                 protected,
                 classification,
                 evidence,
+                merge_target,
+                hint_evidence,
             });
         }
     }
 
+    let event_probe = if scope == "flow" || scope == "both" {
+        probe_event_log_flows(state).await
+    } else {
+        EventLogFlowProbe::default()
+    };
+
     if scope == "flow" || scope == "both" {
-        let flow_stats = collect_flow_usage(state).await?;
-        let registered_v: BTreeSet<String> = registered_flows().into_iter().collect();
-        coverage.flow_registry_count = registered_v.len();
+        let mut flow_stats = collect_flow_usage(state).await?;
+        for (template, count) in &event_probe.counts {
+            let entry = flow_stats.entry(template.clone()).or_default();
+            entry.event_log_observed += *count;
+        }
+        coverage.flow_registry_count = registered_flows_set.len();
         coverage.flow_observed_count = flow_stats.len();
 
-        let mut all_ids: BTreeSet<String> = registered_v.clone();
+        let mut all_ids: BTreeSet<String> = registered_flows_set.clone();
         for k in flow_stats.keys() {
             all_ids.insert(k.clone());
         }
         for id in all_ids {
             let stats = flow_stats.get(&id).cloned().unwrap_or_default();
-            let registered_flag = registered_v.contains(&id);
+            let registered_flag = registered_flows_set.contains(&id);
             let protected = is_protected_flow(&id);
-            let (classification, evidence) = classify_flow(&stats, registered_flag, protected);
+            let (base_class, mut base_evidence) =
+                classify_flow(&stats, registered_flag, protected);
+            if stats.event_log_observed > 0 {
+                base_evidence.push(format!(
+                    "event_log_flow_events: {} board::task_created events referenced this template",
+                    stats.event_log_observed
+                ));
+            }
+            let hints = hint_index.for_source("flow", &id);
+            let (classification, evidence, merge_target, hint_evidence) = apply_hint_overlay(
+                &base_class,
+                base_evidence,
+                &id,
+                &hints,
+                &registered_tools_set,
+                &registered_flows_set,
+            );
             let mut counts = HashMap::new();
             counts.insert("all".to_string(), stats.total);
             counts.insert("running".to_string(), stats.running);
+            counts.insert("event_log".to_string(), stats.event_log_observed);
             let success_rate = if stats.total > 0 {
                 Some(stats.completed as f64 / stats.total as f64)
             } else {
@@ -460,11 +504,21 @@ async fn build_capability_rows(
                 protected,
                 classification,
                 evidence,
+                merge_target,
+                hint_evidence,
             });
         }
     }
 
-    Ok((rows, coverage))
+    Ok((rows, coverage, hint_index, event_probe))
+}
+
+/// Per-source diagnostic entry — surfaces *why* a given lane is on or off.
+#[derive(Debug, Default, Clone, Serialize)]
+struct SourceLane {
+    status: String,
+    count: i64,
+    note: String,
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -475,12 +529,16 @@ struct SourceCoverage {
     flow_observed_count: usize,
     persistence_mode: String,
     persistence_note: String,
+    /// Five-source dictionary mirroring the v0.5 read-model contract.
+    sources: BTreeMap<String, SourceLane>,
+    /// Files actually read by the lisp hint parser this call.
+    lisp_files_read: Vec<String>,
 }
 
 async fn take_snapshot(
     state: &AppState,
     args: &Value,
-) -> Result<(Value, Vec<CapabilityRow>, SourceCoverage)> {
+) -> Result<(Value, Vec<CapabilityRow>, SourceCoverage, HintIndex)> {
     let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("both");
     if !matches!(scope, "tool" | "flow" | "both") {
         return Err(anyhow!("scope must be tool|flow|both"));
@@ -490,12 +548,20 @@ async fn take_snapshot(
         Ok(w) => w,
         Err(_) => return Err(anyhow!("invalid window — expected 7d|30d|90d|all")),
     };
-    let (rows, mut coverage) = build_capability_rows(state, &windows, scope).await?;
+    let project_root = resolve_project_root(state, project_arg(args)).await?;
+    let (rows, mut coverage, hint_index, event_probe) =
+        build_capability_rows(state, &windows, scope, &project_root).await?;
     coverage.persistence_mode = "read-only".to_string();
     coverage.persistence_note =
         "snapshot is recomputed each call; daemon_state is i64-only so no JSON cache. \
          mark/ack writes a JSON sidecar at .missiond/v2/capability-usage-review.json"
             .to_string();
+    coverage.sources = build_source_coverage_dict(
+        &rows,
+        &hint_index,
+        &event_probe,
+        ReviewState::load(&project_root).map(|s| s.entries.len()).ok(),
+    );
 
     let mut counts_by_capability = serde_json::Map::new();
     let mut last_used_at = serde_json::Map::new();
@@ -548,7 +614,109 @@ async fn take_snapshot(
     )
     .await;
 
-    Ok((snapshot, rows, coverage))
+    Ok((snapshot, rows, coverage, hint_index))
+}
+
+/// Compose the five-source dictionary for `source_coverage.sources`.
+fn build_source_coverage_dict(
+    rows: &[CapabilityRow],
+    hint_index: &HintIndex,
+    event_probe: &EventLogFlowProbe,
+    review_entry_count: Option<usize>,
+) -> BTreeMap<String, SourceLane> {
+    let mut out = BTreeMap::new();
+
+    let tool_observed = rows
+        .iter()
+        .filter(|r| r.kind == "tool" && r.last_used_at.is_some())
+        .count() as i64;
+    out.insert(
+        "conversation_tool_calls".to_string(),
+        SourceLane {
+            status: if tool_observed > 0 { "active".into() } else { "empty".into() },
+            count: tool_observed,
+            note: "aggregated via Store::get_tool_call_global_stats".to_string(),
+        },
+    );
+
+    let flow_observed = rows
+        .iter()
+        .filter(|r| r.kind == "flow" && r.last_used_at.is_some())
+        .count() as i64;
+    out.insert(
+        "board_tasks_flow_template".to_string(),
+        SourceLane {
+            status: if flow_observed > 0 { "active".into() } else { "empty".into() },
+            count: flow_observed,
+            note: "scanned via Store::list_board_tasks(include_hidden=true)".to_string(),
+        },
+    );
+
+    let probe_status = if event_probe.error.is_some() {
+        "unavailable"
+    } else if event_probe.events_with_template > 0 {
+        "active"
+    } else {
+        "empty"
+    };
+    let probe_note = match (&event_probe.error, event_probe.events_scanned) {
+        (Some(e), _) => format!("probe failed: {}", e),
+        (None, 0) => "no board::task_created events in the past 90d".to_string(),
+        (None, scanned) => format!(
+            "scanned {} board::task_created events; {} carried flow_template",
+            scanned, event_probe.events_with_template
+        ),
+    };
+    out.insert(
+        "event_log_flow_events".to_string(),
+        SourceLane {
+            status: probe_status.to_string(),
+            count: event_probe.events_with_template,
+            note: probe_note,
+        },
+    );
+
+    let hint_count = hint_index.all.len() as i64;
+    let hint_note = if hint_index.files_read.is_empty() {
+        "no .missiond/v2 lisp files found".to_string()
+    } else {
+        format!(
+            "read {} files: {}",
+            hint_index.files_read.len(),
+            hint_index.files_read.join(", ")
+        )
+    };
+    out.insert(
+        "lisp_semantic_hints".to_string(),
+        SourceLane {
+            status: if hint_count > 0 { "active".into() } else { "empty".into() },
+            count: hint_count,
+            note: hint_note,
+        },
+    );
+
+    let review_note = match review_entry_count {
+        Some(n) if n > 0 => format!(
+            "{} entries in .missiond/v2/capability-usage-review.json",
+            n
+        ),
+        Some(_) => "review sidecar empty".to_string(),
+        None => "review sidecar absent or unreadable".to_string(),
+    };
+    out.insert(
+        "review_sidecar".to_string(),
+        SourceLane {
+            status: match review_entry_count {
+                Some(n) if n > 0 => "active".into(),
+                Some(_) => "empty".into(),
+                None => "empty".into(),
+            },
+            count: review_entry_count.unwrap_or(0) as i64,
+            note: review_note,
+        },
+    );
+
+    out
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -556,16 +724,12 @@ async fn take_snapshot(
 // ───────────────────────────────────────────────────────────────────────
 
 async fn action_snapshot(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let (snapshot, _, _) = take_snapshot(state, args).await?;
+    let (snapshot, _, _, _) = take_snapshot(state, args).await?;
     Ok(ToolResult::json_pretty(&snapshot))
 }
 
-// ───────────────────────────────────────────────────────────────────────
-// report — snapshot + per-row narrative
-// ───────────────────────────────────────────────────────────────────────
-
 async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let (snapshot, rows, _) = take_snapshot(state, args).await?;
+    let (snapshot, rows, _, _) = take_snapshot(state, args).await?;
     let mut by_class: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for r in &rows {
         by_class
@@ -582,6 +746,8 @@ async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
                 "registered": r.registered,
                 "protected": r.protected,
                 "evidence": r.evidence,
+                "merge_target": r.merge_target,
+                "hint_evidence": r.hint_evidence,
             }));
     }
     let report = json!({
@@ -592,25 +758,18 @@ async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
     Ok(ToolResult::json_pretty(&report))
 }
 
-// ───────────────────────────────────────────────────────────────────────
-// candidates — only ranks stale / never-used / shadowed for review
-// ───────────────────────────────────────────────────────────────────────
-
 async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let (snapshot, rows, _) = take_snapshot(state, args).await?;
+    let (snapshot, rows, _, hint_index) = take_snapshot(state, args).await?;
     let include_protected = args
         .get("include_protected")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    // Reuse the snapshot's generated_at so per-row events correlate to the
-    // CapabilityUsageSnapshot emitted by take_snapshot.
     let snapshot_generated_at = snapshot
         .get("generated_at")
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
 
-    // Read review state to surface "already marked / acked" candidates.
     let project_root = resolve_project_root(state, project_arg(args)).await?;
     let review = ReviewState::load(&project_root).unwrap_or_default();
 
@@ -630,12 +789,15 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
             "counts_by_window": r.counts_by_window,
             "last_used_at": r.last_used_at,
             "evidence": r.evidence,
+            "merge_target": r.merge_target,
+            "hint_evidence": r.hint_evidence,
             "review": entry.map(|e| json!({
                 "decision": e.decision,
                 "decided_by": e.decided_by,
                 "decided_at": e.decided_at,
                 "ack_at": e.ack_at,
                 "rationale": e.rationale,
+                "replacement_target": e.replacement_target,
             })),
         });
         buckets.entry(r.classification.clone()).or_default().push(payload);
@@ -652,8 +814,6 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
         .await;
     }
 
-    // Empty bucket placeholders for the 7 declared categories so callers can
-    // iterate a stable shape.
     for cat in [
         "active",
         "quiet",
@@ -666,14 +826,27 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
         buckets.entry(cat.to_string()).or_default();
     }
 
+    let merge_candidate_count = buckets
+        .get("merge-candidate")
+        .map(|v| v.len())
+        .unwrap_or(0);
+
     Ok(ToolResult::json_pretty(&json!({
         "generated_at": iso(Utc::now()),
         "candidates": buckets,
         "include_protected": include_protected,
         "notes": [
-            "merge-candidate is currently empty: semantic-overlap detection requires parsing intent-tools/intent-flow Lisp registries (deferred).",
-            "shadowed-by-better-capability covers tools fired but absent from MCP registry (legacy aliases) and flows fired but missing YAML.",
-            "protected list mirrors capability-evolution-governance policy + bootstrap/repair surfaces.",
+            format!(
+                "merge-candidate now sourced from explicit lisp hints (deprecated/moved-to/replacement/supersedes); {} merge-candidates this run",
+                merge_candidate_count
+            ),
+            format!(
+                "lisp hint parser read {} files and produced {} hints; merge-candidate populated only when a hint resolves a registered, non-self target",
+                hint_index.files_read.len(),
+                hint_index.all.len()
+            ),
+            "shadowed-by-better-capability covers tools fired but absent from MCP registry (legacy aliases) and flows fired but missing YAML.".to_string(),
+            "protected list mirrors capability-evolution-governance policy + bootstrap/repair surfaces.".to_string(),
         ],
     })))
 }
@@ -700,6 +873,8 @@ struct ReviewEntry {
     ack_by: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     follow_up_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement_target: Option<String>,
 }
 
 impl ReviewState {
@@ -766,7 +941,6 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    // Refuse to mark protected capabilities for destructive decisions.
     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("tool");
     let protected = match kind {
         "flow" => is_protected_flow(candidate_id),
@@ -786,6 +960,70 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
 
     let project_root = resolve_project_root(state, project_arg(args)).await?;
+
+    // Resolve replacement_target for merge decisions.
+    let arg_target = args
+        .get("replacement_target")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let mut replacement_target: Option<String> = arg_target.clone();
+    if decision == "merge" {
+        if replacement_target.is_none() {
+            let hint_index = HintIndex::from_project_root(&project_root);
+            let hints = hint_index.for_source(kind, candidate_id);
+            let registered_tools_set: BTreeSet<String> =
+                registered_tools().into_iter().collect();
+            let registered_flows_set: BTreeSet<String> =
+                registered_flows().into_iter().collect();
+            if let Some(hint) = pick_merge_target(
+                &hints,
+                candidate_id,
+                &registered_tools_set,
+                &registered_flows_set,
+            ) {
+                replacement_target = hint.target_id.clone();
+            }
+        }
+        let Some(target) = replacement_target.as_deref() else {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::MISSING_PARAM,
+                    format!(
+                        "decision=merge for `{}` requires `replacement_target` (no lisp hint resolves a target)",
+                        candidate_id
+                    ),
+                )
+                .with_suggestion(
+                    "supply `replacement_target` arg or add an explicit lisp hint (deprecated/moved-to/replacement/supersedes)",
+                ),
+            ));
+        };
+        let target_protected = match kind {
+            "flow" => is_protected_flow(target),
+            _ => is_protected_tool(target),
+        };
+        if target_protected {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    "PROTECTED_CAPABILITY",
+                    format!(
+                        "replacement_target `{}` is protected; mark `{}` as review/monitor/keep instead",
+                        target, candidate_id
+                    ),
+                )
+                .with_suggestion("merging into a protected capability would re-route load to a guarded surface"),
+            ));
+        }
+        if target == candidate_id {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!("replacement_target == candidate_id == `{}`", candidate_id),
+                ),
+            ));
+        }
+    }
+
     let dry_run = args
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -799,6 +1037,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         ack_at: None,
         ack_by: None,
         follow_up_ref: None,
+        replacement_target: replacement_target.clone(),
     };
 
     if dry_run {
@@ -883,6 +1122,416 @@ async fn action_ack(state: &AppState, args: &Value) -> Result<ToolResult> {
         "entry": saved,
         "path": path.display().to_string(),
     })))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// Lisp semantic hint parser
+// ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize)]
+struct SemanticHint {
+    source_id: String,
+    source_kind: String,
+    token: String,
+    target_id: Option<String>,
+    target_kind: String,
+    target_hint: Option<String>,
+    file_anchor: String,
+    raw_snippet: String,
+}
+
+#[derive(Debug, Default, Clone)]
+struct HintIndex {
+    by_source: HashMap<(String, String), Vec<SemanticHint>>,
+    all: Vec<SemanticHint>,
+    files_read: Vec<String>,
+}
+
+impl HintIndex {
+    fn from_project_root(project_root: &Path) -> Self {
+        let files = [
+            ("intent-tools.lisp", "tool"),
+            ("intent-flow.lisp", "flow"),
+            ("intent-intent-layer.lisp", "policy"),
+        ];
+        let mut idx = HintIndex::default();
+        for (fname, default_kind) in files {
+            let path = project_root.join(".missiond").join("v2").join(fname);
+            if let Ok(text) = std::fs::read_to_string(&path) {
+                idx.files_read.push(fname.to_string());
+                let hints = parse_lisp_hints(&text, fname, default_kind);
+                for h in hints {
+                    idx.all.push(h);
+                }
+            }
+        }
+        idx.resolve_targets();
+        idx.rebuild_by_source();
+        idx
+    }
+
+    fn rebuild_by_source(&mut self) {
+        self.by_source.clear();
+        for h in &self.all {
+            self.by_source
+                .entry((h.source_kind.clone(), h.source_id.clone()))
+                .or_default()
+                .push(h.clone());
+        }
+    }
+
+    fn resolve_targets(&mut self) {
+        let tools: Vec<String> = registered_tools();
+        let flows: Vec<String> = registered_flows();
+        self.resolve_targets_against(&tools, &flows);
+    }
+
+    fn resolve_targets_against(&mut self, tools: &[String], flows: &[String]) {
+        for h in self.all.iter_mut() {
+            if h.target_id.is_some() {
+                continue;
+            }
+            let Some(hint) = h.target_hint.as_deref() else {
+                continue;
+            };
+            let trimmed = hint.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let candidates: &[String] = match h.target_kind.as_str() {
+                "flow" => flows,
+                _ => tools,
+            };
+            let hits: Vec<&String> = candidates
+                .iter()
+                .filter(|name| name.contains(trimmed))
+                .collect();
+            if hits.len() == 1 {
+                h.target_id = Some(hits[0].clone());
+            }
+        }
+    }
+
+    fn for_source(&self, kind: &str, id: &str) -> Vec<&SemanticHint> {
+        self.by_source
+            .get(&(kind.to_string(), id.to_string()))
+            .map(|v| v.iter().collect())
+            .unwrap_or_default()
+    }
+}
+
+fn parse_lisp_hints(text: &str, file_label: &str, default_kind: &str) -> Vec<SemanticHint> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+
+    static TOOL_OPEN: OnceLock<Regex> = OnceLock::new();
+    static FLOW_DEFINED: OnceLock<Regex> = OnceLock::new();
+    static FUTURE_BLOCK: OnceLock<Regex> = OnceLock::new();
+    static STATUS_DEPRECATED: OnceLock<Regex> = OnceLock::new();
+    static MOVED_TO: OnceLock<Regex> = OnceLock::new();
+    static SPLIT_DECISION: OnceLock<Regex> = OnceLock::new();
+    static DISPATCH_PREFERRED: OnceLock<Regex> = OnceLock::new();
+    static REPLACEMENT_KV: OnceLock<Regex> = OnceLock::new();
+    static SUPERSEDES_KV: OnceLock<Regex> = OnceLock::new();
+    static F_FLOW_REF: OnceLock<Regex> = OnceLock::new();
+
+    let tool_open =
+        TOOL_OPEN.get_or_init(|| Regex::new(r"^\s*\(tool\s+([A-Za-z][A-Za-z0-9_]+)").unwrap());
+    let flow_def = FLOW_DEFINED
+        .get_or_init(|| Regex::new(r"^\s*\(flow\s+(F-[A-Za-z][A-Za-z0-9_-]+)").unwrap());
+    let future_block =
+        FUTURE_BLOCK.get_or_init(|| Regex::new(r"^\s{4,}\(([a-z][a-z0-9-]+)\s*$").unwrap());
+    let status_dep = STATUS_DEPRECATED
+        .get_or_init(|| Regex::new(r#":status\s+"(deprecated[A-Za-z0-9_-]*)""#).unwrap());
+    let moved_to = MOVED_TO.get_or_init(|| Regex::new(r#":moved-to\s+"([^"]+)""#).unwrap());
+    let split_keep = SPLIT_DECISION
+        .get_or_init(|| Regex::new(r#":split-decision\s+"keep consolidated[^"]*""#).unwrap());
+    let dispatch_pref = DISPATCH_PREFERRED.get_or_init(|| {
+        Regex::new(r#":workstation-dispatch-role\s+"(preferred[^"]*)""#).unwrap()
+    });
+    let replacement_kv = REPLACEMENT_KV
+        .get_or_init(|| Regex::new(r#":replacement\s+"([A-Za-z0-9_-]+)""#).unwrap());
+    let supersedes_kv = SUPERSEDES_KV
+        .get_or_init(|| Regex::new(r#":supersedes\s+"([A-Za-z0-9_-]+)""#).unwrap());
+    let f_flow_ref =
+        F_FLOW_REF.get_or_init(|| Regex::new(r"(F-[A-Za-z][A-Za-z0-9_-]+)").unwrap());
+
+    let mut out: Vec<SemanticHint> = Vec::new();
+    let mut current: Option<(String, String)> = None;
+
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        if let Some(caps) = tool_open.captures(line) {
+            current = Some(("tool".to_string(), caps[1].to_string()));
+            continue;
+        }
+        if let Some(caps) = flow_def.captures(line) {
+            current = Some(("flow".to_string(), caps[1].to_string()));
+            continue;
+        }
+        if default_kind == "flow" {
+            if let Some(caps) = future_block.captures(line) {
+                current = Some(("flow".to_string(), caps[1].to_string()));
+                continue;
+            }
+        }
+        let Some((ref kind, ref source_id)) = current else {
+            continue;
+        };
+        let anchor = format!("{}:{}", file_label, line_no);
+        if let Some(caps) = status_dep.captures(line) {
+            let status_str = caps[1].to_string();
+            let target_hint = status_str
+                .strip_prefix("deprecated-migrated-to-")
+                .or_else(|| status_str.strip_prefix("deprecated-by-"))
+                .map(|s| s.to_string());
+            out.push(SemanticHint {
+                source_id: source_id.clone(),
+                source_kind: kind.clone(),
+                token: "deprecated".to_string(),
+                target_id: None,
+                target_kind: kind.clone(),
+                target_hint,
+                file_anchor: anchor.clone(),
+                raw_snippet: trim_snippet(line),
+            });
+        }
+        if let Some(caps) = moved_to.captures(line) {
+            let blob = caps[1].to_string();
+            let target_id = f_flow_ref.captures(&blob).map(|c| c[1].to_string());
+            out.push(SemanticHint {
+                source_id: source_id.clone(),
+                source_kind: kind.clone(),
+                token: "moved-to".to_string(),
+                target_id,
+                target_kind: "flow".to_string(),
+                target_hint: Some(blob),
+                file_anchor: anchor.clone(),
+                raw_snippet: trim_snippet(line),
+            });
+        }
+        if split_keep.is_match(line) {
+            out.push(SemanticHint {
+                source_id: source_id.clone(),
+                source_kind: kind.clone(),
+                token: "consolidated-keep".to_string(),
+                target_id: None,
+                target_kind: "tool".to_string(),
+                target_hint: None,
+                file_anchor: anchor.clone(),
+                raw_snippet: trim_snippet(line),
+            });
+        }
+        if let Some(caps) = dispatch_pref.captures(line) {
+            out.push(SemanticHint {
+                source_id: source_id.clone(),
+                source_kind: kind.clone(),
+                token: "preferred-substrate".to_string(),
+                target_id: None,
+                target_kind: "tool".to_string(),
+                target_hint: Some(caps[1].to_string()),
+                file_anchor: anchor.clone(),
+                raw_snippet: trim_snippet(line),
+            });
+        }
+        if let Some(caps) = replacement_kv.captures(line) {
+            out.push(SemanticHint {
+                source_id: source_id.clone(),
+                source_kind: kind.clone(),
+                token: "replacement".to_string(),
+                target_id: Some(caps[1].to_string()),
+                target_kind: kind.clone(),
+                target_hint: None,
+                file_anchor: anchor.clone(),
+                raw_snippet: trim_snippet(line),
+            });
+        }
+        if let Some(caps) = supersedes_kv.captures(line) {
+            out.push(SemanticHint {
+                source_id: source_id.clone(),
+                source_kind: kind.clone(),
+                token: "supersedes".to_string(),
+                target_id: Some(caps[1].to_string()),
+                target_kind: kind.clone(),
+                target_hint: None,
+                file_anchor: anchor.clone(),
+                raw_snippet: trim_snippet(line),
+            });
+        }
+    }
+    out
+}
+
+fn trim_snippet(line: &str) -> String {
+    let s = line.trim();
+    if s.chars().count() <= 120 {
+        return s.to_string();
+    }
+    let mut acc = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i >= 117 {
+            break;
+        }
+        acc.push(c);
+    }
+    acc.push_str("...");
+    acc
+}
+
+fn pick_merge_target<'a>(
+    hints: &'a [&'a SemanticHint],
+    source_id: &str,
+    registered_tools: &BTreeSet<String>,
+    registered_flows: &BTreeSet<String>,
+) -> Option<&'a SemanticHint> {
+    for h in hints {
+        let target = match (h.token.as_str(), h.target_id.as_deref()) {
+            ("deprecated", Some(t))
+            | ("moved-to", Some(t))
+            | ("replacement", Some(t))
+            | ("supersedes", Some(t)) => Some(t.to_string()),
+            _ => None,
+        };
+        let Some(target) = target else { continue };
+        if target == source_id {
+            continue;
+        }
+        let registered = match h.target_kind.as_str() {
+            "flow" => registered_flows.contains(&target),
+            _ => registered_tools.contains(&target),
+        };
+        if !registered {
+            continue;
+        }
+        return Some(*h);
+    }
+    None
+}
+
+fn render_hint_evidence(hints: &[&SemanticHint]) -> Vec<String> {
+    hints
+        .iter()
+        .map(|h| {
+            let target = h
+                .target_id
+                .clone()
+                .or_else(|| h.target_hint.clone())
+                .unwrap_or_else(|| "<unresolved>".to_string());
+            format!("{} {} -> {}", h.file_anchor, h.token, target)
+        })
+        .collect()
+}
+
+fn apply_hint_overlay(
+    base_class: &str,
+    base_evidence: Vec<String>,
+    source_id: &str,
+    hints: &[&SemanticHint],
+    registered_tools: &BTreeSet<String>,
+    registered_flows: &BTreeSet<String>,
+) -> (String, Vec<String>, Option<String>, Vec<String>) {
+    if hints.is_empty() {
+        return (base_class.to_string(), base_evidence, None, Vec::new());
+    }
+    let hint_lines = render_hint_evidence(hints);
+    let mut evidence = base_evidence;
+    if base_class == "active" || base_class == "protected" {
+        return (base_class.to_string(), evidence, None, hint_lines);
+    }
+    if hints.iter().any(|h| h.token == "consolidated-keep") {
+        evidence.push("lisp says `consolidated-keep`: suppress merge candidacy".to_string());
+        return (base_class.to_string(), evidence, None, hint_lines);
+    }
+    let Some(target_hint) =
+        pick_merge_target(hints, source_id, registered_tools, registered_flows)
+    else {
+        evidence.push("semantic_hint_missing_target".to_string());
+        return (base_class.to_string(), evidence, None, hint_lines);
+    };
+    let target_id = target_hint
+        .target_id
+        .as_deref()
+        .unwrap_or("")
+        .to_string();
+    let target_kind = target_hint.target_kind.clone();
+    let target_protected = match target_kind.as_str() {
+        "flow" => is_protected_flow(&target_id),
+        _ => is_protected_tool(&target_id),
+    };
+    evidence.push(format!(
+        "merge-candidate: {} {} {} -> {}",
+        target_hint.file_anchor, target_hint.token, source_id, target_id
+    ));
+    if target_protected {
+        evidence.push(format!(
+            "target `{}` is protected; mark only as review, never destructive",
+            target_id
+        ));
+    }
+    (
+        "merge-candidate".to_string(),
+        evidence,
+        Some(target_id),
+        hint_lines,
+    )
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// event_log flow probe
+// ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Default, Clone)]
+struct EventLogFlowProbe {
+    counts: HashMap<String, i64>,
+    events_scanned: i64,
+    events_with_template: i64,
+    error: Option<String>,
+}
+
+async fn probe_event_log_flows(state: &AppState) -> EventLogFlowProbe {
+    let mut probe = EventLogFlowProbe::default();
+    let since = (Utc::now() - Duration::days(90))
+        .format("%Y-%m-%d %H:%M:%S")
+        .to_string();
+    let result = state
+        .store
+        .query_timeline_filtered(
+            Some("board::task_created"),
+            None,
+            Some(since.as_str()),
+            None,
+            500,
+            0,
+        )
+        .await;
+    let rows = match result {
+        Ok(rows) => rows,
+        Err(e) => {
+            probe.error = Some(format!("event_log probe failed: {}", e));
+            return probe;
+        }
+    };
+    probe.events_scanned = rows.len() as i64;
+    for r in rows {
+        let payload: Value = match serde_json::from_str(&r.payload) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let template = payload
+            .get("flow_template")
+            .and_then(|v| v.as_str())
+            .or_else(|| payload.get("template").and_then(|v| v.as_str()))
+            .or_else(|| {
+                payload
+                    .pointer("/task/flow_template")
+                    .and_then(|v| v.as_str())
+            });
+        if let Some(t) = template {
+            probe.events_with_template += 1;
+            *probe.counts.entry(t.to_string()).or_insert(0) += 1;
+        }
+    }
+    probe
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -985,6 +1634,7 @@ mod tests {
                 ack_at: None,
                 ack_by: None,
                 follow_up_ref: None,
+                replacement_target: None,
             },
         );
         let path = s.save(dir.path()).unwrap();
@@ -995,5 +1645,297 @@ mod tests {
             loaded.entries.get("mission_minimax_process").unwrap().decision,
             "deprecate"
         );
+    }
+
+    #[test]
+    fn lisp_parser_extracts_explicit_replacement_token() {
+        let snippet = r#"
+  (tool mission_old_proc
+    :desc "deprecated"
+    :replacement "mission_new_proc")
+"#;
+        let hints = parse_lisp_hints(snippet, "intent-tools.lisp", "tool");
+        let kept: Vec<_> = hints.iter().filter(|h| h.token == "replacement").collect();
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].source_id, "mission_old_proc");
+        assert_eq!(kept[0].target_id.as_deref(), Some("mission_new_proc"));
+    }
+
+    #[test]
+    fn lisp_parser_extracts_moved_to_flow_target() {
+        let snippet = r#"
+  (flow F-old-flow
+    :desc "old"
+    :status "moved-to named flow"
+    :moved-to "category workflow-runtime-flows :: F-new-flow")
+"#;
+        let hints = parse_lisp_hints(snippet, "intent-flow.lisp", "flow");
+        let moved: Vec<_> = hints.iter().filter(|h| h.token == "moved-to").collect();
+        assert_eq!(moved.len(), 1);
+        assert_eq!(moved[0].source_id, "F-old-flow");
+        assert_eq!(moved[0].target_id.as_deref(), Some("F-new-flow"));
+        assert_eq!(moved[0].target_kind, "flow");
+    }
+
+    #[test]
+    fn lisp_parser_ignores_fuzzy_text_without_target() {
+        let snippet = r#"
+  (tool mission_freeform
+    :desc "Eventually we'll migrate this to a different module, but no replacement key here")
+"#;
+        let hints = parse_lisp_hints(snippet, "intent-tools.lisp", "tool");
+        assert!(
+            hints.is_empty(),
+            "fuzzy desc text must not generate hints; got: {:?}",
+            hints
+        );
+    }
+
+    #[test]
+    fn lisp_parser_emits_unresolved_when_target_hint_missing() {
+        let snippet = r#"
+  (tool mission_orphan
+    :status "deprecated")
+"#;
+        let hints = parse_lisp_hints(snippet, "intent-tools.lisp", "tool");
+        let dep: Vec<_> = hints.iter().filter(|h| h.token == "deprecated").collect();
+        assert_eq!(dep.len(), 1);
+        assert_eq!(dep[0].target_hint, None);
+        assert_eq!(dep[0].target_id, None);
+    }
+
+    #[test]
+    fn pick_merge_target_skips_self_and_unregistered() {
+        let hints_owned = vec![
+            SemanticHint {
+                source_id: "mission_a".into(),
+                source_kind: "tool".into(),
+                token: "replacement".into(),
+                target_id: Some("mission_a".into()),
+                target_kind: "tool".into(),
+                target_hint: None,
+                file_anchor: "x:1".into(),
+                raw_snippet: "".into(),
+            },
+            SemanticHint {
+                source_id: "mission_a".into(),
+                source_kind: "tool".into(),
+                token: "replacement".into(),
+                target_id: Some("mission_unregistered".into()),
+                target_kind: "tool".into(),
+                target_hint: None,
+                file_anchor: "x:2".into(),
+                raw_snippet: "".into(),
+            },
+            SemanticHint {
+                source_id: "mission_a".into(),
+                source_kind: "tool".into(),
+                token: "replacement".into(),
+                target_id: Some("mission_b".into()),
+                target_kind: "tool".into(),
+                target_hint: None,
+                file_anchor: "x:3".into(),
+                raw_snippet: "".into(),
+            },
+        ];
+        let hints: Vec<&SemanticHint> = hints_owned.iter().collect();
+        let mut tools = BTreeSet::new();
+        tools.insert("mission_a".to_string());
+        tools.insert("mission_b".to_string());
+        let flows = BTreeSet::new();
+        let picked = pick_merge_target(&hints, "mission_a", &tools, &flows).unwrap();
+        assert_eq!(picked.target_id.as_deref(), Some("mission_b"));
+    }
+
+    #[test]
+    fn apply_overlay_promotes_quiet_to_merge_candidate_with_resolved_target() {
+        let hint = SemanticHint {
+            source_id: "mission_old".into(),
+            source_kind: "tool".into(),
+            token: "deprecated".into(),
+            target_id: Some("mission_new".into()),
+            target_kind: "tool".into(),
+            target_hint: None,
+            file_anchor: "intent-tools.lisp:42".into(),
+            raw_snippet: "".into(),
+        };
+        let hint_refs: Vec<&SemanticHint> = vec![&hint];
+        let mut tools = BTreeSet::new();
+        tools.insert("mission_new".to_string());
+        let flows = BTreeSet::new();
+        let (cls, evidence, target, hint_evidence) = apply_hint_overlay(
+            "quiet",
+            vec!["count_30d=0".into()],
+            "mission_old",
+            &hint_refs,
+            &tools,
+            &flows,
+        );
+        assert_eq!(cls, "merge-candidate");
+        assert_eq!(target.as_deref(), Some("mission_new"));
+        assert!(evidence.iter().any(|e| e.contains("merge-candidate:")));
+        assert_eq!(hint_evidence.len(), 1);
+    }
+
+    #[test]
+    fn apply_overlay_keeps_active_unchanged() {
+        let hint = SemanticHint {
+            source_id: "mission_x".into(),
+            source_kind: "tool".into(),
+            token: "deprecated".into(),
+            target_id: Some("mission_y".into()),
+            target_kind: "tool".into(),
+            target_hint: None,
+            file_anchor: "x:1".into(),
+            raw_snippet: "".into(),
+        };
+        let hint_refs: Vec<&SemanticHint> = vec![&hint];
+        let mut tools = BTreeSet::new();
+        tools.insert("mission_y".to_string());
+        let flows = BTreeSet::new();
+        let (cls, _, target, _) = apply_hint_overlay(
+            "active",
+            vec![],
+            "mission_x",
+            &hint_refs,
+            &tools,
+            &flows,
+        );
+        assert_eq!(cls, "active");
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn apply_overlay_protected_target_keeps_merge_with_review_evidence() {
+        let hint = SemanticHint {
+            source_id: "mission_legacy".into(),
+            source_kind: "tool".into(),
+            token: "replacement".into(),
+            target_id: Some("mission_audit".into()),
+            target_kind: "tool".into(),
+            target_hint: None,
+            file_anchor: "x:1".into(),
+            raw_snippet: "".into(),
+        };
+        let hint_refs: Vec<&SemanticHint> = vec![&hint];
+        let mut tools = BTreeSet::new();
+        tools.insert("mission_audit".to_string());
+        let flows = BTreeSet::new();
+        let (cls, evidence, target, _) = apply_hint_overlay(
+            "stale",
+            vec![],
+            "mission_legacy",
+            &hint_refs,
+            &tools,
+            &flows,
+        );
+        assert_eq!(cls, "merge-candidate");
+        assert_eq!(target.as_deref(), Some("mission_audit"));
+        assert!(
+            evidence.iter().any(|e| e.contains("protected; mark only as review")),
+            "evidence should warn about protected target; got {:?}",
+            evidence
+        );
+    }
+
+    #[test]
+    fn apply_overlay_emits_missing_target_when_hint_unresolved() {
+        let hint = SemanticHint {
+            source_id: "mission_old".into(),
+            source_kind: "tool".into(),
+            token: "deprecated".into(),
+            target_id: None,
+            target_kind: "tool".into(),
+            target_hint: Some("nonexistent-suffix".into()),
+            file_anchor: "x:1".into(),
+            raw_snippet: "".into(),
+        };
+        let hint_refs: Vec<&SemanticHint> = vec![&hint];
+        let tools = BTreeSet::new();
+        let flows = BTreeSet::new();
+        let (cls, evidence, target, hint_evidence) = apply_hint_overlay(
+            "stale",
+            vec!["count_all=0".into()],
+            "mission_old",
+            &hint_refs,
+            &tools,
+            &flows,
+        );
+        assert_eq!(cls, "stale");
+        assert_eq!(target, None);
+        assert!(evidence.iter().any(|e| e == "semantic_hint_missing_target"));
+        assert_eq!(hint_evidence.len(), 1);
+    }
+
+    #[test]
+    fn apply_overlay_consolidated_keep_suppresses_merge_candidacy() {
+        let hint_keep = SemanticHint {
+            source_id: "mission_kb_ops".into(),
+            source_kind: "tool".into(),
+            token: "consolidated-keep".into(),
+            target_id: None,
+            target_kind: "tool".into(),
+            target_hint: None,
+            file_anchor: "intent-tools.lisp:1203".into(),
+            raw_snippet: "".into(),
+        };
+        let hint_dep = SemanticHint {
+            source_id: "mission_kb_ops".into(),
+            source_kind: "tool".into(),
+            token: "deprecated".into(),
+            target_id: Some("mission_other".into()),
+            target_kind: "tool".into(),
+            target_hint: None,
+            file_anchor: "intent-tools.lisp:1300".into(),
+            raw_snippet: "".into(),
+        };
+        let hint_refs: Vec<&SemanticHint> = vec![&hint_keep, &hint_dep];
+        let mut tools = BTreeSet::new();
+        tools.insert("mission_other".to_string());
+        let flows = BTreeSet::new();
+        let (cls, evidence, target, _) = apply_hint_overlay(
+            "quiet",
+            vec![],
+            "mission_kb_ops",
+            &hint_refs,
+            &tools,
+            &flows,
+        );
+        assert_eq!(cls, "quiet");
+        assert_eq!(target, None);
+        assert!(evidence.iter().any(|e| e.contains("consolidated-keep")));
+    }
+
+    #[test]
+    fn build_source_coverage_dict_includes_all_five_lanes() {
+        let mut hint_index = HintIndex::default();
+        hint_index.files_read.push("intent-tools.lisp".into());
+        hint_index.all.push(SemanticHint {
+            source_id: "x".into(),
+            source_kind: "tool".into(),
+            token: "deprecated".into(),
+            target_id: None,
+            target_kind: "tool".into(),
+            target_hint: None,
+            file_anchor: "intent-tools.lisp:1".into(),
+            raw_snippet: "".into(),
+        });
+        let probe = EventLogFlowProbe::default();
+        let dict = build_source_coverage_dict(&[], &hint_index, &probe, Some(0));
+        for key in &[
+            "conversation_tool_calls",
+            "board_tasks_flow_template",
+            "event_log_flow_events",
+            "lisp_semantic_hints",
+            "review_sidecar",
+        ] {
+            assert!(
+                dict.contains_key(*key),
+                "source_coverage missing lane `{}`; have keys {:?}",
+                key,
+                dict.keys().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(dict.get("lisp_semantic_hints").unwrap().count, 1);
     }
 }

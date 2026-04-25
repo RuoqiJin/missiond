@@ -8,12 +8,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
          list/get/match/apply/record_execution 为 store-backed full；\
          distill 默认 dry-run，传 distill_mode=\"sonnet\" 触发 workflow-distiller actor v0 \
          (从 plan + evidence sidecar 蒸馏 workflow_sexp + match_rules)，persist=true 写 workflow 行；\
-         compile_methodology 读 `.missiond/workflows/<name>.lisp` 产出 dry-run 预览（YAML emitter actor 未落地）；\
-         run_methodology 返回 not_implemented，附下一步指引（compile_methodology + 手写 YAML + mission_flow_run）。\
-         Lisp 源: intent-memory.lisp :: module directive-layer :: plumbing workflow-templates \
-         + intent-tools.lisp :: implemented-surface mission_workflow + intent-flow.lisp :: \
-         F-intent-alignment-plan-execution-loop :: s8 workflow-distillation \
-         + intent-intent-layer.lisp :: section unified-entry-pipeline :: role workflow-distiller。",
+         compile_methodology 读 `.missiond/workflows/<name>.lisp`：默认 compile_mode=\"dry_run\" 给预览；\
+         compile_mode=\"deterministic\" 走 v0 编译器 (paren-validate + (step …) 提取 + 生成可被 mission_flow_run 加载的 YAML)，\
+         persist=true 写到 `.missiond/generated/flows/<flow_id>.yaml` (atomic, overwrite 控制) 并附 source_hash；\
+         run_methodology 解析 flow_id|flow_path|name 找 compiled YAML，dry_run=true 返 would_run，\
+         dry_run=false 内部派发到 mission_flow_run 引擎；缺 YAML 时返结构化 MISSING_COMPILED_FLOW + 下一步指引。\
+         Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
+         implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
+         role workflow-distiller。",
         json!({
             "type": "object",
             "required": ["action"],
@@ -49,16 +51,49 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "persist": {
                     "type": "boolean",
-                    "description": "[distill] insert a workflow row (default false). Requires `name`."
+                    "description": "[distill|compile_methodology] distill: insert a workflow row (default false; requires `name`). compile_methodology: write generated YAML to `.missiond/generated/flows/<flow_id>.yaml` (default false)."
                 },
                 "distill_mode": {
                     "type": "string",
                     "enum": ["dry_run", "sonnet"],
                     "description": "[distill] dry_run (default) keeps legacy preview; sonnet drives the workflow-distiller actor v0 (Sonnet over plan + evidence sidecar)"
                 },
+                "compile_mode": {
+                    "type": "string",
+                    "enum": ["dry_run", "deterministic"],
+                    "description": "[compile_methodology] dry_run (default) keeps legacy lint preview; deterministic runs the v0 compiler (paren-validate + (step …) extraction + executable YAML emission)"
+                },
+                "output_flow_id": {
+                    "type": "string",
+                    "description": "[compile_methodology] explicit flow_id for the generated YAML (overrides default `methodology-<stem>-v0`)"
+                },
+                "params": {
+                    "type": "object",
+                    "description": "[compile_methodology|run_methodology] caller-supplied params; compile_methodology only echoes them in the response preview, run_methodology forwards them as FlowContext seed vars"
+                },
+                "overwrite": {
+                    "type": "boolean",
+                    "description": "[compile_methodology] when persist=true, allow overwriting an existing generated YAML (default false)"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "[run_methodology] when true (default), return a `would_run` descriptor without dispatching; when false, internally call mission_flow_run on the compiled YAML"
+                },
+                "flow_id": {
+                    "type": "string",
+                    "description": "[run_methodology] flow id for the compiled YAML under `.missiond/generated/flows/<flow_id>.yaml`"
+                },
+                "flow_path": {
+                    "type": "string",
+                    "description": "[compile_methodology|run_methodology] explicit path to a methodology .lisp file (compile) or a compiled YAML (run)"
+                },
                 "project": {
                     "type": "string",
-                    "description": "[distill|compile_methodology] project id (registry-resolved root); defaults to CWD. distill uses it to locate `.missiond/v2/plans/<plan_id>.evidence.json`"
+                    "description": "[distill|compile_methodology|run_methodology] project id (registry-resolved root); defaults to CWD. distill uses it to locate `.missiond/v2/plans/<plan_id>.evidence.json`."
+                },
+                "target_project": {
+                    "type": "string",
+                    "description": "[compile_methodology|run_methodology] alias of `project` for callers that prefer the explicit name"
                 },
                 "match_hint": {
                     "description": "[distill:sonnet] optional hint passed to the distiller as context — string or array of strings",

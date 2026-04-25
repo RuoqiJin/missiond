@@ -29,6 +29,26 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "type": "string",
                     "description": "[all] project id (registry-resolved root); defaults to CWD"
                 },
+                "target_project": {
+                    "type": "string",
+                    "description": "[all] alias for `project`; if both supplied `project` wins. Persisted in companion log meta when present (intent-tools.lisp :: implemented-surface mission_execution :: :workstation-dispatch-record)."
+                },
+                "dispatch_strategy": {
+                    "type": "string",
+                    "enum": [
+                        "resident-lisp",
+                        "fresh-code-alignment",
+                        "agent-team",
+                        "mixed",
+                        "prompt-fallback",
+                        "unknown"
+                    ],
+                    "description": "[open] workstation-dispatch-record strategy from intent-tools.lisp. Unknown / empty values normalise to `unknown`. Persisted in companion log meta and surfaced by status/list."
+                },
+                "requested_cwd": {
+                    "type": "string",
+                    "description": "[open] working directory the dispatcher used; metadata only, persisted into companion log meta when present."
+                },
                 "execution_id": {
                     "type": "string",
                     "description": "[all except list] companion log basename, e.g. `intent-memory-execution`"

@@ -16,7 +16,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          成功后写 plan_runner_dispatch 证据并把 plan 标记 executing。\
          target ∈ {mission_execution, mission_task_delegate, mission_flow_run}；\
          dispatch_strategy ∈ {resident-lisp|fresh-code-alignment|agent-team|mixed|prompt-fallback|unknown}\
-         （未知值归一化为 unknown，记入响应 + sidecar，mission_execution 持久化字段属未来工作）。\
+         （未知值归一化为 unknown，记入响应 + sidecar，且在 internal target=mission_execution 时\
+         转发给 mission_execution(action=open) 持久化进 companion log）。\
          record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
@@ -115,7 +116,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "prompt-fallback",
                         "unknown"
                     ],
-                    "description": "[execute] workstation-dispatch-record strategy. Surfaced in the response and the plan_runner_dispatch evidence entry. Unknown values are normalised to `unknown`. mission_execution companion-log persistence is future."
+                    "description": "[execute] workstation-dispatch-record strategy. Surfaced in the response and the plan_runner_dispatch evidence entry. Unknown values are normalised to `unknown`. Internal mode forwards dispatch_strategy to mission_execution(action=open), where the companion log now persists this field."
                 },
                 "target_project": {
                     "type": "string",
@@ -124,6 +125,10 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "cwd": {
                     "type": "string",
                     "description": "[execute internal mission_task_delegate] working directory passed through to mission_task_delegate"
+                },
+                "requested_cwd": {
+                    "type": "string",
+                    "description": "[execute internal mission_execution] working directory metadata persisted on the companion log when present (workstation-dispatch-record :requested-cwd)"
                 },
                 "objective": {
                     "type": "string",

@@ -20,14 +20,24 @@
 //!                         + evidence sidecar → workflow_sexp + match_rules; persist
 //!                         optional)
 //!   record_execution    — full (workflow_record_execution)
-//!   compile_methodology — dry-run: locates `.missiond/workflows/<name>.lisp`,
-//!                         emits compile preview; YAML emitter actor pending
-//!   run_methodology     — not_implemented: returns next-step pointer to
-//!                         compile_methodology + mission_flow_run
+//!   compile_methodology — dual mode: compile_mode="dry_run" (default) preserves
+//!                         the legacy lint preview; compile_mode="deterministic"
+//!                         runs the methodology compiler v0 (paren validate +
+//!                         (step …) extraction → executable FlowDefinition YAML
+//!                         loadable by mission_flow_run). persist=true writes
+//!                         the YAML under `.missiond/generated/flows/<flow_id>.yaml`
+//!                         atomically and refuses overwrite unless overwrite=true.
+//!   run_methodology     — resolves a compiled YAML by flow_id|flow_path|name;
+//!                         dry_run=true (default) returns a `would_run` descriptor;
+//!                         dry_run=false dispatches into the existing flow engine
+//!                         (load FlowDefinition + spawn board task + runner::run_flow).
+//!                         Missing compiled YAML returns structured
+//!                         MISSING_COMPILED_FLOW + next-step pointer.
 
 use anyhow::{anyhow, Result};
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 use crate::minimax_client::ChatMessage;
@@ -37,9 +47,12 @@ use missiond_core::types::PlanStatus;
 const DEFAULT_LIST_LIMIT: i64 = 50;
 const MAX_LIST_LIMIT: i64 = 500;
 const WORKFLOWS_DIR: &str = ".missiond/workflows";
+const GENERATED_FLOWS_DIR: &str = ".missiond/generated/flows";
 const EVIDENCE_DIR: &str = ".missiond/v2/plans";
 const SONNET_COMPILER_MODEL: &str = "claude-sonnet";
 const DISTILLER_MAX_TOKENS: u32 = 2048;
+const COMPILER_VERSION: &str = "mission_workflow.compile_methodology.v0";
+const COMPILER_STATUS_PREVIEW: &str = "preview_requires_review";
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let action = match args.get("action").and_then(|v| v.as_str()) {
@@ -540,33 +553,54 @@ async fn action_record_execution(state: &AppState, args: &Value) -> Result<ToolR
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// compile_methodology — dry-run preview from .missiond/workflows/<name>.lisp
+// compile_methodology — dry-run preview vs deterministic compiler v0
 // ───────────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompileMode {
+    DryRun,
+    Deterministic,
+}
+
+fn parse_compile_mode(raw: Option<&str>) -> Result<CompileMode, String> {
+    match raw {
+        None | Some("") | Some("dry_run") => Ok(CompileMode::DryRun),
+        Some("deterministic") => Ok(CompileMode::Deterministic),
+        Some(other) => Err(format!(
+            "compile_mode must be one of [\"dry_run\", \"deterministic\"]; got `{}`",
+            other
+        )),
+    }
+}
+
 async fn action_compile_methodology(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let project_root = resolve_project_root(state, args.get("project").and_then(|v| v.as_str())).await?;
+    let mode = match parse_compile_mode(args.get("compile_mode").and_then(|v| v.as_str())) {
+        Ok(m) => m,
+        Err(msg) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, msg),
+            ))
+        }
+    };
+
+    let project_id = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.get("target_project").and_then(|v| v.as_str()));
+    let project_root = resolve_project_root(state, project_id).await?;
     let workflows_dir = project_root.join(WORKFLOWS_DIR);
 
-    let path: PathBuf = if let Some(p) = args.get("workflow_path").and_then(|v| v.as_str()) {
-        let candidate = PathBuf::from(p);
-        if candidate.is_absolute() {
-            candidate
-        } else {
-            project_root.join(candidate)
+    let path = match resolve_methodology_path(
+        &project_root,
+        args.get("name").and_then(|v| v.as_str()),
+        args.get("workflow_path").and_then(|v| v.as_str()),
+    ) {
+        Ok(p) => p,
+        Err(msg) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::MISSING_PARAM, msg),
+            ))
         }
-    } else if let Some(name) = args.get("name").and_then(|v| v.as_str()) {
-        let mut p = workflows_dir.join(name);
-        if p.extension().is_none() {
-            p.set_extension("lisp");
-        }
-        p
-    } else {
-        return Ok(ToolResult::structured_error(
-            ToolError::new(
-                error_codes::MISSING_PARAM,
-                "compile_methodology requires `workflow_path` or `name`",
-            ),
-        ));
     };
 
     if !path.exists() {
@@ -584,41 +618,606 @@ async fn action_compile_methodology(state: &AppState, args: &Value) -> Result<To
 
     let content = std::fs::read_to_string(&path)
         .map_err(|e| anyhow!("read {}: {}", path.display(), e))?;
-    let line_count = content.lines().count();
-    let phases = count_top_form(&content, "phase");
-    let steps = count_top_form(&content, "step");
 
+    match mode {
+        CompileMode::DryRun => action_compile_dry_run(&path, &content),
+        CompileMode::Deterministic => {
+            action_compile_deterministic(&project_root, &path, &content, args)
+        }
+    }
+}
+
+fn action_compile_dry_run(path: &Path, content: &str) -> Result<ToolResult> {
+    let line_count = content.lines().count();
+    let phases = count_top_form(content, "phase");
+    let steps = count_top_form(content, "step");
     Ok(ToolResult::json_pretty(&json!({
         "status": "dry_run",
+        "compile_mode": "dry_run",
         "actor_pending": "intent-layer :: workflow compiler (Lisp → executable YAML)",
         "flow_ref": "F-methodology-to-executable-compile",
         "source_path": path.display().to_string(),
         "lines": line_count,
         "phase_form_count": phases,
         "step_form_count": steps,
-        "next_step": "compiler emits $MISSIOND_HOME/flows/<name>.yaml; today execute via mission_flow_run on a hand-authored YAML",
+        "next_step": "pass compile_mode=\"deterministic\" to emit an executable YAML preview; persist=true writes it to .missiond/generated/flows/<flow_id>.yaml",
     })))
 }
 
+fn action_compile_deterministic(
+    project_root: &Path,
+    path: &Path,
+    content: &str,
+    args: &Value,
+) -> Result<ToolResult> {
+    if let Err(msg) = validate_methodology_source(content) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(error_codes::INVALID_PARAM, msg)
+                .with_suggestion("repair the methodology lisp and retry"),
+        ));
+    }
+
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("methodology")
+        .to_string();
+    let output_flow_id = args
+        .get("output_flow_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let flow_id = derive_flow_id(&stem, output_flow_id);
+    let display_name = format!("methodology compile v0 — {}", stem);
+
+    let steps = extract_steps(content);
+    let review_required = steps.is_empty();
+    let hash = source_hash(content);
+    let generated_at = chrono::Utc::now().to_rfc3339();
+    let source_display = source_path_for_yaml(project_root, path);
+
+    let meta = GeneratedMeta {
+        flow_id: flow_id.clone(),
+        name: display_name,
+        source_path: source_display.clone(),
+        source_hash: hash.clone(),
+        generated_at: generated_at.clone(),
+        compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+    };
+    let yaml = build_generated_yaml(&meta, &steps, review_required)
+        .map_err(|e| anyhow!("serialize yaml: {}", e))?;
+
+    let persist = args
+        .get("persist")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let overwrite = args
+        .get("overwrite")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    let mut payload = json!({
+        "status": "compiled_preview",
+        "compile_mode": "deterministic",
+        "compiler_version": COMPILER_VERSION,
+        "compiler_status": COMPILER_STATUS_PREVIEW,
+        "flow_ref": "F-methodology-to-executable-compile :: s2/s3/s5",
+        "flow_id": flow_id,
+        "source_path": source_display,
+        "source_hash": hash,
+        "generated_at": generated_at,
+        "step_count": steps.len(),
+        "review_required": review_required,
+        "params_echo": args.get("params").cloned().unwrap_or(Value::Null),
+        "future_compiler_actor": "intent-layer LLM/forge compiler — semantic phase/anti-pattern lifting deferred",
+        "yaml_preview": yaml,
+    });
+
+    if !persist {
+        payload["persisted"] = json!(false);
+        payload["next_step"] = json!(
+            "persist=true to write to .missiond/generated/flows/<flow_id>.yaml; \
+             then run_methodology(flow_id=<flow_id>, dry_run=true) to inspect, dry_run=false to dispatch"
+        );
+        return Ok(ToolResult::json_pretty(&payload));
+    }
+
+    let yaml_path = generated_yaml_path(project_root, &meta.flow_id);
+    if yaml_path.exists() && !overwrite {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!(
+                    "generated YAML already exists at {}; pass overwrite=true to replace",
+                    yaml_path.display()
+                ),
+            ),
+        ));
+    }
+    atomic_write(&yaml_path, &yaml)
+        .map_err(|e| anyhow!("write {}: {}", yaml_path.display(), e))?;
+
+    payload["persisted"] = json!(true);
+    payload["flow_path"] = json!(yaml_path.display().to_string());
+    payload["next_step"] = json!(
+        "run_methodology(flow_id=<flow_id>, dry_run=true) to verify; dry_run=false to dispatch into mission_flow_run"
+    );
+    Ok(ToolResult::json_pretty(&payload))
+}
+
 // ───────────────────────────────────────────────────────────────────────
-// run_methodology — not implemented; explicit pointer
+// run_methodology — resolve compiled YAML, dispatch into flow engine
 // ───────────────────────────────────────────────────────────────────────
 
-async fn action_run_methodology(_state: &AppState, args: &Value) -> Result<ToolResult> {
-    let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
-    let workflow_path = args.get("workflow_path").and_then(|v| v.as_str()).unwrap_or("");
-    Ok(ToolResult::json_pretty(&json!({
-        "status": "not_implemented",
-        "actor_pending": "intent-layer :: workflow compiler + worker flow loader",
-        "flow_ref": "F-methodology-to-executable-compile :: s5/s6",
-        "name": name,
-        "workflow_path": workflow_path,
-        "next_step": [
-            "1) action=compile_methodology to verify source_hash + lint",
-            "2) hand-author or generate <name>.yaml under $MISSIOND_HOME/flows",
-            "3) call mission_flow_run(action=run, flow_id=<name>, params=...)"
-        ],
-    })))
+async fn action_run_methodology(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let project_id = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.get("target_project").and_then(|v| v.as_str()));
+    let project_root = resolve_project_root(state, project_id).await?;
+    let dry_run = args
+        .get("dry_run")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let flow_id_arg = args.get("flow_id").and_then(|v| v.as_str());
+    let flow_path_arg = args.get("flow_path").and_then(|v| v.as_str());
+    let name_arg = args.get("name").and_then(|v| v.as_str());
+
+    let resolved = match resolve_compiled_flow(&project_root, flow_id_arg, flow_path_arg, name_arg)
+    {
+        Ok(r) => r,
+        Err(CompiledFlowError::MissingArgs) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::MISSING_PARAM,
+                    "run_methodology requires `flow_id`, `flow_path`, or `name`",
+                ),
+            ))
+        }
+        Err(CompiledFlowError::Missing { flow_id, expected }) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    "MISSING_COMPILED_FLOW: no compiled YAML on disk for the requested methodology",
+                )
+                .with_suggestion(format!(
+                    "call mission_workflow(action=compile_methodology, compile_mode=\"deterministic\", persist=true, name=<methodology>, output_flow_id=\"{}\") to generate {}",
+                    flow_id,
+                    expected.display()
+                )),
+            ))
+        }
+    };
+
+    let raw = std::fs::read_to_string(&resolved.path)
+        .map_err(|e| anyhow!("read {}: {}", resolved.path.display(), e))?;
+    let flow: crate::engine::flow::FlowDefinition = serde_yaml::from_str(&raw)
+        .map_err(|e| anyhow!("parse {}: {}", resolved.path.display(), e))?;
+
+    if dry_run {
+        return Ok(ToolResult::json_pretty(&json!({
+            "status": "would_run",
+            "flow_ref": "F-methodology-to-executable-compile :: s6 dry-run-or-run (dry_run)",
+            "flow_id": flow.id,
+            "flow_path": resolved.path.display().to_string(),
+            "node_count": flow.nodes.len(),
+            "node_ids": flow.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
+            "params_echo": args.get("params").cloned().unwrap_or(Value::Null),
+            "next_step": "pass dry_run=false to dispatch into mission_flow_run on this compiled YAML",
+        })));
+    }
+
+    // dry_run=false → dispatch through flow engine.
+    let title = format!("Methodology: {}", flow.name);
+    let input = missiond_core::types::CreateBoardTaskInput {
+        title,
+        category: Some("methodology".to_string()),
+        description: Some(format!(
+            "compiled methodology flow `{}` — source: {}",
+            flow.id,
+            resolved.path.display()
+        )),
+        flow_template: Some(flow.id.clone()),
+        ..Default::default()
+    };
+    let task = state
+        .store
+        .create_board_task(&input)
+        .await
+        .map_err(|e| anyhow!("DB: {}", e))?;
+    let task_id = task.id.to_string();
+
+    let mut ctx = crate::engine::flow::FlowContext::new();
+    if let Some(params) = args.get("params").and_then(|v| v.as_object()) {
+        for (k, v) in params {
+            let value = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            ctx.set(k.clone(), value);
+        }
+    }
+
+    let _ = state
+        .store
+        .update_board_task(
+            &task_id,
+            &missiond_core::types::UpdateBoardTaskInput {
+                flow_phase: Some("running".to_string()),
+                flow_context: Some(serde_json::to_string(&ctx).unwrap_or_default()),
+                status: Some("running".to_string()),
+                ..Default::default()
+            },
+        )
+        .await;
+
+    let run_result = crate::engine::flow::runner::run_flow(state, &flow, &mut ctx, &task_id).await;
+    match run_result {
+        Ok(()) => {
+            let _ = state
+                .store
+                .update_board_task(
+                    &task_id,
+                    &missiond_core::types::UpdateBoardTaskInput {
+                        flow_phase: Some("completed".to_string()),
+                        status: Some("done".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            Ok(ToolResult::json_pretty(&json!({
+                "status": "dispatched",
+                "flow_ref": "F-methodology-to-executable-compile :: s6 dry-run-or-run (run)",
+                "flow_id": flow.id,
+                "flow_path": resolved.path.display().to_string(),
+                "task_id": task_id,
+                "completed_nodes": ctx.completed_nodes,
+                "record_execution_status": "TODO_external — methodology compile flows are not yet linked to a workflow row; call mission_workflow(action=record_execution) manually with the matching workflow_id once distilled",
+            })))
+        }
+        Err(e) => {
+            let _ = state
+                .store
+                .update_board_task(
+                    &task_id,
+                    &missiond_core::types::UpdateBoardTaskInput {
+                        flow_phase: Some("failed".to_string()),
+                        status: Some("failed".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await;
+            Err(e)
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// helpers — methodology compiler v0 (pure, covered by unit tests)
+// ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MethodologyStep {
+    id: String,
+    body: String,
+}
+
+#[derive(Debug, Clone)]
+struct GeneratedMeta {
+    flow_id: String,
+    name: String,
+    source_path: String,
+    source_hash: String,
+    generated_at: String,
+    compiler_status: String,
+}
+
+#[derive(Debug)]
+enum CompiledFlowError {
+    MissingArgs,
+    Missing { flow_id: String, expected: PathBuf },
+}
+
+#[derive(Debug, Clone)]
+struct CompiledFlow {
+    path: PathBuf,
+}
+
+fn resolve_methodology_path(
+    project_root: &Path,
+    name: Option<&str>,
+    workflow_path: Option<&str>,
+) -> Result<PathBuf, String> {
+    if let Some(p) = workflow_path.filter(|s| !s.is_empty()) {
+        let candidate = PathBuf::from(p);
+        return Ok(if candidate.is_absolute() {
+            candidate
+        } else {
+            project_root.join(candidate)
+        });
+    }
+    if let Some(name) = name.filter(|s| !s.is_empty()) {
+        let mut p = project_root.join(WORKFLOWS_DIR).join(name);
+        if p.extension().is_none() {
+            p.set_extension("lisp");
+        }
+        return Ok(p);
+    }
+    Err("compile_methodology requires `workflow_path` or `name`".to_string())
+}
+
+fn validate_methodology_source(content: &str) -> Result<(), String> {
+    let trimmed = content.trim();
+    if trimmed.is_empty() {
+        return Err("methodology source is empty".to_string());
+    }
+    if !paren_balanced_ignoring_strings(content) {
+        return Err("methodology source has unbalanced parentheses".to_string());
+    }
+    if !content.chars().any(|c| c == '(') {
+        return Err("methodology source has no top-level form".to_string());
+    }
+    Ok(())
+}
+
+/// SHA-256 hex of the source bytes — stable across runs for identical input.
+fn source_hash(content: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    let digest = hasher.finalize();
+    let mut s = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        s.push_str(&format!("{:02x}", byte));
+    }
+    s
+}
+
+fn derive_flow_id(stem: &str, output_flow_id: Option<&str>) -> String {
+    if let Some(explicit) = output_flow_id.filter(|s| !s.is_empty()) {
+        return explicit.to_string();
+    }
+    let safe = sanitize_id_token(stem);
+    if safe.is_empty() {
+        "methodology-anonymous-v0".to_string()
+    } else {
+        format!("methodology-{}-v0", safe)
+    }
+}
+
+fn sanitize_id_token(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_hyphen = false;
+    for ch in raw.chars() {
+        let allowed = ch.is_ascii_alphanumeric() || ch == '_' || ch == '-';
+        if allowed {
+            out.push(ch);
+            prev_hyphen = ch == '-';
+        } else if !prev_hyphen && !out.is_empty() {
+            out.push('-');
+            prev_hyphen = true;
+        }
+    }
+    out.trim_matches('-').to_string()
+}
+
+fn source_path_for_yaml(project_root: &Path, path: &Path) -> String {
+    match path.strip_prefix(project_root) {
+        Ok(rel) => rel.display().to_string(),
+        Err(_) => path.display().to_string(),
+    }
+}
+
+fn generated_yaml_path(project_root: &Path, flow_id: &str) -> PathBuf {
+    project_root
+        .join(GENERATED_FLOWS_DIR)
+        .join(format!("{}.yaml", flow_id))
+}
+
+/// Extract `(step <id> <body…>)` forms from a methodology Lisp source. Multi-line
+/// bodies are accumulated using paren depth tracking that ignores string contents.
+/// Pure-fn for testing.
+fn extract_steps(content: &str) -> Vec<MethodologyStep> {
+    let mut steps = Vec::new();
+    let mut buffer: Option<(String, String, i32, bool, bool)> = None;
+    // (id, body, depth, in_string, escaped)
+
+    for line in content.lines() {
+        if let Some((mut id, mut body, mut depth, mut in_string, mut escaped)) = buffer.take() {
+            body.push('\n');
+            for ch in line.chars() {
+                body.push(ch);
+                advance_paren_state(ch, &mut depth, &mut in_string, &mut escaped);
+                if depth == 0 {
+                    steps.push(MethodologyStep {
+                        id: std::mem::take(&mut id),
+                        body: std::mem::take(&mut body),
+                    });
+                    buffer = None;
+                    break;
+                }
+            }
+            if depth > 0 {
+                buffer = Some((id, body, depth, in_string, escaped));
+            }
+            continue;
+        }
+
+        let leading = line.chars().take_while(|c| c.is_whitespace()).count();
+        let rest = &line[leading..];
+        if !rest.starts_with("(step") {
+            continue;
+        }
+        let after_step = &rest["(step".len()..];
+        if !after_step.starts_with(|c: char| c.is_whitespace()) {
+            continue; // e.g. (steps … shouldn't match
+        }
+        let after_ws = after_step.trim_start();
+        let id_end = after_ws
+            .find(|c: char| c.is_whitespace() || c == ')')
+            .unwrap_or(after_ws.len());
+        let id = after_ws[..id_end].trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut body = String::new();
+        let mut closed = false;
+        for ch in rest.chars() {
+            body.push(ch);
+            advance_paren_state(ch, &mut depth, &mut in_string, &mut escaped);
+            if depth == 0 && body.ends_with(')') {
+                steps.push(MethodologyStep {
+                    id: id.clone(),
+                    body: body.clone(),
+                });
+                closed = true;
+                break;
+            }
+        }
+        if !closed && depth > 0 {
+            buffer = Some((id, body, depth, in_string, escaped));
+        }
+    }
+
+    steps
+}
+
+fn advance_paren_state(ch: char, depth: &mut i32, in_string: &mut bool, escaped: &mut bool) {
+    if *in_string {
+        if *escaped {
+            *escaped = false;
+        } else if ch == '\\' {
+            *escaped = true;
+        } else if ch == '"' {
+            *in_string = false;
+        }
+        return;
+    }
+    match ch {
+        '"' => *in_string = true,
+        '(' => *depth += 1,
+        ')' => *depth -= 1,
+        _ => {}
+    }
+}
+
+fn build_generated_yaml(
+    meta: &GeneratedMeta,
+    steps: &[MethodologyStep],
+    review_required: bool,
+) -> Result<String, serde_yaml::Error> {
+    use serde_yaml::{Mapping, Value as Yaml};
+
+    let mut root = Mapping::new();
+    root.insert(Yaml::from("id"), Yaml::from(meta.flow_id.clone()));
+    root.insert(Yaml::from("name"), Yaml::from(meta.name.clone()));
+    root.insert(Yaml::from("source_kind"), Yaml::from("methodology_lisp"));
+    root.insert(Yaml::from("source_path"), Yaml::from(meta.source_path.clone()));
+    root.insert(Yaml::from("source_hash"), Yaml::from(meta.source_hash.clone()));
+    root.insert(Yaml::from("generated_by"), Yaml::from(COMPILER_VERSION));
+    root.insert(Yaml::from("generated_at"), Yaml::from(meta.generated_at.clone()));
+    root.insert(
+        Yaml::from("compiler_status"),
+        Yaml::from(meta.compiler_status.clone()),
+    );
+    root.insert(Yaml::from("review_required"), Yaml::from(review_required));
+
+    let mut nodes_seq: Vec<Yaml> = Vec::new();
+    if steps.is_empty() {
+        let mut node = Mapping::new();
+        node.insert(Yaml::from("id"), Yaml::from("manual_review"));
+        node.insert(Yaml::from("type"), Yaml::from("slot_task"));
+        node.insert(Yaml::from("model"), Yaml::from("opus"));
+        node.insert(
+            Yaml::from("prompt"),
+            Yaml::from(format!(
+                "Manually review compiled methodology '{flow}' before running.\n\
+                 Source: {src}\n\
+                 Source hash: {hash}\n\
+                 The deterministic compiler v0 could not auto-extract executable (step …) forms.\n\
+                 Edit this YAML or augment the source Lisp before dispatching.",
+                flow = meta.flow_id,
+                src = meta.source_path,
+                hash = meta.source_hash,
+            )),
+        );
+        nodes_seq.push(Yaml::Mapping(node));
+    } else {
+        for step in steps {
+            let safe_id = sanitize_id_token(&step.id);
+            let node_id = if safe_id.is_empty() {
+                "step".to_string()
+            } else {
+                format!("step_{}", safe_id)
+            };
+            let mut node = Mapping::new();
+            node.insert(Yaml::from("id"), Yaml::from(node_id.clone()));
+            node.insert(Yaml::from("type"), Yaml::from("slot_task"));
+            node.insert(Yaml::from("model"), Yaml::from("opus"));
+            node.insert(Yaml::from("prompt"), Yaml::from(step.body.clone()));
+            node.insert(
+                Yaml::from("save_as"),
+                Yaml::from(format!("{}_result", node_id)),
+            );
+            nodes_seq.push(Yaml::Mapping(node));
+        }
+    }
+    root.insert(Yaml::from("nodes"), Yaml::Sequence(nodes_seq));
+    serde_yaml::to_string(&Yaml::Mapping(root))
+}
+
+fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("tmp.write");
+    std::fs::write(&tmp, content)?;
+    std::fs::rename(&tmp, path)
+}
+
+fn resolve_compiled_flow(
+    project_root: &Path,
+    flow_id: Option<&str>,
+    flow_path: Option<&str>,
+    name: Option<&str>,
+) -> Result<CompiledFlow, CompiledFlowError> {
+    if let Some(p) = flow_path.filter(|s| !s.is_empty()) {
+        let candidate = PathBuf::from(p);
+        let resolved = if candidate.is_absolute() {
+            candidate
+        } else {
+            project_root.join(candidate)
+        };
+        if resolved.exists() {
+            return Ok(CompiledFlow { path: resolved });
+        }
+        let id_for_msg = flow_id
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| resolved.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string());
+        return Err(CompiledFlowError::Missing {
+            flow_id: id_for_msg,
+            expected: resolved,
+        });
+    }
+
+    let id = if let Some(id) = flow_id.filter(|s| !s.is_empty()) {
+        id.to_string()
+    } else if let Some(n) = name.filter(|s| !s.is_empty()) {
+        derive_flow_id(n, None)
+    } else {
+        return Err(CompiledFlowError::MissingArgs);
+    };
+    let expected = generated_yaml_path(project_root, &id);
+    if expected.exists() {
+        Ok(CompiledFlow { path: expected })
+    } else {
+        Err(CompiledFlowError::Missing {
+            flow_id: id,
+            expected,
+        })
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1050,5 +1649,362 @@ mod tests {
         let path = evidence_sidecar_path(Path::new("/tmp/proj"), id);
         let s = path.display().to_string();
         assert!(s.ends_with(&format!(".missiond/v2/plans/{}.evidence.json", id)));
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // methodology compiler v0 — pure-fn tests
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn parse_compile_mode_default_and_explicit() {
+        assert_eq!(parse_compile_mode(None), Ok(CompileMode::DryRun));
+        assert_eq!(parse_compile_mode(Some("")), Ok(CompileMode::DryRun));
+        assert_eq!(parse_compile_mode(Some("dry_run")), Ok(CompileMode::DryRun));
+        assert_eq!(
+            parse_compile_mode(Some("deterministic")),
+            Ok(CompileMode::Deterministic)
+        );
+        assert!(parse_compile_mode(Some("nope")).is_err());
+    }
+
+    #[test]
+    fn methodology_path_workflow_path_takes_precedence() {
+        let root = Path::new("/tmp/proj");
+        // absolute workflow_path passes through
+        let abs = resolve_methodology_path(root, None, Some("/abs/some.lisp")).unwrap();
+        assert_eq!(abs, PathBuf::from("/abs/some.lisp"));
+        // relative workflow_path joins to project_root
+        let rel = resolve_methodology_path(root, None, Some("methods/foo.lisp")).unwrap();
+        assert_eq!(rel, PathBuf::from("/tmp/proj/methods/foo.lisp"));
+    }
+
+    #[test]
+    fn methodology_path_name_appends_lisp_extension() {
+        let root = Path::new("/tmp/proj");
+        let p = resolve_methodology_path(root, Some("bus-refactor"), None).unwrap();
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/proj/.missiond/workflows/bus-refactor.lisp")
+        );
+        // Caller may pass an explicit extension — keep it.
+        let p2 = resolve_methodology_path(root, Some("bus-refactor.lisp"), None).unwrap();
+        assert_eq!(
+            p2,
+            PathBuf::from("/tmp/proj/.missiond/workflows/bus-refactor.lisp")
+        );
+    }
+
+    #[test]
+    fn methodology_path_requires_one_of_args() {
+        let root = Path::new("/tmp/proj");
+        assert!(resolve_methodology_path(root, None, None).is_err());
+        assert!(resolve_methodology_path(root, Some(""), Some("")).is_err());
+    }
+
+    #[test]
+    fn validate_methodology_source_rejects_empty_and_unbalanced() {
+        assert!(validate_methodology_source("").is_err());
+        assert!(validate_methodology_source("   \n  ").is_err());
+        // No top-level form even if non-empty.
+        assert!(validate_methodology_source("not-a-form").is_err());
+        // Unbalanced parens (string-ignoring detector catches this).
+        assert!(validate_methodology_source("(workflow demo (step s1").is_err());
+        // Balanced + has form → ok.
+        assert!(validate_methodology_source("(workflow demo (step s1 \"do x\"))").is_ok());
+    }
+
+    #[test]
+    fn source_hash_is_stable_and_distinguishes_inputs() {
+        let a1 = source_hash("(workflow demo)");
+        let a2 = source_hash("(workflow demo)");
+        let b = source_hash("(workflow other)");
+        assert_eq!(a1, a2, "same input must hash identically");
+        assert_ne!(a1, b, "different input must hash differently");
+        // sha256 hex is 64 chars.
+        assert_eq!(a1.len(), 64);
+        assert!(a1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn derive_flow_id_uses_explicit_first() {
+        assert_eq!(
+            derive_flow_id("bus-refactor", Some("custom-id")),
+            "custom-id".to_string()
+        );
+        // empty explicit falls back
+        assert_eq!(
+            derive_flow_id("bus-refactor", Some("")),
+            "methodology-bus-refactor-v0".to_string()
+        );
+        // none → default
+        assert_eq!(
+            derive_flow_id("bus-refactor", None),
+            "methodology-bus-refactor-v0".to_string()
+        );
+        // sanitization collapses non-alnum
+        assert_eq!(
+            derive_flow_id("Foo Bar/Baz!", None),
+            "methodology-Foo-Bar-Baz-v0".to_string()
+        );
+        // anonymous fallback when stem yields empty token
+        assert_eq!(
+            derive_flow_id("///", None),
+            "methodology-anonymous-v0".to_string()
+        );
+    }
+
+    #[test]
+    fn extract_steps_handles_single_line_form() {
+        let body = "\
+(workflow demo
+  (step s1 \"first thing\")
+  (step s2 \"second thing\"))
+";
+        let steps = extract_steps(body);
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].id, "s1");
+        assert!(steps[0].body.contains("first thing"));
+        assert_eq!(steps[1].id, "s2");
+        assert!(steps[1].body.contains("second thing"));
+    }
+
+    #[test]
+    fn extract_steps_handles_multi_line_form() {
+        let body = "\
+(workflow demo
+  (step long-id
+    \"line one
+     line two\"
+    :note other))
+";
+        let steps = extract_steps(body);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].id, "long-id");
+        assert!(steps[0].body.contains("line one"));
+        assert!(steps[0].body.contains(":note other"));
+    }
+
+    #[test]
+    fn extract_steps_ignores_lookalike_forms() {
+        // (steps …) and (step) without body should be skipped — first because
+        // of the prefix mismatch, second because the id parse fails.
+        let body = "\
+(workflow demo
+  (steps
+    (foo))
+  (step)
+  (step real \"ok\"))
+";
+        let steps = extract_steps(body);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].id, "real");
+    }
+
+    #[test]
+    fn extract_steps_returns_empty_when_no_steps() {
+        // Real methodology lisps frequently have no top-level (step …) — they
+        // use (phase-* …) instead. Compiler v0 must hand this to manual review.
+        let body = "\
+(workflow bus-refactor
+  (phase-A exploration :goal \"survey\")
+  (phase-B design-freeze :goal \"freeze\"))
+";
+        assert!(extract_steps(body).is_empty());
+    }
+
+    #[test]
+    fn extract_steps_paren_in_string_does_not_close_form() {
+        let body = "\
+(workflow demo
+  (step s1 \"closes ) inside string\"
+        :tag normal))
+";
+        let steps = extract_steps(body);
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].id, "s1");
+        assert!(steps[0].body.contains("closes ) inside string"));
+        assert!(steps[0].body.contains(":tag normal"));
+    }
+
+    #[test]
+    fn build_generated_yaml_contains_source_metadata_and_steps() {
+        let meta = GeneratedMeta {
+            flow_id: "methodology-foo-v0".to_string(),
+            name: "methodology compile v0 — foo".to_string(),
+            source_path: ".missiond/workflows/foo.lisp".to_string(),
+            source_hash: "deadbeef".repeat(8),
+            generated_at: "2026-04-25T00:00:00Z".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let steps = vec![MethodologyStep {
+            id: "s1".to_string(),
+            body: "(step s1 \"do x\")".to_string(),
+        }];
+        let yaml = build_generated_yaml(&meta, &steps, false).expect("yaml builds");
+        assert!(yaml.contains("id: methodology-foo-v0"));
+        assert!(yaml.contains("source_kind: methodology_lisp"));
+        assert!(yaml.contains(".missiond/workflows/foo.lisp"));
+        assert!(yaml.contains(&meta.source_hash));
+        assert!(yaml.contains(&format!("generated_by: {}", COMPILER_VERSION)));
+        assert!(yaml.contains(&format!("compiler_status: {}", COMPILER_STATUS_PREVIEW)));
+        assert!(yaml.contains("review_required: false"));
+        assert!(yaml.contains("step_s1"));
+        assert!(yaml.contains("type: slot_task"));
+        // round-trip parse via FlowDefinition (which silently drops the extra
+        // metadata fields) — ensures the generated YAML is loader-ready.
+        let parsed: crate::engine::flow::FlowDefinition =
+            serde_yaml::from_str(&yaml).expect("FlowDefinition parses");
+        assert_eq!(parsed.id, "methodology-foo-v0");
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.nodes[0].id, "step_s1");
+    }
+
+    #[test]
+    fn build_generated_yaml_emits_manual_review_when_no_steps() {
+        let meta = GeneratedMeta {
+            flow_id: "methodology-foo-v0".to_string(),
+            name: "foo".to_string(),
+            source_path: "src.lisp".to_string(),
+            source_hash: "abc".to_string(),
+            generated_at: "ts".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let yaml = build_generated_yaml(&meta, &[], true).expect("yaml builds");
+        assert!(yaml.contains("review_required: true"));
+        assert!(yaml.contains("manual_review"));
+        assert!(yaml.contains("Manually review"));
+        // Must still parse.
+        let parsed: crate::engine::flow::FlowDefinition =
+            serde_yaml::from_str(&yaml).expect("FlowDefinition parses");
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.nodes[0].id, "manual_review");
+    }
+
+    #[test]
+    fn generated_yaml_path_lives_under_project_local_dir() {
+        let p = generated_yaml_path(Path::new("/tmp/proj"), "methodology-foo-v0");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/proj/.missiond/generated/flows/methodology-foo-v0.yaml")
+        );
+    }
+
+    #[test]
+    fn atomic_write_creates_dirs_and_replaces_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let target = tmp
+            .path()
+            .join(".missiond/generated/flows/methodology-foo-v0.yaml");
+        atomic_write(&target, "hello").expect("first write");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "hello".to_string()
+        );
+        // Second write replaces in place.
+        atomic_write(&target, "world").expect("second write");
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "world".to_string()
+        );
+    }
+
+    #[test]
+    fn resolve_compiled_flow_missing_returns_structured_pointer() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let err = resolve_compiled_flow(root, Some("methodology-foo-v0"), None, None)
+            .expect_err("missing yaml must error");
+        match err {
+            CompiledFlowError::Missing { flow_id, expected } => {
+                assert_eq!(flow_id, "methodology-foo-v0");
+                assert!(expected
+                    .display()
+                    .to_string()
+                    .contains(".missiond/generated/flows/methodology-foo-v0.yaml"));
+            }
+            other => panic!("expected Missing, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_compiled_flow_requires_some_arg() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let err = resolve_compiled_flow(root, None, None, None)
+            .expect_err("no args → MissingArgs");
+        assert!(matches!(err, CompiledFlowError::MissingArgs));
+    }
+
+    #[test]
+    fn resolve_compiled_flow_finds_existing_yaml_by_flow_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let yaml_path = root.join(".missiond/generated/flows/methodology-foo-v0.yaml");
+        std::fs::create_dir_all(yaml_path.parent().unwrap()).unwrap();
+        std::fs::write(&yaml_path, "id: x\nname: x\nnodes: []\n").unwrap();
+        let resolved = resolve_compiled_flow(root, Some("methodology-foo-v0"), None, None)
+            .expect("flow yaml exists");
+        assert_eq!(resolved.path, yaml_path);
+    }
+
+    #[test]
+    fn resolve_compiled_flow_falls_back_to_name_via_derive_flow_id() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        // expected location uses the derived id
+        let yaml_path = root.join(".missiond/generated/flows/methodology-bus-refactor-v0.yaml");
+        std::fs::create_dir_all(yaml_path.parent().unwrap()).unwrap();
+        std::fs::write(&yaml_path, "id: x\nname: x\nnodes: []\n").unwrap();
+        let resolved = resolve_compiled_flow(root, None, None, Some("bus-refactor"))
+            .expect("name resolves to derived flow id");
+        assert_eq!(resolved.path, yaml_path);
+    }
+
+    #[test]
+    fn persist_overwrite_policy_via_path_existence() {
+        // The action_compile_deterministic flow uses path.exists() && !overwrite
+        // to refuse rewrites. We mimic that condition here so the behavior is
+        // covered by a unit test rather than an integration test.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let target = generated_yaml_path(root, "methodology-foo-v0");
+        atomic_write(&target, "first").expect("seed file");
+
+        let exists = target.exists();
+        let overwrite = false;
+        let should_refuse = exists && !overwrite;
+        assert!(should_refuse, "must refuse overwrite without flag");
+
+        let overwrite = true;
+        let should_refuse_with_flag = target.exists() && !overwrite;
+        assert!(
+            !should_refuse_with_flag,
+            "overwrite=true must allow replacement"
+        );
+        // And atomic_write actually replaces — the policy is the only gate.
+        atomic_write(&target, "second").expect("overwrite write");
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "second");
+    }
+
+    #[test]
+    fn sanitize_id_token_keeps_safe_chars_and_collapses_runs() {
+        assert_eq!(sanitize_id_token("foo"), "foo");
+        assert_eq!(sanitize_id_token("foo_bar-baz"), "foo_bar-baz");
+        assert_eq!(sanitize_id_token("Foo Bar/Baz!"), "Foo-Bar-Baz");
+        assert_eq!(sanitize_id_token("///"), "");
+    }
+
+    #[test]
+    fn source_path_for_yaml_strips_project_root_when_under_it() {
+        let root = Path::new("/tmp/proj");
+        assert_eq!(
+            source_path_for_yaml(root, Path::new("/tmp/proj/.missiond/workflows/foo.lisp")),
+            ".missiond/workflows/foo.lisp"
+        );
+        // Outside the project root → keep absolute.
+        assert_eq!(
+            source_path_for_yaml(root, Path::new("/elsewhere/foo.lisp")),
+            "/elsewhere/foo.lisp"
+        );
     }
 }

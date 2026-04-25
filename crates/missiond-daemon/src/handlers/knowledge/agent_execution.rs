@@ -42,6 +42,37 @@ const COMPANION_DIR: &str = ".missiond/v2";
 const DEFAULT_LEASE_SECS: i64 = 1800;
 const MAX_LEASE_SECS: i64 = 24 * 3600;
 
+/// Canonical workstation-dispatch strategies surfaced by intent-tools.lisp ::
+/// implemented-surface mission_execution :: :workstation-dispatch-record. Kept
+/// in sync with `plan.rs::VALID_DISPATCH_STRATEGIES`; unknown / empty inputs
+/// normalize to `DEFAULT_DISPATCH_STRATEGY` so legacy callers keep working.
+const VALID_DISPATCH_STRATEGIES: &[&str] = &[
+    "resident-lisp",
+    "fresh-code-alignment",
+    "agent-team",
+    "mixed",
+    "prompt-fallback",
+    "unknown",
+];
+const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
+
+/// Normalize an optional dispatch strategy string against the canonical set.
+/// Unknown / empty values fall back to `DEFAULT_DISPATCH_STRATEGY` (`"unknown"`)
+/// without erroring; we never hard-fail open() on a strategy mismatch because
+/// upstream dispatchers may legitimately surface novel labels we then audit.
+fn normalize_dispatch_strategy(raw: Option<&str>) -> &'static str {
+    let v = raw.unwrap_or("").trim();
+    if v.is_empty() {
+        return DEFAULT_DISPATCH_STRATEGY;
+    }
+    for &known in VALID_DISPATCH_STRATEGIES {
+        if known == v {
+            return known;
+        }
+    }
+    DEFAULT_DISPATCH_STRATEGY
+}
+
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let action = match args.get("action").and_then(|v| v.as_str()) {
         Some(a) => a.to_string(),
@@ -112,8 +143,23 @@ fn companion_path(root: &Path, execution_id: &str) -> PathBuf {
     p
 }
 
+/// Canonical `project` field accessor. Kept (currently only via the alias
+/// resolver below) so future callers — or sibling handlers reaching in for the
+/// strict canonical field — have one source of truth for the field name.
+#[allow(dead_code)]
 fn project_arg(args: &Value) -> Option<&str> {
     args.get("project").and_then(|v| v.as_str())
+}
+
+/// Resolve the active project id from either the canonical `project` field or
+/// the workstation-dispatch alias `target_project`. `project` always wins when
+/// both are present so existing callers stay deterministic; the alias is the
+/// surface intent-tools.lisp :: implemented-surface mission_execution exposes
+/// for `:workstation-dispatch-record`.
+fn project_or_target_project(args: &Value) -> Option<&str> {
+    args.get("project")
+        .and_then(|v| v.as_str())
+        .or_else(|| args.get("target_project").and_then(|v| v.as_str()))
 }
 
 fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
@@ -513,8 +559,48 @@ fn lisp_quote_string(s: &str) -> String {
     out
 }
 
-fn render_canonical_template(execution_id: &str, parent_design: &str, scope: &str, owner: &str) -> String {
+fn render_canonical_template(
+    execution_id: &str,
+    parent_design: &str,
+    scope: &str,
+    owner: &str,
+    dispatch_strategy: &str,
+    target_project: Option<&str>,
+    requested_cwd: Option<&str>,
+) -> String {
     let now = now_iso();
+    let id_q = lisp_quote_string(execution_id);
+    let parent_q = lisp_quote_string(parent_design);
+    let now_q = lisp_quote_string(&now);
+    let owner_q = lisp_quote_string(owner);
+    let scope_q = lisp_quote_string(scope);
+    let dispatch_q = lisp_quote_string(dispatch_strategy);
+
+    // Build the meta block incrementally so the optional dispatch slots can be
+    // omitted cleanly when not supplied while keeping the closing paren
+    // balanced. `:companion-of` was the historical terminal field — we preserve
+    // its position and append the new dispatch metadata after it.
+    let mut meta = String::new();
+    meta.push_str("  (meta\n");
+    meta.push_str(&format!("    :execution-id {}\n", id_q));
+    meta.push_str(&format!("    :parent-design {}\n", parent_q));
+    meta.push_str("    :status \"open\"\n");
+    meta.push_str(&format!("    :opened-at {}\n", now_q));
+    meta.push_str(&format!("    :last-updated-at {}\n", now_q));
+    meta.push_str(&format!("    :owner {}\n", owner_q));
+    meta.push_str(&format!("    :scope {}\n", scope_q));
+    meta.push_str(&format!("    :companion-of {}\n", parent_q));
+    meta.push_str(&format!("    :dispatch-strategy {}", dispatch_q));
+    if let Some(tp) = target_project {
+        meta.push('\n');
+        meta.push_str(&format!("    :target-project {}", lisp_quote_string(tp)));
+    }
+    if let Some(cwd) = requested_cwd {
+        meta.push('\n');
+        meta.push_str(&format!("    :requested-cwd {}", lisp_quote_string(cwd)));
+    }
+    meta.push_str(")\n");
+
     format!(
         ";; ══════════════════════════════════════════════════════\n\
          ;; MissionD — Execution Companion Log\n\
@@ -524,16 +610,7 @@ fn render_canonical_template(execution_id: &str, parent_design: &str, scope: &st
          ;; ══════════════════════════════════════════════════════\n\
          \n\
          (execution-log\n\
-         \x20\x20(meta\n\
-         \x20\x20\x20\x20:execution-id {id}\n\
-         \x20\x20\x20\x20:parent-design {parent_q}\n\
-         \x20\x20\x20\x20:status \"open\"\n\
-         \x20\x20\x20\x20:opened-at {now_q}\n\
-         \x20\x20\x20\x20:last-updated-at {now_q}\n\
-         \x20\x20\x20\x20:owner {owner_q}\n\
-         \x20\x20\x20\x20:scope {scope_q}\n\
-         \x20\x20\x20\x20:companion-of {parent_q})\n\
-         \n\
+         {meta}\n\
          \x20\x20(id-counters\n\
          \x20\x20\x20\x20:next-claim-id 1\n\
          \x20\x20\x20\x20:next-deviation-id 1\n\
@@ -565,11 +642,7 @@ fn render_canonical_template(execution_id: &str, parent_design: &str, scope: &st
          \x20\x20\x20\x20:completed-phases ()))\n",
         now = now,
         parent = parent_design,
-        id = lisp_quote_string(execution_id),
-        parent_q = lisp_quote_string(parent_design),
-        now_q = lisp_quote_string(&now),
-        owner_q = lisp_quote_string(owner),
-        scope_q = lisp_quote_string(scope),
+        meta = meta,
     )
 }
 
@@ -923,7 +996,21 @@ async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let dispatch_strategy = normalize_dispatch_strategy(
+        args.get("dispatch_strategy").and_then(|v| v.as_str()),
+    );
+    let target_project = args
+        .get("target_project")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let requested_cwd = args
+        .get("requested_cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
 
     if path.exists() {
@@ -936,13 +1023,25 @@ async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    let body = render_canonical_template(execution_id, parent_design, scope, owner);
+    let body = render_canonical_template(
+        execution_id,
+        parent_design,
+        scope,
+        owner,
+        dispatch_strategy,
+        target_project,
+        requested_cwd,
+    );
     sexp::check_balance(&body).map_err(|e| anyhow!("template paren balance broken: {}", e))?;
     if let Some(p) = path.parent() {
         std::fs::create_dir_all(p)?;
     }
     std::fs::write(&path, body.as_bytes())?;
 
+    // TODO(intent-tools.lisp :workstation-dispatch-record): once
+    // ExecutionEvent::Opened gets a generic metadata slot, surface
+    // dispatch_strategy / target_project / requested_cwd here. Until then
+    // they live only in the durable companion log.
     emit_execution_event(
         state,
         ExecutionEvent::Opened {
@@ -955,14 +1054,22 @@ async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
     )
     .await;
 
-    Ok(ToolResult::json_pretty(&json!({
+    let mut response = json!({
         "status": "opened",
         "execution_id": execution_id,
         "path": path.display().to_string(),
         "parent_design": parent_design,
         "scope": scope,
         "owner": owner,
-    })))
+        "dispatch_strategy": dispatch_strategy,
+    });
+    if let Some(tp) = target_project {
+        response["target_project"] = json!(tp);
+    }
+    if let Some(cwd) = requested_cwd {
+        response["requested_cwd"] = json!(cwd);
+    }
+    Ok(ToolResult::json_pretty(&response))
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -979,7 +1086,7 @@ async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
         .unwrap_or(50)
         .clamp(1, 500) as usize;
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let dir = root.join(COMPANION_DIR);
     let mut summaries: Vec<Value> = Vec::new();
     if !dir.exists() {
@@ -1022,6 +1129,17 @@ async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
             .cloned()
             .unwrap_or_else(|| "unknown".to_string());
         let scope = meta.get("scope").cloned().unwrap_or_default();
+        // Workstation-dispatch metadata; legacy logs may omit it. Empty
+        // string preserves a stable column shape for dashboards while
+        // signalling "no record" cheaply.
+        let dispatch = meta
+            .get("dispatch-strategy")
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .unwrap_or_default();
+        let target_project = meta
+            .get("target-project")
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty());
 
         if let Some(pf) = parent_filter {
             if !parent.contains(pf) {
@@ -1041,7 +1159,7 @@ async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
 
         let claims = parse_claims(&file);
         let active = claims.iter().filter(|c| c.status == "active").count();
-        summaries.push(json!({
+        let mut row = json!({
             "execution_id": name,
             "path": path.display().to_string(),
             "parent_design": parent.trim_matches('"'),
@@ -1049,7 +1167,12 @@ async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
             "scope": scope.trim_matches('"'),
             "active_claims": active,
             "claim_count": claims.len(),
-        }));
+            "dispatch_strategy": dispatch,
+        });
+        if let Some(tp) = target_project {
+            row["target_project"] = json!(tp);
+        }
+        summaries.push(row);
         if summaries.len() >= limit {
             break;
         }
@@ -1092,7 +1215,7 @@ async fn action_claim(state: &AppState, args: &Value) -> Result<ToolResult> {
         .unwrap_or(DEFAULT_LEASE_SECS)
         .clamp(60, MAX_LEASE_SECS);
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
 
@@ -1186,7 +1309,7 @@ async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> 
         .unwrap_or(DEFAULT_LEASE_SECS)
         .clamp(60, MAX_LEASE_SECS);
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
 
@@ -1269,7 +1392,7 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
     let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
 
@@ -1407,7 +1530,7 @@ async fn action_deviate(state: &AppState, args: &Value) -> Result<ToolResult> {
     let approved_by = args.get("approved_by").and_then(|v| v.as_str()).unwrap_or("auto");
     let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
     let id = allocate_id(&mut file, Counter::Deviation)?;
@@ -1468,7 +1591,7 @@ async fn action_decide(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
     let options = args.get("options").and_then(|v| v.as_str()).unwrap_or("");
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
     let id = allocate_id(&mut file, Counter::Decision)?;
@@ -1525,7 +1648,7 @@ async fn action_issue(state: &AppState, args: &Value) -> Result<ToolResult> {
         .unwrap_or("");
     let owner = args.get("owner").and_then(|v| v.as_str()).unwrap_or("");
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
     let id = allocate_id(&mut file, Counter::Issue)?;
@@ -1588,7 +1711,7 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
     let id = allocate_id(&mut file, Counter::Completion)?;
@@ -1637,7 +1760,7 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let file = read_log_file(&path)?;
 
@@ -1787,7 +1910,7 @@ async fn action_audit(state: &AppState, args: &Value) -> Result<ToolResult> {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let raw = std::fs::read_to_string(&path)?;
     let mut findings: Vec<Value> = Vec::new();
@@ -2046,7 +2169,7 @@ async fn action_repair(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    let root = resolve_project_root(state, project_arg(args)).await?;
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let raw = std::fs::read_to_string(&path)?;
     let mut file = LogFile::parse(raw)?;
@@ -2299,15 +2422,141 @@ mod tests {
             ".missiond/v2/test.lisp",
             "test scope",
             "tester",
+            DEFAULT_DISPATCH_STRATEGY,
+            None,
+            None,
         );
         LogFile::parse(body).expect("template must parse")
     }
 
     #[test]
     fn template_parses_and_balances() {
-        let body = render_canonical_template("e", "p", "s", "o");
+        let body = render_canonical_template(
+            "e",
+            "p",
+            "s",
+            "o",
+            DEFAULT_DISPATCH_STRATEGY,
+            None,
+            None,
+        );
         sexp::check_balance(&body).expect("balanced");
         LogFile::parse(body).expect("parse");
+    }
+
+    #[test]
+    fn dispatch_strategy_normalization() {
+        assert_eq!(normalize_dispatch_strategy(None), "unknown");
+        assert_eq!(normalize_dispatch_strategy(Some("")), "unknown");
+        assert_eq!(normalize_dispatch_strategy(Some("   ")), "unknown");
+        assert_eq!(normalize_dispatch_strategy(Some("not-a-real-mode")), "unknown");
+        assert_eq!(
+            normalize_dispatch_strategy(Some("fresh-code-alignment")),
+            "fresh-code-alignment"
+        );
+        assert_eq!(normalize_dispatch_strategy(Some("agent-team")), "agent-team");
+        assert_eq!(normalize_dispatch_strategy(Some("resident-lisp")), "resident-lisp");
+    }
+
+    #[test]
+    fn template_writes_dispatch_metadata() {
+        let body = render_canonical_template(
+            "exec-disp",
+            ".missiond/v2/disp.lisp",
+            "scope/x",
+            "owner-x",
+            "fresh-code-alignment",
+            Some("missiond"),
+            Some("/Users/x/Projects/missiond/crates/foo"),
+        );
+        sexp::check_balance(&body).expect("balanced");
+        let file = LogFile::parse(body).expect("parse");
+        let meta = parse_kv_pairs(
+            &file.src,
+            file.find_block("meta").expect("meta block").children(),
+        );
+        assert_eq!(
+            meta.get("dispatch-strategy").map(|s| s.as_str()),
+            Some("fresh-code-alignment")
+        );
+        assert_eq!(
+            meta.get("target-project").map(|s| s.as_str()),
+            Some("missiond")
+        );
+        assert_eq!(
+            meta.get("requested-cwd").map(|s| s.as_str()),
+            Some("/Users/x/Projects/missiond/crates/foo")
+        );
+    }
+
+    #[test]
+    fn template_omits_optional_dispatch_fields() {
+        let body = render_canonical_template(
+            "exec-min",
+            ".missiond/v2/min.lisp",
+            "scope/y",
+            "owner-y",
+            "agent-team",
+            None,
+            None,
+        );
+        sexp::check_balance(&body).expect("balanced");
+        let file = LogFile::parse(body).expect("parse");
+        let meta = parse_kv_pairs(
+            &file.src,
+            file.find_block("meta").expect("meta block").children(),
+        );
+        assert_eq!(
+            meta.get("dispatch-strategy").map(|s| s.as_str()),
+            Some("agent-team")
+        );
+        assert!(meta.get("target-project").is_none());
+        assert!(meta.get("requested-cwd").is_none());
+    }
+
+    #[test]
+    fn legacy_template_without_dispatch_still_parses() {
+        // Hand-written legacy meta: no dispatch-strategy key, mirrors files
+        // produced by the previous handler version. Must round-trip cleanly.
+        let body = "(execution-log\n  \
+                    (meta\n    \
+                    :execution-id \"legacy-x\"\n    \
+                    :parent-design \"old.lisp\"\n    \
+                    :status \"open\"\n    \
+                    :owner \"old-owner\"\n    \
+                    :scope \"legacy/scope\"\n    \
+                    :companion-of \"old.lisp\")\n  \
+                    (claims))\n";
+        let file = LogFile::parse(body.to_string()).expect("legacy parses");
+        let meta = parse_kv_pairs(
+            &file.src,
+            file.find_block("meta").expect("meta block").children(),
+        );
+        assert!(meta.get("dispatch-strategy").is_none());
+        assert!(meta.get("target-project").is_none());
+        // sanity: existing fields still readable. parse_kv_pairs returns the
+        // raw source slice when the value is a quoted string atom, so the
+        // outer quotes survive — downstream consumers strip them via
+        // `trim_matches('"')`, which is the contract we mirror here.
+        assert_eq!(
+            meta.get("scope").map(|s| s.trim_matches('"').to_string()),
+            Some("legacy/scope".to_string())
+        );
+    }
+
+    #[test]
+    fn project_or_target_project_prefers_canonical() {
+        let args = json!({
+            "project": "primary",
+            "target_project": "alias",
+        });
+        assert_eq!(project_or_target_project(&args), Some("primary"));
+
+        let alias_only = json!({"target_project": "alias-only"});
+        assert_eq!(project_or_target_project(&alias_only), Some("alias-only"));
+
+        let neither = json!({});
+        assert_eq!(project_or_target_project(&neither), None);
     }
 
     #[test]
