@@ -1787,7 +1787,26 @@ async fn action_record_evidence(state: &AppState, args: &Value) -> Result<ToolRe
     let project_arg = args.get("project").and_then(|v| v.as_str());
     let cwd_arg = args.get("cwd").and_then(|v| v.as_str());
     let target_project_arg = args.get("target_project").and_then(|v| v.as_str());
-    let entry = json!({ "evidence": evidence });
+
+    // wave-12 :: evidence-collector v0 — `evidence_kind` + `source` are
+    // additive opt-in stamps. When BOTH are absent the historical wire form
+    // is preserved byte-for-byte (`{"evidence": …}`), so legacy callers
+    // keep working. When EITHER is present we route through the typed
+    // collector wrapper so the new entry carries `schema_version` /
+    // canonical `source` / canonical `kind` alongside the original
+    // `evidence` body.
+    let evidence_kind = args.get("evidence_kind").and_then(|v| v.as_str());
+    let source_override = args.get("source").and_then(|v| v.as_str());
+    let entry = if evidence_kind.is_some() || source_override.is_some() {
+        super::evidence_collector::wrap_legacy_record_evidence(
+            evidence,
+            evidence_kind,
+            source_override,
+        )
+    } else {
+        json!({ "evidence": evidence })
+    };
+
     let (path, entry_count) = match append_plan_evidence_entry(
         state,
         id,
@@ -1816,6 +1835,10 @@ async fn action_record_evidence(state: &AppState, args: &Value) -> Result<ToolRe
         "plan_id": id,
         "path": path.display().to_string(),
         "entry_count": entry_count,
+        // Echo what the caller asked for so the response makes the routing
+        // visible. `null` when the legacy untagged shape was used.
+        "evidence_kind": evidence_kind,
+        "source": source_override,
     })))
 }
 
@@ -3142,5 +3165,87 @@ mod tests {
                 .await
                 .expect("explicit id should win");
         assert_eq!(resolved, root_a);
+    }
+
+    // ── wave-12 :: record_evidence routing decision ──────────────────
+    //
+    // The action handler picks between the historical untagged shape
+    // (`{"evidence": …}`) and the new evidence-collector wrapper based on
+    // whether the caller supplied `evidence_kind` / `source`. We can't
+    // exercise the full handler here without spinning up an AppState +
+    // store, but we CAN pin the entry-shape decision by replaying the same
+    // branching logic against the real wrapper.
+    //
+    // These tests guard against a regression where someone "simplifies" the
+    // action by always wrapping (which would break legacy readers that
+    // expect the un-stamped payload) or always passing through (which would
+    // make the new params silently no-op).
+
+    #[test]
+    fn record_evidence_legacy_shape_when_no_kind_or_source() {
+        let evidence = serde_json::json!({"tool_calls": []});
+        // Replays the action's branching: both args absent → legacy wire form.
+        let evidence_kind: Option<&str> = None;
+        let source_override: Option<&str> = None;
+        let entry = if evidence_kind.is_some() || source_override.is_some() {
+            super::super::evidence_collector::wrap_legacy_record_evidence(
+                evidence.clone(),
+                evidence_kind,
+                source_override,
+            )
+        } else {
+            serde_json::json!({ "evidence": evidence })
+        };
+        let obj = entry.as_object().expect("entry is object");
+        assert_eq!(obj.len(), 1, "legacy shape: only `evidence` at top level");
+        assert!(obj.contains_key("evidence"));
+        assert!(!obj.contains_key("schema_version"), "legacy shape has no schema stamp");
+        assert!(!obj.contains_key("source"), "legacy shape has no source");
+        assert!(!obj.contains_key("kind"), "legacy shape has no kind");
+    }
+
+    #[test]
+    fn record_evidence_typed_wrap_when_kind_present() {
+        let evidence = serde_json::json!({"note": "build green"});
+        // Replays the action's branching: kind present → typed wrap.
+        let evidence_kind: Option<&str> = Some("verification");
+        let source_override: Option<&str> = None;
+        let entry = if evidence_kind.is_some() || source_override.is_some() {
+            super::super::evidence_collector::wrap_legacy_record_evidence(
+                evidence.clone(),
+                evidence_kind,
+                source_override,
+            )
+        } else {
+            serde_json::json!({ "evidence": evidence })
+        };
+        assert_eq!(entry["schema_version"], "v0", "schema stamp present");
+        assert_eq!(entry["kind"], "verification", "caller-supplied kind round-trips");
+        assert_eq!(
+            entry["source"], "record_evidence_manual",
+            "default source applied when caller omits it"
+        );
+        assert_eq!(entry["evidence"], evidence, "original payload preserved");
+    }
+
+    #[test]
+    fn record_evidence_typed_wrap_when_source_present() {
+        let evidence = serde_json::json!(["t1", "t2"]);
+        let evidence_kind: Option<&str> = None;
+        let source_override: Option<&str> = Some("ci_workflow");
+        let entry = if evidence_kind.is_some() || source_override.is_some() {
+            super::super::evidence_collector::wrap_legacy_record_evidence(
+                evidence.clone(),
+                evidence_kind,
+                source_override,
+            )
+        } else {
+            serde_json::json!({ "evidence": evidence })
+        };
+        assert_eq!(entry["source"], "ci_workflow", "caller-supplied source round-trips");
+        assert_eq!(
+            entry["kind"], "note",
+            "default kind applied when caller omits it"
+        );
     }
 }

@@ -210,6 +210,16 @@ fn build_properties() -> Value {
         "[record_evidence] arbitrary JSON: tool_calls / event_log / test outputs / execution log refs",
     ));
 
+    p.insert("evidence_kind".into(), prop(
+        "string",
+        "[record_evidence] (Wave 12 evidence-collector v0) optional canonical taxonomy tag for the entry — one of `dispatch`/`verification`/`git_diff`/`commit`/`note` (open enum, arbitrary strings accepted). When supplied (alongside or instead of `source`), the action wraps the legacy `{\"evidence\": …}` payload with `schema_version=\"v0\"` + the supplied `kind` + a default `source=\"record_evidence_manual\"`. When BOTH `evidence_kind` and `source` are absent, the historical untagged shape is preserved byte-for-byte for backward compatibility.",
+    ));
+
+    p.insert("source".into(), prop(
+        "string",
+        "[record_evidence] (Wave 12 evidence-collector v0) optional canonical source tag for the entry (e.g. `record_evidence_manual`, `plan_runner_dispatch`, `plan_dag_node_dispatch`, or any caller-defined string). Same routing as `evidence_kind`: presence triggers the typed wrap (with `kind` defaulting to `note` if not supplied); absence preserves the legacy untagged wire form.",
+    ));
+
     p.insert("project".into(), prop(
         "string",
         "[record_evidence|execute] project id (registry-resolved root); defaults to CWD",
@@ -253,7 +263,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
          condition/failure-policy/timeout-ms/dispatch-strategy/target-project/requested-cwd/flow-id；\
          failure-policy ∈ {fail-fast (默认), continue}；不支持字段保留进 node_hint_summary 不静默丢弃；\
          v1 顺序执行 ready set，并发为后续工作。\
-         record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`。\
+         record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`；\
+         Wave 12 evidence-collector v0: 新增 evidence_kind / source 两个可选参数 — 当至少一个被传入时,\
+         entry 会被 wrap 为带 `schema_version=\"v0\"` + canonical `source` + canonical `kind` 的 typed 形态\
+         (kind 默认 `note`, source 默认 `record_evidence_manual`); 两个都不传时仍保留 legacy `{\"evidence\": …}` wire form,\
+         向后兼容。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \
