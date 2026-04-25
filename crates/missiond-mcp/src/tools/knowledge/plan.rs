@@ -6,13 +6,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
         "mission_plan",
         "plan 表 manager — 9 actions (compile/list/get/by_task/approve/mark/supersede/execute/record_evidence)。\
          compile 当前为 dry-run（plan-compiler actor 未落地），persist=true 写 draft 行；\
-         其余 list/get/by_task/approve/mark/supersede 为 store-backed full；\
-         execute 仅返回 next_call 描述（不递归 dispatch），target ∈ \
-         {mission_execution, mission_task_delegate, mission_flow_run}，未知 target 返回 INVALID_PARAM；\
+         list/get/by_task/approve/mark/supersede 为 store-backed full；\
+         execute 为 plan-runner v0：默认 execute_mode=\"bridge\" 返回 next_call descriptor（runner_status=\"bridge_only\"），\
+         向后兼容；execute_mode=\"internal\" 时 MissionD 内部 dispatch 目标 handler，\
+         成功后写 plan_runner_dispatch 证据并把 plan 标记 executing。\
+         target ∈ {mission_execution, mission_task_delegate, mission_flow_run}；\
+         dispatch_strategy ∈ {resident-lisp|fresh-code-alignment|agent-team|mixed|prompt-fallback|unknown}\
+         （未知值归一化为 unknown，记入响应 + sidecar，mission_execution 持久化字段属未来工作）。\
          record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`。\
-         Lisp 源: intent-memory.lisp :: module directive-layer :: plumbing plan-execution \
-         + intent-tools.lisp :: future-surface mission_plan + intent-flow.lisp :: \
-         F-directive-plan-workflow-compile :: plan branch。",
+         Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract \
+         + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-runner \
+         + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s6 execution-runner \
+         + F-workstation-dispatch-policy + intent-worker.lisp :: section claudecode-workstation-orchestration。",
         json!({
             "type": "object",
             "required": ["action"],
@@ -62,14 +67,85 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "target": {
                     "type": "string",
                     "enum": ["mission_execution", "mission_task_delegate", "mission_flow_run"],
-                    "description": "[execute] safe routing target — manager returns next_call descriptor only"
+                    "description": "[execute] routing target — bridge mode hands back next_call; internal mode dispatches inside MissionD"
+                },
+                "execute_mode": {
+                    "type": "string",
+                    "enum": ["bridge", "internal"],
+                    "description": "[execute] bridge (default) returns a next_call descriptor; internal asks the plan-runner to dispatch the target handler inside the daemon and append evidence"
+                },
+                "dispatch_strategy": {
+                    "type": "string",
+                    "enum": [
+                        "resident-lisp",
+                        "fresh-code-alignment",
+                        "agent-team",
+                        "mixed",
+                        "prompt-fallback",
+                        "unknown"
+                    ],
+                    "description": "[execute] workstation-dispatch-record strategy. Surfaced in the response and the plan_runner_dispatch evidence entry. Unknown values are normalised to `unknown`. mission_execution companion-log persistence is future."
+                },
+                "target_project": {
+                    "type": "string",
+                    "description": "[execute] registered project id OR project root path. For mission_execution it is forwarded as `project`; for mission_task_delegate it is treated as cwd if it looks like a path."
+                },
+                "cwd": {
+                    "type": "string",
+                    "description": "[execute internal mission_task_delegate] working directory passed through to mission_task_delegate"
+                },
+                "objective": {
+                    "type": "string",
+                    "description": "[execute internal mission_task_delegate] override the auto-derived objective; absent → derived from the first non-empty line of plan.sexp_text"
+                },
+                "intent": {
+                    "type": "string",
+                    "enum": ["code", "ops", "research", "general"],
+                    "description": "[execute internal mission_task_delegate] task intent (default `code`); strict whitelist mirrored from mission_task_delegate"
+                },
+                "execution_id": {
+                    "type": "string",
+                    "description": "[execute internal mission_execution] caller-supplied execution_id (default `plan-<plan_id>`)"
+                },
+                "parent_design": {
+                    "type": "string",
+                    "description": "[execute internal mission_execution] override parent-design ref (default `directive/<id>` if plan has source_directive_id, else `plan/<plan_id>`)"
+                },
+                "scope": {
+                    "type": "string",
+                    "description": "[execute internal mission_execution] override the human-readable scope string"
+                },
+                "owner": {
+                    "type": "string",
+                    "description": "[execute internal mission_execution] execution owner (default `plan-runner`)"
+                },
+                "flow_id": {
+                    "type": "string",
+                    "description": "[execute internal mission_flow_run] required — plan.sexp_text → flow YAML compilation is future, so caller must provide an existing flow id"
+                },
+                "params": {
+                    "type": "object",
+                    "description": "[execute internal mission_flow_run] forwarded as the flow params object",
+                    "additionalProperties": true
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "[execute internal mission_task_delegate] passthrough priority"
+                },
+                "timeout_secs": {
+                    "type": "integer",
+                    "description": "[execute internal mission_task_delegate] passthrough timeout"
+                },
+                "dry_run": {
+                    "type": "boolean",
+                    "description": "[execute internal] when true, return the would-be inner args without dispatching (does NOT mutate plan status, does NOT write evidence)"
                 },
                 "evidence": {
                     "description": "[record_evidence] arbitrary JSON: tool_calls / event_log / test outputs / execution log refs"
                 },
                 "project": {
                     "type": "string",
-                    "description": "[record_evidence] project id (registry-resolved root); defaults to CWD"
+                    "description": "[record_evidence|execute] project id (registry-resolved root); defaults to CWD"
                 }
             }
         }),

@@ -15,24 +15,51 @@
 //!   approve          — full (plan_update_status → approved, stamps approved_at)
 //!   mark             — full (plan_update_status to any FSM target)
 //!   supersede        — full (plan_supersede)
-//!   execute          — bridge: routes to mission_execution / mission_task_delegate /
-//!                      mission_flow_run via target hint; otherwise not_implemented
+//!   execute          — plan-runner v0:
+//!                        execute_mode=bridge (default) returns enriched
+//!                          next_call descriptor (runner_status="bridge_only");
+//!                        execute_mode=internal dispatches the chosen target
+//!                          handler (mission_execution / mission_task_delegate /
+//!                          mission_flow_run) inside MissionD, appends a
+//!                          plan_runner_dispatch evidence entry on success, and
+//!                          transitions plan status to executing.
+//!                      dispatch_strategy is recorded in response + evidence
+//!                      (mission_execution companion-log persistence is future).
 //!   record_evidence  — full: persists evidence sidecar at
 //!                      <project>/.missiond/v2/plans/<plan_id>.evidence.json
 
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
-use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
+use missiond_mcp::tools::{error_codes, ToolContent, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::state::AppState;
-use missiond_core::types::PlanStatus;
+use missiond_core::types::{Plan, PlanStatus};
 
 const DEFAULT_LIST_LIMIT: i64 = 50;
 const MAX_LIST_LIMIT: i64 = 500;
 const COMPANION_DIR: &str = ".missiond/v2/plans";
+/// Cap derived objective at a manager-friendly length so we never push huge
+/// sexp blobs into mission_task_delegate (which has its own 16K cap, but the
+/// derived summary should be a *summary*, not the whole DAG).
+const DERIVED_OBJECTIVE_MAX: usize = 240;
+/// Valid intents accepted by mission_task_delegate (kept in sync with that
+/// handler's whitelist; we surface a structured error if caller picks something
+/// else, instead of letting it through to be rejected downstream).
+const VALID_DELEGATE_INTENTS: &[&str] = &["code", "ops", "research", "general"];
+/// Workstation-dispatch strategies surfaced in
+/// `intent-tools.lisp :: workstation-dispatch-record`. Anything outside this
+/// set is normalised to "unknown" so the evidence trail stays clean.
+const VALID_DISPATCH_STRATEGIES: &[&str] = &[
+    "resident-lisp",
+    "fresh-code-alignment",
+    "agent-team",
+    "mixed",
+    "prompt-fallback",
+    "unknown",
+];
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let action = match args.get("action").and_then(|v| v.as_str()) {
@@ -281,7 +308,23 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// execute — bridge to existing surfaces by `target`
+// execute — plan-runner v0
+//
+// execute_mode=bridge (default): return next_call descriptor, do NOT dispatch.
+// execute_mode=internal: dispatch the chosen target handler inside MissionD,
+//                        append plan_runner_dispatch evidence, mark plan
+//                        executing on success.
+//
+// Lisp authority for the internal path:
+//   intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-runner
+//   intent-tools.lisp        :: implemented-surface mission_plan :: :execute-contract
+//   intent-flow.lisp         :: F-intent-alignment-plan-execution-loop :: s6 execution-runner
+//
+// TODO(plan-runner): mission_execution companion-log persistence of
+// dispatch_strategy is still future per
+// `intent-tools.lisp :: workstation-dispatch-record`. We surface it in this
+// tool's response and the evidence sidecar so the audit trail is complete
+// even before the schema-side field exists.
 // ───────────────────────────────────────────────────────────────────────
 
 async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -295,11 +338,50 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
                     "execute requires `target` (mission_execution|mission_task_delegate|mission_flow_run)",
                 )
                 .with_suggestion(
-                    "execute is an explicit bridge — caller picks the safe surface",
+                    "execute_mode=bridge default returns a next_call descriptor; \
+                     execute_mode=internal dispatches the chosen target inside MissionD",
                 ),
             ))
         }
     };
+
+    let execute_mode = args
+        .get("execute_mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("bridge");
+    if !matches!(execute_mode, "bridge" | "internal") {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!("execute_mode `{}` not supported", execute_mode),
+            )
+            .with_suggestion("execute_mode ∈ {bridge, internal}; default is bridge"),
+        ));
+    }
+
+    let dispatch_strategy_raw = args
+        .get("dispatch_strategy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let dispatch_strategy = if VALID_DISPATCH_STRATEGIES.contains(&dispatch_strategy_raw) {
+        dispatch_strategy_raw
+    } else {
+        // Don't reject: future strategies may be added in Lisp before code
+        // catches up. Just normalise so evidence stays clean.
+        "unknown"
+    };
+
+    if !matches!(target, "mission_execution" | "mission_task_delegate" | "mission_flow_run") {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!("execute target `{}` is not supported", target),
+            )
+            .with_suggestion(
+                "supported targets: mission_execution | mission_task_delegate | mission_flow_run",
+            ),
+        ));
+    }
 
     let plan = match state
         .store
@@ -326,47 +408,381 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    // We do NOT recursively dispatch the target tool — the manager's job is
-    // to hand back an actionable next-step JSON. The caller invokes the
-    // routed tool directly, which keeps blast radius and tracing clean.
-    match target {
-        "mission_execution" | "mission_task_delegate" | "mission_flow_run" => {
-            Ok(ToolResult::json_pretty(&json!({
-                "status": "bridge_ready",
-                "plan_id": id,
-                "board_task_id": plan.board_task_id,
-                "target_tool": target,
-                "next_call": match target {
-                    "mission_execution" => json!({
-                        "tool": "mission_execution",
-                        "action": "open",
-                        "execution_id": format!("plan-{}", id),
-                        "scope": format!("plan {}", id),
-                    }),
-                    "mission_task_delegate" => json!({
-                        "tool": "mission_task_delegate",
-                        "board_task_id": plan.board_task_id,
-                        "plan_id": id,
-                    }),
-                    "mission_flow_run" => json!({
-                        "tool": "mission_flow_run",
-                        "action": "run",
-                        "hint": "supply flow_id; plan.sexp_text 暂未自动编译为 flow YAML",
-                    }),
-                    _ => Value::Null,
-                },
-                "note": "manager returns the next-call descriptor; caller invokes the target tool directly",
-            })))
+    if execute_mode == "bridge" {
+        return Ok(action_execute_bridge(&plan, target, dispatch_strategy));
+    }
+
+    action_execute_internal(state, args, &plan, target, dispatch_strategy).await
+}
+
+fn action_execute_bridge(plan: &Plan, target: &str, dispatch_strategy: &str) -> ToolResult {
+    let next_call = match target {
+        "mission_execution" => json!({
+            "tool": "mission_execution",
+            "action": "open",
+            "execution_id": format!("plan-{}", plan.id),
+            "scope": format!("plan {}", plan.id),
+        }),
+        "mission_task_delegate" => json!({
+            "tool": "mission_task_delegate",
+            "board_task_id": plan.board_task_id,
+            "plan_id": plan.id,
+        }),
+        "mission_flow_run" => json!({
+            "tool": "mission_flow_run",
+            "action": "run",
+            "hint": "supply flow_id; plan.sexp_text 暂未自动编译为 flow YAML",
+        }),
+        _ => Value::Null,
+    };
+
+    ToolResult::json_pretty(&json!({
+        "status": "bridge_ready",
+        "execute_mode": "bridge",
+        "runner_status": "bridge_only",
+        "plan_id": plan.id,
+        "board_task_id": plan.board_task_id,
+        "target_tool": target,
+        "dispatch_strategy": dispatch_strategy,
+        "next_call": next_call,
+        "note": "manager returns the next-call descriptor; caller invokes the target tool directly. \
+                 Pass execute_mode=\"internal\" to have MissionD dispatch the target inside the daemon.",
+    }))
+}
+
+async fn action_execute_internal(
+    state: &AppState,
+    args: &Value,
+    plan: &Plan,
+    target: &str,
+    dispatch_strategy: &str,
+) -> Result<ToolResult> {
+    let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    let inner_args = match build_internal_dispatch_args(args, plan, target) {
+        Ok(v) => v,
+        Err(err_result) => return Ok(err_result),
+    };
+
+    if dry_run {
+        return Ok(ToolResult::json_pretty(&json!({
+            "status": "dry_run",
+            "execute_mode": "internal",
+            "runner_status": "dry_run_no_dispatch",
+            "plan_id": plan.id,
+            "board_task_id": plan.board_task_id,
+            "target_tool": target,
+            "dispatch_strategy": dispatch_strategy,
+            "would_dispatch": inner_args,
+        })));
+    }
+
+    let inner_result = match target {
+        "mission_execution" => {
+            super::agent_execution::handle(state, "mission_execution", inner_args.clone()).await?
         }
-        other => Ok(ToolResult::structured_error(
-            ToolError::new(
-                error_codes::INVALID_PARAM,
-                format!("execute target `{}` is not supported", other),
+        "mission_task_delegate" => {
+            super::super::compute::task_delegate::handle(
+                state,
+                "mission_task_delegate",
+                inner_args.clone(),
             )
-            .with_suggestion(
-                "supported targets: mission_execution | mission_task_delegate | mission_flow_run",
-            ),
-        )),
+            .await?
+        }
+        "mission_flow_run" => {
+            super::super::compute::flow_run::handle(state, "mission_flow_run", inner_args.clone())
+                .await?
+        }
+        _ => unreachable!("target whitelist already enforced"),
+    };
+
+    let inner_payload = tool_result_payload(&inner_result);
+    let inner_is_error = inner_result.is_error.unwrap_or(false);
+
+    if inner_is_error {
+        // Don't transition plan; just report the inner failure verbatim so the
+        // caller can decide whether to retry, fix args, or escalate.
+        return Ok(ToolResult::json_pretty(&json!({
+            "status": "dispatch_failed",
+            "execute_mode": "internal",
+            "runner_status": "inner_returned_error",
+            "plan_id": plan.id,
+            "board_task_id": plan.board_task_id,
+            "target_tool": target,
+            "dispatch_strategy": dispatch_strategy,
+            "inner_result": inner_payload,
+        })));
+    }
+
+    // Successful dispatch — append evidence then transition plan to executing.
+    let project_arg = args
+        .get("target_project")
+        .or_else(|| args.get("project"))
+        .and_then(|v| v.as_str());
+    let evidence_entry = json!({
+        "kind": "plan_runner_dispatch",
+        "execute_mode": "internal",
+        "target_tool": target,
+        "dispatch_strategy": dispatch_strategy,
+        "inner_result": inner_payload.clone(),
+    });
+    let (evidence_path, evidence_error) =
+        match append_plan_evidence_entry(state, plan.id, project_arg, evidence_entry).await {
+            Ok((p, _count)) => (Some(p.display().to_string()), None),
+            Err(e) => {
+                // Evidence append failure does not abort the dispatch (the inner
+                // tool already succeeded with its own durable side effects), but
+                // we now surface the error in the response so callers cannot
+                // mistake a missing sidecar for a clean run.
+                tracing::warn!(plan_id = %plan.id, error = %e, "plan-runner: evidence sidecar append failed");
+                (None, Some(e.to_string()))
+            }
+        };
+
+    let status_update_error = if matches!(plan.status, PlanStatus::Executing) {
+        // Already in Executing — nothing to update, nothing can fail.
+        None
+    } else {
+        match state
+            .store
+            .plan_update_status(plan.id, PlanStatus::Executing)
+            .await
+        {
+            Ok(_) => None,
+            Err(e) => {
+                tracing::warn!(plan_id = %plan.id, error = %e, "plan-runner: failed to transition plan to executing");
+                Some(e.to_string())
+            }
+        }
+    };
+
+    Ok(build_internal_dispatch_success_response(
+        plan,
+        target,
+        dispatch_strategy,
+        inner_payload,
+        evidence_path,
+        evidence_error,
+        status_update_error,
+    ))
+}
+
+/// Build the response for a plan-runner internal dispatch where the inner
+/// tool already returned non-error.
+///
+/// Status semantics:
+///   * `status_update_error.is_some()` → `status="dispatch_partial"` /
+///     `runner_status="status_update_failed"`. We must NOT claim
+///     `executing`, because the plan FSM did not actually persist.
+///   * otherwise → `status="executing"` / `runner_status="dispatched"`.
+///
+/// `evidence_error` is independent: a missing sidecar still leaves the inner
+/// side effect in place, so it is reported via `evidence_error` but does not
+/// downgrade the runner status by itself. Caller may still observe both
+/// `evidence_error` and `status_update_error` together.
+fn build_internal_dispatch_success_response(
+    plan: &Plan,
+    target: &str,
+    dispatch_strategy: &str,
+    inner_payload: Value,
+    evidence_path: Option<String>,
+    evidence_error: Option<String>,
+    status_update_error: Option<String>,
+) -> ToolResult {
+    let (status, runner_status) = if status_update_error.is_some() {
+        ("dispatch_partial", "status_update_failed")
+    } else {
+        ("executing", "dispatched")
+    };
+
+    let mut payload = json!({
+        "status": status,
+        "execute_mode": "internal",
+        "runner_status": runner_status,
+        "plan_id": plan.id,
+        "board_task_id": plan.board_task_id,
+        "target_tool": target,
+        "dispatch_strategy": dispatch_strategy,
+        "evidence_path": evidence_path,
+        "inner_result": inner_payload,
+    });
+    if let Some(err) = evidence_error {
+        payload["evidence_error"] = json!(err);
+    }
+    if let Some(err) = status_update_error {
+        payload["status_update_error"] = json!(err);
+    }
+    ToolResult::json_pretty(&payload)
+}
+
+/// Build the argument JSON for the inner target handler. Returns
+/// `Err(structured_error_result)` on caller-facing validation failures so the
+/// outer handler can return them verbatim.
+fn build_internal_dispatch_args(
+    args: &Value,
+    plan: &Plan,
+    target: &str,
+) -> std::result::Result<Value, ToolResult> {
+    match target {
+        "mission_execution" => {
+            let execution_id = args
+                .get("execution_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("plan-{}", plan.id));
+            let parent_design = args
+                .get("parent_design")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .or_else(|| {
+                    plan.source_directive_id
+                        .map(|d| format!("directive/{}", d))
+                })
+                .unwrap_or_else(|| format!("plan/{}", plan.id));
+            let scope = args
+                .get("scope")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| {
+                    format!("plan {} (board_task {})", plan.id, plan.board_task_id)
+                });
+            let owner = args
+                .get("owner")
+                .and_then(|v| v.as_str())
+                .unwrap_or("plan-runner");
+
+            let mut inner = json!({
+                "action": "open",
+                "execution_id": execution_id,
+                "parent_design": parent_design,
+                "scope": scope,
+                "owner": owner,
+            });
+            if let Some(p) = args.get("target_project").or_else(|| args.get("project")) {
+                if let Some(s) = p.as_str() {
+                    inner["project"] = json!(s);
+                }
+            }
+            Ok(inner)
+        }
+        "mission_task_delegate" => {
+            let objective_in = args
+                .get("objective")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.to_string());
+            let objective = objective_in
+                .unwrap_or_else(|| derive_objective_from_plan(plan, DERIVED_OBJECTIVE_MAX));
+
+            let intent = args.get("intent").and_then(|v| v.as_str());
+            if let Some(i) = intent {
+                if !VALID_DELEGATE_INTENTS.contains(&i) {
+                    return Err(ToolResult::structured_error(
+                        ToolError::new(
+                            error_codes::INVALID_PARAM,
+                            format!(
+                                "intent `{}` is not valid for mission_task_delegate; valid: {:?}",
+                                i, VALID_DELEGATE_INTENTS
+                            ),
+                        )
+                        .with_suggestion(
+                            "default for plan-runner is `code`; pass intent only when overriding",
+                        ),
+                    ));
+                }
+            }
+            let intent = intent.unwrap_or("code");
+
+            let mut inner = json!({
+                "objective": objective,
+                "intent": intent,
+                "context_hints": [
+                    format!("plan:{}", plan.id),
+                    format!("board_task:{}", plan.board_task_id),
+                ],
+            });
+            // task_delegate accepts cwd as a path; target_project (registry id)
+            // is not directly understood downstream, so we map only the path.
+            if let Some(cwd) = args.get("cwd").and_then(|v| v.as_str()) {
+                inner["cwd"] = json!(cwd);
+            } else if let Some(tp) = args.get("target_project").and_then(|v| v.as_str()) {
+                // Only forward as cwd if it looks like a filesystem path; bare
+                // project ids cannot resolve in task_delegate. Heuristic: '/'
+                // present.
+                if tp.contains('/') {
+                    inner["cwd"] = json!(tp);
+                }
+            }
+            if let Some(p) = args.get("priority").and_then(|v| v.as_str()) {
+                inner["priority"] = json!(p);
+            }
+            if let Some(t) = args.get("timeout_secs").and_then(|v| v.as_i64()) {
+                inner["timeout_secs"] = json!(t);
+            }
+            Ok(inner)
+        }
+        "mission_flow_run" => {
+            let flow_id = match args.get("flow_id").and_then(|v| v.as_str()) {
+                Some(s) if !s.is_empty() => s,
+                _ => {
+                    return Err(ToolResult::structured_error(
+                        ToolError::new(
+                            error_codes::MISSING_PARAM,
+                            "execute_mode=internal target=mission_flow_run requires `flow_id`",
+                        )
+                        .with_suggestion(
+                            "plan.sexp_text 自动编译为 flow YAML 仍是未来工作 \
+                             (intent-flow.lisp :: workflow-distiller); 当前必须显式传入 flow_id",
+                        ),
+                    ));
+                }
+            };
+            let mut inner = json!({
+                "action": "run",
+                "flow_id": flow_id,
+            });
+            if let Some(params) = args.get("params") {
+                inner["params"] = params.clone();
+            }
+            Ok(inner)
+        }
+        _ => unreachable!("target whitelist already enforced"),
+    }
+}
+
+/// Derive a short objective string from `plan.sexp_text` for use as a
+/// task_delegate objective. Caller can always override via the explicit
+/// `objective` argument.
+fn derive_objective_from_plan(plan: &Plan, max_chars: usize) -> String {
+    let summary = plan
+        .sexp_text
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty())
+        .unwrap_or("plan execution");
+    let summary = truncate_chars(summary, max_chars);
+    format!("Plan {}: {}", plan.id, summary)
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.len() <= max_chars {
+        return s.to_string();
+    }
+    let mut end = max_chars;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &s[..end])
+}
+
+/// Best-effort extraction of the payload JSON from a downstream `ToolResult`.
+/// Inner handlers always render `ToolContent::Text`; we parse the first text
+/// content as JSON and fall back to the raw string to avoid losing data.
+fn tool_result_payload(result: &ToolResult) -> Value {
+    match result.content.first() {
+        Some(ToolContent::Text { text }) => serde_json::from_str::<Value>(text)
+            .unwrap_or_else(|_| Value::String(text.clone())),
+        None => Value::Null,
     }
 }
 
@@ -380,7 +796,6 @@ async fn action_record_evidence(state: &AppState, args: &Value) -> Result<ToolRe
         .get("evidence")
         .cloned()
         .ok_or_else(|| anyhow!("`evidence` required (object/array; tool_calls/event_log/test/exec refs)"))?;
-    let project_root = resolve_project_root(state, args.get("project").and_then(|v| v.as_str())).await?;
 
     let ensured = state
         .store
@@ -393,37 +808,72 @@ async fn action_record_evidence(state: &AppState, args: &Value) -> Result<ToolRe
         ));
     }
 
-    let dir = project_root.join(COMPANION_DIR);
-    std::fs::create_dir_all(&dir).map_err(|e| anyhow!("mkdir {}: {}", dir.display(), e))?;
-    let path = dir.join(format!("{}.evidence.json", id));
-
-    let mut bundle = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .map_err(|e| anyhow!("read {}: {}", path.display(), e))?;
-        serde_json::from_str::<Value>(&raw).unwrap_or_else(|_| json!({"plan_id": id, "entries": []}))
-    } else {
-        json!({"plan_id": id, "entries": []})
-    };
-    let entry = json!({
-        "recorded_at": iso_now(),
-        "evidence": evidence,
-    });
-    if let Some(arr) = bundle.get_mut("entries").and_then(|v| v.as_array_mut()) {
-        arr.push(entry);
-    } else {
-        bundle["entries"] = json!([entry]);
-    }
-    let body = serde_json::to_string_pretty(&bundle)?;
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, body.as_bytes()).map_err(|e| anyhow!("write tmp: {}", e))?;
-    std::fs::rename(&tmp, &path).map_err(|e| anyhow!("rename: {}", e))?;
+    let project_arg = args.get("project").and_then(|v| v.as_str());
+    let entry = json!({ "evidence": evidence });
+    let (path, entry_count) = append_plan_evidence_entry(state, id, project_arg, entry).await?;
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "recorded",
         "plan_id": id,
         "path": path.display().to_string(),
-        "entry_count": bundle.get("entries").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0),
+        "entry_count": entry_count,
     })))
+}
+
+/// Append a single evidence entry to
+/// `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`.
+///
+/// `entry` is merged with a `recorded_at` timestamp. Returns the sidecar path
+/// and the resulting total entry count for caller-facing reporting. Used by
+/// both `record_evidence` (manual evidence) and the plan-runner internal
+/// dispatch path (`plan_runner_dispatch` audit trail).
+async fn append_plan_evidence_entry(
+    state: &AppState,
+    plan_id: uuid::Uuid,
+    project_arg: Option<&str>,
+    entry: Value,
+) -> Result<(PathBuf, usize)> {
+    let project_root = resolve_project_root(state, project_arg).await?;
+    let dir = project_root.join(COMPANION_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| anyhow!("mkdir {}: {}", dir.display(), e))?;
+    let path = dir.join(format!("{}.evidence.json", plan_id));
+
+    let mut bundle = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .map_err(|e| anyhow!("read {}: {}", path.display(), e))?;
+        serde_json::from_str::<Value>(&raw)
+            .unwrap_or_else(|_| json!({"plan_id": plan_id, "entries": []}))
+    } else {
+        json!({"plan_id": plan_id, "entries": []})
+    };
+
+    // Stamp recorded_at on the entry. If caller already supplied an object,
+    // merge the field; otherwise wrap the value under `evidence`.
+    let stamped = match entry {
+        Value::Object(mut map) => {
+            map.insert("recorded_at".to_string(), json!(iso_now()));
+            Value::Object(map)
+        }
+        other => json!({ "recorded_at": iso_now(), "evidence": other }),
+    };
+
+    if let Some(arr) = bundle.get_mut("entries").and_then(|v| v.as_array_mut()) {
+        arr.push(stamped);
+    } else {
+        bundle["entries"] = json!([stamped]);
+    }
+
+    let entry_count = bundle
+        .get("entries")
+        .and_then(|v| v.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    let body = serde_json::to_string_pretty(&bundle)?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, body.as_bytes()).map_err(|e| anyhow!("write tmp: {}", e))?;
+    std::fs::rename(&tmp, &path).map_err(|e| anyhow!("rename: {}", e))?;
+
+    Ok((path, entry_count))
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -476,6 +926,8 @@ async fn resolve_project_root(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
+    use uuid::Uuid;
 
     #[test]
     fn sha256_hex_is_64_chars() {
@@ -491,5 +943,246 @@ mod tests {
         assert!(require_str(&args, "k").is_err());
         let args2 = serde_json::json!({"k": "v"});
         assert_eq!(require_str(&args2, "k").unwrap(), "v");
+    }
+
+    fn fixture_plan(sexp: &str) -> Plan {
+        Plan {
+            id: Uuid::parse_str("00000000-0000-0000-0000-000000000abc").unwrap(),
+            board_task_id: "btk-1".to_string(),
+            source_directive_id: None,
+            version: 1,
+            sexp_text: sexp.to_string(),
+            sexp_hash: "deadbeef".to_string(),
+            status: PlanStatus::Approved,
+            compiler_model: None,
+            compiled_from: None,
+            created_at: Utc.with_ymd_and_hms(2026, 1, 1, 0, 0, 0).unwrap(),
+            approved_at: None,
+            finished_at: None,
+        }
+    }
+
+    #[test]
+    fn truncate_chars_preserves_short_input() {
+        let s = "short";
+        assert_eq!(truncate_chars(s, 100), "short");
+    }
+
+    #[test]
+    fn truncate_chars_caps_long_input() {
+        let s = "a".repeat(500);
+        let out = truncate_chars(&s, 240);
+        assert!(out.ends_with("..."));
+        assert!(out.len() <= 240 + 3);
+    }
+
+    #[test]
+    fn derive_objective_from_plan_caps_long_summary() {
+        let huge = format!("(plan-draft :summary \"{}\")", "x".repeat(500));
+        let plan = fixture_plan(&huge);
+        let out = derive_objective_from_plan(&plan, 80);
+        // Plan id prefix + truncated summary + ellipsis.
+        assert!(out.starts_with(&format!("Plan {}: ", plan.id)));
+        assert!(out.ends_with("..."));
+        // Body shouldn't blow past the cap by more than the prefix overhead.
+        assert!(out.len() < 200);
+    }
+
+    #[test]
+    fn derive_objective_from_plan_takes_first_nonempty_line() {
+        let plan = fixture_plan("\n\n  (plan-draft :goal :align)  \n  (next ...)\n");
+        let out = derive_objective_from_plan(&plan, 240);
+        assert!(out.contains("(plan-draft :goal :align)"));
+        assert!(!out.contains("(next ..."));
+    }
+
+    #[test]
+    fn bridge_response_includes_plan_runner_v0_fields() {
+        let plan = fixture_plan("(plan)");
+        let result = action_execute_bridge(&plan, "mission_execution", "fresh-code-alignment");
+        assert!(result.is_error.is_none());
+        let text = match result.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let v: Value = serde_json::from_str(&text).expect("valid json");
+        assert_eq!(v["execute_mode"], "bridge");
+        assert_eq!(v["runner_status"], "bridge_only");
+        assert_eq!(v["target_tool"], "mission_execution");
+        assert_eq!(v["dispatch_strategy"], "fresh-code-alignment");
+        assert_eq!(v["next_call"]["tool"], "mission_execution");
+        assert_eq!(v["next_call"]["action"], "open");
+    }
+
+    #[test]
+    fn build_internal_args_for_mission_execution_defaults() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let inner = build_internal_dispatch_args(&args, &plan, "mission_execution")
+            .expect("default args build");
+        assert_eq!(inner["action"], "open");
+        assert_eq!(inner["execution_id"], format!("plan-{}", plan.id));
+        assert_eq!(inner["parent_design"], format!("plan/{}", plan.id));
+        assert_eq!(inner["owner"], "plan-runner");
+        assert!(inner["scope"]
+            .as_str()
+            .unwrap()
+            .contains(&plan.board_task_id));
+    }
+
+    #[test]
+    fn build_internal_args_for_task_delegate_derives_objective() {
+        let plan = fixture_plan("(plan-draft :goal :align)\n");
+        let args = json!({});
+        let inner = build_internal_dispatch_args(&args, &plan, "mission_task_delegate")
+            .expect("default task_delegate args");
+        let obj = inner["objective"].as_str().unwrap();
+        assert!(obj.starts_with(&format!("Plan {}", plan.id)));
+        assert!(obj.contains("(plan-draft"));
+        assert_eq!(inner["intent"], "code");
+        // context_hints should pin the plan + board_task ids
+        let hints: Vec<String> = inner["context_hints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        assert!(hints.iter().any(|h| h.starts_with("plan:")));
+        assert!(hints.iter().any(|h| h.starts_with("board_task:")));
+    }
+
+    #[test]
+    fn build_internal_args_for_task_delegate_rejects_unknown_intent() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({ "intent": "cosmic" });
+        let err = build_internal_dispatch_args(&args, &plan, "mission_task_delegate")
+            .expect_err("unknown intent should be rejected");
+        assert_eq!(err.is_error, Some(true));
+    }
+
+    #[test]
+    fn build_internal_args_for_flow_run_requires_flow_id() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({});
+        let err = build_internal_dispatch_args(&args, &plan, "mission_flow_run")
+            .expect_err("missing flow_id should be MISSING_PARAM");
+        assert_eq!(err.is_error, Some(true));
+        let text = match err.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text"),
+        };
+        assert!(text.contains("flow_id"));
+    }
+
+    #[test]
+    fn build_internal_args_for_flow_run_passes_through_params() {
+        let plan = fixture_plan("(plan)");
+        let args = json!({
+            "flow_id": "F-demo",
+            "params": { "k": "v" },
+        });
+        let inner = build_internal_dispatch_args(&args, &plan, "mission_flow_run")
+            .expect("flow_run with flow_id");
+        assert_eq!(inner["action"], "run");
+        assert_eq!(inner["flow_id"], "F-demo");
+        assert_eq!(inner["params"]["k"], "v");
+    }
+
+    fn parse_payload(result: &ToolResult) -> Value {
+        let text = match result.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        serde_json::from_str(&text).expect("valid json")
+    }
+
+    #[test]
+    fn success_response_clean_path_is_executing() {
+        let plan = fixture_plan("(plan)");
+        let result = build_internal_dispatch_success_response(
+            &plan,
+            "mission_execution",
+            "fresh-code-alignment",
+            json!({"ok": true}),
+            Some("/tmp/sidecar.json".to_string()),
+            None,
+            None,
+        );
+        let v = parse_payload(&result);
+        assert_eq!(v["status"], "executing");
+        assert_eq!(v["runner_status"], "dispatched");
+        assert_eq!(v["evidence_path"], "/tmp/sidecar.json");
+        assert!(v.get("evidence_error").is_none());
+        assert!(v.get("status_update_error").is_none());
+        assert_eq!(v["target_tool"], "mission_execution");
+        assert_eq!(v["dispatch_strategy"], "fresh-code-alignment");
+        assert_eq!(v["inner_result"]["ok"], true);
+    }
+
+    #[test]
+    fn success_response_evidence_failure_keeps_dispatched_but_exposes_error() {
+        let plan = fixture_plan("(plan)");
+        let result = build_internal_dispatch_success_response(
+            &plan,
+            "mission_task_delegate",
+            "agent-team",
+            json!({"task_id": "btk-9"}),
+            None,
+            Some("mkdir failed: read-only fs".to_string()),
+            None,
+        );
+        let v = parse_payload(&result);
+        // Inner tool already produced durable side effects; we keep
+        // dispatched/executing semantics but surface the sidecar error.
+        assert_eq!(v["status"], "executing");
+        assert_eq!(v["runner_status"], "dispatched");
+        assert!(v["evidence_path"].is_null());
+        assert_eq!(v["evidence_error"], "mkdir failed: read-only fs");
+        assert!(v.get("status_update_error").is_none());
+    }
+
+    #[test]
+    fn success_response_status_update_failure_does_not_claim_executing() {
+        let plan = fixture_plan("(plan)");
+        let result = build_internal_dispatch_success_response(
+            &plan,
+            "mission_execution",
+            "resident-lisp",
+            json!({"execution_id": "plan-x"}),
+            Some("/tmp/sidecar.json".to_string()),
+            None,
+            Some("DB error: connection lost".to_string()),
+        );
+        let v = parse_payload(&result);
+        assert_ne!(v["status"], "executing");
+        assert_eq!(v["status"], "dispatch_partial");
+        assert_eq!(v["runner_status"], "status_update_failed");
+        assert_eq!(v["status_update_error"], "DB error: connection lost");
+        // inner_result and evidence_path must still be reported so callers can
+        // act on the durable inner side effects.
+        assert_eq!(v["evidence_path"], "/tmp/sidecar.json");
+        assert_eq!(v["inner_result"]["execution_id"], "plan-x");
+        assert_eq!(v["target_tool"], "mission_execution");
+        assert_eq!(v["dispatch_strategy"], "resident-lisp");
+    }
+
+    #[test]
+    fn success_response_status_and_evidence_failure_combined() {
+        let plan = fixture_plan("(plan)");
+        let result = build_internal_dispatch_success_response(
+            &plan,
+            "mission_flow_run",
+            "mixed",
+            json!({"flow_id": "F-demo"}),
+            None,
+            Some("disk full".to_string()),
+            Some("DB error: timeout".to_string()),
+        );
+        let v = parse_payload(&result);
+        assert_eq!(v["status"], "dispatch_partial");
+        assert_eq!(v["runner_status"], "status_update_failed");
+        assert_eq!(v["evidence_error"], "disk full");
+        assert_eq!(v["status_update_error"], "DB error: timeout");
+        assert!(v["evidence_path"].is_null());
     }
 }
