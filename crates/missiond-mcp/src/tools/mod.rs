@@ -172,7 +172,7 @@ mod comm;
 mod sysinfra;
 
 // Domain aliases for readability
-use knowledge::{board, cascade, insight, intent, kb, skill, memory, project};
+use knowledge::{agent_execution, board, cascade, insight, intent, kb, skill, memory, project};
 use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job, flow_run, forge};
 use comm::{router_chat, question, conversation, timeline, audit, codex_ops};
 use sysinfra::{infra, permission, power, system};
@@ -189,6 +189,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(cascade::definitions());
     tools.extend(intent::definitions());
     tools.extend(project::definitions());
+    tools.extend(agent_execution::definitions());
     // compute
     tools.extend(task::definitions());
     tools.extend(process::definitions());
