@@ -841,7 +841,7 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
 const AGENT_TEAM_OBJECTIVE_HINT: &str = "使用 agent-team提高效率";
 
 #[derive(Debug, Default, Clone)]
-struct ParsedPlanHints {
+pub(super) struct ParsedPlanHints {
     target: Option<String>,
     flow_id: Option<String>,
     dispatch_strategy: Option<String>,
@@ -1185,6 +1185,29 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
+    // scheduler_mode hook (Wave 12 / Task 02): when the caller asks for the
+    // DAG scheduler, hand off to the dedicated module. The DAG scheduler only
+    // makes sense in `execute_mode="internal"` (bridge mode is the v0
+    // single-call descriptor and does not encode multi-node fan-out).
+    match super::plan_dag::detect_scheduler_mode(args) {
+        Ok(true) => {
+            if execute_mode != "internal" {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        "scheduler_mode=dag_v1 requires execute_mode=internal",
+                    )
+                    .with_suggestion(
+                        "DAG scheduler dispatches inside the daemon; pass execute_mode=\"internal\"",
+                    ),
+                ));
+            }
+            return super::plan_dag::action_execute_dag_v1(state, args, &plan).await;
+        }
+        Ok(false) => {}
+        Err(structured) => return Ok(structured),
+    }
+
     // plan-runner auto-selection v1: parse hints up front so caller-omitted
     // target / dispatch knobs can be derived from PLAN.lisp itself.
     let hints = parse_plan_hints(&plan.sexp_text);
@@ -1505,7 +1528,7 @@ fn build_internal_dispatch_success_response(
 /// `hints` are the parsed PLAN.lisp keyword/value pairs. Each per-target
 /// branch falls back to the relevant hint when the caller omitted the
 /// corresponding arg. Caller-supplied args ALWAYS win.
-fn build_internal_dispatch_args(
+pub(super) fn build_internal_dispatch_args(
     args: &Value,
     plan: &Plan,
     target: &str,
@@ -1731,7 +1754,7 @@ fn truncate_chars(s: &str, max_chars: usize) -> String {
 /// Best-effort extraction of the payload JSON from a downstream `ToolResult`.
 /// Inner handlers always render `ToolContent::Text`; we parse the first text
 /// content as JSON and fall back to the raw string to avoid losing data.
-fn tool_result_payload(result: &ToolResult) -> Value {
+pub(super) fn tool_result_payload(result: &ToolResult) -> Value {
     match result.content.first() {
         Some(ToolContent::Text { text }) => serde_json::from_str::<Value>(text)
             .unwrap_or_else(|_| Value::String(text.clone())),
@@ -1809,7 +1832,7 @@ async fn action_record_evidence(state: &AppState, args: &Value) -> Result<ToolRe
 /// fallback `target_project` only. There is **no** process-cwd fallback —
 /// callers that omit all signals get a structured error so the evidence
 /// sidecar never lands under a surprising directory.
-async fn append_plan_evidence_entry(
+pub(super) async fn append_plan_evidence_entry(
     state: &AppState,
     plan_id: uuid::Uuid,
     project_arg: Option<&str>,
@@ -1870,7 +1893,7 @@ async fn append_plan_evidence_entry(
 // helpers
 // ───────────────────────────────────────────────────────────────────────
 
-fn parse_id_arg(args: &Value, key: &str) -> Result<uuid::Uuid> {
+pub(super) fn parse_id_arg(args: &Value, key: &str) -> Result<uuid::Uuid> {
     let raw = args
         .get(key)
         .and_then(|v| v.as_str())

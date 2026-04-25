@@ -1,7 +1,229 @@
 use crate::ToolDefinition;
-use serde_json::json;
+use serde_json::{json, Map, Value};
+
+/// Build a single property descriptor `{"type": ..., "description": ...}` —
+/// optionally with an `enum` constraint. Centralising construction here keeps
+/// the schema-builder readable while sidestepping `json!` macro recursion
+/// limits (default 128) when the property bag grows past ~30 entries.
+fn prop(ty: &str, description: &str) -> Value {
+    json!({"type": ty, "description": description})
+}
+
+fn prop_enum(ty: &str, description: &str, variants: &[&str]) -> Value {
+    json!({
+        "type": ty,
+        "enum": variants,
+        "description": description,
+    })
+}
+
+fn prop_no_type(description: &str) -> Value {
+    json!({"description": description})
+}
+
+fn prop_object_open(description: &str) -> Value {
+    json!({
+        "type": "object",
+        "description": description,
+        "additionalProperties": true,
+    })
+}
+
+fn build_properties() -> Value {
+    let mut p: Map<String, Value> = Map::new();
+
+    p.insert("action".into(), prop_enum(
+        "string",
+        "manager action — see Lisp future-surface mission_plan",
+        &[
+            "compile", "list", "get", "by_task",
+            "approve", "mark", "supersede",
+            "execute", "record_evidence",
+        ],
+    ));
+
+    p.insert("directive_id".into(), prop(
+        "string",
+        "[compile] directive id; sonnet mode loads sexp_text from version_chain head (or `directive_version`). Default approval gate requires directive.status ∈ {approved, compiled}.",
+    ));
+
+    p.insert("board_task_id".into(), prop(
+        "string",
+        "[compile|by_task] board_tasks.id (TEXT FK). Required for sonnet compile (anchor) and for any persist=true (FK NOT NULL).",
+    ));
+
+    p.insert("persist".into(), prop(
+        "boolean",
+        "[compile] insert a row (default false). Requires board_task_id. dry_run inserts as draft; sonnet inserts as awaiting_approval with compiler_model + compiled_from.",
+    ));
+
+    p.insert("compiler_mode".into(), prop_enum(
+        "string",
+        "[compile] dry_run (default, no LLM, same envelope as before); sonnet asks the plan-compiler actor (Sonnet) to emit a PLAN sexp anchored to board_task_id. See intent-intent-layer.lisp :: role plan-compiler.",
+        &["dry_run", "sonnet"],
+    ));
+
+    p.insert("directive_version".into(), prop(
+        "integer",
+        "[compile sonnet] specific directive version (default = version_chain head).",
+    ));
+
+    p.insert("allow_unapproved".into(), prop(
+        "boolean",
+        "[compile sonnet] override approval gate. When true, the compiler runs against directive.status outside {approved, compiled}; the response flags `approval_gate_overridden=true`.",
+    ));
+
+    p.insert("target_project".into(), prop(
+        "string",
+        "[compile sonnet | execute] for compile this is prompt context only. For execute internal mission_task_delegate it is treated as cwd if it looks like a path; for execute internal mission_execution it is forwarded as `project`. Auto-selection v1: when omitted, runner extracts from plan.sexp_text :target-project / :target_project / :project hints; explicit arg still wins.",
+    ));
+
+    p.insert("parallelism".into(), prop(
+        "string",
+        "[compile sonnet | execute] for compile sonnet this is a hint for the planner (e.g. `serial`, `agent-team`, `mixed`) surfaced inside the Sonnet prompt. For execute (auto-selection v1) it is also consumed by the plan-runner: value `agent-team` (also resolvable from plan.sexp_text :parallelism hint) maps dispatch_strategy to `agent-team` (lower precedence than explicit dispatch_strategy arg or :dispatch-strategy hint), and when the resolved target is `mission_task_delegate` the runner injects the literal「使用 agent-team提高效率」hint into the delegated objective (no-duplicate).",
+    ));
+
+    p.insert("acceptance".into(), prop_no_type(
+        "[compile sonnet] string or array of acceptance criteria woven into the planner prompt.",
+    ));
+
+    p.insert("constraints".into(), prop_no_type(
+        "[compile sonnet] string or array of constraints woven into the planner prompt.",
+    ));
+
+    p.insert("plan_id".into(), prop(
+        "string",
+        "[get|approve|mark|execute|record_evidence] plan UUID",
+    ));
+
+    p.insert("status".into(), prop_enum(
+        "string",
+        "[list filter | mark target] PlanStatus",
+        &["draft", "awaiting_approval", "approved", "executing", "succeeded", "failed", "superseded"],
+    ));
+
+    p.insert("limit".into(), prop(
+        "integer",
+        "[list] cap result count (1-500, default 50)",
+    ));
+
+    p.insert("old_plan_id".into(), prop(
+        "string",
+        "[supersede] plan to mark superseded",
+    ));
+
+    p.insert("new_plan_id".into(), prop(
+        "string",
+        "[supersede] replacement plan UUID (recorded in result only)",
+    ));
+
+    p.insert("target".into(), prop_enum(
+        "string",
+        "[execute] routing target — bridge mode hands back next_call; internal mode dispatches inside MissionD. OPTIONAL under plan-runner auto-selection v1: when omitted, runner scans plan.sexp_text for :target / :target-tool / :tool hints (case-insensitive substring: `mission_execution`/`execution`→mission_execution; `task_delegate`/`claudecode`/`code-alignment`→mission_task_delegate; `flow_run`/`flow` + a resolvable :flow-id→mission_flow_run). Source-resolution precedence is explicit_arg > plan_hint > missing; the response surfaces target_source. If parser cannot derive a safe target and caller didn't pass one, the existing MISSING_PARAM structured error is returned with a suggestion to add `target` arg or PLAN hint fields.",
+        &["mission_execution", "mission_task_delegate", "mission_flow_run"],
+    ));
+
+    p.insert("execute_mode".into(), prop_enum(
+        "string",
+        "[execute] bridge (default) returns a next_call descriptor; internal asks the plan-runner to dispatch the target handler inside the daemon and append evidence",
+        &["bridge", "internal"],
+    ));
+
+    p.insert("scheduler_mode".into(), prop_enum(
+        "string",
+        "[execute] default (current single-node v0 runner) | dag_v1 (Wave 12 minimal DAG scheduler). dag_v1 only parses explicit `(node :id ... :target ... :depends-on [...])` forms inside PLAN.lisp; supported per-node fields: id / target / objective / depends-on / condition / failure-policy / timeout-ms / dispatch-strategy / target-project / requested-cwd / flow-id. failure-policy ∈ {fail-fast (default), continue}; unsupported fields are preserved into node_hint_summary.unsupported_fields and never silently dropped. Requires execute_mode=internal. v1 runs ready nodes sequentially in topological order; concurrent dispatch is future work.",
+        &["default", "dag_v1"],
+    ));
+
+    p.insert("dispatch_strategy".into(), prop_enum(
+        "string",
+        "[execute] workstation-dispatch-record strategy. Surfaced in the response and the plan_runner_dispatch evidence entry. Unknown values are normalised to `unknown`. Internal mode forwards dispatch_strategy to mission_execution(action=open), where the companion log now persists this field. Auto-selection v1 precedence: explicit_arg > plan_hint :dispatch-strategy > :parallelism mapping > default `unknown`; keyword mapping (case-insensitive substring): `agent-team`→agent-team, `code-alignment`/`fresh-session`→fresh-code-alignment, `lisp`/`architecture`/`resident`→resident-lisp, anything else→unknown (never hard-fails). Response surfaces dispatch_strategy_source ∈ {explicit_arg, plan_hint, default}.",
+        &["resident-lisp", "fresh-code-alignment", "agent-team", "mixed", "prompt-fallback", "unknown"],
+    ));
+
+    p.insert("cwd".into(), prop(
+        "string",
+        "[execute internal mission_task_delegate] working directory passed through to mission_task_delegate",
+    ));
+
+    p.insert("requested_cwd".into(), prop(
+        "string",
+        "[execute internal mission_execution] working directory metadata persisted on the companion log when present (workstation-dispatch-record :requested-cwd). Auto-selection v1: when omitted, runner extracts from plan.sexp_text :requested-cwd / :requested_cwd / :cwd hints; explicit arg still wins.",
+    ));
+
+    p.insert("objective".into(), prop(
+        "string",
+        "[execute internal mission_task_delegate] override the auto-derived objective. Auto-selection v1 derivation order when omitted: plan.sexp_text :objective hint > :summary hint > first non-empty line of plan.sexp_text. When dispatch_strategy resolves to agent-team under target=mission_task_delegate, the runner additionally injects the literal Chinese hint「使用 agent-team提高效率」into the delegated objective (without duplicating if already present).",
+    ));
+
+    p.insert("intent".into(), prop_enum(
+        "string",
+        "[execute internal mission_task_delegate] task intent (default `code`); strict whitelist mirrored from mission_task_delegate",
+        &["code", "ops", "research", "general"],
+    ));
+
+    p.insert("execution_id".into(), prop(
+        "string",
+        "[execute internal mission_execution] caller-supplied execution_id (default `plan-<plan_id>`)",
+    ));
+
+    p.insert("parent_design".into(), prop(
+        "string",
+        "[execute internal mission_execution] override parent-design ref (default `directive/<id>` if plan has source_directive_id, else `plan/<plan_id>`)",
+    ));
+
+    p.insert("scope".into(), prop(
+        "string",
+        "[execute internal mission_execution] override the human-readable scope string",
+    ));
+
+    p.insert("owner".into(), prop(
+        "string",
+        "[execute internal mission_execution] execution owner (default `plan-runner`)",
+    ));
+
+    p.insert("flow_id".into(), prop(
+        "string",
+        "[execute internal mission_flow_run] existing flow id. Auto-selection v1: when omitted, runner extracts it from plan.sexp_text :flow-id / :flow_id hints; explicit arg still wins. plan.sexp_text → flow YAML compilation is still future, so the caller (or PLAN hint) must point at an already-registered flow id.",
+    ));
+
+    p.insert("params".into(), prop_object_open(
+        "[execute internal mission_flow_run] forwarded as the flow params object",
+    ));
+
+    p.insert("priority".into(), prop(
+        "string",
+        "[execute internal mission_task_delegate] passthrough priority",
+    ));
+
+    p.insert("timeout_secs".into(), prop(
+        "integer",
+        "[execute internal mission_task_delegate] passthrough timeout",
+    ));
+
+    p.insert("dry_run".into(), prop(
+        "boolean",
+        "[execute internal] when true, return the would-be inner args without dispatching (does NOT mutate plan status, does NOT write evidence). Also recognised under scheduler_mode=dag_v1 to return the DAG plan + topological order without dispatching nodes or writing per-node evidence.",
+    ));
+
+    p.insert("evidence".into(), prop_no_type(
+        "[record_evidence] arbitrary JSON: tool_calls / event_log / test outputs / execution log refs",
+    ));
+
+    p.insert("project".into(), prop(
+        "string",
+        "[record_evidence|execute] project id (registry-resolved root); defaults to CWD",
+    ));
+
+    Value::Object(p)
+}
 
 pub fn definitions() -> Vec<ToolDefinition> {
+    let schema = json!({
+        "type": "object",
+        "required": ["action"],
+        "properties": build_properties(),
+    });
     vec![ToolDefinition::new(
         "mission_plan",
         "plan 表 manager — 9 actions (compile/list/get/by_task/approve/mark/supersede/execute/record_evidence)。\
@@ -26,6 +248,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
          runner 在 objective 中注入字面提示「使用 agent-team提高效率」（已含则不重复）；\
          dispatch_strategy 关键字映射：agent-team→agent-team、code-alignment/fresh-session→fresh-code-alignment、lisp/architecture/resident→resident-lisp，未识别归一化 unknown 不硬失败；\
          若 parser 无法导出安全 target 且 caller 未传，仍返回原 MISSING_PARAM 结构化错误（suggestion 提示新增 target arg 或 PLAN hint）。\
+         scheduler_mode=\"dag_v1\" (Wave 12 / Task 02): 在 v0 单节点 runner 之上启用最小 DAG scheduler，\
+         只解析 PLAN.lisp 中显式 `(node :id ... :target ... :depends-on [...])` 节点；支持字段 id/target/objective/depends-on/\
+         condition/failure-policy/timeout-ms/dispatch-strategy/target-project/requested-cwd/flow-id；\
+         failure-policy ∈ {fail-fast (默认), continue}；不支持字段保留进 node_hint_summary 不静默丢弃；\
+         v1 顺序执行 ready set，并发为后续工作。\
          record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
@@ -33,167 +260,6 @@ pub fn definitions() -> Vec<ToolDefinition> {
          + intent-flow.lisp :: F-workstation-dispatch-policy \
          + intent-worker.lisp :: claudecode-workstation-orchestration \
          + intent-memory.lisp :: directive-layer :: file-first-artifacts :: plan-lisp。",
-        json!({
-            "type": "object",
-            "required": ["action"],
-            "properties": {
-                "action": {
-                    "type": "string",
-                    "enum": [
-                        "compile", "list", "get", "by_task",
-                        "approve", "mark", "supersede",
-                        "execute", "record_evidence"
-                    ],
-                    "description": "manager action — see Lisp future-surface mission_plan"
-                },
-                "directive_id": {
-                    "type": "string",
-                    "description": "[compile] directive id; sonnet mode loads sexp_text from version_chain head (or `directive_version`). Default approval gate requires directive.status ∈ {approved, compiled}."
-                },
-                "board_task_id": {
-                    "type": "string",
-                    "description": "[compile|by_task] board_tasks.id (TEXT FK). Required for sonnet compile (anchor) and for any persist=true (FK NOT NULL)."
-                },
-                "persist": {
-                    "type": "boolean",
-                    "description": "[compile] insert a row (default false). Requires board_task_id. dry_run inserts as draft; sonnet inserts as awaiting_approval with compiler_model + compiled_from."
-                },
-                "compiler_mode": {
-                    "type": "string",
-                    "enum": ["dry_run", "sonnet"],
-                    "description": "[compile] dry_run (default, no LLM, same envelope as before); sonnet asks the plan-compiler actor (Sonnet) to emit a PLAN sexp anchored to board_task_id. See intent-intent-layer.lisp :: role plan-compiler."
-                },
-                "directive_version": {
-                    "type": "integer",
-                    "description": "[compile sonnet] specific directive version (default = version_chain head)."
-                },
-                "allow_unapproved": {
-                    "type": "boolean",
-                    "description": "[compile sonnet] override approval gate. When true, the compiler runs against directive.status outside {approved, compiled}; the response flags `approval_gate_overridden=true`."
-                },
-                "target_project": {
-                    "type": "string",
-                    "description": "[compile sonnet | execute] for compile this is prompt context only. For execute internal mission_task_delegate it is treated as cwd if it looks like a path; for execute internal mission_execution it is forwarded as `project`."
-                },
-                "parallelism": {
-                    "type": "string",
-                    "description": "[compile sonnet | execute] for compile sonnet this is a hint for the planner (e.g. `serial`, `agent-team`, `mixed`) surfaced inside the Sonnet prompt. For execute (auto-selection v1) it is also consumed by the plan-runner: value `agent-team` (also resolvable from plan.sexp_text :parallelism hint) maps dispatch_strategy to `agent-team` (lower precedence than explicit dispatch_strategy arg or :dispatch-strategy hint), and when the resolved target is `mission_task_delegate` the runner injects the literal「使用 agent-team提高效率」hint into the delegated objective (no-duplicate)."
-                },
-                "acceptance": {
-                    "description": "[compile sonnet] string or array of acceptance criteria woven into the planner prompt."
-                },
-                "constraints": {
-                    "description": "[compile sonnet] string or array of constraints woven into the planner prompt."
-                },
-                "plan_id": {
-                    "type": "string",
-                    "description": "[get|approve|mark|execute|record_evidence] plan UUID"
-                },
-                "status": {
-                    "type": "string",
-                    "enum": ["draft","awaiting_approval","approved","executing","succeeded","failed","superseded"],
-                    "description": "[list filter | mark target] PlanStatus"
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "[list] cap result count (1-500, default 50)"
-                },
-                "old_plan_id": {
-                    "type": "string",
-                    "description": "[supersede] plan to mark superseded"
-                },
-                "new_plan_id": {
-                    "type": "string",
-                    "description": "[supersede] replacement plan UUID (recorded in result only)"
-                },
-                "target": {
-                    "type": "string",
-                    "enum": ["mission_execution", "mission_task_delegate", "mission_flow_run"],
-                    "description": "[execute] routing target — bridge mode hands back next_call; internal mode dispatches inside MissionD. OPTIONAL under plan-runner auto-selection v1: when omitted, runner scans plan.sexp_text for :target / :target-tool / :tool hints (case-insensitive substring: `mission_execution`/`execution`→mission_execution; `task_delegate`/`claudecode`/`code-alignment`→mission_task_delegate; `flow_run`/`flow` + a resolvable :flow-id→mission_flow_run). Source-resolution precedence is explicit_arg > plan_hint > missing; the response surfaces target_source. If parser cannot derive a safe target and caller didn't pass one, the existing MISSING_PARAM structured error is returned with a suggestion to add `target` arg or PLAN hint fields."
-                },
-                "execute_mode": {
-                    "type": "string",
-                    "enum": ["bridge", "internal"],
-                    "description": "[execute] bridge (default) returns a next_call descriptor; internal asks the plan-runner to dispatch the target handler inside the daemon and append evidence"
-                },
-                "dispatch_strategy": {
-                    "type": "string",
-                    "enum": [
-                        "resident-lisp",
-                        "fresh-code-alignment",
-                        "agent-team",
-                        "mixed",
-                        "prompt-fallback",
-                        "unknown"
-                    ],
-                    "description": "[execute] workstation-dispatch-record strategy. Surfaced in the response and the plan_runner_dispatch evidence entry. Unknown values are normalised to `unknown`. Internal mode forwards dispatch_strategy to mission_execution(action=open), where the companion log now persists this field. Auto-selection v1 precedence: explicit_arg > plan_hint :dispatch-strategy > :parallelism mapping > default `unknown`; keyword mapping (case-insensitive substring): `agent-team`→agent-team, `code-alignment`/`fresh-session`→fresh-code-alignment, `lisp`/`architecture`/`resident`→resident-lisp, anything else→unknown (never hard-fails). Response surfaces dispatch_strategy_source ∈ {explicit_arg, plan_hint, default}."
-                },
-                "target_project": {
-                    "type": "string",
-                    "description": "[execute] registered project id OR project root path. For mission_execution it is forwarded as `project`; for mission_task_delegate it is treated as cwd if it looks like a path. Auto-selection v1: when omitted, runner extracts from plan.sexp_text :target-project / :target_project / :project hints; explicit arg still wins."
-                },
-                "cwd": {
-                    "type": "string",
-                    "description": "[execute internal mission_task_delegate] working directory passed through to mission_task_delegate"
-                },
-                "requested_cwd": {
-                    "type": "string",
-                    "description": "[execute internal mission_execution] working directory metadata persisted on the companion log when present (workstation-dispatch-record :requested-cwd). Auto-selection v1: when omitted, runner extracts from plan.sexp_text :requested-cwd / :requested_cwd / :cwd hints; explicit arg still wins."
-                },
-                "objective": {
-                    "type": "string",
-                    "description": "[execute internal mission_task_delegate] override the auto-derived objective. Auto-selection v1 derivation order when omitted: plan.sexp_text :objective hint > :summary hint > first non-empty line of plan.sexp_text. When dispatch_strategy resolves to agent-team under target=mission_task_delegate, the runner additionally injects the literal Chinese hint「使用 agent-team提高效率」into the delegated objective (without duplicating if already present)."
-                },
-                "intent": {
-                    "type": "string",
-                    "enum": ["code", "ops", "research", "general"],
-                    "description": "[execute internal mission_task_delegate] task intent (default `code`); strict whitelist mirrored from mission_task_delegate"
-                },
-                "execution_id": {
-                    "type": "string",
-                    "description": "[execute internal mission_execution] caller-supplied execution_id (default `plan-<plan_id>`)"
-                },
-                "parent_design": {
-                    "type": "string",
-                    "description": "[execute internal mission_execution] override parent-design ref (default `directive/<id>` if plan has source_directive_id, else `plan/<plan_id>`)"
-                },
-                "scope": {
-                    "type": "string",
-                    "description": "[execute internal mission_execution] override the human-readable scope string"
-                },
-                "owner": {
-                    "type": "string",
-                    "description": "[execute internal mission_execution] execution owner (default `plan-runner`)"
-                },
-                "flow_id": {
-                    "type": "string",
-                    "description": "[execute internal mission_flow_run] existing flow id. Auto-selection v1: when omitted, runner extracts it from plan.sexp_text :flow-id / :flow_id hints; explicit arg still wins. plan.sexp_text → flow YAML compilation is still future, so the caller (or PLAN hint) must point at an already-registered flow id."
-                },
-                "params": {
-                    "type": "object",
-                    "description": "[execute internal mission_flow_run] forwarded as the flow params object",
-                    "additionalProperties": true
-                },
-                "priority": {
-                    "type": "string",
-                    "description": "[execute internal mission_task_delegate] passthrough priority"
-                },
-                "timeout_secs": {
-                    "type": "integer",
-                    "description": "[execute internal mission_task_delegate] passthrough timeout"
-                },
-                "dry_run": {
-                    "type": "boolean",
-                    "description": "[execute internal] when true, return the would-be inner args without dispatching (does NOT mutate plan status, does NOT write evidence)"
-                },
-                "evidence": {
-                    "description": "[record_evidence] arbitrary JSON: tool_calls / event_log / test outputs / execution log refs"
-                },
-                "project": {
-                    "type": "string",
-                    "description": "[record_evidence|execute] project id (registry-resolved root); defaults to CWD"
-                }
-            }
-        }),
+        schema,
     )]
 }

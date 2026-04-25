@@ -8,6 +8,7 @@ pub(crate) mod intent;
 pub(crate) mod kb;
 pub(crate) mod memory;
 pub(crate) mod plan;
+pub(crate) mod plan_dag;
 pub(crate) mod project;
 pub(crate) mod project_memory;
 pub(crate) mod skill;
