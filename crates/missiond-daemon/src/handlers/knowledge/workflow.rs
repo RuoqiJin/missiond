@@ -650,8 +650,13 @@ async fn action_compile_methodology(state: &AppState, args: &Value) -> Result<To
 
 fn action_compile_dry_run(path: &Path, content: &str) -> Result<ToolResult> {
     let line_count = content.lines().count();
+    // Surface both the cheap line-counter (back-compat with earlier
+    // dry-run consumers that scraped `phase_form_count` / `step_form_count`)
+    // and the v0 semantic lifter's richer breakdown so callers can preview
+    // exactly what `compile_mode="deterministic"` will emit.
     let phases = count_top_form(content, "phase");
     let steps = count_top_form(content, "step");
+    let lifted = extract_methodology_lifted(content);
     Ok(ToolResult::json_pretty(&json!({
         "status": "dry_run",
         "compile_mode": "dry_run",
@@ -661,6 +666,15 @@ fn action_compile_dry_run(path: &Path, content: &str) -> Result<ToolResult> {
         "lines": line_count,
         "phase_form_count": phases,
         "step_form_count": steps,
+        "lifted_form_count": lifted.total_count(),
+        "lifted_form_breakdown": json!({
+            "phases": lifted.phases.len(),
+            "principles": lifted.principles.len(),
+            "anti_patterns": lifted.anti_patterns.len(),
+            "gates": lifted.gates.len(),
+            "artifacts": lifted.artifacts.len(),
+            "authorities": lifted.authorities.len(),
+        }),
         "next_step": "pass compile_mode=\"deterministic\" to emit an executable YAML preview; persist=true writes it to .missiond/generated/flows/<flow_id>.yaml",
     })))
 }
@@ -690,8 +704,9 @@ fn action_compile_deterministic(
     let flow_id = derive_flow_id(&stem, output_flow_id);
     let display_name = format!("methodology compile v0 — {}", stem);
 
-    let steps = extract_steps(content);
-    let review_required = steps.is_empty();
+    let located_steps = extract_steps_with_lines(content);
+    let lifted = extract_methodology_lifted(content);
+    let review_required = located_steps.is_empty();
     let hash = source_hash(content);
     let generated_at = chrono::Utc::now().to_rfc3339();
     let source_display = source_path_for_yaml(project_root, path);
@@ -704,7 +719,7 @@ fn action_compile_deterministic(
         generated_at: generated_at.clone(),
         compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
     };
-    let yaml = build_generated_yaml(&meta, &steps, review_required)
+    let yaml = build_generated_yaml(&meta, &located_steps, &lifted, review_required)
         .map_err(|e| anyhow!("serialize yaml: {}", e))?;
 
     let persist = args
@@ -726,10 +741,19 @@ fn action_compile_deterministic(
         "source_path": source_display,
         "source_hash": hash,
         "generated_at": generated_at,
-        "step_count": steps.len(),
+        "step_count": located_steps.len(),
         "review_required": review_required,
+        "lifted_form_count": lifted.total_count(),
+        "lifted_form_breakdown": json!({
+            "phases": lifted.phases.len(),
+            "principles": lifted.principles.len(),
+            "anti_patterns": lifted.anti_patterns.len(),
+            "gates": lifted.gates.len(),
+            "artifacts": lifted.artifacts.len(),
+            "authorities": lifted.authorities.len(),
+        }),
         "params_echo": args.get("params").cloned().unwrap_or(Value::Null),
-        "future_compiler_actor": "intent-layer LLM/forge compiler — semantic phase/anti-pattern lifting deferred",
+        "future_compiler_actor": "intent-layer LLM/forge compiler — semantic execution of phase/anti-pattern/gate forms deferred; v0 lifts them into methodology_metadata only",
         "yaml_preview": yaml,
     });
 
@@ -929,6 +953,92 @@ struct MethodologyStep {
     body: String,
 }
 
+/// One of the higher-order methodology forms the v0 lifter recognises but
+/// never converts into an executable node. The compiler stays conservative:
+/// the form's raw body is preserved verbatim under
+/// `methodology_metadata` in the generated YAML so downstream readers
+/// (manual reviewer, future forge compiler, audit trace) can recover the
+/// original semantics. Only `(step …)` forms turn into nodes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MethodologyForm {
+    /// Form keyword as it appears in source, e.g. `principle`, `anti-pattern`.
+    kind: String,
+    /// First whitespace-delimited token after the keyword, treated as an
+    /// optional id (e.g. `(principle no-fallback …)` → Some("no-fallback")).
+    /// Forms without a leading identifier (or a malformed one) keep `None`
+    /// — we never invent ids the source did not author.
+    id: Option<String>,
+    /// Verbatim source slice of the form, parens included. Multi-line bodies
+    /// preserve their original whitespace so reviewers see the methodology
+    /// exactly as authored.
+    body: String,
+    /// 0-based line at which the opening `(` was emitted in the source.
+    start_line: usize,
+}
+
+/// A `(phase …)` form with the steps the v0 lifter found nested under it.
+/// Steps inside a phase are STILL emitted as top-level executable nodes by
+/// the YAML builder, but each carries `methodology_metadata.phase_id` so a
+/// manual reviewer can rejoin the narrative with the executable plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct MethodologyPhase {
+    /// Phase id (token after `(phase `). Anonymous phases keep `None` and
+    /// surface in metadata as `phase_<line>` so YAML keys stay distinct.
+    id: Option<String>,
+    /// Verbatim source slice including parens.
+    body: String,
+    /// Inclusive 0-based line range covered by the phase form. Used to
+    /// associate inner steps without requiring a recursive parser.
+    start_line: usize,
+    end_line: usize,
+}
+
+/// Aggregate result of the v0 semantic lifter — produced by
+/// [`extract_methodology_lifted`] and consumed by [`build_generated_yaml`].
+/// All vectors preserve source order so the generated YAML reads top-to-
+/// bottom against the methodology Lisp.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct MethodologyLifted {
+    phases: Vec<MethodologyPhase>,
+    principles: Vec<MethodologyForm>,
+    anti_patterns: Vec<MethodologyForm>,
+    gates: Vec<MethodologyForm>,
+    artifacts: Vec<MethodologyForm>,
+    authorities: Vec<MethodologyForm>,
+}
+
+impl MethodologyLifted {
+    fn is_empty(&self) -> bool {
+        self.phases.is_empty()
+            && self.principles.is_empty()
+            && self.anti_patterns.is_empty()
+            && self.gates.is_empty()
+            && self.artifacts.is_empty()
+            && self.authorities.is_empty()
+    }
+
+    /// Total count of all lifted forms across every category — used by the
+    /// dry-run preview and the deterministic-mode payload to surface a single
+    /// `lifted_form_count` figure for callers.
+    fn total_count(&self) -> usize {
+        self.phases.len()
+            + self.principles.len()
+            + self.anti_patterns.len()
+            + self.gates.len()
+            + self.artifacts.len()
+            + self.authorities.len()
+    }
+}
+
+/// Step keyed by its 0-based starting line, used internally by
+/// [`build_generated_yaml`] to attach `phase_id` metadata when a step's line
+/// falls inside a phase form's `start_line..=end_line` range.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct LocatedStep {
+    step: MethodologyStep,
+    start_line: usize,
+}
+
 #[derive(Debug, Clone)]
 struct GeneratedMeta {
     flow_id: String,
@@ -1112,6 +1222,320 @@ fn extract_steps(content: &str) -> Vec<MethodologyStep> {
     steps
 }
 
+/// Variant of [`extract_steps`] that also records each step's 0-based source
+/// line. Used by [`build_generated_yaml`] to assign `phase_id` metadata when
+/// a step's line falls inside a `(phase …)` form's range. The matching rules
+/// are identical to `extract_steps` so the back-compat tests still cover the
+/// recognition surface.
+fn extract_steps_with_lines(content: &str) -> Vec<LocatedStep> {
+    let mut out: Vec<LocatedStep> = Vec::new();
+    let mut buffer: Option<(LocatedStep, i32, bool, bool)> = None;
+    // (located_step, depth, in_string, escaped)
+
+    for (line_idx, line) in content.lines().enumerate() {
+        if let Some((mut ls, mut depth, mut in_string, mut escaped)) = buffer.take() {
+            ls.step.body.push('\n');
+            for ch in line.chars() {
+                ls.step.body.push(ch);
+                advance_paren_state(ch, &mut depth, &mut in_string, &mut escaped);
+                if depth == 0 {
+                    out.push(LocatedStep {
+                        step: MethodologyStep {
+                            id: std::mem::take(&mut ls.step.id),
+                            body: std::mem::take(&mut ls.step.body),
+                        },
+                        start_line: ls.start_line,
+                    });
+                    buffer = None;
+                    break;
+                }
+            }
+            if depth > 0 {
+                buffer = Some((ls, depth, in_string, escaped));
+            }
+            continue;
+        }
+
+        let leading = line.chars().take_while(|c| c.is_whitespace()).count();
+        let rest = &line[leading..];
+        if !rest.starts_with("(step") {
+            continue;
+        }
+        let after_step = &rest["(step".len()..];
+        if !after_step.starts_with(|c: char| c.is_whitespace()) {
+            continue; // e.g. (steps … shouldn't match
+        }
+        let after_ws = after_step.trim_start();
+        let id_end = after_ws
+            .find(|c: char| c.is_whitespace() || c == ')')
+            .unwrap_or(after_ws.len());
+        let id = after_ws[..id_end].trim().to_string();
+        if id.is_empty() {
+            continue;
+        }
+
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut body = String::new();
+        let mut closed = false;
+        for ch in rest.chars() {
+            body.push(ch);
+            advance_paren_state(ch, &mut depth, &mut in_string, &mut escaped);
+            if depth == 0 && body.ends_with(')') {
+                out.push(LocatedStep {
+                    step: MethodologyStep {
+                        id: id.clone(),
+                        body: body.clone(),
+                    },
+                    start_line: line_idx,
+                });
+                closed = true;
+                break;
+            }
+        }
+        if !closed && depth > 0 {
+            buffer = Some((
+                LocatedStep {
+                    step: MethodologyStep { id, body },
+                    start_line: line_idx,
+                },
+                depth,
+                in_string,
+                escaped,
+            ));
+        }
+    }
+
+    out
+}
+
+/// Conservative semantic lifter for the methodology compiler v0.
+///
+/// Recognises six higher-order forms — `(phase …)`, `(principle …)`,
+/// `(anti-pattern …)`, `(gate …)`, `(artifact …)`, `(authority …)` — when
+/// they appear as standalone forms whose opening paren sits at the start of
+/// a (whitespace-trimmed) line. This matches the convention used by
+/// [`extract_steps`] and by every methodology Lisp shipped under
+/// `.missiond/workflows/`. Forms appearing only as inner tokens of another
+/// expression are deliberately ignored — the lifter never tries to be a
+/// real sexp parser, and never speculates about meaning the source did not
+/// declare.
+///
+/// The lifter NEVER converts these forms into executable nodes. They live in
+/// `methodology_metadata` on the generated YAML so the deterministic
+/// compiler's contract — "v0 only emits nodes for `(step …)`" — stays
+/// intact (intent-flow.lisp :: F-methodology-to-executable-compile :: s2
+/// `phases / gates / anti-patterns / authority lifting` is no longer
+/// pending; semantic execution remains a future forge concern).
+fn extract_methodology_lifted(content: &str) -> MethodologyLifted {
+    const KEYWORDS: &[&str] = &[
+        "phase",
+        "principle",
+        "anti-pattern",
+        "gate",
+        "artifact",
+        "authority",
+    ];
+
+    let mut lifted = MethodologyLifted::default();
+    // (kind, id, body, depth, in_string, escaped, start_line)
+    let mut buffer: Option<(String, Option<String>, String, i32, bool, bool, usize)> = None;
+
+    for (line_idx, line) in content.lines().enumerate() {
+        if let Some((kind, id, mut body, mut depth, mut in_string, mut escaped, start_line)) =
+            buffer.take()
+        {
+            body.push('\n');
+            let mut closed = false;
+            for ch in line.chars() {
+                body.push(ch);
+                advance_paren_state(ch, &mut depth, &mut in_string, &mut escaped);
+                if depth == 0 {
+                    push_lifted_form(
+                        &mut lifted,
+                        &kind,
+                        id.clone(),
+                        std::mem::take(&mut body),
+                        start_line,
+                        line_idx,
+                    );
+                    closed = true;
+                    break;
+                }
+            }
+            if !closed && depth > 0 {
+                buffer = Some((kind, id, body, depth, in_string, escaped, start_line));
+            }
+            continue;
+        }
+
+        let leading = line.chars().take_while(|c| c.is_whitespace()).count();
+        let rest = &line[leading..];
+        let Some((kind, after_kind)) = match_form_keyword(rest, KEYWORDS) else {
+            continue;
+        };
+        let after_ws = after_kind.trim_start();
+        // Optional id: first non-whitespace, non-paren token. We only treat a
+        // bare identifier (no leading `:` or `"`) as an id; keyword args and
+        // string payloads stay anonymous so we never accidentally promote
+        // `:goal` or `"summary"` into an id slot.
+        let id = parse_optional_form_id(after_ws);
+
+        let mut depth: i32 = 0;
+        let mut in_string = false;
+        let mut escaped = false;
+        let mut body = String::new();
+        let mut closed = false;
+        for ch in rest.chars() {
+            body.push(ch);
+            advance_paren_state(ch, &mut depth, &mut in_string, &mut escaped);
+            if depth == 0 && body.ends_with(')') {
+                push_lifted_form(
+                    &mut lifted,
+                    kind,
+                    id.clone(),
+                    body.clone(),
+                    line_idx,
+                    line_idx,
+                );
+                closed = true;
+                break;
+            }
+        }
+        if !closed && depth > 0 {
+            buffer = Some((
+                kind.to_string(),
+                id,
+                body,
+                depth,
+                in_string,
+                escaped,
+                line_idx,
+            ));
+        }
+    }
+
+    lifted
+}
+
+/// Match a known form keyword at the start of a (whitespace-trimmed) line.
+/// Returns `Some((keyword, remainder))` only when the keyword is followed by
+/// whitespace or `)` — i.e. `(phase` matches, but `(phases` and `(phaseA`
+/// do not. This is the same disambiguation rule [`extract_steps`] uses for
+/// `(step` vs `(steps`.
+fn match_form_keyword<'a>(rest: &'a str, keywords: &[&'static str]) -> Option<(&'static str, &'a str)> {
+    if !rest.starts_with('(') {
+        return None;
+    }
+    for kw in keywords {
+        let prefix = format!("({}", kw);
+        if !rest.starts_with(&prefix) {
+            continue;
+        }
+        let after = &rest[prefix.len()..];
+        let next = after.chars().next();
+        match next {
+            None => return Some((*kw, after)),
+            Some(c) if c.is_whitespace() || c == ')' => return Some((*kw, after)),
+            _ => continue,
+        }
+    }
+    None
+}
+
+/// Treat the first whitespace/paren-delimited token as the form id, but only
+/// when it looks like a bare identifier (no leading `:` keyword arg, no
+/// leading quote, and at least one ASCII alphanumeric / `-` / `_` char).
+/// Anything else stays anonymous — we'd rather lose an id than fabricate
+/// one from a string payload or keyword arg.
+fn parse_optional_form_id(after_ws: &str) -> Option<String> {
+    let token_end = after_ws
+        .find(|c: char| c.is_whitespace() || c == ')')
+        .unwrap_or(after_ws.len());
+    let token = after_ws[..token_end].trim();
+    if token.is_empty() {
+        return None;
+    }
+    let first = token.chars().next()?;
+    if first == ':' || first == '"' || first == '(' {
+        return None;
+    }
+    if !token
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '/' || c == '.')
+    {
+        return None;
+    }
+    Some(token.to_string())
+}
+
+fn push_lifted_form(
+    lifted: &mut MethodologyLifted,
+    kind: &str,
+    id: Option<String>,
+    body: String,
+    start_line: usize,
+    end_line: usize,
+) {
+    match kind {
+        "phase" => lifted.phases.push(MethodologyPhase {
+            id,
+            body,
+            start_line,
+            end_line,
+        }),
+        "principle" => lifted.principles.push(MethodologyForm {
+            kind: kind.to_string(),
+            id,
+            body,
+            start_line,
+        }),
+        "anti-pattern" => lifted.anti_patterns.push(MethodologyForm {
+            kind: kind.to_string(),
+            id,
+            body,
+            start_line,
+        }),
+        "gate" => lifted.gates.push(MethodologyForm {
+            kind: kind.to_string(),
+            id,
+            body,
+            start_line,
+        }),
+        "artifact" => lifted.artifacts.push(MethodologyForm {
+            kind: kind.to_string(),
+            id,
+            body,
+            start_line,
+        }),
+        "authority" => lifted.authorities.push(MethodologyForm {
+            kind: kind.to_string(),
+            id,
+            body,
+            start_line,
+        }),
+        _ => {} // unknown keyword: silently ignore (defensive — kept for forward-compat)
+    }
+}
+
+/// Resolve which phase (if any) a step's line falls inside. Returns the
+/// phase's effective id — explicit when authored, else a stable
+/// `phase_<line>` token so YAML keys stay distinct. `None` means the step
+/// lives outside any recognised phase form.
+fn phase_id_for_step(phases: &[MethodologyPhase], step_line: usize) -> Option<String> {
+    for ph in phases {
+        if step_line >= ph.start_line && step_line <= ph.end_line {
+            return Some(
+                ph.id
+                    .clone()
+                    .unwrap_or_else(|| format!("phase_{}", ph.start_line)),
+            );
+        }
+    }
+    None
+}
+
 fn advance_paren_state(ch: char, depth: &mut i32, in_string: &mut bool, escaped: &mut bool) {
     if *in_string {
         if *escaped {
@@ -1133,7 +1557,8 @@ fn advance_paren_state(ch: char, depth: &mut i32, in_string: &mut bool, escaped:
 
 fn build_generated_yaml(
     meta: &GeneratedMeta,
-    steps: &[MethodologyStep],
+    steps: &[LocatedStep],
+    lifted: &MethodologyLifted,
     review_required: bool,
 ) -> Result<String, serde_yaml::Error> {
     use serde_yaml::{Mapping, Value as Yaml};
@@ -1152,6 +1577,19 @@ fn build_generated_yaml(
     );
     root.insert(Yaml::from("review_required"), Yaml::from(review_required));
 
+    // Lifted higher-order semantics — emitted under a top-level
+    // `methodology_metadata` mapping. `FlowDefinition` does NOT declare this
+    // field, so serde_yaml ignores it during loader deserialisation while
+    // the raw YAML still preserves it for human reviewers and the future
+    // forge compiler. Keeping this strictly out-of-band is what lets the
+    // v0 lifter stay conservative — no execution semantics change.
+    if !lifted.is_empty() {
+        root.insert(
+            Yaml::from("methodology_metadata"),
+            Yaml::Mapping(build_methodology_metadata_yaml(lifted)),
+        );
+    }
+
     let mut nodes_seq: Vec<Yaml> = Vec::new();
     if steps.is_empty() {
         let mut node = Mapping::new();
@@ -1160,21 +1598,22 @@ fn build_generated_yaml(
         node.insert(Yaml::from("model"), Yaml::from("opus"));
         node.insert(
             Yaml::from("prompt"),
-            Yaml::from(format!(
-                "Manually review compiled methodology '{flow}' before running.\n\
-                 Source: {src}\n\
-                 Source hash: {hash}\n\
-                 The deterministic compiler v0 could not auto-extract executable (step …) forms.\n\
-                 Edit this YAML or augment the source Lisp before dispatching.",
-                flow = meta.flow_id,
-                src = meta.source_path,
-                hash = meta.source_hash,
-            )),
+            Yaml::from(build_manual_review_prompt(meta, lifted)),
         );
+        // Mirror the lifted metadata onto the manual_review node itself so
+        // the reviewer sees it without having to walk back to the YAML
+        // root. The flattened FlowNode/NodeType serde shape ignores
+        // unknown keys, so this is a pure documentation channel.
+        if !lifted.is_empty() {
+            node.insert(
+                Yaml::from("methodology_metadata"),
+                Yaml::Mapping(build_methodology_metadata_yaml(lifted)),
+            );
+        }
         nodes_seq.push(Yaml::Mapping(node));
     } else {
         for step in steps {
-            let safe_id = sanitize_id_token(&step.id);
+            let safe_id = sanitize_id_token(&step.step.id);
             let node_id = if safe_id.is_empty() {
                 "step".to_string()
             } else {
@@ -1184,16 +1623,151 @@ fn build_generated_yaml(
             node.insert(Yaml::from("id"), Yaml::from(node_id.clone()));
             node.insert(Yaml::from("type"), Yaml::from("slot_task"));
             node.insert(Yaml::from("model"), Yaml::from("opus"));
-            node.insert(Yaml::from("prompt"), Yaml::from(step.body.clone()));
+            node.insert(Yaml::from("prompt"), Yaml::from(step.step.body.clone()));
             node.insert(
                 Yaml::from("save_as"),
                 Yaml::from(format!("{}_result", node_id)),
             );
+            // Per-node `methodology_metadata.phase_id` carries the v0
+            // lifter's phase association. FlowNode flattens NodeType (which
+            // has `tag = "type"`); serde_yaml's default unknown-field
+            // tolerance lets us attach this without affecting the
+            // executable shape — verified by the YAML round-trip test.
+            if let Some(phase_id) = phase_id_for_step(&lifted.phases, step.start_line) {
+                let mut node_meta = Mapping::new();
+                node_meta.insert(Yaml::from("phase_id"), Yaml::from(phase_id));
+                node.insert(
+                    Yaml::from("methodology_metadata"),
+                    Yaml::Mapping(node_meta),
+                );
+            }
             nodes_seq.push(Yaml::Mapping(node));
         }
     }
     root.insert(Yaml::from("nodes"), Yaml::Sequence(nodes_seq));
     serde_yaml::to_string(&Yaml::Mapping(root))
+}
+
+/// Build the prompt body for the `manual_review` fallback node. When the
+/// v0 lifter recovered higher-order forms, surface them in the prompt so
+/// the reviewer immediately sees what the methodology declared even before
+/// touching the metadata mapping.
+fn build_manual_review_prompt(meta: &GeneratedMeta, lifted: &MethodologyLifted) -> String {
+    let base = format!(
+        "Manually review compiled methodology '{flow}' before running.\n\
+         Source: {src}\n\
+         Source hash: {hash}\n\
+         The deterministic compiler v0 could not auto-extract executable (step …) forms.\n\
+         Edit this YAML or augment the source Lisp before dispatching.",
+        flow = meta.flow_id,
+        src = meta.source_path,
+        hash = meta.source_hash,
+    );
+    if lifted.is_empty() {
+        return base;
+    }
+    let mut out = base;
+    out.push_str("\n\nLifted methodology semantics (v0 recognised, NOT executable):");
+    if !lifted.phases.is_empty() {
+        out.push_str(&format!("\n  - phases: {}", lifted.phases.len()));
+    }
+    if !lifted.principles.is_empty() {
+        out.push_str(&format!("\n  - principles: {}", lifted.principles.len()));
+    }
+    if !lifted.anti_patterns.is_empty() {
+        out.push_str(&format!(
+            "\n  - anti-patterns: {}",
+            lifted.anti_patterns.len()
+        ));
+    }
+    if !lifted.gates.is_empty() {
+        out.push_str(&format!("\n  - gates: {}", lifted.gates.len()));
+    }
+    if !lifted.artifacts.is_empty() {
+        out.push_str(&format!("\n  - artifacts: {}", lifted.artifacts.len()));
+    }
+    if !lifted.authorities.is_empty() {
+        out.push_str(&format!(
+            "\n  - authorities: {}",
+            lifted.authorities.len()
+        ));
+    }
+    out.push_str("\nSee the `methodology_metadata` mapping at the YAML root for raw bodies.");
+    out
+}
+
+/// Produce the YAML representation of the lifted methodology forms.
+/// Each category is a sequence of `{kind, id?, body, start_line}` entries
+/// (or `{id?, body, start_line, end_line}` for phases). Bodies are kept
+/// verbatim so reviewers and the future forge compiler can recover the
+/// exact source spelling.
+fn build_methodology_metadata_yaml(lifted: &MethodologyLifted) -> serde_yaml::Mapping {
+    use serde_yaml::{Mapping, Value as Yaml};
+
+    fn form_to_yaml(form: &MethodologyForm) -> Yaml {
+        let mut m = Mapping::new();
+        m.insert(Yaml::from("kind"), Yaml::from(form.kind.clone()));
+        if let Some(id) = &form.id {
+            m.insert(Yaml::from("id"), Yaml::from(id.clone()));
+        }
+        m.insert(Yaml::from("body"), Yaml::from(form.body.clone()));
+        m.insert(
+            Yaml::from("start_line"),
+            Yaml::from(form.start_line as u64),
+        );
+        Yaml::Mapping(m)
+    }
+
+    let mut root = Mapping::new();
+    if !lifted.phases.is_empty() {
+        let phases_seq: Vec<Yaml> = lifted
+            .phases
+            .iter()
+            .map(|ph| {
+                let mut m = Mapping::new();
+                m.insert(Yaml::from("kind"), Yaml::from("phase"));
+                if let Some(id) = &ph.id {
+                    m.insert(Yaml::from("id"), Yaml::from(id.clone()));
+                }
+                m.insert(Yaml::from("body"), Yaml::from(ph.body.clone()));
+                m.insert(Yaml::from("start_line"), Yaml::from(ph.start_line as u64));
+                m.insert(Yaml::from("end_line"), Yaml::from(ph.end_line as u64));
+                Yaml::Mapping(m)
+            })
+            .collect();
+        root.insert(Yaml::from("phases"), Yaml::Sequence(phases_seq));
+    }
+    if !lifted.principles.is_empty() {
+        root.insert(
+            Yaml::from("principles"),
+            Yaml::Sequence(lifted.principles.iter().map(form_to_yaml).collect()),
+        );
+    }
+    if !lifted.anti_patterns.is_empty() {
+        root.insert(
+            Yaml::from("anti_patterns"),
+            Yaml::Sequence(lifted.anti_patterns.iter().map(form_to_yaml).collect()),
+        );
+    }
+    if !lifted.gates.is_empty() {
+        root.insert(
+            Yaml::from("gates"),
+            Yaml::Sequence(lifted.gates.iter().map(form_to_yaml).collect()),
+        );
+    }
+    if !lifted.artifacts.is_empty() {
+        root.insert(
+            Yaml::from("artifacts"),
+            Yaml::Sequence(lifted.artifacts.iter().map(form_to_yaml).collect()),
+        );
+    }
+    if !lifted.authorities.is_empty() {
+        root.insert(
+            Yaml::from("authorities"),
+            Yaml::Sequence(lifted.authorities.iter().map(form_to_yaml).collect()),
+        );
+    }
+    root
 }
 
 /// Per-process monotonic counter feeding [`unique_generated_yaml_temp_path`]
@@ -1986,11 +2560,15 @@ mod tests {
             generated_at: "2026-04-25T00:00:00Z".to_string(),
             compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
         };
-        let steps = vec![MethodologyStep {
-            id: "s1".to_string(),
-            body: "(step s1 \"do x\")".to_string(),
+        let steps = vec![LocatedStep {
+            step: MethodologyStep {
+                id: "s1".to_string(),
+                body: "(step s1 \"do x\")".to_string(),
+            },
+            start_line: 0,
         }];
-        let yaml = build_generated_yaml(&meta, &steps, false).expect("yaml builds");
+        let yaml = build_generated_yaml(&meta, &steps, &MethodologyLifted::default(), false)
+            .expect("yaml builds");
         assert!(yaml.contains("id: methodology-foo-v0"));
         assert!(yaml.contains("source_kind: methodology_lisp"));
         assert!(yaml.contains(".missiond/workflows/foo.lisp"));
@@ -2000,6 +2578,12 @@ mod tests {
         assert!(yaml.contains("review_required: false"));
         assert!(yaml.contains("step_s1"));
         assert!(yaml.contains("type: slot_task"));
+        // No lifted forms → no methodology_metadata key emitted at all.
+        assert!(
+            !yaml.contains("methodology_metadata"),
+            "default lifted must produce no metadata key: {}",
+            yaml
+        );
         // round-trip parse via FlowDefinition (which silently drops the extra
         // metadata fields) — ensures the generated YAML is loader-ready.
         let parsed: crate::engine::flow::FlowDefinition =
@@ -2019,7 +2603,8 @@ mod tests {
             generated_at: "ts".to_string(),
             compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
         };
-        let yaml = build_generated_yaml(&meta, &[], true).expect("yaml builds");
+        let yaml = build_generated_yaml(&meta, &[], &MethodologyLifted::default(), true)
+            .expect("yaml builds");
         assert!(yaml.contains("review_required: true"));
         assert!(yaml.contains("manual_review"));
         assert!(yaml.contains("Manually review"));
@@ -2028,6 +2613,524 @@ mod tests {
             serde_yaml::from_str(&yaml).expect("FlowDefinition parses");
         assert_eq!(parsed.nodes.len(), 1);
         assert_eq!(parsed.nodes[0].id, "manual_review");
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Wave 12 / Task 04 — methodology semantic lifter v0
+    //
+    // These tests pin the conservative recognition surface for the six
+    // higher-order forms (phase / principle / anti-pattern / gate /
+    // artifact / authority). The lifter must:
+    //   1. Recognise each form at line-start with a whitespace/`)`
+    //      delimiter so `(phases …)` / `(principled …)` never match.
+    //   2. Preserve verbatim bodies (multi-line + string-paren safe).
+    //   3. Stay paren-balanced through nested step forms inside a phase.
+    //   4. NEVER convert lifted forms into executable nodes.
+    //   5. Surface metadata under a YAML root `methodology_metadata` key
+    //      that the FlowDefinition loader silently drops on round-trip.
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn lifter_recognises_all_six_form_keywords() {
+        let body = "\
+(workflow demo
+  (phase planning)
+  (principle no-fallback)
+  (anti-pattern silent-fallback)
+  (gate compile-passes)
+  (artifact intent.lisp)
+  (authority intent-flow.lisp))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert_eq!(lifted.phases.len(), 1, "phases: {:?}", lifted.phases);
+        assert_eq!(
+            lifted.principles.len(),
+            1,
+            "principles: {:?}",
+            lifted.principles
+        );
+        assert_eq!(
+            lifted.anti_patterns.len(),
+            1,
+            "anti_patterns: {:?}",
+            lifted.anti_patterns
+        );
+        assert_eq!(lifted.gates.len(), 1, "gates: {:?}", lifted.gates);
+        assert_eq!(
+            lifted.artifacts.len(),
+            1,
+            "artifacts: {:?}",
+            lifted.artifacts
+        );
+        assert_eq!(
+            lifted.authorities.len(),
+            1,
+            "authorities: {:?}",
+            lifted.authorities
+        );
+        assert_eq!(lifted.total_count(), 6);
+        assert_eq!(lifted.phases[0].id.as_deref(), Some("planning"));
+        assert_eq!(lifted.principles[0].id.as_deref(), Some("no-fallback"));
+        assert_eq!(lifted.anti_patterns[0].kind, "anti-pattern");
+        assert_eq!(lifted.artifacts[0].id.as_deref(), Some("intent.lisp"));
+    }
+
+    #[test]
+    fn lifter_ignores_lookalike_prefixes() {
+        // `(phases …)` / `(principled …)` / `(gateway …)` etc. share a
+        // prefix with the recognised keywords but must NOT match — the
+        // lifter only fires on a clean keyword + delimiter.
+        let body = "\
+(workflow demo
+  (phases big and bold)
+  (principled stance ok)
+  (anti-pattern-ish bad)
+  (gateway open)
+  (artifacts many)
+  (authorities-list a))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert!(lifted.is_empty(), "lookalikes lifted: {:?}", lifted);
+    }
+
+    #[test]
+    fn lifter_handles_phase_with_nested_step() {
+        // A phase containing nested (step …) forms must (a) lift the
+        // phase as a methodology form, (b) still allow extract_steps to
+        // surface the inner steps as executable candidates, and (c) the
+        // YAML builder must tag those step nodes with phase_id metadata.
+        let body = "\
+(workflow demo
+  (phase planning
+    (step plan-1 \"draft plan\")
+    (step plan-2 \"review plan\")))
+";
+        let lifted = extract_methodology_lifted(body);
+        let steps = extract_steps_with_lines(body);
+        assert_eq!(lifted.phases.len(), 1);
+        assert_eq!(lifted.phases[0].id.as_deref(), Some("planning"));
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].step.id, "plan-1");
+        assert_eq!(steps[1].step.id, "plan-2");
+        // Both steps fall inside the phase's line range.
+        assert!(steps[0].start_line >= lifted.phases[0].start_line);
+        assert!(steps[1].start_line <= lifted.phases[0].end_line);
+        let pid = phase_id_for_step(&lifted.phases, steps[0].start_line);
+        assert_eq!(pid.as_deref(), Some("planning"));
+    }
+
+    #[test]
+    fn lifter_principle_extraction_preserves_body() {
+        let body = "\
+(workflow demo
+  (principle fail-fast \"Reject silent fallbacks; surface errors at the boundary.\"))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert_eq!(lifted.principles.len(), 1);
+        let p = &lifted.principles[0];
+        assert_eq!(p.kind, "principle");
+        assert_eq!(p.id.as_deref(), Some("fail-fast"));
+        assert!(
+            p.body.contains("Reject silent fallbacks"),
+            "body must preserve docstring: {}",
+            p.body
+        );
+        // Body keeps its outer parens — that's the verbatim slice convention.
+        assert!(p.body.starts_with('('));
+        assert!(p.body.trim_end().ends_with(')'));
+    }
+
+    #[test]
+    fn lifter_anti_pattern_extraction_with_keyword_args() {
+        let body = "\
+(workflow demo
+  (anti-pattern poll-fallback
+    :why \"polling tries to recover from upstream failure silently\"
+    :remedy \"surface the upstream error and let the caller decide\"))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert_eq!(lifted.anti_patterns.len(), 1);
+        let ap = &lifted.anti_patterns[0];
+        assert_eq!(ap.kind, "anti-pattern");
+        assert_eq!(ap.id.as_deref(), Some("poll-fallback"));
+        assert!(ap.body.contains(":why"));
+        assert!(ap.body.contains(":remedy"));
+        assert!(ap.body.contains("polling tries to recover"));
+    }
+
+    #[test]
+    fn lifter_string_paren_safe() {
+        // String payloads can contain `(`/`)` glyphs that must NEVER move
+        // the depth counter. If the lifter mishandles them it will close
+        // the form too early or never close it at all.
+        let body = "\
+(workflow demo
+  (gate compile-passes
+    :note \"runs (cargo build --workspace) on green; ) is fine inside a string\"
+    :evidence \"test.log\"))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert_eq!(lifted.gates.len(), 1);
+        let g = &lifted.gates[0];
+        assert_eq!(g.id.as_deref(), Some("compile-passes"));
+        assert!(g.body.contains("cargo build"));
+        assert!(g.body.contains(":evidence"));
+        // Source paren balance unchanged — sanity guard against earlier-close bugs.
+        assert!(paren_balanced_ignoring_strings(&g.body));
+    }
+
+    #[test]
+    fn lifter_string_paren_safe_unterminated_phase_does_not_eat_eof() {
+        // Defensive: a malformed source where a phase opens but never
+        // closes must NOT panic the lifter. We just don't emit the
+        // unfinished form.
+        let body = "(workflow x\n  (phase open\n    (step s1 \"hi\")\n";
+        let lifted = extract_methodology_lifted(body);
+        assert!(lifted.phases.is_empty());
+    }
+
+    #[test]
+    fn lifter_anonymous_form_keeps_id_none() {
+        // `(phase :goal "x")` has no leading identifier — id should
+        // stay None instead of fabricating from the `:goal` keyword.
+        let body = "\
+(workflow demo
+  (phase :goal \"x\"))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert_eq!(lifted.phases.len(), 1);
+        assert_eq!(lifted.phases[0].id, None);
+    }
+
+    #[test]
+    fn lifter_artifact_and_authority_with_path_ids() {
+        // Real methodology lisps frequently use file paths as ids. The
+        // lifter must accept `/`, `.`, `_`, `-` in id tokens.
+        let body = "\
+(workflow demo
+  (artifact .missiond/v2/intent-flow.lisp)
+  (authority intent_memory.lisp))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert_eq!(lifted.artifacts.len(), 1);
+        assert_eq!(
+            lifted.artifacts[0].id.as_deref(),
+            Some(".missiond/v2/intent-flow.lisp")
+        );
+        assert_eq!(lifted.authorities.len(), 1);
+        assert_eq!(
+            lifted.authorities[0].id.as_deref(),
+            Some("intent_memory.lisp")
+        );
+    }
+
+    #[test]
+    fn lifter_preserves_source_order() {
+        // Order matters for human review — the YAML must read top-to-
+        // bottom against the source.
+        let body = "\
+(workflow demo
+  (principle p1)
+  (principle p2)
+  (principle p3))
+";
+        let lifted = extract_methodology_lifted(body);
+        assert_eq!(lifted.principles.len(), 3);
+        assert_eq!(lifted.principles[0].id.as_deref(), Some("p1"));
+        assert_eq!(lifted.principles[1].id.as_deref(), Some("p2"));
+        assert_eq!(lifted.principles[2].id.as_deref(), Some("p3"));
+    }
+
+    #[test]
+    fn match_form_keyword_requires_delimiter() {
+        // Direct unit cover of the prefix matcher — the load-bearing
+        // disambiguation rule between `(phase` and `(phases`.
+        const KEYWORDS: &[&str] = &["phase", "step"];
+        assert_eq!(
+            match_form_keyword("(phase planning)", KEYWORDS),
+            Some(("phase", " planning)"))
+        );
+        assert_eq!(
+            match_form_keyword("(phase)", KEYWORDS),
+            Some(("phase", ")"))
+        );
+        assert_eq!(match_form_keyword("(phases big)", KEYWORDS), None);
+        assert_eq!(match_form_keyword("(phaseA bad)", KEYWORDS), None);
+        assert_eq!(match_form_keyword("(step s1)", KEYWORDS), Some(("step", " s1)")));
+        assert_eq!(match_form_keyword("(steps)", KEYWORDS), None);
+        assert_eq!(match_form_keyword("not-a-form", KEYWORDS), None);
+    }
+
+    #[test]
+    fn parse_optional_form_id_rejects_keyword_args_and_strings() {
+        // Identifier-only — no colon-prefixed keyword args, no strings.
+        assert_eq!(
+            parse_optional_form_id("ident :rest"),
+            Some("ident".to_string())
+        );
+        assert_eq!(parse_optional_form_id(":goal x"), None);
+        assert_eq!(parse_optional_form_id("\"quoted\""), None);
+        assert_eq!(parse_optional_form_id("(nested)"), None);
+        assert_eq!(parse_optional_form_id(""), None);
+        // Path-like ids accepted (real methodology convention).
+        assert_eq!(
+            parse_optional_form_id("intent-flow.lisp :rest"),
+            Some("intent-flow.lisp".to_string())
+        );
+        // Tokens with disallowed glyphs (e.g. `?`, `!`) reject — we'd
+        // rather lose an id than fabricate something the source did not
+        // sanction.
+        assert_eq!(parse_optional_form_id("foo!bar :rest"), None);
+    }
+
+    #[test]
+    fn phase_id_for_step_returns_anonymous_id_when_phase_unnamed() {
+        let phases = vec![
+            MethodologyPhase {
+                id: None,
+                body: "(phase ...)".to_string(),
+                start_line: 5,
+                end_line: 9,
+            },
+            MethodologyPhase {
+                id: Some("named".to_string()),
+                body: "(phase named ...)".to_string(),
+                start_line: 12,
+                end_line: 14,
+            },
+        ];
+        assert_eq!(phase_id_for_step(&phases, 6).as_deref(), Some("phase_5"));
+        assert_eq!(phase_id_for_step(&phases, 13).as_deref(), Some("named"));
+        // Outside any phase → None.
+        assert_eq!(phase_id_for_step(&phases, 0), None);
+        assert_eq!(phase_id_for_step(&phases, 11), None);
+    }
+
+    #[test]
+    fn yaml_node_carries_phase_id_when_step_belongs_to_phase() {
+        let body = "\
+(workflow demo
+  (phase planning
+    (step plan-1 \"plan it\")))
+";
+        let lifted = extract_methodology_lifted(body);
+        let steps = extract_steps_with_lines(body);
+        let meta = GeneratedMeta {
+            flow_id: "methodology-demo-v0".to_string(),
+            name: "demo".to_string(),
+            source_path: ".missiond/workflows/demo.lisp".to_string(),
+            source_hash: "h".to_string(),
+            generated_at: "ts".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let yaml = build_generated_yaml(&meta, &steps, &lifted, false).expect("yaml builds");
+        // Per-step methodology_metadata mapping with phase_id.
+        assert!(
+            yaml.contains("phase_id: planning"),
+            "yaml must tag step with phase_id: {}",
+            yaml
+        );
+        // Loader still parses (unknown fields are tolerated by serde_yaml).
+        let parsed: crate::engine::flow::FlowDefinition =
+            serde_yaml::from_str(&yaml).expect("FlowDefinition parses");
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.nodes[0].id, "step_plan-1");
+    }
+
+    #[test]
+    fn yaml_root_carries_methodology_metadata_when_lifted_present() {
+        let body = "\
+(workflow demo
+  (principle p1 \"fail fast\")
+  (anti-pattern silent-fallback))
+";
+        let lifted = extract_methodology_lifted(body);
+        let steps = extract_steps_with_lines(body);
+        assert!(steps.is_empty(), "no (step …) forms in this fixture");
+        let meta = GeneratedMeta {
+            flow_id: "methodology-demo-v0".to_string(),
+            name: "demo".to_string(),
+            source_path: ".missiond/workflows/demo.lisp".to_string(),
+            source_hash: "h".to_string(),
+            generated_at: "ts".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let yaml = build_generated_yaml(&meta, &steps, &lifted, true).expect("yaml builds");
+        // Manual-review fallback because no executable steps; methodology
+        // metadata still surfaces.
+        assert!(yaml.contains("manual_review"));
+        assert!(yaml.contains("methodology_metadata"));
+        assert!(yaml.contains("principles"));
+        assert!(yaml.contains("anti_patterns"));
+        assert!(yaml.contains("fail fast"));
+        assert!(yaml.contains("silent-fallback"));
+        // Manual-review prompt summarises lifted counts so the reviewer
+        // does not have to scroll the metadata mapping.
+        assert!(yaml.contains("Lifted methodology semantics"));
+        assert!(yaml.contains("principles: 1"));
+        assert!(yaml.contains("anti-patterns: 1"));
+    }
+
+    #[test]
+    fn yaml_round_trips_when_lifted_metadata_present() {
+        // YAML metadata round-trip test — the FlowDefinition loader must
+        // silently drop `methodology_metadata` while every executable
+        // shape (id / name / nodes) survives.
+        let body = "\
+(workflow demo
+  (principle p1 \"ok\")
+  (phase planning
+    (step plan-1 \"plan it\"))
+  (gate g1 \"green build\")
+  (anti-pattern silent-fallback)
+  (artifact .missiond/v2/intent-flow.lisp)
+  (authority intent-memory.lisp))
+";
+        let lifted = extract_methodology_lifted(body);
+        let steps = extract_steps_with_lines(body);
+        let meta = GeneratedMeta {
+            flow_id: "methodology-demo-v0".to_string(),
+            name: "demo".to_string(),
+            source_path: ".missiond/workflows/demo.lisp".to_string(),
+            source_hash: "h".to_string(),
+            generated_at: "ts".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let yaml = build_generated_yaml(&meta, &steps, &lifted, false).expect("yaml builds");
+        // Loader must accept the YAML — methodology_metadata & phase_id
+        // are unknown to FlowDefinition's serde shape and must be ignored.
+        let parsed: crate::engine::flow::FlowDefinition = serde_yaml::from_str(&yaml)
+            .expect("FlowDefinition parses despite extra metadata");
+        assert_eq!(parsed.id, "methodology-demo-v0");
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.nodes[0].id, "step_plan-1");
+        // Raw YAML retains every lifted form so an audit can reconstruct
+        // the methodology.
+        for needle in [
+            "methodology_metadata",
+            "principles",
+            "phases",
+            "gates",
+            "anti_patterns",
+            "artifacts",
+            "authorities",
+            "phase_id: planning",
+            ".missiond/v2/intent-flow.lisp",
+            "intent-memory.lisp",
+        ] {
+            assert!(
+                yaml.contains(needle),
+                "yaml missing `{}`: {}",
+                needle,
+                yaml
+            );
+        }
+    }
+
+    #[test]
+    fn methodology_lifted_total_count_matches_breakdown() {
+        let lifted = MethodologyLifted {
+            phases: vec![MethodologyPhase {
+                id: None,
+                body: "()".into(),
+                start_line: 0,
+                end_line: 0,
+            }],
+            principles: vec![MethodologyForm {
+                kind: "principle".into(),
+                id: None,
+                body: "()".into(),
+                start_line: 0,
+            }],
+            anti_patterns: vec![],
+            gates: vec![MethodologyForm {
+                kind: "gate".into(),
+                id: None,
+                body: "()".into(),
+                start_line: 0,
+            }],
+            artifacts: vec![],
+            authorities: vec![],
+        };
+        assert_eq!(lifted.total_count(), 3);
+        assert!(!lifted.is_empty());
+        assert!(MethodologyLifted::default().is_empty());
+        assert_eq!(MethodologyLifted::default().total_count(), 0);
+    }
+
+    #[test]
+    fn manual_review_prompt_omits_lift_section_when_lifted_empty() {
+        let meta = GeneratedMeta {
+            flow_id: "methodology-foo-v0".into(),
+            name: "foo".into(),
+            source_path: "src.lisp".into(),
+            source_hash: "abc".into(),
+            generated_at: "ts".into(),
+            compiler_status: COMPILER_STATUS_PREVIEW.into(),
+        };
+        let prompt = build_manual_review_prompt(&meta, &MethodologyLifted::default());
+        assert!(prompt.contains("Manually review"));
+        assert!(
+            !prompt.contains("Lifted methodology semantics"),
+            "no lifted section when lifted is empty: {}",
+            prompt
+        );
+    }
+
+    #[test]
+    fn lifter_does_not_promote_phase_with_steps_when_no_step_keyword_present() {
+        // Conservative invariant: lifting alone NEVER produces an
+        // executable node. A methodology with phases but no steps must
+        // still hit the manual_review fallback.
+        let body = "\
+(workflow phase-only
+  (phase exploration)
+  (phase design-freeze))
+";
+        let lifted = extract_methodology_lifted(body);
+        let steps = extract_steps_with_lines(body);
+        assert_eq!(lifted.phases.len(), 2);
+        assert!(steps.is_empty());
+        let meta = GeneratedMeta {
+            flow_id: "methodology-phase-only-v0".into(),
+            name: "phase-only".into(),
+            source_path: ".missiond/workflows/phase-only.lisp".into(),
+            source_hash: "h".into(),
+            generated_at: "ts".into(),
+            compiler_status: COMPILER_STATUS_PREVIEW.into(),
+        };
+        let yaml = build_generated_yaml(&meta, &steps, &lifted, true).expect("yaml builds");
+        let parsed: crate::engine::flow::FlowDefinition =
+            serde_yaml::from_str(&yaml).expect("parses");
+        assert_eq!(parsed.nodes.len(), 1);
+        assert_eq!(parsed.nodes[0].id, "manual_review");
+    }
+
+    #[test]
+    fn extract_steps_with_lines_preserves_back_compat_recognition() {
+        // The line-tracking variant must recognise the same forms as the
+        // legacy line-counter — pin both extractors against the same
+        // fixtures so divergence is impossible.
+        let bodies = [
+            "(workflow demo (step s1 \"a\") (step s2 \"b\"))",
+            "(workflow demo\n  (step s1 \"a\")\n  (step s2 \"b\"))",
+            "(workflow demo\n  (step long\n    \"line one\n     line two\"))",
+            "(workflow demo\n  (steps (foo))\n  (step real \"ok\"))",
+        ];
+        for body in bodies {
+            let legacy = extract_steps(body);
+            let with_lines = extract_steps_with_lines(body);
+            assert_eq!(
+                legacy.len(),
+                with_lines.len(),
+                "step count diverged for: {}",
+                body
+            );
+            for (a, b) in legacy.iter().zip(with_lines.iter()) {
+                assert_eq!(a.id, b.step.id);
+                assert_eq!(a.body, b.step.body);
+            }
+        }
     }
 
     #[test]

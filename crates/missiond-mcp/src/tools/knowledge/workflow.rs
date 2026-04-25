@@ -9,8 +9,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
          distill 默认 dry-run，传 distill_mode=\"sonnet\" 触发 workflow-distiller actor v0 \
          (从 plan + evidence sidecar 蒸馏 workflow_sexp + match_rules)，persist=true 写 workflow 行；\
          compile_methodology 读 `.missiond/workflows/<name>.lisp`：默认 compile_mode=\"dry_run\" 给预览；\
-         compile_mode=\"deterministic\" 走 v0 编译器 (paren-validate + (step …) 提取 + 生成可被 mission_flow_run 加载的 YAML)，\
-         persist=true 写到 `.missiond/generated/flows/<flow_id>.yaml` (atomic, overwrite 控制) 并附 source_hash；\
+         compile_mode=\"deterministic\" 走 v0 编译器 (paren-validate + (step …) 提取 + 生成可被 mission_flow_run 加载的 YAML)；\
+         v0 同时保守提取 6 类 methodology 高阶语义 (phase / principle / anti-pattern / gate / artifact / authority) 写入 \
+         generated YAML 的 `methodology_metadata` (FlowDefinition 加载时静默忽略，原始 YAML 保留供人类/未来 forge compiler 使用)，\
+         不会把这些 form 强行变成可执行 node — phase 内含 step 时 step 节点带 `methodology_metadata.phase_id`，无 step 仅有 \
+         phase/principle 时仍只生成单个 manual_review 节点；persist=true 写到 `.missiond/generated/flows/<flow_id>.yaml` \
+         (atomic, overwrite 控制) 并附 source_hash + lifted_form_count + lifted_form_breakdown；\
          run_methodology 解析 flow_id|flow_path|name 找 compiled YAML，dry_run=true 返 would_run，\
          dry_run=false 内部派发到 mission_flow_run 引擎；缺 YAML 时返结构化 MISSING_COMPILED_FLOW + 下一步指引。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
