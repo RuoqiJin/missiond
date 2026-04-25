@@ -131,8 +131,13 @@ fn build_properties() -> Value {
 
     p.insert("scheduler_mode".into(), prop_enum(
         "string",
-        "[execute] default (current single-node v0 runner) | dag_v1 (Wave 12 minimal DAG scheduler). dag_v1 only parses explicit `(node :id ... :target ... :depends-on [...])` forms inside PLAN.lisp; supported per-node fields: id / target / objective / depends-on / condition / failure-policy / timeout-ms / dispatch-strategy / target-project / requested-cwd / flow-id. failure-policy ∈ {fail-fast (default), continue}; unsupported fields are preserved into node_hint_summary.unsupported_fields and never silently dropped. Requires execute_mode=internal. v1 runs ready nodes sequentially in topological order; concurrent dispatch is future work.",
+        "[execute] default (current single-node v0 runner) | dag_v1 (Wave 12 minimal DAG scheduler, upgraded to wave-based runtime in Wave 13/02). dag_v1 only parses explicit `(node :id ... :target ... :depends-on [...])` forms inside PLAN.lisp; supported per-node fields: id / target / objective / depends-on / condition / failure-policy / timeout-ms / dispatch-strategy / target-project / requested-cwd / flow-id. failure-policy ∈ {fail-fast (default), continue}; unsupported fields are preserved into node_hint_summary.unsupported_fields and never silently dropped. Requires execute_mode=internal. v2 runtime drives ready nodes through a tokio JoinSet up to `max_parallel_nodes` per wave (default 1 = strict-sequential v1 behaviour); each per-node state transition (ready->running, running->{succeeded|failed}, pending->skipped) appends one plan_dag_node_dispatch evidence entry tagged with `state_transition`. Response surfaces scheduler_mode / node_count / max_parallel_nodes / node_results[] / skipped_nodes[] / aggregate_status / concurrency_plan.",
         &["default", "dag_v1"],
+    ));
+
+    p.insert("max_parallel_nodes".into(), prop(
+        "integer",
+        "[execute scheduler_mode=dag_v1] Wave 13/02 wave-scheduler concurrency budget. Default 1 (preserves the v1 strict-sequential contract — every wave dispatches exactly one ready node). Values >1 let the scheduler hand up to that many ready nodes to a tokio JoinSet per wave; ready-set selection is sorted by node id for deterministic test output. 0 / negative are clamped to 1. Each spawned task clones AppState (cheap, all Arc fields) and the plan; per-node evidence writes are serialised through the scheduler's main task so the on-disk sidecar stays consistent under concurrency. Has no effect when scheduler_mode!=dag_v1.",
     ));
 
     p.insert("dispatch_strategy".into(), prop_enum(
@@ -203,7 +208,7 @@ fn build_properties() -> Value {
 
     p.insert("dry_run".into(), prop(
         "boolean",
-        "[execute internal] when true, return the would-be inner args without dispatching (does NOT mutate plan status, does NOT write evidence). Also recognised under scheduler_mode=dag_v1 to return the DAG plan + topological order without dispatching nodes or writing per-node evidence.",
+        "[execute internal] when true, return the would-be inner args without dispatching (does NOT mutate plan status, does NOT write evidence). Also recognised under scheduler_mode=dag_v1 to return the DAG plan + topological order + projected concurrency_plan (the wave layout the v2 wave-scheduler would launch given max_parallel_nodes) without dispatching nodes or writing per-node evidence.",
     ));
 
     p.insert("evidence".into(), prop_no_type(
@@ -258,11 +263,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
          runner 在 objective 中注入字面提示「使用 agent-team提高效率」（已含则不重复）；\
          dispatch_strategy 关键字映射：agent-team→agent-team、code-alignment/fresh-session→fresh-code-alignment、lisp/architecture/resident→resident-lisp，未识别归一化 unknown 不硬失败；\
          若 parser 无法导出安全 target 且 caller 未传，仍返回原 MISSING_PARAM 结构化错误（suggestion 提示新增 target arg 或 PLAN hint）。\
-         scheduler_mode=\"dag_v1\" (Wave 12 / Task 02): 在 v0 单节点 runner 之上启用最小 DAG scheduler，\
+         scheduler_mode=\"dag_v1\" (Wave 12 / Task 02 起，Wave 13 / 02 升级到 v2 runtime): 在 v0 单节点 runner 之上启用 DAG scheduler，\
          只解析 PLAN.lisp 中显式 `(node :id ... :target ... :depends-on [...])` 节点；支持字段 id/target/objective/depends-on/\
          condition/failure-policy/timeout-ms/dispatch-strategy/target-project/requested-cwd/flow-id；\
          failure-policy ∈ {fail-fast (默认), continue}；不支持字段保留进 node_hint_summary 不静默丢弃；\
-         v1 顺序执行 ready set，并发为后续工作。\
+         v2 runtime: tokio JoinSet 驱动的 wave-based 调度器，每 wave 取最多 max_parallel_nodes 个 ready 节点并发 dispatch (默认 1 = 严格顺序 v1 兼容)；\
+         每节点 state transition (ready->running, running->{succeeded|failed}, pending->skipped) 都写一条 plan_dag_node_dispatch 证据；\
+         响应字段: scheduler_mode / node_count / max_parallel_nodes / node_results[] / skipped_nodes[] / aggregate_status / concurrency_plan / topological_order；\
+         dry_run=true 只返 DAG + concurrency_plan 不 dispatch。\
          record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`；\
          Wave 12 evidence-collector v0: 新增 evidence_kind / source 两个可选参数 — 当至少一个被传入时,\
          entry 会被 wrap 为带 `schema_version=\"v0\"` + canonical `source` + canonical `kind` 的 typed 形态\

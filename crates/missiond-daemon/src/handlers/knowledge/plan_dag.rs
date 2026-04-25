@@ -1,8 +1,17 @@
-//! mission_plan — DAG scheduler v1 (minimal, explicit-node-only).
+//! mission_plan — DAG scheduler v2 (bounded ready-node concurrency).
 //!
 //! This module is loaded by `mission_plan(action=execute, scheduler_mode="dag_v1")`.
 //! It is intentionally separated from `plan.rs` so the v0 single-node runner
 //! stays untouched as the default contract.
+//!
+//! v2 changes (Wave 13 / Task 02) keep the parser / validator / dry-run wire
+//! shape identical to v1 — they only upgrade the runtime: a wave-based
+//! scheduler now dispatches up to `max_parallel_nodes` ready nodes
+//! concurrently within the same async task, observes a richer node lifecycle
+//! (`pending / ready / running / succeeded / failed / skipped`), and writes
+//! one evidence-collector entry per state transition (start + finish for
+//! every running node, plus an explicit skip entry for every taint /
+//! condition / fail-fast-aborted node).
 //!
 //! Lisp authority:
 //!   - intent-flow.lisp        :: F-intent-alignment-plan-execution-loop ::
@@ -12,7 +21,7 @@
 //!   - intent-tools.lisp       :: implemented-surface mission_plan ::
 //!                                 :execute-contract
 //!
-//! Scope (v1) — what this scheduler DOES support:
+//! Scope (v2) — what this scheduler DOES support:
 //!   * Top-level `(node :id ... :target ...)` forms inside an outer
 //!     `(plan|plan-draft|PLAN ...)` envelope.
 //!   * Field allowlist:
@@ -34,19 +43,33 @@
 //!       - The dependency graph must be acyclic (Kahn topo sort).
 //!       - `:target` must be on the inner-dispatch whitelist.
 //!   * Execution mode:
-//!       - Sequential by topological order (concurrency is future work).
-//!       - `failure-policy=fail-fast` (default): the first failure stops the
-//!         scheduler and downstream nodes are marked `skipped_upstream_failed`.
-//!       - `failure-policy=continue`: failed node taints its transitive
-//!         downstream (marked `skipped_upstream_failed`); independent nodes
-//!         keep running. Per-node policy applies to that node's own failure.
-//!   * `dry_run=true`: returns the planned DAG (nodes + topo order) without
+//!       - Wave-based scheduler driven by a `tokio::task::JoinSet`. Each
+//!         wave drains up to `max_parallel_nodes` ready nodes (default 1
+//!         keeps the v1 strictly-sequential contract intact). Ready-node
+//!         selection is deterministic (sorted by node id) so test output is
+//!         reproducible across runs.
+//!       - Node lifecycle: `pending → ready → running → succeeded | failed`
+//!         for executed nodes, `pending → skipped` for taint / condition /
+//!         fail-fast-aborted nodes. Each transition writes one
+//!         `plan_dag_node_dispatch` evidence entry tagged with
+//!         `state_transition`.
+//!       - `failure-policy=fail-fast` (default): the failing node taints its
+//!         transitive downstream and the scheduler stops dispatching new
+//!         waves. In-flight nodes from the *current* wave are awaited so the
+//!         caller still sees their final state — they are never abandoned
+//!         mid-flight. Any nodes still `pending` after the in-flight wave
+//!         drains are marked `skipped` with reason `fail_fast_aborted`.
+//!       - `failure-policy=continue`: the failing node taints only its own
+//!         transitive downstream (marked `skipped_upstream_failed`);
+//!         independent ready nodes keep being dispatched in subsequent waves.
+//!   * `dry_run=true`: returns the planned DAG, the topological order, and
+//!     the projected concurrency waves (groups of node ids the scheduler
+//!     would launch together given `max_parallel_nodes`) without
 //!     dispatching anything and without writing evidence.
-//!   * Evidence sidecar: each executed node appends a `plan_dag_node_dispatch`
-//!     entry via `super::plan::append_plan_evidence_entry`.
+//!   * Evidence sidecar: every node-state transition appends one
+//!     `plan_dag_node_dispatch` entry via the typed evidence collector.
 //!
-//! Out of scope (v1) — explicitly NOT supported:
-//!   * Concurrent dispatch across independent ready nodes (sequential only).
+//! Out of scope (v2) — explicitly NOT supported:
 //!   * Per-node retry policy.
 //!   * Rollback / compensation.
 //!   * Condition evaluation (`:condition` is captured into evidence but never
@@ -58,6 +81,15 @@
 //!   * Unsupported per-node fields (anything outside the allowlist above) are
 //!     captured into `node_hint_summary.unsupported_fields[node_id]` so the
 //!     audit trail never silently drops author intent.
+//!   * Live `ExecutionEvent` bus subscription. Like v1 we still attach an
+//!     `EventRef::unavailable("…")` placeholder to each per-node entry so
+//!     consumers can distinguish "no events at all" from "we tried to
+//!     correlate but the bus subscription is not yet wired". Wave-13 / 02
+//!     intentionally does NOT extend the `ExecutionEvent` enum: scheduler
+//!     runtime and bus wiring are orthogonal concerns and bundling them
+//!     would force every event-bus consumer (audit dashboards, replayers,
+//!     DLQ) to handle new variants for a feature that does not yet emit them.
+//!     The placeholder reason string already records the gap in-band.
 
 use anyhow::Result;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
@@ -737,6 +769,7 @@ pub(super) async fn action_execute_dag_v1(
     // Plan must be re-fetched by caller for status checks; we just need the
     // sexp_text and the id here.
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
+    let max_parallel_nodes = parse_max_parallel_nodes(args);
 
     let (parsed, order) = match build_validated_dag(&plan.sexp_text) {
         Ok(v) => v,
@@ -745,6 +778,7 @@ pub(super) async fn action_execute_dag_v1(
 
     let nodes_summary = build_nodes_summary(&parsed.nodes, &order);
     let node_hint_summary = build_node_hint_summary(&parsed);
+    let concurrency_plan = compute_concurrency_plan(&parsed.nodes, &order, max_parallel_nodes);
 
     if dry_run {
         return Ok(ToolResult::json_pretty(&json!({
@@ -754,13 +788,17 @@ pub(super) async fn action_execute_dag_v1(
             "runner_status": "dry_run_no_dispatch",
             "plan_id": plan.id,
             "board_task_id": plan.board_task_id,
+            "node_count": parsed.nodes.len(),
+            "max_parallel_nodes": max_parallel_nodes,
             "nodes": nodes_summary,
             "topological_order": order,
+            "concurrency_plan": concurrency_plan,
             "node_hint_summary": node_hint_summary,
         })));
     }
 
-    let outcome = execute_sequential(state, args, plan, &parsed, &order).await?;
+    let outcome =
+        execute_with_concurrency(state, args, plan, &parsed, &order, max_parallel_nodes).await?;
     let aggregate_status = outcome.aggregate_status();
     let evidence_path = outcome.evidence_path.clone();
     let evidence_error = outcome.evidence_error.clone();
@@ -777,13 +815,21 @@ pub(super) async fn action_execute_dag_v1(
 
     let mut payload = json!({
         "status": aggregate_status,
+        "aggregate_status": aggregate_status,
         "execute_mode": "internal",
         "scheduler_mode": "dag_v1",
         "runner_status": outcome.runner_status(),
         "plan_id": plan.id,
         "board_task_id": plan.board_task_id,
+        "node_count": parsed.nodes.len(),
+        "max_parallel_nodes": max_parallel_nodes,
+        "node_results": outcome.node_results_json(),
+        // `nodes` retained as the v1-compatible alias for `node_results` so
+        // any caller that already pivots on the older field keeps working.
         "nodes": outcome.node_results_json(),
+        "skipped_nodes": outcome.skipped_nodes_json(),
         "topological_order": order,
+        "concurrency_plan": concurrency_plan,
         "node_hint_summary": node_hint_summary,
         "evidence_path": evidence_path,
     });
@@ -855,12 +901,45 @@ fn build_node_hint_summary(parsed: &ParsedDag) -> Value {
     })
 }
 
+/// Terminal node state recorded in `NodeResult`. Mirrors the v1 enum so the
+/// per-node JSON shape (`state` discriminant + `failed_dep` extra) stays
+/// byte-identical for downstream readers; v2 only adds `SkippedFailFastAbort`
+/// to distinguish "we never dispatched you because an unrelated upstream
+/// failed under fail-fast" from "your direct dependency failed".
 #[derive(Debug, Clone)]
 enum NodeState {
     Succeeded,
     Failed { reason: String },
     SkippedUpstreamFailed { failed_dep: String },
     SkippedCondition,
+    /// `failure-policy=fail-fast` aborted the scheduler before this node was
+    /// ever ready. Distinct from `SkippedUpstreamFailed` because the failing
+    /// upstream is not necessarily a transitive dependency — under fail-fast
+    /// every still-pending node is force-skipped once the abort flag flips.
+    SkippedFailFastAbort { aborter: String },
+}
+
+/// Per-node lifecycle phase. Drives the wave-scheduler bookkeeping; mapped to
+/// `state` discriminants in the response only after the node terminates. The
+/// intermediate phases (`Pending`, `Ready`, `Running`) never leak into the
+/// response — they live entirely in the scheduler's internal state map.
+///
+/// `Ready` is the brief moment between the scheduler computing the ready set
+/// and dispatching it to the JoinSet. The current loop transitions
+/// `Pending -> Running` directly (skipping the explicit `Ready` storage)
+/// because the ready set is recomputed each iteration; the variant is kept
+/// in the enum to satisfy the wave-13/02 spec lifecycle list and to leave
+/// room for a future scheduler that materialises a persistent ready queue
+/// (`#[allow(dead_code)]` is intentional for now).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NodeLifecycle {
+    Pending,
+    #[allow(dead_code)]
+    Ready,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
 }
 
 #[derive(Debug, Clone)]
@@ -894,6 +973,10 @@ impl ExecutionOutcome {
                     Some(("failed_dep", failed_dep.clone())),
                 ),
                 NodeState::SkippedCondition => ("skipped_condition", None),
+                NodeState::SkippedFailFastAbort { aborter } => (
+                    "skipped_fail_fast_abort",
+                    Some(("aborter", aborter.clone())),
+                ),
             };
             let mut e = json!({
                 "id": r.id,
@@ -901,6 +984,37 @@ impl ExecutionOutcome {
                 "state": state_str,
                 "dispatch_strategy": r.dispatch_strategy,
                 "inner_result": r.inner_payload,
+            });
+            if let Some((k, v)) = extra {
+                e[k] = json!(v);
+            }
+            out.push(e);
+        }
+        Value::Array(out)
+    }
+
+    /// Project the subset of results that ended in a `skipped_*` discriminant
+    /// so callers can grep without re-walking the full results array. Order
+    /// matches the topological-order placement of each result.
+    fn skipped_nodes_json(&self) -> Value {
+        let mut out: Vec<Value> = Vec::new();
+        for r in &self.results {
+            let (state_str, extra) = match &r.state {
+                NodeState::SkippedUpstreamFailed { failed_dep } => (
+                    "skipped_upstream_failed",
+                    Some(("failed_dep", failed_dep.clone())),
+                ),
+                NodeState::SkippedCondition => ("skipped_condition", None),
+                NodeState::SkippedFailFastAbort { aborter } => (
+                    "skipped_fail_fast_abort",
+                    Some(("aborter", aborter.clone())),
+                ),
+                _ => continue,
+            };
+            let mut e = json!({
+                "id": r.id,
+                "target": r.target,
+                "state": state_str,
             });
             if let Some((k, v)) = extra {
                 e[k] = json!(v);
@@ -958,256 +1072,673 @@ impl ExecutionOutcome {
     }
 }
 
-async fn execute_sequential(
+/// Outcome of dispatching a single node — produced inside the spawned task
+/// so the scheduler's main loop can decide success/failure + record evidence
+/// without holding any per-node lock during the dispatch itself.
+struct DispatchOutcome {
+    node_id: String,
+    target: String,
+    dispatch_strategy: String,
+    inner_payload: Value,
+    /// `Ok(())` when the inner handler returned a non-error tool result;
+    /// `Err(reason)` when either inner-args building or the inner handler
+    /// surfaced an error. The reason string is what we surface in the
+    /// per-node response under `reason` and in the `running -> failed`
+    /// evidence entry's failure annotation.
+    classification: std::result::Result<(), String>,
+}
+
+async fn dispatch_node(
+    state: AppState,
+    plan: Plan,
+    node: DagNode,
+) -> Result<DispatchOutcome> {
+    let inner_args_built = build_node_inner_args(&node, &plan);
+    let dispatch_strategy = inner_args_built.dispatch_strategy.clone();
+    let inner_args = match inner_args_built.inner_args {
+        Ok(v) => v,
+        Err(err_payload) => {
+            let reason = err_payload
+                .as_object()
+                .and_then(|m| m.get("error"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("inner args build failed")
+                .to_string();
+            return Ok(DispatchOutcome {
+                node_id: node.id.clone(),
+                target: node.target.clone(),
+                dispatch_strategy,
+                inner_payload: err_payload,
+                classification: Err(reason),
+            });
+        }
+    };
+
+    let inner_result = match node.target.as_str() {
+        "mission_execution" => {
+            super::agent_execution::handle(&state, "mission_execution", inner_args.clone()).await?
+        }
+        "mission_task_delegate" => {
+            super::super::compute::task_delegate::handle(
+                &state,
+                "mission_task_delegate",
+                inner_args.clone(),
+            )
+            .await?
+        }
+        "mission_flow_run" => {
+            super::super::compute::flow_run::handle(&state, "mission_flow_run", inner_args.clone())
+                .await?
+        }
+        _ => unreachable!("DAG validation already enforced target whitelist"),
+    };
+
+    let inner_payload = tool_result_payload(&inner_result);
+    let inner_is_error = inner_result.is_error.unwrap_or(false);
+    let classification = if inner_is_error {
+        Err(inner_payload
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("inner handler returned error")
+            .to_string())
+    } else {
+        Ok(())
+    };
+    Ok(DispatchOutcome {
+        node_id: node.id.clone(),
+        target: node.target.clone(),
+        dispatch_strategy,
+        inner_payload,
+        classification,
+    })
+}
+
+/// Pre-built immutable evidence parameters that vary per call to
+/// `action_execute_dag_v1`. The scheduler captures these once so each
+/// per-node evidence emit doesn't re-thread the same args through.
+struct EvidenceCtx<'a> {
+    plan_id: uuid::Uuid,
+    project_arg: Option<&'a str>,
+    cwd_arg: Option<&'a str>,
+    target_project_arg: Option<&'a str>,
+}
+
+const EVENT_REF_UNAVAILABLE_REASON: &str =
+    "plan_dag scheduler v1 does not yet subscribe to the live \
+     ExecutionEvent bus; caller correlates by plan_id + node_id";
+
+/// Emit `ready -> running` evidence at the moment the scheduler hands a node
+/// to its dispatch task. Kept structurally identical to the success/failure
+/// branches so audit dashboards can pivot on `state_transition` alone.
+async fn emit_evidence_running(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    outcome: &mut ExecutionOutcome,
+) {
+    let entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition("ready -> running")
+    .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy));
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: ready->running evidence append failed"
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
+/// Emit `running -> succeeded` (success branch) or `running -> failed`
+/// (failure branch) evidence after the dispatch task returns. The two
+/// branches keep the byte shape of v1's `ready -> {succeeded|failed}` legacy
+/// passthrough fields so existing audit consumers do not need updates.
+async fn emit_evidence_finished(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    inner_payload: &Value,
+    succeeded: bool,
+    outcome: &mut ExecutionOutcome,
+) {
+    let mut entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy));
+    if succeeded {
+        // Success branch — populate `inner_dispatch` (canonical typed slot)
+        // AND `inner_result` (legacy alias) so wave-12 typed readers and
+        // pre-wave12 dashboard greps both keep working byte-for-byte.
+        entry = entry
+            .with_inner_dispatch(inner_payload.clone())
+            .with_state_transition("running -> succeeded")
+            .with_extra("inner_result", inner_payload.clone());
+    } else {
+        // Failure branch — keep the legacy `inner_error` extra slot for
+        // readers that historically filtered on it; intentionally do NOT
+        // call `with_inner_dispatch` so success vs failure stay shape-distinct.
+        entry = entry
+            .with_state_transition("running -> failed")
+            .with_extra("inner_error", inner_payload.clone());
+    }
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: running->{} evidence append failed",
+            if succeeded { "succeeded" } else { "failed" }
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
+/// Emit a `pending -> skipped` evidence entry for nodes the scheduler never
+/// dispatches (taint propagation, condition gating, fail-fast abort). The
+/// `skip_reason` and `skip_detail` fields surface why the skip happened so
+/// audit consumers can route on a single transition string.
+async fn emit_evidence_skipped(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    skip_reason: &str,
+    skip_detail: Option<(&'static str, String)>,
+    outcome: &mut ExecutionOutcome,
+) {
+    let mut entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition("pending -> skipped")
+    .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("skip_reason", json!(skip_reason));
+    if let Some((k, v)) = skip_detail {
+        entry = entry.with_extra(k, json!(v));
+    }
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: pending->skipped evidence append failed"
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
+/// Wave-based scheduler. Drains up to `max_parallel_nodes` ready nodes per
+/// wave through a `tokio::task::JoinSet`, awaits the wave, records the
+/// transitions in the order results land, then recomputes ready set and
+/// repeats. `max_parallel_nodes=1` produces a wave size of 1 each iteration
+/// — equivalent to the v1 sequential contract.
+async fn execute_with_concurrency(
     state: &AppState,
     args: &Value,
     plan: &Plan,
     parsed: &ParsedDag,
     order: &[String],
+    max_parallel_nodes: usize,
 ) -> Result<ExecutionOutcome> {
-    let by_id: HashMap<&str, &DagNode> =
-        parsed.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let max_parallel = max_parallel_nodes.max(1);
+    let by_id: HashMap<String, DagNode> =
+        parsed.nodes.iter().map(|n| (n.id.clone(), n.clone())).collect();
 
-    // Reverse-adjacency for failure propagation: who depends on each node.
+    // Reverse-adjacency for failure propagation.
     let mut succs: HashMap<&str, Vec<&str>> = HashMap::new();
     for n in &parsed.nodes {
         for dep in &n.depends_on {
             succs.entry(dep.as_str()).or_default().push(n.id.as_str());
         }
     }
+    // Topo position so we can write results in topological order at the end
+    // (matches v1's shape — `nodes` array is topologically ordered).
+    let topo_index: HashMap<&str, usize> =
+        order.iter().enumerate().map(|(i, id)| (id.as_str(), i)).collect();
+
+    let mut lifecycle: HashMap<String, NodeLifecycle> = parsed
+        .nodes
+        .iter()
+        .map(|n| (n.id.clone(), NodeLifecycle::Pending))
+        .collect();
     let mut tainted_by: HashMap<String, String> = HashMap::new();
+    let mut results_by_id: HashMap<String, NodeResult> = HashMap::new();
     let mut outcome = ExecutionOutcome::default();
+    let mut abort_new_dispatch = false;
+    let mut abort_aborter: Option<String> = None;
 
-    let project_arg = args.get("project").and_then(|v| v.as_str());
-    let cwd_arg = args.get("cwd").and_then(|v| v.as_str());
-    let target_project_arg = args.get("target_project").and_then(|v| v.as_str());
+    let ctx = EvidenceCtx {
+        plan_id: plan.id,
+        project_arg: args.get("project").and_then(|v| v.as_str()),
+        cwd_arg: args.get("cwd").and_then(|v| v.as_str()),
+        target_project_arg: args.get("target_project").and_then(|v| v.as_str()),
+    };
 
-    'outer: for id in order {
-        if let Some(failed_dep) = tainted_by.get(id).cloned() {
-            outcome.results.push(NodeResult {
-                id: id.clone(),
-                target: by_id
-                    .get(id.as_str())
-                    .map(|n| n.target.clone())
-                    .unwrap_or_default(),
-                state: NodeState::SkippedUpstreamFailed { failed_dep },
-                dispatch_strategy: "unknown".to_string(),
-                inner_payload: Value::Null,
-            });
-            continue;
+    loop {
+        // 1. Materialise tainted-pending skips up-front so they're recorded
+        //    in the response in topological order even when the wave that
+        //    causes the taint runs concurrently with their would-have-been
+        //    siblings.
+        let mut became_skipped: Vec<(String, NodeState)> = Vec::new();
+        for id in order {
+            if !matches!(lifecycle.get(id.as_str()), Some(NodeLifecycle::Pending)) {
+                continue;
+            }
+            if let Some(failed_dep) = tainted_by.get(id.as_str()).cloned() {
+                became_skipped.push((
+                    id.clone(),
+                    NodeState::SkippedUpstreamFailed { failed_dep },
+                ));
+            }
         }
-        let Some(node) = by_id.get(id.as_str()).copied() else { continue };
+        for (id, state_skip) in became_skipped.drain(..) {
+            let node = match by_id.get(&id) {
+                Some(n) => n.clone(),
+                None => continue,
+            };
+            lifecycle.insert(id.clone(), NodeLifecycle::Skipped);
+            let dispatch_strategy = node
+                .dispatch_strategy
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            let (skip_reason, skip_detail) = match &state_skip {
+                NodeState::SkippedUpstreamFailed { failed_dep } => (
+                    "upstream_failed",
+                    Some(("failed_dep", failed_dep.clone())),
+                ),
+                _ => ("upstream_failed", None),
+            };
+            emit_evidence_skipped(
+                state,
+                &ctx,
+                &node,
+                &dispatch_strategy,
+                skip_reason,
+                skip_detail,
+                &mut outcome,
+            )
+            .await;
+            results_by_id.insert(
+                id.clone(),
+                NodeResult {
+                    id,
+                    target: node.target.clone(),
+                    state: state_skip,
+                    dispatch_strategy,
+                    inner_payload: Value::Null,
+                },
+            );
+        }
 
-        // Conditions are not evaluated in v1; non-empty `:condition` forces a
-        // structured skip so authors notice the gating field is honoured.
-        if node
-            .condition
-            .as_deref()
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false)
-        {
-            outcome.results.push(NodeResult {
-                id: id.clone(),
-                target: node.target.clone(),
-                state: NodeState::SkippedCondition,
-                dispatch_strategy: node
+        // 2. Compute ready set: Pending nodes whose dependencies are all
+        //    Succeeded. Sorted by id for deterministic dispatch order.
+        let mut ready_ids: Vec<String> = Vec::new();
+        for id in order {
+            if !matches!(lifecycle.get(id.as_str()), Some(NodeLifecycle::Pending)) {
+                continue;
+            }
+            let node = match by_id.get(id.as_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let deps_done = node
+                .depends_on
+                .iter()
+                .all(|dep| matches!(lifecycle.get(dep.as_str()), Some(NodeLifecycle::Succeeded)));
+            if deps_done {
+                ready_ids.push(id.clone());
+            }
+        }
+        ready_ids.sort();
+
+        // 3. If fail-fast aborted and no Running, force-skip remaining
+        //    Pending nodes and stop.
+        let any_running = lifecycle
+            .values()
+            .any(|s| matches!(s, NodeLifecycle::Running));
+        if abort_new_dispatch && !any_running {
+            let aborter = abort_aborter.clone().unwrap_or_default();
+            // Force-skip every still-pending node (including ones already in
+            // the just-computed ready set — fail-fast supersedes ready).
+            let pending_ids: Vec<String> = order
+                .iter()
+                .filter(|id| matches!(lifecycle.get(id.as_str()), Some(NodeLifecycle::Pending)))
+                .cloned()
+                .collect();
+            for id in pending_ids {
+                let node = match by_id.get(&id) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                };
+                lifecycle.insert(id.clone(), NodeLifecycle::Skipped);
+                let dispatch_strategy = node
                     .dispatch_strategy
                     .clone()
-                    .unwrap_or_else(|| "unknown".to_string()),
-                inner_payload: Value::Null,
-            });
-            propagate_taint(node, &succs, &mut tainted_by);
-            continue;
+                    .unwrap_or_else(|| "unknown".to_string());
+                emit_evidence_skipped(
+                    state,
+                    &ctx,
+                    &node,
+                    &dispatch_strategy,
+                    "fail_fast_aborted",
+                    Some(("aborter", aborter.clone())),
+                    &mut outcome,
+                )
+                .await;
+                results_by_id.insert(
+                    id.clone(),
+                    NodeResult {
+                        id,
+                        target: node.target.clone(),
+                        state: NodeState::SkippedFailFastAbort {
+                            aborter: aborter.clone(),
+                        },
+                        dispatch_strategy,
+                        inner_payload: Value::Null,
+                    },
+                );
+            }
+            break;
         }
 
-        let inner_args_built = build_node_inner_args(node, plan);
-        let dispatch_strategy = inner_args_built.dispatch_strategy.clone();
-        let inner_args = match inner_args_built.inner_args {
-            Ok(v) => v,
-            Err(err_payload) => {
-                outcome.results.push(NodeResult {
-                    id: id.clone(),
-                    target: node.target.clone(),
-                    state: NodeState::Failed {
-                        reason: err_payload
-                            .as_object()
-                            .and_then(|m| m.get("error"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("inner args build failed")
-                            .to_string(),
+        // 4. If nothing ready and nothing running, we're done.
+        if ready_ids.is_empty() && !any_running {
+            break;
+        }
+
+        // 5. Filter ready set by condition gate. Nodes with non-empty
+        //    `:condition` skip in v2 just like v1 — taint propagated.
+        let mut to_dispatch: Vec<DagNode> = Vec::new();
+        for id in &ready_ids {
+            let node = match by_id.get(id.as_str()) {
+                Some(n) => n,
+                None => continue,
+            };
+            let has_condition = node
+                .condition
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            if has_condition {
+                lifecycle.insert(id.clone(), NodeLifecycle::Skipped);
+                let dispatch_strategy = node
+                    .dispatch_strategy
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                emit_evidence_skipped(
+                    state,
+                    &ctx,
+                    node,
+                    &dispatch_strategy,
+                    "condition_gated",
+                    node.condition
+                        .as_ref()
+                        .map(|c| ("condition", c.clone())),
+                    &mut outcome,
+                )
+                .await;
+                results_by_id.insert(
+                    id.clone(),
+                    NodeResult {
+                        id: id.clone(),
+                        target: node.target.clone(),
+                        state: NodeState::SkippedCondition,
+                        dispatch_strategy,
+                        inner_payload: Value::Null,
                     },
-                    dispatch_strategy: dispatch_strategy.clone(),
-                    inner_payload: err_payload,
-                });
-                if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
-                    outcome.aborted_fail_fast = true;
-                    propagate_taint(node, &succs, &mut tainted_by);
-                    break 'outer;
-                }
+                );
                 propagate_taint(node, &succs, &mut tainted_by);
                 continue;
             }
-        };
+            to_dispatch.push(node.clone());
+            if to_dispatch.len() >= max_parallel {
+                break;
+            }
+        }
 
-        let inner_result = match node.target.as_str() {
-            "mission_execution" => {
-                super::agent_execution::handle(state, "mission_execution", inner_args.clone()).await?
+        if to_dispatch.is_empty() {
+            // Either everything ready was condition-gated (loop again to pick
+            // up the new tainted skips) or nothing's ready and something is
+            // still running — in either case, short-circuit if no JoinSet
+            // work is needed and no progress was made on this iteration.
+            if !any_running {
+                continue;
             }
-            "mission_task_delegate" => {
-                super::super::compute::task_delegate::handle(
-                    state,
-                    "mission_task_delegate",
-                    inner_args.clone(),
-                )
-                .await?
-            }
-            "mission_flow_run" => {
-                super::super::compute::flow_run::handle(state, "mission_flow_run", inner_args.clone())
-                    .await?
-            }
-            _ => unreachable!("DAG validation already enforced target whitelist"),
-        };
+            // Shouldn't happen because we'd hit step 4 already, but be safe.
+        }
 
-        let inner_payload = tool_result_payload(&inner_result);
-        let inner_is_error = inner_result.is_error.unwrap_or(false);
+        // 6. Mark dispatched nodes Running, write start evidence, spawn.
+        let mut join_set: tokio::task::JoinSet<Result<DispatchOutcome>> =
+            tokio::task::JoinSet::new();
+        for node in to_dispatch {
+            let dispatch_strategy = node
+                .dispatch_strategy
+                .clone()
+                .unwrap_or_else(|| "unknown".to_string());
+            lifecycle.insert(node.id.clone(), NodeLifecycle::Running);
+            emit_evidence_running(state, &ctx, &node, &dispatch_strategy, &mut outcome).await;
+            let state_clone = state.clone();
+            let plan_clone = plan.clone();
+            join_set.spawn(async move { dispatch_node(state_clone, plan_clone, node).await });
+        }
 
-        // Append per-node evidence. Both the success and failure branches
-        // route through the typed evidence collector — the only differences
-        // are the `state_transition` annotation and whether the inner JSON
-        // lands under `inner_dispatch` (success) or the legacy `inner_error`
-        // extra slot (failure).
-        //
-        // The legacy wire-form preserved fields:
-        //   * `kind="plan_dag_node_dispatch"` is now mapped to
-        //     `source=plan_dag_node_dispatch` + canonical `kind="dispatch"`
-        //     (matches the wave-12 typed collector contract).
-        //   * `scheduler_mode`, `node_id`, `target_tool`, and
-        //     `dispatch_strategy` keep their flat-top-level placement so
-        //     existing audit dashboards do not need to traverse the new
-        //     `inner_dispatch` wrapper.
-        //   * On the failure branch the inner payload remains discoverable as
-        //     `inner_error` (legacy key) for byte-compat; on the success
-        //     branch the inner payload moves to `inner_dispatch` (canonical
-        //     typed key) and the typed setter is authoritative.
-        //
-        // Each node also carries one `EventRef::unavailable(...)` placeholder
-        // so consumers can distinguish "no events at all" from "we tried to
-        // correlate but the bus subscription is not yet wired" — the DAG
-        // scheduler does not yet plumb live ExecutionEvent ids through.
-        if !inner_is_error {
-            let entry = EvidenceEntry::new(
-                evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
-                evidence_collector::kind::DISPATCH,
-            )
-            .with_inner_dispatch(inner_payload.clone())
-            .with_state_transition("ready -> succeeded")
-            .add_execution_event(EventRef::unavailable(
-                "plan_dag scheduler v1 does not yet subscribe to the live \
-                 ExecutionEvent bus; caller correlates by plan_id + node_id",
-            ))
-            .with_extra("scheduler_mode", json!("dag_v1"))
-            .with_extra("node_id", json!(node.id))
-            .with_extra("plan_id", json!(plan.id))
-            .with_extra("target_tool", json!(node.target))
-            .with_extra("target", json!(node.target))
-            .with_extra("dispatch_strategy", json!(dispatch_strategy))
-            // Legacy `inner_result` alias: pre-wave12 sidecars carried the
-            // success payload under `inner_result`; the canonical typed slot
-            // is `inner_dispatch` (set above). We keep BOTH so historical
-            // readers (audit dashboards, retrospective queries) that filter
-            // on `inner_result` keep working byte-for-byte.
-            .with_extra("inner_result", inner_payload.clone());
-            let append_outcome = evidence_collector::append(
-                state,
-                plan.id,
-                project_arg,
-                cwd_arg,
-                target_project_arg.or(node.target_project.as_deref()),
-                entry,
-            )
-            .await;
-            if let AppendOutcome::Failed { error } = &append_outcome {
-                tracing::warn!(plan_id = %plan.id, node_id = %node.id, error = %error, "DAG scheduler: evidence append failed");
-            }
-            let (path, err) = append_outcome.into_legacy_tuple();
-            if let Some(p) = path {
-                outcome.evidence_path = Some(p);
-            }
-            if let Some(e) = err {
-                outcome.evidence_error = Some(e);
-            }
-
-            outcome.results.push(NodeResult {
-                id: id.clone(),
-                target: node.target.clone(),
-                state: NodeState::Succeeded,
+        // 7. Drain wave; for each result decide success/failure, update
+        //    lifecycle + taint, write finish evidence.
+        while let Some(joined) = join_set.join_next().await {
+            let dispatch_outcome = match joined {
+                Ok(Ok(o)) => o,
+                Ok(Err(e)) => {
+                    // Rare: the inner handler returned an `anyhow::Error`
+                    // (panic-equivalent). Treat as a fatal scheduler error so
+                    // the caller sees something — bubbling up here aborts the
+                    // whole dispatch, which is the right thing for an
+                    // unhandled exception.
+                    return Err(e);
+                }
+                Err(join_err) => {
+                    // tokio task panicked. Same reasoning as above.
+                    return Err(anyhow::anyhow!(
+                        "DAG scheduler: dispatch task join failed: {}",
+                        join_err
+                    ));
+                }
+            };
+            let DispatchOutcome {
+                node_id,
+                target,
                 dispatch_strategy,
                 inner_payload,
-            });
-        } else {
-            // Inner error — record evidence with explicit failure transition.
-            // The inner payload lands under the legacy `inner_error` extra so
-            // historical readers that filtered on that key keep working; we
-            // intentionally do NOT call `with_inner_dispatch` here so the
-            // success vs failure branches produce distinct sidecar shapes.
-            let entry = EvidenceEntry::new(
-                evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
-                evidence_collector::kind::DISPATCH,
-            )
-            .with_state_transition("ready -> failed")
-            .add_execution_event(EventRef::unavailable(
-                "plan_dag scheduler v1 does not yet subscribe to the live \
-                 ExecutionEvent bus; caller correlates by plan_id + node_id",
-            ))
-            .with_extra("scheduler_mode", json!("dag_v1"))
-            .with_extra("node_id", json!(node.id))
-            .with_extra("plan_id", json!(plan.id))
-            .with_extra("target_tool", json!(node.target))
-            .with_extra("target", json!(node.target))
-            .with_extra("dispatch_strategy", json!(dispatch_strategy))
-            .with_extra("inner_error", inner_payload.clone());
-            let append_outcome = evidence_collector::append(
+                classification,
+            } = dispatch_outcome;
+            let node = match by_id.get(&node_id) {
+                Some(n) => n.clone(),
+                None => continue,
+            };
+            let succeeded = classification.is_ok();
+            emit_evidence_finished(
                 state,
-                plan.id,
-                project_arg,
-                cwd_arg,
-                target_project_arg.or(node.target_project.as_deref()),
-                entry,
+                &ctx,
+                &node,
+                &dispatch_strategy,
+                &inner_payload,
+                succeeded,
+                &mut outcome,
             )
             .await;
-            if let AppendOutcome::Failed { error } = &append_outcome {
-                tracing::warn!(plan_id = %plan.id, node_id = %node.id, error = %error, "DAG scheduler: evidence append failed");
+            if succeeded {
+                lifecycle.insert(node_id.clone(), NodeLifecycle::Succeeded);
+                results_by_id.insert(
+                    node_id.clone(),
+                    NodeResult {
+                        id: node_id,
+                        target,
+                        state: NodeState::Succeeded,
+                        dispatch_strategy,
+                        inner_payload,
+                    },
+                );
+            } else {
+                lifecycle.insert(node_id.clone(), NodeLifecycle::Failed);
+                let reason = classification
+                    .err()
+                    .unwrap_or_else(|| "inner handler returned error".to_string());
+                results_by_id.insert(
+                    node_id.clone(),
+                    NodeResult {
+                        id: node_id.clone(),
+                        target,
+                        state: NodeState::Failed { reason },
+                        dispatch_strategy,
+                        inner_payload,
+                    },
+                );
+                // Taint propagates regardless of policy — it just changes
+                // whether *unrelated* nodes also get aborted (fail-fast) or
+                // can keep running (continue).
+                propagate_taint(&node, &succs, &mut tainted_by);
+                if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
+                    abort_new_dispatch = true;
+                    abort_aborter = Some(node_id.clone());
+                }
             }
-            let (path, err) = append_outcome.into_legacy_tuple();
-            if let Some(p) = path {
-                outcome.evidence_path = Some(p);
-            }
-            if let Some(e) = err {
-                outcome.evidence_error = Some(e);
-            }
-            outcome.results.push(NodeResult {
-                id: id.clone(),
-                target: node.target.clone(),
-                state: NodeState::Failed {
-                    reason: inner_payload
-                        .get("error")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("inner handler returned error")
-                        .to_string(),
-                },
-                dispatch_strategy,
-                inner_payload,
-            });
-            if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
-                outcome.aborted_fail_fast = true;
-                propagate_taint(node, &succs, &mut tainted_by);
-                break 'outer;
-            }
-            propagate_taint(node, &succs, &mut tainted_by);
         }
     }
 
+    if abort_new_dispatch {
+        outcome.aborted_fail_fast = true;
+    }
+
+    // Stitch results back into topological order so the response array's
+    // shape matches v1.
+    let mut ordered: Vec<(usize, NodeResult)> = results_by_id
+        .into_iter()
+        .filter_map(|(id, r)| topo_index.get(id.as_str()).map(|&i| (i, r)))
+        .collect();
+    ordered.sort_by_key(|(i, _)| *i);
+    outcome.results = ordered.into_iter().map(|(_, r)| r).collect();
+
     Ok(outcome)
+}
+
+/// Pure projection of the wave plan the scheduler WOULD execute given
+/// `max_parallel_nodes`. Used by the dry-run response so callers can preview
+/// the parallelism shape without dispatching anything. Each entry in the
+/// returned vector is one wave — the ids the scheduler would launch in one
+/// `tokio::task::JoinSet` round.
+///
+/// The projection assumes every dispatched node succeeds (no taint, no
+/// condition gate). Real runs may differ when conditions skip nodes or
+/// failures taint subtrees; the dry-run is therefore a *capacity* preview,
+/// not an outcome prediction.
+fn compute_concurrency_plan(
+    nodes: &[DagNode],
+    order: &[String],
+    max_parallel_nodes: usize,
+) -> Vec<Vec<String>> {
+    let max_parallel = max_parallel_nodes.max(1);
+    let by_id: HashMap<&str, &DagNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut completed: HashSet<String> = HashSet::new();
+    let mut remaining: Vec<String> = order.to_vec();
+    let mut waves: Vec<Vec<String>> = Vec::new();
+    while !remaining.is_empty() {
+        let mut ready: Vec<String> = Vec::new();
+        for id in &remaining {
+            let node = match by_id.get(id.as_str()) {
+                Some(n) => *n,
+                None => continue,
+            };
+            if node.depends_on.iter().all(|dep| completed.contains(dep)) {
+                ready.push(id.clone());
+            }
+        }
+        if ready.is_empty() {
+            break;
+        }
+        ready.sort();
+        let wave: Vec<String> = ready.iter().take(max_parallel).cloned().collect();
+        for id in &wave {
+            completed.insert(id.clone());
+        }
+        remaining.retain(|id| !wave.contains(id));
+        waves.push(wave);
+    }
+    waves
+}
+
+/// Parse `max_parallel_nodes` from the call args. Defaults to 1 (preserving
+/// the v1 sequential contract). Negative or zero values are clamped to 1
+/// rather than rejected — the scheduler treats "less than 1 wave width" as a
+/// caller mistake we silently normalise, mirroring how `dispatch_strategy`
+/// handles unknown values today.
+pub(super) fn parse_max_parallel_nodes(args: &Value) -> usize {
+    args.get("max_parallel_nodes")
+        .and_then(|v| v.as_u64())
+        .map(|n| n.max(1) as usize)
+        .unwrap_or(1)
 }
 
 /// Mark every transitive successor of `failed` as tainted by `failed.id`.
@@ -1970,6 +2501,401 @@ mod tests {
             "reason must mention the bus subscription gap so consumers can route on it: {}",
             reason
         );
+    }
+
+    // ── wave-13 / 02 :: v2 scheduler runtime — pure tests ────────────
+    //
+    // Full execution requires `AppState` (handlers + project registry +
+    // evidence sidecar). The wave-based scheduler's pure subset is the
+    // concurrency-plan projection (`compute_concurrency_plan`) and the
+    // response shape (`ExecutionOutcome::node_results_json` /
+    // `skipped_nodes_json`). End-to-end behaviour is exercised by the
+    // existing v1 tests that still pass under the v2 runtime (above), plus
+    // the bridge / record_evidence tests under `plan::tests`.
+
+    #[test]
+    fn parse_max_parallel_nodes_defaults_to_one_when_absent() {
+        let v = json!({});
+        assert_eq!(parse_max_parallel_nodes(&v), 1);
+    }
+
+    #[test]
+    fn parse_max_parallel_nodes_reads_positive_integer() {
+        let v = json!({"max_parallel_nodes": 4});
+        assert_eq!(parse_max_parallel_nodes(&v), 4);
+    }
+
+    #[test]
+    fn parse_max_parallel_nodes_clamps_zero_to_one() {
+        // Caller passing 0 / negative is normalised to the v1-equivalent
+        // sequential contract instead of hard-failing — same posture as the
+        // dispatch_strategy unknown-value normalisation in plan.rs.
+        let v = json!({"max_parallel_nodes": 0});
+        assert_eq!(parse_max_parallel_nodes(&v), 1);
+    }
+
+    #[test]
+    fn compute_concurrency_plan_linear_chain_single_per_wave() {
+        // a -> b -> c with max=2 still produces three single-node waves
+        // because each tier exposes only one ready node.
+        let sexp = r#"
+            (plan
+              (node :id "a" :target "mission_execution")
+              (node :id "b" :target "mission_execution" :depends-on ["a"])
+              (node :id "c" :target "mission_execution" :depends-on ["b"]))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let waves = compute_concurrency_plan(&parsed.nodes, &order, 2);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["a".to_string()]);
+        assert_eq!(waves[1], vec!["b".to_string()]);
+        assert_eq!(waves[2], vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn compute_concurrency_plan_diamond_fans_under_max_2() {
+        // a fans out to {b, c}, both feed d. max=2 lets b+c run together.
+        let sexp = r#"
+            (plan
+              (node :id "a" :target "mission_execution")
+              (node :id "b" :target "mission_execution" :depends-on ["a"])
+              (node :id "c" :target "mission_execution" :depends-on ["a"])
+              (node :id "d" :target "mission_execution" :depends-on ["b" "c"]))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let waves = compute_concurrency_plan(&parsed.nodes, &order, 2);
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["a".to_string()]);
+        // Wave 2 ids are sorted lexicographically for determinism.
+        assert_eq!(waves[1], vec!["b".to_string(), "c".to_string()]);
+        assert_eq!(waves[2], vec!["d".to_string()]);
+    }
+
+    #[test]
+    fn compute_concurrency_plan_max_one_matches_v1_sequential_order() {
+        // max_parallel_nodes=1 must produce exactly one wave per node, in
+        // strict topological-sort order — preserves the v1 contract.
+        let sexp = r#"
+            (plan
+              (node :id "a" :target "mission_execution")
+              (node :id "b" :target "mission_execution" :depends-on ["a"])
+              (node :id "c" :target "mission_execution" :depends-on ["a"])
+              (node :id "d" :target "mission_execution" :depends-on ["b" "c"]))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let waves = compute_concurrency_plan(&parsed.nodes, &order, 1);
+        assert_eq!(waves.len(), 4);
+        for w in &waves {
+            assert_eq!(w.len(), 1, "max=1 must produce single-node waves");
+        }
+        let flat: Vec<String> = waves.iter().flatten().cloned().collect();
+        assert_eq!(flat, vec!["a", "b", "c", "d"]);
+    }
+
+    #[test]
+    fn compute_concurrency_plan_three_independent_packs_into_one_wave_when_budget_allows() {
+        // Three roots, no dependencies — max=3 should pack them all into
+        // one wave; max=2 splits 2+1; max=1 splits 1+1+1 in id-sorted order.
+        let sexp = r#"
+            (plan
+              (node :id "x" :target "mission_execution")
+              (node :id "a" :target "mission_execution")
+              (node :id "m" :target "mission_execution"))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let w3 = compute_concurrency_plan(&parsed.nodes, &order, 3);
+        assert_eq!(w3, vec![vec!["a".to_string(), "m".to_string(), "x".to_string()]]);
+        let w2 = compute_concurrency_plan(&parsed.nodes, &order, 2);
+        assert_eq!(w2, vec![
+            vec!["a".to_string(), "m".to_string()],
+            vec!["x".to_string()],
+        ]);
+        let w1 = compute_concurrency_plan(&parsed.nodes, &order, 1);
+        assert_eq!(w1.len(), 3);
+        assert_eq!(w1[0], vec!["a".to_string()]);
+        assert_eq!(w1[1], vec!["m".to_string()]);
+        assert_eq!(w1[2], vec!["x".to_string()]);
+    }
+
+    #[test]
+    fn compute_concurrency_plan_clamps_zero_max_parallel_to_one() {
+        // 0 is normalised to 1 inside parse_max_parallel_nodes, but the
+        // pure helper also applies the clamp so direct callers stay safe.
+        let sexp = r#"
+            (plan
+              (node :id "a" :target "mission_execution")
+              (node :id "b" :target "mission_execution"))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let waves = compute_concurrency_plan(&parsed.nodes, &order, 0);
+        assert_eq!(waves.len(), 2, "max=0 must clamp to 1 -> two waves");
+    }
+
+    #[test]
+    fn skipped_nodes_json_filters_only_skip_states() {
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "a".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({}),
+        });
+        o.results.push(NodeResult {
+            id: "b".into(),
+            target: "mission_execution".into(),
+            state: NodeState::SkippedUpstreamFailed { failed_dep: "a".into() },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        o.results.push(NodeResult {
+            id: "c".into(),
+            target: "mission_execution".into(),
+            state: NodeState::SkippedCondition,
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        o.results.push(NodeResult {
+            id: "d".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Failed { reason: "boom".into() },
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({"error": "boom"}),
+        });
+        o.results.push(NodeResult {
+            id: "e".into(),
+            target: "mission_execution".into(),
+            state: NodeState::SkippedFailFastAbort { aborter: "d".into() },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        let v = o.skipped_nodes_json();
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 3, "only the three skip variants surface here");
+        assert_eq!(arr[0]["id"], "b");
+        assert_eq!(arr[0]["state"], "skipped_upstream_failed");
+        assert_eq!(arr[0]["failed_dep"], "a");
+        assert_eq!(arr[1]["id"], "c");
+        assert_eq!(arr[1]["state"], "skipped_condition");
+        assert_eq!(arr[2]["id"], "e");
+        assert_eq!(arr[2]["state"], "skipped_fail_fast_abort");
+        assert_eq!(arr[2]["aborter"], "d");
+    }
+
+    #[test]
+    fn node_results_json_includes_skipped_fail_fast_abort_variant() {
+        let mut o = ExecutionOutcome::default();
+        o.aborted_fail_fast = true;
+        o.results.push(NodeResult {
+            id: "a".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Failed { reason: "boom".into() },
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({"error": "boom"}),
+        });
+        o.results.push(NodeResult {
+            id: "b".into(),
+            target: "mission_execution".into(),
+            state: NodeState::SkippedFailFastAbort { aborter: "a".into() },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().expect("array");
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[1]["state"], "skipped_fail_fast_abort");
+        assert_eq!(arr[1]["aborter"], "a");
+        assert_eq!(o.aggregate_status(), "dag_failed");
+        assert_eq!(o.runner_status(), "fail_fast_aborted");
+    }
+
+    #[test]
+    fn outcome_partial_status_when_no_failure_but_skips_present() {
+        // wave-13/02 fail-fast abort path: the failing node's policy may be
+        // `continue` while *another* upstream-tainted child still ends up as
+        // `skipped_upstream_failed` — aggregate_status must surface this as
+        // dag_partial (not dag_succeeded).
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "a".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({}),
+        });
+        o.results.push(NodeResult {
+            id: "b".into(),
+            target: "mission_execution".into(),
+            state: NodeState::SkippedCondition,
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        assert_eq!(o.aggregate_status(), "dag_partial");
+        assert_eq!(o.runner_status(), "partial_dispatched");
+        assert_eq!(o.target_plan_status(), None);
+    }
+
+    // ── evidence shape :: v2 lifecycle transitions ─────────────────
+    //
+    // The v2 scheduler emits one evidence entry per state transition. We
+    // pin the `state_transition` annotations + the `skip_reason` extra so
+    // audit dashboards can route on them. Replays the entry construction
+    // (mirrored from the helpers above) instead of standing up `AppState`.
+
+    fn build_running_entry(node: &DagNode, plan: &Plan, dispatch_strategy: &str) -> Value {
+        EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_state_transition("ready -> running")
+        .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+        .with_extra("scheduler_mode", json!("dag_v1"))
+        .with_extra("node_id", json!(node.id))
+        .with_extra("plan_id", json!(plan.id))
+        .with_extra("target_tool", json!(node.target))
+        .with_extra("target", json!(node.target))
+        .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .into_json()
+    }
+
+    fn build_finished_entry(
+        node: &DagNode,
+        plan: &Plan,
+        dispatch_strategy: &str,
+        inner_payload: Value,
+        succeeded: bool,
+    ) -> Value {
+        let mut entry = EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+        .with_extra("scheduler_mode", json!("dag_v1"))
+        .with_extra("node_id", json!(node.id))
+        .with_extra("plan_id", json!(plan.id))
+        .with_extra("target_tool", json!(node.target))
+        .with_extra("target", json!(node.target))
+        .with_extra("dispatch_strategy", json!(dispatch_strategy));
+        if succeeded {
+            entry = entry
+                .with_inner_dispatch(inner_payload.clone())
+                .with_state_transition("running -> succeeded")
+                .with_extra("inner_result", inner_payload);
+        } else {
+            entry = entry
+                .with_state_transition("running -> failed")
+                .with_extra("inner_error", inner_payload);
+        }
+        entry.into_json()
+    }
+
+    fn build_skipped_entry(
+        node: &DagNode,
+        plan: &Plan,
+        dispatch_strategy: &str,
+        skip_reason: &str,
+        skip_detail: Option<(&'static str, String)>,
+    ) -> Value {
+        let mut entry = EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_state_transition("pending -> skipped")
+        .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+        .with_extra("scheduler_mode", json!("dag_v1"))
+        .with_extra("node_id", json!(node.id))
+        .with_extra("plan_id", json!(plan.id))
+        .with_extra("target_tool", json!(node.target))
+        .with_extra("target", json!(node.target))
+        .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("skip_reason", json!(skip_reason));
+        if let Some((k, v)) = skip_detail {
+            entry = entry.with_extra(k, json!(v));
+        }
+        entry.into_json()
+    }
+
+    #[test]
+    fn evidence_running_entry_carries_ready_to_running_transition() {
+        let node = fixture_dag_node("n1", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry = build_running_entry(&node, &plan, "agent-team");
+        assert_eq!(entry["source"], "plan_dag_node_dispatch");
+        assert_eq!(entry["kind"], "dispatch");
+        assert_eq!(entry["state_transition"], "ready -> running");
+        // No inner payload yet — the dispatch hasn't returned.
+        assert!(entry.get("inner_dispatch").is_none());
+        assert!(entry.get("inner_result").is_none());
+        assert!(entry.get("inner_error").is_none());
+    }
+
+    #[test]
+    fn evidence_finished_entry_succeeded_uses_running_to_succeeded() {
+        let node = fixture_dag_node("n1", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry = build_finished_entry(&node, &plan, "agent-team", json!({"ok": true}), true);
+        assert_eq!(entry["state_transition"], "running -> succeeded");
+        assert_eq!(entry["inner_dispatch"]["ok"], true);
+        assert_eq!(entry["inner_result"]["ok"], true);
+        assert!(entry.get("inner_error").is_none());
+    }
+
+    #[test]
+    fn evidence_finished_entry_failed_uses_running_to_failed() {
+        let node = fixture_dag_node("n1", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry =
+            build_finished_entry(&node, &plan, "agent-team", json!({"error": "boom"}), false);
+        assert_eq!(entry["state_transition"], "running -> failed");
+        assert_eq!(entry["inner_error"]["error"], "boom");
+        assert!(entry.get("inner_dispatch").is_none());
+        assert!(entry.get("inner_result").is_none());
+    }
+
+    #[test]
+    fn evidence_skipped_entry_records_pending_to_skipped_with_reason() {
+        let node = fixture_dag_node("n1", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry = build_skipped_entry(
+            &node,
+            &plan,
+            "agent-team",
+            "upstream_failed",
+            Some(("failed_dep", "n0".to_string())),
+        );
+        assert_eq!(entry["state_transition"], "pending -> skipped");
+        assert_eq!(entry["skip_reason"], "upstream_failed");
+        assert_eq!(entry["failed_dep"], "n0");
+    }
+
+    #[test]
+    fn evidence_skipped_entry_for_fail_fast_records_aborter() {
+        let node = fixture_dag_node("n2", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry = build_skipped_entry(
+            &node,
+            &plan,
+            "agent-team",
+            "fail_fast_aborted",
+            Some(("aborter", "n1".to_string())),
+        );
+        assert_eq!(entry["skip_reason"], "fail_fast_aborted");
+        assert_eq!(entry["aborter"], "n1");
+    }
+
+    #[test]
+    fn evidence_skipped_entry_for_condition_records_condition_text() {
+        let node = fixture_dag_node("n3", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry = build_skipped_entry(
+            &node,
+            &plan,
+            "agent-team",
+            "condition_gated",
+            Some(("condition", "(env :debug)".to_string())),
+        );
+        assert_eq!(entry["skip_reason"], "condition_gated");
+        assert_eq!(entry["condition"], "(env :debug)");
     }
 
 }
