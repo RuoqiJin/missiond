@@ -13,12 +13,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
          workflow_execution_stats lane 来自 DirectiveLayerStore::workflow_list_top_n,\
          按 workflow.name (exact) + match_rules.{tool_calls,flows} (exact strings) 映射,\
          DB 失败时 lane status=`unavailable`,主响应不挂。\
+         **merge review v0 (v0.5.6)**: candidates 行追加 5 字段 — \
+         `replacement_target` / `replacement_confidence` (high|medium) / \
+         `semantic_hint_source` (lisp anchor + token) / `review_required` (bool) / \
+         `protected_target_policy` (n/a|destructive-allowed|review-only)。\
+         `mark(decision=merge)` 强校验顺序: (1) 必须有 replacement_target (operator 显式给或 \
+         lisp hint 解析); (2) 不能 == self; (3) 必须存在于 MCP/flow 注册表; (4) 不能指向 \
+         protected target; protected source 也禁止 destructive (deprecate/merge/remove-after-compat-window),\
+         只准 keep/monitor/review。**不做 fuzzy semantic merge,不改 tool/flow registry**。\
          Lisp 源: intent-memory.lisp :: capability-usage-read-model + intent-flow.lisp :: \
          F-capability-usage-monitoring + intent-intent-layer.lisp :: capability-evolution-governance \
          + intent-tools.lisp :: future-surface mission_capability_usage。\
          注意: ObservabilityEvent::CapabilityUsageSnapshot/CapabilityStaleCandidate 在 \
          snapshot/report/candidates 已发射,daemon_state 是 i64-only,mark/ack 写 \
-         .missiond/v2/capability-usage-review.json sidecar。",
+         .missiond/v2/capability-usage-review.json sidecar (entries 含 decision, rationale, \
+         replacement_target, replacement_target_source — 新字段 Option,旧 sidecar 兼容加载)。",
         json!({
             "type": "object",
             "required": ["action"],
@@ -70,7 +79,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "replacement_target": {
                     "type": "string",
-                    "description": "[mark] decision=merge 必填 (operator override). 若未提供,会自动从 .missiond/v2 lisp 提示 (deprecated/moved-to/replacement/supersedes) 解析. 必须存在于 MCP/flow 注册表;不能 == candidate_id;不能指向 protected 项."
+                    "description": "[mark] decision=merge 必填 (operator override). 若未提供,会自动从 .missiond/v2 lisp 提示 (deprecated/moved-to/replacement/supersedes) 解析. 验证顺序: 必须存在于 MCP/flow 注册表 (按 kind 选 tool 或 flow);不能 == candidate_id;不能指向 protected 项. 任意一条失败立即 fail-fast 并返回结构化错误,不写 sidecar."
                 },
                 "ack_by": {
                     "type": "string",

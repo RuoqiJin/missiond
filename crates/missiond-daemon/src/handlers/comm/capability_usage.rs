@@ -14,6 +14,17 @@
 //! references in board::task_created payloads. No DB migrations; new lanes
 //! are reported under `source_coverage.sources`.
 //!
+//! v0.5.6 merge-review-v0: candidates now surface five review fields per row
+//! (`replacement_target`, `replacement_confidence`, `semantic_hint_source`,
+//! `review_required`, `protected_target_policy`) and `mark(decision=merge)`
+//! enforces the registry+protection invariants up front. The behaviour is
+//! observation-only: nothing edits the tool/flow registry, no fuzzy matching
+//! is performed, and protected source/target combinations are forced down a
+//! review-only path that records the rationale in the sidecar instead of a
+//! destructive transition. Sidecar layout stays additive (new fields are
+//! `Option`-typed with `serde(default)`), so older `capability-usage-review.json`
+//! files load without migration.
+//!
 //! ObservabilityEvent::CapabilityUsageSnapshot is emitted by snapshot/report/
 //! candidates after the read-model finishes computing. CapabilityStaleCandidate
 //! fans out per non-active, non-protected row from `action=candidates` so
@@ -130,8 +141,22 @@ struct CapabilityRow {
     evidence: Vec<String>,
     /// When classification == "merge-candidate", names the resolved target
     /// capability id (must exist in the registry; never the row's own id).
+    /// Carried under both `merge_target` (legacy alias) and `replacement_target`
+    /// in the rendered candidate payload — the field is the same value.
     #[serde(skip_serializing_if = "Option::is_none")]
     merge_target: Option<String>,
+    /// Confidence of the resolved replacement target. `"high"` means an
+    /// explicit lisp `:replacement` / `:supersedes` carried a literal id;
+    /// `"medium"` means the target was resolved by uniquely matching a
+    /// registered name against a `:moved-to` / deprecated suffix hint;
+    /// absent means no resolved target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    replacement_confidence: Option<String>,
+    /// Anchor of the lisp form that produced the merge hint
+    /// (e.g. `"intent-tools.lisp:732 deprecated"`). Absent when no hint
+    /// resolved a target.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_hint_source: Option<String>,
     /// Compact references to the lisp anchors that drove the classification
     /// (e.g. ["intent-tools.lisp:732 deprecated -> mission_sonnet_process"]).
     #[serde(skip_serializing_if = "Vec::is_empty", default)]
@@ -417,7 +442,7 @@ async fn build_capability_rows(
             let protected = is_protected_tool(&id);
             let (base_class, base_evidence) = classify_tool(&stats, registered_flag, protected);
             let hints = hint_index.for_source("tool", &id);
-            let (classification, evidence, merge_target, hint_evidence) = apply_hint_overlay(
+            let overlay = apply_hint_overlay(
                 &base_class,
                 base_evidence,
                 &id,
@@ -441,10 +466,12 @@ async fn build_capability_rows(
                 success_rate,
                 registered: registered_flag,
                 protected,
-                classification,
-                evidence,
-                merge_target,
-                hint_evidence,
+                classification: overlay.classification,
+                evidence: overlay.evidence,
+                merge_target: overlay.merge_target,
+                replacement_confidence: overlay.replacement_confidence,
+                semantic_hint_source: overlay.semantic_hint_source,
+                hint_evidence: overlay.hint_evidence,
             });
         }
     }
@@ -524,7 +551,7 @@ async fn build_capability_rows(
                 ));
             }
             let hints = hint_index.for_source("flow", &id);
-            let (classification, evidence, merge_target, hint_evidence) = apply_hint_overlay(
+            let overlay = apply_hint_overlay(
                 &base_class,
                 base_evidence,
                 &id,
@@ -551,10 +578,12 @@ async fn build_capability_rows(
                 success_rate,
                 registered: registered_flag,
                 protected,
-                classification,
-                evidence,
-                merge_target,
-                hint_evidence,
+                classification: overlay.classification,
+                evidence: overlay.evidence,
+                merge_target: overlay.merge_target,
+                replacement_confidence: overlay.replacement_confidence,
+                semantic_hint_source: overlay.semantic_hint_source,
+                hint_evidence: overlay.hint_evidence,
             });
         }
     }
@@ -826,6 +855,11 @@ async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
                 "protected": r.protected,
                 "evidence": r.evidence,
                 "merge_target": r.merge_target,
+                "replacement_target": r.merge_target,
+                "replacement_confidence": r.replacement_confidence,
+                "semantic_hint_source": r.semantic_hint_source,
+                "review_required": compute_review_required(r),
+                "protected_target_policy": compute_protected_target_policy(r),
                 "hint_evidence": r.hint_evidence,
             }));
     }
@@ -835,6 +869,41 @@ async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
         "row_count": rows.len(),
     });
     Ok(ToolResult::json_pretty(&report))
+}
+
+/// Decide which protection policy applies to a candidate row's would-be
+/// merge target. Independent of operator input — purely derived from the
+/// row's resolved replacement target plus the protected lists.
+///
+/// Values:
+///   - `"n/a"` — no replacement target resolved (nothing to gate)
+///   - `"review-only"` — source or target is protected; mark must avoid
+///     destructive transitions and only `keep` / `monitor` / `review`
+///     should be persisted
+///   - `"destructive-allowed"` — neither side is protected, so the operator
+///     may proceed with `merge` / `deprecate` / `remove-after-compat-window`
+fn compute_protected_target_policy(row: &CapabilityRow) -> &'static str {
+    let Some(target) = row.merge_target.as_deref() else {
+        return "n/a";
+    };
+    let target_protected = match row.kind.as_str() {
+        "flow" => is_protected_flow(target),
+        _ => is_protected_tool(target),
+    };
+    if row.protected || target_protected {
+        "review-only"
+    } else {
+        "destructive-allowed"
+    }
+}
+
+/// Whether this candidate row needs operator review before being acted on.
+/// Active and protected rows do not flow through review (active because they
+/// are healthy; protected because the policy is to keep them). Everything
+/// else — quiet, stale, never-used, shadowed, merge-candidate — is on the
+/// review path until acked.
+fn compute_review_required(row: &CapabilityRow) -> bool {
+    !matches!(row.classification.as_str(), "active" | "protected")
 }
 
 async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -861,6 +930,8 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
             continue;
         }
         let entry = review.entries.get(&r.capability_id);
+        let protected_target_policy = compute_protected_target_policy(r);
+        let review_required = compute_review_required(r);
         let payload = json!({
             "capability_id": r.capability_id,
             "kind": r.kind,
@@ -868,6 +939,14 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
             "counts_by_window": r.counts_by_window,
             "last_used_at": r.last_used_at,
             "evidence": r.evidence,
+            // Merge review v0 schema (5 fields) — emitted alongside the
+            // legacy `merge_target` so existing consumers stay green while
+            // new clients can read the typed view.
+            "replacement_target": r.merge_target,
+            "replacement_confidence": r.replacement_confidence,
+            "semantic_hint_source": r.semantic_hint_source,
+            "review_required": review_required,
+            "protected_target_policy": protected_target_policy,
             "merge_target": r.merge_target,
             "hint_evidence": r.hint_evidence,
             "review": entry.map(|e| json!({
@@ -954,6 +1033,12 @@ struct ReviewEntry {
     follow_up_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     replacement_target: Option<String>,
+    /// Where the `replacement_target` came from for this entry —
+    /// `"operator"` (user-supplied arg), `"lisp-hint"` (resolved from a
+    /// lisp `:replacement` / `:moved-to` / `:supersedes` form), or absent
+    /// for non-merge decisions. Optional so older sidecars round-trip.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    replacement_target_source: Option<String>,
 }
 
 impl ReviewState {
@@ -1041,11 +1126,26 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
     let project_root = resolve_project_root(state, project_arg(args)).await?;
 
     // Resolve replacement_target for merge decisions.
+    //
+    // Validation ordering (fail fast, most specific first):
+    //   1. Operator must supply `replacement_target` — or an explicit lisp
+    //      hint must resolve a target. We do not silently merge into nothing.
+    //   2. Self-target: target != candidate_id. Cheap, check before registry.
+    //   3. Registry: target must exist in the active MCP/flow registry. The
+    //      kind argument selects which registry (default `tool`).
+    //   4. Protected target: target must not be on the protected list. We
+    //      check this last so the operator gets a clear "exists but
+    //      protected" diagnostic instead of "not found".
     let arg_target = args
         .get("replacement_target")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
     let mut replacement_target: Option<String> = arg_target.clone();
+    let mut replacement_target_source: &'static str = if arg_target.is_some() {
+        "operator"
+    } else {
+        "unset"
+    };
     if decision == "merge" {
         if replacement_target.is_none() {
             let hint_index = HintIndex::from_project_root(&project_root);
@@ -1061,6 +1161,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
                 &registered_flows_set,
             ) {
                 replacement_target = hint.target_id.clone();
+                replacement_target_source = "lisp-hint";
             }
         }
         let Some(target) = replacement_target.as_deref() else {
@@ -1077,6 +1178,40 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
                 ),
             ));
         };
+        if target == candidate_id {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!(
+                        "replacement_target == candidate_id == `{}`; cannot merge a capability into itself",
+                        candidate_id
+                    ),
+                )
+                .with_suggestion("supply a different `replacement_target` or downgrade to decision=review"),
+            ));
+        }
+        let registered_tools_set: BTreeSet<String> =
+            registered_tools().into_iter().collect();
+        let registered_flows_set: BTreeSet<String> =
+            registered_flows().into_iter().collect();
+        let target_registered = match kind {
+            "flow" => registered_flows_set.contains(target),
+            _ => registered_tools_set.contains(target),
+        };
+        if !target_registered {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!(
+                        "replacement_target `{}` is not in the {} registry; refusing to record a merge to a missing surface",
+                        target, kind
+                    ),
+                )
+                .with_suggestion(
+                    "verify spelling against mission_capability_usage(action=\"snapshot\") or use decision=review until the target is registered",
+                ),
+            ));
+        }
         let target_protected = match kind {
             "flow" => is_protected_flow(target),
             _ => is_protected_tool(target),
@@ -1086,22 +1221,19 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
                 ToolError::new(
                     "PROTECTED_CAPABILITY",
                     format!(
-                        "replacement_target `{}` is protected; mark `{}` as review/monitor/keep instead",
+                        "replacement_target `{}` is protected by capability-evolution-governance policy; mark `{}` as review/monitor/keep instead",
                         target, candidate_id
                     ),
                 )
-                .with_suggestion("merging into a protected capability would re-route load to a guarded surface"),
-            ));
-        }
-        if target == candidate_id {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(
-                    error_codes::INVALID_PARAM,
-                    format!("replacement_target == candidate_id == `{}`", candidate_id),
-                ),
+                .with_suggestion("merging into a protected capability would re-route load to a guarded surface — only review/monitor/keep are allowed"),
             ));
         }
     }
+    let recorded_source = if decision == "merge" {
+        Some(replacement_target_source.to_string())
+    } else {
+        None
+    };
 
     let dry_run = args
         .get("dry_run")
@@ -1117,6 +1249,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         ack_by: None,
         follow_up_ref: None,
         replacement_target: replacement_target.clone(),
+        replacement_target_source: recorded_source,
     };
 
     if dry_run {
@@ -1501,6 +1634,37 @@ fn render_hint_evidence(hints: &[&SemanticHint]) -> Vec<String> {
         .collect()
 }
 
+/// Output of the hint overlay.
+///
+/// `merge_target` mirrors the resolved replacement id (when known).
+/// `replacement_confidence` reflects how the id was reached: `"high"` for
+/// explicit `:replacement` / `:supersedes` literals, `"medium"` when a
+/// uniquely-matching registry id was inferred from a `:moved-to` /
+/// `deprecated-migrated-to-...` hint. The field is `None` when no merge
+/// target was resolved (so the candidate row simply omits the field instead
+/// of fabricating a confidence).
+/// `semantic_hint_source` records the lisp anchor + token (e.g.
+/// `"intent-tools.lisp:732 deprecated"`) so the operator can audit where the
+/// suggestion came from without scanning all hint evidence.
+struct HintOverlay {
+    classification: String,
+    evidence: Vec<String>,
+    merge_target: Option<String>,
+    replacement_confidence: Option<String>,
+    semantic_hint_source: Option<String>,
+    hint_evidence: Vec<String>,
+}
+
+fn confidence_for_token(token: &str) -> &'static str {
+    match token {
+        "replacement" | "supersedes" => "high",
+        // moved-to/deprecated land here; the id was inferred via
+        // `HintIndex::resolve_targets_against` substring uniqueness, so we
+        // mark it as `medium` to flag review.
+        _ => "medium",
+    }
+}
+
 fn apply_hint_overlay(
     base_class: &str,
     base_evidence: Vec<String>,
@@ -1508,24 +1672,52 @@ fn apply_hint_overlay(
     hints: &[&SemanticHint],
     registered_tools: &BTreeSet<String>,
     registered_flows: &BTreeSet<String>,
-) -> (String, Vec<String>, Option<String>, Vec<String>) {
+) -> HintOverlay {
     if hints.is_empty() {
-        return (base_class.to_string(), base_evidence, None, Vec::new());
+        return HintOverlay {
+            classification: base_class.to_string(),
+            evidence: base_evidence,
+            merge_target: None,
+            replacement_confidence: None,
+            semantic_hint_source: None,
+            hint_evidence: Vec::new(),
+        };
     }
     let hint_lines = render_hint_evidence(hints);
     let mut evidence = base_evidence;
     if base_class == "active" || base_class == "protected" {
-        return (base_class.to_string(), evidence, None, hint_lines);
+        return HintOverlay {
+            classification: base_class.to_string(),
+            evidence,
+            merge_target: None,
+            replacement_confidence: None,
+            semantic_hint_source: None,
+            hint_evidence: hint_lines,
+        };
     }
     if hints.iter().any(|h| h.token == "consolidated-keep") {
         evidence.push("lisp says `consolidated-keep`: suppress merge candidacy".to_string());
-        return (base_class.to_string(), evidence, None, hint_lines);
+        return HintOverlay {
+            classification: base_class.to_string(),
+            evidence,
+            merge_target: None,
+            replacement_confidence: None,
+            semantic_hint_source: None,
+            hint_evidence: hint_lines,
+        };
     }
     let Some(target_hint) =
         pick_merge_target(hints, source_id, registered_tools, registered_flows)
     else {
         evidence.push("semantic_hint_missing_target".to_string());
-        return (base_class.to_string(), evidence, None, hint_lines);
+        return HintOverlay {
+            classification: base_class.to_string(),
+            evidence,
+            merge_target: None,
+            replacement_confidence: None,
+            semantic_hint_source: None,
+            hint_evidence: hint_lines,
+        };
     };
     let target_id = target_hint
         .target_id
@@ -1547,12 +1739,17 @@ fn apply_hint_overlay(
             target_id
         ));
     }
-    (
-        "merge-candidate".to_string(),
+    let confidence = confidence_for_token(&target_hint.token).to_string();
+    let semantic_hint_source =
+        format!("{} {}", target_hint.file_anchor, target_hint.token);
+    HintOverlay {
+        classification: "merge-candidate".to_string(),
         evidence,
-        Some(target_id),
-        hint_lines,
-    )
+        merge_target: Some(target_id),
+        replacement_confidence: Some(confidence),
+        semantic_hint_source: Some(semantic_hint_source),
+        hint_evidence: hint_lines,
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1817,6 +2014,7 @@ mod tests {
                 ack_by: None,
                 follow_up_ref: None,
                 replacement_target: None,
+                replacement_target_source: None,
             },
         );
         let path = s.save(dir.path()).unwrap();
@@ -1945,7 +2143,7 @@ mod tests {
         let mut tools = BTreeSet::new();
         tools.insert("mission_new".to_string());
         let flows = BTreeSet::new();
-        let (cls, evidence, target, hint_evidence) = apply_hint_overlay(
+        let overlay = apply_hint_overlay(
             "quiet",
             vec!["count_30d=0".into()],
             "mission_old",
@@ -1953,10 +2151,17 @@ mod tests {
             &tools,
             &flows,
         );
-        assert_eq!(cls, "merge-candidate");
-        assert_eq!(target.as_deref(), Some("mission_new"));
-        assert!(evidence.iter().any(|e| e.contains("merge-candidate:")));
-        assert_eq!(hint_evidence.len(), 1);
+        assert_eq!(overlay.classification, "merge-candidate");
+        assert_eq!(overlay.merge_target.as_deref(), Some("mission_new"));
+        assert!(overlay.evidence.iter().any(|e| e.contains("merge-candidate:")));
+        assert_eq!(overlay.hint_evidence.len(), 1);
+        // deprecated → medium confidence (target inferred via filename match,
+        // not a literal id key)
+        assert_eq!(overlay.replacement_confidence.as_deref(), Some("medium"));
+        assert_eq!(
+            overlay.semantic_hint_source.as_deref(),
+            Some("intent-tools.lisp:42 deprecated")
+        );
     }
 
     #[test]
@@ -1975,7 +2180,7 @@ mod tests {
         let mut tools = BTreeSet::new();
         tools.insert("mission_y".to_string());
         let flows = BTreeSet::new();
-        let (cls, _, target, _) = apply_hint_overlay(
+        let overlay = apply_hint_overlay(
             "active",
             vec![],
             "mission_x",
@@ -1983,8 +2188,10 @@ mod tests {
             &tools,
             &flows,
         );
-        assert_eq!(cls, "active");
-        assert_eq!(target, None);
+        assert_eq!(overlay.classification, "active");
+        assert_eq!(overlay.merge_target, None);
+        assert_eq!(overlay.replacement_confidence, None);
+        assert_eq!(overlay.semantic_hint_source, None);
     }
 
     #[test]
@@ -2003,7 +2210,7 @@ mod tests {
         let mut tools = BTreeSet::new();
         tools.insert("mission_audit".to_string());
         let flows = BTreeSet::new();
-        let (cls, evidence, target, _) = apply_hint_overlay(
+        let overlay = apply_hint_overlay(
             "stale",
             vec![],
             "mission_legacy",
@@ -2011,13 +2218,15 @@ mod tests {
             &tools,
             &flows,
         );
-        assert_eq!(cls, "merge-candidate");
-        assert_eq!(target.as_deref(), Some("mission_audit"));
+        assert_eq!(overlay.classification, "merge-candidate");
+        assert_eq!(overlay.merge_target.as_deref(), Some("mission_audit"));
         assert!(
-            evidence.iter().any(|e| e.contains("protected; mark only as review")),
+            overlay.evidence.iter().any(|e| e.contains("protected; mark only as review")),
             "evidence should warn about protected target; got {:?}",
-            evidence
+            overlay.evidence
         );
+        // explicit `:replacement` literal → high confidence
+        assert_eq!(overlay.replacement_confidence.as_deref(), Some("high"));
     }
 
     #[test]
@@ -2035,7 +2244,7 @@ mod tests {
         let hint_refs: Vec<&SemanticHint> = vec![&hint];
         let tools = BTreeSet::new();
         let flows = BTreeSet::new();
-        let (cls, evidence, target, hint_evidence) = apply_hint_overlay(
+        let overlay = apply_hint_overlay(
             "stale",
             vec!["count_all=0".into()],
             "mission_old",
@@ -2043,10 +2252,12 @@ mod tests {
             &tools,
             &flows,
         );
-        assert_eq!(cls, "stale");
-        assert_eq!(target, None);
-        assert!(evidence.iter().any(|e| e == "semantic_hint_missing_target"));
-        assert_eq!(hint_evidence.len(), 1);
+        assert_eq!(overlay.classification, "stale");
+        assert_eq!(overlay.merge_target, None);
+        assert_eq!(overlay.replacement_confidence, None);
+        assert_eq!(overlay.semantic_hint_source, None);
+        assert!(overlay.evidence.iter().any(|e| e == "semantic_hint_missing_target"));
+        assert_eq!(overlay.hint_evidence.len(), 1);
     }
 
     #[test]
@@ -2075,7 +2286,7 @@ mod tests {
         let mut tools = BTreeSet::new();
         tools.insert("mission_other".to_string());
         let flows = BTreeSet::new();
-        let (cls, evidence, target, _) = apply_hint_overlay(
+        let overlay = apply_hint_overlay(
             "quiet",
             vec![],
             "mission_kb_ops",
@@ -2083,9 +2294,10 @@ mod tests {
             &tools,
             &flows,
         );
-        assert_eq!(cls, "quiet");
-        assert_eq!(target, None);
-        assert!(evidence.iter().any(|e| e.contains("consolidated-keep")));
+        assert_eq!(overlay.classification, "quiet");
+        assert_eq!(overlay.merge_target, None);
+        assert_eq!(overlay.replacement_confidence, None);
+        assert!(overlay.evidence.iter().any(|e| e.contains("consolidated-keep")));
     }
 
     #[test]
@@ -2275,5 +2487,286 @@ mod tests {
         assert!(probe.by_name.get("f-canonical").is_none());
         // Exact lookup hits.
         assert!(probe.by_name.get("F-canonical").is_some());
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // merge review v0 — schema, validation, sidecar backward compatibility
+    // ───────────────────────────────────────────────────────────────────
+
+    fn make_row(
+        capability_id: &str,
+        kind: &str,
+        classification: &str,
+        protected: bool,
+        merge_target: Option<&str>,
+        confidence: Option<&str>,
+        hint_source: Option<&str>,
+    ) -> CapabilityRow {
+        CapabilityRow {
+            capability_id: capability_id.to_string(),
+            kind: kind.to_string(),
+            counts_by_window: HashMap::new(),
+            last_used_at: None,
+            success_count: 0,
+            failure_count: 0,
+            success_rate: None,
+            registered: true,
+            protected,
+            classification: classification.to_string(),
+            evidence: vec![],
+            merge_target: merge_target.map(|s| s.to_string()),
+            replacement_confidence: confidence.map(|s| s.to_string()),
+            semantic_hint_source: hint_source.map(|s| s.to_string()),
+            hint_evidence: vec![],
+        }
+    }
+
+    #[test]
+    fn protected_target_policy_n_a_when_no_merge_target() {
+        let row = make_row("mission_old", "tool", "stale", false, None, None, None);
+        assert_eq!(compute_protected_target_policy(&row), "n/a");
+    }
+
+    #[test]
+    fn protected_target_policy_destructive_allowed_when_neither_protected() {
+        let row = make_row(
+            "mission_old",
+            "tool",
+            "merge-candidate",
+            false,
+            Some("mission_router_chat"),
+            Some("high"),
+            Some("intent-tools.lisp:1 replacement"),
+        );
+        assert_eq!(compute_protected_target_policy(&row), "destructive-allowed");
+    }
+
+    #[test]
+    fn protected_target_policy_review_only_when_target_protected() {
+        // Target `mission_audit` is in PROTECTED_TOOL_PATTERNS — even with a
+        // resolved replacement, we must downgrade to review-only.
+        let row = make_row(
+            "mission_legacy",
+            "tool",
+            "merge-candidate",
+            false,
+            Some("mission_audit"),
+            Some("high"),
+            Some("intent-tools.lisp:1 replacement"),
+        );
+        assert_eq!(compute_protected_target_policy(&row), "review-only");
+    }
+
+    #[test]
+    fn protected_target_policy_review_only_when_source_protected() {
+        // Even if the operator picked a non-protected target, a protected
+        // source means we must not record a destructive transition.
+        let row = make_row(
+            "mission_audit",
+            "tool",
+            "merge-candidate",
+            true,
+            Some("mission_router_chat"),
+            Some("high"),
+            Some("intent-tools.lisp:1 replacement"),
+        );
+        assert_eq!(compute_protected_target_policy(&row), "review-only");
+    }
+
+    #[test]
+    fn protected_target_policy_review_only_for_protected_flow_target() {
+        let row = make_row(
+            "F-old-flow",
+            "flow",
+            "merge-candidate",
+            false,
+            Some("F-execution-log-governance"),
+            Some("high"),
+            Some("intent-flow.lisp:1 replacement"),
+        );
+        assert_eq!(compute_protected_target_policy(&row), "review-only");
+    }
+
+    #[test]
+    fn review_required_true_for_non_active_non_protected() {
+        for cls in [
+            "quiet",
+            "stale",
+            "never-used",
+            "shadowed-by-better-capability",
+            "merge-candidate",
+        ] {
+            let row = make_row("x", "tool", cls, false, None, None, None);
+            assert!(compute_review_required(&row), "{} should require review", cls);
+        }
+    }
+
+    #[test]
+    fn review_required_false_for_active_or_protected() {
+        for cls in ["active", "protected"] {
+            let row = make_row("x", "tool", cls, false, None, None, None);
+            assert!(
+                !compute_review_required(&row),
+                "{} should NOT require review",
+                cls
+            );
+        }
+    }
+
+    #[test]
+    fn confidence_for_token_distinguishes_explicit_vs_inferred() {
+        // Explicit `:replacement` / `:supersedes` keys carry literal target
+        // ids — high confidence.
+        assert_eq!(confidence_for_token("replacement"), "high");
+        assert_eq!(confidence_for_token("supersedes"), "high");
+        // Everything else routes through HintIndex::resolve_targets_against
+        // (substring uniqueness) — medium confidence.
+        assert_eq!(confidence_for_token("deprecated"), "medium");
+        assert_eq!(confidence_for_token("moved-to"), "medium");
+        assert_eq!(confidence_for_token("unknown-token"), "medium");
+    }
+
+    #[test]
+    fn sidecar_backward_compat_loads_v0_5_5_entries_without_new_fields() {
+        // A capability-usage-review.json written before v0.5.6 only had
+        // {decision, decided_by, decided_at, rationale, ack_*, follow_up_ref,
+        // replacement_target}. New fields must be Option-typed with
+        // serde(default) so the load path does not fail.
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let v2 = dir.path().join(".missiond").join("v2");
+        std::fs::create_dir_all(&v2).unwrap();
+        let raw = r#"{
+            "entries": {
+                "mission_old": {
+                    "decision": "merge",
+                    "decided_by": "commander",
+                    "decided_at": "2026-04-25T00:00:00Z",
+                    "rationale": "deprecated",
+                    "replacement_target": "mission_new"
+                }
+            }
+        }"#;
+        std::fs::write(v2.join("capability-usage-review.json"), raw).unwrap();
+        let loaded = ReviewState::load(dir.path()).unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        let entry = loaded.entries.get("mission_old").unwrap();
+        assert_eq!(entry.decision, "merge");
+        assert_eq!(entry.replacement_target.as_deref(), Some("mission_new"));
+        // New optional field defaults to None on load.
+        assert_eq!(entry.replacement_target_source, None);
+    }
+
+    #[test]
+    fn sidecar_round_trip_preserves_replacement_target_source() {
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let mut s = ReviewState::default();
+        s.entries.insert(
+            "mission_old".to_string(),
+            ReviewEntry {
+                decision: "merge".to_string(),
+                decided_by: "commander".to_string(),
+                decided_at: "2026-04-25T00:00:00Z".to_string(),
+                rationale: "lisp deprecated -> mission_new".to_string(),
+                ack_at: None,
+                ack_by: None,
+                follow_up_ref: None,
+                replacement_target: Some("mission_new".to_string()),
+                replacement_target_source: Some("operator".to_string()),
+            },
+        );
+        s.save(dir.path()).unwrap();
+        let loaded = ReviewState::load(dir.path()).unwrap();
+        let entry = loaded.entries.get("mission_old").unwrap();
+        assert_eq!(entry.replacement_target.as_deref(), Some("mission_new"));
+        assert_eq!(entry.replacement_target_source.as_deref(), Some("operator"));
+    }
+
+    #[test]
+    fn sidecar_skips_serializing_none_fields_for_backward_compat() {
+        // A non-merge decision shouldn't write replacement_target_source,
+        // keeping the JSON shape compatible with the v0.5.5 reader.
+        let entry = ReviewEntry {
+            decision: "monitor".to_string(),
+            decided_by: "tester".to_string(),
+            decided_at: "2026-04-25T00:00:00Z".to_string(),
+            rationale: "watching".to_string(),
+            ack_at: None,
+            ack_by: None,
+            follow_up_ref: None,
+            replacement_target: None,
+            replacement_target_source: None,
+        };
+        let json = serde_json::to_string(&entry).unwrap();
+        assert!(
+            !json.contains("replacement_target_source"),
+            "None fields must be skipped: {}",
+            json
+        );
+        assert!(
+            !json.contains("replacement_target\""),
+            "None replacement_target must be skipped: {}",
+            json
+        );
+    }
+
+    #[test]
+    fn merge_review_protected_lists_cover_known_governance_anchors() {
+        // Ensure the protected lists used by compute_protected_target_policy
+        // and action_mark validation still include the surfaces the lisp
+        // policy mentions. This guards against accidental shrinkage during
+        // refactors.
+        for tool in [
+            "mission_intent",
+            "mission_execution",
+            "mission_kb_ops",
+            "mission_audit",
+            "mission_sys_logs",
+            "mission_forge_build",
+        ] {
+            assert!(is_protected_tool(tool), "{} should remain protected", tool);
+        }
+        for flow in [
+            "engineering",
+            "F-execution-log-governance",
+            "F-incident-reaction",
+            "F-capability-usage-monitoring",
+        ] {
+            assert!(
+                is_protected_flow(flow),
+                "{} should remain a protected flow",
+                flow
+            );
+        }
+    }
+
+    #[test]
+    fn merge_review_six_lanes_present_in_source_coverage() {
+        // Wave 11 made workflow_execution_stats a first-class lane; merge
+        // review v0 must not regress the 6-lane contract.
+        let hint_index = HintIndex::default();
+        let event_probe = EventLogFlowProbe::default();
+        let workflow_probe = WorkflowStatsProbe::default();
+        let dict = build_source_coverage_dict(
+            &[],
+            &hint_index,
+            &event_probe,
+            &workflow_probe,
+            Some(0),
+        );
+        for key in [
+            "conversation_tool_calls",
+            "board_tasks_flow_template",
+            "event_log_flow_events",
+            "lisp_semantic_hints",
+            "review_sidecar",
+            "workflow_execution_stats",
+        ] {
+            assert!(
+                dict.contains_key(key),
+                "lane `{}` must remain present after merge review v0; have keys: {:?}",
+                key,
+                dict.keys().collect::<Vec<_>>()
+            );
+        }
     }
 }
