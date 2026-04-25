@@ -171,6 +171,16 @@ pub trait ConversationStore: Send + Sync {
     async fn get_tool_error_samples(&self, session_id: &str, tool_name: &str) -> DbResult<Vec<(String, String, String)>>;
     async fn get_tool_calls_for_detailed_analysis(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>>;
     async fn get_tool_calls_with_status_timeline(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>>;
+    /// Global aggregation across all sessions: returns
+    /// `(tool_name, total_calls, max_timestamp, success_count, error_count)`.
+    /// Used by capability-usage-read-model (memory :: system-support, v0.5.4) to
+    /// derive snapshots without per-session iteration. `since_iso` filters by
+    /// `timestamp >= since_iso` when present (timestamps are stored as ISO text
+    /// in `conversation_tool_calls.timestamp`).
+    async fn get_tool_call_global_stats(
+        &self,
+        since_iso: Option<&str>,
+    ) -> DbResult<Vec<(String, i64, Option<String>, i64, i64)>>;
 
     // -- conversation events / JSONL audit (from EventStore v0.4.x) --
     async fn insert_conversation_events_batch(&self, events: &[ConversationEvent]) -> DbResult<usize>;

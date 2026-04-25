@@ -1684,6 +1684,44 @@ impl ConversationStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
+    async fn get_tool_call_global_stats(
+        &self,
+        since_iso: Option<&str>,
+    ) -> DbResult<Vec<(String, i64, Option<String>, i64, i64)>> {
+        // capability-usage-read-model :: tool-calls truth source.
+        // `timestamp` is ISO text; lexicographic compare is correct here because
+        // ISO-8601 with the same offset/zone sorts the same as chronological.
+        let rows: Vec<(String, i64, Option<String>, i64, i64)> = match since_iso {
+            Some(since) => sqlx::query_as(
+                "SELECT tool_name,
+                        COUNT(*)::bigint AS total,
+                        MAX(timestamp) AS last_at,
+                        SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::bigint AS ok,
+                        SUM(CASE WHEN status='error'   THEN 1 ELSE 0 END)::bigint AS err
+                 FROM conversation_tool_calls
+                 WHERE timestamp >= $1
+                 GROUP BY tool_name
+                 ORDER BY total DESC",
+            )
+            .bind(since)
+            .fetch_all(&self.pool)
+            .await?,
+            None => sqlx::query_as(
+                "SELECT tool_name,
+                        COUNT(*)::bigint AS total,
+                        MAX(timestamp) AS last_at,
+                        SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::bigint AS ok,
+                        SUM(CASE WHEN status='error'   THEN 1 ELSE 0 END)::bigint AS err
+                 FROM conversation_tool_calls
+                 GROUP BY tool_name
+                 ORDER BY total DESC",
+            )
+            .fetch_all(&self.pool)
+            .await?,
+        };
+        Ok(rows)
+    }
+
     async fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> DbResult<Vec<(String, String, String)>> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT role, raw_content, timestamp FROM conversation_messages

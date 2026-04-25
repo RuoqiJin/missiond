@@ -174,7 +174,7 @@ mod sysinfra;
 // Domain aliases for readability
 use knowledge::{agent_execution, board, cascade, insight, intent, kb, skill, memory, project};
 use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job, flow_run, forge};
-use comm::{router_chat, question, conversation, timeline, audit, codex_ops};
+use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
 use sysinfra::{infra, permission, power, system};
 
 /// Generate all tool definitions
@@ -209,6 +209,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(conversation::definitions());
     tools.extend(timeline::definitions());
     tools.extend(audit::definitions());
+    tools.extend(capability_usage::definitions());
     tools.extend(codex_ops::definitions());
     // sysinfra
     tools.extend(infra::definitions());
