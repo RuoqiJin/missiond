@@ -1405,39 +1405,61 @@ async fn action_execute_internal(
         .get("target_project")
         .and_then(|v| v.as_str())
         .or(hints.target_project.as_deref());
-    let evidence_entry = json!({
-        "kind": "plan_runner_dispatch",
-        "execute_mode": "internal",
-        "target_tool": resolved.target,
-        "target_source": resolved.target_source,
-        "dispatch_strategy": resolved.dispatch_strategy,
-        "dispatch_strategy_source": resolved.dispatch_strategy_source,
-        "plan_hint_summary": resolved.plan_hint_summary.clone(),
-        "inner_result": inner_payload.clone(),
-    });
-    let (evidence_path, evidence_error) = match append_plan_evidence_entry(
+    // wave-13 :: typed evidence-collector path. Legacy `kind` ("dispatch") +
+    // legacy `source` ("plan_runner_dispatch") are preserved so any reader
+    // that filtered on those exact strings keeps working — `kind` is the
+    // canonical taxonomy from `evidence_collector::kind` and `source` is the
+    // historical wire tag (also re-exported as `evidence_collector::source::
+    // PLAN_RUNNER_DISPATCH`). Inner dispatch summary, plan-hint passthrough,
+    // and target/strategy provenance all land under their canonical typed
+    // keys; legacy passthrough keys (`execute_mode`, `target_tool`,
+    // `target_source`, `dispatch_strategy_source`, `plan_hint_summary`) keep
+    // their flat-top-level placement via `with_extra` so audit dashboards do
+    // not need to traverse the new `inner_dispatch` wrapper to find them.
+    let entry = super::evidence_collector::EvidenceEntry::new(
+        super::evidence_collector::source::PLAN_RUNNER_DISPATCH,
+        super::evidence_collector::kind::DISPATCH,
+    )
+    .with_inner_dispatch(inner_payload.clone())
+    .add_execution_event(super::evidence_collector::EventRef::unavailable(
+        "plan-runner v0 does not yet subscribe to the live ExecutionEvent bus; \
+         caller correlates by plan_id + board_task_id",
+    ))
+    .with_extra("execute_mode", json!("internal"))
+    .with_extra("target_tool", json!(resolved.target))
+    .with_extra("target_source", json!(resolved.target_source))
+    .with_extra("dispatch_strategy", json!(resolved.dispatch_strategy))
+    .with_extra(
+        "dispatch_strategy_source",
+        json!(resolved.dispatch_strategy_source),
+    )
+    .with_extra("plan_hint_summary", resolved.plan_hint_summary.clone())
+    // Legacy `inner_result` alias: pre-wave12 sidecars carried the inner
+    // payload under `inner_result`, the new canonical slot is
+    // `inner_dispatch`. We keep BOTH so historical readers (audit
+    // dashboards, retrospective queries) that filter on `inner_result`
+    // keep working byte-for-byte during the transition.
+    .with_extra("inner_result", inner_payload.clone());
+    let outcome = super::evidence_collector::append(
         state,
         plan.id,
         project_arg,
         cwd_arg,
         target_project_arg,
-        evidence_entry,
+        entry,
     )
-    .await
-    {
-        Ok((p, _count)) => (Some(p.display().to_string()), None),
-        Err(e) => {
-            // Evidence append failure does not abort the dispatch (the inner
-            // tool already succeeded with its own durable side effects), but
-            // we now surface the error in the response so callers cannot
-            // mistake a missing sidecar for a clean run. This also covers
-            // resolver failures (project root unresolved / relative cwd
-            // rejected) — those bubble up as `evidence_error` rather than
-            // silently landing under the daemon process cwd.
-            tracing::warn!(plan_id = %plan.id, error = %e, "plan-runner: evidence sidecar append failed");
-            (None, Some(e.to_string()))
-        }
-    };
+    .await;
+    if let super::evidence_collector::AppendOutcome::Failed { error } = &outcome {
+        // Evidence append failure does not abort the dispatch (the inner
+        // tool already succeeded with its own durable side effects), but
+        // we now surface the error in the response so callers cannot
+        // mistake a missing sidecar for a clean run. This also covers
+        // resolver failures (project root unresolved / relative cwd
+        // rejected) — those bubble up as `evidence_error` rather than
+        // silently landing under the daemon process cwd.
+        tracing::warn!(plan_id = %plan.id, error = %error, "plan-runner: evidence sidecar append failed");
+    }
+    let (evidence_path, evidence_error) = outcome.into_legacy_tuple();
 
     let status_update_error = if matches!(plan.status, PlanStatus::Executing) {
         // Already in Executing — nothing to update, nothing can fail.
@@ -3247,5 +3269,108 @@ mod tests {
             entry["kind"], "note",
             "default kind applied when caller omits it"
         );
+    }
+
+    // ── wave-13 :: plan_runner_dispatch typed evidence shape ──────────
+    //
+    // `action_execute_internal` builds an `EvidenceEntry` (wave-12 typed
+    // collector) instead of a hand-rolled JSON object. These tests pin the
+    // projected on-disk shape so the wire-compatible mapping
+    //   legacy `kind="plan_runner_dispatch"`
+    //     ↦ canonical `source="plan_runner_dispatch"` + `kind="dispatch"`
+    // is enforced, and the legacy passthrough fields (`execute_mode`,
+    // `target_tool`, `target_source`, `dispatch_strategy`,
+    // `dispatch_strategy_source`, `plan_hint_summary`) keep their flat
+    // top-level placement for existing audit dashboards.
+    //
+    // We replay the exact entry construction (mirrored from
+    // `action_execute_internal`) instead of hitting the live handler so the
+    // assertions stay focused on the wire shape — the live handler is
+    // covered end-to-end by the runtime tests, but those don't introspect
+    // the on-disk JSON.
+    fn build_plan_runner_evidence_entry(
+        resolved: &ResolvedExec,
+        inner_payload: Value,
+    ) -> Value {
+        super::super::evidence_collector::EvidenceEntry::new(
+            super::super::evidence_collector::source::PLAN_RUNNER_DISPATCH,
+            super::super::evidence_collector::kind::DISPATCH,
+        )
+        .with_inner_dispatch(inner_payload.clone())
+        .add_execution_event(super::super::evidence_collector::EventRef::unavailable(
+            "plan-runner v0 does not yet subscribe to the live ExecutionEvent bus; \
+             caller correlates by plan_id + board_task_id",
+        ))
+        .with_extra("execute_mode", json!("internal"))
+        .with_extra("target_tool", json!(resolved.target))
+        .with_extra("target_source", json!(resolved.target_source))
+        .with_extra("dispatch_strategy", json!(resolved.dispatch_strategy))
+        .with_extra(
+            "dispatch_strategy_source",
+            json!(resolved.dispatch_strategy_source),
+        )
+        .with_extra("plan_hint_summary", resolved.plan_hint_summary.clone())
+        .with_extra("inner_result", inner_payload)
+        .into_json()
+    }
+
+    #[test]
+    fn plan_runner_dispatch_evidence_carries_canonical_source_and_kind() {
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let inner = json!({"execution_id": "plan-x", "status": "executing"});
+        let entry = build_plan_runner_evidence_entry(&resolved, inner.clone());
+        // wave-12 wire-compatible mapping: historical `kind="plan_runner_dispatch"`
+        // moves to `source`, canonical `kind="dispatch"`.
+        assert_eq!(entry["source"], "plan_runner_dispatch");
+        assert_eq!(entry["kind"], "dispatch");
+        assert_eq!(entry["schema_version"], "v0");
+        // Inner payload lands under the canonical typed slot.
+        assert_eq!(entry["inner_dispatch"], inner);
+        // Pre-wave12 sidecars carried the same payload under `inner_result`;
+        // we keep it as a legacy alias for byte-for-byte reader compat.
+        assert_eq!(entry["inner_result"], inner);
+    }
+
+    #[test]
+    fn plan_runner_dispatch_evidence_keeps_legacy_passthrough_keys_flat() {
+        let resolved = fixture_resolved("mission_task_delegate", "agent-team");
+        let entry =
+            build_plan_runner_evidence_entry(&resolved, json!({"task_id": "btk-9"}));
+        // Audit dashboards historically grep at the top level for these.
+        assert_eq!(entry["execute_mode"], "internal");
+        assert_eq!(entry["target_tool"], "mission_task_delegate");
+        assert_eq!(entry["target_source"], "explicit_arg");
+        assert_eq!(entry["dispatch_strategy"], "agent-team");
+        assert_eq!(entry["dispatch_strategy_source"], "explicit_arg");
+        // `plan_hint_summary` is an object — we simply assert its presence
+        // (the fixture seeds an empty object so structural equality holds).
+        assert!(
+            entry.get("plan_hint_summary").is_some(),
+            "plan_hint_summary must stay at the top level for audit grep"
+        );
+    }
+
+    #[test]
+    fn plan_runner_dispatch_evidence_records_event_unavailability_reason() {
+        // The runner does not yet subscribe to the live ExecutionEvent bus;
+        // `EventRef::unavailable(...)` documents that explicitly so consumers
+        // can tell "no events" apart from "we tried but couldn't correlate".
+        let resolved = fixture_resolved("mission_execution", "resident-lisp");
+        let entry = build_plan_runner_evidence_entry(&resolved, json!({"ok": true}));
+        let events = entry["execution_events"]
+            .as_array()
+            .expect("execution_events array present");
+        assert_eq!(events.len(), 1, "exactly one placeholder reference");
+        assert_eq!(events[0]["unavailable"], true);
+        let reason = events[0]["unavailable_reason"]
+            .as_str()
+            .expect("reason recorded as string");
+        assert!(
+            reason.contains("ExecutionEvent bus"),
+            "reason must mention the bus subscription gap so consumers can route on it: {}",
+            reason
+        );
+        // No real event id leaked through.
+        assert!(events[0].get("event_id").is_none());
     }
 }

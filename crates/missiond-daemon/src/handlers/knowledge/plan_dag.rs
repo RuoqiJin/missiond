@@ -67,8 +67,11 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use crate::state::AppState;
 use missiond_core::types::{Plan, PlanStatus};
 
+use super::evidence_collector::{
+    self, AppendOutcome, EventRef, EvidenceEntry,
+};
 use super::plan::{
-    append_plan_evidence_entry, build_internal_dispatch_args, tool_result_payload, ParsedPlanHints,
+    build_internal_dispatch_args, tool_result_payload, ParsedPlanHints,
 };
 
 const VALID_TARGETS: &[&str] = &[
@@ -1068,19 +1071,53 @@ async fn execute_sequential(
         let inner_payload = tool_result_payload(&inner_result);
         let inner_is_error = inner_result.is_error.unwrap_or(false);
 
-        // Append per-node evidence (skipped on inner error so the caller sees
-        // the structured rejection without phantom audit entries).
+        // Append per-node evidence. Both the success and failure branches
+        // route through the typed evidence collector — the only differences
+        // are the `state_transition` annotation and whether the inner JSON
+        // lands under `inner_dispatch` (success) or the legacy `inner_error`
+        // extra slot (failure).
+        //
+        // The legacy wire-form preserved fields:
+        //   * `kind="plan_dag_node_dispatch"` is now mapped to
+        //     `source=plan_dag_node_dispatch` + canonical `kind="dispatch"`
+        //     (matches the wave-12 typed collector contract).
+        //   * `scheduler_mode`, `node_id`, `target_tool`, and
+        //     `dispatch_strategy` keep their flat-top-level placement so
+        //     existing audit dashboards do not need to traverse the new
+        //     `inner_dispatch` wrapper.
+        //   * On the failure branch the inner payload remains discoverable as
+        //     `inner_error` (legacy key) for byte-compat; on the success
+        //     branch the inner payload moves to `inner_dispatch` (canonical
+        //     typed key) and the typed setter is authoritative.
+        //
+        // Each node also carries one `EventRef::unavailable(...)` placeholder
+        // so consumers can distinguish "no events at all" from "we tried to
+        // correlate but the bus subscription is not yet wired" — the DAG
+        // scheduler does not yet plumb live ExecutionEvent ids through.
         if !inner_is_error {
-            let entry = json!({
-                "kind": "plan_dag_node_dispatch",
-                "scheduler_mode": "dag_v1",
-                "node_id": node.id,
-                "target_tool": node.target,
-                "dispatch_strategy": dispatch_strategy,
-                "state_transition": "ready -> succeeded",
-                "inner_result": inner_payload.clone(),
-            });
-            match append_plan_evidence_entry(
+            let entry = EvidenceEntry::new(
+                evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+                evidence_collector::kind::DISPATCH,
+            )
+            .with_inner_dispatch(inner_payload.clone())
+            .with_state_transition("ready -> succeeded")
+            .add_execution_event(EventRef::unavailable(
+                "plan_dag scheduler v1 does not yet subscribe to the live \
+                 ExecutionEvent bus; caller correlates by plan_id + node_id",
+            ))
+            .with_extra("scheduler_mode", json!("dag_v1"))
+            .with_extra("node_id", json!(node.id))
+            .with_extra("plan_id", json!(plan.id))
+            .with_extra("target_tool", json!(node.target))
+            .with_extra("target", json!(node.target))
+            .with_extra("dispatch_strategy", json!(dispatch_strategy))
+            // Legacy `inner_result` alias: pre-wave12 sidecars carried the
+            // success payload under `inner_result`; the canonical typed slot
+            // is `inner_dispatch` (set above). We keep BOTH so historical
+            // readers (audit dashboards, retrospective queries) that filter
+            // on `inner_result` keep working byte-for-byte.
+            .with_extra("inner_result", inner_payload.clone());
+            let append_outcome = evidence_collector::append(
                 state,
                 plan.id,
                 project_arg,
@@ -1088,15 +1125,16 @@ async fn execute_sequential(
                 target_project_arg.or(node.target_project.as_deref()),
                 entry,
             )
-            .await
-            {
-                Ok((path, _count)) => {
-                    outcome.evidence_path = Some(path.display().to_string());
-                }
-                Err(e) => {
-                    tracing::warn!(plan_id = %plan.id, node_id = %node.id, error = %e, "DAG scheduler: evidence append failed");
-                    outcome.evidence_error = Some(e.to_string());
-                }
+            .await;
+            if let AppendOutcome::Failed { error } = &append_outcome {
+                tracing::warn!(plan_id = %plan.id, node_id = %node.id, error = %error, "DAG scheduler: evidence append failed");
+            }
+            let (path, err) = append_outcome.into_legacy_tuple();
+            if let Some(p) = path {
+                outcome.evidence_path = Some(p);
+            }
+            if let Some(e) = err {
+                outcome.evidence_error = Some(e);
             }
 
             outcome.results.push(NodeResult {
@@ -1108,16 +1146,27 @@ async fn execute_sequential(
             });
         } else {
             // Inner error — record evidence with explicit failure transition.
-            let entry = json!({
-                "kind": "plan_dag_node_dispatch",
-                "scheduler_mode": "dag_v1",
-                "node_id": node.id,
-                "target_tool": node.target,
-                "dispatch_strategy": dispatch_strategy,
-                "state_transition": "ready -> failed",
-                "inner_error": inner_payload.clone(),
-            });
-            match append_plan_evidence_entry(
+            // The inner payload lands under the legacy `inner_error` extra so
+            // historical readers that filtered on that key keep working; we
+            // intentionally do NOT call `with_inner_dispatch` here so the
+            // success vs failure branches produce distinct sidecar shapes.
+            let entry = EvidenceEntry::new(
+                evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+                evidence_collector::kind::DISPATCH,
+            )
+            .with_state_transition("ready -> failed")
+            .add_execution_event(EventRef::unavailable(
+                "plan_dag scheduler v1 does not yet subscribe to the live \
+                 ExecutionEvent bus; caller correlates by plan_id + node_id",
+            ))
+            .with_extra("scheduler_mode", json!("dag_v1"))
+            .with_extra("node_id", json!(node.id))
+            .with_extra("plan_id", json!(plan.id))
+            .with_extra("target_tool", json!(node.target))
+            .with_extra("target", json!(node.target))
+            .with_extra("dispatch_strategy", json!(dispatch_strategy))
+            .with_extra("inner_error", inner_payload.clone());
+            let append_outcome = evidence_collector::append(
                 state,
                 plan.id,
                 project_arg,
@@ -1125,14 +1174,16 @@ async fn execute_sequential(
                 target_project_arg.or(node.target_project.as_deref()),
                 entry,
             )
-            .await
-            {
-                Ok((path, _count)) => {
-                    outcome.evidence_path = Some(path.display().to_string());
-                }
-                Err(e) => {
-                    outcome.evidence_error = Some(e.to_string());
-                }
+            .await;
+            if let AppendOutcome::Failed { error } = &append_outcome {
+                tracing::warn!(plan_id = %plan.id, node_id = %node.id, error = %error, "DAG scheduler: evidence append failed");
+            }
+            let (path, err) = append_outcome.into_legacy_tuple();
+            if let Some(p) = path {
+                outcome.evidence_path = Some(p);
+            }
+            if let Some(e) = err {
+                outcome.evidence_error = Some(e);
             }
             outcome.results.push(NodeResult {
                 id: id.clone(),
@@ -1772,6 +1823,153 @@ mod tests {
         let built = build_node_inner_args(&node, &plan);
         // Missing flow_id -> inner builder returns Err with a structured payload.
         assert!(built.inner_args.is_err());
+    }
+
+    // ── wave-13 :: plan_dag_node_dispatch typed evidence shape ───────
+    //
+    // Each DAG node dispatch (success or failure branch) builds an
+    // `EvidenceEntry` from `evidence_collector` instead of a hand-rolled
+    // JSON object. These tests pin the projected on-disk shape so the
+    // wire-compatible mapping
+    //   legacy `kind="plan_dag_node_dispatch"`
+    //     ↦ canonical `source="plan_dag_node_dispatch"` + `kind="dispatch"`
+    // is enforced, and the legacy passthrough fields (`scheduler_mode`,
+    // `node_id`, `plan_id`, `target_tool`, `target`, `dispatch_strategy`,
+    // and the failure-branch `inner_error`) keep their flat top-level
+    // placement for existing audit dashboards.
+    //
+    // We replay the exact entry construction (mirrored from
+    // `execute_sequential`) instead of standing up an `AppState` so the
+    // assertions stay focused on the wire shape.
+    fn build_dag_success_entry(node: &DagNode, plan: &Plan, dispatch_strategy: &str, inner_payload: Value) -> Value {
+        EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_inner_dispatch(inner_payload.clone())
+        .with_state_transition("ready -> succeeded")
+        .add_execution_event(EventRef::unavailable(
+            "plan_dag scheduler v1 does not yet subscribe to the live \
+             ExecutionEvent bus; caller correlates by plan_id + node_id",
+        ))
+        .with_extra("scheduler_mode", json!("dag_v1"))
+        .with_extra("node_id", json!(node.id))
+        .with_extra("plan_id", json!(plan.id))
+        .with_extra("target_tool", json!(node.target))
+        .with_extra("target", json!(node.target))
+        .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("inner_result", inner_payload)
+        .into_json()
+    }
+
+    fn build_dag_failure_entry(node: &DagNode, plan: &Plan, dispatch_strategy: &str, inner_payload: Value) -> Value {
+        EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_state_transition("ready -> failed")
+        .add_execution_event(EventRef::unavailable(
+            "plan_dag scheduler v1 does not yet subscribe to the live \
+             ExecutionEvent bus; caller correlates by plan_id + node_id",
+        ))
+        .with_extra("scheduler_mode", json!("dag_v1"))
+        .with_extra("node_id", json!(node.id))
+        .with_extra("plan_id", json!(plan.id))
+        .with_extra("target_tool", json!(node.target))
+        .with_extra("target", json!(node.target))
+        .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("inner_error", inner_payload)
+        .into_json()
+    }
+
+    fn fixture_dag_node(id: &str, target: &str) -> DagNode {
+        DagNode {
+            id: id.into(),
+            target: target.into(),
+            objective: None,
+            depends_on: vec![],
+            condition: None,
+            failure_policy: "fail-fast".into(),
+            timeout_ms: None,
+            dispatch_strategy: Some("agent-team".into()),
+            target_project: None,
+            requested_cwd: None,
+            flow_id: None,
+            unsupported_fields: vec![],
+        }
+    }
+
+    #[test]
+    fn dag_node_dispatch_evidence_carries_canonical_source_and_kind() {
+        let node = fixture_dag_node("n1", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry = build_dag_success_entry(&node, &plan, "agent-team", json!({"ok": true}));
+        // wave-12 wire-compatible mapping for the DAG branch.
+        assert_eq!(entry["source"], "plan_dag_node_dispatch");
+        assert_eq!(entry["kind"], "dispatch");
+        assert_eq!(entry["schema_version"], "v0");
+        // Success-branch transition and inner payload land under canonical slots.
+        assert_eq!(entry["state_transition"], "ready -> succeeded");
+        assert_eq!(entry["inner_dispatch"]["ok"], true);
+        // Pre-wave12 sidecars carried the same payload under `inner_result`;
+        // we keep it as a legacy alias for byte-for-byte reader compat.
+        assert_eq!(entry["inner_result"]["ok"], true);
+    }
+
+    #[test]
+    fn dag_node_dispatch_evidence_keeps_legacy_passthrough_keys_flat() {
+        let node = fixture_dag_node("n7", "mission_task_delegate");
+        let plan = fixture_plan("(plan)");
+        let entry = build_dag_success_entry(&node, &plan, "fresh-code-alignment", json!({"task_id": "t7"}));
+        // Audit dashboards historically grep at the top level for these.
+        assert_eq!(entry["scheduler_mode"], "dag_v1");
+        assert_eq!(entry["node_id"], "n7");
+        assert_eq!(entry["plan_id"], plan.id.to_string());
+        assert_eq!(entry["target_tool"], "mission_task_delegate");
+        // `target` is the new short alias the wave-13 plan_dag entry now also
+        // exposes (mirrors `target_tool` for DAG-only consumers that pivot
+        // on the shorter name).
+        assert_eq!(entry["target"], "mission_task_delegate");
+        assert_eq!(entry["dispatch_strategy"], "fresh-code-alignment");
+    }
+
+    #[test]
+    fn dag_node_dispatch_evidence_failure_branch_keeps_inner_error_legacy_key() {
+        // The failure branch must NOT call `with_inner_dispatch`; the inner
+        // payload stays under the legacy `inner_error` extra so historical
+        // readers that filtered on that key keep working byte-for-byte.
+        let node = fixture_dag_node("n3", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let inner = json!({"error": "downstream rejected request"});
+        let entry = build_dag_failure_entry(&node, &plan, "resident-lisp", inner.clone());
+        assert_eq!(entry["state_transition"], "ready -> failed");
+        // Legacy `inner_error` key survives at top level.
+        assert_eq!(entry["inner_error"], inner);
+        // Canonical typed slot is intentionally absent on the failure branch.
+        assert!(
+            entry.get("inner_dispatch").is_none(),
+            "failure branch must not populate `inner_dispatch`; payload stays under `inner_error`"
+        );
+    }
+
+    #[test]
+    fn dag_node_dispatch_evidence_records_event_unavailability_reason() {
+        let node = fixture_dag_node("n2", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entry = build_dag_success_entry(&node, &plan, "agent-team", json!({"ok": true}));
+        let events = entry["execution_events"]
+            .as_array()
+            .expect("execution_events array present");
+        assert_eq!(events.len(), 1, "exactly one placeholder reference per node");
+        assert_eq!(events[0]["unavailable"], true);
+        let reason = events[0]["unavailable_reason"]
+            .as_str()
+            .expect("reason recorded as string");
+        assert!(
+            reason.contains("ExecutionEvent bus"),
+            "reason must mention the bus subscription gap so consumers can route on it: {}",
+            reason
+        );
     }
 
 }

@@ -53,6 +53,14 @@ use crate::state::AppState;
 /// `plan.rs`; duplicated here so the lower-level
 /// [`append_entry_to_project_root`] writer can be tested without taking an
 /// `AppState` (which carries half the daemon).
+///
+/// `#[allow(dead_code)]`: only referenced by the `#[cfg(test)]`-only
+/// [`append_entry_to_project_root`] writer. Production callers go through
+/// `super::plan::append_plan_evidence_entry` which holds its own copy of the
+/// path constant. We intentionally duplicate to avoid leaking that internal
+/// const just for the test surface; the duplication is explicitly noted in
+/// the docstring above.
+#[allow(dead_code)]
 const COMPANION_DIR: &str = ".missiond/v2/plans";
 
 /// Schema version stamped onto every evidence entry produced through this
@@ -98,8 +106,23 @@ pub(crate) mod source {
 ///   - `note`     : free-form caller note (manual `record_evidence`).
 pub(crate) mod kind {
     pub(crate) const DISPATCH: &str = "dispatch";
+    /// `#[allow(dead_code)]`: future plan-runner verification step (cargo
+    /// test / lint / build summary) — wave-12 reserved this slot for the
+    /// upcoming verification-evidence wiring (intent-flow.lisp ::
+    /// F-intent-alignment-plan-execution-loop :: s7 verification-runner).
+    /// Not yet emitted by any call site, but documented in the public
+    /// taxonomy so the wire contract is stable when wiring lands.
+    #[allow(dead_code)]
     pub(crate) const VERIFICATION: &str = "verification";
+    /// `#[allow(dead_code)]`: future git-diff snapshot for plan evidence
+    /// (paired with VERIFICATION above; the verification runner attaches a
+    /// `git diff --stat` payload alongside the test results).
+    #[allow(dead_code)]
     pub(crate) const GIT_DIFF: &str = "git_diff";
+    /// `#[allow(dead_code)]`: future scoped-commit handoff metadata (wave-12
+    /// task-01 commit_hash / commit_status round-trip — covered by
+    /// `commit_metadata_round_trip_via_typed_setter` test).
+    #[allow(dead_code)]
     pub(crate) const COMMIT: &str = "commit";
     pub(crate) const NOTE: &str = "note";
 }
@@ -127,6 +150,14 @@ pub(crate) struct EventRef {
 }
 
 impl EventRef {
+    /// `#[allow(dead_code)]`: typed constructor for "I have a real event id"
+    /// case. The current call sites (plan.rs / plan_dag.rs) only use
+    /// `EventRef::unavailable(...)` because plan-runner v0 / DAG scheduler
+    /// v1 do not yet subscribe to the live ExecutionEvent bus. Kept on the
+    /// public surface so the upcoming bus subscription wiring (which DOES
+    /// know real event ids) can drop in without re-introducing the
+    /// constructor — exercised by `execution_events_array_in_order` test.
+    #[allow(dead_code)]
     pub(crate) fn new(source: impl Into<String>, kind: impl Into<String>, event_id: impl Into<String>) -> Self {
         Self {
             event_id: Some(event_id.into()),
@@ -216,6 +247,11 @@ impl EvidenceEntry {
 
     /// Verification commands run (tests / lint / build) — caller supplies a
     /// list of commands and a result summary; we record both verbatim.
+    ///
+    /// `#[allow(dead_code)]`: future verification-runner step (see
+    /// `kind::VERIFICATION` docstring above). Exercised by
+    /// `typed_setters_land_under_canonical_keys` test.
+    #[allow(dead_code)]
     pub(crate) fn with_verification(mut self, commands: Vec<String>, result_summary: Value) -> Self {
         self.verification = Some(json!({
             "commands": commands,
@@ -227,6 +263,11 @@ impl EvidenceEntry {
     /// Git diff snapshot — caller picks whatever shape they have
     /// (`git diff --stat` text, structured per-file list, etc.). Stored
     /// verbatim under `git_diff`.
+    ///
+    /// `#[allow(dead_code)]`: paired with `with_verification` above; the
+    /// verification runner attaches a git-diff snapshot. Exercised by
+    /// `typed_setters_land_under_canonical_keys` test.
+    #[allow(dead_code)]
     pub(crate) fn with_git_diff(mut self, payload: Value) -> Self {
         self.git_diff = Some(payload);
         self
@@ -235,6 +276,15 @@ impl EvidenceEntry {
     /// Commit metadata — `commit_hash` is the resolved sha (40 hex chars or
     /// short form, caller's choice). `commit_status` is a free string (e.g.
     /// `"committed"` / `"detached_head"` / `"dirty"`).
+    ///
+    /// `#[allow(dead_code)]`: scoped-commit handoff metadata is the
+    /// canonical typed slot for the commit_hash/commit_status round-trip
+    /// added in wave-12 task-01. Today plan-runner / DAG scheduler do not
+    /// produce a scoped commit themselves (they hand off to the caller),
+    /// but the typed setter is on the public surface so the upcoming
+    /// scoped-commit wiring can drop it in. Exercised by
+    /// `commit_metadata_round_trip_via_typed_setter`.
+    #[allow(dead_code)]
     pub(crate) fn with_commit(mut self, commit_hash: Option<String>, commit_status: Option<String>) -> Self {
         let mut m = Map::new();
         if let Some(h) = commit_hash {
@@ -275,6 +325,15 @@ impl EvidenceEntry {
     /// has already built a payload object (e.g. the legacy
     /// `plan_runner_dispatch` shape) and wants to migrate without rewriting
     /// every field by hand.
+    ///
+    /// `#[allow(dead_code)]`: wave-13 plan.rs / plan_dag.rs migrated to
+    /// per-field `with_extra(...)` calls (more explicit + easier to grep
+    /// for the legacy passthrough keys). `merge_extra` stays on the public
+    /// surface for the next legacy producer that wants to migrate without
+    /// rewriting. Exercised by `merge_extra_skips_canonical_stamps`,
+    /// `typed_inner_dispatch_wins_over_extra_legacy_inner_dispatch`, and
+    /// `commit_metadata_round_trip_via_legacy_merge`.
+    #[allow(dead_code)]
     pub(crate) fn merge_extra(mut self, value: Value) -> Self {
         if let Value::Object(m) = value {
             for (k, v) in m {
@@ -347,10 +406,25 @@ impl EvidenceEntry {
 /// underlying error text). Failures are NEVER silently swallowed — callers
 /// are expected to surface them on the response payload (mirrors the
 /// existing `evidence_error` field on plan-runner / DAG-runner responses).
+///
+/// `entry_count` is preserved on the `Written` variant for upcoming UI /
+/// retrospective surfaces that want to show "this dispatch is the Nth entry
+/// in the evidence trail" (today's plan-runner / DAG-runner responses only
+/// surface the path). `into_legacy_tuple` discards it because the existing
+/// `evidence_path` / `evidence_error` response shape predates per-entry
+/// counting.
 #[derive(Debug, Clone)]
 pub(crate) enum AppendOutcome {
-    Written { path: PathBuf, entry_count: usize },
-    Failed { error: String },
+    Written {
+        path: PathBuf,
+        /// `#[allow(dead_code)]`: read by tests only today — see variant
+        /// docstring for the future read-out plan.
+        #[allow(dead_code)]
+        entry_count: usize,
+    },
+    Failed {
+        error: String,
+    },
 }
 
 impl AppendOutcome {
@@ -405,6 +479,16 @@ pub(crate) async fn append(
 /// on-disk shape — both write to the same canonical path (`<project_root>/
 /// .missiond/v2/plans/<plan_id>.evidence.json`) so the two writers are
 /// interchangeable from a reader's perspective.
+///
+/// `#[allow(dead_code)]`: only invoked by `#[cfg(test)]` tests in this
+/// module (`sidecar_append_preserves_order_and_schema_version`,
+/// `sidecar_append_surfaces_writer_failure`,
+/// `sidecar_append_is_strictly_additive`). Production callers go through
+/// `append(...)` which delegates to `super::plan::append_plan_evidence_entry`
+/// (resolves project root via the canonical resolver). This twin exists so
+/// the on-disk shape contract is testable without standing up a full
+/// `AppState` + project registry.
+#[allow(dead_code)]
 pub(crate) fn append_entry_to_project_root(
     project_root: &Path,
     plan_id: uuid::Uuid,
@@ -448,6 +532,11 @@ pub(crate) fn append_entry_to_project_root(
     Ok((path, entry_count))
 }
 
+/// `#[allow(dead_code)]`: only called by [`append_entry_to_project_root`]
+/// (test-only writer; see its docstring). Production callers reach the same
+/// stamping behaviour through `super::plan::append_plan_evidence_entry`
+/// which keeps a private copy.
+#[allow(dead_code)]
 fn iso_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
