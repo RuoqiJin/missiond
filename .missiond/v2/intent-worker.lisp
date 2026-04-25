@@ -7,7 +7,7 @@
 
 (pillar worker
   :version "v0.5"
-  :status "phase-C recursive architecture contract 2026-04-25 — runtime path → ordered mechanics → explicit egress; project-root spawn cwd contract added; claudecode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd) operational-practice + architecture-designed; mission_execution dispatch_strategy companion log meta 已 code-aligned partial; plan-runner v0 + auto-selection v1 已 code-aligned partial (sexp hint parsing); ExecutionEvent dispatch metadata 扩展 / 完整 PLAN DAG scheduler 仍 code-alignment pending"
+  :status "phase-C recursive architecture contract 2026-04-26 — runtime path → ordered mechanics → explicit egress; project-root spawn cwd contract added; claudecode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd / scoped-commit-handoff) operational-practice + architecture-designed; mission_execution dispatch_strategy companion log meta 已 code-aligned partial; scoped commit handoff 作为 durability plane 设计完成; 完整 PLAN DAG scheduler architecture-designed; ExecutionEvent dispatch metadata / PlanNodeStateChanged / scoped commit daemon enforce / plan-runner v1 仍 code-alignment pending"
   :predecessor "v0.2 2026-04-21 (integrated by 主 Claude)"
   :target-path ".missiond/v2/intent-worker.lisp"
   :integration-notes
@@ -1965,8 +1965,8 @@
   ;; 2.7b ClaudeCode Workstation Orchestration — 把人工运维经验沉淀为一等调度策略
   ;; ══════════════════════════════════════════════════════════
   (section claudecode-workstation-orchestration
-    :desc "MissionD 调度 ClaudeCode 工作时的默认策略 — 何时复用常驻 Lisp 会话 / 何时新开代码同构会话 / 何时提示 agent-team / 为何优先 spawn 工位 / 项目根 cwd 契约"
-    :status "operational-practice (人工流程已在用) + architecture-designed (Lisp 已声明); auto-selection by plan-runner code-alignment pending"
+    :desc "MissionD 调度 ClaudeCode 工作时的默认策略 — 何时复用常驻 Lisp 会话 / 何时新开代码同构会话 / 何时提示 agent-team / 为何优先 spawn 工位 / 项目根 cwd 契约 / 如何 scoped commit"
+    :status "operational-practice (人工流程已在用) + architecture-designed (Lisp 已声明); shared execution log + scoped commit handoff 设计完成; auto-selection by plan-runner code-alignment pending"
     :rationale "用户提的 5 条真实经验需要从'临时使用技巧'升级为 MissionD plan-runner / worker orchestration 的默认调度规则, 不再依赖某次会话的临时记忆"
     :scope "本 section 描述 worker pillar 视角的调度策略 — 决策语义同时挂在 intent-layer pillar :: section unified-entry-pipeline :: workstation-dispatch-policy"
     :flow-cross-ref "flow pillar :: F-workstation-dispatch-policy + F-intent-alignment-plan-execution-loop :: s2 / s4 / s6"
@@ -2046,9 +2046,36 @@
       :status "code-aligned for spawn cwd enforcement; 任务 .md 中显式声明 :target_project 字段, 让 plan-runner 决定 reuse 还是 new spawn — 这一段的自动选路待实现"
       :anti-pattern "不要把 missiond 常驻 Lisp 会话用来执行 cuthub 的 Rust 修改 — cwd 不对, project memory / JSONL / tool path 全错位")
 
+    (policy scoped-commit-handoff
+      :purpose "并行工位完成 claim scope 后, 用 git commit 固化成果, 并把 commit_hash 回填 execution log"
+      :why "共享 execution Lisp 是 control plane, 可协调 claim/lease/decision; 但未提交代码仍可能被后续 agent 的 stash/pop/Edit 回退. scoped commit 是 durability plane."
+      :cross-ref "memory pillar :: helper agent-execution-coordination :: scoped-commit-contract + flow pillar :: F-scoped-commit-handoff"
+      :applies-to
+        [(code-alignment-new-session "required — Rust/SQL/JS/TS 代码同构完成并验收后必须只提交自己 scope")
+         (parallel-code-agent "required — 并行写代码风险最高, 每个 agent 独立 commit 自己 ownership")
+         (resident-lisp-architect "wave-boundary-or-required — 常驻 Lisp 会话可以按 wave 汇总 commit, 但每个 wave 必须落 durable hash")
+         (exploration-only "not-required — 只读调查写 completion 即可")
+         (emergency-fix "required-after-verify — 修正任务必须可回滚")]
+      :handoff-steps
+        [(s1 "mission_execution(action=claim) 先锁定文件/模块 scope")
+         (s2 "工作期间 heartbeat; 发现越界写入需求则 issue/deviate, 不抢写")
+         (s3 "验收通过后 mission_execution(action=complete) 写 changed_files + verification")
+         (s4 "git add 仅添加 claimed_scope 内文件; 禁止 git add .")
+         (s5 "git diff --cached --name-only 必须是 claimed_scope 子集")
+         (s6 "git commit scoped patch")
+         (s7 "commit_hash 回填 completion/git-handoff; 若失败写 commit_status=blocked + blocker")]
+      :task-file-contract "所有给 ClaudeCode 的写入型任务 .md 必须包含本 handoff policy; 若任务禁止 commit, 必须写明替代 durability artifact (patch file / branch / worktree)"
+      :status "architecture-designed; current task-file practice can enforce immediately; daemon 自动 preflight/stage/commit 仍 code-alignment pending"
+      :anti-patterns ["不要 git add ."
+                      "不要把别人的 unstaged 文件带进 commit"
+                      "不要用 stash/reset/checkout 清理别人的 scope"
+                      "不要只看测试通过就宣称交付 — 必须确认 live diff 或 commit hash 存在"])
+
     (dispatch-decision-matrix
       :desc "plan-runner 选择策略的决策表 — 当前由人/上层 actor 手动应用; 未来由 plan-runner 读取 PLAN.lisp 自动应用"
       :status "architecture-designed; code-alignment pending"
+      :dag-scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler — 节点 schema :dispatch-strategy / :target-project / :parallelism 字段是本 matrix 的输入; scheduler s6 dispatch-ready-nodes 按本 matrix 路由 substrate"
+      :flow-cross-ref "flow pillar :: F-intent-alignment-plan-execution-loop :: s6 :: dag-scheduler — 完整 11-stage 协议正文"
       (rule lisp-architecture-task
         :pattern "PLAN.lisp 仅修改 .missiond/v2/*.lisp / .missiond/intent-*.lisp / .missiond/workflows/*.lisp"
         :strategy "resident-lisp-architect-session — 复用常驻 slot, 不另开"
@@ -2056,14 +2083,14 @@
       (rule code-alignment-task
         :pattern "PLAN.lisp 含 Rust / SQL / JS / TS / Swift 文件修改"
         :strategy "fresh-code-alignment-session — spawn 新 slot, project-root cwd"
-        :rationale "代码同构需要隔离 + 任务自包含; 任务 .md 已是 self-contained contract")
+        :rationale "代码同构需要隔离 + 任务自包含; 任务 .md 已是 self-contained contract; 完成后必须 scoped commit")
       (rule cross-pillar-scan
         :pattern "PLAN.lisp 含 N≥2 个独立可并行的扫描/读取/验证步骤"
         :strategy "fresh session + agent-team-hint"
         :rationale "并行 sub-agent 加速 anchor 定位; 但写入仍由主 agent 单点")
       (rule mixed-task
         :pattern "PLAN.lisp 既改 Lisp 又改代码"
-        :strategy "拆 plan: Lisp 改动给 resident-lisp-session, 代码改动给 fresh-code-alignment-session; 用 mission_execution coordination 串接"
+        :strategy "拆 plan: Lisp 改动给 resident-lisp-session, 代码改动给 fresh-code-alignment-session; 用 mission_execution coordination 串接; 各自按 claim scope scoped commit"
         :rationale "单 slot 同时持两种上下文会互相污染; 最好按文件类型划分 phase")
       (rule emergency-throwaway
         :pattern "无需观测 / 无需 evidence / 一次性查询 (例: 临时调试问答)"
@@ -2076,13 +2103,17 @@
       :writer "mission_execution(action=open) 接收 dispatch_strategy/target_project/requested_cwd 写入 companion log meta; 由 plan-runner v0 (mission_plan execute_mode=internal target=mission_execution) 自动转发"
       :consumer "evidence-collector 落到 evidence sidecar plan_runner_dispatch entry; mission_execution(list/status) 暴露给 capability-usage-monitor 与回放"
       :status "code-aligned partial — mission_execution schema 已含 dispatch_strategy/target_project/requested_cwd 字段, 写 companion log meta + list/status graceful read; ExecutionEvent::Opened 扩展 dispatch metadata 仍 code-alignment pending (companion log durable only)"
+      :durability-cross-ref "scoped-commit-handoff policy — completion 必须最终带 commit_hash 或 commit_status=blocked, 否则 audit 标记 durability gap"
       :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (open schema)"
                                "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (action_open meta render + list/status graceful)"
                                "crates/missiond-daemon/src/handlers/knowledge/plan.rs (execute_mode=internal forwarding to mission_execution)"
                                "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — 字段扩展 pending)"]
       :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd"
+                "ExecutionEvent::PlanNodeStateChanged 新增 (per-node FSM 转移广播 — 配合 actor plan-dag-scheduler)"
                 "timeline / 其他查询面暴露 dispatch_strategy"
-                "plan-runner 自动从 PLAN.lisp DAG 推断 strategy (auto-selection v1 已支持保守 hint, 完整推断 pending)"]))
+                "plan-runner 自动从 PLAN.lisp DAG 推断 strategy (auto-selection v1 已支持保守 hint, 完整推断 pending)"
+                "完整 PLAN DAG scheduler 跑通后 per-node companion log 写入路径 (claim/heartbeat/release/complete 由 scheduler s5/s8 调用) — 复用 mission_execution 12-action manager, 不新增 action"])
+      :dag-scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler — scheduler 必须经 mission_execution(action=claim) 申请节点 scope=plan/<plan_id>/node/<node_id> claim_id, 不允许自建 ID 池 (D010 教训)")
 
   ;; ══════════════════════════════════════════════════════════
   ;; 2.8 Worker-side Computation (retrieval + forge)

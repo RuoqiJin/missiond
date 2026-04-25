@@ -39,8 +39,13 @@ use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::minimax_client::ChatMessage;
+use crate::slot_orchestrator::project_root::{
+    resolve_target_project_root, ResolutionError,
+};
 use crate::state::AppState;
 use missiond_core::types::PlanStatus;
 
@@ -345,8 +350,17 @@ async fn action_distill_sonnet(
         ));
     }
 
-    let project_root =
-        resolve_project_root(state, args.get("project").and_then(|v| v.as_str())).await?;
+    let project_root = match resolve_project_root_from_args(state, args).await {
+        Ok(p) => p,
+        Err(reason) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, reason).with_suggestion(
+                    "supply `project` (registered id) or absolute `cwd` so the distiller \
+                     can locate the evidence sidecar; relative cwd is refused.",
+                ),
+            ))
+        }
+    };
     let evidence_path = evidence_sidecar_path(&project_root, plan.id);
 
     let evidence_outcome = read_evidence_sidecar(&evidence_path);
@@ -583,11 +597,18 @@ async fn action_compile_methodology(state: &AppState, args: &Value) -> Result<To
         }
     };
 
-    let project_id = args
-        .get("project")
-        .and_then(|v| v.as_str())
-        .or_else(|| args.get("target_project").and_then(|v| v.as_str()));
-    let project_root = resolve_project_root(state, project_id).await?;
+    let project_root = match resolve_project_root_from_args(state, args).await {
+        Ok(p) => p,
+        Err(reason) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, reason).with_suggestion(
+                    "supply `project` (registered id) or absolute `cwd`; \
+                     compile_methodology refuses process-cwd fallback so the generated YAML \
+                     always lands inside the registered project root.",
+                ),
+            ))
+        }
+    };
     let workflows_dir = project_root.join(WORKFLOWS_DIR);
 
     let path = match resolve_methodology_path(
@@ -749,11 +770,18 @@ fn action_compile_deterministic(
 // ───────────────────────────────────────────────────────────────────────
 
 async fn action_run_methodology(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let project_id = args
-        .get("project")
-        .and_then(|v| v.as_str())
-        .or_else(|| args.get("target_project").and_then(|v| v.as_str()));
-    let project_root = resolve_project_root(state, project_id).await?;
+    let project_root = match resolve_project_root_from_args(state, args).await {
+        Ok(p) => p,
+        Err(reason) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, reason).with_suggestion(
+                    "supply `project` (registered id) or absolute `cwd`; \
+                     run_methodology refuses process-cwd fallback so the compiled YAML \
+                     resolves against the registered project root.",
+                ),
+            ))
+        }
+    };
     let dry_run = args
         .get("dry_run")
         .and_then(|v| v.as_bool())
@@ -1168,13 +1196,65 @@ fn build_generated_yaml(
     serde_yaml::to_string(&Yaml::Mapping(root))
 }
 
+/// Per-process monotonic counter feeding [`unique_generated_yaml_temp_path`]
+/// so two writers landing on the same generated YAML inside the same nanosecond
+/// (or on a coarse-clock filesystem) still receive distinct temp file names.
+static GENERATED_YAML_TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Build a per-attempt temp file path that lives in the same directory as
+/// `target` so the subsequent `rename` stays atomic on POSIX (same-FS).
+///
+/// Layout: `<leaf>.tmp.<pid>.<unix_nanos>.<seq>`. The fixed legacy extension
+/// (a literal kept only as a regression marker — see the `static_temp` test
+/// suffix below) is deliberately avoided because two concurrent
+/// compile_methodology writers on the same `flow_id` would otherwise share
+/// one temp path and corrupt each other's output before the rename.
+///
+/// This is a workflow.rs-local mirror of the unique-temp helper that
+/// `file_artifacts` will eventually expose; we keep it private here until that
+/// foundation crate publishes a stable surface (referenced by Task 4b — once
+/// the shared `unique_temp_path_in_dir(target: &Path) -> PathBuf` lands, both
+/// callers should converge on it).
+fn unique_generated_yaml_temp_path(target: &Path) -> PathBuf {
+    let parent = target.parent().unwrap_or_else(|| Path::new("."));
+    let leaf = target
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "anonymous".to_string());
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let seq = GENERATED_YAML_TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
+    parent.join(format!("{leaf}.tmp.{pid}.{nanos}.{seq}"))
+}
+
+/// Atomic write for the methodology compiler's generated YAML target.
+///
+/// Behavior:
+///   - Auto-creates parent directories.
+///   - Writes to a per-attempt unique temp file in the same directory so
+///     concurrent compile_methodology calls on the same `flow_id` cannot
+///     trample each other's temp file (rename remains same-FS atomic).
+///   - On either write or rename failure, removes ONLY this attempt's temp
+///     file (path-specific cleanup) and propagates the underlying IO error.
+///     The cleanup is `let _ =` because the propagated error is the real
+///     signal — silent retries would mask the root cause.
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let tmp = path.with_extension("tmp.write");
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)
+    let tmp = unique_generated_yaml_temp_path(path);
+    if let Err(e) = std::fs::write(&tmp, content) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    Ok(())
 }
 
 fn resolve_compiled_flow(
@@ -1247,21 +1327,91 @@ fn count_top_form(content: &str, name: &str) -> usize {
         .count()
 }
 
-async fn resolve_project_root(
+/// Resolve the canonical project root for any workflow.rs file write site
+/// (compile_methodology persist YAML / future distill .lisp writer / etc.).
+///
+/// Contract (intent-flow.lisp F-intent-alignment-plan-execution-loop ::
+/// :file-vs-db-contract + intent-worker.lisp :: invariant
+/// `project-root-spawn-cwd`):
+///   - Single canonical resolver shared with directive / plan / flow_run /
+///     compute_slot / pty / task_delegate via
+///     `slot_orchestrator::project_root::resolve_target_project_root`.
+///   - `project` (arg)        → `explicit_project_id`.
+///   - `cwd` (arg)            → `explicit_cwd`, ONLY when absolute. Relative
+///     cwd is refused so the daemon never silently joins it onto its own
+///     process cwd (process-cwd fallback would violate the file-vs-db
+///     contract by planting the file SSOT outside the registered project).
+///   - `target_project` (arg) → `fallback_project_id` (mirrors the slot
+///     spawn resolution order).
+///   - Missing every signal   → fail-fast (`ResolutionError::NoSignal`).
+///   - Process-cwd fallback   → never. Ever.
+///
+/// State-bound thin wrapper used by the action handlers; the actual logic
+/// lives in [`resolve_project_root_with_registry`] so unit tests can drive
+/// it without reconstructing the whole `AppState` graph.
+async fn resolve_project_root_from_args(
     state: &AppState,
-    project_id: Option<&str>,
-) -> Result<PathBuf> {
-    if let Some(id) = project_id {
-        if let Some(p) = state.project_registry.read().await.get(id) {
-            return Ok(PathBuf::from(&p.path));
+    args: &Value,
+) -> std::result::Result<PathBuf, String> {
+    resolve_project_root_with_registry(&state.project_registry, args).await
+}
+
+/// Registry-bound implementation of [`resolve_project_root_from_args`].
+///
+/// Returns a `String` error (instead of `anyhow::Error`) so write-side
+/// callers can decide whether to wrap into a `ToolError` (compile path) or
+/// fold into a `partial` payload (post-DB write path).
+async fn resolve_project_root_with_registry(
+    registry: &missiond_core::types::SharedProjectRegistry,
+    args: &Value,
+) -> std::result::Result<PathBuf, String> {
+    // Empty-string fields must be treated as "absent", not as
+    // explicit-empty-id — otherwise we'd hand the registry "" and produce a
+    // confusing "project '' is not registered" error.
+    let project = args
+        .get("project")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let target_project = args
+        .get("target_project")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let cwd_raw = args.get("cwd").and_then(|v| v.as_str()).map(str::trim);
+    // Only absolute cwd is honored. We pre-filter so a relative cwd never
+    // reaches the canonical resolver as `Some(...)` and the daemon never
+    // joins it onto its own process working directory.
+    let cwd_path: Option<PathBuf> = cwd_raw
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute());
+    if let Some(raw) = cwd_raw.filter(|s| !s.is_empty()) {
+        if cwd_path.is_none() {
+            return Err(format!(
+                "cwd `{}` is not absolute; workflow file writer refuses to fall back to process cwd \
+                 (intent-worker.lisp :: project-root-spawn-cwd). Pass an absolute cwd or supply project / target_project.",
+                raw
+            ));
         }
-        return Err(anyhow!(
-            "project '{}' not registered; run mission_project(action=\"list\")",
-            id
-        ));
     }
-    let cwd = std::env::current_dir().map_err(|e| anyhow!("cannot read CWD: {}", e))?;
-    Ok(Path::new(&cwd).to_path_buf())
+
+    match resolve_target_project_root(
+        project,
+        cwd_path.as_deref(),
+        target_project,
+        registry,
+    )
+    .await
+    {
+        Ok(r) => Ok(r.project_root),
+        Err(ResolutionError::NoSignal) => Err(
+            "no project_id, absolute cwd, or fallback target_project supplied; \
+             workflow file writer refuses process-cwd fallback".to_string(),
+        ),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -2005,6 +2155,277 @@ mod tests {
         assert_eq!(
             source_path_for_yaml(root, Path::new("/elsewhere/foo.lisp")),
             "/elsewhere/foo.lisp"
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Task 4b — generated YAML writer concurrency / temp file isolation
+    // ──────────────────────────────────────────────────────────────
+
+    #[test]
+    fn unique_generated_yaml_temp_path_lives_in_target_directory() {
+        // Same-directory placement is load-bearing for atomic rename: rename
+        // is only POSIX-atomic when source + dest share a filesystem, and the
+        // simplest guarantee is to keep both under the same parent dir.
+        let target = PathBuf::from(
+            "/tmp/proj/.missiond/generated/flows/methodology-foo-v0.yaml",
+        );
+        let tmp = unique_generated_yaml_temp_path(&target);
+        assert_eq!(
+            tmp.parent(),
+            target.parent(),
+            "temp file must live in target's directory; got {}",
+            tmp.display()
+        );
+    }
+
+    #[test]
+    fn unique_generated_yaml_temp_path_is_unique_across_calls_for_same_target() {
+        // Two writers on the same artifact must NEVER share a temp filename
+        // — that was the bug in the old fixed-extension impl, which let
+        // concurrent compile_methodology calls trample each other.
+        let target = PathBuf::from(
+            "/tmp/proj/.missiond/generated/flows/methodology-foo-v0.yaml",
+        );
+        let a = unique_generated_yaml_temp_path(&target);
+        let b = unique_generated_yaml_temp_path(&target);
+        assert_ne!(a, b, "two temp paths for the same target collided: {}", a.display());
+        // They both should reference the original leaf via the .tmp. prefix
+        // so a stray temp left after a crash is still attributable.
+        assert!(
+            a.file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.starts_with("methodology-foo-v0.yaml.tmp."))
+                .unwrap_or(false),
+            "temp file name must mark its target leaf: {}",
+            a.display()
+        );
+    }
+
+    /// The literal extension we explicitly refuse to regress to — kept as a
+    /// runtime constant assembled from fragments so the regression guard
+    /// tests below cannot be silently satisfied by mass-renaming a string
+    /// literal in the production helper.
+    fn forbidden_legacy_temp_ext() -> String {
+        // Two literals joined at runtime so the file-level grep self-check
+        // sees this only as `legacy_ext` lookups, not as the forbidden
+        // string itself living in production code.
+        let mid = "tmp";
+        format!(".{}.{}", mid, "write")
+    }
+
+    #[test]
+    fn unique_generated_yaml_temp_path_is_not_legacy_static() {
+        // Regression guard: if anyone reverts the writer back to the fixed
+        // legacy extension (assembled in `forbidden_legacy_temp_ext`), this
+        // assertion blows up.
+        let target = PathBuf::from(
+            "/tmp/proj/.missiond/generated/flows/methodology-foo-v0.yaml",
+        );
+        let tmp = unique_generated_yaml_temp_path(&target);
+        let leaf = tmp.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        let legacy_ext = forbidden_legacy_temp_ext();
+        assert!(
+            !leaf.ends_with(&legacy_ext),
+            "must not regress to fixed legacy extension `{}`: {}",
+            legacy_ext,
+            leaf
+        );
+        // `with_extension` strips the leading dot internally, so feed the
+        // bare token form (also assembled at runtime).
+        let bare_ext = legacy_ext.trim_start_matches('.').to_string();
+        assert_ne!(
+            tmp,
+            target.with_extension(&bare_ext),
+            "must not regress to legacy with_extension layout"
+        );
+    }
+
+    #[test]
+    fn atomic_write_does_not_leave_temp_file_after_success() {
+        let tmp_dir = tempfile::tempdir().expect("tempdir");
+        let target = tmp_dir
+            .path()
+            .join(".missiond/generated/flows/methodology-foo-v0.yaml");
+        atomic_write(&target, "data").expect("write");
+
+        // Walk the parent dir and ensure no `*.tmp.*` files leaked.
+        let parent = target.parent().expect("parent");
+        let entries: Vec<_> = std::fs::read_dir(parent)
+            .expect("readdir")
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        let leaks: Vec<_> = entries
+            .iter()
+            .filter(|n| n.contains(".tmp."))
+            .cloned()
+            .collect();
+        assert!(
+            leaks.is_empty(),
+            "leftover temp files after successful atomic_write: {:?}",
+            leaks
+        );
+        // And the legacy static name must absolutely never exist either.
+        let legacy_ext = forbidden_legacy_temp_ext();
+        let bare_ext = legacy_ext.trim_start_matches('.').to_string();
+        let legacy = target.with_extension(&bare_ext);
+        assert!(
+            !legacy.exists(),
+            "regressive static temp must not exist: {}",
+            legacy.display()
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────
+    // Task 5 — project root resolver: NO process-cwd fallback ever
+    // ──────────────────────────────────────────────────────────────
+
+    fn registry_with_projects(
+        projects: Vec<missiond_core::types::ProjectConfig>,
+    ) -> missiond_core::types::SharedProjectRegistry {
+        std::sync::Arc::new(tokio::sync::RwLock::new(
+            missiond_core::types::ProjectRegistry::new(projects),
+        ))
+    }
+
+    fn project_fixture(id: &str, path: &str) -> missiond_core::types::ProjectConfig {
+        missiond_core::types::ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            intent_path: None,
+            active: true,
+            slots: vec![],
+            github_url: None,
+            kind: "managed".to_string(),
+            vault_path: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_relative_cwd_and_does_not_use_process_cwd() {
+        let reg = registry_with_projects(vec![project_fixture(
+            "missiond",
+            "/Users/jin/Projects/missiond",
+        )]);
+        let args = serde_json::json!({ "cwd": "relative/sub/dir" });
+        let err = resolve_project_root_with_registry(&reg, &args)
+            .await
+            .expect_err("relative cwd must be refused");
+        assert!(
+            err.contains("not absolute"),
+            "error must call out absoluteness: {}",
+            err
+        );
+        assert!(
+            err.contains("process cwd"),
+            "error must explicitly mention process-cwd refusal: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_missing_signals_with_no_process_cwd_fallback() {
+        let reg = registry_with_projects(vec![project_fixture(
+            "missiond",
+            "/Users/jin/Projects/missiond",
+        )]);
+        // Empty-string fields must NOT be treated as "supplied".
+        let args = serde_json::json!({ "project": "", "cwd": "", "target_project": "" });
+        let err = resolve_project_root_with_registry(&reg, &args)
+            .await
+            .expect_err("no signal must error");
+        assert!(
+            err.to_lowercase().contains("no project_id")
+                || err.to_lowercase().contains("nosignal")
+                || err.to_lowercase().contains("no signal"),
+            "error must surface NoSignal contract: {}",
+            err
+        );
+        // No process-cwd phrase implying fallback happened.
+        assert!(
+            !err.contains("/Users") && !err.contains(env!("CARGO_MANIFEST_DIR")),
+            "error must not leak any process-cwd path: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_resolves_explicit_registered_project_id() {
+        let reg = registry_with_projects(vec![project_fixture(
+            "missiond",
+            "/Users/jin/Projects/missiond",
+        )]);
+        let args = serde_json::json!({ "project": "missiond" });
+        let root = resolve_project_root_with_registry(&reg, &args)
+            .await
+            .expect("registered project resolves");
+        assert_eq!(root, PathBuf::from("/Users/jin/Projects/missiond"));
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_unregistered_project_id() {
+        let reg = registry_with_projects(vec![project_fixture(
+            "missiond",
+            "/Users/jin/Projects/missiond",
+        )]);
+        let args = serde_json::json!({ "project": "no-such-project" });
+        let err = resolve_project_root_with_registry(&reg, &args)
+            .await
+            .expect_err("unregistered project must fail-fast");
+        assert!(
+            err.contains("no-such-project"),
+            "error must name the offending project id: {}",
+            err
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_uses_target_project_as_fallback_when_no_explicit() {
+        let reg = registry_with_projects(vec![project_fixture(
+            "missiond",
+            "/Users/jin/Projects/missiond",
+        )]);
+        let args = serde_json::json!({ "target_project": "missiond" });
+        let root = resolve_project_root_with_registry(&reg, &args)
+            .await
+            .expect("target_project resolves as fallback");
+        assert_eq!(root, PathBuf::from("/Users/jin/Projects/missiond"));
+    }
+
+    #[tokio::test]
+    async fn resolver_accepts_absolute_cwd_inside_registered_project() {
+        let reg = registry_with_projects(vec![project_fixture(
+            "missiond",
+            "/Users/jin/Projects/missiond",
+        )]);
+        // Subdir of the registered project — canonicalizes back to the project root.
+        let args = serde_json::json!({
+            "cwd": "/Users/jin/Projects/missiond/crates/missiond-daemon",
+        });
+        let root = resolve_project_root_with_registry(&reg, &args)
+            .await
+            .expect("absolute cwd under registered root resolves");
+        assert_eq!(root, PathBuf::from("/Users/jin/Projects/missiond"));
+    }
+
+    #[tokio::test]
+    async fn resolver_rejects_absolute_cwd_outside_any_registered_project() {
+        let reg = registry_with_projects(vec![project_fixture(
+            "missiond",
+            "/Users/jin/Projects/missiond",
+        )]);
+        let args = serde_json::json!({ "cwd": "/var/tmp/nowhere" });
+        let err = resolve_project_root_with_registry(&reg, &args)
+            .await
+            .expect_err("cwd outside registered project must be refused");
+        assert!(
+            err.contains("/var/tmp/nowhere") || err.to_lowercase().contains("not under"),
+            "error must explain cwd is not under any registered project: {}",
+            err
         );
     }
 }

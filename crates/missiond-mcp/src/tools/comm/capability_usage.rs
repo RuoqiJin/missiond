@@ -5,14 +5,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition::new(
         "mission_capability_usage",
         "tool/flow 调用热度监控 — 5 actions (snapshot/report/candidates/mark/ack)。\
-         从 conversation_tool_calls + board_tasks.flow_template 派生使用度,与 MCP 注册表 + \
-         flows YAML 注册表对账,产出 active/quiet/stale/never-used/shadowed-by-better-capability\
-         /merge-candidate/protected 七类候选。**只产出证据,不删 tool/flow,不改 registry**。\
+         从 6 sources 派生使用度: conversation_tool_calls + board_tasks_flow_template + \
+         event_log_flow_events + lisp_semantic_hints + review_sidecar + workflow_execution_stats。\
+         与 MCP 注册表 + flows YAML 注册表对账,产出 active/quiet/stale/never-used/\
+         shadowed-by-better-capability/merge-candidate/protected 七类候选。\
+         **只产出证据,不删 tool/flow,不改 registry**。\
+         workflow_execution_stats lane 来自 DirectiveLayerStore::workflow_list_top_n,\
+         按 workflow.name (exact) + match_rules.{tool_calls,flows} (exact strings) 映射,\
+         DB 失败时 lane status=`unavailable`,主响应不挂。\
          Lisp 源: intent-memory.lisp :: capability-usage-read-model + intent-flow.lisp :: \
          F-capability-usage-monitoring + intent-intent-layer.lisp :: capability-evolution-governance \
          + intent-tools.lisp :: future-surface mission_capability_usage。\
-         注意: ObservabilityEvent::CapabilityUsageSnapshot/CapabilityStaleCandidate 暂未发射(planned), \
-         daemon_state 是 i64-only,mark/ack 写 .missiond/v2/capability-usage-review.json sidecar。",
+         注意: ObservabilityEvent::CapabilityUsageSnapshot/CapabilityStaleCandidate 在 \
+         snapshot/report/candidates 已发射,daemon_state 是 i64-only,mark/ack 写 \
+         .missiond/v2/capability-usage-review.json sidecar。",
         json!({
             "type": "object",
             "required": ["action"],

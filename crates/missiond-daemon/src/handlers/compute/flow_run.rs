@@ -8,6 +8,9 @@ use serde_json::{json, Value};
 use tracing::{error, info};
 
 use crate::engine::flow::loader;
+use crate::slot_orchestrator::project_root::{
+    resolve_target_project_root, ResolutionError, ResolutionSource,
+};
 use crate::state::AppState;
 
 pub(crate) async fn handle(
@@ -244,6 +247,13 @@ pub(crate) enum ProjectRootSource {
     None,
     ExplicitPath,
     RegistryId,
+    /// `cwd` was an absolute existing path under a registered project; the
+    /// resolved root is the canonical project root (longest-prefix match
+    /// in `ProjectRegistry`). Mirrors `slot_orchestrator::project_root::
+    /// ResolutionSource::CwdLongestPrefix` so callers see the same source
+    /// vocabulary as compute_slot / pty / process / task_delegate spawn
+    /// paths.
+    RegistryLongestPrefix,
 }
 
 impl ProjectRootSource {
@@ -252,6 +262,7 @@ impl ProjectRootSource {
             ProjectRootSource::None => "none",
             ProjectRootSource::ExplicitPath => "explicit_path",
             ProjectRootSource::RegistryId => "registry_id",
+            ProjectRootSource::RegistryLongestPrefix => "registry_longest_prefix",
         }
     }
 }
@@ -311,9 +322,24 @@ async fn resolve_project_root_from_args(
         };
     }
 
-    // Resolution order: cwd → project → target_project, each tried as a
-    // path-first, then as a registry id. Paths win because they are
-    // unambiguous; registry ids exist for callers without a usable cwd.
+    // Resolution order — aligned with intent-worker.lisp :: invariant
+    // project-root-spawn-cwd resolution-order [r1 → r2 → r3]:
+    //
+    //   1. `project` → registered id wins; otherwise treat as absolute
+    //      existing path (legacy ExplicitPath, supports "I'm pointing at
+    //      a project root that isn't registered yet").
+    //   2. `target_project` → same logic, alias-style fallback.
+    //   3. `cwd` → must be absolute existing. Try longest-prefix match
+    //      against `ProjectRegistry`; if it lands inside a registered
+    //      project we resolve to the *project root* (RegistryLongestPrefix,
+    //      same vocabulary as slot_orchestrator::project_root). If no
+    //      registered project covers cwd, fall back to using cwd itself
+    //      as the root (ExplicitPath) so unregistered project dirs still
+    //      work for one-off `mission_flow_run` calls.
+    //
+    // Relative cwd is rejected outright — we never silently fall back to
+    // the daemon's process CWD (would leak the wrong project into flow
+    // discovery).
     let mut diagnostics: Vec<String> = Vec::new();
     let try_path = |raw: &str| -> Option<PathBuf> {
         let p = PathBuf::from(raw);
@@ -324,39 +350,95 @@ async fn resolve_project_root_from_args(
         }
     };
 
-    for (label, value) in [
-        ("cwd", raw.cwd.as_deref()),
-        ("project", raw.project.as_deref()),
-        ("target_project", raw.target_project.as_deref()),
-    ] {
-        let Some(v) = value else { continue };
-        if let Some(p) = try_path(v) {
-            return ProjectRoot {
-                root: Some(p),
-                status: ProjectRootStatus::Resolved,
-                source: ProjectRootSource::ExplicitPath,
-                diagnostic: None,
-            };
-        } else {
-            diagnostics.push(format!("{}={} not an absolute existing path", label, v));
+    {
+        let reg = registry.read().await;
+        for (label, value) in [
+            ("project", raw.project.as_deref()),
+            ("target_project", raw.target_project.as_deref()),
+        ] {
+            let Some(v) = value else { continue };
+            if let Some(p) = reg.get(v) {
+                return ProjectRoot {
+                    root: Some(PathBuf::from(&p.path)),
+                    status: ProjectRootStatus::Resolved,
+                    source: ProjectRootSource::RegistryId,
+                    diagnostic: None,
+                };
+            } else if let Some(p) = try_path(v) {
+                return ProjectRoot {
+                    root: Some(p),
+                    status: ProjectRootStatus::Resolved,
+                    source: ProjectRootSource::ExplicitPath,
+                    diagnostic: None,
+                };
+            } else {
+                diagnostics.push(format!(
+                    "{}={} not registered and not an absolute existing path",
+                    label, v
+                ));
+            }
         }
     }
 
-    let reg = registry.read().await;
-    for (label, value) in [
-        ("project", raw.project.as_deref()),
-        ("target_project", raw.target_project.as_deref()),
-    ] {
-        let Some(v) = value else { continue };
-        if let Some(p) = reg.get(v) {
-            return ProjectRoot {
-                root: Some(PathBuf::from(&p.path)),
-                status: ProjectRootStatus::Resolved,
-                source: ProjectRootSource::RegistryId,
-                diagnostic: None,
-            };
-        } else {
-            diagnostics.push(format!("{}={} not registered", label, v));
+    if let Some(cwd_raw) = raw.cwd.as_deref() {
+        let cwd_path = match try_path(cwd_raw) {
+            Some(p) => p,
+            None => {
+                diagnostics.push(format!(
+                    "cwd={} not an absolute existing path (relative cwd is never resolved against process CWD)",
+                    cwd_raw
+                ));
+                return ProjectRoot {
+                    root: None,
+                    status: ProjectRootStatus::Unresolved,
+                    source: ProjectRootSource::None,
+                    diagnostic: Some(diagnostics.join("; ")),
+                };
+            }
+        };
+
+        // Delegate to the canonical helper for longest-prefix lookup so
+        // flow_run, compute_slot, pty, process and task_delegate all
+        // share the same registry resolution path. If cwd is outside any
+        // registered project we fall back to ExplicitPath (unregistered
+        // project root usage is still legal for mission_flow_run), but
+        // unknown_project_id / no_signal errors still propagate as
+        // diagnostics.
+        match resolve_target_project_root(None, Some(cwd_path.as_path()), None, registry).await {
+            Ok(resolution) if resolution.source == ResolutionSource::CwdLongestPrefix => {
+                return ProjectRoot {
+                    root: Some(resolution.project_root),
+                    status: ProjectRootStatus::Resolved,
+                    source: ProjectRootSource::RegistryLongestPrefix,
+                    diagnostic: None,
+                };
+            }
+            Ok(_) => {
+                // The canonical helper only returns ExplicitProjectId /
+                // FallbackProjectId when those args are passed (we passed
+                // None for both), so this arm is structurally unreachable.
+                // Treat as longest-prefix anyway to stay safe.
+                return ProjectRoot {
+                    root: Some(cwd_path),
+                    status: ProjectRootStatus::Resolved,
+                    source: ProjectRootSource::RegistryLongestPrefix,
+                    diagnostic: None,
+                };
+            }
+            Err(ResolutionError::CwdOutsideRegisteredProject { .. }) => {
+                // cwd is a real directory but not under any registered
+                // project — preserve legacy "use cwd as root directly"
+                // behavior so unregistered project dirs keep working.
+                return ProjectRoot {
+                    root: Some(cwd_path),
+                    status: ProjectRootStatus::Resolved,
+                    source: ProjectRootSource::ExplicitPath,
+                    diagnostic: None,
+                };
+            }
+            Err(e) => {
+                diagnostics.push(format!("cwd resolution failed: {}", e));
+            }
         }
     }
 
@@ -495,5 +577,150 @@ mod tests {
     fn absolute_flow_path_does_not_require_project_root() {
         let resolved = resolve_flow_path_arg("/tmp/x.yaml", None).unwrap();
         assert_eq!(resolved, PathBuf::from("/tmp/x.yaml"));
+    }
+
+    // ── longest-prefix lane tests (canonical helper integration) ──
+    //
+    // These cover the new RegistryLongestPrefix source: when a caller
+    // passes `cwd` that lives under a registered project root, flow_run
+    // must resolve the *project root*, not the literal cwd. Same
+    // semantics as `slot_orchestrator::project_root::resolve_target_
+    // project_root`, so flow_run shares the spawn-cwd vocabulary used
+    // by compute_slot / pty / process / task_delegate.
+
+    #[tokio::test]
+    async fn cwd_at_project_root_resolves_via_longest_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().to_path_buf();
+        let canonical = project_root.canonicalize().unwrap();
+        let reg = registry_with(vec![project(
+            "alpha",
+            &canonical.display().to_string(),
+        )]);
+        let r = resolve_project_root_from_args(
+            &json!({ "cwd": canonical.display().to_string() }),
+            &reg,
+        )
+        .await;
+        assert_eq!(r.status, ProjectRootStatus::Resolved);
+        assert_eq!(r.source, ProjectRootSource::RegistryLongestPrefix);
+        assert_eq!(r.root.unwrap(), canonical);
+    }
+
+    #[tokio::test]
+    async fn cwd_inside_registered_project_resolves_to_project_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project_root = tmp.path().canonicalize().unwrap();
+        let subdir = project_root.join("crates").join("inner");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let reg = registry_with(vec![project(
+            "alpha",
+            &project_root.display().to_string(),
+        )]);
+        let r = resolve_project_root_from_args(
+            &json!({ "cwd": subdir.display().to_string() }),
+            &reg,
+        )
+        .await;
+        assert_eq!(r.status, ProjectRootStatus::Resolved);
+        assert_eq!(r.source, ProjectRootSource::RegistryLongestPrefix);
+        assert_eq!(r.root.unwrap(), project_root);
+    }
+
+    #[tokio::test]
+    async fn nested_projects_pick_longest_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let parent_root = tmp.path().canonicalize().unwrap();
+        let child_root = parent_root.join("subprojects").join("child");
+        std::fs::create_dir_all(&child_root).unwrap();
+        let inside_child = child_root.join("src");
+        std::fs::create_dir_all(&inside_child).unwrap();
+        let reg = registry_with(vec![
+            project("parent", &parent_root.display().to_string()),
+            project("child", &child_root.display().to_string()),
+        ]);
+        let r = resolve_project_root_from_args(
+            &json!({ "cwd": inside_child.display().to_string() }),
+            &reg,
+        )
+        .await;
+        assert_eq!(r.status, ProjectRootStatus::Resolved);
+        assert_eq!(r.source, ProjectRootSource::RegistryLongestPrefix);
+        assert_eq!(r.root.unwrap(), child_root);
+    }
+
+    #[tokio::test]
+    async fn cwd_outside_any_registered_project_falls_back_to_explicit_path() {
+        // When cwd is a real absolute existing dir but no registered
+        // project covers it, mission_flow_run should still let the caller
+        // use cwd as the project root (legacy ExplicitPath behavior).
+        let tmp_proj = tempfile::tempdir().unwrap();
+        let tmp_cwd = tempfile::tempdir().unwrap();
+        let canonical_cwd = tmp_cwd.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project(
+            "alpha",
+            &tmp_proj.path().canonicalize().unwrap().display().to_string(),
+        )]);
+        let r = resolve_project_root_from_args(
+            &json!({ "cwd": canonical_cwd.display().to_string() }),
+            &reg,
+        )
+        .await;
+        assert_eq!(r.status, ProjectRootStatus::Resolved);
+        assert_eq!(r.source, ProjectRootSource::ExplicitPath);
+        assert_eq!(r.root.unwrap(), canonical_cwd);
+    }
+
+    #[tokio::test]
+    async fn relative_cwd_with_relative_flow_path_is_rejected_end_to_end() {
+        // Combined contract: if cwd cannot resolve, a relative flow_path
+        // has nothing to anchor against and resolve_flow_path_arg must
+        // refuse rather than silently joining the daemon's process CWD.
+        let reg = registry_with(vec![]);
+        let project_root =
+            resolve_project_root_from_args(&json!({ "cwd": "relative/dir" }), &reg).await;
+        assert_eq!(project_root.status, ProjectRootStatus::Unresolved);
+        assert!(project_root.root.is_none());
+        let err = resolve_flow_path_arg(
+            ".missiond/generated/flows/x.yaml",
+            project_root.root.as_deref(),
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("requires resolved project_root"));
+    }
+
+    #[tokio::test]
+    async fn no_args_still_supports_core_flow_lookup_without_root() {
+        // Old behavior: callers using $MISSIOND_HOME/flows core flows
+        // do not need to pass project / cwd. status = NotRequested,
+        // root = None — the loader then falls through to the core
+        // flow path. Guard regression where requiring a project_root
+        // would break legacy core-flow callers.
+        let reg = registry_with(vec![]);
+        let r = resolve_project_root_from_args(&json!({}), &reg).await;
+        assert_eq!(r.status, ProjectRootStatus::NotRequested);
+        assert_eq!(r.source, ProjectRootSource::None);
+        assert!(r.root.is_none());
+        // Loader contract: load_flow_with_project(None, …) only searches
+        // core. The resolver returning None is exactly what enables that.
+    }
+
+    #[tokio::test]
+    async fn registry_id_via_project_arg_still_wins() {
+        let tmp = tempfile::tempdir().unwrap();
+        let canonical = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project(
+            "alpha",
+            &canonical.display().to_string(),
+        )]);
+        let r = resolve_project_root_from_args(
+            &json!({ "project": "alpha" }),
+            &reg,
+        )
+        .await;
+        assert_eq!(r.status, ProjectRootStatus::Resolved);
+        assert_eq!(r.source, ProjectRootSource::RegistryId);
+        assert_eq!(r.root.unwrap(), PathBuf::from(canonical.display().to_string()));
     }
 }

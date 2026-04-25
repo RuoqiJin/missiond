@@ -27,7 +27,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (intent memory
-  (version "v0.5.6"
+  (version "v0.5.8"
     :polish "v0.5.0 L1 语义压缩 (2026-04-20): history + migration-log 外移到 intent-memory-history.lisp; table-catalog 表详情 SSOT 合并到各 module (保持 count + 表名索引). 不做 L2/L3 DSL 压缩 (会破坏 :binds-to / :library-pov 的 grep 明显性 + 施工 agent 体验). 行数: 2999 → 2629 (-12.7%)."
     :v0.5.1-patch "v0.5.1 (2026-04-21 — gptpro agent-execution-coordination 协议升级): (EEEE) 回应 D010 重复编号 — execution-log helper 从 pilot 升格为正式协议. id-counters / claims-with-lease / audit/repair / derived-indexes 等结构性升级. 12 MCP actions (mission_execution *) 设计完整. 未来 execution lisp 按协议产生, 避免手工编号复发 D010 类问题."
     :v0.5.2-patch "v0.5.2 (2026-04-25 — recursive-contract alignment): agent-execution-coordination helper 补 ingress/core/egress 与实现状态标注; xjp-router embedding provider 归属校正为 worker pillar. 不改表归属,只补架构标注."
@@ -35,7 +35,9 @@
     :v0.5.4-patch "v0.5.4 (2026-04-25 — capability usage monitor): system-support 新增 capability-usage-read-model; 当前代码用 conversation_tool_calls + board_tasks.flow_template + MCP/YAML registry 形成 tool+flow 调用热度快照,只产出治理候选,不自动删除; event_log/workflow stats/semantic merge 留后续增强."
     :v0.5.5-patch "v0.5.5 (2026-04-25 — directive/plan/workflow manager alignment): directive-layer 标注 mission_directive / mission_plan / mission_workflow 管理面已代码同构; compile/distill 仍为 dry-run, LLM compiler/distiller actors 待实现."
     :v0.5.5-pipeline-note "v0.5.5 (2026-04-25 — unified-entry-pipeline file-first 加固): directive-layer file-first-artifacts 补 status lifecycle / review-gate-owner / evidence sidecar 契约, 与 flow pillar F-intent-alignment-plan-execution-loop + intent-layer section unified-entry-pipeline 对齐. 不改表归属与 schema; 仅补文件级 lifecycle 与 DB 镜像约定."
-    :v0.5.6-patch "v0.5.6 (2026-04-25 — actor v0 status backfill + semantic evidence v1): directive-layer 标注 directive-compiler v0 (compiler_mode=sonnet) / plan-compiler v0 (compiler_mode=sonnet) / plan-runner v0 + auto-selection v1 (sexp hint parsing) / workflow-distiller v0 (distill_mode=sonnet) / methodology compiler v0 (compile_mode=deterministic + run_methodology) / generated flow loader 已 code-aligned partial; capability-usage-read-model 升级到 semantic evidence v1 (5 sources + lisp hint merge-candidate); 不改 schema/表归属, 仅回填 implementation status. file-first .lisp writer/sync / 高阶 semantic lifting / forge compiler / planner-class model alias / 完整 PLAN DAG scheduler / ExecutionEvent dispatch metadata 仍 code-alignment pending.")
+    :v0.5.6-patch "v0.5.6 (2026-04-25 — actor v0 status backfill + semantic evidence v1): directive-layer 标注 directive-compiler v0 (compiler_mode=sonnet) / plan-compiler v0 (compiler_mode=sonnet) / plan-runner v0 + auto-selection v1 (sexp hint parsing, 单节点 dispatch) / workflow-distiller v0 (distill_mode=sonnet) / methodology compiler v0 (compile_mode=deterministic + run_methodology) / generated flow loader 已 code-aligned partial; capability-usage-read-model 升级到 semantic evidence v1 (5 sources + lisp hint merge-candidate); 不改 schema/表归属, 仅回填 implementation status. file-first .lisp writer/sync / 高阶 semantic lifting / forge compiler / planner-class model alias / 完整 PLAN DAG scheduler / ExecutionEvent dispatch metadata 仍 code-alignment pending."
+    :v0.5.7-patch "v0.5.7 (2026-04-26 — wave 11 plan-dag-scheduler 设计): file-first-artifacts 新增 artifact plan-node-state-projection (architecture-designed) — 完整 PLAN DAG scheduler 启用后 evidence sidecar 增 nodes[<node_id>] block (per-node attempts/claim_id/start-end/inner_result/acceptance_pass/rollback_path); 不改 directive/plan/workflow 表 schema, sidecar 仍是 file-first; v0 plan_runner_dispatch entry shape 必须向后兼容; writer plan-runner-v0 标注 v1-future-target=writer plan-dag-scheduler (复用 agent-execution-coordination claim/lease 协议, D010 教训不允许自建 ID 池). 完整 11-stage 协议 + 节点 schema 见 intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler 与 flow pillar :: F-intent-alignment-plan-execution-loop :: s6 :: dag-scheduler."
+    :v0.5.8-patch "v0.5.8 (2026-04-26 — execution handoff protocol): agent-execution-coordination 升级为双平面协议 — execution companion Lisp 是 control plane (claim/heartbeat/deviation/decision/issue/completion/verification), scoped git commit 是 durability plane (防止并行 agent stash/pop/Edit 回退成果). completions 扩展 changed_files/staged_files/verification/commit_hash/commit_status; 新增 git-handoff slot 与 scoped-commit-contract. 当前为 architecture-designed + task-file operational-practice; mission_execution complete schema 与 daemon enforce 仍 code-alignment pending.")
   (parent "v2/intent.lisp :: pillar memory")
   (created "2026-04-19")
   (history
@@ -958,12 +960,13 @@
       ;; ── 并行 agent 协作的共享内存层 — v0.5.1 gptpro 升级为正式协议 ──
       (helper agent-execution-coordination
         (desc "并行 agent 协作的共享内存层 — 从单次 pilot 升级为可复用的正式协议")
-        :status "v0.5.3 recursive-contract; protocol code-aligned via mission_execution manager + ExecutionEvent live projection"
+        :status "v0.5.8 recursive-contract; protocol code-aligned via mission_execution manager + ExecutionEvent live projection; scoped commit durability plane architecture-designed"
         :implementation-status
           (:file-protocol "implemented-by-practice — intent-event-bus-execution.lisp / intent-memory-execution.lisp / worker-pillar-execution.lisp 已实战复用"
-           :schema-shape "architecture-designed — meta/id-counters/phase-tracker/claims/deviations/decisions/issues/completions/derived-indexes"
+           :schema-shape "architecture-designed — meta/id-counters/phase-tracker/claims/deviations/decisions/issues/completions/git-handoff/derived-indexes"
            :manager-code "code-aligned — crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs implements 12 actions"
-           :mcp-tool "code-aligned — mission_execution exposed via crates/missiond-mcp/src/tools/knowledge/agent_execution.rs")
+           :mcp-tool "code-aligned — mission_execution exposed via crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
+           :scoped-commit "architecture-designed + task-file operational-practice — mission_execution complete schema extension / scoped git guardrails pending")
         :actual-evidence
           ["intent-event-bus-execution.lisp — 首个成功 pilot"
            "intent-memory-execution.lisp — 第二次复用"
@@ -975,13 +978,16 @@
           :rule-1 "memory owns durable protocol/file shape, not runtime manager mechanics"
           :rule-2 "ID allocation / lease / audit / repair must be manager-controlled before MCP write access is enabled"
           :rule-3 "execution-log records operational truth; methodology/workflow remains intent-layer owned"
-          :rule-4 "status/audit can rebuild derived-indexes from durable slots; derived-indexes are cache, not truth")
+          :rule-4 "status/audit can rebuild derived-indexes from durable slots; derived-indexes are cache, not truth"
+          :rule-5 "execution companion Lisp is control plane; git commit is durability plane; neither replaces the other"
+          :rule-6 "parallel code-writing agents must claim scope before editing and scoped-commit after verification")
 
         (helper-ingress
           (entry-1 "mission_execution(action=open|list|claim|heartbeat|release|deviate|decide|issue|complete|status|audit|repair)")
           (entry-2 "human/agent file edit following file-protocol (current implemented practice)")
           (entry-3 "board_task / flow_context linkage when execution scope is tied to a board task")
-          (entry-4 "architecture-lisp checker before any manager commit"))
+          (entry-4 "architecture-lisp checker before any manager commit")
+          (entry-5 "git handoff request from workstation after verification (changed_files + staged_files + commit_hash)"))
 
         (helper-core
           :contract "把并行 agent 的协作状态写成固定 slot, 让 claim / ID / deviation / completion 不再靠口头约定"
@@ -990,12 +996,13 @@
           (step s3 "record facts: deviate/decide/issue/complete allocate D/DC/I/COMP ids atomically and append typed entries")
           (step s4 "validate write: paren balance + schema shape + monotonic id + no open conflicting claim")
           (step s5 "rebuild derived-indexes: active_claims / open_issues / unresolved_deviations / latest_decisions / completed_phases")
-          (step s6 "audit/repair: report semantic risks; apply only structural repair with explicit dry_run/apply mode"))
+          (step s6 "audit/repair: report semantic risks; apply only structural repair with explicit dry_run/apply mode")
+          (step s7 "durability handoff: after verification, stage only claimed files, commit scoped patch, record commit_hash or commit_blocker"))
 
         (helper-egress
           :writes ["execution companion Lisp slots" "derived-indexes cache"]
           :reads ["parent design Lisp" "existing execution companion log"]
-          :returns "status report / audit report / repair plan or receipt"
+          :returns "status report / audit report / repair plan or receipt / scoped commit receipt"
           :optional-emits ["event-bus ExecutionEvent::*" "BoardTaskStatusChanged when linked to board scope"]
           :cross-ref-worker "intent-worker.lisp :: orchestration-governance :: agent-execution-manager-interface"
           :cross-ref-flow "intent-flow.lisp :: F-execution-log-governance"
@@ -1053,7 +1060,16 @@
 
           (completions
             :purpose "阶段完成证据"
-            :fields "completion_id / phase / agent / summary / deliverables / verification / at")
+            :fields "completion_id / phase / agent / summary / deliverables / verification / changed_files / staged_files / commit_hash / commit_status / at"
+            :commit-status-values "[not-required pending committed blocked skipped]"
+            :rationale "让 status/audit 能发现 '报告完成但 live tree 没有成果' 的断层")
+
+          (git-handoff
+            :purpose "把 execution control-plane 与 git durability-plane 连接起来"
+            :fields "handoff_id / claim_id / agent / claimed_scope / changed_files / staged_files / diff_check / verification_commands / commit_hash / commit_message / commit_status / blocker / at"
+            :truth-rule "commit_hash 指向 durable code artifact; execution log 指向 operational context; 二者互为索引, 不互相替代"
+            :scope-rule "staged_files 必须是 claimed_scope 子集; 否则 audit 报 scoped-commit-violation"
+            :recovery-rule "commit_status=blocked 时必须有 blocker + changed_files, 后续 agent 可按 claim scope 接手")
 
           (issues
             :purpose "阻塞 / 风险 / 未决事项"
@@ -1111,10 +1127,11 @@
               :writes "issues")
 
             (action complete
-              :args "execution_id + phase + agent_name + summary + deliverables? + verification?"
+              :args "execution_id + phase + agent_name + summary + deliverables? + verification? + changed_files? + staged_files? + commit_hash? + commit_status?"
               :id-allocation "manager 自动分配 COMP<NNN>"
               :writes "completions + phase-tracker"
-              :side-effect "若 phase 全部完成可更新 meta.status")
+              :side-effect "若 phase 全部完成可更新 meta.status"
+              :durability-plane "architecture-designed — commit_hash 记录 scoped git commit; code-alignment pending")
 
             (action status
               :args "execution_id"
@@ -1142,6 +1159,33 @@
           :write-mode "整体 read → validate → modify → write; 或 file lock"
           :rebuild-rule "derived-indexes 可删可重建, 正文 slots 才是 durable truth")
 
+        ;; ── Git 交付协议 ───────────────────────────────────
+        (scoped-commit-contract
+          :status "architecture-designed; task-file operational-practice; daemon enforcement pending"
+          :why "共享 execution Lisp 可证明 agent 做过什么, 但无法防止后续 stash/pop/Edit 回退 live tree; scoped commit 把成果持久化为 git object"
+          :control-plane "mission_execution companion log — claim/heartbeat/deviation/decision/issue/completion/verification"
+          :durability-plane "git commit — 只包含本 claim scope 内文件, 可回滚/复核/合并"
+          :logic-core
+            ((s1 claim "agent 开工前 mission_execution(action=claim) 锁定文件/模块 scope")
+             (s2 work "只修改 claimed_scope; 如发现必须越界, 先 issue/deviate 并等待新 claim")
+             (s3 verify "运行任务书验收命令 + git diff --check + architecture-lisp checker(若改 Lisp)")
+             (s4 complete "mission_execution(action=complete) 写 changed_files/verification/remaining_risk")
+             (s5 stage "git add 仅添加 claimed_scope 内文件; 禁止 git add .")
+             (s6 preflight "git diff --cached --name-only 必须是 claimed_scope 子集")
+             (s7 commit "git commit scoped patch; commit message 包含 execution_id/phase 或任务名")
+             (s8 backfill "把 commit_hash 回填 completion/git-handoff; 若 commit blocked, 写 blocker 与 patch state"))
+          :commit-policy
+            ((code-alignment-new-session :commit "required" :reason "代码成果必须防止后续并行 agent 回退")
+             (parallel-code-agent        :commit "required" :reason "并行工位共享 worktree 风险最高")
+             (resident-lisp-architect    :commit "wave-boundary-or-required" :reason "常驻 Lisp 会话需要上下文连续, 但每个 wave 至少要落一次 durable commit")
+             (exploration-only           :commit "not-required" :reason "只读调查无代码成果, complete 记录 findings 即可")
+             (emergency-fix              :commit "required-after-verify" :reason "修正任务必须可回滚"))
+          :anti-patterns ["不要 git add ."
+                          "不要 stage 未 claim 文件"
+                          "不要用 stash/reset/checkout 处理别人的 scope"
+                          "不要只有 completion report 没有 commit_hash 就宣称代码交付完成"
+                          "不要把 commit 当 coordination log — commit message 不替代 decisions/deviations"])
+
         ;; ── 设计约束 ────────────────────────────────────────
         (invariants
           :inv-1 "ID 只能由 manager 分配, 不允许人工手写下一个编号"
@@ -1149,7 +1193,8 @@
           :inv-3 "所有 write 必须做 paren-balance 与 schema-shape 校验"
           :inv-4 "status 读取优先走 derived-indexes, 但 audit 以正文 slot 为真"
           :inv-5 "deviation 不等于立即改 frozen design; 仍需指挥官批准"
-          :inv-6 "execution = operational state; methodology = reusable playbook; 二者不得混写")
+          :inv-6 "execution = operational state; methodology = reusable playbook; 二者不得混写"
+          :inv-7 "scoped commit 只能包含 claimed scope; commit_hash 必须回填 execution completion, 否则 status/audit 视为 durability gap")
 
         (placement-rationale
           :why-board
@@ -1772,7 +1817,34 @@
         :writer "evidence-collector role — mission_plan(action=record_evidence) 显式写入 + plan-runner v0 internal mode 自动追加 plan_runner_dispatch entry (含 dispatch_strategy / target_project / requested_cwd / target / inner result)"
         :status "code-aligned partial — sidecar 写入 code-aligned (record_evidence + plan-runner internal append); 全自动 evidence-collector actor (聚合 git diff / event_log / ExecutionEvent / test outputs / 跨执行路径) 仍 code-alignment pending; 升级到 plan_evidence DB JSONB 仍 pending"
         :consumer "workflow-distiller (s8) + retrospective + capability-usage-monitor (间接)"
-        :ssot-note "当前文件即真相; 升级为 DB 时保留文件作为长期归档"))
+        :ssot-note "当前文件即真相; 升级为 DB 时保留文件作为长期归档"
+        :dag-scheduler-future "actor plan-dag-scheduler (intent-layer architecture-designed) 升级时, sidecar 增 nodes[<node_id>] block (per-node attempts / claim_id / start-end / inner_result / acceptance_pass / rollback_path); v0 plan_runner_dispatch entry shape 必须向后兼容")
+
+      (artifact plan-node-state-projection
+        :path ".missiond/v2/plans/<plan_id>.evidence.json :: nodes[<node_id>] (sidecar 子树, 与 plan-evidence-sidecar 同文件)"
+        :status architecture-designed
+        :purpose "完整 PLAN DAG scheduler 的 per-node 状态 + evidence 聚合视图 — 当前 v0 单节点 dispatch 不需要; v1 多节点 DAG 启用后必须落"
+        :scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler"
+        :flow-cross-ref "flow pillar :: F-intent-alignment-plan-execution-loop :: s6 :: dag-scheduler"
+        :node-fsm-enum [pending ready claimed running succeeded failed skipped retrying rolling-back paused]
+        :per-node-block-shape
+          ((node_id        :type "string" :desc "PLAN.lisp 节点 :id (kebab-case)")
+           (state          :type "enum"   :desc "node-fsm-enum 当前态")
+           (claim_id       :type "string" :desc "由 mission_execution(action=claim) 原子分配, 不允许 scheduler 自建")
+           (lease_expires_at :type "iso8601" :desc "claim lease 截止")
+           (target         :type "enum"   :desc "本次 dispatch substrate")
+           (dispatch_strategy :type "enum" :desc "本次解析后的策略")
+           (target_project :type "string" :desc "解析后的 target_project_root")
+           (requested_cwd  :type "path"   :desc "解析后的 cwd, 必须在 target_project 内")
+           (attempts       :type "list"   :desc "[{attempt_no, started_at, ended_at, inner_result, acceptance_pass, error?}] — 每次 retry 一个条目")
+           (acceptance_pass :type "bool"  :desc "节点 :acceptance 验证结果; 缺省以 inner_result success 为准")
+           (rollback_path  :type "list"   :desc "若触发 rollback, 记录补偿节点 chain")
+           (artifacts_refs :type "list"   :desc "execution companion log claim/completion ref / git diff path / test output ref"))
+        :writer-future "actor plan-dag-scheduler s7 collect-node-evidence + s8 update-node-state 落; v0 不写本块, 仅写顶层 plan_runner_dispatch entry"
+        :consumer-future "workflow-distiller s8 (per-node 模式提取) + capability-usage-monitor (per-node retry / dispatch_strategy 命中率) + retrospective"
+        :ssot-rule "本块仍是 file-first sidecar; 升级到 DB plan_evidence JSONB 时保留 sidecar 长期归档 — 与 plan-evidence-sidecar 共享 ssot-note"
+        :pending-writes ["actor plan-dag-scheduler 实现 (crates/missiond-daemon/src/intent_layer/plan_runner.rs + plan_dag.rs)"
+                         "ExecutionEvent::PlanNodeStateChanged 事件扩展 (per-node FSM 转移广播)"]))
 
     (module-ingress
       (desc "写入 3 张表的路径 — MCP 管理面已启用, LLM writer actors 待 pillar 五 实现")
@@ -1809,17 +1881,18 @@
 
       (writer plan-runner-v0
         :binds-to [:mcp-surface]
-        :status "code-aligned partial — mission_plan(action=execute, execute_mode=internal) 直接 dispatch 到 mission_execution / mission_task_delegate / mission_flow_run + 写 evidence sidecar plan_runner_dispatch entry + 推 plan FSM 到 executing; auto-selection v1 从 plan.sexp_text 保守解析 :target / :dispatch-strategy / :parallelism / :target-project / :requested-cwd 等 hints (explicit args 优先, 无法安全推断时 MISSING_PARAM); 完整 PLAN DAG scheduler / 多节点 dependency / arbitrary semantic interpretation 仍 pending"
+        :status "code-aligned partial — mission_plan(action=execute, execute_mode=internal) 直接 dispatch 到 mission_execution / mission_task_delegate / mission_flow_run + 写 evidence sidecar plan_runner_dispatch entry + 推 plan FSM 到 executing (单节点 dispatch); auto-selection v1 从 plan.sexp_text 保守解析 :target / :dispatch-strategy / :parallelism / :target-project / :requested-cwd 等 hints (explicit args 优先, 无法安全推断时 MISSING_PARAM); 完整 PLAN DAG scheduler / 多节点 dependency / arbitrary semantic interpretation 仍 architecture-designed pending — 详 intent-layer pillar :: actor plan-dag-scheduler"
         :writes "plan FSM (status → executing) + .missiond/v2/plans/<plan_id>.evidence.json (plan_runner_dispatch entry)"
         :triggers ["mission_plan(action=execute, execute_mode=internal) MCP 调用"]
         :implementation-targets ["crates/missiond-daemon/src/handlers/knowledge/plan.rs (action=execute internal + auto-selection v1)"
                                  "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (mission_execution forwarding)"
                                  "crates/missiond-daemon/src/handlers/compute/task_delegate.rs (mission_task_delegate forwarding)"]
-        :pending ["完整 PLAN DAG scheduler / 多节点 dependency / 并发 dispatch"
+        :v1-future-target "writer plan-dag-scheduler — actor plan-dag-scheduler (intent-layer architecture-designed) 实现后, 此 writer 升级为 DAG 调度循环 + per-node FSM + claim/lease 接入 (复用 helper agent-execution-coordination); v0 单节点 fast-path 必须保留"
+        :pending ["完整 PLAN DAG scheduler / 多节点 dependency / 并发 dispatch / per-node retry-failure-policy / condition-gate / rollback-compensation / per-node evidence aggregation (architecture-designed; intent-layer pillar :: actor plan-dag-scheduler)"
                   "arbitrary PLAN.lisp 语义解释 (超出保守 key/value hints)"
                   "PLAN file (.missiond/plans/<topic>/PLAN.lisp) 自动写入"
                   "auto QuestionEvent gate"
-                  "ExecutionEvent dispatch metadata 扩展"
+                  "ExecutionEvent dispatch metadata 扩展 (含 PlanNodeStateChanged 字段)"
                   "status update failure 时事务性回滚"])
 
       (writer workflow-distiller-v0

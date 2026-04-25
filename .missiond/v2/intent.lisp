@@ -20,13 +20,23 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — 哪个旧图代表哪 pillar 的代码真相 (gptpro 2026-04-21 产出)")
+      :desc "判真索引 — 哪个旧图代表哪 pillar 的代码真相 (gptpro 2026-04-21 产出); v0.2 (2026-04-26) 增 stable section-id registry: 7 pillar baseline + status taxonomy + implements 路径, 主 Lisp 后续压缩/拆分的 cross-ref 锚点都走这里")
     (drift-audit "drift-audit-2026-04-21.md"
       :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")
     (refactor-methodology ".missiond/workflows/pillar-refactor.lisp"
       :desc "memory pillar 实战凝结方法论 — 5 phase × 原则 × anti-patterns × checklist")
     (architecture-dsl "architecture-dsl.lisp"
-      :desc "可复用架构 DSL: pillar/function/flow/tool 的 ingress → logic-core → egress 结构与检查规则"))
+      :desc "可复用架构 DSL: pillar/function/flow/tool 的 ingress → logic-core → egress 结构与检查规则; v0.3 (2026-04-26) 加 execution dual-plane handoff rule (control-plane + durability-plane) 与 scoped-commit-subset; 主 Lisp 暂不压缩, 先建索引和 checker 约定")
+    (precompression-note
+      :desc "本次 wave 11 决议: 主 Lisp 不压缩 — 等 file-first writer + review gate + PLAN DAG 最小闭环稳定后, 才按 compression-policy.allowed 批量压缩状态文本; 物理 split shard 是再下一步; 详见 architecture-dsl.lisp :: judgement-now / intent-pillar-source-index.lisp :: judgement-now")
+    (plan-dag-scheduler-design
+      :desc "wave 11 D 组: 完整 PLAN DAG scheduler Lisp 架构 (architecture-designed) — 当前 plan-runner v0 单节点 dispatch 已 code-aligned, v1 多节点 DAG 协议落地 anchor"
+      :flow-anchor ".missiond/v2/intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler (11-stage logic-core + node schema + node FSM + claim-lease + anti-patterns + open-questions)"
+      :actor-anchor ".missiond/v2/intent-intent-layer.lisp :: section action-instruction-actor :: actor plan-dag-scheduler"
+      :evidence-anchor ".missiond/v2/intent-memory.lisp :: module directive-layer :: file-first-artifacts :: artifact plan-node-state-projection"
+      :worker-cross-ref ".missiond/v2/intent-worker.lisp :: section claudecode-workstation-orchestration :: dispatch-decision-matrix + execution-strategy-record"
+      :coordination-protocol "复用 memory pillar :: module board :: helper agent-execution-coordination (id-counters / claims-with-lease / audit-repair) — 不自建 ID 池, D010 教训"
+      :status architecture-designed))
 
   ;; ── v2 递归同构标准: 原子 / 分子 / pillar ──
   (recursive-architecture-standard
@@ -55,7 +65,7 @@
   ;; 详细规格在 intent-memory.lisp (草稿),本处只作导航摘要
   (pillar memory
     :file ".missiond/v2/intent-memory.lisp"
-    :status "v0.5.6 — 9 modules + directive artifacts + agent-execution contract + capability-usage-read-model semantic evidence v1 (5 sources + lisp hint merge-candidate) + directive-layer actor v0 (directive-compiler / plan-compiler / plan-runner + auto-selection v1 / workflow-distiller / methodology compiler / generated flow loader) all code-aligned partial; file-first .missiond/alignment/<topic>/intent-alignment.lisp / .missiond/plans/<topic>/PLAN.lisp / .missiond/workflows/<topic>.lisp 自动写入 仍 code-alignment pending"
+    :status "v0.5.8 — 9 modules + directive artifacts + agent-execution contract upgraded to dual-plane handoff (execution Lisp control plane + scoped git commit durability plane) + capability-usage-read-model semantic evidence v1 + directive-layer actor v0 all code-aligned partial; plan-runner v1 (full PLAN DAG scheduler 复用 agent-execution-coordination claim/lease 协议) architecture-designed pending; scoped commit daemon enforce / file-first .lisp writer / 完整 PLAN DAG 代码同构仍 pending"
     :paradigm "4 mature modules (project-management / board / kb-manager / conversation-logs) 自治 + 系统支持 + 横切"
 
     (purpose "系统长期记忆: 4 个业务模块自治管理自己的表 + 底层系统支持层 + 横切")
@@ -178,7 +188,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar worker
     :canonical-ref ".missiond/v2/intent-worker.lisp"
-    :canonical-status "v0.5 phase-C 2026-04-25 (recursive contract + xjp-router provider + mission_execution manager + project-root spawn cwd design + claudecode-workstation-orchestration policy operational-practice + architecture-designed; mission_execution dispatch_strategy/target_project/requested_cwd 已写入 companion log meta — code-aligned partial; plan-runner v0 + auto-selection v1 sexp hint parsing 已 code-aligned partial; ExecutionEvent dispatch metadata 扩展 / 完整 PLAN DAG scheduler 仍 code-alignment pending)"
+    :canonical-status "v0.5 phase-C 2026-04-26 (recursive contract + xjp-router provider + mission_execution manager + project-root spawn cwd design + claudecode-workstation-orchestration policy operational-practice + architecture-designed; shared execution log + scoped commit handoff 升级为默认并行工位协议; mission_execution dispatch_strategy/target_project/requested_cwd 已写入 companion log meta — code-aligned partial; plan-runner v0 + auto-selection v1 sexp hint parsing 已 code-aligned partial 单节点 dispatch; 完整 PLAN DAG scheduler architecture-designed; scoped commit daemon enforce / ExecutionEvent dispatch metadata / PlanNodeStateChanged 扩展 / plan-runner v1 仍 code-alignment pending)"
     :v0.1-archive ".missiond/v2/drafts/gptpro/intent-worker.lisp"
     :v0.2-gptpro-archive ".missiond/v2/drafts/gptpro/intent-worker-v0.2.lisp"
     :execution-log ".missiond/v2/worker-pillar-execution.lisp"
@@ -513,7 +523,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar tools
     :canonical-ref ".missiond/v2/intent-tools.lisp"
-    :canonical-status "v0.7 phase-C 2026-04-25 (83 actual tools classified; mission_directive/plan/workflow actor v0 + plan-runner v0 + auto-selection v1 + methodology compiler v0 deterministic + generated flow loader (mission_flow_run discoverability) + mission_execution dispatch_strategy companion log + mission_capability_usage semantic evidence v1 + mission_global_instruction all code-aligned partial; future backlog empty; 不新增 tool — mission_message/mission_invoke 仅 future-candidate; mission_pty_spawn / mission_pty_send / mission_compute_slot / mission_task_delegate 标记为 unified-entry pipeline 的 preferred workstation dispatch substrate; file-first .lisp writer / 完整 PLAN DAG / auto QuestionEvent / semantic lifting / forge compiler / ExecutionEvent dispatch metadata / planner-class model alias 仍 code-alignment pending)"
+    :canonical-status "v0.7 phase-C 2026-04-26 (83 actual tools classified; mission_directive/plan/workflow actor v0 + plan-runner v0 + auto-selection v1 + methodology compiler v0 + generated flow loader + mission_execution dispatch_strategy companion log + mission_capability_usage semantic evidence v1 all code-aligned partial; mission_execution complete future fields for scoped commit handoff architecture-designed; 不新增 tool — scoped commit handoff 复用 mission_execution, agent-team 仍任务 .md 提示; file-first .lisp writer / 完整 PLAN DAG / auto QuestionEvent / semantic lifting / forge compiler / ExecutionEvent dispatch metadata / planner-class model alias / scoped commit daemon enforce 仍 code-alignment pending)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-tools.lisp"
     (purpose "通过 MCP JSON-RPC 协议暴露给 Claude Code / 其他 Agent 的能力集")
 
@@ -621,7 +631,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar intent-layer
     :canonical-ref ".missiond/v2/intent-intent-layer.lisp"
-    :canonical-status "v0.4 phase-B 2026-04-25 (unified-entry-pipeline actor v0 全部 code-aligned partial: directive-compiler v0 / plan-compiler v0 / plan-runner v0 + auto-selection v1 / workflow-distiller v0 / methodology compiler v0 / generated flow loader; capability-evolution-governance semantic evidence v1 已 code-aligned partial 5 sources + lisp hint merge-candidate; workstation-dispatch-policy operational-practice + companion log dispatch_strategy 已落; file-first .lisp writer / 高阶 semantic lifting / forge compiler / 完整 PLAN DAG scheduler / auto QuestionEvent gate / ExecutionEvent dispatch metadata / planner-class model alias 仍 code-alignment pending)"
+    :canonical-status "v0.4 phase-B 2026-04-25 (unified-entry-pipeline actor v0 全部 code-aligned partial: directive-compiler v0 / plan-compiler v0 / plan-runner v0 + auto-selection v1 (单节点) / workflow-distiller v0 / methodology compiler v0 / generated flow loader; capability-evolution-governance semantic evidence v1 已 code-aligned partial 5 sources + lisp hint merge-candidate; workstation-dispatch-policy operational-practice + companion log dispatch_strategy 已落; section action-instruction-actor :: actor plan-dag-scheduler architecture-designed (完整 11-stage / per-node FSM / claim-lease 复用 agent-execution-coordination); file-first .lisp writer / 高阶 semantic lifting / forge compiler / 完整 PLAN DAG scheduler 代码同构 / auto QuestionEvent gate / ExecutionEvent dispatch metadata / planner-class model alias 仍 code-alignment pending)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-intent-layer.lisp"
     (purpose "元层: 系统如何描述自己, 如何感知变化, 如何演进, 以及全局用户指令")
 
@@ -871,7 +881,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar flow
     :canonical-ref ".missiond/v2/intent-flow.lisp"
-    :canonical-status "v0.7 phase-C 2026-04-25 (83 actual tools indexed + F-intent-alignment-plan-execution-loop 8 stages canonical 统一入口 + 双 review gate + plan-runner 内部调度契约 + actor v0 code-aligned partial; F-methodology-to-executable-compile + generated flow loader 已 code-aligned partial; F-capability-usage-monitoring semantic evidence v1 已 code-aligned partial; F-workstation-dispatch-policy operational-practice + companion log dispatch_strategy 已落; 不引入新 tool — file-first .lisp writer / 完整 PLAN DAG / auto QuestionEvent / semantic lifting / forge compiler / ExecutionEvent dispatch metadata 仍 code-alignment pending)"
+    :canonical-status "v0.7 phase-C 2026-04-26 (83 actual tools indexed + F-intent-alignment-plan-execution-loop 8 stages canonical 统一入口 + 双 review gate + plan-runner 内部调度契约 + actor v0 code-aligned partial; F-execution-log-governance 增 F-scoped-commit-handoff: shared execution Lisp control plane + scoped git commit durability plane; F-methodology / F-capability-usage / F-workstation-dispatch 已 code-aligned partial; 完整 PLAN DAG scheduler architecture-designed; 不引入新 tool — file-first .lisp writer / 完整 PLAN DAG 代码同构 / auto QuestionEvent / semantic lifting / forge compiler / ExecutionEvent dispatch metadata / scoped commit daemon enforce 仍 pending)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-flow.lisp"
     (purpose "跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative")
     (rationale "v0.4.7 从 board 拆出 autopilot/flow-engine 后, 丢失了 end-to-end narrative; 本 pillar 补上")

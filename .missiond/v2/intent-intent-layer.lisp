@@ -8,7 +8,7 @@
 
 (pillar intent-layer
   :version "v0.4"
-  :status "phase-B recursive architecture contract 2026-04-25 — stimulus/directive → reasoning → prescription/output; methodology compile + capability governance designed; unified-entry-pipeline (message → alignment → plan → execution → workflow) code-aligned partial: directive-compiler v0 / plan-compiler v0 / plan-runner v0 + auto-selection v1 (sexp hint parsing) / workflow-distiller v0 / methodology compiler v0 / generated flow loader 已 code-aligned; capability-evolution-governance semantic evidence v1 (5 sources + lisp hint merge-candidate) 已 code-aligned partial; workstation-dispatch-policy (resident-lisp / fresh-code-alignment / agent-team / spawn-over-prompt / project-root-cwd / task-md-self-contained / checker-not-substituted) operational-practice + architecture-designed (companion log dispatch_strategy 已落); file-first .lisp writer/sync / 自动 review gate / 高阶 semantic lifting / forge compiler / ExecutionEvent dispatch metadata / 完整 PLAN DAG scheduler 仍 code-alignment pending"
+  :status "phase-B recursive architecture contract 2026-04-25 — stimulus/directive → reasoning → prescription/output; methodology compile + capability governance designed; unified-entry-pipeline (message → alignment → plan → execution → workflow) code-aligned partial: directive-compiler v0 / plan-compiler v0 / plan-runner v0 + auto-selection v1 (sexp hint parsing, 单节点 dispatch) / workflow-distiller v0 / methodology compiler v0 / generated flow loader 已 code-aligned; capability-evolution-governance semantic evidence v1 (5 sources + lisp hint merge-candidate) 已 code-aligned partial; workstation-dispatch-policy (resident-lisp / fresh-code-alignment / agent-team / spawn-over-prompt / project-root-cwd / task-md-self-contained / checker-not-substituted) operational-practice + architecture-designed (companion log dispatch_strategy 已落); section action-instruction-actor :: actor plan-dag-scheduler architecture-designed (完整 11-stage / per-node FSM / claim-lease / retry-failure-policy / condition-gate / rollback-compensation / per-node evidence aggregation, 复用 agent-execution-coordination D010 协议) — 代码同构 plan-runner v1 待启动; file-first .lisp writer/sync / 自动 review gate / 高阶 semantic lifting / forge compiler / ExecutionEvent dispatch metadata 仍 code-alignment pending"
   :predecessor "drafts/gptpro/intent-intent-layer.lisp (159 行 starter)"
   :target-path ".missiond/v2/intent-intent-layer.lisp"
 
@@ -427,10 +427,13 @@
       :desc "directive 编译出的执行 DAG — 绑 board_task + 版本 + FSM"
       :table "plan"
       :schema-owned-by "memory :: module directive-layer :: plumbing plan-execution"
-      :writer-owned-by "本 pillar (plan-compiler actor v0 + plan-runner v0)"
-      :status "store+manager code-aligned + plan-compiler actor v0 code-aligned (compiler_mode=sonnet) + plan-runner v0 code-aligned (execute_mode=internal + dispatch_strategy + sidecar); 自动选 dispatch_strategy/target/target_project 仍 code-alignment pending"
+      :writer-owned-by "本 pillar (plan-compiler actor v0 + plan-runner v0; 未来 plan-dag-scheduler / plan-runner v1)"
+      :status "store+manager code-aligned + plan-compiler actor v0 code-aligned (compiler_mode=sonnet) + plan-runner v0 code-aligned (execute_mode=internal + dispatch_strategy + sidecar, 单节点 dispatch); 自动选 dispatch_strategy/target/target_project + 完整 PLAN DAG scheduler 仍 architecture-designed pending — 详 section action-instruction-actor :: actor plan-dag-scheduler"
       :implementation-targets ["crates/missiond-daemon/src/handlers/knowledge/plan.rs (compile sonnet + execute internal)"]
-      :pending ["PLAN.lisp DAG 自动选 target/dispatch_strategy/target_project"
+      :future-implementation-targets ["crates/missiond-daemon/src/intent_layer/plan_runner.rs (新文件 — DAG scheduler 出 plan.rs handler)"
+                                      "crates/missiond-daemon/src/intent_layer/plan_dag.rs (新文件 — DAG 结构 + cycle 检测 + ready-set + 节点 FSM)"]
+      :pending ["完整 PLAN DAG scheduler — 多节点 dependency 执行 / 并发 dispatch / per-node retry-failure-policy / condition-gate / rollback-compensation / per-node evidence aggregation (architecture-designed; 详 actor plan-dag-scheduler)"
+                "PLAN.lisp DAG 自动选 target/dispatch_strategy/target_project (auto-selection v1 仅保守 hint)"
                 "supersede-chain 策略 (FSM 迁移已 code-aligned, 自动选最佳 supersede target 仍 caller 决定)"])
 
     (component workflow-spec-db
@@ -579,7 +582,7 @@
   ;; ══════════════════════════════════════════════════════════
   (section unified-entry-pipeline
     :desc "MissionD 长期运作 canonical 主线: message → intent-alignment.lisp → review → PLAN.lisp → review → MissionD-internal execution → evidence → workflow.lisp distillation"
-    :status "code-aligned partial — directive-compiler v0 / plan-compiler v0 / plan-runner v0 + auto-selection v1 / workflow-distiller v0 / methodology compiler v0 / generated flow loader 已 code-aligned partial; file-first .lisp writer/sync / 自动 review gate / 高阶 semantic lifting / forge compiler / ExecutionEvent dispatch metadata 仍 code-alignment pending"
+    :status "code-aligned partial — directive-compiler v0 / plan-compiler v0 / plan-runner v0 + auto-selection v1 (单节点 dispatch) / workflow-distiller v0 / methodology compiler v0 / generated flow loader 已 code-aligned partial; section action-instruction-actor :: actor plan-dag-scheduler architecture-designed pending (完整 11-stage / per-node FSM / claim-lease / retry-failure-policy / condition-gate / rollback-compensation / per-node evidence aggregation); file-first .lisp writer/sync / 自动 review gate / 高阶 semantic lifting / forge compiler / ExecutionEvent dispatch metadata 仍 code-alignment pending"
     :implementation-target-policy "本 section 各 role 的 :implementation-targets 命名 *current code-aligned entry points*, 不是最终 module boundaries; future code-convergence 可能把现有大 handler 文件按 Lisp 声明拆分成更细的 module / actor"
     :flow-ref "flow pillar :: F-intent-alignment-plan-execution-loop"
     :file-first-ssot ".missiond/alignment/<topic>/intent-alignment.lisp + .missiond/plans/<topic>/PLAN.lisp + .missiond/workflows/<topic>.lisp"
@@ -651,18 +654,19 @@
         :desc "MissionD 内部 plan 执行调度器 — 不是 client 直接调工位, 而是 plan-runner 内部消费 mission_execution / mission_task_delegate / mission_flow_run / mission_compute_slot / mission_pty_spawn"
         :principle "review gate 已经把 LLM 产物收敛到可执行边界; plan-runner 在 daemon 内部按 PLAN.lisp 节点调度 + 工位策略调度 + execution coordination, 把执行从 client 私有逻辑里抽离"
         :current-surface "mission_plan(action=execute, execute_mode=bridge|internal, dispatch_strategy=...)"
-        :status "code-aligned partial — plan-runner v0 + auto-selection v1 已实现 (execute_mode=internal 直接 dispatch 到 mission_execution/mission_task_delegate/mission_flow_run, 写 evidence sidecar plan_runner_dispatch entry, 推 plan FSM 到 executing; bridge mode 仍向后兼容; dispatch_strategy 进 response/sidecar/companion log meta; auto-selection v1 从 plan.sexp_text 保守解析 :target / :dispatch-strategy / :parallelism / :target-project / :requested-cwd 等 hints, explicit args 仍优先, 无法安全推断时返回 MISSING_PARAM; agent-team 解析时向 mission_task_delegate objective 注入字面提示, 幂等); 完整 PLAN DAG scheduler / 多节点 dependency / 任意语义解析 / file-first PLAN.lisp writer 仍 code-alignment pending"
+        :status "code-aligned partial — plan-runner v0 + auto-selection v1 已实现 (execute_mode=internal 直接 dispatch 到 mission_execution/mission_task_delegate/mission_flow_run, 写 evidence sidecar plan_runner_dispatch entry, 推 plan FSM 到 executing; bridge mode 仍向后兼容; dispatch_strategy 进 response/sidecar/companion log meta; auto-selection v1 从 plan.sexp_text 保守解析 :target / :dispatch-strategy / :parallelism / :target-project / :requested-cwd 等 hints, explicit args 仍优先, 无法安全推断时返回 MISSING_PARAM; agent-team 解析时向 mission_task_delegate objective 注入字面提示, 幂等); 完整 PLAN DAG scheduler / 多节点 dependency / 任意语义解析 / file-first PLAN.lisp writer 仍 architecture-designed pending — 详 actor plan-dag-scheduler"
         :execution-substrate "mission_execution 12-action manager (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair) — F-execution-log-governance"
         :downstream-tools ["mission_execution" "mission_task_delegate" "mission_flow_run" "mission_compute_slot" "mission_pty_spawn" "mission_pty_send"]
         :workstation-dispatch-responsibility "读取 PLAN.lisp 节点 :dispatch-strategy + :target_project, 按 dispatch-decision-matrix 选 resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback, 再 spawn/reuse 对应 slot"
         :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration / flow pillar :: F-workstation-dispatch-policy"
         :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/plan.rs (execute_mode + dispatch_strategy + auto-selection schema)"
                                  "crates/missiond-daemon/src/handlers/knowledge/plan.rs (action=execute internal + auto-selection v1 sexp hint parser + sidecar + plan FSM)"]
-        :pending ["完整 PLAN DAG scheduler — 多节点 dependency 执行 / 并发 dispatch"
+        :pending ["完整 PLAN DAG scheduler — 多节点 dependency 执行 / 并发 dispatch (architecture-designed; 详 section action-instruction-actor :: actor plan-dag-scheduler + flow pillar :: F-intent-alignment-plan-execution-loop :: s6 :: dag-scheduler)"
                   "arbitrary PLAN.lisp 语义解释 (超出保守 key/value hints)"
                   "PLAN.lisp 节点 → flow YAML 自动编译 — auto-selection 暂用 :flow-id 命中已编译产物, 完整链路 pending"
                   "file-first PLAN.lisp writer/sync (mirror 当前是单向 plan 表 → 文件人工产出)"
                   "status update failure 时的事务性回滚 (当前 partial 暴露)"]
+        :v1-future-cross-ref "section action-instruction-actor :: actor plan-dag-scheduler (architecture-designed) — 完整 11-stage scheduler / per-node FSM / claim-lease 接入 agent-execution-coordination"
         :anti-pattern "不允许把执行调度逻辑下沉给某个 client (例如 ClaudeCode CLI) 私有的 next_call 解析能力 — 那等于把 MissionD 主线绑死在某个 client")
 
       (role evidence-collector
@@ -1185,6 +1189,96 @@
         :reads ["directive" "board_tasks" "workflow templates as hints"]
         :returns "plan id/version/status/execution target"))
 
+    (actor plan-dag-scheduler
+      :status architecture-designed
+      :desc "完整 PLAN DAG scheduler — plan-runner v1 升级目标; v0 (单节点 dispatch) 已 code-aligned; v1 引入 11-stage 调度循环 / per-node FSM / claim-lease / retry-failure-policy / condition-gate / rollback-compensation / per-node evidence aggregation"
+      :v0-relation "复用 v0 的 sexp hint parser + dispatch_strategy 注入 + evidence sidecar + companion log meta + agent-team idempotent 注入; 升级是 'mission_plan(action=execute) 单次 dispatch' → 'plan-runner 持有 DAG + ready-set + 节点 FSM + claim 生命周期'"
+      :future-target ["crates/missiond-daemon/src/intent_layer/plan_runner.rs (新文件 — scheduler 出 plan.rs handler)"
+                      "crates/missiond-daemon/src/intent_layer/plan_dag.rs (新文件 — DAG 结构 + cycle 检测 + ready-set + 节点 FSM enum)"]
+      :input "approved plan (sexp_text 含 (nodes …) (edges …)) + plan-level / 节点级 hints"
+      :output "plan FSM final (succeeded/failed/succeeded-partial) + per-node evidence sidecar + execution companion log claims/completions/issues/deviations slots"
+      :flow-cross-ref "flow pillar :: F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler — 完整 11 stage 协议正文"
+      :coordination-protocol-cross-ref "memory pillar :: module board :: helper agent-execution-coordination — id-counters / claims-with-lease / audit-repair / derived-indexes 必须复用 (D010 教训)"
+
+      (minimal-node-schema
+        :scope "PLAN.lisp 节点字段; plan-compiler v1 写入 / file-first writer 写入 / 人工 review 编辑都按本 schema"
+        :required-fields
+          ((id              :type "string (kebab-case)" :desc "DAG 内唯一稳定标识, 重 run 不变")
+           (objective       :type "string"              :desc "节点意图, 传给 dispatch substrate / 任务 .md")
+           (target          :type "enum"                :desc "∈ {mission_execution / mission_task_delegate / mission_flow_run}"))
+        :optional-fields
+          ((title            :type "string"              :desc "人读标题 (review gate 用)")
+           (flow-id          :type "string"              :desc "若 target=mission_flow_run 必填, plan-compiler 产出的 generated flow_id")
+           (dispatch-strategy :type "enum"               :desc "∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback / unknown}; 缺省继承 plan-level")
+           (parallelism     :type "int"                 :desc "节点内 sub-task 并发 hint")
+           (target-project  :type "string"              :desc "节点级目标项目, 缺省继承 plan-level")
+           (requested-cwd   :type "path"                :desc "覆盖 spawn cwd, 必须在 target_project_root 内")
+           (depends-on      :type "list[node-id]"       :desc "DAG 边; 空 = 根节点")
+           (condition       :type "sexp predicate"      :desc "gate 表达式, 引用上游节点 evidence; 不满足 → skipped (不算 failed)")
+           (failure-policy  :type "enum + meta"         :desc "∈ {fail-fast / retry-N(:max-attempts :backoff-ms) / continue-on-failure / route-to-rollback}; 缺省继承 plan-level (默认 fail-fast)")
+           (rollback-policy :type "enum + ref"          :desc "∈ {none / compensate-node(:ref node-id) / cascade-up}; 缺省 none")
+           (timeout-ms      :type "int"                 :desc "节点 wall-clock 上限; 触发即 timeout, 走 failure-policy")
+           (evidence-tags   :type "list[string]"        :desc "节点级 evidence 分类 hint, evidence-collector 按 tag 聚合")
+           (acceptance      :type "sexp"                :desc "节点完成判据 (cmd / kb_query / file_exists 等); 缺省 = inner result success")
+           (review-gate     :type "enum"                :desc "∈ {none / question-event / human-checkpoint}; 触发 plan paused, 等 QuestionEvent::Resolved"))
+        :node-fsm-enum
+          [pending ready claimed running succeeded failed skipped retrying rolling-back paused]
+        :validation-rules
+          ["DAG 必须无 cycle — s1 load-plan-graph 检测, 失败 plan FSM → failed"
+           "depends-on 必须全部解析为已存在的 node-id"
+           "rollback-policy=compensate-node 的 :ref 必须指向同 plan 内已声明的节点"
+           "requested-cwd (若有) 必须在 target_project_root 之内"
+           "节点 FSM 转移必须经 scheduler — 外部不允许直接写节点状态"])
+
+      (claim-lease-protocol-binding
+        :rule "scheduler 必须经 mission_execution(action=claim) 申请节点 scope=plan/<plan_id>/node/<node_id> claim_id, 不允许自建 ID 池"
+        :lease "lease_secs 由节点 :failure-policy / :timeout-ms 派生; heartbeat 由 dispatch substrate 内部循环维护"
+        :reap "lease 过期未 heartbeat → mission_execution reap, scheduler 把节点回 ready (s4)"
+        :anti-pattern "scheduler 自己管 claim_id / lease 是 D010 教训直接复发 — 必须从 helper agent-execution-coordination manager 拿"
+        :cross-ref "memory pillar :: module board :: helper agent-execution-coordination :: shared-memory-slots :: id-counters / claims")
+
+      (logic-core
+        (step s1 "load-plan-graph: 解析 (nodes …)(edges …), 构建 DAG, cycle 检测")
+        (step s2 "validate-node-schema: 校验必填字段 / enum 值 / depends-on 引用 / failure-policy 形状")
+        (step s3 "resolve-target-project-root: 节点级 > plan 级 > directive 级; 校验 :requested-cwd 在 root 内")
+        (step s4 "build-ready-set: 计算 {n | depends-on 全 succeeded/skipped ∧ condition 通过 ∧ 当前并发 < limit}")
+        (step s5 "acquire-execution-claim: mission_execution(action=claim, scope=plan/<plan_id>/node/<node_id>); manager 原子分配 claim_id + lease")
+        (step s6 "dispatch-ready-nodes: 路由 mission_execution / mission_task_delegate / mission_flow_run; companion log meta + evidence sidecar plan_runner_dispatch (per node)")
+        (step s7 "collect-node-evidence: 聚合 inner result + companion log slice + acceptance 验证, 落 sidecar nodes[<node_id>] block")
+        (step s8 "update-node-state: running → succeeded/failed/timeout; succeeded 触发 release claim + 重算 ready-set")
+        (step s9 "handle-retry-failure-rollback: 按 failure-policy 分支 (fail-fast / retry-N / continue-on-failure / route-to-rollback) + rollback-policy 触发 compensate")
+        (step s10 "mark-plan-final: 全节点终态 → plan FSM 推 succeeded / failed / succeeded-partial via mission_plan(action=mark)")
+        (step s11 "trigger-record-execution-distill-candidate: mission_workflow(action=record_execution); 满足条件 enqueue distill 给 s8 workflow-distillation"))
+
+      (egress
+        :writes ["plan FSM final state (executing → succeeded | failed | succeeded-partial) via DirectiveLayerStore::plan_update_status"
+                 ".missiond/v2/plans/<plan_id>.evidence.json :: nodes[<node_id>] block (per-node attempts/claim_id/start-end/inner_result/acceptance_pass/rollback_path)"
+                 "mission_execution companion log claims/completions/deviations/issues slots (per-node)"
+                 "scheduler tick observability hint (capability_usage)"]
+        :emits ["future ExecutionEvent::PlanNodeStateChanged (含 plan_id / node_id / from / to / dispatch_strategy / target_project; 当前 ExecutionEvent dispatch metadata 仍 pending)"
+                "future PlanCompleted / PlanFailed / PlanPartial DomainEvent (经 mission_plan(action=mark) 触发)"]
+        :returns "plan_id + final_status + per-node summary + distill_candidate_enqueued flag"
+        :downstream-flow ["F-intent-alignment-plan-execution-loop :: s7 evidence-collection (sidecar 升级)"
+                          "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation (distill 候选消费)"
+                          "F-execution-log-governance (per-node companion log audit/repair)"
+                          "F-capability-usage-monitoring (dispatch_strategy 命中率 / 节点 retry 模式)"])
+
+      (anti-patterns
+        ["不允许 scheduler 自建 claim/lease — agent-execution-coordination 是单一真相 (D010 教训)"
+         "不允许 silent retry — 每次 retry 写 evidence + 增 attempt counter; 失败信息暴露不掩盖"
+         "不允许节点失败时静默吞错 — failure-policy 必须显式声明; 缺省 fail-fast"
+         "不允许 client 自行解析 PLAN.lisp DAG 后逐节点重新调用 mission_plan(execute) — scheduler 必须在 daemon 内"
+         "不允许把 'continue-on-failure' 当默认 — 那是兜底反模式"
+         "不允许把 prompt-fallback 当 dispatch_strategy 默认 — 默认 fail-fast 走 spawn 路径"])
+
+      (open-design-questions
+        ["dispatch substrate 间的 cross-node lock — 多节点共享 resident-lisp slot 时, 是 scheduler 持锁还是 mission_execution claim 子 scope?"
+         "rollback semantic 是否可全自动 — 当前默认 :rollback-policy=none, 是否引入 'auto-compensate by reverse-dispatch' 待审"
+         "DAG-level vs node-level :failure-policy 优先级 — 节点级覆盖 plan 级是合理默认"
+         "scheduler tick 周期 — 事件驱动 (ExecutionEvent::PlanNodeStateChanged) 还是固定 tick? 当前推荐事件驱动 + autopilot fallback tick"
+         "节点级 review-gate=question-event 触发后, plan FSM 是 paused 还是新增 paused 态?"
+         "节点 :acceptance sexp 的 evaluator — 复用 deterministic methodology compiler 的 sexp 子集还是新做"]))
+
     (actor workflow-distiller
       :status "architecture-designed; code-alignment pending"
       :desc "从成功 plan 蒸馏出可复用 workflow 模板"
@@ -1234,9 +1328,9 @@
          :actions ["compile" "list" "get" "approve" "archive" "version_chain"]
          :owner "tools pillar shell + intent-layer directive-compiler actor")
       :mission_plan
-        (:status "code-aligned partial; compile dry-run, list/get/by_task/approve/mark/supersede full, execute bridge, record_evidence sidecar"
+        (:status "code-aligned partial; compile dry-run/sonnet, list/get/by_task/approve/mark/supersede full, execute bridge + execute internal v0 (单节点), record_evidence sidecar; execute internal v1 (full PLAN DAG scheduler 完整 11-stage 协议) architecture-designed pending — 详 actor plan-dag-scheduler"
          :actions ["compile" "list" "get" "by_task" "approve" "mark" "supersede" "execute" "record_evidence"]
-         :owner "tools pillar shell + intent-layer plan-compiler/execution adapter")
+         :owner "tools pillar shell + intent-layer plan-compiler v0 / plan-runner v0 (单节点) / 未来 plan-dag-scheduler (多节点)")
       :mission_workflow
         (:status "code-aligned partial; list/get/match/record_execution full, apply read-only, distill/compile_methodology dry-run, run_methodology not_implemented"
          :actions ["list" "get" "match" "apply" "distill" "record_execution" "compile_methodology" "run_methodology"]

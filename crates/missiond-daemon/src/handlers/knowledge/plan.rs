@@ -46,6 +46,9 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::minimax_client::ChatMessage;
+use crate::slot_orchestrator::project_root::{
+    resolve_target_project_root, ResolutionError,
+};
 use crate::state::AppState;
 use missiond_core::types::{DirectiveStatus, Plan, PlanStatus};
 
@@ -1363,11 +1366,20 @@ async fn action_execute_internal(
     }
 
     // Successful dispatch — append evidence then transition plan to executing.
-    // Project resolution for evidence sidecar placement: explicit args first,
-    // then plan-hint :target-project, then CWD fallback inside the appender.
-    let project_arg = args
+    //
+    // Project root resolution for evidence sidecar placement honours the
+    // canonical contract (intent-worker.lisp :: project-root-spawn-cwd):
+    //   - `project`         → registry id (primary)
+    //   - `cwd`             → absolute path (longest-prefix), or rejected if relative
+    //   - `target_project`  → registry id (fallback)
+    //   - plan-hint :target-project also fed into the fallback slot
+    // No process-cwd fallback. Evidence-sidecar failures still degrade
+    // gracefully (`evidence_error`) — the inner dispatch already produced
+    // durable side effects, so we surface the failure but do not abort.
+    let project_arg = args.get("project").and_then(|v| v.as_str());
+    let cwd_arg = args.get("cwd").and_then(|v| v.as_str());
+    let target_project_arg = args
         .get("target_project")
-        .or_else(|| args.get("project"))
         .and_then(|v| v.as_str())
         .or(hints.target_project.as_deref());
     let evidence_entry = json!({
@@ -1380,18 +1392,29 @@ async fn action_execute_internal(
         "plan_hint_summary": resolved.plan_hint_summary.clone(),
         "inner_result": inner_payload.clone(),
     });
-    let (evidence_path, evidence_error) =
-        match append_plan_evidence_entry(state, plan.id, project_arg, evidence_entry).await {
-            Ok((p, _count)) => (Some(p.display().to_string()), None),
-            Err(e) => {
-                // Evidence append failure does not abort the dispatch (the inner
-                // tool already succeeded with its own durable side effects), but
-                // we now surface the error in the response so callers cannot
-                // mistake a missing sidecar for a clean run.
-                tracing::warn!(plan_id = %plan.id, error = %e, "plan-runner: evidence sidecar append failed");
-                (None, Some(e.to_string()))
-            }
-        };
+    let (evidence_path, evidence_error) = match append_plan_evidence_entry(
+        state,
+        plan.id,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+        evidence_entry,
+    )
+    .await
+    {
+        Ok((p, _count)) => (Some(p.display().to_string()), None),
+        Err(e) => {
+            // Evidence append failure does not abort the dispatch (the inner
+            // tool already succeeded with its own durable side effects), but
+            // we now surface the error in the response so callers cannot
+            // mistake a missing sidecar for a clean run. This also covers
+            // resolver failures (project root unresolved / relative cwd
+            // rejected) — those bubble up as `evidence_error` rather than
+            // silently landing under the daemon process cwd.
+            tracing::warn!(plan_id = %plan.id, error = %e, "plan-runner: evidence sidecar append failed");
+            (None, Some(e.to_string()))
+        }
+    };
 
     let status_update_error = if matches!(plan.status, PlanStatus::Executing) {
         // Already in Executing — nothing to update, nothing can fail.
@@ -1739,8 +1762,31 @@ async fn action_record_evidence(state: &AppState, args: &Value) -> Result<ToolRe
     }
 
     let project_arg = args.get("project").and_then(|v| v.as_str());
+    let cwd_arg = args.get("cwd").and_then(|v| v.as_str());
+    let target_project_arg = args.get("target_project").and_then(|v| v.as_str());
     let entry = json!({ "evidence": evidence });
-    let (path, entry_count) = append_plan_evidence_entry(state, id, project_arg, entry).await?;
+    let (path, entry_count) = match append_plan_evidence_entry(
+        state,
+        id,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+        entry,
+    )
+    .await
+    {
+        Ok(v) => v,
+        Err(e) => {
+            // Resolver / write failure is a structured rejection rather than an
+            // anyhow bubble, so the caller sees the actionable suggestion
+            // (intent-worker.lisp :: project-root-spawn-cwd contract).
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, e.to_string()).with_suggestion(
+                    "supply project=<registered id> | target_project=<registered id> | cwd=<absolute path>",
+                ),
+            ));
+        }
+    };
 
     Ok(ToolResult::json_pretty(&json!({
         "status": "recorded",
@@ -1757,13 +1803,27 @@ async fn action_record_evidence(state: &AppState, args: &Value) -> Result<ToolRe
 /// and the resulting total entry count for caller-facing reporting. Used by
 /// both `record_evidence` (manual evidence) and the plan-runner internal
 /// dispatch path (`plan_runner_dispatch` audit trail).
+///
+/// Project root resolution goes through [`resolve_project_root`] which
+/// honours the canonical contract: explicit `project_id` / absolute `cwd` /
+/// fallback `target_project` only. There is **no** process-cwd fallback —
+/// callers that omit all signals get a structured error so the evidence
+/// sidecar never lands under a surprising directory.
 async fn append_plan_evidence_entry(
     state: &AppState,
     plan_id: uuid::Uuid,
     project_arg: Option<&str>,
+    cwd_arg: Option<&str>,
+    target_project_arg: Option<&str>,
     entry: Value,
 ) -> Result<(PathBuf, usize)> {
-    let project_root = resolve_project_root(state, project_arg).await?;
+    let project_root = resolve_project_root(
+        &state.project_registry,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+    )
+    .await?;
     let dir = project_root.join(COMPANION_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| anyhow!("mkdir {}: {}", dir.display(), e))?;
     let path = dir.join(format!("{}.evidence.json", plan_id));
@@ -1836,21 +1896,61 @@ fn sha256_hex(s: &str) -> String {
     format!("{:x}", h.finalize())
 }
 
+/// Resolve the canonical project root for plan-side file writes (evidence
+/// sidecar, file-first PLAN.lisp, etc.).
+///
+/// Strict contract — mirrors `intent-worker.lisp ::
+/// invariant project-root-spawn-cwd` and the slot orchestrator
+/// (`slot_orchestrator::project_root::resolve_target_project_root`):
+///   1. explicit `project` registry id → canonical root.
+///   2. explicit `cwd` → must be **absolute**; falls into the canonical
+///      resolver's `CwdLongestPrefix` source. Relative cwd is rejected
+///      outright; we never silently fall back to the daemon's process cwd
+///      (CLAUDE.md `feedback_fail_fast_no_fallback`).
+///   3. fallback `target_project` registry id → canonical root.
+///   4. no signal → structured error.
+///
+/// This replaces the prior process-cwd fallback. File writes must always
+/// land under a registered project root; otherwise we surface a loud error
+/// so the caller can supply the correct project signal instead of quietly
+/// persisting evidence under whatever directory the daemon happened to be
+/// running from when it started.
 async fn resolve_project_root(
-    state: &AppState,
+    registry: &missiond_core::types::SharedProjectRegistry,
     project_id: Option<&str>,
+    cwd: Option<&str>,
+    target_project: Option<&str>,
 ) -> Result<PathBuf> {
-    if let Some(id) = project_id {
-        if let Some(p) = state.project_registry.read().await.get(id) {
-            return Ok(PathBuf::from(&p.path));
+    let cwd_path: Option<PathBuf> = match cwd {
+        Some(raw) if !raw.is_empty() => {
+            let path = PathBuf::from(raw);
+            if !path.is_absolute() {
+                return Err(anyhow!(
+                    "cwd `{}` is not absolute; plan resolver refuses to fall back to process cwd \
+                     (intent-worker.lisp :: project-root-spawn-cwd contract)",
+                    raw
+                ));
+            }
+            Some(path)
         }
-        return Err(anyhow!(
-            "project '{}' not registered; run mission_project(action=\"list\")",
-            id
-        ));
+        _ => None,
+    };
+
+    match resolve_target_project_root(
+        project_id,
+        cwd_path.as_deref(),
+        target_project,
+        registry,
+    )
+    .await
+    {
+        Ok(r) => Ok(r.project_root),
+        Err(ResolutionError::NoSignal) => Err(anyhow!(
+            "project root unresolved: pass `project=<registered id>` (or `target_project=<id>`, \
+             or absolute `cwd=<abs path>`); plan resolver does not fall back to process cwd"
+        )),
+        Err(e) => Err(anyhow!(e.to_string())),
     }
-    let cwd = std::env::current_dir().map_err(|e| anyhow!("cannot read CWD: {}", e))?;
-    Ok(Path::new(&cwd).to_path_buf())
 }
 
 #[cfg(test)]
@@ -2860,5 +2960,164 @@ mod tests {
         let obj = summary.as_object().expect("summary is object");
         assert_eq!(obj.len(), 1, "only :target should appear");
         assert_eq!(obj.get("target"), Some(&json!("mission_execution")));
+    }
+
+    // ── wave-11 :: project-root resolver (canonical contract) ────────────
+    //
+    // These tests pin `resolve_project_root` to the
+    // `intent-worker.lisp :: project-root-spawn-cwd` contract:
+    //   - explicit registered project id resolves to its canonical path
+    //   - cwd inside a registered project resolves via longest-prefix
+    //   - relative cwd is rejected (no process-cwd fallback)
+    //   - missing-signal-only case is rejected (no process-cwd fallback)
+    //   - unknown registered id is rejected
+    // We exercise the resolver helper directly with a `SharedProjectRegistry`
+    // so we don't have to materialise a full `AppState`.
+
+    use missiond_core::types::{ProjectConfig, ProjectRegistry, SharedProjectRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn registry_with(projects: Vec<ProjectConfig>) -> SharedProjectRegistry {
+        Arc::new(RwLock::new(ProjectRegistry::new(projects)))
+    }
+
+    fn project(id: &str, path: &str) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            intent_path: None,
+            active: true,
+            slots: vec![],
+            github_url: None,
+            kind: "managed".to_string(),
+            vault_path: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_project_root_resolves_registered_project_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+        let resolved = resolve_project_root(&reg, Some("missiond"), None, None)
+            .await
+            .expect("explicit project id should resolve");
+        assert_eq!(resolved, root);
+    }
+
+    #[tokio::test]
+    async fn resolve_project_root_resolves_absolute_cwd_via_longest_prefix() {
+        // cwd-under-subdir → registry longest-prefix lookup picks the
+        // canonical project root, NOT the subdir. This is the same path
+        // flow_run / compute_slot use; the plan resolver must agree.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let subdir = root.join("crates").join("missiond-daemon");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+        let resolved = resolve_project_root(
+            &reg,
+            None,
+            Some(subdir.display().to_string().as_str()),
+            None,
+        )
+        .await
+        .expect("absolute cwd inside registered project should resolve");
+        assert_eq!(resolved, root, "must collapse to canonical root, not subdir");
+    }
+
+    #[tokio::test]
+    async fn resolve_project_root_resolves_target_project_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+        let resolved = resolve_project_root(&reg, None, None, Some("missiond"))
+            .await
+            .expect("target_project fallback should resolve");
+        assert_eq!(resolved, root);
+    }
+
+    #[tokio::test]
+    async fn resolve_project_root_rejects_relative_cwd() {
+        // Relative cwd must NEVER silently fall back to process cwd.
+        // Even with a registered project, the relative cwd is refused at
+        // pre-flight, so no resolver call ever sees it.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+        let err = resolve_project_root(&reg, None, Some("relative/path"), None)
+            .await
+            .expect_err("relative cwd should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not absolute"),
+            "error must explain refusal, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("project-root-spawn-cwd"),
+            "error must reference the lisp contract, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_project_root_rejects_missing_signal_no_process_cwd_fallback() {
+        // No project, no cwd, no target_project → resolver MUST fail rather
+        // than fall back to the daemon's process working directory
+        // (CLAUDE.md `feedback_fail_fast_no_fallback`). This is the
+        // regression guard for the prior process-cwd fallback path.
+        let reg = registry_with(vec![project("missiond", "/tmp/missiond")]);
+        let err = resolve_project_root(&reg, None, None, None)
+            .await
+            .expect_err("missing signal must be rejected; no process cwd fallback");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("project root unresolved"),
+            "error must explain refusal, got: {}",
+            msg
+        );
+        assert!(
+            msg.contains("does not fall back"),
+            "error must explicitly disclaim cwd fallback, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_project_root_rejects_unknown_registered_id() {
+        let reg = registry_with(vec![project("missiond", "/tmp/missiond")]);
+        let err = resolve_project_root(&reg, Some("nonexistent"), None, None)
+            .await
+            .expect_err("unknown project id should be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("not registered") || msg.contains("nonexistent"),
+            "error must mention the missing id, got: {}",
+            msg
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_project_root_explicit_id_wins_over_target_project() {
+        // Explicit `project` arg takes precedence over `target_project`
+        // (mirrors the canonical resolver source order).
+        let tmp_a = tempfile::tempdir().unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+        let root_a = tmp_a.path().canonicalize().unwrap();
+        let root_b = tmp_b.path().canonicalize().unwrap();
+        let reg = registry_with(vec![
+            project("alpha", &root_a.display().to_string()),
+            project("beta", &root_b.display().to_string()),
+        ]);
+        let resolved =
+            resolve_project_root(&reg, Some("alpha"), None, Some("beta"))
+                .await
+                .expect("explicit id should win");
+        assert_eq!(resolved, root_a);
     }
 }

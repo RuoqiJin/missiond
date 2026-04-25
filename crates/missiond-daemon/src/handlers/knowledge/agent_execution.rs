@@ -38,6 +38,41 @@ async fn emit_execution_event(state: &AppState, ev: ExecutionEvent) {
     }
 }
 
+/// Build an `ExecutionEvent::Opened` payload from the inputs `action_open`
+/// has already validated and normalized. Centralizing the construction
+/// keeps the dispatch-metadata mapping (intent-worker.lisp ::
+/// claudecode-workstation-orchestration :: execution-strategy-record)
+/// in one testable place — the runtime caller and the unit tests stay in
+/// lock-step on which open args land in which event slot.
+///
+/// `dispatch_strategy` always resolves to a canonical string via
+/// `normalize_dispatch_strategy`. We surface it on the event verbatim so
+/// downstream auditors observe the same label that lives in the companion
+/// log meta block. `target_project` / `requested_cwd` are forwarded only
+/// when the open args carry them — `Option::is_none` skip-serialize keeps
+/// the wire form byte-identical to the legacy 5-field shape otherwise.
+fn build_opened_event(
+    execution_id: &str,
+    parent_design: &str,
+    scope: &str,
+    owner: &str,
+    path: String,
+    dispatch_strategy: &str,
+    target_project: Option<&str>,
+    requested_cwd: Option<&str>,
+) -> ExecutionEvent {
+    ExecutionEvent::Opened {
+        execution_id: execution_id.to_string(),
+        parent_design: parent_design.to_string(),
+        scope: scope.to_string(),
+        owner: owner.to_string(),
+        path,
+        dispatch_strategy: Some(dispatch_strategy.to_string()),
+        target_project: target_project.map(|s| s.to_string()),
+        requested_cwd: requested_cwd.map(|s| s.to_string()),
+    }
+}
+
 const COMPANION_DIR: &str = ".missiond/v2";
 const DEFAULT_LEASE_SECS: i64 = 1800;
 const MAX_LEASE_SECS: i64 = 24 * 3600;
@@ -1038,21 +1073,24 @@ async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     std::fs::write(&path, body.as_bytes())?;
 
-    // TODO(intent-tools.lisp :workstation-dispatch-record): once
-    // ExecutionEvent::Opened gets a generic metadata slot, surface
-    // dispatch_strategy / target_project / requested_cwd here. Until then
-    // they live only in the durable companion log.
-    emit_execution_event(
-        state,
-        ExecutionEvent::Opened {
-            execution_id: execution_id.to_string(),
-            parent_design: parent_design.to_string(),
-            scope: scope.to_string(),
-            owner: owner.to_string(),
-            path: path.display().to_string(),
-        },
-    )
-    .await;
+    // intent-worker.lisp :: claudecode-workstation-orchestration ::
+    // execution-strategy-record asks for dispatch metadata to be surfaced on
+    // the live ExecutionEvent::Opened projection alongside the durable
+    // companion-log meta block. The companion log remains the source of
+    // truth (per planned-event-extensions :: ExecutionEvent :: rationale);
+    // these optional fields are skipped on serialize when absent so legacy
+    // Opened consumers stay byte-identical.
+    let event = build_opened_event(
+        execution_id,
+        parent_design,
+        scope,
+        owner,
+        path.display().to_string(),
+        dispatch_strategy,
+        target_project,
+        requested_cwd,
+    );
+    emit_execution_event(state, event).await;
 
     let mut response = json!({
         "status": "opened",
@@ -2599,5 +2637,86 @@ mod tests {
         let file = LogFile::parse(body.to_string()).unwrap();
         assert!(file.find_block("meta").is_some());
         assert!(file.find_block("claims").is_some());
+    }
+
+    /// `build_opened_event` is the single mapping point between
+    /// `action_open` arguments and the live `ExecutionEvent::Opened`
+    /// projection. When all dispatch metadata is present, every slot
+    /// must round-trip into the event verbatim.
+    #[test]
+    fn build_opened_event_carries_all_dispatch_metadata() {
+        let ev = build_opened_event(
+            "exec-evt",
+            ".missiond/v2/parent.lisp",
+            "scope/x",
+            "claude",
+            "/abs/path/exec-evt.lisp".into(),
+            "fresh-code-alignment",
+            Some("missiond"),
+            Some("/Users/x/Projects/missiond/crates/foo"),
+        );
+        match ev {
+            ExecutionEvent::Opened {
+                execution_id,
+                parent_design,
+                scope,
+                owner,
+                path,
+                dispatch_strategy,
+                target_project,
+                requested_cwd,
+            } => {
+                assert_eq!(execution_id, "exec-evt");
+                assert_eq!(parent_design, ".missiond/v2/parent.lisp");
+                assert_eq!(scope, "scope/x");
+                assert_eq!(owner, "claude");
+                assert_eq!(path, "/abs/path/exec-evt.lisp");
+                assert_eq!(dispatch_strategy.as_deref(), Some("fresh-code-alignment"));
+                assert_eq!(target_project.as_deref(), Some("missiond"));
+                assert_eq!(
+                    requested_cwd.as_deref(),
+                    Some("/Users/x/Projects/missiond/crates/foo"),
+                );
+            }
+            _ => panic!("expected Opened"),
+        }
+    }
+
+    /// When the open args omit `target_project` / `requested_cwd`, the
+    /// event keeps them as `None` (so they skip-serialize) while still
+    /// surfacing the canonical `dispatch_strategy` string. This mirrors
+    /// the runtime path through `action_open` for callers that only
+    /// provide the strategy.
+    #[test]
+    fn build_opened_event_omits_optional_metadata_when_absent() {
+        let ev = build_opened_event(
+            "exec-min",
+            "p.lisp",
+            "scope/y",
+            "owner-y",
+            "/abs/exec-min.lisp".into(),
+            DEFAULT_DISPATCH_STRATEGY,
+            None,
+            None,
+        );
+        match &ev {
+            ExecutionEvent::Opened {
+                dispatch_strategy,
+                target_project,
+                requested_cwd,
+                ..
+            } => {
+                assert_eq!(dispatch_strategy.as_deref(), Some(DEFAULT_DISPATCH_STRATEGY));
+                assert!(target_project.is_none());
+                assert!(requested_cwd.is_none());
+            }
+            _ => panic!("expected Opened"),
+        }
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let opened = parsed.get("Opened").and_then(|v| v.as_object()).unwrap();
+        assert!(opened.contains_key("dispatch_strategy"));
+        assert!(!opened.contains_key("target_project"));
+        assert!(!opened.contains_key("requested_cwd"));
     }
 }

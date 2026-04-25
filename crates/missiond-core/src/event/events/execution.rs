@@ -26,12 +26,27 @@ use super::super::event_trait::DomainEvent;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExecutionEvent {
     /// New companion log opened by `mission_execution(action=open)`.
+    ///
+    /// `dispatch_strategy` / `target_project` / `requested_cwd` mirror the
+    /// workstation-dispatch metadata persisted in the companion log
+    /// (intent-worker.lisp :: claudecode-workstation-orchestration ::
+    /// execution-strategy-record). They are optional + skipped on serialize
+    /// when absent so legacy producers / consumers stay byte-identical with
+    /// the original 5-field wire form. Durable truth still lives in the
+    /// on-disk `<project_root>/.missiond/v2/<id>.lisp` companion file; the
+    /// event metadata is a live projection for status / audit consumers.
     Opened {
         execution_id: String,
         parent_design: String,
         scope: String,
         owner: String,
         path: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatch_strategy: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_cwd: Option<String>,
     },
     /// A new claim was acquired over a scope.
     Claimed {
@@ -157,6 +172,9 @@ mod tests {
                 scope: "s".into(),
                 owner: "o".into(),
                 path: "/tmp/e.lisp".into(),
+                dispatch_strategy: None,
+                target_project: None,
+                requested_cwd: None,
             },
             ExecutionEvent::Claimed {
                 execution_id: "e".into(),
@@ -237,6 +255,19 @@ mod tests {
                 scope: "src/event/**".into(),
                 owner: "claude".into(),
                 path: ".missiond/v2/exec-1.lisp".into(),
+                dispatch_strategy: None,
+                target_project: None,
+                requested_cwd: None,
+            },
+            ExecutionEvent::Opened {
+                execution_id: "exec-2".into(),
+                parent_design: "intent-worker.lisp".into(),
+                scope: "src/handlers/**".into(),
+                owner: "claude".into(),
+                path: ".missiond/v2/exec-2.lisp".into(),
+                dispatch_strategy: Some("fresh-code-alignment".into()),
+                target_project: Some("missiond".into()),
+                requested_cwd: Some("/Users/x/Projects/missiond".into()),
             },
             ExecutionEvent::Claimed {
                 execution_id: "exec-1".into(),
@@ -276,5 +307,134 @@ mod tests {
             lease_expires_at: "2026-04-25T00:00:00Z".into(),
         };
         assert!(ev.payload_size_hint() <= 1024);
+    }
+
+    /// Legacy producers wrote `Opened` with only the original 5 fields.
+    /// `#[serde(default)]` on the new `Option<String>` slots must let the
+    /// old shape deserialize into `None` everywhere without erroring.
+    #[test]
+    fn opened_deserializes_legacy_json_without_dispatch_metadata() {
+        let legacy = r#"{
+            "Opened": {
+                "execution_id": "exec-legacy",
+                "parent_design": "old.lisp",
+                "scope": "old/scope",
+                "owner": "old-owner",
+                "path": ".missiond/v2/exec-legacy.lisp"
+            }
+        }"#;
+        let ev: ExecutionEvent = serde_json::from_str(legacy).expect("legacy JSON parses");
+        match ev {
+            ExecutionEvent::Opened {
+                ref execution_id,
+                ref dispatch_strategy,
+                ref target_project,
+                ref requested_cwd,
+                ..
+            } => {
+                assert_eq!(execution_id, "exec-legacy");
+                assert!(dispatch_strategy.is_none());
+                assert!(target_project.is_none());
+                assert!(requested_cwd.is_none());
+            }
+            _ => panic!("expected Opened"),
+        }
+    }
+
+    /// When all dispatch metadata is absent, the serialized JSON must be
+    /// byte-identical to the old 5-field wire form (no extra keys for
+    /// `dispatch_strategy` / `target_project` / `requested_cwd`).
+    /// `skip_serializing_if = "Option::is_none"` enforces this.
+    #[test]
+    fn opened_without_dispatch_metadata_serializes_byte_identical_to_legacy() {
+        let ev = ExecutionEvent::Opened {
+            execution_id: "exec-1".into(),
+            parent_design: "p.lisp".into(),
+            scope: "s".into(),
+            owner: "o".into(),
+            path: "/tmp/e.lisp".into(),
+            dispatch_strategy: None,
+            target_project: None,
+            requested_cwd: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let opened = parsed
+            .get("Opened")
+            .and_then(|v| v.as_object())
+            .expect("Opened payload");
+        assert!(!opened.contains_key("dispatch_strategy"));
+        assert!(!opened.contains_key("target_project"));
+        assert!(!opened.contains_key("requested_cwd"));
+        for key in ["execution_id", "parent_design", "scope", "owner", "path"] {
+            assert!(opened.contains_key(key), "missing legacy key {}", key);
+        }
+        assert_eq!(opened.len(), 5);
+    }
+
+    /// New producers may surface dispatch metadata; round-trip must preserve
+    /// each provided value verbatim and re-serialize exactly the keys
+    /// present.
+    #[test]
+    fn opened_with_dispatch_metadata_round_trips() {
+        let ev = ExecutionEvent::Opened {
+            execution_id: "exec-disp".into(),
+            parent_design: "p.lisp".into(),
+            scope: "s".into(),
+            owner: "claude".into(),
+            path: ".missiond/v2/exec-disp.lisp".into(),
+            dispatch_strategy: Some("agent-team".into()),
+            target_project: Some("missiond".into()),
+            requested_cwd: Some("/Users/x/Projects/missiond/crates".into()),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let opened = parsed
+            .get("Opened")
+            .and_then(|v| v.as_object())
+            .expect("Opened payload");
+        assert_eq!(opened.len(), 8);
+        assert_eq!(
+            opened.get("dispatch_strategy").and_then(|v| v.as_str()),
+            Some("agent-team")
+        );
+        assert_eq!(
+            opened.get("target_project").and_then(|v| v.as_str()),
+            Some("missiond")
+        );
+        assert_eq!(
+            opened.get("requested_cwd").and_then(|v| v.as_str()),
+            Some("/Users/x/Projects/missiond/crates")
+        );
+    }
+
+    /// Producers may surface only one of the three optional fields. Each
+    /// such partial form must round-trip and skip the absent siblings.
+    #[test]
+    fn opened_with_partial_dispatch_metadata_round_trips() {
+        let ev = ExecutionEvent::Opened {
+            execution_id: "exec-part".into(),
+            parent_design: "p.lisp".into(),
+            scope: "s".into(),
+            owner: "claude".into(),
+            path: ".missiond/v2/exec-part.lisp".into(),
+            dispatch_strategy: Some("resident-lisp".into()),
+            target_project: None,
+            requested_cwd: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let opened = parsed
+            .get("Opened")
+            .and_then(|v| v.as_object())
+            .expect("Opened payload");
+        assert!(opened.contains_key("dispatch_strategy"));
+        assert!(!opened.contains_key("target_project"));
+        assert!(!opened.contains_key("requested_cwd"));
+        assert_eq!(opened.len(), 6);
     }
 }

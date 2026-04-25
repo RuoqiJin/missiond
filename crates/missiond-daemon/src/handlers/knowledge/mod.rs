@@ -2,6 +2,7 @@ pub(crate) mod agent_execution;
 pub(crate) mod board;
 pub(crate) mod cascade;
 pub(crate) mod directive;
+pub(crate) mod file_artifacts;
 pub(crate) mod insight;
 pub(crate) mod intent;
 pub(crate) mod kb;

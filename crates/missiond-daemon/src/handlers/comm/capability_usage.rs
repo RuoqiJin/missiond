@@ -388,7 +388,13 @@ async fn build_capability_rows(
     windows: &[WindowSpec],
     scope: &str,
     project_root: &Path,
-) -> Result<(Vec<CapabilityRow>, SourceCoverage, HintIndex, EventLogFlowProbe)> {
+) -> Result<(
+    Vec<CapabilityRow>,
+    SourceCoverage,
+    HintIndex,
+    EventLogFlowProbe,
+    WorkflowStatsProbe,
+)> {
     let mut rows: Vec<CapabilityRow> = Vec::new();
     let mut coverage = SourceCoverage::default();
     let registered_tools_set: BTreeSet<String> = registered_tools().into_iter().collect();
@@ -449,6 +455,12 @@ async fn build_capability_rows(
         EventLogFlowProbe::default()
     };
 
+    let workflow_probe = if scope == "flow" || scope == "both" {
+        probe_workflow_execution_stats(state).await
+    } else {
+        WorkflowStatsProbe::default()
+    };
+
     if scope == "flow" || scope == "both" {
         let mut flow_stats = collect_flow_usage(state).await?;
         for (template, count) in &event_probe.counts {
@@ -472,6 +484,43 @@ async fn build_capability_rows(
                 base_evidence.push(format!(
                     "event_log_flow_events: {} board::task_created events referenced this template",
                     stats.event_log_observed
+                ));
+            }
+            // workflow_execution_stats lane: exact-name mapping only.
+            // Upgrade evidence with workflow row stats when this flow id matches a
+            // workflow.name verbatim (or appears in workflow.match_rules.tool_calls
+            // / .flows array). Never alters classification — the workflow table is a
+            // separate distillation surface and we cannot prove a flow YAML and a
+            // workflow row are the same artifact.
+            if let Some(wf_stats) = workflow_probe.by_name.get(&id) {
+                base_evidence.push(format!(
+                    "workflow_execution_stats: name=`{}` executions={} success={} failure={} avg_cost_usd={} last_used_at={}",
+                    wf_stats.name,
+                    wf_stats.executions,
+                    wf_stats.success_count,
+                    wf_stats.failure_count,
+                    wf_stats
+                        .avg_cost_usd
+                        .map(|c| format!("{:.4}", c))
+                        .unwrap_or_else(|| "null".to_string()),
+                    wf_stats
+                        .last_used_at
+                        .as_deref()
+                        .unwrap_or("null"),
+                ));
+            }
+            for wf_stats in workflow_probe
+                .by_match_reference
+                .get(&id)
+                .map(|v| v.as_slice())
+                .unwrap_or(&[])
+            {
+                base_evidence.push(format!(
+                    "workflow_execution_stats: match_rules in workflow `{}` references this flow (executions={}, success={}, failure={})",
+                    wf_stats.name,
+                    wf_stats.executions,
+                    wf_stats.success_count,
+                    wf_stats.failure_count,
                 ));
             }
             let hints = hint_index.for_source("flow", &id);
@@ -510,7 +559,7 @@ async fn build_capability_rows(
         }
     }
 
-    Ok((rows, coverage, hint_index, event_probe))
+    Ok((rows, coverage, hint_index, event_probe, workflow_probe))
 }
 
 /// Per-source diagnostic entry — surfaces *why* a given lane is on or off.
@@ -549,7 +598,7 @@ async fn take_snapshot(
         Err(_) => return Err(anyhow!("invalid window — expected 7d|30d|90d|all")),
     };
     let project_root = resolve_project_root(state, project_arg(args)).await?;
-    let (rows, mut coverage, hint_index, event_probe) =
+    let (rows, mut coverage, hint_index, event_probe, workflow_probe) =
         build_capability_rows(state, &windows, scope, &project_root).await?;
     coverage.persistence_mode = "read-only".to_string();
     coverage.persistence_note =
@@ -560,6 +609,7 @@ async fn take_snapshot(
         &rows,
         &hint_index,
         &event_probe,
+        &workflow_probe,
         ReviewState::load(&project_root).map(|s| s.entries.len()).ok(),
     );
 
@@ -617,11 +667,12 @@ async fn take_snapshot(
     Ok((snapshot, rows, coverage, hint_index))
 }
 
-/// Compose the five-source dictionary for `source_coverage.sources`.
+/// Compose the six-source dictionary for `source_coverage.sources`.
 fn build_source_coverage_dict(
     rows: &[CapabilityRow],
     hint_index: &HintIndex,
     event_probe: &EventLogFlowProbe,
+    workflow_probe: &WorkflowStatsProbe,
     review_entry_count: Option<usize>,
 ) -> BTreeMap<String, SourceLane> {
     let mut out = BTreeMap::new();
@@ -713,6 +764,34 @@ fn build_source_coverage_dict(
             },
             count: review_entry_count.unwrap_or(0) as i64,
             note: review_note,
+        },
+    );
+
+    let workflow_status = if workflow_probe.error.is_some() {
+        "unavailable"
+    } else if workflow_probe.workflows_observed > 0 {
+        "active"
+    } else {
+        "empty"
+    };
+    let workflow_note = match (&workflow_probe.error, workflow_probe.workflows_observed) {
+        (Some(e), _) => format!("workflow stats query failed: {}", e),
+        (None, 0) => "no rows in workflow table (DirectiveLayerStore::workflow_list_top_n)".to_string(),
+        (None, observed) => format!(
+            "scanned {} workflow rows via DirectiveLayerStore::workflow_list_top_n; \
+             upgraded evidence on {} flow ids by exact-name match and {} via match_rules \
+             references (no destructive classification)",
+            observed,
+            workflow_probe.by_name.len(),
+            workflow_probe.by_match_reference.len(),
+        ),
+    };
+    out.insert(
+        "workflow_execution_stats".to_string(),
+        SourceLane {
+            status: workflow_status.to_string(),
+            count: workflow_probe.workflows_observed,
+            note: workflow_note,
         },
     );
 
@@ -1535,6 +1614,109 @@ async fn probe_event_log_flows(state: &AppState) -> EventLogFlowProbe {
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// workflow_execution_stats lane
+// ───────────────────────────────────────────────────────────────────────
+
+/// Per-workflow stats lifted from the `workflow` table. Counts come straight
+/// from `workflow.executions / success_count / avg_cost_usd / last_used_at`.
+/// `failure_count` is derived (`executions - success_count`).
+#[derive(Debug, Clone)]
+struct WorkflowExecutionStats {
+    name: String,
+    executions: i64,
+    success_count: i64,
+    failure_count: i64,
+    avg_cost_usd: Option<f64>,
+    last_used_at: Option<String>,
+}
+
+/// Aggregated read of the `workflow` table.
+///
+/// `by_name` maps workflow.name → stats (exact match against flow id).
+/// `by_match_reference` maps a flow id mentioned in workflow.match_rules
+/// (`tool_calls` / `flows` arrays, exact strings only — never substring) to
+/// the list of stats whose match_rules referenced it.
+///
+/// Failure to query the table is captured in `error`; both maps remain empty
+/// in that case so the main snapshot pipeline does not stall.
+#[derive(Debug, Default, Clone)]
+struct WorkflowStatsProbe {
+    by_name: HashMap<String, WorkflowExecutionStats>,
+    by_match_reference: HashMap<String, Vec<WorkflowExecutionStats>>,
+    workflows_observed: i64,
+    error: Option<String>,
+}
+
+/// Maximum rows pulled from `workflow_list_top_n`. The table is small (a few
+/// hundred rows in mature deployments) and `top_n` orders by usage so this
+/// covers the live ranking without paginating.
+const WORKFLOW_PROBE_LIMIT: i64 = 500;
+
+async fn probe_workflow_execution_stats(state: &AppState) -> WorkflowStatsProbe {
+    let mut probe = WorkflowStatsProbe::default();
+    let rows = match state.store.workflow_list_top_n(WORKFLOW_PROBE_LIMIT).await {
+        Ok(rs) => rs,
+        Err(e) => {
+            probe.error = Some(format!("DirectiveLayerStore::workflow_list_top_n failed: {}", e));
+            return probe;
+        }
+    };
+    probe.workflows_observed = rows.len() as i64;
+    for w in rows {
+        let executions = w.executions as i64;
+        let success_count = w.success_count as i64;
+        let failure_count = (executions - success_count).max(0);
+        let stats = WorkflowExecutionStats {
+            name: w.name.clone(),
+            executions,
+            success_count,
+            failure_count,
+            avg_cost_usd: w.avg_cost_usd,
+            last_used_at: w.last_used_at.map(iso),
+        };
+        // Exact-name lane: workflow.name → stats.
+        probe.by_name.insert(w.name.clone(), stats.clone());
+        // match_rules.tool_calls + match_rules.flows array references (exact
+        // string match only — no substring, no case folding). Anything outside
+        // those well-known keys is intentionally ignored to keep the mapping
+        // deterministic.
+        for ref_id in extract_match_references(&w.match_rules) {
+            probe
+                .by_match_reference
+                .entry(ref_id)
+                .or_default()
+                .push(stats.clone());
+        }
+    }
+    probe
+}
+
+/// Pull exact id references out of a workflow.match_rules JSONB blob.
+///
+/// Only honours the `tool_calls` and `flows` arrays at the root, with each
+/// entry treated as a verbatim string. Any nested or fuzzy-text fields are
+/// ignored. This mirrors the lane contract: exact-name mapping only.
+fn extract_match_references(match_rules: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let Some(obj) = match_rules.as_object() else {
+        return out;
+    };
+    for key in &["tool_calls", "flows"] {
+        let Some(arr) = obj.get(*key).and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for item in arr {
+            if let Some(s) = item.as_str() {
+                if !s.is_empty() {
+                    out.push(s.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // tests
 // ───────────────────────────────────────────────────────────────────────
 
@@ -1907,7 +2089,7 @@ mod tests {
     }
 
     #[test]
-    fn build_source_coverage_dict_includes_all_five_lanes() {
+    fn build_source_coverage_dict_includes_all_six_lanes() {
         let mut hint_index = HintIndex::default();
         hint_index.files_read.push("intent-tools.lisp".into());
         hint_index.all.push(SemanticHint {
@@ -1921,13 +2103,15 @@ mod tests {
             raw_snippet: "".into(),
         });
         let probe = EventLogFlowProbe::default();
-        let dict = build_source_coverage_dict(&[], &hint_index, &probe, Some(0));
+        let workflow_probe = WorkflowStatsProbe::default();
+        let dict = build_source_coverage_dict(&[], &hint_index, &probe, &workflow_probe, Some(0));
         for key in &[
             "conversation_tool_calls",
             "board_tasks_flow_template",
             "event_log_flow_events",
             "lisp_semantic_hints",
             "review_sidecar",
+            "workflow_execution_stats",
         ] {
             assert!(
                 dict.contains_key(*key),
@@ -1937,5 +2121,159 @@ mod tests {
             );
         }
         assert_eq!(dict.get("lisp_semantic_hints").unwrap().count, 1);
+    }
+
+    #[test]
+    fn workflow_stats_lane_unavailable_when_probe_errors() {
+        let hint_index = HintIndex::default();
+        let event_probe = EventLogFlowProbe::default();
+        let workflow_probe = WorkflowStatsProbe {
+            by_name: HashMap::new(),
+            by_match_reference: HashMap::new(),
+            workflows_observed: 0,
+            error: Some("connection refused".to_string()),
+        };
+        let dict = build_source_coverage_dict(
+            &[],
+            &hint_index,
+            &event_probe,
+            &workflow_probe,
+            Some(0),
+        );
+        let lane = dict
+            .get("workflow_execution_stats")
+            .expect("workflow_execution_stats lane present even on probe failure");
+        assert_eq!(lane.status, "unavailable");
+        assert_eq!(lane.count, 0);
+        assert!(
+            lane.note.contains("connection refused"),
+            "note should surface upstream error; got `{}`",
+            lane.note
+        );
+    }
+
+    #[test]
+    fn workflow_stats_lane_active_when_rows_present() {
+        let hint_index = HintIndex::default();
+        let event_probe = EventLogFlowProbe::default();
+        let stats = WorkflowExecutionStats {
+            name: "F-some-flow".into(),
+            executions: 5,
+            success_count: 4,
+            failure_count: 1,
+            avg_cost_usd: Some(0.1234),
+            last_used_at: Some("2026-04-25T00:00:00Z".into()),
+        };
+        let mut by_name = HashMap::new();
+        by_name.insert("F-some-flow".to_string(), stats.clone());
+        let workflow_probe = WorkflowStatsProbe {
+            by_name,
+            by_match_reference: HashMap::new(),
+            workflows_observed: 1,
+            error: None,
+        };
+        let dict = build_source_coverage_dict(
+            &[],
+            &hint_index,
+            &event_probe,
+            &workflow_probe,
+            Some(0),
+        );
+        let lane = dict.get("workflow_execution_stats").unwrap();
+        assert_eq!(lane.status, "active");
+        assert_eq!(lane.count, 1);
+        assert!(
+            lane.note.contains("scanned 1 workflow rows"),
+            "note: {}",
+            lane.note
+        );
+    }
+
+    #[test]
+    fn workflow_stats_lane_empty_when_no_rows() {
+        let hint_index = HintIndex::default();
+        let event_probe = EventLogFlowProbe::default();
+        let workflow_probe = WorkflowStatsProbe {
+            by_name: HashMap::new(),
+            by_match_reference: HashMap::new(),
+            workflows_observed: 0,
+            error: None,
+        };
+        let dict = build_source_coverage_dict(
+            &[],
+            &hint_index,
+            &event_probe,
+            &workflow_probe,
+            None,
+        );
+        let lane = dict.get("workflow_execution_stats").unwrap();
+        assert_eq!(lane.status, "empty");
+        assert_eq!(lane.count, 0);
+    }
+
+    #[test]
+    fn extract_match_references_pulls_exact_strings_only() {
+        let v = json!({
+            "tool_calls": ["mission_router_chat", "mission_kb_query"],
+            "flows": ["F-some-flow"],
+            "free_text": "this should be ignored",
+            "nested": {"tool_calls": ["mission_ignored"]}
+        });
+        let refs = extract_match_references(&v);
+        assert!(refs.contains(&"mission_router_chat".to_string()));
+        assert!(refs.contains(&"mission_kb_query".to_string()));
+        assert!(refs.contains(&"F-some-flow".to_string()));
+        assert!(
+            !refs.contains(&"mission_ignored".to_string()),
+            "nested keys must not leak: {:?}",
+            refs
+        );
+        assert!(
+            !refs.iter().any(|s| s.contains("ignored")),
+            "free text must not leak: {:?}",
+            refs
+        );
+    }
+
+    #[test]
+    fn extract_match_references_ignores_non_object_or_missing_keys() {
+        let v = json!([]);
+        assert!(extract_match_references(&v).is_empty());
+        let v = json!({"unrelated": 1});
+        assert!(extract_match_references(&v).is_empty());
+        let v = json!({"tool_calls": "not-an-array"});
+        assert!(extract_match_references(&v).is_empty());
+        let v = json!({"tool_calls": [42, null, ""]});
+        // numeric / null / empty entries must be skipped, not stringified
+        assert!(extract_match_references(&v).is_empty());
+    }
+
+    #[test]
+    fn workflow_probe_lookup_rejects_substring_and_case_variants() {
+        // The lane contract says exact-name only; validate the lookup side
+        // (the probe builder is store-backed and gets a separate functional
+        // test once a fake store lands).
+        let stats = WorkflowExecutionStats {
+            name: "F-canonical".into(),
+            executions: 3,
+            success_count: 3,
+            failure_count: 0,
+            avg_cost_usd: None,
+            last_used_at: None,
+        };
+        let mut by_name = HashMap::new();
+        by_name.insert("F-canonical".to_string(), stats);
+        let probe = WorkflowStatsProbe {
+            by_name,
+            by_match_reference: HashMap::new(),
+            workflows_observed: 1,
+            error: None,
+        };
+        // Substring lookup must miss.
+        assert!(probe.by_name.get("F-canonical-extended").is_none());
+        // Case-insensitive lookup must miss (HashMap<String,_> is exact).
+        assert!(probe.by_name.get("f-canonical").is_none());
+        // Exact lookup hits.
+        assert!(probe.by_name.get("F-canonical").is_some());
     }
 }
