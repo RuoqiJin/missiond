@@ -91,6 +91,28 @@ const VALID_DISPATCH_STRATEGIES: &[&str] = &[
 ];
 const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
 
+/// Canonical scoped-commit handoff statuses surfaced by intent-memory.lisp ::
+/// helper agent-execution-coordination :: shared-memory-slots :: completions
+/// :commit-status-values "[not-required pending committed blocked skipped]".
+/// Used both to validate `mission_execution(action=complete, commit_status=…)`
+/// arguments and to drive the audit checks for the durability plane.
+const VALID_COMMIT_STATUSES: &[&str] = &[
+    "not-required",
+    "pending",
+    "committed",
+    "blocked",
+    "skipped",
+];
+
+/// Audit finding kinds emitted by the scoped-commit handoff checks. Kept as
+/// `&'static str` constants so test assertions can pin the exact wire form
+/// without spelling them out repeatedly. Names mirror the scoped-commit
+/// contract terminology (intent-memory.lisp :: scoped-commit-contract +
+/// intent-flow.lisp :: F-scoped-commit-handoff :: failure-modes).
+const FINDING_COMMIT_STATUS_NO_HASH: &str = "commit-status-without-hash";
+const FINDING_COMMIT_BLOCKED_NO_BLOCKER: &str = "commit-status-blocked-without-blocker";
+const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
+
 /// Normalize an optional dispatch strategy string against the canonical set.
 /// Unknown / empty values fall back to `DEFAULT_DISPATCH_STRATEGY` (`"unknown"`)
 /// without erroring; we never hard-fail open() on a strategy mismatch because
@@ -106,6 +128,76 @@ fn normalize_dispatch_strategy(raw: Option<&str>) -> &'static str {
         }
     }
     DEFAULT_DISPATCH_STRATEGY
+}
+
+/// Return the canonical form of a `commit_status` value if recognised.
+/// Unlike `normalize_dispatch_strategy`, an unknown value yields `None` so
+/// the caller can hard-fail with a structured `INVALID_PARAM`. Per
+/// intent-memory.lisp :: completions :commit-status-values these are the
+/// only legal labels; we refuse to silently coerce typos because audit
+/// invariants downstream key off the exact string.
+fn normalize_commit_status(raw: &str) -> Option<&'static str> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return None;
+    }
+    for &known in VALID_COMMIT_STATUSES {
+        if known == v {
+            return Some(known);
+        }
+    }
+    None
+}
+
+/// Pull a `[string]` argument off `args[key]` and return it as a `Vec<String>`.
+/// Returns `None` if the key is absent so callers can distinguish "field was
+/// not supplied" from "field was supplied as empty list" — both shapes are
+/// legal: a writer that ran no commit may legitimately report
+/// `staged_files=[]` to record "nothing staged".
+fn collect_string_list(args: &Value, key: &str) -> Option<Vec<String>> {
+    let arr = args.get(key)?.as_array()?;
+    let out: Vec<String> = arr
+        .iter()
+        .filter_map(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    Some(out)
+}
+
+/// Render a string list as a Lisp expression `("a" "b" ...)`, or `()` when
+/// empty. Empty lists still emit the empty-list literal so audit can tell the
+/// caller deliberately recorded "no files" — distinct from the field being
+/// absent altogether.
+fn render_string_list(items: &[String]) -> String {
+    if items.is_empty() {
+        return "()".to_string();
+    }
+    let parts: Vec<String> = items.iter().map(|s| lisp_quote_string(s)).collect();
+    format!("({})", parts.join(" "))
+}
+
+/// Parse a Lisp list literal `("a" "b" ...)` slice back into `Vec<String>`.
+/// Tolerates whitespace/newlines and unquoted atoms (legacy hand-edited
+/// files); caller passes the raw source slice covering the value.
+/// Returns `None` if the slice does not parse as a list — caller decides
+/// whether to treat that as audit-worthy or as a no-op.
+fn parse_string_list(slice: &str) -> Option<Vec<String>> {
+    let trimmed = slice.trim();
+    if !trimmed.starts_with('(') {
+        return None;
+    }
+    let nodes = sexp::parse(trimmed).ok()?;
+    let outer = nodes.first()?;
+    let mut out = Vec::new();
+    for child in outer.children() {
+        match &child.kind {
+            sexp::NodeKind::Str(s) => out.push(s.clone()),
+            sexp::NodeKind::Atom(a) => out.push(a.clone()),
+            _ => {}
+        }
+    }
+    Some(out)
 }
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
@@ -1010,6 +1102,177 @@ fn scopes_overlap(a: &str, b: &str) -> bool {
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// completion record + durability projection
+// ───────────────────────────────────────────────────────────────────────
+
+/// View of a single `(COMPxxx ...)` entry inside the `completions` block,
+/// including the optional scoped-commit handoff fields per intent-memory.lisp
+/// :: helper agent-execution-coordination :: shared-memory-slots ::
+/// completions. All durability fields are `Option`/`Option<Vec<_>>` so legacy
+/// completions (no scoped-commit metadata) round-trip cleanly: missing keys
+/// stay `None` and consumers — status, list, audit — make the same backward
+/// compatibility decisions in one place.
+#[derive(Debug, Clone)]
+struct CompletionRecord {
+    id: String,
+    phase: String,
+    agent: String,
+    at: String,
+    changed_files: Option<Vec<String>>,
+    staged_files: Option<Vec<String>>,
+    commit_hash: Option<String>,
+    commit_status: Option<String>,
+    commit_blocker: Option<String>,
+}
+
+fn parse_completions(file: &LogFile) -> Vec<CompletionRecord> {
+    let block = match file.find_block("completions") {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for child in block.children().iter().skip(1) {
+        let head = child.head_atom().unwrap_or("").to_string();
+        let kvs = parse_kv_pairs(&file.src, child.children());
+        // `parse_kv_pairs` returns the value's verbatim source slice (the
+        // outer quotes survive for strings, parentheses survive for lists).
+        // We trim the wrapping quote characters here so per-field consumers
+        // can compare canonical content directly.
+        let unwrap_str = |raw: &str| raw.trim().trim_matches('"').to_string();
+        // For `:changed-files (...)` and `:staged-files (...)` the slice is a
+        // Lisp list literal; reuse the sexp parser to recover the entries.
+        let unwrap_list = |raw: &str| -> Option<Vec<String>> {
+            let trimmed = raw.trim();
+            if !trimmed.starts_with('(') {
+                return None;
+            }
+            parse_string_list(trimmed)
+        };
+
+        let id = if head.starts_with("COMP")
+            && head.len() > 4
+            && head[4..].chars().all(|c| c.is_ascii_digit())
+        {
+            head.clone()
+        } else if let Some(v) = kvs.get("id").or_else(|| kvs.get("completion-id")) {
+            unwrap_str(v)
+        } else {
+            format!("completion@{}", child.start)
+        };
+
+        let changed_files = kvs
+            .get("changed-files")
+            .or_else(|| kvs.get("changed_files"))
+            .and_then(|raw| unwrap_list(raw));
+        let staged_files = kvs
+            .get("staged-files")
+            .or_else(|| kvs.get("staged_files"))
+            .and_then(|raw| unwrap_list(raw));
+        let commit_hash = kvs
+            .get("commit-hash")
+            .or_else(|| kvs.get("commit_hash"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let commit_status = kvs
+            .get("commit-status")
+            .or_else(|| kvs.get("commit_status"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let commit_blocker = kvs
+            .get("commit-blocker")
+            .or_else(|| kvs.get("commit_blocker"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+
+        out.push(CompletionRecord {
+            id,
+            phase: kvs.get("phase").map(|s| unwrap_str(s)).unwrap_or_default(),
+            agent: kvs.get("agent").map(|s| unwrap_str(s)).unwrap_or_default(),
+            at: kvs.get("at").map(|s| unwrap_str(s)).unwrap_or_default(),
+            changed_files,
+            staged_files,
+            commit_hash,
+            commit_status,
+            commit_blocker,
+        });
+    }
+    out
+}
+
+/// Build the dashboard-friendly `durability` projection over a slice of
+/// `CompletionRecord`s. The shape stays stable across legacy + new
+/// companion logs: when no completion carries scoped-commit metadata the
+/// summary still surfaces zero counts plus `latest_commit_status: null`
+/// so consumers do not need to special-case "old log".
+fn summarize_durability(records: &[CompletionRecord]) -> Value {
+    let total = records.len();
+    let mut by_status: HashMap<&str, u32> = HashMap::new();
+    let mut without_status = 0u32;
+    let mut with_hash = 0u32;
+    let mut blocked_with_blocker = 0u32;
+    let mut blocked_without_blocker = 0u32;
+    for r in records {
+        match r.commit_status.as_deref() {
+            Some(s) => {
+                *by_status.entry(canonical_status_str(s)).or_insert(0) += 1;
+                if s == "blocked" {
+                    if r.commit_blocker.is_some() {
+                        blocked_with_blocker += 1;
+                    } else {
+                        blocked_without_blocker += 1;
+                    }
+                }
+            }
+            None => without_status += 1,
+        }
+        if r.commit_hash.is_some() {
+            with_hash += 1;
+        }
+    }
+    let mut by_status_json = serde_json::Map::new();
+    for &status in VALID_COMMIT_STATUSES {
+        by_status_json.insert(
+            status.to_string(),
+            json!(*by_status.get(status).unwrap_or(&0)),
+        );
+    }
+    let unknown_count = *by_status.get("unknown").unwrap_or(&0);
+    if unknown_count > 0 {
+        by_status_json.insert("unknown".to_string(), json!(unknown_count));
+    }
+    let latest_status = records
+        .iter()
+        .rev()
+        .find_map(|r| r.commit_status.clone());
+    let latest_hash = records.iter().rev().find_map(|r| r.commit_hash.clone());
+    json!({
+        "completion_count": total,
+        "without_commit_status": without_status,
+        "with_commit_hash": with_hash,
+        "blocked_with_blocker": blocked_with_blocker,
+        "blocked_without_blocker": blocked_without_blocker,
+        "by_commit_status": Value::Object(by_status_json),
+        "latest_commit_status": latest_status,
+        "latest_commit_hash": latest_hash,
+    })
+}
+
+/// Map a raw status string back to one of `VALID_COMMIT_STATUSES`. Returns
+/// `"unknown"` for anything else so we never silently drop weird tokens out
+/// of the rollup. Audit still emits a finding via the strict normalize path
+/// at write-time, but the dashboard shape stays predictable.
+fn canonical_status_str(raw: &str) -> &'static str {
+    match raw.trim() {
+        "not-required" => "not-required",
+        "pending" => "pending",
+        "committed" => "committed",
+        "blocked" => "blocked",
+        "skipped" => "skipped",
+        _ => "unknown",
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // action: open
 // ───────────────────────────────────────────────────────────────────────
 
@@ -1197,6 +1460,14 @@ async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
 
         let claims = parse_claims(&file);
         let active = claims.iter().filter(|c| c.status == "active").count();
+        // Surface a thin durability snapshot per execution so dashboards can
+        // tell at a glance whether scoped commits are flowing. Full per-row
+        // details still live behind `mission_execution(action=status)` —
+        // here we only carry counts + the latest commit_status to keep the
+        // list payload small (intent-memory.lisp :: helper agent-execution-
+        // coordination :: scoped-commit-contract :: invariants :inv-7).
+        let completions = parse_completions(&file);
+        let durability = summarize_durability(&completions);
         let mut row = json!({
             "execution_id": name,
             "path": path.display().to_string(),
@@ -1206,6 +1477,7 @@ async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
             "active_claims": active,
             "claim_count": claims.len(),
             "dispatch_strategy": dispatch,
+            "durability": durability,
         });
         if let Some(tp) = target_project {
             row["target_project"] = json!(tp);
@@ -1749,13 +2021,63 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
+    // ── scoped-commit handoff fields (intent-memory.lisp :: helper
+    // agent-execution-coordination :: shared-memory-slots :: completions —
+    // :fields "... changed_files / staged_files / commit_hash / commit_status").
+    // All five are optional so legacy callers that omit them still write a
+    // backward-compatible completion entry; only the keys actually supplied
+    // are emitted into the Lisp slot. `commit_status` is normalized against
+    // the canonical enum from the protocol's :commit-status-values.
+    let changed_files = collect_string_list(args, "changed_files");
+    let staged_files = collect_string_list(args, "staged_files");
+    let commit_hash = args
+        .get("commit_hash")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let commit_status_raw = args
+        .get("commit_status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let commit_status = match commit_status_raw {
+        Some(s) => match normalize_commit_status(s) {
+            Some(canonical) => Some(canonical.to_string()),
+            None => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "commit_status must be one of {:?}, got `{}`",
+                            VALID_COMMIT_STATUSES, s
+                        ),
+                    )
+                    .with_suggestion(
+                        "see intent-memory.lisp :: completions :commit-status-values",
+                    ),
+                ));
+            }
+        },
+        None => None,
+    };
+    let commit_blocker = args
+        .get("commit_blocker")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
     let id = allocate_id(&mut file, Counter::Completion)?;
     let date = now_iso();
-    let entry = format!(
-        "    ({id}\n      :phase {phase}\n      :agent {agent}\n      :summary {summary}\n      :deliverables {deliverables}\n      :verification {verification}\n      :at {date})",
+
+    // Build the completion entry incrementally so the durability handoff
+    // fields are appended only when supplied. The legacy 6-field shape stays
+    // byte-identical when no scoped-commit metadata is provided; new callers
+    // simply tack additional `:key value` pairs onto the same form.
+    let mut entry = format!(
+        "    ({id}\n      :phase {phase}\n      :agent {agent}\n      :summary {summary}\n      :deliverables {deliverables}\n      :verification {verification}\n      :at {date}",
         id = id,
         phase = lisp_quote_string(phase),
         agent = lisp_quote_string(agent),
@@ -1764,6 +2086,35 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         verification = lisp_quote_string(verification),
         date = lisp_quote_string(&date),
     );
+    if let Some(ref list) = changed_files {
+        entry.push_str(&format!(
+            "\n      :changed-files {}",
+            render_string_list(list)
+        ));
+    }
+    if let Some(ref list) = staged_files {
+        entry.push_str(&format!(
+            "\n      :staged-files {}",
+            render_string_list(list)
+        ));
+    }
+    if let Some(ref hash) = commit_hash {
+        entry.push_str(&format!("\n      :commit-hash {}", lisp_quote_string(hash)));
+    }
+    if let Some(ref status_val) = commit_status {
+        entry.push_str(&format!(
+            "\n      :commit-status {}",
+            lisp_quote_string(status_val)
+        ));
+    }
+    if let Some(ref blocker) = commit_blocker {
+        entry.push_str(&format!(
+            "\n      :commit-blocker {}",
+            lisp_quote_string(blocker)
+        ));
+    }
+    entry.push(')');
+
     append_to_block(&mut file, "completions", &entry)?;
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
@@ -1780,13 +2131,29 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     )
     .await;
 
-    Ok(ToolResult::json_pretty(&json!({
+    let mut response = json!({
         "status": "recorded",
         "completion_id": id,
         "phase": phase,
         "agent": agent,
         "at": date,
-    })))
+    });
+    if let Some(list) = changed_files {
+        response["changed_files"] = json!(list);
+    }
+    if let Some(list) = staged_files {
+        response["staged_files"] = json!(list);
+    }
+    if let Some(hash) = commit_hash {
+        response["commit_hash"] = json!(hash);
+    }
+    if let Some(status_val) = commit_status {
+        response["commit_status"] = json!(status_val);
+    }
+    if let Some(blocker) = commit_blocker {
+        response["commit_blocker"] = json!(blocker);
+    }
+    Ok(ToolResult::json_pretty(&response))
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1886,14 +2253,43 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
         }))
     });
 
-    let completed_phases = list_block_summaries(&file, "completions", |kvs, head| {
-        Some(json!({
-            "id": head.to_string(),
-            "phase": kvs.get("phase").cloned().unwrap_or_default(),
-            "agent": kvs.get("agent").cloned().unwrap_or_default(),
-            "at": kvs.get("at").cloned().unwrap_or_default(),
-        }))
-    });
+    // ── completion durability projection ───────────────────────────
+    // intent-memory.lisp :: helper agent-execution-coordination :: completions
+    // gained `changed_files / staged_files / commit_hash / commit_status /
+    // commit_blocker` for the scoped-commit handoff. Surface them in
+    // `completed_phases` (legacy keys preserved) and roll them up into a
+    // dedicated `durability` block so dashboards can show "still pending /
+    // blocked / fully durable" without re-parsing the companion log.
+    let completion_records = parse_completions(&file);
+    let completed_phases: Vec<Value> = completion_records
+        .iter()
+        .map(|c| {
+            let mut row = json!({
+                "id": c.id,
+                "phase": c.phase,
+                "agent": c.agent,
+                "at": c.at,
+            });
+            if let Some(list) = &c.changed_files {
+                row["changed_files"] = json!(list);
+            }
+            if let Some(list) = &c.staged_files {
+                row["staged_files"] = json!(list);
+            }
+            if let Some(hash) = &c.commit_hash {
+                row["commit_hash"] = json!(hash);
+            }
+            if let Some(status_val) = &c.commit_status {
+                row["commit_status"] = json!(status_val);
+            }
+            if let Some(blocker) = &c.commit_blocker {
+                row["commit_blocker"] = json!(blocker);
+            }
+            row
+        })
+        .collect();
+
+    let durability = summarize_durability(&completion_records);
 
     Ok(ToolResult::json_pretty(&json!({
         "execution_id": execution_id,
@@ -1906,6 +2302,7 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
         "open_issues": open_issues,
         "latest_decisions": latest_decisions,
         "completed_phases": completed_phases,
+        "durability": durability,
     })))
 }
 
@@ -2084,6 +2481,18 @@ async fn action_audit(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     }
 
+    // ── scoped-commit handoff durability checks ──────────────────────
+    // intent-memory.lisp :: helper agent-execution-coordination ::
+    // scoped-commit-contract + invariants :inv-7 — every completion that
+    // claims to have committed must carry a real commit_hash, every
+    // blocked completion must explain itself, and staged_files must stay
+    // inside the claim scope (the active or most-recently-released claim
+    // owned by the same agent). These are read-only audit findings — the
+    // daemon never executes git itself; the writer agent is responsible
+    // for the actual commit. See task-file
+    // wave12-01-mission-execution-scoped-commit-handoff.md.
+    audit_scoped_commit_handoff(&file, &claims, &mut findings);
+
     let ok = findings.iter().all(|f| {
         f.get("severity")
             .and_then(|v| v.as_str())
@@ -2185,6 +2594,111 @@ fn check_id_monotonic(file: &LogFile, counter: Counter, findings: &mut Vec<Value
             "block": counter.block_name(),
             "ids": duplicates,
         }));
+    }
+}
+
+/// Run the scoped-commit handoff checks against every completion in the file.
+/// Three failure modes from intent-memory.lisp :: scoped-commit-contract +
+/// intent-flow.lisp :: F-scoped-commit-handoff :: failure-modes:
+///
+/// 1. `commit-status-without-hash` — `commit_status=committed` but no
+///    `commit_hash`. The completion claims durability without the artifact.
+/// 2. `commit-status-blocked-without-blocker` — `commit_status=blocked` but
+///    no `commit_blocker`. The next agent has no recovery context.
+/// 3. `scoped-commit-violation` — a `staged_files` entry escapes the union
+///    of every claim scope on the file (active + released). We use the
+///    union because a completion can post-date a release: the writer
+///    legitimately stages files inside their just-released claim. Audit
+///    only fails when no claim — past or present — covers a staged file.
+///
+/// All three are `error`-severity to match the existing audit invariants
+/// (duplicate-id / claim-overlap), so the audit `ok=false` flips and
+/// downstream consumers can gate on the same boolean.
+fn audit_scoped_commit_handoff(
+    file: &LogFile,
+    claims: &[ClaimRecord],
+    findings: &mut Vec<Value>,
+) {
+    let completions = parse_completions(file);
+    if completions.is_empty() {
+        return;
+    }
+    // Collect every claim scope ever recorded — even released ones — so a
+    // completion that stages files in a just-released claim is not flagged.
+    // Empty scopes are skipped (legacy claims sometimes omit `:scope`).
+    let claim_scopes: Vec<&str> = claims
+        .iter()
+        .map(|c| c.scope.as_str())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    for c in &completions {
+        if let Some(status_val) = c.commit_status.as_deref() {
+            if status_val == "committed" && c.commit_hash.is_none() {
+                findings.push(json!({
+                    "severity": "error",
+                    "kind": FINDING_COMMIT_STATUS_NO_HASH,
+                    "completion_id": c.id,
+                    "phase": c.phase,
+                    "agent": c.agent,
+                    "detail": "commit_status=committed but no commit_hash recorded — durability gap per scoped-commit-contract :inv-7",
+                }));
+            }
+            if status_val == "blocked" && c.commit_blocker.is_none() {
+                findings.push(json!({
+                    "severity": "error",
+                    "kind": FINDING_COMMIT_BLOCKED_NO_BLOCKER,
+                    "completion_id": c.id,
+                    "phase": c.phase,
+                    "agent": c.agent,
+                    "detail": "commit_status=blocked but no commit_blocker recorded — recovery-rule violation per scoped-commit-contract",
+                }));
+            }
+        }
+        if let Some(staged) = c.staged_files.as_ref() {
+            if staged.is_empty() {
+                continue;
+            }
+            if claim_scopes.is_empty() {
+                // Files staged with no claim ever recorded: every entry is
+                // a violation. Reuse the same finding kind so audit
+                // consumers branch on `kind` rather than count claim
+                // history.
+                findings.push(json!({
+                    "severity": "error",
+                    "kind": FINDING_SCOPED_COMMIT_VIOLATION,
+                    "completion_id": c.id,
+                    "phase": c.phase,
+                    "staged_files": staged,
+                    "detail": "staged_files recorded but no claims exist on this companion log — scope-rule violation per scoped-commit-contract",
+                }));
+                continue;
+            }
+            // A file is in-scope when at least one claim's scope is a prefix
+            // (or exact match). `scopes_overlap` already encodes the
+            // bidirectional prefix relationship the contract uses for
+            // claim conflict detection; we reuse it here so coordinator and
+            // auditor agree on what "inside scope" means.
+            let mut violators = Vec::new();
+            for path in staged {
+                let in_scope = claim_scopes.iter().any(|cs| scopes_overlap(cs, path));
+                if !in_scope {
+                    violators.push(path.clone());
+                }
+            }
+            if !violators.is_empty() {
+                findings.push(json!({
+                    "severity": "error",
+                    "kind": FINDING_SCOPED_COMMIT_VIOLATION,
+                    "completion_id": c.id,
+                    "phase": c.phase,
+                    "agent": c.agent,
+                    "staged_files": violators,
+                    "claim_scopes": claim_scopes,
+                    "detail": "staged_files include paths outside every recorded claim scope — scope-rule violation per scoped-commit-contract",
+                }));
+            }
+        }
     }
 }
 
@@ -2718,5 +3232,370 @@ mod tests {
         assert!(opened.contains_key("dispatch_strategy"));
         assert!(!opened.contains_key("target_project"));
         assert!(!opened.contains_key("requested_cwd"));
+    }
+
+    // ── Wave 12 / Task 01 — scoped-commit handoff durability plane ──
+    //
+    // Tests below pin the shape of the new completion fields and the
+    // audit findings against intent-memory.lisp :: scoped-commit-contract
+    // and intent-flow.lisp :: F-scoped-commit-handoff. They exercise
+    // pure helpers (no AppState / no project root) so the daemon-wide
+    // `cargo test -p missiond-daemon` still PASSes when sibling agents
+    // are mid-edit on plan.rs / workflow.rs / etc.
+
+    fn fresh_file_with_claim() -> LogFile {
+        let mut file = fresh_file();
+        // Hand-append a single active claim covering "src/" so the
+        // staged-file scope check has something to validate against.
+        // We bypass `action_claim` because it lives behind AppState.
+        let now = now_iso();
+        let entry = format!(
+            "    (C001\n      :claimer \"agent\"\n      :scope \"src/\"\n      :phase \"phase-A\"\n      :acquired-at {ts}\n      :lease-expires-at {ts}\n      :heartbeat-at {ts}\n      :status \"active\")",
+            ts = lisp_quote_string(&now),
+        );
+        append_to_block(&mut file, "claims", &entry).unwrap();
+        file
+    }
+
+    /// Validate the canonical commit-status normalizer rejects unknown
+    /// labels but lets every value from intent-memory.lisp ::
+    /// :commit-status-values through unchanged.
+    #[test]
+    fn commit_status_normalizer_accepts_canonical_only() {
+        for &status in VALID_COMMIT_STATUSES {
+            assert_eq!(normalize_commit_status(status), Some(status));
+        }
+        assert_eq!(normalize_commit_status("  pending  "), Some("pending"));
+        assert!(normalize_commit_status("").is_none());
+        assert!(normalize_commit_status("done").is_none());
+        assert!(normalize_commit_status("COMMITTED").is_none());
+    }
+
+    /// Empty list arguments must be preserved as `Some(vec![])` so a
+    /// completion can record "intentionally staged nothing"; absent keys
+    /// stay `None` so the legacy 6-field shape remains byte-identical.
+    #[test]
+    fn collect_string_list_distinguishes_absent_from_empty() {
+        let none_args = json!({});
+        assert!(collect_string_list(&none_args, "changed_files").is_none());
+
+        let empty_args = json!({"changed_files": []});
+        assert_eq!(
+            collect_string_list(&empty_args, "changed_files"),
+            Some(vec![])
+        );
+
+        let with_paths = json!({
+            "changed_files": ["src/a.rs", "  src/b.rs  ", "", "src/c.rs"],
+        });
+        assert_eq!(
+            collect_string_list(&with_paths, "changed_files"),
+            Some(vec![
+                "src/a.rs".to_string(),
+                "src/b.rs".to_string(),
+                "src/c.rs".to_string(),
+            ])
+        );
+    }
+
+    /// `render_string_list` round-trips through `parse_string_list` so
+    /// audit/status reads of the companion log return the exact list the
+    /// writer recorded — including the empty-list literal.
+    #[test]
+    fn string_list_round_trip() {
+        let empty = render_string_list(&[]);
+        assert_eq!(empty, "()");
+        assert_eq!(parse_string_list(&empty), Some(Vec::<String>::new()));
+
+        let items = vec!["src/a.rs".to_string(), "tests/b.rs".to_string()];
+        let rendered = render_string_list(&items);
+        let parsed = parse_string_list(&rendered).expect("must parse");
+        assert_eq!(parsed, items);
+
+        // Quotes inside paths survive the lisp_quote_string escape cycle.
+        let quoted = vec!["src/a\"b.rs".to_string()];
+        let rendered = render_string_list(&quoted);
+        assert_eq!(parse_string_list(&rendered), Some(quoted));
+    }
+
+    /// Legacy completions (no scoped-commit metadata) must still parse
+    /// and yield `None` everywhere on the new fields. This is the
+    /// backward-compat contract from the task file: "legacy execution
+    /// 文件缺字段必须继续 parse".
+    #[test]
+    fn parse_completions_handles_legacy_shape() {
+        let body = "(execution-log\n  (completions\n    (COMP001 :phase \"a\" :agent \"x\" :summary \"s\" :deliverables \"d\" :verification \"v\" :at \"2026-04-26T00:00:00Z\")))\n";
+        let file = LogFile::parse(body.to_string()).expect("legacy parses");
+        let comps = parse_completions(&file);
+        assert_eq!(comps.len(), 1);
+        let c = &comps[0];
+        assert_eq!(c.id, "COMP001");
+        assert_eq!(c.phase, "a");
+        assert_eq!(c.agent, "x");
+        assert!(c.changed_files.is_none());
+        assert!(c.staged_files.is_none());
+        assert!(c.commit_hash.is_none());
+        assert!(c.commit_status.is_none());
+        assert!(c.commit_blocker.is_none());
+    }
+
+    /// A completion that carries every scoped-commit field must be
+    /// readable round-trip from the durable file. We assemble the
+    /// completion entry by hand (mirroring what `action_complete`
+    /// writes) so the parser is exercised against the on-disk shape.
+    #[test]
+    fn parse_completions_reads_scoped_commit_fields() {
+        let body = "(execution-log\n  (completions\n    (COMP001\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :changed-files (\"src/a.rs\" \"src/b.rs\")\n      :staged-files (\"src/a.rs\")\n      :commit-hash \"abc1234\"\n      :commit-status \"committed\"\n      :commit-blocker \"\")))\n";
+        let file = LogFile::parse(body.to_string()).expect("parse");
+        let comps = parse_completions(&file);
+        assert_eq!(comps.len(), 1);
+        let c = &comps[0];
+        assert_eq!(
+            c.changed_files.as_deref(),
+            Some(&["src/a.rs".to_string(), "src/b.rs".to_string()][..])
+        );
+        assert_eq!(c.staged_files.as_deref(), Some(&["src/a.rs".to_string()][..]));
+        assert_eq!(c.commit_hash.as_deref(), Some("abc1234"));
+        assert_eq!(c.commit_status.as_deref(), Some("committed"));
+        // Empty blocker collapses to `None` so audit does not key off
+        // whitespace.
+        assert!(c.commit_blocker.is_none());
+    }
+
+    /// `action_complete` is gated behind AppState, so we directly drive
+    /// the lower-level write helpers it now wraps. The test asserts
+    /// that each scoped-commit field round-trips into the companion log
+    /// when supplied, and that omitting them keeps the legacy entry
+    /// shape intact.
+    #[test]
+    fn complete_writes_each_commit_status_value() {
+        for &status in &["not-required", "pending", "committed", "blocked", "skipped"] {
+            let mut file = fresh_file_with_claim();
+            let id = allocate_id(&mut file, Counter::Completion).unwrap();
+            let mut entry = format!(
+                "    ({id}\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :changed-files {changed}\n      :staged-files {staged}",
+                id = id,
+                changed = render_string_list(&["src/a.rs".to_string()]),
+                staged = render_string_list(&["src/a.rs".to_string()]),
+            );
+            entry.push_str(&format!(
+                "\n      :commit-status {}",
+                lisp_quote_string(status)
+            ));
+            if status == "committed" {
+                entry.push_str("\n      :commit-hash \"abc1234\"");
+            }
+            if status == "blocked" {
+                entry.push_str("\n      :commit-blocker \"index conflict\"");
+            }
+            entry.push(')');
+            append_to_block(&mut file, "completions", &entry).unwrap();
+            sexp::check_balance(&file.src).expect("balanced");
+            let comps = parse_completions(&file);
+            let c = comps.last().unwrap();
+            assert_eq!(c.commit_status.as_deref(), Some(status));
+            if status == "committed" {
+                assert_eq!(c.commit_hash.as_deref(), Some("abc1234"));
+            } else {
+                assert!(c.commit_hash.is_none());
+            }
+            if status == "blocked" {
+                assert_eq!(c.commit_blocker.as_deref(), Some("index conflict"));
+            } else {
+                assert!(c.commit_blocker.is_none());
+            }
+        }
+    }
+
+    /// Audit must flag a completion whose commit_status="committed" lacks
+    /// a commit_hash — the durability gap that scoped-commit-contract
+    /// :inv-7 explicitly rejects.
+    #[test]
+    fn audit_flags_committed_without_hash() {
+        let mut file = fresh_file_with_claim();
+        let id = allocate_id(&mut file, Counter::Completion).unwrap();
+        let entry = format!(
+            "    ({id}\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :commit-status \"committed\")",
+            id = id,
+        );
+        append_to_block(&mut file, "completions", &entry).unwrap();
+
+        let claims = parse_claims(&file);
+        let mut findings = Vec::new();
+        audit_scoped_commit_handoff(&file, &claims, &mut findings);
+        let kinds: Vec<&str> = findings
+            .iter()
+            .filter_map(|f| f.get("kind").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            kinds.contains(&FINDING_COMMIT_STATUS_NO_HASH),
+            "expected {} in {:?}",
+            FINDING_COMMIT_STATUS_NO_HASH,
+            kinds
+        );
+        // Severity must be "error" so audit `ok` flips, mirroring the
+        // existing duplicate-id / claim-overlap invariants.
+        let f = findings
+            .iter()
+            .find(|f| f.get("kind").and_then(|v| v.as_str()) == Some(FINDING_COMMIT_STATUS_NO_HASH))
+            .unwrap();
+        assert_eq!(
+            f.get("severity").and_then(|v| v.as_str()),
+            Some("error")
+        );
+    }
+
+    /// Audit must flag a completion whose commit_status="blocked" lacks a
+    /// commit_blocker — the next agent has no recovery context per the
+    /// scoped-commit-contract :recovery-rule.
+    #[test]
+    fn audit_flags_blocked_without_blocker() {
+        let mut file = fresh_file_with_claim();
+        let id = allocate_id(&mut file, Counter::Completion).unwrap();
+        let entry = format!(
+            "    ({id}\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :commit-status \"blocked\")",
+            id = id,
+        );
+        append_to_block(&mut file, "completions", &entry).unwrap();
+
+        let claims = parse_claims(&file);
+        let mut findings = Vec::new();
+        audit_scoped_commit_handoff(&file, &claims, &mut findings);
+        assert!(findings.iter().any(|f| f.get("kind").and_then(|v| v.as_str())
+            == Some(FINDING_COMMIT_BLOCKED_NO_BLOCKER)));
+    }
+
+    /// Audit must flag staged_files paths that escape every recorded
+    /// claim scope. The active claim covers "src/"; staging
+    /// "vendor/x.rs" is outside scope and must surface as
+    /// scoped-commit-violation per scoped-commit-contract :scope-rule.
+    #[test]
+    fn audit_flags_scoped_commit_violation() {
+        let mut file = fresh_file_with_claim();
+        let id = allocate_id(&mut file, Counter::Completion).unwrap();
+        let entry = format!(
+            "    ({id}\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :changed-files {changed}\n      :staged-files {staged}\n      :commit-status \"committed\"\n      :commit-hash \"abc1234\")",
+            id = id,
+            changed = render_string_list(&["src/a.rs".to_string(), "vendor/x.rs".to_string()]),
+            staged = render_string_list(&["src/a.rs".to_string(), "vendor/x.rs".to_string()]),
+        );
+        append_to_block(&mut file, "completions", &entry).unwrap();
+
+        let claims = parse_claims(&file);
+        let mut findings = Vec::new();
+        audit_scoped_commit_handoff(&file, &claims, &mut findings);
+        let violation = findings
+            .iter()
+            .find(|f| f.get("kind").and_then(|v| v.as_str()) == Some(FINDING_SCOPED_COMMIT_VIOLATION))
+            .expect("scoped-commit-violation finding required");
+        let staged = violation
+            .get("staged_files")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let staged_strs: Vec<&str> = staged.iter().filter_map(|v| v.as_str()).collect();
+        assert_eq!(staged_strs, vec!["vendor/x.rs"]);
+        assert_eq!(
+            violation.get("severity").and_then(|v| v.as_str()),
+            Some("error")
+        );
+    }
+
+    /// Completions whose staged_files stay inside an existing claim
+    /// scope must NOT trip the violation check, even when the claim is
+    /// already released — that is the legitimate handoff path from
+    /// F-scoped-commit-handoff :: s7 release-claim.
+    #[test]
+    fn audit_passes_scoped_commit_inside_released_claim() {
+        let mut file = fresh_file();
+        // Released claim covering "crates/foo/" — staging files inside
+        // this scope must remain valid even after release.
+        let now = now_iso();
+        let claim = format!(
+            "    (C001\n      :claimer \"agent\"\n      :scope \"crates/foo/\"\n      :phase \"phase-A\"\n      :acquired-at {ts}\n      :lease-expires-at {ts}\n      :released-at {ts}\n      :heartbeat-at {ts}\n      :status \"released\")",
+            ts = lisp_quote_string(&now),
+        );
+        append_to_block(&mut file, "claims", &claim).unwrap();
+        let id = allocate_id(&mut file, Counter::Completion).unwrap();
+        let entry = format!(
+            "    ({id}\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :changed-files {changed}\n      :staged-files {staged}\n      :commit-status \"committed\"\n      :commit-hash \"abc1234\")",
+            id = id,
+            changed = render_string_list(&["crates/foo/src/a.rs".to_string()]),
+            staged = render_string_list(&["crates/foo/src/a.rs".to_string()]),
+        );
+        append_to_block(&mut file, "completions", &entry).unwrap();
+
+        let claims = parse_claims(&file);
+        let mut findings = Vec::new();
+        audit_scoped_commit_handoff(&file, &claims, &mut findings);
+        let kinds: Vec<&str> = findings
+            .iter()
+            .filter_map(|f| f.get("kind").and_then(|v| v.as_str()))
+            .collect();
+        assert!(
+            !kinds.contains(&FINDING_SCOPED_COMMIT_VIOLATION),
+            "no violation expected, got {:?}",
+            kinds
+        );
+        assert!(
+            !kinds.contains(&FINDING_COMMIT_STATUS_NO_HASH),
+            "no missing-hash expected, got {:?}",
+            kinds
+        );
+    }
+
+    /// `summarize_durability` rolls up an empty completions list to
+    /// zero counts + null latest fields, so list/status payloads stay
+    /// shape-stable across legacy companion logs.
+    #[test]
+    fn summarize_durability_handles_empty_and_mixed() {
+        let v = summarize_durability(&[]);
+        assert_eq!(
+            v.get("completion_count").and_then(|x| x.as_i64()),
+            Some(0)
+        );
+        assert!(v.get("latest_commit_status").map(|x| x.is_null()).unwrap_or(false));
+
+        let records = vec![
+            CompletionRecord {
+                id: "COMP001".into(),
+                phase: "p".into(),
+                agent: "a".into(),
+                at: "2026-04-26T00:00:00Z".into(),
+                changed_files: None,
+                staged_files: None,
+                commit_hash: Some("abc".into()),
+                commit_status: Some("committed".into()),
+                commit_blocker: None,
+            },
+            CompletionRecord {
+                id: "COMP002".into(),
+                phase: "p".into(),
+                agent: "a".into(),
+                at: "2026-04-26T00:01:00Z".into(),
+                changed_files: None,
+                staged_files: None,
+                commit_hash: None,
+                commit_status: Some("blocked".into()),
+                commit_blocker: Some("conflict".into()),
+            },
+        ];
+        let v = summarize_durability(&records);
+        assert_eq!(v.get("completion_count").and_then(|x| x.as_i64()), Some(2));
+        assert_eq!(v.get("with_commit_hash").and_then(|x| x.as_i64()), Some(1));
+        assert_eq!(
+            v.get("blocked_with_blocker").and_then(|x| x.as_i64()),
+            Some(1)
+        );
+        assert_eq!(
+            v.get("latest_commit_status").and_then(|x| x.as_str()),
+            Some("blocked")
+        );
+        let by = v
+            .get("by_commit_status")
+            .and_then(|x| x.as_object())
+            .unwrap();
+        assert_eq!(by.get("committed").and_then(|x| x.as_i64()), Some(1));
+        assert_eq!(by.get("blocked").and_then(|x| x.as_i64()), Some(1));
+        assert_eq!(by.get("pending").and_then(|x| x.as_i64()), Some(0));
     }
 }
