@@ -169,6 +169,20 @@ pub(super) struct DagNode {
     pub owned_files_raw: Option<String>,
     pub forbidden_files_raw: Option<String>,
     pub acceptance_commands_raw: Option<String>,
+    /// wave-17 / task 03 — declarative acceptance evaluator hint.
+    /// `:acceptance-mode "inner_status" | "manual" | "evidence_keys"`.
+    /// Absent / blank / unrecognised values fall through to the default
+    /// behaviour: nodes with `acceptance_commands_raw` set but no safe
+    /// evaluator pause as `manual_required`; nodes without any
+    /// acceptance hints preserve the wave-13 succeed-on-dispatch contract.
+    /// Unknown raw values ALSO get pushed into `unsupported_fields` so
+    /// the typo surfaces through `node_hint_summary`.
+    pub acceptance_mode_raw: Option<String>,
+    /// wave-17 / task 03 — required typed-evidence keys when
+    /// `:acceptance-mode "evidence_keys"`. Stored as the raw lisp list
+    /// string and split via `split_lisp_string_list` at evaluation time
+    /// (same shape as `:owned-files` / `:acceptance-commands`).
+    pub acceptance_evidence_keys_raw: Option<String>,
     pub workstation_dispatch_flag: Option<String>,
     /// wave-16 / task 04 — per-node review-gate hint contract.
     /// `:review-gate` is the gate kind ("none" default, "question-event"
@@ -276,6 +290,42 @@ impl DagNode {
             .filter(|&n| n > 0)
             .map(|n| n.min(MAX_RETRY_DELAY_MS))
     }
+
+    /// wave-17 / task 03 — typed projection of `:acceptance-mode`. Pure
+    /// helper so the scheduler can pivot on the enum without
+    /// re-tokenising the raw string. Returns `None` when the author did
+    /// not declare a mode OR wrote an unrecognised value (the parser
+    /// also pushes unrecognised values into `unsupported_fields`).
+    pub(super) fn acceptance_mode_kind(&self) -> Option<AcceptanceMode> {
+        let raw = self.acceptance_mode_raw.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        AcceptanceMode::parse(raw)
+    }
+
+    /// wave-17 / task 03 — true iff this node carries any acceptance
+    /// hint at all (mode / commands / evidence keys). Used by the
+    /// scheduler to skip the acceptance-evidence emit when the node
+    /// did not opt in (preserves the wave-13 byte shape).
+    pub(super) fn has_acceptance_hints(&self) -> bool {
+        let mode_present = self
+            .acceptance_mode_raw
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let commands_present = self
+            .acceptance_commands_raw
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let keys_present = self
+            .acceptance_evidence_keys_raw
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        mode_present || commands_present || keys_present
+    }
 }
 
 /// wave-16 / task 04 — typed projection of `:review-gate` for the
@@ -290,6 +340,401 @@ pub(super) enum ReviewGateKind {
     /// Pause the node and emit `QuestionEvent::Created` instead of
     /// dispatching the target tool.
     QuestionEvent,
+}
+
+/// wave-17 / task 03 — typed projection of `:acceptance-mode` for the
+/// deterministic acceptance evaluator. Resolved on the parser side so the
+/// runtime can pivot without re-tokenising the raw string.
+///
+/// Three modes are recognised:
+///   * `InnerStatus` — accept when the inner dispatch returned Ok and the
+///     inner payload does not carry an explicit non-success status.
+///   * `EvidenceKeys` — accept when the inner payload (object or array of
+///     objects under `evidence` / `typed_evidence`) contains every key
+///     declared in `:acceptance-evidence-keys`.
+///   * `Manual`      — never auto-accept; always surface as
+///     `acceptance_status="manual_required"` so a human / follow-up
+///     pipeline must approve the node.
+///
+/// `None` (returned by [`DagNode::acceptance_mode_kind`]) means the
+/// author did not declare a mode. The evaluator then falls back to the
+/// default policy: any declared `:acceptance-commands` triggers
+/// `manual_required` (we refuse to run shell from PLAN.lisp); no hints
+/// at all preserves the wave-13 succeed-on-dispatch contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AcceptanceMode {
+    InnerStatus,
+    EvidenceKeys,
+    Manual,
+}
+
+impl AcceptanceMode {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            AcceptanceMode::InnerStatus => "inner_status",
+            AcceptanceMode::EvidenceKeys => "evidence_keys",
+            AcceptanceMode::Manual => "manual",
+        }
+    }
+
+    /// Parse a raw `:acceptance-mode` value into a typed mode. Trims and
+    /// lowercases the input; `_` and `-` separators are interchangeable
+    /// so authors can write either `inner_status` or `inner-status`.
+    /// Unknown values yield `None` (the caller — the parser — also pushes
+    /// them onto `unsupported_fields` so the typo surfaces in
+    /// `node_hint_summary`).
+    pub(super) fn parse(raw: &str) -> Option<Self> {
+        let lc = raw.trim().to_ascii_lowercase();
+        match lc.as_str() {
+            "inner_status" | "inner-status" => Some(AcceptanceMode::InnerStatus),
+            "evidence_keys" | "evidence-keys" => Some(AcceptanceMode::EvidenceKeys),
+            "manual" => Some(AcceptanceMode::Manual),
+            _ => None,
+        }
+    }
+}
+
+/// wave-17 / task 03 — outcome of the deterministic acceptance phase.
+/// Drives whether a successful dispatch becomes `Succeeded`, `Failed`,
+/// or `Paused (manual_required)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AcceptanceStatus {
+    /// Author declared no acceptance hints — preserve the wave-13
+    /// succeed-on-dispatch contract.
+    NotEvaluated,
+    /// Acceptance evaluator approved the run.
+    Accepted,
+    /// Acceptance evaluator refused (e.g. evidence_keys missing).
+    Rejected,
+    /// Acceptance cannot be proven without human input (manual mode, or
+    /// declared commands without a safe evaluator). Node pauses; the
+    /// scheduler MUST NOT execute any declared shell commands.
+    ManualRequired,
+}
+
+impl AcceptanceStatus {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            AcceptanceStatus::NotEvaluated => "not_evaluated",
+            AcceptanceStatus::Accepted => "accepted",
+            AcceptanceStatus::Rejected => "rejected",
+            AcceptanceStatus::ManualRequired => "manual_required",
+        }
+    }
+}
+
+/// wave-17 / task 03 — pure result of evaluating a node's acceptance
+/// hints. Carries every field the response and evidence rows surface so
+/// callers don't have to re-derive them from the node + payload.
+#[derive(Debug, Clone)]
+pub(super) struct AcceptanceEvaluation {
+    pub status: AcceptanceStatus,
+    /// Resolved typed mode. `None` when the author did not declare
+    /// `:acceptance-mode` (or wrote an unrecognised value).
+    pub mode: Option<AcceptanceMode>,
+    /// Declared acceptance commands surfaced verbatim — NEVER executed.
+    /// The evaluator captures them so the response + evidence rows make
+    /// the author intent visible to humans / downstream pipelines that
+    /// might run them out-of-band.
+    pub commands: Vec<String>,
+    /// Required evidence keys declared via `:acceptance-evidence-keys`
+    /// (only meaningful for `evidence_keys` mode but surfaced regardless
+    /// so observers can see the declared contract).
+    pub evidence_keys: Vec<String>,
+    /// Human-readable explanation of the decision. Always populated.
+    pub reason: String,
+}
+
+impl AcceptanceEvaluation {
+    /// Convenience: this evaluation produced no acceptance signal at all
+    /// (no hints declared). Used by the scheduler to skip the
+    /// acceptance-evidence emit and preserve the v2 byte-shape.
+    pub(super) fn is_inactive(&self) -> bool {
+        matches!(self.status, AcceptanceStatus::NotEvaluated)
+            && self.mode.is_none()
+            && self.commands.is_empty()
+            && self.evidence_keys.is_empty()
+    }
+
+    /// Project the evaluation as a JSON block suitable for
+    /// `node_results[].acceptance` / `evidence.acceptance`. Stable shape
+    /// — every field is always present so consumers don't have to
+    /// branch on absence.
+    pub(super) fn to_json(&self) -> Value {
+        json!({
+            "status": self.status.as_wire(),
+            "mode": self.mode.map(|m| m.as_wire()),
+            "commands": self.commands,
+            "evidence_keys": self.evidence_keys,
+            "reason": self.reason,
+        })
+    }
+}
+
+/// wave-17 / task 03 — pure deterministic acceptance evaluator. NEVER
+/// runs shell. Decides one of the four [`AcceptanceStatus`] values based
+/// on the node's hints + the inner dispatch payload.
+///
+/// Decision tree (in order):
+///   1. No hints at all (no mode + no commands + no keys) →
+///      `NotEvaluated`. The caller preserves the wave-13
+///      succeed-on-dispatch contract.
+///   2. Mode = `Manual` → `ManualRequired` (always pauses, regardless of
+///      payload). Reason: `"manual mode declared"`.
+///   3. Mode = `InnerStatus` → `Accepted` iff `dispatch_succeeded` AND
+///      the inner payload does not carry an explicit failure status
+///      (`success=false`, `error` string, or `status="error"`).
+///      Otherwise `Rejected` with a reason explaining the mismatch.
+///   4. Mode = `EvidenceKeys` → `Accepted` iff every required key is
+///      present in the inner payload's typed-evidence projection;
+///      otherwise `Rejected` with the missing-key list. Empty key list
+///      degrades to `ManualRequired` (an empty contract cannot prove
+///      anything).
+///   5. Mode unset but `:acceptance-commands` declared → `ManualRequired`
+///      (we refuse to run shell). Reason captures the command count so
+///      observers can tell why the gate triggered.
+///   6. Otherwise (mode unset, no commands, only stray keys) →
+///      `ManualRequired` so the author's typo surfaces loudly.
+///
+/// `dispatch_succeeded` is the boolean we already computed from the
+/// inner classification. The evaluator never re-derives it from the
+/// payload — that would risk drifting from the dispatch judgment.
+pub(super) fn evaluate_node_acceptance(
+    node: &DagNode,
+    inner_payload: &Value,
+    dispatch_succeeded: bool,
+) -> AcceptanceEvaluation {
+    let commands =
+        super::plan::split_lisp_string_list(node.acceptance_commands_raw.as_deref());
+    let evidence_keys = super::plan::split_lisp_string_list(
+        node.acceptance_evidence_keys_raw.as_deref(),
+    );
+    let mode_raw = node.acceptance_mode_raw.as_deref().unwrap_or("").trim();
+    let mode = if mode_raw.is_empty() {
+        None
+    } else {
+        AcceptanceMode::parse(mode_raw)
+    };
+
+    if mode.is_none() && commands.is_empty() && evidence_keys.is_empty() {
+        return AcceptanceEvaluation {
+            status: AcceptanceStatus::NotEvaluated,
+            mode: None,
+            commands,
+            evidence_keys,
+            reason: "no acceptance hints declared".to_string(),
+        };
+    }
+
+    match mode {
+        Some(AcceptanceMode::Manual) => AcceptanceEvaluation {
+            status: AcceptanceStatus::ManualRequired,
+            mode,
+            commands,
+            evidence_keys,
+            reason: "acceptance-mode=manual; human approval required".to_string(),
+        },
+        Some(AcceptanceMode::InnerStatus) => {
+            if !dispatch_succeeded {
+                return AcceptanceEvaluation {
+                    status: AcceptanceStatus::Rejected,
+                    mode,
+                    commands,
+                    evidence_keys,
+                    reason: "inner_status: dispatch classification was not Ok".to_string(),
+                };
+            }
+            if let Some(detail) = inner_payload_failure_signal(inner_payload) {
+                AcceptanceEvaluation {
+                    status: AcceptanceStatus::Rejected,
+                    mode,
+                    commands,
+                    evidence_keys,
+                    reason: format!(
+                        "inner_status: inner payload reports non-success ({})",
+                        detail
+                    ),
+                }
+            } else {
+                AcceptanceEvaluation {
+                    status: AcceptanceStatus::Accepted,
+                    mode,
+                    commands,
+                    evidence_keys,
+                    reason: "inner_status: dispatch Ok and payload carries no error signal"
+                        .to_string(),
+                }
+            }
+        }
+        Some(AcceptanceMode::EvidenceKeys) => {
+            if evidence_keys.is_empty() {
+                return AcceptanceEvaluation {
+                    status: AcceptanceStatus::ManualRequired,
+                    mode,
+                    commands,
+                    evidence_keys,
+                    reason:
+                        "evidence_keys mode declared but :acceptance-evidence-keys is empty"
+                            .to_string(),
+                };
+            }
+            let missing = inner_payload_missing_keys(inner_payload, &evidence_keys);
+            if missing.is_empty() {
+                AcceptanceEvaluation {
+                    status: AcceptanceStatus::Accepted,
+                    mode,
+                    commands,
+                    evidence_keys,
+                    reason: "evidence_keys: all required keys present in inner payload"
+                        .to_string(),
+                }
+            } else {
+                AcceptanceEvaluation {
+                    status: AcceptanceStatus::Rejected,
+                    mode,
+                    commands,
+                    evidence_keys,
+                    reason: format!(
+                        "evidence_keys: missing required keys {:?}",
+                        missing
+                    ),
+                }
+            }
+        }
+        None => {
+            // Mode unset but the author declared SOME acceptance hint.
+            // We refuse to execute shell from PLAN.lisp, so the only
+            // safe default is to surface the gate as manual_required.
+            let reason = if !commands.is_empty() {
+                format!(
+                    "acceptance commands declared ({} item(s)) without :acceptance-mode; \
+                     PLAN DAG never runs shell — manual approval required",
+                    commands.len()
+                )
+            } else {
+                format!(
+                    "acceptance evidence keys declared ({} item(s)) without :acceptance-mode; \
+                     manual approval required",
+                    evidence_keys.len()
+                )
+            };
+            AcceptanceEvaluation {
+                status: AcceptanceStatus::ManualRequired,
+                mode,
+                commands,
+                evidence_keys,
+                reason,
+            }
+        }
+    }
+}
+
+/// wave-17 / task 03 — best-effort detection of an explicit failure
+/// signal in an inner-dispatch payload. Returns `Some(detail)` when the
+/// payload structurally claims non-success, `None` otherwise.
+///
+/// Recognised shapes (all conservative — only loud signals count):
+///   * `payload.error` is a non-empty string.
+///   * `payload.success == false`.
+///   * `payload.ok == false`.
+///   * `payload.status` ∈ {"error", "failed", "fail"}.
+///   * `payload.workstation_dispatch_status` starts with `"skipped_"`
+///     or equals `"failed"` (matches the wave-15 substrate's
+///     safe-descriptor refusal vocabulary).
+fn inner_payload_failure_signal(payload: &Value) -> Option<String> {
+    let obj = payload.as_object()?;
+    if let Some(s) = obj.get("error").and_then(|v| v.as_str()) {
+        if !s.trim().is_empty() {
+            return Some(format!("error=`{}`", s));
+        }
+    }
+    if let Some(false) = obj.get("success").and_then(|v| v.as_bool()) {
+        return Some("success=false".to_string());
+    }
+    if let Some(false) = obj.get("ok").and_then(|v| v.as_bool()) {
+        return Some("ok=false".to_string());
+    }
+    if let Some(s) = obj.get("status").and_then(|v| v.as_str()) {
+        let lc = s.trim().to_ascii_lowercase();
+        if matches!(lc.as_str(), "error" | "failed" | "fail") {
+            return Some(format!("status=`{}`", s));
+        }
+    }
+    if let Some(s) = obj
+        .get("workstation_dispatch_status")
+        .and_then(|v| v.as_str())
+    {
+        let lc = s.trim().to_ascii_lowercase();
+        if lc == "failed" || lc.starts_with("skipped_") {
+            return Some(format!("workstation_dispatch_status=`{}`", s));
+        }
+    }
+    None
+}
+
+/// wave-17 / task 03 — pure helper: locate every required key NOT
+/// present in the inner payload. The payload is searched at the
+/// top-level object AND inside common nested holders (`evidence`,
+/// `typed_evidence`, `inner_result.evidence`) so authors don't have to
+/// guess where the substrate stashed the typed evidence. Order of
+/// returned missing keys matches `required` for stable test output.
+fn inner_payload_missing_keys(payload: &Value, required: &[String]) -> Vec<String> {
+    let mut missing = Vec::new();
+    for key in required {
+        if !inner_payload_contains_key(payload, key) {
+            missing.push(key.clone());
+        }
+    }
+    missing
+}
+
+fn inner_payload_contains_key(payload: &Value, key: &str) -> bool {
+    match payload {
+        Value::Object(map) => {
+            if map.contains_key(key) {
+                return true;
+            }
+            // Conservative descent into the well-known nested holders.
+            for nested_key in [
+                "evidence",
+                "typed_evidence",
+                "inner_result",
+                "inner_dispatch",
+                "result",
+            ] {
+                if let Some(child) = map.get(nested_key) {
+                    if inner_payload_contains_key(child, key) {
+                        return true;
+                    }
+                }
+            }
+            false
+        }
+        Value::Array(items) => items
+            .iter()
+            .any(|v| inner_payload_contains_key(v, key)),
+        _ => false,
+    }
+}
+
+/// wave-17 / task 03 — deterministic id format used when an acceptance
+/// evaluation needs to surface a manual-required pause. Distinct from
+/// the wave-16 / task 04 review-gate id format so the wave-17 / task 01
+/// resume helper does NOT accidentally re-dispatch acceptance pauses
+/// (its validator hard-requires `action=plan-node` AND the node still
+/// carrying `:review-gate "question-event"` — neither holds for an
+/// acceptance pause).
+///
+/// Layout: `acceptance:plan:<plan_id>:v<version>:<node_id>`.
+pub(super) fn derive_acceptance_pause_id(
+    plan_id: uuid::Uuid,
+    plan_version: i32,
+    node_id: &str,
+) -> String {
+    format!(
+        "acceptance:plan:{}:v{}:{}",
+        plan_id, plan_version, node_id
+    )
 }
 
 /// Result of parsing a PLAN.lisp body for explicit `(node ...)` forms.
@@ -602,6 +1047,9 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut owned_files_raw: Option<String> = None;
     let mut forbidden_files_raw: Option<String> = None;
     let mut acceptance_commands_raw: Option<String> = None;
+    // wave-17 / task 03 — declarative acceptance evaluator hints.
+    let mut acceptance_mode_raw: Option<String> = None;
+    let mut acceptance_evidence_keys_raw: Option<String> = None;
     let mut workstation_dispatch_flag: Option<String> = None;
     let mut review_gate: Option<String> = None;
     let mut review_action: Option<String> = None;
@@ -660,6 +1108,21 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
             }
             "acceptance-commands" | "acceptance_commands" => {
                 set_first(&mut acceptance_commands_raw, &value)
+            }
+            // wave-17 / task 03 — declarative acceptance evaluator hints.
+            // `:acceptance-mode` is parsed strictly: unknown values land
+            // BOTH on the typed slot AND in `unsupported_fields` so the
+            // scheduler safely degrades to the manual-required default
+            // while the typo surfaces through `node_hint_summary`.
+            "acceptance-mode" | "acceptance_mode" => {
+                let raw = value.trim();
+                if !raw.is_empty() && AcceptanceMode::parse(raw).is_none() {
+                    unsupported_fields.push((raw_key.clone(), value.clone()));
+                }
+                set_first(&mut acceptance_mode_raw, &value);
+            }
+            "acceptance-evidence-keys" | "acceptance_evidence_keys" => {
+                set_first(&mut acceptance_evidence_keys_raw, &value)
             }
             "workstation-dispatch" | "workstation_dispatch" => {
                 set_first(&mut workstation_dispatch_flag, &value)
@@ -819,6 +1282,8 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         owned_files_raw,
         forbidden_files_raw,
         acceptance_commands_raw,
+        acceptance_mode_raw,
+        acceptance_evidence_keys_raw,
         workstation_dispatch_flag,
         review_gate,
         review_action,
@@ -1325,6 +1790,15 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
         if let Some(a) = &n.acceptance_commands_raw {
             entry["acceptance_commands_raw"] = json!(a);
         }
+        // wave-17 / task 03 — acceptance evaluator declarations. Surface
+        // only when present so summaries for nodes that did not opt in
+        // stay byte-identical with the wave-16 baseline.
+        if let Some(m) = &n.acceptance_mode_raw {
+            entry["acceptance_mode"] = json!(m);
+        }
+        if let Some(k) = &n.acceptance_evidence_keys_raw {
+            entry["acceptance_evidence_keys_raw"] = json!(k);
+        }
         if n.workstation_dispatch_opt_in() {
             entry["workstation_dispatch"] = json!(true);
         }
@@ -1517,6 +1991,13 @@ struct NodeResult {
     /// substrate). Surfaces on the per-node response so consumers can
     /// distinguish "we exhausted attempts" from "we refused to retry".
     retry_skipped_non_retryable: bool,
+    /// wave-17 / task 03 — deterministic acceptance phase result.
+    /// `None` means the acceptance evaluator never ran for this node
+    /// (skipped node, dispatch failed before acceptance, no hints
+    /// declared). `Some(e)` carries the full evaluation block — the
+    /// scheduler stamps it onto `node_results[].acceptance` so callers
+    /// see what the evaluator decided + why.
+    acceptance: Option<AcceptanceEvaluation>,
 }
 
 impl NodeResult {
@@ -1539,6 +2020,7 @@ impl NodeResult {
             attempts_made: 0,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         }
     }
 }
@@ -1554,6 +2036,7 @@ impl Default for NodeResult {
             attempts_made: 0,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         }
     }
 }
@@ -1635,6 +2118,15 @@ impl ExecutionOutcome {
                     retry["non_retryable"] = json!(true);
                 }
                 e["retry"] = retry;
+            }
+            // wave-17 / task 03 — acceptance evaluation surface. Quiet
+            // (omitted) when the evaluator never ran OR ran but found no
+            // hints declared so the wave-16 byte-shape is preserved for
+            // callers that did not opt into the acceptance contract.
+            if let Some(acc) = r.acceptance.as_ref() {
+                if !acc.is_inactive() {
+                    e["acceptance"] = acc.to_json();
+                }
             }
             out.push(e);
         }
@@ -2405,6 +2897,11 @@ pub(super) fn build_planned_claims(
 /// per-node evidence emit doesn't re-thread the same args through.
 struct EvidenceCtx<'a> {
     plan_id: uuid::Uuid,
+    /// wave-17 / task 03 — captured here so the deterministic
+    /// acceptance pause id (which carries the plan version segment for
+    /// resolver routing) can be derived without re-fetching the plan
+    /// row from every emit site.
+    plan_version: i32,
     project_arg: Option<&'a str>,
     cwd_arg: Option<&'a str>,
     target_project_arg: Option<&'a str>,
@@ -2731,6 +3228,128 @@ async fn emit_evidence_finished(
             plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
             "DAG scheduler: running->{} evidence append failed",
             to_state
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
+/// wave-17 / task 03 — emit one acceptance-phase evidence entry per
+/// successfully-dispatched node that opted into the acceptance contract.
+/// Runs ONLY after `emit_evidence_finished` for the success branch; the
+/// scheduler skips the call entirely for nodes that did not declare
+/// acceptance hints so the wave-13 byte shape is preserved.
+///
+/// The entry's `state_transition` reflects the acceptance decision
+/// (`succeeded -> acceptance_accepted`, `succeeded -> acceptance_rejected`,
+/// `succeeded -> acceptance_manual_required`) so audit dashboards can
+/// pivot on a single string. The entry surfaces:
+///   * `acceptance_status` — wire form of [`AcceptanceStatus`].
+///   * `acceptance_mode` — wire form of [`AcceptanceMode`] when set.
+///   * `acceptance_commands` — declared commands surfaced verbatim,
+///     **NEVER executed**. They are recorded so observers / out-of-band
+///     pipelines can see what the author wanted to verify.
+///   * `acceptance_evidence_keys` — declared required keys.
+///   * `acceptance_reason` — human-readable explanation.
+///
+/// Bus publish failure on the lifecycle event is observability-only —
+/// the warning lands on `outcome.bus_publish_warnings` and the
+/// evidence ref falls back to the deterministic id; the acceptance
+/// decision itself is unaffected.
+async fn emit_evidence_acceptance(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    attempt: u32,
+    evaluation: &AcceptanceEvaluation,
+    outcome: &mut ExecutionOutcome,
+) {
+    let to_state = match evaluation.status {
+        AcceptanceStatus::NotEvaluated => "acceptance_skipped",
+        AcceptanceStatus::Accepted => "acceptance_accepted",
+        AcceptanceStatus::Rejected => "acceptance_rejected",
+        AcceptanceStatus::ManualRequired => "acceptance_manual_required",
+    };
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        attempt,
+        "succeeded",
+        to_state,
+        Some(format!(
+            "acceptance:{}:mode={}:reason={}",
+            evaluation.status.as_wire(),
+            evaluation.mode.map(|m| m.as_wire()).unwrap_or("none"),
+            evaluation.reason
+        )),
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
+    let mut entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition(format!("succeeded -> {}", to_state))
+    .add_execution_event(event_ref)
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(attempt))
+    .with_extra("acceptance_status", json!(evaluation.status.as_wire()))
+    .with_extra("acceptance_reason", json!(evaluation.reason))
+    .with_extra("acceptance_commands", json!(evaluation.commands))
+    .with_extra(
+        "acceptance_commands_executed",
+        json!(false),
+    )
+    .with_extra(
+        "acceptance_evidence_keys",
+        json!(evaluation.evidence_keys),
+    );
+    if let Some(mode) = evaluation.mode {
+        entry = entry.with_extra("acceptance_mode", json!(mode.as_wire()));
+    }
+    if matches!(evaluation.status, AcceptanceStatus::ManualRequired) {
+        // Surface the deterministic pause id so downstream resolvers can
+        // address the gate without re-deriving the format. Distinct from
+        // the wave-16 review-gate id space (`acceptance:` prefix vs
+        // `review:`) so the wave-17 / task 01 paused-node resume helper
+        // never accidentally consumes an acceptance pause.
+        entry = entry.with_extra(
+            "acceptance_pause_id",
+            json!(derive_acceptance_pause_id(
+                ctx.plan_id,
+                ctx.plan_version,
+                &node.id,
+            )),
+        );
+    }
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: succeeded->acceptance_* evidence append failed"
         );
     }
     let (path, err) = append_outcome.into_legacy_tuple();
@@ -3270,6 +3889,7 @@ async fn execute_with_concurrency(
 
     let ctx = EvidenceCtx {
         plan_id: plan.id,
+        plan_version: plan.version,
         project_arg: args.get("project").and_then(|v| v.as_str()),
         cwd_arg: args.get("cwd").and_then(|v| v.as_str()),
         target_project_arg: args.get("target_project").and_then(|v| v.as_str()),
@@ -3629,6 +4249,11 @@ async fn execute_with_concurrency(
                                 attempts_made: attempt,
                                 max_attempts: node.effective_max_attempts(),
                                 retry_skipped_non_retryable: true,
+                                // wave-17 / task 03 — claim-conflict
+                                // refusal happens BEFORE the inner
+                                // handler runs; acceptance phase is
+                                // never reached for this node.
+                                acceptance: None,
                             },
                         );
                         // Taint propagation — the failed node still
@@ -3762,7 +4387,64 @@ async fn execute_with_concurrency(
             )
             .await;
             if succeeded {
-                lifecycle.insert(node_id.clone(), NodeLifecycle::Succeeded);
+                // wave-17 / task 03 — deterministic acceptance phase.
+                // Runs ONLY on the success branch (failure already
+                // dominates the lifecycle). NEVER executes shell — the
+                // evaluator is a pure projection over `(node, payload)`
+                // and decides one of: NotEvaluated (no hints — preserve
+                // wave-13 behaviour), Accepted, Rejected, ManualRequired.
+                // The first three terminate the node (succeeded /
+                // failed / paused) without further dispatch.
+                let acceptance =
+                    evaluate_node_acceptance(&node, &inner_payload, true);
+                let acceptance_active = !acceptance.is_inactive();
+                if acceptance_active {
+                    emit_evidence_acceptance(
+                        state,
+                        &ctx,
+                        &node,
+                        &dispatch_strategy,
+                        current_attempt,
+                        &acceptance,
+                        &mut outcome,
+                    )
+                    .await;
+                }
+                let terminal_state_label = match acceptance.status {
+                    AcceptanceStatus::NotEvaluated | AcceptanceStatus::Accepted => "succeeded",
+                    AcceptanceStatus::Rejected => "failed",
+                    AcceptanceStatus::ManualRequired => "paused",
+                };
+                let next_node_state: NodeState = match acceptance.status {
+                    AcceptanceStatus::NotEvaluated | AcceptanceStatus::Accepted => {
+                        NodeState::Succeeded
+                    }
+                    AcceptanceStatus::Rejected => NodeState::Failed {
+                        reason: format!(
+                            "acceptance_rejected: {}",
+                            acceptance.reason
+                        ),
+                    },
+                    AcceptanceStatus::ManualRequired => {
+                        let qid = derive_acceptance_pause_id(
+                            plan.id,
+                            plan.version,
+                            &node.id,
+                        );
+                        NodeState::Paused {
+                            question_id: qid,
+                            bus_publish_warning: None,
+                        }
+                    }
+                };
+                let next_lifecycle = match acceptance.status {
+                    AcceptanceStatus::NotEvaluated | AcceptanceStatus::Accepted => {
+                        NodeLifecycle::Succeeded
+                    }
+                    AcceptanceStatus::Rejected => NodeLifecycle::Failed,
+                    AcceptanceStatus::ManualRequired => NodeLifecycle::Paused,
+                };
+                lifecycle.insert(node_id.clone(), next_lifecycle);
                 // wave-17 / task 02 — release the claim now that the
                 // terminal state is set. Best-effort: we only release
                 // when the registry actually recorded the claim
@@ -3778,10 +4460,21 @@ async fn execute_with_concurrency(
                             &dispatch_strategy,
                             current_attempt,
                             &released,
-                            "succeeded",
+                            terminal_state_label,
                             &mut outcome,
                         )
                         .await;
+                    }
+                }
+                // wave-17 / task 03 — Rejected acceptance also taints
+                // downstream and may trip fail-fast (matches the
+                // dispatch-failure path so consumers get one shape for
+                // any non-success terminal state).
+                if matches!(acceptance.status, AcceptanceStatus::Rejected) {
+                    propagate_taint(&node, &succs, &mut tainted_by);
+                    if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
+                        abort_new_dispatch = true;
+                        abort_aborter = Some(node_id.clone());
                     }
                 }
                 results_by_id.insert(
@@ -3789,12 +4482,17 @@ async fn execute_with_concurrency(
                     NodeResult {
                         id: node_id,
                         target,
-                        state: NodeState::Succeeded,
+                        state: next_node_state,
                         dispatch_strategy,
                         inner_payload,
                         attempts_made: current_attempt,
                         max_attempts,
                         retry_skipped_non_retryable: false,
+                        acceptance: if acceptance_active {
+                            Some(acceptance)
+                        } else {
+                            None
+                        },
                     },
                 );
                 continue;
@@ -3993,6 +4691,9 @@ async fn execute_with_concurrency(
                     attempts_made: current_attempt,
                     max_attempts,
                     retry_skipped_non_retryable: non_retryable,
+                    // wave-17 / task 03 — dispatch-failure path skips
+                    // the acceptance phase (failure dominates).
+                    acceptance: None,
                 },
             );
             // Taint propagates regardless of policy — it just changes
@@ -4446,6 +5147,7 @@ pub(super) async fn action_execute_resume(
 
     let ctx = EvidenceCtx {
         plan_id: plan.id,
+        plan_version: plan.version,
         project_arg: args.get("project").and_then(|v| v.as_str()),
         cwd_arg: args.get("cwd").and_then(|v| v.as_str()),
         target_project_arg: args.get("target_project").and_then(|v| v.as_str()),
@@ -4795,6 +5497,7 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
         .unwrap_or_else(|| "unknown".to_string());
     let ctx = EvidenceCtx {
         plan_id: plan.id,
+        plan_version: plan.version,
         project_arg: None,
         cwd_arg: None,
         target_project_arg: None,
@@ -5209,6 +5912,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_succeeded");
         assert_eq!(o.runner_status(), "all_nodes_dispatched");
@@ -5228,6 +5932,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_failed");
         assert_eq!(o.runner_status(), "fail_fast_aborted");
@@ -5247,6 +5952,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "n2".into(),
@@ -5259,6 +5965,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "n3".into(),
@@ -5269,6 +5976,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
         assert_eq!(o.target_plan_status(), Some(PlanStatus::Failed));
@@ -5807,6 +6515,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "b".into(),
@@ -5817,6 +6526,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "c".into(),
@@ -5827,6 +6537,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "d".into(),
@@ -5837,6 +6548,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "e".into(),
@@ -5847,6 +6559,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         let v = o.skipped_nodes_json();
         let arr = v.as_array().expect("array");
@@ -5874,6 +6587,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "b".into(),
@@ -5884,6 +6598,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         let v = o.node_results_json();
         let arr = v.as_array().expect("array");
@@ -5910,6 +6625,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "b".into(),
@@ -5920,6 +6636,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
         assert_eq!(o.runner_status(), "partial_dispatched");
@@ -6860,6 +7577,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         let v = o.node_results_json();
         let arr = v.as_array().unwrap();
@@ -6887,6 +7605,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         let v = o.node_results_json();
         let arr = v.as_array().unwrap();
@@ -6906,6 +7625,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "g".into(),
@@ -6919,6 +7639,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "g2".into(),
@@ -6932,6 +7653,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         let v = o.paused_nodes_json();
         let arr = v.as_array().unwrap();
@@ -6959,6 +7681,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "g1".into(),
@@ -6972,6 +7695,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "g2".into(),
@@ -6985,6 +7709,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.paused_node_ids(), vec!["g1".to_string(), "g2".to_string()]);
         assert_eq!(
@@ -7011,6 +7736,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_paused");
         assert_eq!(o.runner_status(), "review_gate_paused");
@@ -7035,6 +7761,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "g".into(),
@@ -7048,6 +7775,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_paused");
         assert_eq!(o.target_plan_status(), None);
@@ -7068,6 +7796,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         o.results.push(NodeResult {
             id: "g".into(),
@@ -7081,6 +7810,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
         assert_eq!(o.target_plan_status(), Some(PlanStatus::Failed));
@@ -7495,6 +8225,7 @@ mod tests {
             attempts_made: 2,
             max_attempts: 3,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         // A baseline-quiet node (single attempt, no retry policy) must
         // NOT emit the block — preserves wave-15 byte-shape.
@@ -7507,6 +8238,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         let v = o.node_results_json();
         let arr = v.as_array().unwrap();
@@ -7534,6 +8266,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 3,
             retry_skipped_non_retryable: true,
+            acceptance: None,
         });
         let v = o.node_results_json();
         let arr = v.as_array().unwrap();
@@ -7605,6 +8338,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            acceptance: None,
         });
         let v = o.node_results_json();
         let arr = v.as_array().unwrap();
@@ -8409,5 +9143,411 @@ mod tests {
         // earlier timestamp (audit dashboards depend on the original
         // release moment).
         assert_eq!(r2.released_at, Some(later1));
+    }
+
+    // ── wave-17 / task 03 — deterministic acceptance evaluator ───────────
+    //
+    // The acceptance phase runs after a successful inner dispatch and
+    // decides whether the node truly succeeded, was rejected, or needs
+    // human approval. CRITICAL invariant: NO shell command is ever
+    // executed; the evaluator is a pure projection over `(node,
+    // payload)`. These tests pin the four decision branches plus the
+    // fact that declared `:acceptance-commands` are surfaced verbatim
+    // without execution.
+
+    fn acceptance_node_with(
+        mode: Option<&str>,
+        commands: Option<&str>,
+        keys: Option<&str>,
+    ) -> DagNode {
+        DagNode {
+            id: "n".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            acceptance_mode_raw: mode.map(|s| s.to_string()),
+            acceptance_commands_raw: commands.map(|s| s.to_string()),
+            acceptance_evidence_keys_raw: keys.map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parse_node_form_captures_acceptance_evaluator_hints() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :acceptance-mode "evidence_keys"
+                    :acceptance-evidence-keys ["build_ok" "tests_passed"]
+                    :acceptance-commands ["cargo test" "git diff --check"]))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n = &parsed.nodes[0];
+        assert_eq!(n.acceptance_mode_raw.as_deref(), Some("evidence_keys"));
+        assert!(n
+            .acceptance_evidence_keys_raw
+            .as_deref()
+            .unwrap()
+            .contains("build_ok"));
+        assert!(n
+            .acceptance_commands_raw
+            .as_deref()
+            .unwrap()
+            .contains("cargo test"));
+        // None of the new keys must land in unsupported_fields — that
+        // would mean the scheduler can't route the acceptance phase.
+        let unsupported_keys: Vec<String> =
+            n.unsupported_fields.iter().map(|(k, _)| k.clone()).collect();
+        for forbidden in [
+            "acceptance-mode",
+            "acceptance-evidence-keys",
+            "acceptance-commands",
+        ] {
+            assert!(
+                !unsupported_keys.contains(&forbidden.to_string()),
+                "key `{}` must land on a typed slot, not unsupported_fields",
+                forbidden
+            );
+        }
+        assert!(n.has_acceptance_hints());
+        assert_eq!(
+            n.acceptance_mode_kind(),
+            Some(AcceptanceMode::EvidenceKeys)
+        );
+    }
+
+    #[test]
+    fn parse_node_form_records_unrecognised_acceptance_mode_in_unsupported_fields() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :acceptance-mode "invent_a_mode"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n = &parsed.nodes[0];
+        // Raw value lands on the typed slot AND the typo surfaces in
+        // unsupported_fields so the response loudly flags the mistake.
+        assert_eq!(n.acceptance_mode_raw.as_deref(), Some("invent_a_mode"));
+        assert!(n
+            .unsupported_fields
+            .iter()
+            .any(|(k, v)| k == "acceptance-mode" && v == "invent_a_mode"));
+        // The typed projection refuses to interpret a typo as a real mode.
+        assert!(n.acceptance_mode_kind().is_none());
+    }
+
+    #[test]
+    fn build_nodes_summary_surfaces_acceptance_hints_when_present() {
+        let nodes = vec![
+            DagNode {
+                id: "with".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                acceptance_mode_raw: Some("inner_status".into()),
+                acceptance_evidence_keys_raw: Some(r#"["k1"]"#.into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "plain".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["with".to_string(), "plain".to_string()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr[0]["acceptance_mode"], "inner_status");
+        assert!(arr[0]["acceptance_evidence_keys_raw"]
+            .as_str()
+            .unwrap()
+            .contains("k1"));
+        // Plain node carries none of the acceptance fields so the
+        // summary stays quiet (regression guard for the wave-16 baseline).
+        assert!(arr[1].get("acceptance_mode").is_none());
+        assert!(arr[1].get("acceptance_evidence_keys_raw").is_none());
+    }
+
+    #[test]
+    fn evaluate_acceptance_no_hints_returns_not_evaluated() {
+        let node = acceptance_node_with(None, None, None);
+        let payload = json!({"task_id": "btk-1"});
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        assert_eq!(e.status, AcceptanceStatus::NotEvaluated);
+        assert!(e.is_inactive());
+        assert!(e.commands.is_empty());
+        assert!(e.evidence_keys.is_empty());
+        assert!(e.mode.is_none());
+    }
+
+    #[test]
+    fn evaluate_acceptance_inner_status_accepts_clean_success_payload() {
+        let node = acceptance_node_with(Some("inner_status"), None, None);
+        let payload = json!({"workstation_dispatch_status": "dispatched", "task_id": "btk-1"});
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        assert_eq!(e.status, AcceptanceStatus::Accepted);
+        assert_eq!(e.mode, Some(AcceptanceMode::InnerStatus));
+        assert!(e.reason.contains("dispatch Ok"));
+    }
+
+    #[test]
+    fn evaluate_acceptance_inner_status_rejects_when_dispatch_classification_failed() {
+        // dispatch_succeeded=false short-circuits the evaluator to
+        // Rejected even when the payload looks clean. This guards
+        // against the evaluator second-guessing the dispatch judgment.
+        let node = acceptance_node_with(Some("inner_status"), None, None);
+        let payload = json!({"task_id": "btk-1"});
+        let e = evaluate_node_acceptance(&node, &payload, false);
+        assert_eq!(e.status, AcceptanceStatus::Rejected);
+        assert!(e.reason.contains("dispatch classification was not Ok"));
+    }
+
+    #[test]
+    fn evaluate_acceptance_inner_status_rejects_when_payload_signals_error() {
+        let node = acceptance_node_with(Some("inner_status"), None, None);
+        for bad in [
+            json!({"error": "boom"}),
+            json!({"success": false}),
+            json!({"ok": false}),
+            json!({"status": "failed"}),
+            json!({"workstation_dispatch_status": "skipped_project_root_unresolved"}),
+        ] {
+            let e = evaluate_node_acceptance(&node, &bad, true);
+            assert_eq!(
+                e.status,
+                AcceptanceStatus::Rejected,
+                "payload {:?} should reject under inner_status",
+                bad
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_acceptance_evidence_keys_accepts_when_all_present_at_top_level() {
+        let node = acceptance_node_with(
+            Some("evidence_keys"),
+            None,
+            Some(r#"["build_ok" "tests_passed"]"#),
+        );
+        let payload = json!({
+            "build_ok": true,
+            "tests_passed": 3,
+            "noise": "anything",
+        });
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        assert_eq!(e.status, AcceptanceStatus::Accepted);
+        assert_eq!(e.mode, Some(AcceptanceMode::EvidenceKeys));
+        assert_eq!(
+            e.evidence_keys,
+            vec!["build_ok".to_string(), "tests_passed".to_string()]
+        );
+    }
+
+    #[test]
+    fn evaluate_acceptance_evidence_keys_descends_into_nested_holders() {
+        // Substrates often stash typed evidence under `evidence` /
+        // `inner_result`; the evaluator descends one level into the
+        // well-known holders so authors don't have to mirror the
+        // payload's exact nesting in their `:acceptance-evidence-keys`.
+        let node = acceptance_node_with(
+            Some("evidence_keys"),
+            None,
+            Some(r#"["build_ok" "tests_passed"]"#),
+        );
+        let payload = json!({
+            "evidence": {
+                "build_ok": true,
+                "tests_passed": 1,
+            }
+        });
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        assert_eq!(e.status, AcceptanceStatus::Accepted);
+    }
+
+    #[test]
+    fn evaluate_acceptance_evidence_keys_rejects_missing_keys_with_named_list() {
+        let node = acceptance_node_with(
+            Some("evidence_keys"),
+            None,
+            Some(r#"["build_ok" "tests_passed"]"#),
+        );
+        let payload = json!({"build_ok": true});
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        assert_eq!(e.status, AcceptanceStatus::Rejected);
+        assert!(
+            e.reason.contains("tests_passed"),
+            "reason `{}` must surface the missing key",
+            e.reason
+        );
+    }
+
+    #[test]
+    fn evaluate_acceptance_evidence_keys_with_empty_keys_degrades_to_manual() {
+        let node = acceptance_node_with(Some("evidence_keys"), None, Some("[]"));
+        let payload = json!({"task_id": "x"});
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        // An empty contract cannot prove anything — surface as
+        // manual_required so the typo is loud.
+        assert_eq!(e.status, AcceptanceStatus::ManualRequired);
+        assert!(e.reason.contains("empty"));
+    }
+
+    #[test]
+    fn evaluate_acceptance_manual_mode_always_pauses() {
+        let node = acceptance_node_with(Some("manual"), None, None);
+        let payload = json!({"task_id": "x"});
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        assert_eq!(e.status, AcceptanceStatus::ManualRequired);
+        assert_eq!(e.mode, Some(AcceptanceMode::Manual));
+    }
+
+    #[test]
+    fn evaluate_acceptance_commands_without_mode_pause_as_manual_required_and_never_run_shell() {
+        // CRITICAL: declaring `:acceptance-commands` without a typed
+        // evaluator must NOT execute shell. The default policy is to
+        // surface the gate as manual_required and carry the commands
+        // verbatim into the response so a human / out-of-band pipeline
+        // can run them.
+        let node = acceptance_node_with(
+            None,
+            Some(r#"["cargo test" "git diff --check"]"#),
+            None,
+        );
+        let payload = json!({"task_id": "x"});
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        assert_eq!(e.status, AcceptanceStatus::ManualRequired);
+        assert_eq!(
+            e.commands,
+            vec!["cargo test".to_string(), "git diff --check".to_string()],
+            "declared commands must round-trip into the evaluation block verbatim"
+        );
+        assert!(e.mode.is_none());
+        assert!(e.reason.contains("never runs shell"));
+    }
+
+    #[test]
+    fn evaluation_to_json_carries_every_surface_field() {
+        let node = acceptance_node_with(
+            Some("inner_status"),
+            Some(r#"["cargo test"]"#),
+            Some(r#"["k1"]"#),
+        );
+        let payload = json!({"task_id": "x"});
+        let e = evaluate_node_acceptance(&node, &payload, true);
+        let v = e.to_json();
+        assert_eq!(v["status"], "accepted");
+        assert_eq!(v["mode"], "inner_status");
+        assert_eq!(v["commands"][0], "cargo test");
+        assert_eq!(v["evidence_keys"][0], "k1");
+        assert!(v["reason"].is_string());
+    }
+
+    #[test]
+    fn derive_acceptance_pause_id_is_distinct_from_review_gate_id_space() {
+        // The deterministic pause id MUST start with `acceptance:` so
+        // the wave-17 / task 01 paused-node resume helper (which
+        // requires `review:plan:...:plan-node:...` shape) cannot
+        // accidentally consume an acceptance pause.
+        let plan_id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000abc").unwrap();
+        let id = derive_acceptance_pause_id(plan_id, 7, "n42");
+        assert!(
+            id.starts_with("acceptance:plan:"),
+            "id `{}` must use the acceptance prefix",
+            id
+        );
+        assert!(id.contains(":v7:"));
+        assert!(id.ends_with(":n42"));
+        // Round-trips deterministically — same inputs, same output.
+        assert_eq!(id, derive_acceptance_pause_id(plan_id, 7, "n42"));
+    }
+
+    #[test]
+    fn node_results_json_surfaces_acceptance_block_only_when_active() {
+        let mut o = ExecutionOutcome::default();
+        // Active acceptance — surfaces.
+        o.results.push(NodeResult {
+            id: "with_acc".into(),
+            target: "mission_task_delegate".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "fresh-code-alignment".into(),
+            inner_payload: json!({"task_id": "btk-1"}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+            acceptance: Some(AcceptanceEvaluation {
+                status: AcceptanceStatus::Accepted,
+                mode: Some(AcceptanceMode::InnerStatus),
+                commands: vec!["cargo test".into()],
+                evidence_keys: vec![],
+                reason: "ok".into(),
+            }),
+        });
+        // No hints — quiet.
+        o.results.push(NodeResult {
+            id: "plain".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "unknown".into(),
+            inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+            acceptance: None,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0]["acceptance"]["status"], "accepted");
+        assert_eq!(arr[0]["acceptance"]["mode"], "inner_status");
+        assert_eq!(arr[0]["acceptance"]["commands"][0], "cargo test");
+        assert!(arr[1].get("acceptance").is_none());
+    }
+
+    #[test]
+    fn manual_required_surfaces_paused_state_with_acceptance_id_distinct_from_review_gate() {
+        // When the acceptance phase returns ManualRequired the wave
+        // loop MUST flip the node to `Paused` with the deterministic
+        // `acceptance:plan:...` id (NOT the wave-16 `review:plan:...`
+        // id). The aggregate status surfaces as `dag_paused` — same
+        // codepath as review-gate paused.
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "n".into(),
+            target: "mission_task_delegate".into(),
+            state: NodeState::Paused {
+                question_id: derive_acceptance_pause_id(
+                    uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000abc")
+                        .unwrap(),
+                    1,
+                    "n",
+                ),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "fresh-code-alignment".into(),
+            inner_payload: json!({"task_id": "btk-1"}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+            acceptance: Some(AcceptanceEvaluation {
+                status: AcceptanceStatus::ManualRequired,
+                mode: Some(AcceptanceMode::Manual),
+                commands: vec![],
+                evidence_keys: vec![],
+                reason: "manual mode".into(),
+            }),
+        });
+        assert_eq!(o.aggregate_status(), "dag_paused");
+        assert_eq!(o.runner_status(), "review_gate_paused");
+        let arr = o.node_results_json();
+        let arr = arr.as_array().unwrap();
+        assert_eq!(arr[0]["state"], "paused");
+        assert_eq!(arr[0]["acceptance"]["status"], "manual_required");
+        let qid = arr[0]["review_question_id"].as_str().unwrap();
+        assert!(
+            qid.starts_with("acceptance:plan:"),
+            "manual_required pause id `{}` MUST use the acceptance: prefix",
+            qid
+        );
     }
 }
