@@ -2104,6 +2104,28 @@
         :wave "17 task 08 (commit c7fbac0)"
         :note "wave 16 task 08 落 deterministic 4 hand-off no-LLM smoke (s1→s4→s6 + sidecar). wave 17 task 08 加: build_plan_execute_args 扩 forward 7 个 wave-17 keys (4 resume: resume_review_question_id / resume_review_decision / resume_actor / resume_note + 3 finalize: finalize_plan / distill_on_success / distill_mode); 加 build_plan_execute_args_forwards_wave17_resume_keys + build_plan_execute_args_resume_keys_absent_when_omitted 两个 unit test 锁 forward 行为. 加 6 步 e2e smoke (no LLM no spawn no shell): s1 directive create → s4 plan compile → s6 first execute (节点 :review-gate 'question-event' → paused, sidecar 写 review_question_id) → resume validate 同 round-trip review id 形状 + 4 resume args → s6 second execute (resume_review_decision='approved' 路由 paused-node helper, fresh attempt 1 succeeded) → sidecar 同 plan 写两份 evidence (paused→resume_approved + ready→running + running→succeeded). 不引入新 MCP tool, 不动 workflow.rs / plan.rs 主路径; 用作 wave-17-01 (paused-resume hook) + wave-17-05 (finalize_plan) 联合 contract 的回归基线. wave-17 / Task 02 claim/lease lifecycle / Task 04 rollback / Task 06 event-log resolver / Task 07 workstation brief 由各自 unit test cover (本 smoke 不重复 cover); 在测试模板里显式 list 哪些 wave-17 task 由本 smoke 覆盖 vs 由其他 unit test 覆盖, 避免误以为 e2e cross-cuts 全部"))
 
+      ;; ── 区域 36 · machine-contract task protocol v1 (manual architecture upgrade) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.task-contract-v1"
+        :title "machine-contract task protocol v1 — Lisp SSOT + rendered ClaudeCode Markdown view"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: task-contract-v1"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["scripts/check-task-contract.mjs"
+           "scripts/render-claudecode-task.mjs"
+           "scripts/lib/missiond_lisp.mjs"
+           ".missiond/tasks/schema/task-contract-v1.lisp"
+           ".missiond/tasks/wave19/wave19-00-machine-contract-pilot.lisp"
+           ".missiond/claudecode/wave19-00-machine-contract-pilot.md"]
+        :cross-ref ["architecture-dsl.lisp :: R019-R022"
+                    "intent-layer.unified-entry-pipeline"
+                    "worker.section.claudecode-workstation-orchestration"
+                    "memory.helper.agent-execution-coordination"]
+        :wave "manual architecture upgrade after wave18 dispatch"
+        :note "task.lisp is now the dispatch SSOT: checker validates required boundaries, write-scope, must-not-touch, acceptance and commit policy; renderer creates the ClaudeCode Markdown execution view. Markdown remains compatibility surface, not source of truth. Verifier/report-contract and direct MissionD task dispatch remain future.")
+
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
       :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener (QuestionEvent::Resolved subscriber) / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 (live/log/unavailable) / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; 仍有以下未细化项, 等后续 wave 再补"

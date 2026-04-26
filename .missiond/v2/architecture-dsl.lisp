@@ -6,8 +6,8 @@
 ;; ═════════════════════════════════════════════════════════════
 
 (defdsl architecture-v1
-  :version "v0.6"
-  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule; v0.4 (wave 12 task 06) adds source-index entry mandatory-fields rule + section-id uniqueness rule + :compression-safe? optional field; v0.5 (wave 14 task 07) adds l2-shard-split-plan (5 candidate shards designed, NOT executed; execution-gate + per-shard moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan); v0.6 (wave 15 task 03) adds R017 source-file-must-exist + R018 source-file-must-live-under-v2 + shard auto-discovery via collectSourceFileRefs (data-driven, no hardcoded shard paths)"
+  :version "v0.7"
+  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule; v0.4 (wave 12 task 06) adds source-index entry mandatory-fields rule + section-id uniqueness rule + :compression-safe? optional field; v0.5 (wave 14 task 07) adds l2-shard-split-plan (5 candidate shards designed, NOT executed; execution-gate + per-shard moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan); v0.6 (wave 15 task 03) adds R017 source-file-must-exist + R018 source-file-must-live-under-v2 + shard auto-discovery via collectSourceFileRefs (data-driven, no hardcoded shard paths); v0.7 adds machine-contract layer: task.lisp SSOT + generated ClaudeCode Markdown view + checker/renderer"
   :checker "scripts/check-architecture-lisp.mjs"
 
   (purpose
@@ -17,7 +17,8 @@
     "v0.3 扩: 执行型 flow 可声明 control-plane / durability-plane handoff, 防止 operational report 与代码成果脱节"
     "v0.4 扩: source-index entry 强制三必填 (file / local-path / status), section-id 全局唯一; 加 :compression-safe? 字段, 让未来批量压缩可白名单驱动"
     "v0.5 扩: 加 l2-shard-split-plan, 设计 5 候选 shard (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); 每 shard 含 moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan; execution-gate 全满足才允许实际拆分; 本 v0.5 不移动任何 shard 内容"
-    "v0.6 扩: shard-aware checker — R017 (source-file 必存在) + R018 (source-file 必 .missiond/v2/) + checker 通过 source-index 自动发现 shard 文件 (data-driven, 不 hardcode); 报告行显示 initial + auto-discovered shard 数, 方便 review 验证 wave 15 后 5 shard 实际接入")
+    "v0.6 扩: shard-aware checker — R017 (source-file 必存在) + R018 (source-file 必 .missiond/v2/) + checker 通过 source-index 自动发现 shard 文件 (data-driven, 不 hardcode); 报告行显示 initial + auto-discovered shard 数, 方便 review 验证 wave 15 后 5 shard 实际接入"
+    "v0.7 扩: machine-contract layer — .missiond/tasks/**/*.lisp 是任务 SSOT, scripts/check-task-contract.mjs 校验边界, scripts/render-claudecode-task.mjs 生成 ClaudeCode Markdown 视图")
 
   (reader-contract
     :syntax "S-expression + bracket vector"
@@ -66,6 +67,11 @@
       :desc "执行结果从 operational control-plane 交到 durable artifact-plane 的协议"
       :required [:control-plane :durability-plane :claim-scope :verification :receipt]
       :optional [:commit-policy :rollback :blocker :audit-rule])
+
+    (task-contract
+      :desc "Agent 任务的机器可读契约; Markdown 只是渲染视图"
+      :required [:schema :title :kind :status :owner :goal :write-scope :must-not-touch :acceptance :commit]
+      :optional [:depends-on :dispatch-strategy :requirements :report :review-gate :rollback :evidence])
 
     ;; ── v0.2 新增: source-index 节点类型 ──
     (source-index
@@ -254,7 +260,16 @@
     (R017 :name "source-file-must-exist"
           :rule "intent-pillar-source-index.lisp 内 (pillar-section-index :source-file ...) 与 (section-entry :source-file ...) 引用的路径必须真实存在; 缺失 checker phase-3.2 报 source-file-does-not-exist; 防止 L2 shard rename / move 后留下死链")
     (R018 :name "source-file-must-live-under-v2"
-          :rule "intent-pillar-source-index.lisp 内 :source-file 必须以 '.missiond/v2/' 起头; 跨目录引用先归并到 v2/ 下的 shard, 再在 source-index 注册; 防止 source-index 退化为通用文件清单"))
+          :rule "intent-pillar-source-index.lisp 内 :source-file 必须以 '.missiond/v2/' 起头; 跨目录引用先归并到 v2/ 下的 shard, 再在 source-index 注册; 防止 source-index 退化为通用文件清单")
+    ;; ── v0.7 新增 — task machine-contract layer ──
+    (R019 :name "task-contract-is-ssot"
+          :rule ".missiond/tasks/**/*.lisp 是任务真实契约; .missiond/claudecode/*.md 是 renderer 产物, 不再作为唯一事实源")
+    (R020 :name "task-contract-boundaries-required"
+          :rule "每个 (task ...) 必须声明 :write-scope / :must-not-touch / :acceptance / :commit; checker 缺字段即失败")
+    (R021 :name "task-contract-renderer-no-invention"
+          :rule "renderer 只能投影 task.lisp 已声明字段, 不允许补写 scope / acceptance / commit policy")
+    (R022 :name "shared-memory-runtime-ledger"
+          :rule "shared-memory.lisp 只记录 claim / decision / issue / evidence / commit 等运行事实, 不承载长篇任务说明"))
 
   (checker-contract
     :phase-1 ["parse all files" "balanced () and []" "unterminated string" "unexpected delimiter"]
@@ -286,7 +301,8 @@
     :future-phases ["load this defdsl as data"
                     "validate required-shape dynamically"
                     "emit JSON IR"
-                    "generate Mermaid / Markdown / review checklist"])
+                    "generate Mermaid / Markdown / review checklist"
+                    "verify task report/commit against task-contract v1"]))
 
   ;; ── v0.5 新增 (wave 14 task 07): L2 shard split plan ──
   ;; 设计 5 候选 shard, 但本 wave 不移动任何 shard 内容; 真正拆分由后续 wave 在 execution-gate 全满足后做
@@ -517,4 +533,4 @@
        (d4 :name "compression-safe-flag-required-for-batch-compression"
            :reason "section-entry-extended 引入 :compression-safe? 字段; 未来批量压缩必须以该字段做白名单, 缺省按 false 处理 (wave 12 task 06)")
        (d5 :name "l2-shard-split-plan-designed-not-executed"
-           :reason "wave 14 task 07 写 5 候选 shard plan + 4-gate execution gate; 本 wave 不移动任何 shard 内容; L2 实际执行需 gate 全满足且无 parallel code wave (wave 14 task 07)"))))
+           :reason "wave 14 task 07 写 5 候选 shard plan + 4-gate execution gate; 本 wave 不移动任何 shard 内容; L2 实际执行需 gate 全满足且无 parallel code wave (wave 14 task 07)")))
