@@ -275,7 +275,7 @@ fn build_properties() -> Value {
     // plan-runner internal dispatch contract documented above.
     p.insert("workstation_dispatch".into(), prop(
         "boolean",
-        "[execute internal target=mission_task_delegate] Wave 15 / Task 05 — opt into workstation-dispatch v0. When true (or PLAN.lisp carries `:workstation-dispatch true`) the runner builds a scoped task brief (objective / scope / owned-files / forbidden-files / acceptance-commands / commit policy / agent-team hint when dispatch_strategy=agent-team) and dispatches via the existing `mission_task_delegate` substrate (NEVER `claude -p`). Project root is resolved via `resolve_target_project_root` (project > absolute cwd > target_project; relative cwd refused; no process-cwd fallback). On safety failure (target!=mission_task_delegate, project root unresolved, missing objective) the runner returns a structured `workstation_dispatch_status=skipped_*` descriptor instead of silently falling back. Response surfaces workstation_dispatch_status / dispatch_strategy / task_brief_preview / inner_result / evidence_path.",
+        "[execute internal target=mission_task_delegate] Wave 15 / Task 05 — opt into workstation-dispatch v0. When true (or PLAN.lisp carries `:workstation-dispatch true`) the runner builds a scoped task brief (objective / scope / owned-files / forbidden-files / acceptance-commands / commit policy / agent-team hint when dispatch_strategy=agent-team) and dispatches via the existing `mission_task_delegate` substrate (NEVER `claude -p`). Project root is resolved via `resolve_target_project_root` (project > absolute cwd > target_project; relative cwd refused; no process-cwd fallback). On safety failure (target!=mission_task_delegate, project root unresolved, missing objective) the runner returns a structured `workstation_dispatch_status=skipped_*` descriptor instead of silently falling back. Response surfaces workstation_dispatch_status / dispatch_strategy / task_brief_preview / inner_result / evidence_path. Wave 16 / Task 03 conservative auto-inference: when omitted the runner auto-enables workstation dispatch ONLY when ALL of the following hold: resolved target = `mission_task_delegate`, dispatch_strategy ∈ {fresh-code-alignment, resident-lisp, agent-team, mixed}, objective non-empty, AND at least one scoping signal present (owned_files, scope, target_project, or requested_cwd). Explicit `false` always suppresses inference. The response always carries `workstation_dispatch_source` ∈ {explicit_arg, plan_hint, inferred, disabled, not_applicable} and `workstation_dispatch_inference_reason` (when set).",
     ));
 
     p.insert("scope".into(), prop(
@@ -395,6 +395,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
          不静默 fallback prompt mode；响应附 workstation_dispatch_status / dispatch_strategy / task_brief_preview / inner_result / evidence_path。\
          同样的 hint contract 在 scheduler_mode=dag_v1 节点上生效 (per-node `:workstation-dispatch true`)，\
          workstation-dispatch 节点 dispatch 走相同 substrate，evidence source=workstation_dispatch。\
+         wave-16 / task 03 conservative auto-inference: 当 caller 未传 workstation_dispatch 且 PLAN/node 也无 \
+         :workstation-dispatch hint 时，runner 仅在五项条件同时满足时自动启用 workstation-dispatch — \
+         resolved target = mission_task_delegate，dispatch_strategy ∈ {fresh-code-alignment, resident-lisp, agent-team, mixed}，\
+         objective 非空，且至少一个 scoping signal (owned_files / scope / target_project / requested_cwd) 出现，\
+         caller 未显式 workstation_dispatch=false。`mission_execution` / `mission_flow_run` 永不自动推断；target / project root 未解析时不推断；\
+         显式 false 始终压制推断。响应始终附带 workstation_dispatch_source ∈ {explicit_arg, plan_hint, inferred, disabled, not_applicable} \
+         + workstation_dispatch_inference_reason (when set)；DAG 节点同样规则 (per-node 字段)。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \

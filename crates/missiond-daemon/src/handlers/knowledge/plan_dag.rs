@@ -1214,6 +1214,7 @@ fn workstation_outcome_to_dispatch_pair(
     node: &DagNode,
     dispatch_strategy: &str,
     outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
+    decision: &super::workstation_dispatch::DispatchDecision,
 ) -> (Value, std::result::Result<(), String>) {
     let status = outcome.status();
     let envelope =
@@ -1241,7 +1242,19 @@ fn workstation_outcome_to_dispatch_pair(
     let mut payload = json!({
         "workstation_dispatch_status": status,
         "node_id": node.id,
+        // wave-16 / task 03 — surface routing provenance per node so the
+        // DAG response makes the explicit/inferred split visible without
+        // re-deriving from the plan body.
+        "workstation_dispatch_source": decision.source.as_str(),
     });
+    if let Some(reason) = decision.reason.as_deref() {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "workstation_dispatch_inference_reason".to_string(),
+                json!(reason),
+            );
+        }
+    }
     if let Some(map) = envelope.as_object() {
         if let Some(payload_map) = payload.as_object_mut() {
             for (k, v) in map {
@@ -1260,13 +1273,46 @@ async fn dispatch_node(
     let inner_args_built = build_node_inner_args(&node, &plan);
     let dispatch_strategy = inner_args_built.dispatch_strategy.clone();
 
-    // wave-15 / task 05 — when this node opts into workstation-dispatch v0
-    // AND targets `mission_task_delegate`, route through the workstation
-    // dispatcher (scoped task brief + scoped commit handoff) instead of
-    // the legacy passthrough. Other targets keep the legacy path so the
-    // DAG scheduler's overall contract is unchanged.
-    if node.workstation_dispatch_opt_in() && node.target == "mission_task_delegate" {
-        let merged = node_to_workstation_hints(&node);
+    // wave-15 / task 05 + wave-16 / task 03 — workstation-dispatch routing
+    // for DAG nodes. Wave-15 honoured an explicit per-node
+    // `:workstation-dispatch true` only. Wave-16 layers conservative
+    // auto-inference on top: when a node's :target is already
+    // `mission_task_delegate`, the dispatch strategy resolves to a known
+    // workstation strategy, the objective is non-empty, and at least one
+    // scoping signal is declared, the scheduler routes through the
+    // workstation substrate without requiring the explicit hint. There is
+    // no per-node `workstation_dispatch=false` knob because DAG nodes are
+    // declared in PLAN.lisp; the only off-switch is to mark the node with
+    // a non-task-delegate target or omit the dispatch strategy.
+    let merged = node_to_workstation_hints(&node);
+    let inference_ctx = super::workstation_dispatch::InferenceContext {
+        target: node.target.as_str(),
+        dispatch_strategy: dispatch_strategy.as_str(),
+        objective: merged.objective.as_deref(),
+        owned_files_present: !merged.owned_files.is_empty(),
+        scope_present: merged
+            .scope
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        target_project_present: merged
+            .target_project
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        requested_cwd_present: merged
+            .requested_cwd
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+    };
+    let dispatch_decision = super::workstation_dispatch::evaluate_dispatch_decision(
+        &serde_json::Value::Null,
+        node.workstation_dispatch_opt_in(),
+        &inference_ctx,
+    );
+
+    if dispatch_decision.is_enabled() {
         let outcome = super::workstation_dispatch::run_workstation_dispatch(
             &state,
             &plan,
@@ -1280,6 +1326,7 @@ async fn dispatch_node(
             &node,
             &dispatch_strategy,
             outcome,
+            &dispatch_decision,
         );
         return Ok(DispatchOutcome {
             node_id: node.id.clone(),
@@ -3642,6 +3689,22 @@ mod tests {
         assert_eq!(w.acceptance_commands, vec!["cargo test".to_string()]);
     }
 
+    fn fixture_decision_explicit(
+    ) -> crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+        crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+            source: crate::handlers::knowledge::workstation_dispatch::WorkstationDispatchSource::PlanHint,
+            reason: Some("test fixture".to_string()),
+        }
+    }
+
+    fn fixture_decision_inferred(
+    ) -> crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+        crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+            source: crate::handlers::knowledge::workstation_dispatch::WorkstationDispatchSource::Inferred,
+            reason: Some("inferred test fixture".to_string()),
+        }
+    }
+
     /// Safe-descriptor outcomes from the workstation-dispatch substrate
     /// must classify as failures so the DAG scheduler taints downstream
     /// nodes (vs success which would falsely advance the wave).
@@ -3660,11 +3723,16 @@ mod tests {
             ),
             task_brief: None,
         };
-        let (payload, classification) =
-            workstation_outcome_to_dispatch_pair(&node, "fresh-code-alignment", outcome);
+        let (payload, classification) = workstation_outcome_to_dispatch_pair(
+            &node,
+            "fresh-code-alignment",
+            outcome,
+            &fixture_decision_explicit(),
+        );
         assert!(classification.is_err(), "safe descriptors must fail dispatch");
         assert_eq!(payload["workstation_dispatch_status"], "skipped_project_root_unresolved");
         assert_eq!(payload["node_id"], "n1");
+        assert_eq!(payload["workstation_dispatch_source"], "plan_hint");
     }
 
     /// Dispatched outcomes must classify as success (the inner handler
@@ -3685,12 +3753,167 @@ mod tests {
             evidence_error: None,
             inner_payload: json!({"task_id": "btk-7"}),
         };
-        let (payload, classification) =
-            workstation_outcome_to_dispatch_pair(&node, "agent-team", outcome);
+        let (payload, classification) = workstation_outcome_to_dispatch_pair(
+            &node,
+            "agent-team",
+            outcome,
+            &fixture_decision_inferred(),
+        );
         assert!(classification.is_ok(), "dispatched must succeed");
         assert_eq!(payload["workstation_dispatch_status"], "dispatched");
         assert_eq!(payload["dispatch_strategy"], "agent-team");
         assert_eq!(payload["inner_result"]["task_id"], "btk-7");
+        assert_eq!(payload["workstation_dispatch_source"], "inferred");
+        assert_eq!(payload["workstation_dispatch_inference_reason"], "inferred test fixture");
+    }
+
+    // ── wave-16 / task 03 — DAG node auto-inference ─────────────────────
+
+    /// Compose `node_to_workstation_hints` with `evaluate_dispatch_decision`
+    /// to assert the per-node decision the scheduler would arrive at.
+    fn dag_node_decision(
+        node: &DagNode,
+        dispatch_strategy: &str,
+    ) -> crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+        let merged = node_to_workstation_hints(node);
+        let ctx = crate::handlers::knowledge::workstation_dispatch::InferenceContext {
+            target: node.target.as_str(),
+            dispatch_strategy,
+            objective: merged.objective.as_deref(),
+            owned_files_present: !merged.owned_files.is_empty(),
+            scope_present: merged
+                .scope
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false),
+            target_project_present: merged
+                .target_project
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false),
+            requested_cwd_present: merged
+                .requested_cwd
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false),
+        };
+        crate::handlers::knowledge::workstation_dispatch::evaluate_dispatch_decision(
+            &serde_json::Value::Null,
+            node.workstation_dispatch_opt_in(),
+            &ctx,
+        )
+    }
+
+    #[test]
+    fn dag_node_auto_inferred_for_task_delegate_with_owned_files_and_strategy() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :objective "ship the wave"
+                    :dispatch-strategy "fresh-code-alignment"
+                    :owned-files ["a.rs"]))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert!(!parsed.nodes[0].workstation_dispatch_opt_in());
+        let decision = dag_node_decision(&parsed.nodes[0], "fresh-code-alignment");
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::Inferred);
+    }
+
+    #[test]
+    fn dag_node_auto_inferred_for_agent_team_with_target_project_signal() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :objective "ship"
+                    :dispatch-strategy "agent-team"
+                    :target-project "missiond"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let decision = dag_node_decision(&parsed.nodes[0], "agent-team");
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::Inferred);
+    }
+
+    #[test]
+    fn dag_node_explicit_opt_in_takes_plan_hint_path() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :workstation-dispatch true
+                    :objective "ship"
+                    :dispatch-strategy "fresh-code-alignment"
+                    :owned-files ["a.rs"]))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let decision = dag_node_decision(&parsed.nodes[0], "fresh-code-alignment");
+        // Explicit hint wins over inference and shows up as PlanHint.
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::PlanHint);
+    }
+
+    #[test]
+    fn dag_node_not_inferred_when_strategy_unknown() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :objective "ship"
+                    :owned-files ["a.rs"]))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let decision = dag_node_decision(&parsed.nodes[0], "unknown");
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn dag_node_not_inferred_when_objective_missing() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :dispatch-strategy "fresh-code-alignment"
+                    :owned-files ["a.rs"]))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let decision = dag_node_decision(&parsed.nodes[0], "fresh-code-alignment");
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn dag_node_not_inferred_for_mission_execution_target() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_execution"
+                    :objective "ship"
+                    :dispatch-strategy "fresh-code-alignment"
+                    :owned-files ["a.rs"]))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let decision = dag_node_decision(&parsed.nodes[0], "fresh-code-alignment");
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn dag_node_not_inferred_when_no_scope_signal() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :objective "ship"
+                    :dispatch-strategy "fresh-code-alignment"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let decision = dag_node_decision(&parsed.nodes[0], "fresh-code-alignment");
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
     }
 
     /// `build_nodes_summary` must surface the new workstation-dispatch

@@ -140,13 +140,241 @@ impl WorkstationDispatchHints {
 }
 
 /// Whether the caller / plan opted into workstation-dispatch v0. This is
-/// the ONLY trigger — workstation dispatch is opt-in by design.
+/// the legacy back-compat helper kept so existing tests / callers keep
+/// reading the same boolean. New code goes through `evaluate_dispatch_decision`
+/// so the response can surface the source + inference reason.
 pub(crate) fn opt_in_requested(args: &Value, plan_hint_workstation_dispatch: bool) -> bool {
     let arg_flag = args
         .get("workstation_dispatch")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     arg_flag || plan_hint_workstation_dispatch
+}
+
+/// wave-16 / task 03 — the resolved source of a workstation-dispatch
+/// decision. Surfaced verbatim on the response under
+/// `workstation_dispatch_source` so callers can route on the provenance
+/// without re-deriving it.
+///
+/// Semantics:
+///   * `ExplicitArg`   — caller passed `workstation_dispatch=true` (and
+///                       passed every safety gate). Wave-15 behaviour.
+///   * `PlanHint`      — PLAN.lisp / DAG node carried `:workstation-dispatch
+///                       true` (and explicit arg was absent or true).
+///                       Wave-15 behaviour.
+///   * `Inferred`      — caller set neither flag, but the resolved target +
+///                       dispatch strategy + objective + at least one
+///                       scoping signal all matched the conservative
+///                       auto-inference rule. Wave-16 behaviour.
+///   * `Disabled`      — caller passed `workstation_dispatch=false`.
+///                       Auto-inference is suppressed.
+///   * `NotApplicable` — none of the above; fall through to the legacy
+///                       plan-runner internal dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkstationDispatchSource {
+    ExplicitArg,
+    PlanHint,
+    Inferred,
+    Disabled,
+    NotApplicable,
+}
+
+impl WorkstationDispatchSource {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            WorkstationDispatchSource::ExplicitArg => "explicit_arg",
+            WorkstationDispatchSource::PlanHint => "plan_hint",
+            WorkstationDispatchSource::Inferred => "inferred",
+            WorkstationDispatchSource::Disabled => "disabled",
+            WorkstationDispatchSource::NotApplicable => "not_applicable",
+        }
+    }
+}
+
+/// Resolved decision: should this dispatch run through the workstation
+/// substrate? Carries the source + (when relevant) the reason text the
+/// inference engine attached. The reason is response-facing only — it does
+/// NOT change the dispatch path.
+#[derive(Debug, Clone)]
+pub(crate) struct DispatchDecision {
+    pub source: WorkstationDispatchSource,
+    pub reason: Option<String>,
+}
+
+impl DispatchDecision {
+    fn enabled(source: WorkstationDispatchSource, reason: Option<String>) -> Self {
+        Self { source, reason }
+    }
+
+    fn off(source: WorkstationDispatchSource, reason: Option<String>) -> Self {
+        Self { source, reason }
+    }
+
+    /// True iff this decision routes through the workstation-dispatch
+    /// substrate. Only the explicit/plan-hint/inferred branches do; the
+    /// disabled and not-applicable branches stay on the legacy plan-runner.
+    pub(crate) fn is_enabled(&self) -> bool {
+        matches!(
+            self.source,
+            WorkstationDispatchSource::ExplicitArg
+                | WorkstationDispatchSource::PlanHint
+                | WorkstationDispatchSource::Inferred
+        )
+    }
+}
+
+/// wave-16 / task 03 — the strategies the auto-inference engine accepts.
+/// Strictly a sub-list of `VALID_DISPATCH_STRATEGIES` from plan.rs:
+/// `unknown` and `prompt-fallback` are intentionally excluded so a node
+/// without a real dispatch hint stays on the legacy plan-runner path.
+pub(crate) const INFERABLE_DISPATCH_STRATEGIES: &[&str] =
+    &["fresh-code-alignment", "resident-lisp", "agent-team", "mixed"];
+
+/// Hint context the inference engine reads. Only the conservative subset
+/// of fields that actually scope a workstation task — the fully merged
+/// hint set is built later via `WorkstationDispatchHints::merge_args` once
+/// we know the decision is "go".
+pub(crate) struct InferenceContext<'a> {
+    /// Resolved target (already normalised to one of `mission_execution |
+    /// mission_task_delegate | mission_flow_run`).
+    pub target: &'a str,
+    /// Already-canonicalised dispatch strategy (one of
+    /// `VALID_DISPATCH_STRATEGIES` in plan.rs, including `unknown`).
+    pub dispatch_strategy: &'a str,
+    /// Final objective text (caller arg with PLAN.lisp / node fallback).
+    pub objective: Option<&'a str>,
+    /// Scoping signal #1 — declared owned files (post-merge).
+    pub owned_files_present: bool,
+    /// Scoping signal #2 — free-form scope string.
+    pub scope_present: bool,
+    /// Scoping signal #3 — explicit `target_project` (caller arg or hint).
+    pub target_project_present: bool,
+    /// Scoping signal #4 — explicit `requested_cwd` (caller arg or hint).
+    pub requested_cwd_present: bool,
+}
+
+/// Read the caller's explicit `workstation_dispatch` knob. `None` means
+/// "no explicit choice" (auto-inference is allowed); `Some(true)` /
+/// `Some(false)` mean "explicit on" / "explicit off".
+pub(crate) fn explicit_workstation_dispatch_flag(args: &Value) -> Option<bool> {
+    args.get("workstation_dispatch").and_then(|v| v.as_bool())
+}
+
+/// Decide whether to route through workstation-dispatch.
+///
+/// Precedence (highest first):
+///   1. `workstation_dispatch=false` arg → `Disabled` (suppresses inference).
+///   2. `workstation_dispatch=true` arg  → `ExplicitArg`.
+///   3. PLAN.lisp / node `:workstation-dispatch true` → `PlanHint`.
+///   4. Auto-inference (all five conditions) → `Inferred`.
+///   5. Otherwise → `NotApplicable`.
+///
+/// Conditions for `Inferred` (ALL must hold):
+///   a. resolved target is `mission_task_delegate`
+///   b. dispatch strategy is one of `INFERABLE_DISPATCH_STRATEGIES`
+///   c. objective is non-empty
+///   d. at least one scoping signal is present
+///      (owned_files | scope | target_project | requested_cwd)
+///   e. caller did not set `workstation_dispatch=false`
+///
+/// `mission_execution` and `mission_flow_run` are NEVER auto-inferred —
+/// auto-inference only ever wraps the task_delegate substrate.
+pub(crate) fn evaluate_dispatch_decision(
+    args: &Value,
+    plan_hint_workstation_dispatch: bool,
+    ctx: &InferenceContext<'_>,
+) -> DispatchDecision {
+    let explicit = explicit_workstation_dispatch_flag(args);
+
+    // 1. Explicit `false` short-circuits everything.
+    if explicit == Some(false) {
+        return DispatchDecision::off(
+            WorkstationDispatchSource::Disabled,
+            Some("workstation_dispatch=false suppresses both opt-in and auto-inference".to_string()),
+        );
+    }
+
+    // 2. Explicit `true` is honoured even if a safety gate would later
+    //    refuse — the wave-15 behaviour returns a SafeDescriptor and the
+    //    caller sees it. We do NOT silently downgrade to NotApplicable.
+    if explicit == Some(true) {
+        return DispatchDecision::enabled(
+            WorkstationDispatchSource::ExplicitArg,
+            Some("caller passed workstation_dispatch=true".to_string()),
+        );
+    }
+
+    // 3. PLAN.lisp / node hint.
+    if plan_hint_workstation_dispatch {
+        return DispatchDecision::enabled(
+            WorkstationDispatchSource::PlanHint,
+            Some("PLAN.lisp / node carried :workstation-dispatch true".to_string()),
+        );
+    }
+
+    // 4. Auto-inference. Each gate produces a deterministic skip-reason
+    //    so the response can explain why we did NOT auto-enable.
+
+    // a. Target must be mission_task_delegate.
+    if ctx.target != "mission_task_delegate" {
+        return DispatchDecision::off(
+            WorkstationDispatchSource::NotApplicable,
+            Some(format!(
+                "auto-inference only wraps mission_task_delegate; resolved target is `{}`",
+                ctx.target
+            )),
+        );
+    }
+
+    // b. Dispatch strategy must be in the inferable subset.
+    if !INFERABLE_DISPATCH_STRATEGIES.contains(&ctx.dispatch_strategy) {
+        return DispatchDecision::off(
+            WorkstationDispatchSource::NotApplicable,
+            Some(format!(
+                "auto-inference requires a known workstation dispatch strategy ({:?}); got `{}`",
+                INFERABLE_DISPATCH_STRATEGIES, ctx.dispatch_strategy
+            )),
+        );
+    }
+
+    // c. Objective must be non-empty.
+    let has_objective = ctx
+        .objective
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !has_objective {
+        return DispatchDecision::off(
+            WorkstationDispatchSource::NotApplicable,
+            Some(
+                "auto-inference requires a non-empty objective (caller arg or PLAN.lisp hint)"
+                    .to_string(),
+            ),
+        );
+    }
+
+    // d. At least one scoping signal.
+    let any_scope = ctx.owned_files_present
+        || ctx.scope_present
+        || ctx.target_project_present
+        || ctx.requested_cwd_present;
+    if !any_scope {
+        return DispatchDecision::off(
+            WorkstationDispatchSource::NotApplicable,
+            Some(
+                "auto-inference requires at least one scoping signal: owned_files, scope, \
+                 target_project, or requested_cwd"
+                    .to_string(),
+            ),
+        );
+    }
+
+    DispatchDecision::enabled(
+        WorkstationDispatchSource::Inferred,
+        Some(format!(
+            "inferred from target=mission_task_delegate, dispatch_strategy=`{}`, non-empty objective, scoping signals present",
+            ctx.dispatch_strategy
+        )),
+    )
 }
 
 /// Outcome of a workstation-dispatch evaluation. The variants are surfaced
@@ -649,6 +877,255 @@ mod tests {
         // Random truthy fields do NOT count.
         assert!(!opt_in_requested(&json!({"target": "mission_task_delegate"}), false));
         assert!(!opt_in_requested(&json!({"workstation_dispatch": false}), false));
+    }
+
+    // ── wave-16 / task 03 — auto-inference decision tests ───────────────
+
+    /// Helper: build an inference context that matches every gate by
+    /// default. Individual tests flip a single field to assert that gate.
+    fn ctx_all_pass<'a>() -> InferenceContext<'a> {
+        InferenceContext {
+            target: "mission_task_delegate",
+            dispatch_strategy: "fresh-code-alignment",
+            objective: Some("ship the wave"),
+            owned_files_present: true,
+            scope_present: false,
+            target_project_present: false,
+            requested_cwd_present: false,
+        }
+    }
+
+    #[test]
+    fn evaluate_decision_explicit_true_wins_even_without_scope_signal() {
+        let mut ctx = ctx_all_pass();
+        ctx.owned_files_present = false;
+        let decision = evaluate_dispatch_decision(
+            &json!({"workstation_dispatch": true}),
+            false,
+            &ctx,
+        );
+        assert_eq!(decision.source, WorkstationDispatchSource::ExplicitArg);
+        assert!(decision.is_enabled());
+    }
+
+    #[test]
+    fn evaluate_decision_explicit_false_disables_inference() {
+        let ctx = ctx_all_pass();
+        let decision = evaluate_dispatch_decision(
+            &json!({"workstation_dispatch": false}),
+            true, // even with plan hint set
+            &ctx,
+        );
+        assert_eq!(decision.source, WorkstationDispatchSource::Disabled);
+        assert!(!decision.is_enabled());
+        assert!(decision.reason.unwrap().contains("workstation_dispatch=false"));
+    }
+
+    #[test]
+    fn evaluate_decision_plan_hint_takes_precedence_over_inference() {
+        let ctx = ctx_all_pass();
+        let decision = evaluate_dispatch_decision(&json!({}), true, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::PlanHint);
+        assert!(decision.is_enabled());
+    }
+
+    #[test]
+    fn evaluate_decision_inferred_when_all_gates_pass() {
+        let ctx = ctx_all_pass();
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::Inferred);
+        assert!(decision.is_enabled());
+        assert!(decision.reason.unwrap().contains("fresh-code-alignment"));
+    }
+
+    #[test]
+    fn evaluate_decision_inferred_for_each_strategy_in_whitelist() {
+        for strategy in INFERABLE_DISPATCH_STRATEGIES {
+            let mut ctx = ctx_all_pass();
+            ctx.dispatch_strategy = strategy;
+            let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+            assert_eq!(
+                decision.source,
+                WorkstationDispatchSource::Inferred,
+                "strategy `{}` should be inferable",
+                strategy
+            );
+        }
+    }
+
+    #[test]
+    fn evaluate_decision_not_inferred_for_unknown_strategy() {
+        let mut ctx = ctx_all_pass();
+        ctx.dispatch_strategy = "unknown";
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::NotApplicable);
+        assert!(!decision.is_enabled());
+        assert!(decision.reason.unwrap().contains("dispatch strategy"));
+    }
+
+    #[test]
+    fn evaluate_decision_not_inferred_for_prompt_fallback_strategy() {
+        let mut ctx = ctx_all_pass();
+        ctx.dispatch_strategy = "prompt-fallback";
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn evaluate_decision_not_inferred_for_mission_execution_target() {
+        let mut ctx = ctx_all_pass();
+        ctx.target = "mission_execution";
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::NotApplicable);
+        assert!(decision.reason.unwrap().contains("mission_task_delegate"));
+    }
+
+    #[test]
+    fn evaluate_decision_not_inferred_for_mission_flow_run_target() {
+        let mut ctx = ctx_all_pass();
+        ctx.target = "mission_flow_run";
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn evaluate_decision_not_inferred_when_objective_missing() {
+        let mut ctx = ctx_all_pass();
+        ctx.objective = None;
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::NotApplicable);
+        assert!(decision.reason.unwrap().contains("objective"));
+    }
+
+    #[test]
+    fn evaluate_decision_not_inferred_when_objective_blank() {
+        let mut ctx = ctx_all_pass();
+        ctx.objective = Some("   ");
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn evaluate_decision_not_inferred_when_no_scope_signal() {
+        let ctx = InferenceContext {
+            target: "mission_task_delegate",
+            dispatch_strategy: "fresh-code-alignment",
+            objective: Some("ship"),
+            owned_files_present: false,
+            scope_present: false,
+            target_project_present: false,
+            requested_cwd_present: false,
+        };
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::NotApplicable);
+        assert!(decision.reason.unwrap().contains("scoping signal"));
+    }
+
+    #[test]
+    fn evaluate_decision_inferred_when_scope_present_only() {
+        let ctx = InferenceContext {
+            target: "mission_task_delegate",
+            dispatch_strategy: "agent-team",
+            objective: Some("ship"),
+            owned_files_present: false,
+            scope_present: true,
+            target_project_present: false,
+            requested_cwd_present: false,
+        };
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::Inferred);
+    }
+
+    #[test]
+    fn evaluate_decision_inferred_when_target_project_present_only() {
+        let ctx = InferenceContext {
+            target: "mission_task_delegate",
+            dispatch_strategy: "resident-lisp",
+            objective: Some("ship"),
+            owned_files_present: false,
+            scope_present: false,
+            target_project_present: true,
+            requested_cwd_present: false,
+        };
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::Inferred);
+    }
+
+    #[test]
+    fn evaluate_decision_inferred_when_requested_cwd_present_only() {
+        let ctx = InferenceContext {
+            target: "mission_task_delegate",
+            dispatch_strategy: "mixed",
+            objective: Some("ship"),
+            owned_files_present: false,
+            scope_present: false,
+            target_project_present: false,
+            requested_cwd_present: true,
+        };
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::Inferred);
+    }
+
+    #[test]
+    fn workstation_dispatch_source_string_pin() {
+        // The five values are part of the response wire contract.
+        assert_eq!(WorkstationDispatchSource::ExplicitArg.as_str(), "explicit_arg");
+        assert_eq!(WorkstationDispatchSource::PlanHint.as_str(), "plan_hint");
+        assert_eq!(WorkstationDispatchSource::Inferred.as_str(), "inferred");
+        assert_eq!(WorkstationDispatchSource::Disabled.as_str(), "disabled");
+        assert_eq!(WorkstationDispatchSource::NotApplicable.as_str(), "not_applicable");
+    }
+
+    /// End-to-end shape check: when auto-inference picks `agent-team`,
+    /// the brief built from the inferred hints carries the literal Chinese
+    /// reminder exactly once. This pins the wave-15 invariant onto the
+    /// wave-16 inference path so a future merge cannot silently double-
+    /// inject the hint.
+    #[test]
+    fn inferred_agent_team_path_injects_literal_exactly_once() {
+        let ctx = InferenceContext {
+            target: "mission_task_delegate",
+            dispatch_strategy: "agent-team",
+            objective: Some("ship the wave"),
+            owned_files_present: true,
+            scope_present: false,
+            target_project_present: false,
+            requested_cwd_present: false,
+        };
+        let decision = evaluate_dispatch_decision(&json!({}), false, &ctx);
+        assert_eq!(decision.source, WorkstationDispatchSource::Inferred);
+        // Build the brief the same way `run_workstation_dispatch` would
+        // to confirm the literal lands once.
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship the wave".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let brief = build_task_brief(&plan, &hints, "agent-team");
+        assert_eq!(
+            brief.matches(AGENT_TEAM_OBJECTIVE_HINT).count(),
+            1,
+            "agent-team hint must appear exactly once on the inferred path"
+        );
+    }
+
+    #[test]
+    fn explicit_workstation_dispatch_flag_extracts_explicit_choice() {
+        assert_eq!(explicit_workstation_dispatch_flag(&json!({})), None);
+        assert_eq!(
+            explicit_workstation_dispatch_flag(&json!({"workstation_dispatch": true})),
+            Some(true)
+        );
+        assert_eq!(
+            explicit_workstation_dispatch_flag(&json!({"workstation_dispatch": false})),
+            Some(false)
+        );
+        // Non-bool values do not satisfy the strict opt-in/out contract.
+        assert_eq!(
+            explicit_workstation_dispatch_flag(&json!({"workstation_dispatch": "yes"})),
+            None
+        );
     }
 
     #[test]

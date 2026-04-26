@@ -2164,14 +2164,43 @@ async fn action_execute_internal(
 ) -> Result<ToolResult> {
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
-    // wave-15 / task 05 — workstation-dispatch v0 opt-in path. Only fires
-    // when the caller (or PLAN.lisp) explicitly opted in AND the resolved
-    // target is `mission_task_delegate`. Anything else falls through to
-    // the legacy plan-runner internal dispatch below.
-    if super::workstation_dispatch::opt_in_requested(args, hints.workstation_dispatch_opt_in())
-        && resolved.target == "mission_task_delegate"
-    {
-        let merged_hints = hints.to_workstation_hints().merge_args(args);
+    // wave-15 / task 05 + wave-16 / task 03 — workstation-dispatch routing.
+    // Wave-15 honours explicit opt-in (caller arg `workstation_dispatch=true`
+    // or PLAN.lisp `:workstation-dispatch true`). Wave-16 layers conservative
+    // auto-inference on top: when caller / plan are silent AND the resolved
+    // shape is unmistakably a ClaudeCode workstation task, the runner
+    // auto-enables. Explicit `workstation_dispatch=false` always wins and
+    // suppresses inference. We never `claude -p`; we never broaden the target
+    // whitelist; auto-inference is restricted to `mission_task_delegate`.
+    let merged_hints = hints.to_workstation_hints().merge_args(args);
+    let inference_ctx = super::workstation_dispatch::InferenceContext {
+        target: resolved.target,
+        dispatch_strategy: resolved.dispatch_strategy,
+        objective: merged_hints.objective.as_deref(),
+        owned_files_present: !merged_hints.owned_files.is_empty(),
+        scope_present: merged_hints
+            .scope
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        target_project_present: merged_hints
+            .target_project
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+        requested_cwd_present: merged_hints
+            .requested_cwd
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false),
+    };
+    let dispatch_decision = super::workstation_dispatch::evaluate_dispatch_decision(
+        args,
+        hints.workstation_dispatch_opt_in(),
+        &inference_ctx,
+    );
+
+    if dispatch_decision.is_enabled() {
         let outcome = super::workstation_dispatch::run_workstation_dispatch(
             state,
             plan,
@@ -2201,7 +2230,12 @@ async fn action_execute_internal(
                 );
             }
         }
-        return Ok(build_workstation_dispatch_response(plan, resolved, outcome));
+        return Ok(build_workstation_dispatch_response(
+            plan,
+            resolved,
+            outcome,
+            &dispatch_decision,
+        ));
     }
 
     let inner_args = match build_internal_dispatch_args(
@@ -2216,7 +2250,7 @@ async fn action_execute_internal(
     };
 
     if dry_run {
-        return Ok(ToolResult::json_pretty(&json!({
+        let mut payload = json!({
             "status": "dry_run",
             "execute_mode": "internal",
             "runner_status": "dry_run_no_dispatch",
@@ -2228,7 +2262,12 @@ async fn action_execute_internal(
             "dispatch_strategy_source": resolved.dispatch_strategy_source,
             "plan_hint_summary": resolved.plan_hint_summary,
             "would_dispatch": inner_args,
-        })));
+            "workstation_dispatch_source": dispatch_decision.source.as_str(),
+        });
+        if let Some(reason) = dispatch_decision.reason.as_deref() {
+            payload["workstation_dispatch_inference_reason"] = json!(reason);
+        }
+        return Ok(ToolResult::json_pretty(&payload));
     }
 
     let inner_result = match resolved.target {
@@ -2256,7 +2295,7 @@ async fn action_execute_internal(
     if inner_is_error {
         // Don't transition plan; just report the inner failure verbatim so the
         // caller can decide whether to retry, fix args, or escalate.
-        return Ok(ToolResult::json_pretty(&json!({
+        let mut payload = json!({
             "status": "dispatch_failed",
             "execute_mode": "internal",
             "runner_status": "inner_returned_error",
@@ -2268,7 +2307,12 @@ async fn action_execute_internal(
             "dispatch_strategy_source": resolved.dispatch_strategy_source,
             "plan_hint_summary": resolved.plan_hint_summary,
             "inner_result": inner_payload,
-        })));
+            "workstation_dispatch_source": dispatch_decision.source.as_str(),
+        });
+        if let Some(reason) = dispatch_decision.reason.as_deref() {
+            payload["workstation_dispatch_inference_reason"] = json!(reason);
+        }
+        return Ok(ToolResult::json_pretty(&payload));
     }
 
     // Successful dispatch — append evidence then transition plan to executing.
@@ -2368,6 +2412,7 @@ async fn action_execute_internal(
         evidence_path,
         evidence_error,
         status_update_error,
+        &dispatch_decision,
     ))
 }
 
@@ -2390,6 +2435,7 @@ fn build_workstation_dispatch_response(
     plan: &Plan,
     resolved: &ResolvedExec,
     outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
+    decision: &super::workstation_dispatch::DispatchDecision,
 ) -> ToolResult {
     let status = match &outcome {
         super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. } => "executing",
@@ -2415,7 +2461,18 @@ fn build_workstation_dispatch_response(
         "dispatch_strategy": resolved.dispatch_strategy,
         "dispatch_strategy_source": resolved.dispatch_strategy_source,
         "plan_hint_summary": resolved.plan_hint_summary,
+        // wave-16 / task 03 — surface the routing decision so callers can
+        // tell apart explicit opt-in (wave-15) from auto-inference (wave-16).
+        "workstation_dispatch_source": decision.source.as_str(),
     });
+    if let Some(reason) = decision.reason.as_deref() {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert(
+                "workstation_dispatch_inference_reason".to_string(),
+                json!(reason),
+            );
+        }
+    }
     if let Some(map) = extension.as_object() {
         if let Some(payload_map) = payload.as_object_mut() {
             for (k, v) in map {
@@ -2446,6 +2503,7 @@ fn build_internal_dispatch_success_response(
     evidence_path: Option<String>,
     evidence_error: Option<String>,
     status_update_error: Option<String>,
+    decision: &super::workstation_dispatch::DispatchDecision,
 ) -> ToolResult {
     let (status, runner_status) = if status_update_error.is_some() {
         ("dispatch_partial", "status_update_failed")
@@ -2466,7 +2524,11 @@ fn build_internal_dispatch_success_response(
         "plan_hint_summary": resolved.plan_hint_summary,
         "evidence_path": evidence_path,
         "inner_result": inner_payload,
+        "workstation_dispatch_source": decision.source.as_str(),
     });
+    if let Some(reason) = decision.reason.as_deref() {
+        payload["workstation_dispatch_inference_reason"] = json!(reason);
+    }
     if let Some(err) = evidence_error {
         payload["evidence_error"] = json!(err);
     }
@@ -3255,6 +3317,14 @@ mod tests {
         serde_json::from_str(&text).expect("valid json")
     }
 
+    fn fixture_decision_not_applicable(
+    ) -> crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+        crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+            source: crate::handlers::knowledge::workstation_dispatch::WorkstationDispatchSource::NotApplicable,
+            reason: None,
+        }
+    }
+
     #[test]
     fn success_response_clean_path_is_executing() {
         let plan = fixture_plan("(plan)");
@@ -3266,6 +3336,7 @@ mod tests {
             Some("/tmp/sidecar.json".to_string()),
             None,
             None,
+            &fixture_decision_not_applicable(),
         );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "executing");
@@ -3278,6 +3349,9 @@ mod tests {
         assert_eq!(v["dispatch_strategy"], "fresh-code-alignment");
         assert_eq!(v["dispatch_strategy_source"], "explicit_arg");
         assert_eq!(v["inner_result"]["ok"], true);
+        // wave-16 / task 03 — every legacy success response now carries
+        // the routing decision so callers always see the provenance.
+        assert_eq!(v["workstation_dispatch_source"], "not_applicable");
     }
 
     #[test]
@@ -3291,6 +3365,7 @@ mod tests {
             None,
             Some("mkdir failed: read-only fs".to_string()),
             None,
+            &fixture_decision_not_applicable(),
         );
         let v = parse_payload(&result);
         // Inner tool already produced durable side effects; we keep
@@ -3313,6 +3388,7 @@ mod tests {
             Some("/tmp/sidecar.json".to_string()),
             None,
             Some("DB error: connection lost".to_string()),
+            &fixture_decision_not_applicable(),
         );
         let v = parse_payload(&result);
         assert_ne!(v["status"], "executing");
@@ -3543,6 +3619,7 @@ mod tests {
             None,
             Some("disk full".to_string()),
             Some("DB error: timeout".to_string()),
+            &fixture_decision_not_applicable(),
         );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "dispatch_partial");
@@ -4512,6 +4589,15 @@ mod tests {
         assert_eq!(v["workstation_dispatch"], "true");
     }
 
+    fn fixture_decision(
+        source: crate::handlers::knowledge::workstation_dispatch::WorkstationDispatchSource,
+    ) -> crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+        crate::handlers::knowledge::workstation_dispatch::DispatchDecision {
+            source,
+            reason: Some("test fixture".to_string()),
+        }
+    }
+
     #[test]
     fn build_workstation_dispatch_response_dispatched_marks_status_executing() {
         use crate::handlers::knowledge::workstation_dispatch as wd;
@@ -4524,7 +4610,8 @@ mod tests {
             evidence_error: None,
             inner_payload: json!({"task_id": "btk-7"}),
         };
-        let result = build_workstation_dispatch_response(&plan, &resolved, outcome);
+        let decision = fixture_decision(wd::WorkstationDispatchSource::ExplicitArg);
+        let result = build_workstation_dispatch_response(&plan, &resolved, outcome, &decision);
         let v = parse_payload(&result);
         assert_eq!(v["status"], "executing");
         assert_eq!(v["runner_status"], "workstation_dispatch_v0");
@@ -4533,6 +4620,8 @@ mod tests {
         assert_eq!(v["workstation_dispatch_status"], "dispatched");
         assert_eq!(v["evidence_path"], "/tmp/sidecar.json");
         assert_eq!(v["inner_result"]["task_id"], "btk-7");
+        assert_eq!(v["workstation_dispatch_source"], "explicit_arg");
+        assert_eq!(v["workstation_dispatch_inference_reason"], "test fixture");
     }
 
     #[test]
@@ -4546,12 +4635,17 @@ mod tests {
             ),
             task_brief: None,
         };
-        let result = build_workstation_dispatch_response(&plan, &resolved, outcome);
+        let decision = fixture_decision(wd::WorkstationDispatchSource::Inferred);
+        let result = build_workstation_dispatch_response(&plan, &resolved, outcome, &decision);
         let v = parse_payload(&result);
         assert_ne!(v["status"], "executing");
         assert_eq!(v["status"], "dispatch_skipped");
         assert_eq!(v["workstation_dispatch_status"], "skipped_project_root_unresolved");
         assert!(v.get("inner_result").is_none());
+        // Even when the substrate refused, we surface that auto-inference
+        // routed the call so the caller sees both the routing decision and
+        // the safety failure side by side — never a silent prompt fallback.
+        assert_eq!(v["workstation_dispatch_source"], "inferred");
     }
 
     #[test]
@@ -4562,10 +4656,240 @@ mod tests {
         let outcome = wd::WorkstationDispatchOutcome::DryRun {
             task_brief: "## Objective\nship\n".to_string(),
         };
-        let result = build_workstation_dispatch_response(&plan, &resolved, outcome);
+        let decision = fixture_decision(wd::WorkstationDispatchSource::PlanHint);
+        let result = build_workstation_dispatch_response(&plan, &resolved, outcome, &decision);
         let v = parse_payload(&result);
         assert_eq!(v["status"], "dry_run");
         assert_eq!(v["workstation_dispatch_status"], "dry_run_no_dispatch");
+        assert_eq!(v["workstation_dispatch_source"], "plan_hint");
+    }
+
+    // ── wave-16 / task 03 — auto-inference integration with plan hints ──
+    //
+    // The decision is the composition of `ParsedPlanHints::to_workstation_hints`
+    // with `evaluate_dispatch_decision`. These tests exercise the full
+    // pipeline so a refactor that moves the merge point can't silently
+    // change the inference outcome.
+
+    /// Build the inference context the runner would build at this point —
+    /// keeps the test bodies short and pins the merge order.
+    fn build_inference_ctx<'a>(
+        target: &'a str,
+        dispatch_strategy: &'a str,
+        merged: &'a crate::handlers::knowledge::workstation_dispatch::WorkstationDispatchHints,
+    ) -> crate::handlers::knowledge::workstation_dispatch::InferenceContext<'a> {
+        crate::handlers::knowledge::workstation_dispatch::InferenceContext {
+            target,
+            dispatch_strategy,
+            objective: merged.objective.as_deref(),
+            owned_files_present: !merged.owned_files.is_empty(),
+            scope_present: merged
+                .scope
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false),
+            target_project_present: merged
+                .target_project
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false),
+            requested_cwd_present: merged
+                .requested_cwd
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false),
+        }
+    }
+
+    #[test]
+    fn auto_inference_fires_for_task_delegate_with_owned_files_and_strategy() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        // Hints come from a plan body that already has every signal — no
+        // explicit caller arg, no PLAN-level :workstation-dispatch flag.
+        let sexp = r#"
+            (plan
+              :objective "ship the wave"
+              :dispatch-strategy "fresh-code-alignment"
+              :owned-files ["a.rs" "b.rs"])
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints.to_workstation_hints().merge_args(&json!({}));
+        let ctx = build_inference_ctx("mission_task_delegate", "fresh-code-alignment", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::Inferred);
+        assert!(decision.is_enabled());
+    }
+
+    #[test]
+    fn auto_inference_disabled_by_explicit_workstation_dispatch_false() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        // Same hints as above — explicit false must still suppress.
+        let sexp = r#"
+            (plan
+              :objective "ship"
+              :dispatch-strategy "fresh-code-alignment"
+              :owned-files ["a.rs"])
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints
+            .to_workstation_hints()
+            .merge_args(&json!({"workstation_dispatch": false}));
+        let ctx = build_inference_ctx("mission_task_delegate", "fresh-code-alignment", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({"workstation_dispatch": false}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::Disabled);
+        assert!(!decision.is_enabled());
+    }
+
+    #[test]
+    fn explicit_workstation_dispatch_true_preserves_wave15_path() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        // Even with no scoping hints in PLAN.lisp, explicit true still
+        // routes through workstation-dispatch — wave-15 contract pin.
+        let hints = parse_plan_hints("(plan :objective \"ship\")");
+        let merged = hints
+            .to_workstation_hints()
+            .merge_args(&json!({"workstation_dispatch": true}));
+        let ctx = build_inference_ctx("mission_task_delegate", "unknown", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({"workstation_dispatch": true}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::ExplicitArg);
+        assert!(decision.is_enabled());
+    }
+
+    #[test]
+    fn auto_inference_skipped_when_strategy_unknown() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              :objective "ship"
+              :owned-files ["a.rs"])
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints.to_workstation_hints().merge_args(&json!({}));
+        // Strategy resolves to `unknown` because no :dispatch-strategy or
+        // :parallelism hint is supplied — same default the runner would
+        // arrive at via `resolve_dispatch_strategy`.
+        let ctx = build_inference_ctx("mission_task_delegate", "unknown", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn auto_inference_skipped_when_objective_missing() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              :dispatch-strategy "fresh-code-alignment"
+              :owned-files ["a.rs"])
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints.to_workstation_hints().merge_args(&json!({}));
+        let ctx = build_inference_ctx("mission_task_delegate", "fresh-code-alignment", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+        assert!(decision.reason.unwrap().contains("objective"));
+    }
+
+    #[test]
+    fn auto_inference_skipped_for_mission_execution_target() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              :objective "ship"
+              :dispatch-strategy "fresh-code-alignment"
+              :owned-files ["a.rs"])
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints.to_workstation_hints().merge_args(&json!({}));
+        let ctx = build_inference_ctx("mission_execution", "fresh-code-alignment", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn auto_inference_skipped_for_mission_flow_run_target() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let sexp = r#"
+            (plan
+              :objective "ship"
+              :dispatch-strategy "fresh-code-alignment"
+              :owned-files ["a.rs"])
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints.to_workstation_hints().merge_args(&json!({}));
+        let ctx = build_inference_ctx("mission_flow_run", "fresh-code-alignment", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+    }
+
+    #[test]
+    fn auto_inference_fires_for_agent_team_with_target_project_signal() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        // Scoping signal in this case is `target_project`, NOT owned_files.
+        let sexp = r#"
+            (plan
+              :objective "ship the wave"
+              :dispatch-strategy "agent-team"
+              :target-project "missiond")
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints.to_workstation_hints().merge_args(&json!({}));
+        let ctx = build_inference_ctx("mission_task_delegate", "agent-team", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::Inferred);
+    }
+
+    #[test]
+    fn auto_inference_skipped_when_no_scope_signal() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        // Objective + strategy + target are all fine, but NO scoping hint:
+        // no owned-files, no scope, no target-project, no requested-cwd.
+        let sexp = r#"
+            (plan
+              :objective "ship"
+              :dispatch-strategy "fresh-code-alignment")
+        "#;
+        let hints = parse_plan_hints(sexp);
+        let merged = hints.to_workstation_hints().merge_args(&json!({}));
+        let ctx = build_inference_ctx("mission_task_delegate", "fresh-code-alignment", &merged);
+        let decision = wd::evaluate_dispatch_decision(
+            &json!({}),
+            hints.workstation_dispatch_opt_in(),
+            &ctx,
+        );
+        assert_eq!(decision.source, wd::WorkstationDispatchSource::NotApplicable);
+        assert!(decision.reason.unwrap().contains("scoping signal"));
     }
 
     #[test]
