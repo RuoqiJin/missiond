@@ -44,6 +44,9 @@
 
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
+use missiond_core::event::events::ExecutionEvent;
+use missiond_core::event::log::{LogReadable, Seq};
+use missiond_core::event::Domain;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -308,6 +311,13 @@ pub(crate) struct EvidenceEntry {
     /// State-transition annotation for DAG node entries (`ready -> succeeded`,
     /// `ready -> failed`, etc.). Optional; callers that don't have one omit it.
     state_transition: Option<String>,
+    /// Wave-17 / task 06 — primary event-ref summary surfaced at the top of
+    /// the evidence entry (mirrors the leading `EventRef`'s status /
+    /// source so audit consumers can pivot without diving into the
+    /// `execution_events` array). Set via [`Self::with_primary_event_ref`].
+    event_ref_status: Option<String>,
+    event_ref_source: Option<String>,
+    event_ref_warning: Option<String>,
 }
 
 impl EvidenceEntry {
@@ -325,6 +335,9 @@ impl EvidenceEntry {
             commit_metadata: None,
             execution_events: Vec::new(),
             state_transition: None,
+            event_ref_status: None,
+            event_ref_source: None,
+            event_ref_warning: None,
         }
     }
 
@@ -405,6 +418,35 @@ impl EvidenceEntry {
         self
     }
 
+    /// Wave-17 / task 06 — surface the primary event-ref provenance at the
+    /// top level of the evidence entry. Mirrors what `add_execution_event`
+    /// would record on the leading `EventRef` so audit consumers can pivot
+    /// on `event_ref_status` / `event_ref_source` without iterating the
+    /// `execution_events` array.
+    ///
+    /// `warning` is emitted on the JSON envelope only when present (e.g.
+    /// "log query error: …" when the resolver had to fall back from the
+    /// log path to `unavailable`).
+    pub(crate) fn with_primary_event_ref(
+        mut self,
+        event_ref: &EventRef,
+        warning: Option<String>,
+    ) -> Self {
+        self.event_ref_status = Some(event_ref.status.as_wire().to_string());
+        self.event_ref_source = event_ref.source.clone();
+        self.event_ref_warning = warning.or_else(|| {
+            // Surface the unavailable_reason as the warning when no other
+            // explicit warning was passed in — keeps the failure surface
+            // visible without requiring the caller to duplicate it.
+            if matches!(event_ref.status, EventRefStatus::Unavailable) {
+                event_ref.unavailable_reason.clone()
+            } else {
+                None
+            }
+        });
+        self
+    }
+
     /// Drop an arbitrary key/value into the entry. Used for fields not
     /// covered by typed setters (legacy passthrough — `target_tool`,
     /// `dispatch_strategy`, `node_id`, `plan_hint_summary`, etc.).
@@ -458,6 +500,9 @@ impl EvidenceEntry {
             commit_metadata,
             execution_events,
             state_transition,
+            event_ref_status,
+            event_ref_source,
+            event_ref_warning,
         } = self;
 
         let mut m = Map::new();
@@ -478,6 +523,15 @@ impl EvidenceEntry {
         }
         if let Some(v) = commit_metadata {
             m.insert("commit".to_string(), v);
+        }
+        if let Some(s) = event_ref_status {
+            m.insert("event_ref_status".to_string(), Value::String(s));
+        }
+        if let Some(s) = event_ref_source {
+            m.insert("event_ref_source".to_string(), Value::String(s));
+        }
+        if let Some(w) = event_ref_warning {
+            m.insert("event_ref_warning".to_string(), Value::String(w));
         }
         if !execution_events.is_empty() {
             let arr: Vec<Value> = execution_events.into_iter().map(EventRef::into_json).collect();
@@ -704,6 +758,29 @@ pub(crate) const EVENT_REF_CACHE_CAP: usize = 1024;
 pub(crate) const EVENT_REF_RESOLVER_MISS_REASON: &str =
     "event ref not in resolver cache";
 
+/// Reason stamped when neither the cache nor the persistent event log can
+/// produce a matching `PlanNodeStateChanged` ref. Surfaces on the
+/// `unavailable_reason` field so audit consumers can distinguish a clean
+/// "no event ever recorded" miss from a transient query error
+/// ([`EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX`] below).
+pub(crate) const EVENT_REF_LOG_QUERY_MISS_REASON: &str =
+    "event ref not in resolver cache or event log";
+
+/// Prefix stamped when the log-query path itself errored (DB unavailable,
+/// pg feature off, etc.). The full reason format is
+/// `<prefix>: <underlying error>` so consumers can pivot on the prefix
+/// without parsing the inner detail.
+pub(crate) const EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX: &str =
+    "event ref log-query error";
+
+/// Bound on the number of execution-domain rows the resolver will scan when
+/// looking for a `PlanNodeStateChanged` match. The scan is read-only and
+/// happens off the dispatch hot path (only when the cache misses) — sized
+/// so a few hundred recent transitions are always reachable while a long
+/// history replay can never balloon a single lookup. Adjust upward only if
+/// the dispatch fan-out grows past this within the cache miss window.
+pub(crate) const EVENT_REF_LOG_QUERY_SCAN_LIMIT: usize = 512;
+
 /// Cached event entry — what the subscriber stored alongside the
 /// correlation key. Currently just the (source, kind, event_id) triple
 /// surfaced as `EventRef`. Kept as a separate struct so the cache value
@@ -843,6 +920,116 @@ impl EventRefResolver {
         match g.map.get(&key) {
             Some(c) => EventRef::from_log(c.source.clone(), c.kind.clone(), c.event_id.clone()),
             None => EventRef::unavailable(EVENT_REF_RESOLVER_MISS_REASON),
+        }
+    }
+
+    /// Three-tier lookup: live in-memory cache, then a bounded read-only
+    /// scan of the persistent event log (`Domain::Execution` rows newer
+    /// than `Seq(0)`, capped at [`EVENT_REF_LOG_QUERY_SCAN_LIMIT`]),
+    /// then `EventRef::unavailable(...)` with a descriptive reason.
+    ///
+    /// Wave-17 / task 06: the persistent path lets evidence refs survive
+    /// daemon restarts — once a `PlanNodeStateChanged` was committed to
+    /// the event log, any later evidence write can recover it through
+    /// this method even though the in-memory cache (`EventRefResolver`)
+    /// was dropped on restart.
+    ///
+    /// Contract:
+    ///   * Cache hit returns immediately with `EventRef::from_log` (no
+    ///     log scan triggered).
+    ///   * Cache miss triggers `LogReadable::read_from(Domain::Execution,
+    ///     Seq(0), EVENT_REF_LOG_QUERY_SCAN_LIMIT)`. We scan the result
+    ///     for `PlanNodeStateChanged` payloads whose deterministic
+    ///     correlation tuple matches the requested key. First match wins
+    ///     (rows are ordered by `seq` ASC; matching is exact on
+    ///     plan_id/node_id/from/to and `attempt` if the row carried one).
+    ///   * Log query failure returns `EventRef::unavailable` with reason
+    ///     `<EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX>: <error>` — the
+    ///     primary dispatch must NEVER fail because of this.
+    ///   * No match returns `EventRef::unavailable(EVENT_REF_LOG_QUERY_MISS_REASON)`.
+    ///
+    /// `attempt` is matched when the persisted row carries a non-empty
+    /// `attempt` field; rows without an `attempt` are accepted as
+    /// matches for any caller `attempt` (mirrors the `attempt: Option<u32>`
+    /// shape on `ExecutionEvent::PlanNodeStateChanged` — early producers
+    /// may not populate it).
+    pub(crate) async fn lookup_or_query_plan_node_state_change(
+        &self,
+        log: &dyn LogReadable,
+        plan_id: &str,
+        node_id: &str,
+        attempt: u32,
+        from: &str,
+        to: &str,
+    ) -> EventRef {
+        // Tier 1 — live in-memory cache.
+        let cached = self.lookup_plan_node_state_change(plan_id, node_id, attempt, from, to);
+        if cached.status == EventRefStatus::Log {
+            return cached;
+        }
+        // Tier 2 — bounded read-only scan of the persistent log.
+        match log
+            .read_from(Domain::Execution, Seq(0), EVENT_REF_LOG_QUERY_SCAN_LIMIT)
+            .await
+        {
+            Ok(rows) => {
+                for row in rows.into_iter().rev() {
+                    // Iterate newest-first so the latest matching row wins
+                    // when the same correlation tuple was published more
+                    // than once (e.g. attempt re-emit after a partial
+                    // failure).
+                    if row.kind != "plan_node_state_changed" {
+                        continue;
+                    }
+                    let ev: ExecutionEvent =
+                        match serde_json::from_value(row.payload.clone()) {
+                            Ok(e) => e,
+                            Err(_) => continue,
+                        };
+                    if let ExecutionEvent::PlanNodeStateChanged {
+                        plan_id: rp,
+                        node_id: rn,
+                        from: rf,
+                        to: rt,
+                        attempt: ra,
+                        ..
+                    } = ev
+                    {
+                        if rp != plan_id || rn != node_id || rf != from || rt != to {
+                            continue;
+                        }
+                        if let Some(ra) = ra {
+                            if ra != attempt {
+                                continue;
+                            }
+                        }
+                        // Match. Populate the cache so subsequent lookups
+                        // skip the scan.
+                        let seq_id = row.seq.0.to_string();
+                        self.record_plan_node_state_change(
+                            plan_id,
+                            node_id,
+                            attempt,
+                            from,
+                            to,
+                            "execution",
+                            "plan_node_state_changed",
+                            seq_id.clone(),
+                        );
+                        return EventRef::from_log(
+                            "execution",
+                            "plan_node_state_changed",
+                            seq_id,
+                        );
+                    }
+                }
+                // Tier 3 — no match in the log either.
+                EventRef::unavailable(EVENT_REF_LOG_QUERY_MISS_REASON)
+            }
+            Err(err) => EventRef::unavailable(format!(
+                "{}: {}",
+                EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX, err
+            )),
         }
     }
 
@@ -1098,6 +1285,316 @@ mod tests {
         assert_eq!(
             key,
             "plan-node:11111111-1111-1111-1111-111111111111:node-A:3:running-succeeded"
+        );
+    }
+
+    // ── wave-17 / task 06 :: log-query path ─────────────────────────────
+
+    /// Stub `LogReadable` that returns a caller-supplied list of rows on
+    /// every `read_from`. Lets us exercise the log-query branch of
+    /// [`EventRefResolver::lookup_or_query_plan_node_state_change`] without
+    /// standing up a real PG `LogWriter`. The stub is `Send + Sync` and
+    /// tracks the call count so tests can assert that a cache hit DOES
+    /// NOT trigger a log scan.
+    #[derive(Default)]
+    struct StubLog {
+        rows: Vec<missiond_core::event::log::LoggedEvent>,
+        err: Option<String>,
+        calls: std::sync::atomic::AtomicUsize,
+    }
+    #[async_trait::async_trait]
+    impl missiond_core::event::log::LogReadable for StubLog {
+        async fn read_from(
+            &self,
+            _domain: missiond_core::event::Domain,
+            _after: missiond_core::event::log::Seq,
+            _limit: usize,
+        ) -> Result<
+            Vec<missiond_core::event::log::LoggedEvent>,
+            missiond_core::event::log::LogError,
+        > {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if let Some(e) = &self.err {
+                return Err(missiond_core::event::log::LogError::Other(e.clone()));
+            }
+            Ok(self.rows.clone())
+        }
+        async fn head_seq(
+            &self,
+        ) -> Result<missiond_core::event::log::Seq, missiond_core::event::log::LogError> {
+            Ok(missiond_core::event::log::Seq(
+                self.rows.last().map(|r| r.seq.0).unwrap_or(0),
+            ))
+        }
+    }
+
+    fn fixture_plan_node_logged_event(
+        seq: i64,
+        plan_id: &str,
+        node_id: &str,
+        attempt: Option<u32>,
+        from: &str,
+        to: &str,
+    ) -> missiond_core::event::log::LoggedEvent {
+        let payload = json!({
+            "PlanNodeStateChanged": {
+                "plan_id": plan_id,
+                "node_id": node_id,
+                "from": from,
+                "to": to,
+                "attempt": attempt,
+            }
+        });
+        missiond_core::event::log::LoggedEvent {
+            seq: missiond_core::event::log::Seq(seq),
+            domain: missiond_core::event::Domain::Execution,
+            kind: "plan_node_state_changed".to_string(),
+            payload,
+            producer_id: "test/plan_dag".to_string(),
+            dedupe_key: None,
+            causation_depth: 0,
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
+            ts: chrono::Utc::now(),
+            ephemeral: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn resolver_log_query_returns_log_ref_after_cache_miss() {
+        let resolver = EventRefResolver::new();
+        let plan_id = "11111111-1111-1111-1111-111111111111";
+        let log = StubLog {
+            rows: vec![fixture_plan_node_logged_event(
+                123,
+                plan_id,
+                "n1",
+                Some(1),
+                "ready",
+                "running",
+            )],
+            ..Default::default()
+        };
+        let r = resolver
+            .lookup_or_query_plan_node_state_change(&log, plan_id, "n1", 1, "ready", "running")
+            .await;
+        assert_eq!(r.status, EventRefStatus::Log);
+        assert_eq!(r.event_id.as_deref(), Some("123"));
+        assert_eq!(r.source.as_deref(), Some("execution"));
+        assert_eq!(r.kind.as_deref(), Some("plan_node_state_changed"));
+        // Subsequent lookup must NOT re-scan the log — the cache should
+        // have been populated by the previous call.
+        let calls_before = log.calls.load(std::sync::atomic::Ordering::Relaxed);
+        let r2 = resolver
+            .lookup_or_query_plan_node_state_change(&log, plan_id, "n1", 1, "ready", "running")
+            .await;
+        assert_eq!(r2.status, EventRefStatus::Log);
+        assert_eq!(r2.event_id.as_deref(), Some("123"));
+        let calls_after = log.calls.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            calls_before, calls_after,
+            "cache hit must not trigger a log scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_live_cache_wins_over_log_query() {
+        // Pre-populate the cache with a different seq than what the log
+        // would return. The cache must win, and the log must NOT be hit.
+        let resolver = EventRefResolver::new();
+        let plan_id = "22222222-2222-2222-2222-222222222222";
+        resolver.record_plan_node_state_change(
+            plan_id,
+            "n1",
+            1,
+            "ready",
+            "running",
+            "execution",
+            "plan_node_state_changed",
+            "999",
+        );
+        let log = StubLog {
+            rows: vec![fixture_plan_node_logged_event(
+                123,
+                plan_id,
+                "n1",
+                Some(1),
+                "ready",
+                "running",
+            )],
+            ..Default::default()
+        };
+        let r = resolver
+            .lookup_or_query_plan_node_state_change(&log, plan_id, "n1", 1, "ready", "running")
+            .await;
+        assert_eq!(r.status, EventRefStatus::Log);
+        assert_eq!(
+            r.event_id.as_deref(),
+            Some("999"),
+            "cache value wins over log query"
+        );
+        assert_eq!(
+            log.calls.load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "cache hit must short-circuit the log scan"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_log_query_returns_unavailable_on_no_match() {
+        let resolver = EventRefResolver::new();
+        let log = StubLog {
+            rows: vec![fixture_plan_node_logged_event(
+                7,
+                "other-plan",
+                "other-node",
+                Some(1),
+                "ready",
+                "running",
+            )],
+            ..Default::default()
+        };
+        let r = resolver
+            .lookup_or_query_plan_node_state_change(
+                &log,
+                "missing-plan",
+                "missing-node",
+                1,
+                "ready",
+                "running",
+            )
+            .await;
+        assert_eq!(r.status, EventRefStatus::Unavailable);
+        assert_eq!(
+            r.unavailable_reason.as_deref(),
+            Some(EVENT_REF_LOG_QUERY_MISS_REASON),
+            "no match in cache or log surfaces the canonical miss reason"
+        );
+        assert!(r.event_id.is_none());
+    }
+
+    #[tokio::test]
+    async fn resolver_log_query_error_degrades_to_unavailable_with_warning() {
+        let resolver = EventRefResolver::new();
+        let log = StubLog {
+            err: Some("db connection refused".to_string()),
+            ..Default::default()
+        };
+        let r = resolver
+            .lookup_or_query_plan_node_state_change(
+                &log,
+                "p",
+                "n1",
+                1,
+                "ready",
+                "running",
+            )
+            .await;
+        assert_eq!(
+            r.status,
+            EventRefStatus::Unavailable,
+            "query error must NEVER fail the caller"
+        );
+        let reason = r.unavailable_reason.expect("reason set on query error");
+        assert!(
+            reason.starts_with(EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX),
+            "reason must carry the canonical prefix; got: {reason}"
+        );
+        assert!(
+            reason.contains("db connection refused"),
+            "reason must include the underlying error; got: {reason}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_log_query_picks_newest_match_when_attempt_repeats() {
+        // Two rows for the same correlation tuple — newest wins so the
+        // recovered ref points at the latest emit.
+        let resolver = EventRefResolver::new();
+        let plan_id = "33333333-3333-3333-3333-333333333333";
+        let log = StubLog {
+            rows: vec![
+                fixture_plan_node_logged_event(10, plan_id, "n1", Some(1), "ready", "running"),
+                fixture_plan_node_logged_event(20, plan_id, "n1", Some(1), "ready", "running"),
+            ],
+            ..Default::default()
+        };
+        let r = resolver
+            .lookup_or_query_plan_node_state_change(&log, plan_id, "n1", 1, "ready", "running")
+            .await;
+        assert_eq!(r.status, EventRefStatus::Log);
+        assert_eq!(
+            r.event_id.as_deref(),
+            Some("20"),
+            "newest matching seq wins"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolver_log_query_accepts_row_without_attempt() {
+        // Producer that omits `attempt` should still be matched as an
+        // any-attempt row (mirrors `attempt: Option<u32>` on the event).
+        let resolver = EventRefResolver::new();
+        let plan_id = "44444444-4444-4444-4444-444444444444";
+        let log = StubLog {
+            rows: vec![fixture_plan_node_logged_event(
+                42, plan_id, "n1", None, "ready", "running",
+            )],
+            ..Default::default()
+        };
+        let r = resolver
+            .lookup_or_query_plan_node_state_change(&log, plan_id, "n1", 1, "ready", "running")
+            .await;
+        assert_eq!(r.status, EventRefStatus::Log);
+        assert_eq!(r.event_id.as_deref(), Some("42"));
+    }
+
+    // ── wave-17 / task 06 :: top-level event_ref_* surface ──────────────
+
+    #[test]
+    fn primary_event_ref_surface_emits_status_source_for_live() {
+        let r = EventRef::live("execution", "plan_node_state_changed", "42");
+        let v = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, kind::DISPATCH)
+            .with_primary_event_ref(&r, None)
+            .add_execution_event(r)
+            .into_json();
+        assert_eq!(v["event_ref_status"], "live");
+        assert_eq!(v["event_ref_source"], "execution");
+        assert!(
+            v.get("event_ref_warning").is_none(),
+            "live ref with no warning omits the warning key"
+        );
+    }
+
+    #[test]
+    fn primary_event_ref_surface_emits_status_source_for_log() {
+        let r = EventRef::from_log("execution", "plan_node_state_changed", "77");
+        let v = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, kind::DISPATCH)
+            .with_primary_event_ref(&r, Some("recovered from event log".to_string()))
+            .add_execution_event(r)
+            .into_json();
+        assert_eq!(v["event_ref_status"], "log");
+        assert_eq!(v["event_ref_source"], "execution");
+        assert_eq!(v["event_ref_warning"], "recovered from event log");
+    }
+
+    #[test]
+    fn primary_event_ref_surface_lifts_unavailable_reason_when_no_explicit_warning() {
+        let r = EventRef::unavailable(EVENT_REF_LOG_QUERY_MISS_REASON);
+        let v = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, kind::DISPATCH)
+            .with_primary_event_ref(&r, None)
+            .add_execution_event(r)
+            .into_json();
+        assert_eq!(v["event_ref_status"], "unavailable");
+        assert!(
+            v.get("event_ref_source").is_none(),
+            "unavailable ref carries no source"
+        );
+        assert_eq!(
+            v["event_ref_warning"],
+            EVENT_REF_LOG_QUERY_MISS_REASON,
+            "unavailable_reason is lifted as the warning when no explicit warning is set"
         );
     }
 

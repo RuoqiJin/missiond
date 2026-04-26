@@ -4036,6 +4036,44 @@ async fn publish_plan_node_state_change(
             None,
         ),
         Err(err) => {
+            // Wave-17 / task 06 — try the resolver before surrendering to
+            // the deterministic-id fallback. The resolver checks its
+            // in-memory cache first (a previous attempt for the same
+            // transition may already have cached a real `Seq`), then
+            // falls through to a bounded read-only scan of the persistent
+            // event log so refs survive daemon restarts. Lookup failure
+            // NEVER aborts the dispatch — on every error path we keep the
+            // deterministic id so the audit trail still carries a stable
+            // correlation key.
+            let plan_id_str = plan_id.to_string();
+            let recovered = state
+                .bus
+                .event_ref_resolver
+                .lookup_or_query_plan_node_state_change(
+                    state.bus.log.as_ref(),
+                    &plan_id_str,
+                    &node.id,
+                    attempt,
+                    from,
+                    to,
+                )
+                .await;
+            if recovered.status == evidence_collector::EventRefStatus::Log {
+                let warning = format!(
+                    "plan_node_state_changed bus publish failed for {} ({} -> {}): {}; \
+                     evidence ref recovered from event log",
+                    node.id, from, to, err
+                );
+                tracing::warn!(
+                    plan_id = %plan_id,
+                    node_id = %node.id,
+                    from = %from,
+                    to = %to,
+                    error = %err,
+                    "DAG scheduler: PlanNodeStateChanged bus publish failed; recovered event ref from log"
+                );
+                return (recovered, Some(warning));
+            }
             let warning = format!(
                 "plan_node_state_changed bus publish failed for {} ({} -> {}): {}; \
                  evidence ref falls back to deterministic id `{}`",
@@ -4114,14 +4152,15 @@ async fn emit_evidence_running(
         None,
     )
     .await;
-    if let Some(w) = warning {
-        outcome.bus_publish_warnings.push(w);
+    if let Some(w) = &warning {
+        outcome.bus_publish_warnings.push(w.clone());
     }
     let entry = EvidenceEntry::new(
         evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
         evidence_collector::kind::DISPATCH,
     )
     .with_state_transition("ready -> running")
+    .with_primary_event_ref(&event_ref, warning)
     .add_execution_event(event_ref)
     .with_extra("scheduler_mode", json!("dag_v1"))
     .with_extra("node_id", json!(node.id))
@@ -4201,13 +4240,14 @@ async fn emit_evidence_finished(
         reason,
     )
     .await;
-    if let Some(w) = warning {
-        outcome.bus_publish_warnings.push(w);
+    if let Some(w) = &warning {
+        outcome.bus_publish_warnings.push(w.clone());
     }
     let mut entry = EvidenceEntry::new(
         evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
         evidence_collector::kind::DISPATCH,
     )
+    .with_primary_event_ref(&event_ref, warning)
     .add_execution_event(event_ref)
     .with_extra("scheduler_mode", json!("dag_v1"))
     .with_extra("node_id", json!(node.id))
@@ -7814,6 +7854,107 @@ mod tests {
         assert_eq!(ev["source"], "execution");
         assert_eq!(ev["kind"], "plan_node_state_changed");
         assert!(ev.get("unavailable").is_none());
+    }
+
+    // ── wave-17 / Task 06 :: persistent event-log query ─────────────────
+
+    /// Wave-17 / Task 06: when the in-memory cache misses but the
+    /// persistent event log carries a matching `PlanNodeStateChanged`
+    /// row, the resolver must recover the ref and the evidence entry
+    /// must surface `event_ref_status=log` plus the leading
+    /// `execution_events[0].status=log`. This pins the contract that
+    /// event refs survive daemon restarts (the in-memory cache is
+    /// dropped on restart but the event log persists).
+    #[tokio::test]
+    async fn dag_node_dispatch_evidence_recovers_event_ref_from_log_after_cache_miss() {
+        use evidence_collector::EventRefResolver;
+        use missiond_core::event::log::{LogError, LogReadable, LoggedEvent, Seq};
+        use missiond_core::event::Domain;
+
+        // A tiny `LogReadable` stub that returns one matching row. Matches
+        // the post-restart shape: cache empty, log carries the prior emit.
+        struct OneRowLog(LoggedEvent);
+        #[async_trait::async_trait]
+        impl LogReadable for OneRowLog {
+            async fn read_from(
+                &self,
+                _domain: Domain,
+                _after: Seq,
+                _limit: usize,
+            ) -> Result<Vec<LoggedEvent>, LogError> {
+                Ok(vec![self.0.clone()])
+            }
+            async fn head_seq(&self) -> Result<Seq, LogError> {
+                Ok(self.0.seq)
+            }
+        }
+
+        let node = fixture_dag_node("n7", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let plan_id_str = plan.id.to_string();
+        let row = LoggedEvent {
+            seq: Seq(314),
+            domain: Domain::Execution,
+            kind: "plan_node_state_changed".to_string(),
+            payload: json!({
+                "PlanNodeStateChanged": {
+                    "plan_id": plan_id_str,
+                    "node_id": node.id,
+                    "from": "ready",
+                    "to": "succeeded",
+                    "attempt": PLAN_NODE_DEFAULT_ATTEMPT,
+                }
+            }),
+            producer_id: "test/plan_dag".to_string(),
+            dedupe_key: None,
+            causation_depth: 0,
+            trace_id: None,
+            span_id: None,
+            parent_span_id: None,
+            ts: chrono::Utc::now(),
+            ephemeral: false,
+        };
+        let log = OneRowLog(row);
+
+        // Empty resolver — cache miss forces the log-query path.
+        let resolver = EventRefResolver::new();
+        let event_ref = resolver
+            .lookup_or_query_plan_node_state_change(
+                &log,
+                &plan_id_str,
+                &node.id,
+                PLAN_NODE_DEFAULT_ATTEMPT,
+                "ready",
+                "succeeded",
+            )
+            .await;
+
+        // Build the evidence entry the way `emit_evidence_finished` would.
+        let entry = EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_state_transition("ready -> succeeded")
+        .with_primary_event_ref(&event_ref, None)
+        .add_execution_event(event_ref)
+        .into_json();
+
+        // Top-level surface fields carry the log provenance.
+        assert_eq!(
+            entry["event_ref_status"], "log",
+            "log-recovered ref surfaces status=log at top level"
+        );
+        assert_eq!(entry["event_ref_source"], "execution");
+        assert!(
+            entry.get("event_ref_warning").is_none(),
+            "no warning when recovery succeeded"
+        );
+        // Per-event entry mirrors the same provenance.
+        let ev = &entry["execution_events"][0];
+        assert_eq!(ev["status"], "log");
+        assert_eq!(ev["event_id"], "314");
+        assert_eq!(ev["source"], "execution");
+        assert_eq!(ev["kind"], "plan_node_state_changed");
     }
 
     // ── wave-13 / 02 :: v2 scheduler runtime — pure tests ────────────
