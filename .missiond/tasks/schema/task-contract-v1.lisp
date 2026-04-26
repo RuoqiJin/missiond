@@ -41,6 +41,17 @@
     :input ".missiond/tasks/**/*.lisp"
     :output ".missiond/claudecode/<task-id>.md"
     :default "refuse overwrite unless --force"
+    :machine-context-rendered
+      ["task :kind / :status / :owner"
+       ":dispatch-strategy when present"
+       ":depends-on as code-fenced ids"
+       "shared-memory ledger path .missiond/tasks/<wave>/shared-memory.lisp when the file exists on disk"
+       "expected report-contract path .missiond/tasks/<wave>/reports/<task-id>.report.lisp when the wave id is derivable"
+       "verify-task-contract command line in the Commit section when :commit :required is true"
+       "literal '使用 agent-team提高效率' rendered exactly once in a 'Dispatch Note' section when :dispatch-strategy is agent-team"]
+    :backward-compatibility
+      ["existing fields (kind/status/owner/dispatch_strategy/depends_on/Goal/Ownership/Must Not Touch/Requirements/Acceptance Commands/Commit/Report) keep their prior wording and ordering"
+       "new sections (Dispatch Note, Shared Memory, Report Contract, verify-task-contract command) are additive and conditional"]
     :non-goal "renderer does not invent scope, acceptance, or commit policy; missing fields are checker errors")
 
   (verifier-contract
