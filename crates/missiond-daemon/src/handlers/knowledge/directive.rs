@@ -31,7 +31,10 @@ use crate::handlers::knowledge::file_artifacts::{
 };
 use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
-    parse_resolution_review_question_id, parse_review_gate_policy, review_gate_policy_was_explicit,
+    parse_resolution_review_question_id, parse_review_gate_policy,
+    parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
+    review_gate_policy_was_explicit, stamp_needs_changes_next_step, stamp_resolution_payload,
+    validate_review_resolution_envelope, ResolutionOutcome, ReviewResolutionInput,
 };
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
@@ -787,9 +790,35 @@ async fn action_version_chain(state: &AppState, args: &Value) -> Result<ToolResu
 // approve / archive — control actions
 // ───────────────────────────────────────────────────────────────────────
 
+/// Action whitelist for the directive surface — the parsed
+/// `review:directive:<id>:v<v>:<action>` envelope's `<action>` segment
+/// must be in this list before we accept the resolution. We deliberately
+/// scope to manager actions that change persisted state (compile / approve
+/// / archive); `version_chain` / `get` / `list` never resolve a gate.
+const DIRECTIVE_REVIEW_ACTIONS: &[&str] = &["compile", "approve", "archive"];
+
 async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "directive_id")?;
     let version = require_i32(args, "version")?;
+
+    // wave-15 :: explicit resolution bridge. When the caller supplies
+    // `review_question_id` + `review_decision` we validate the envelope
+    // BEFORE mutating state. `Rejected` / `NeedsChanges` skip the DB
+    // transition entirely (the artifact stays non-approved); `Approved`
+    // proceeds with the existing manager transition.
+    let resolution = match parse_review_resolution_input(args) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(e.code(), e.message()),
+            ))
+        }
+    };
+
+    if let Some(input) = resolution {
+        return action_approve_with_resolution(state, id, version, input).await;
+    }
+
     state
         .store
         .directive_approve(id, version)
@@ -800,7 +829,8 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         "directive_id": id,
         "version": version,
     });
-    // wave-11/14 resolution path — opt-in via `review_question_id`. The DB
+    // wave-11/14 quiet emit path — kept for callers that fire a Resolved
+    // event without the wave-15 decision-bearing envelope. The DB
     // mutation already committed; bus failures only surface a warning so
     // the approve never fails on a side-channel error.
     let qid = parse_resolution_review_question_id(args);
@@ -815,9 +845,123 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
     Ok(ToolResult::json_pretty(&payload))
 }
 
+/// Wave-15 explicit resolution bridge for `action=approve`. Validates the
+/// review envelope (scope / artifact / version / action), then performs
+/// the manager transition only when the decision is `approved`.
+async fn action_approve_with_resolution(
+    state: &AppState,
+    id: uuid::Uuid,
+    version: i32,
+    input: ReviewResolutionInput,
+) -> Result<ToolResult> {
+    // Parse the deterministic id envelope.
+    let parsed = match parse_review_question_id_struct(&input.question_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    // Source the current artifact version from the chain head so the
+    // staleness check is anchored to the latest persisted draft / version.
+    let chain = state
+        .store
+        .directive_get_version_chain(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let current_version = match chain.iter().last() {
+        Some(d) => d.version,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("directive `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    if version != current_version {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "STALE_REVIEW_VERSION",
+                format!(
+                    "approve `version=v{}` does not match directive `{}` head `v{}`",
+                    version, id, current_version
+                ),
+            ),
+        ));
+    }
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "directive",
+        &id.to_string(),
+        current_version,
+        DIRECTIVE_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "directive_id": id,
+        "version": version,
+    });
+
+    match input.decision.outcome() {
+        ResolutionOutcome::PerformTransition => {
+            state
+                .store
+                .directive_approve(id, version)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            payload["status"] = json!("approved");
+        }
+        ResolutionOutcome::KeepArtifact => {
+            // rejected — leave the artifact at its current status. We do
+            // not down-convert (e.g. force back to Draft) because the
+            // file-first SSOT contract says transitions are append-only;
+            // we just refuse to advance.
+            payload["status"] = json!("review_rejected");
+        }
+        ResolutionOutcome::RequestChanges => {
+            payload["status"] = json!("review_needs_changes");
+            stamp_needs_changes_next_step(&mut payload, "directive", "compile");
+        }
+    }
+
+    stamp_resolution_payload(&mut payload, &input);
+    let resolution_str = resolution_wire_string(input.decision);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        Some(&input.question_id),
+        resolution_str,
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
 async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "directive_id")?;
     let version = require_i32(args, "version")?;
+
+    // wave-15 :: explicit resolution bridge — see `action_approve` above.
+    let resolution = match parse_review_resolution_input(args) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(e.code(), e.message()),
+            ))
+        }
+    };
+
+    if let Some(input) = resolution {
+        return action_archive_with_resolution(state, id, version, input).await;
+    }
+
     state
         .store
         .directive_update_status(id, version, DirectiveStatus::Archived)
@@ -834,6 +978,99 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
         &state.bus,
         qid.as_deref(),
         "archived",
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
+/// Wave-15 explicit resolution bridge for `action=archive`. Same envelope
+/// validation as approve; on `approved` decision we perform the archive
+/// transition; on `rejected`/`needs_changes` the directive stays at its
+/// current status.
+async fn action_archive_with_resolution(
+    state: &AppState,
+    id: uuid::Uuid,
+    version: i32,
+    input: ReviewResolutionInput,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&input.question_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let chain = state
+        .store
+        .directive_get_version_chain(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let current_version = match chain.iter().last() {
+        Some(d) => d.version,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("directive `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    if version != current_version {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "STALE_REVIEW_VERSION",
+                format!(
+                    "archive `version=v{}` does not match directive `{}` head `v{}`",
+                    version, id, current_version
+                ),
+            ),
+        ));
+    }
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "directive",
+        &id.to_string(),
+        current_version,
+        DIRECTIVE_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "directive_id": id,
+        "version": version,
+    });
+
+    match input.decision.outcome() {
+        ResolutionOutcome::PerformTransition => {
+            state
+                .store
+                .directive_update_status(id, version, DirectiveStatus::Archived)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            payload["status"] = json!("archived");
+        }
+        ResolutionOutcome::KeepArtifact => {
+            payload["status"] = json!("review_rejected");
+        }
+        ResolutionOutcome::RequestChanges => {
+            payload["status"] = json!("review_needs_changes");
+            stamp_needs_changes_next_step(&mut payload, "directive", "compile");
+        }
+    }
+
+    stamp_resolution_payload(&mut payload, &input);
+    let resolution_str = resolution_wire_string(input.decision);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        Some(&input.question_id),
+        resolution_str,
         None,
     )
     .await;
@@ -1165,5 +1402,179 @@ mod tests {
         // We surface Some("  ") at the extraction layer; the caller
         // (`maybe_write_directive_artifact`) is what trims-and-rejects.
         assert_eq!(f.topic, Some("  "));
+    }
+
+    // ── wave-15 :: directive resolution bridge — pure handler-shape ─────
+    //
+    // These tests pin the directive surface's resolution-path contract
+    // without an AppState (DB read for `directive_get_version_chain` is
+    // exercised by the daemon test suite; here we drive the deterministic
+    // branch logic that the resolution helpers compose).
+    use crate::handlers::knowledge::review_gate::{
+        parse_review_question_id_struct, parse_review_resolution_input,
+        stamp_needs_changes_next_step, stamp_resolution_payload,
+        validate_review_resolution_envelope, ResolutionInputError,
+        ReviewDecision, ReviewResolutionInput,
+    };
+
+    #[test]
+    fn directive_action_whitelist_pins_the_three_state_changing_actions() {
+        // Pin the action whitelist for the directive surface. If we add a
+        // new state-changing action (e.g. supersede on directive), this
+        // test must be updated in lockstep with the resolution wiring.
+        assert_eq!(DIRECTIVE_REVIEW_ACTIONS, &["compile", "approve", "archive"]);
+    }
+
+    #[test]
+    fn directive_resolution_input_missing_decision_rejected_at_handler_boundary() {
+        // approve handler-shape: qid present without decision must surface
+        // the structured MISSING_PARAM error and never run the transition.
+        let args = json!({
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+            "review_question_id": "review:directive:00000000-0000-0000-0000-000000000abc:v1:approve",
+        });
+        let err = parse_review_resolution_input(&args).unwrap_err();
+        assert_eq!(err, ResolutionInputError::MissingDecision);
+    }
+
+    #[test]
+    fn directive_resolution_envelope_accepts_canonical_approve() {
+        // The handler builds this envelope; here we exercise it directly
+        // so the contract is pinned even before AppState wiring.
+        let qid = "review:directive:00000000-0000-0000-0000-000000000abc:v1:approve";
+        let parsed = parse_review_question_id_struct(qid).unwrap();
+        validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            DIRECTIVE_REVIEW_ACTIONS,
+        )
+        .expect("approve via valid review id must pass envelope validation");
+    }
+
+    #[test]
+    fn directive_resolution_envelope_rejects_stale_version() {
+        // qid encodes v1 but the directive head is v2 → handler must
+        // refuse the transition with STALE_REVIEW_VERSION.
+        let qid = "review:directive:00000000-0000-0000-0000-000000000abc:v1:approve";
+        let parsed = parse_review_question_id_struct(qid).unwrap();
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "00000000-0000-0000-0000-000000000abc",
+            2,
+            DIRECTIVE_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "STALE_REVIEW_VERSION");
+    }
+
+    #[test]
+    fn directive_resolution_envelope_rejects_scope_mismatch() {
+        // qid says scope=plan but submitted to the directive surface →
+        // REVIEW_SCOPE_MISMATCH (handler rejects before mutating state).
+        let qid = "review:plan:00000000-0000-0000-0000-000000000abc:v1:approve";
+        let parsed = parse_review_question_id_struct(qid).unwrap();
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            DIRECTIVE_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_SCOPE_MISMATCH");
+    }
+
+    #[test]
+    fn directive_rejected_decision_records_reason_in_payload_without_approving() {
+        // rejected → handler must NOT advance the directive but MUST
+        // record the actor / note in the payload + tag status as
+        // `review_rejected`.
+        let input = ReviewResolutionInput {
+            question_id: "review:directive:00000000-0000-0000-0000-000000000abc:v1:approve"
+                .to_string(),
+            decision: ReviewDecision::Rejected,
+            actor: Some("alice".to_string()),
+            note: Some("scope is too broad — split into smaller directives first".to_string()),
+        };
+        // Replay the handler's keep-artifact branch.
+        let mut payload = json!({
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+        });
+        payload["status"] = json!("review_rejected");
+        stamp_resolution_payload(&mut payload, &input);
+        assert_eq!(payload["status"], "review_rejected");
+        assert_eq!(payload["review_decision"], "rejected");
+        assert_eq!(payload["review_decision_outcome"], "keep_artifact");
+        assert_eq!(payload["review_actor"], "alice");
+        assert!(payload["review_note"]
+            .as_str()
+            .unwrap()
+            .contains("scope is too broad"));
+    }
+
+    #[test]
+    fn directive_needs_changes_decision_surfaces_next_step() {
+        // needs_changes → handler must keep the directive in
+        // review/draft and surface a `next_step` hint pointing back at
+        // mission_directive(action=compile).
+        let input = ReviewResolutionInput {
+            question_id: "review:directive:00000000-0000-0000-0000-000000000abc:v1:approve"
+                .to_string(),
+            decision: ReviewDecision::NeedsChanges,
+            actor: Some("alice".to_string()),
+            note: Some("add explicit non-goals before re-submitting".to_string()),
+        };
+        let mut payload = json!({
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+        });
+        payload["status"] = json!("review_needs_changes");
+        stamp_needs_changes_next_step(&mut payload, "directive", "compile");
+        stamp_resolution_payload(&mut payload, &input);
+        assert_eq!(payload["status"], "review_needs_changes");
+        assert_eq!(payload["review_decision"], "needs_changes");
+        assert_eq!(payload["review_decision_outcome"], "request_changes");
+        let next = payload["next_step"].as_str().unwrap();
+        assert!(next.contains("rework"));
+        assert!(next.contains("directive"));
+        assert!(next.contains("compile"));
+    }
+
+    #[test]
+    fn directive_resolution_envelope_rejects_unsupported_action() {
+        // Even if scope / artifact / version match, an action the
+        // directive surface doesn't own (e.g. supersede) must be
+        // rejected with REVIEW_ACTION_UNSUPPORTED.
+        let qid = "review:directive:00000000-0000-0000-0000-000000000abc:v1:supersede";
+        let parsed = parse_review_question_id_struct(qid).unwrap();
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            DIRECTIVE_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_ACTION_UNSUPPORTED");
+    }
+
+    #[test]
+    fn directive_resolution_legacy_quiet_path_still_returns_none() {
+        // Legacy callers that only send `review_question_id` (no
+        // `review_decision`) on `compile` would also hit this — the
+        // resolution input would be Err. But on a compile call we never
+        // call `parse_review_resolution_input`. So at the handler
+        // boundary, when called WITHOUT a qid at all, we get None and
+        // fall through to the original `directive_approve` path.
+        let args = json!({
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+        });
+        assert!(parse_review_resolution_input(&args).unwrap().is_none());
     }
 }

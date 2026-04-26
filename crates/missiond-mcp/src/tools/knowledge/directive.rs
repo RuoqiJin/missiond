@@ -22,6 +22,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
          不实现 UI / 不等回答 / 不自动 approve; bus 失败 surface review_question_warning + 确定性 id 供重试。\
          approve / archive 接收 review_question_id → 触发 QuestionEvent::Resolved (或 DecisionResolved)。\
          响应总附 review_gate_policy / review_question_emitted (+ review_question_id / review_question_warning when applicable)。\
+         wave-15 review-resolution bridge v0: approve / archive 同时传 review_question_id + review_decision (approved | rejected | needs_changes) 时, \
+         先 validate envelope (scope=directive, artifact=directive_id, version=chain head, action ∈ {compile|approve|archive}) 再决定: \
+         approved → 跑 directive_approve / directive_update_status(Archived); rejected → 保持当前 status + status=\"review_rejected\"; \
+         needs_changes → 保持当前 status + status=\"review_needs_changes\" + next_step。失败 (REVIEW_ID_MALFORMED / REVIEW_SCOPE_MISMATCH / \
+         REVIEW_SCOPE_UNSUPPORTED / REVIEW_ARTIFACT_MISMATCH / STALE_REVIEW_VERSION / REVIEW_ACTION_UNSUPPORTED) 在 mutate 前 fail-fast。\
+         不实现 UI / 不等 QuestionEvent::Resolved 回答 / 不自动 approve; bus 失败转 review_question_warning, DB 已 commit 时不回滚。\
+         可选 review_actor + review_note 仅作 audit 字符串透传到 response。\
          list/get/approve/archive/version_chain 为 store-backed full。\
          Lisp 源: intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: \
          s2 intent-alignment-authoring + s3 alignment-review-gate \
@@ -77,7 +84,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "review_question_id": {
                     "type": "string",
-                    "description": "[compile persist=true | approve | archive] deterministic question-id override. On compile, replaces the auto-derived id (`review:directive:<id>:v<version>:compile[:<topic-hash>]`). On approve/archive, opts the action into emitting a follow-up QuestionEvent::Resolved (or DecisionResolved) with the supplied id — same fire-and-forget, bus-failure-warns semantics. Absent → no resolution emit (legacy quiet)."
+                    "description": "[compile persist=true | approve | archive] deterministic question-id override. On compile, replaces the auto-derived id (`review:directive:<id>:v<version>:compile[:<topic-hash>]`). On approve/archive without `review_decision`, opts the action into emitting a follow-up QuestionEvent::Resolved (or DecisionResolved) with the supplied id — same fire-and-forget, bus-failure-warns semantics (legacy quiet path). On approve/archive WITH `review_decision`, switches to the wave-15 explicit-resolution bridge: validates the deterministic id (scope=directive, artifact=directive_id, version=current head, action ∈ {compile|approve|archive}) BEFORE mutating state; `review_decision=approved` runs the manager transition, `rejected`/`needs_changes` skip it. Absent → no resolution emit (legacy quiet)."
+                },
+                "review_decision": {
+                    "type": "string",
+                    "enum": ["approved", "rejected", "needs_changes"],
+                    "description": "[approve | archive] (wave-15 explicit-resolution bridge) explicit decision attached to the supplied `review_question_id`. Required when `review_question_id` is supplied; absence with the id triggers a structured MISSING_PARAM error (we never guess). `approved` performs the manager transition (existing approve / archive semantics); `rejected` keeps the directive at its current status and emits Resolved/rejected; `needs_changes` keeps the directive in review/draft and surfaces a `next_step` hint with Resolved/needs_changes. NOT auto-approve and NOT a poll for a QuestionEvent::Resolved answer — the helper consumes only this caller-supplied input."
+                },
+                "review_actor": {
+                    "type": "string",
+                    "description": "[approve | archive review_decision=*] (wave-15) free-form identity of the resolver. Echoed onto the response payload (`review_actor`) so callers can correlate the decision with whoever made it; never used for authentication."
+                },
+                "review_note": {
+                    "type": "string",
+                    "description": "[approve | archive review_decision=*] (wave-15) free-form reason / next-step note. Echoed onto the response payload (`review_note`) and surfaced to downstream consumers as the human-readable resolution context."
                 },
                 "affected_pillars": {
                     "type": ["array", "string"],

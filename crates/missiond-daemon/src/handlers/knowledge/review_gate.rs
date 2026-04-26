@@ -732,6 +732,510 @@ pub(crate) async fn maybe_emit_review_question_resolved(
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// wave-15 :: explicit review-resolution input
+//
+// Wave-14 emits deterministic `QuestionEvent::Created` events for
+// directive / plan / workflow file-first artifacts. Wave-15 closes the
+// loop with an EXPLICIT (non-autonomous) resume path: when a human or
+// operator resolves a review, the manager surfaces (approve / mark /
+// supersede / archive) accept a structured input so MissionD can advance
+// the artifact through its existing transition. This is NOT auto-approve
+// and NOT a poll for a `QuestionEvent::Resolved` answer — the helper
+// consumes ONLY the caller-supplied JSON.
+//
+// Input shape (all opt-in; absent → legacy quiet path):
+//
+//   review_question_id : string  — the deterministic id wave-14 produced
+//                                  (`review:<scope>:<id>:v<version>:<action>[:<topic-hash>]`)
+//   review_decision    : string  — "approved" | "rejected" | "needs_changes"
+//   review_actor       : string  — free-form identity of the resolver
+//                                  (echoed into the resolution event /
+//                                  payload; never used for authentication)
+//   review_note        : string  — free-form reason / next step (echoed)
+//
+// Validation pipeline (fail-fast):
+//   1. parse_review_question_id_struct — refuses malformed envelopes
+//   2. validate_resolution_envelope    — refuses scope mismatch / unsupported
+//                                        scope / unsupported action / version
+//                                        outside expected lifeline
+//
+// State transitions on `approved`: the manager surface performs its
+// existing transition (e.g. `directive_approve`, `plan_update_status`).
+// On `rejected` / `needs_changes`: the artifact STAYS non-approved. The
+// payload surfaces the decision + reason so callers see the outcome.
+//
+// Bus failures are warnings (mirrors the wave-11/14 contract for
+// `QuestionEvent::Resolved` emit). They never roll back the DB row.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Explicit resolution decision attached to a review-question id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewDecision {
+    /// Human / operator approved the artifact. The manager surface should
+    /// run its existing approval transition.
+    Approved,
+    /// Human / operator rejected the artifact. The manager surface MUST
+    /// keep the artifact non-approved and record the reason.
+    Rejected,
+    /// Human / operator wants the artifact reworked. The manager surface
+    /// MUST keep the artifact in review/draft path and surface the
+    /// next-step reason.
+    NeedsChanges,
+}
+
+impl ReviewDecision {
+    /// Lower-snake-case label for response payload + event resolution
+    /// string.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ReviewDecision::Approved => "approved",
+            ReviewDecision::Rejected => "rejected",
+            ReviewDecision::NeedsChanges => "needs_changes",
+        }
+    }
+
+    /// Parse the wire string. Case-insensitive + trimmed; we deliberately
+    /// fail-fast on unknown values rather than collapsing to a default
+    /// because the resolution decision is load-bearing for state
+    /// transitions.
+    fn parse(raw: &str) -> Result<Self, ResolutionInputError> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "approved" | "approve" => Ok(ReviewDecision::Approved),
+            "rejected" | "reject" => Ok(ReviewDecision::Rejected),
+            "needs_changes" | "needs-changes" | "changes" => Ok(ReviewDecision::NeedsChanges),
+            other => Err(ResolutionInputError::UnknownDecision(other.to_string())),
+        }
+    }
+}
+
+/// Structured resolution input pulled out of the request JSON.
+#[derive(Debug, Clone)]
+pub(crate) struct ReviewResolutionInput {
+    pub(crate) question_id: String,
+    pub(crate) decision: ReviewDecision,
+    pub(crate) actor: Option<String>,
+    pub(crate) note: Option<String>,
+}
+
+/// Errors returned while extracting the resolution input. We surface them
+/// as structured `ToolError` codes at the handler boundary (so the bus
+/// stays out of the failure path).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolutionInputError {
+    /// `review_question_id` was supplied but `review_decision` was missing.
+    /// Caller must explicitly say what they decided — we never guess.
+    MissingDecision,
+    /// `review_decision` value is not in {approved, rejected,
+    /// needs_changes}.
+    UnknownDecision(String),
+}
+
+impl ResolutionInputError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            ResolutionInputError::MissingDecision => "MISSING_PARAM",
+            ResolutionInputError::UnknownDecision(_) => "INVALID_PARAM",
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            ResolutionInputError::MissingDecision => {
+                "review_question_id supplied without `review_decision`; \
+                 add review_decision=approved|rejected|needs_changes"
+                    .to_string()
+            }
+            ResolutionInputError::UnknownDecision(raw) => format!(
+                "review_decision `{}` is not in {{approved, rejected, needs_changes}}",
+                raw
+            ),
+        }
+    }
+}
+
+/// Pull `review_question_id`, `review_decision`, `review_actor`,
+/// `review_note` out of an args JSON object.
+///
+/// Returns:
+///   * `Ok(None)`      — `review_question_id` absent / blank → legacy
+///                        quiet path; caller must skip resolution.
+///   * `Ok(Some(...))` — full input; caller must validate it against the
+///                        manager surface (scope / action / version) before
+///                        mutating state.
+///   * `Err(...)`      — `review_question_id` supplied but decision is
+///                        missing / unknown. Caller must surface as
+///                        structured error and refuse the action.
+pub(crate) fn parse_review_resolution_input(
+    args: &Value,
+) -> Result<Option<ReviewResolutionInput>, ResolutionInputError> {
+    let qid = parse_resolution_review_question_id(args);
+    let Some(qid) = qid else {
+        return Ok(None);
+    };
+    let decision_raw = args
+        .get("review_decision")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let decision = match decision_raw {
+        Some(s) => ReviewDecision::parse(&s)?,
+        None => return Err(ResolutionInputError::MissingDecision),
+    };
+    let actor = args
+        .get("review_actor")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let note = args
+        .get("review_note")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Ok(Some(ReviewResolutionInput {
+        question_id: qid,
+        decision,
+        actor,
+        note,
+    }))
+}
+
+/// Parsed envelope of a wave-14 deterministic review-question id. Layout:
+///   `review:<scope>:<artifact_id>:v<version>:<action>[:<topic-hash>]`
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ParsedReviewQuestionId {
+    pub(crate) scope: String,
+    pub(crate) artifact_id: String,
+    pub(crate) version: i32,
+    pub(crate) action: String,
+    /// Optional 16-hex-char topic hash. Wave-14 layout suffix; wave-11
+    /// layout has no suffix and this field stays None.
+    pub(crate) topic_hash: Option<String>,
+}
+
+/// Errors returned by [`parse_review_question_id_struct`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewIdParseError {
+    /// id does not start with the literal `review:` prefix.
+    MissingPrefix,
+    /// id is missing one of the mandatory `<scope>:<id>:v<version>:<action>`
+    /// segments.
+    InsufficientSegments,
+    /// Mandatory segment is empty (e.g. `review::abc:v1:compile`).
+    EmptySegment(&'static str),
+    /// `v<version>` segment is malformed (missing `v` prefix or non-numeric
+    /// version).
+    BadVersion(String),
+}
+
+impl ReviewIdParseError {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            ReviewIdParseError::MissingPrefix => {
+                "review_question_id must start with `review:` prefix".to_string()
+            }
+            ReviewIdParseError::InsufficientSegments => {
+                "review_question_id must look like `review:<scope>:<id>:v<version>:<action>[:<topic-hash>]`"
+                    .to_string()
+            }
+            ReviewIdParseError::EmptySegment(seg) => {
+                format!("review_question_id has empty `{}` segment", seg)
+            }
+            ReviewIdParseError::BadVersion(raw) => format!(
+                "review_question_id version segment `{}` must be `v<int>` (e.g. `v1`)",
+                raw
+            ),
+        }
+    }
+}
+
+/// Parse a wave-14 deterministic review-question id back into its parts.
+/// Pure / side-effect free; does not consult the DB.
+///
+/// Recognised shapes:
+///   `review:<scope>:<artifact_id>:v<version>:<action>`
+///   `review:<scope>:<artifact_id>:v<version>:<action>:<topic-hash>`
+pub(crate) fn parse_review_question_id_struct(
+    qid: &str,
+) -> Result<ParsedReviewQuestionId, ReviewIdParseError> {
+    let trimmed = qid.trim();
+    let body = trimmed
+        .strip_prefix("review:")
+        .ok_or(ReviewIdParseError::MissingPrefix)?;
+    let segs: Vec<&str> = body.split(':').collect();
+    if segs.len() < 4 {
+        return Err(ReviewIdParseError::InsufficientSegments);
+    }
+    if segs.len() > 5 {
+        // We don't accept `v<v>:<action>:<hash>:<extra>` — extra colons inside
+        // the action / hash were never produced by wave-14.
+        return Err(ReviewIdParseError::InsufficientSegments);
+    }
+    let scope = segs[0].trim();
+    if scope.is_empty() {
+        return Err(ReviewIdParseError::EmptySegment("scope"));
+    }
+    let artifact_id = segs[1].trim();
+    if artifact_id.is_empty() {
+        return Err(ReviewIdParseError::EmptySegment("artifact_id"));
+    }
+    let version_seg = segs[2].trim();
+    let version_num = version_seg
+        .strip_prefix('v')
+        .ok_or_else(|| ReviewIdParseError::BadVersion(version_seg.to_string()))?;
+    let version: i32 = version_num
+        .parse()
+        .map_err(|_| ReviewIdParseError::BadVersion(version_seg.to_string()))?;
+    let action = segs[3].trim();
+    if action.is_empty() {
+        return Err(ReviewIdParseError::EmptySegment("action"));
+    }
+    let topic_hash = if segs.len() == 5 {
+        let hash = segs[4].trim();
+        if hash.is_empty() {
+            return Err(ReviewIdParseError::EmptySegment("topic_hash"));
+        }
+        Some(hash.to_string())
+    } else {
+        None
+    };
+    Ok(ParsedReviewQuestionId {
+        scope: scope.to_string(),
+        artifact_id: artifact_id.to_string(),
+        version,
+        action: action.to_ascii_lowercase(),
+        topic_hash,
+    })
+}
+
+/// Errors returned by [`validate_review_resolution_envelope`]. Each
+/// variant maps to an MCP `ToolError` code via [`Self::code`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ResolutionValidationError {
+    /// The parsed id's scope does not match the manager surface (e.g. a
+    /// `directive` id submitted to the plan handler).
+    ScopeMismatch {
+        expected: &'static str,
+        actual: String,
+    },
+    /// The parsed id's artifact_id does not match the action's artifact
+    /// (e.g. `directive_id=abc` but qid encodes `xyz`).
+    ArtifactIdMismatch { expected: String, actual: String },
+    /// The parsed id's version does not match the artifact's current
+    /// version (or the version the caller passed for transition).
+    StaleVersion {
+        expected: i32,
+        actual_in_id: i32,
+        artifact_id: String,
+    },
+    /// The parsed id's action is not in the action whitelist for this
+    /// manager surface (e.g. `:supersede` arrived at the directive
+    /// handler).
+    UnsupportedAction {
+        scope: &'static str,
+        action: String,
+        allowed: &'static [&'static str],
+    },
+    /// The parsed id's scope is not one of the wave-14 surfaces (i.e. not
+    /// directive/plan/workflow). Defensive — shouldn't happen for ids we
+    /// produced, but keeps malformed third-party ids loud.
+    UnsupportedScope { scope: String },
+}
+
+impl ResolutionValidationError {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            ResolutionValidationError::StaleVersion { .. } => "STALE_REVIEW_VERSION",
+            ResolutionValidationError::ScopeMismatch { .. } => "REVIEW_SCOPE_MISMATCH",
+            ResolutionValidationError::ArtifactIdMismatch { .. } => "REVIEW_ARTIFACT_MISMATCH",
+            ResolutionValidationError::UnsupportedAction { .. } => "REVIEW_ACTION_UNSUPPORTED",
+            ResolutionValidationError::UnsupportedScope { .. } => "REVIEW_SCOPE_UNSUPPORTED",
+        }
+    }
+
+    pub(crate) fn message(&self) -> String {
+        match self {
+            ResolutionValidationError::ScopeMismatch { expected, actual } => format!(
+                "review_question_id scope `{}` does not match manager surface `{}`",
+                actual, expected
+            ),
+            ResolutionValidationError::ArtifactIdMismatch { expected, actual } => format!(
+                "review_question_id artifact `{}` does not match request artifact `{}`",
+                actual, expected
+            ),
+            ResolutionValidationError::StaleVersion {
+                expected,
+                actual_in_id,
+                artifact_id,
+            } => format!(
+                "review_question_id targets version `v{}` but artifact `{}` is at version `v{}`",
+                actual_in_id, artifact_id, expected
+            ),
+            ResolutionValidationError::UnsupportedAction {
+                scope,
+                action,
+                allowed,
+            } => format!(
+                "review_question_id action `{}` is not allowed on scope `{}` (valid: {})",
+                action,
+                scope,
+                allowed.join("|")
+            ),
+            ResolutionValidationError::UnsupportedScope { scope } => format!(
+                "review_question_id scope `{}` is not supported (valid: directive|plan|workflow)",
+                scope
+            ),
+        }
+    }
+}
+
+/// All wave-14 surfaces that we accept review-question ids for. Defensive
+/// check — wave-15 handler-side validators repeat the per-surface match
+/// (so they can pin the action whitelist), but this guards against
+/// third-party ids whose scope is not one we ever produced.
+const WAVE14_SUPPORTED_SCOPES: &[&str] = &["directive", "plan", "workflow"];
+
+/// Validate a parsed review-question id against the manager surface that
+/// received it. Pure / side-effect free; does not consult the DB. The
+/// caller is responsible for sourcing `current_artifact_version` (e.g.
+/// from `directive_get_version_chain` head) before invoking this.
+///
+/// `allowed_actions` is the manager-side action whitelist (e.g.
+/// `&["compile", "approve", "archive"]` for the directive surface). The
+/// id's `action` must be in this list — we refuse to resolve a directive
+/// surface against a `:supersede` qid even if other validators pass.
+pub(crate) fn validate_review_resolution_envelope(
+    parsed: &ParsedReviewQuestionId,
+    expected_scope: &'static str,
+    expected_artifact_id: &str,
+    current_artifact_version: i32,
+    allowed_actions: &'static [&'static str],
+) -> Result<(), ResolutionValidationError> {
+    if !WAVE14_SUPPORTED_SCOPES.contains(&parsed.scope.as_str()) {
+        return Err(ResolutionValidationError::UnsupportedScope {
+            scope: parsed.scope.clone(),
+        });
+    }
+    if parsed.scope != expected_scope {
+        return Err(ResolutionValidationError::ScopeMismatch {
+            expected: expected_scope,
+            actual: parsed.scope.clone(),
+        });
+    }
+    if parsed.artifact_id != expected_artifact_id {
+        return Err(ResolutionValidationError::ArtifactIdMismatch {
+            expected: expected_artifact_id.to_string(),
+            actual: parsed.artifact_id.clone(),
+        });
+    }
+    if parsed.version != current_artifact_version {
+        return Err(ResolutionValidationError::StaleVersion {
+            expected: current_artifact_version,
+            actual_in_id: parsed.version,
+            artifact_id: parsed.artifact_id.clone(),
+        });
+    }
+    if !allowed_actions.contains(&parsed.action.as_str()) {
+        return Err(ResolutionValidationError::UnsupportedAction {
+            scope: expected_scope,
+            action: parsed.action.clone(),
+            allowed: allowed_actions,
+        });
+    }
+    Ok(())
+}
+
+/// What the manager surface should DO after the resolution input passes
+/// validation. Pure projection of `decision`:
+///
+///   * `Approved`     → `PerformTransition` — caller runs its existing
+///                       state transition (e.g. `directive_approve`),
+///                       then emits `Resolved/approved`.
+///   * `Rejected`     → `KeepArtifact` — caller skips the transition,
+///                       leaves the artifact non-approved, emits
+///                       `Resolved/rejected` with the actor / note as the
+///                       reason.
+///   * `NeedsChanges` → `RequestChanges` — caller skips the transition,
+///                       leaves the artifact in the review/draft path,
+///                       emits `Resolved/needs_changes`, surfaces a
+///                       `next_step` recommendation in the payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResolutionOutcome {
+    PerformTransition,
+    KeepArtifact,
+    RequestChanges,
+}
+
+impl ReviewDecision {
+    pub(crate) fn outcome(self) -> ResolutionOutcome {
+        match self {
+            ReviewDecision::Approved => ResolutionOutcome::PerformTransition,
+            ReviewDecision::Rejected => ResolutionOutcome::KeepArtifact,
+            ReviewDecision::NeedsChanges => ResolutionOutcome::RequestChanges,
+        }
+    }
+}
+
+/// Stamp the resolution decision + actor + note onto the response
+/// payload. Always called after the manager surface decides what to do
+/// (whether or not the DB transition fired). Pure / no bus calls.
+///
+/// Mutates `payload` with:
+///   * `review_question_id`        (string) — echoed back so callers can
+///     correlate with the original Created event.
+///   * `review_decision`           (string) — `approved|rejected|needs_changes`.
+///   * `review_decision_outcome`   (string) — `perform_transition|keep_artifact|request_changes`.
+///   * `review_actor`              (string) — when supplied.
+///   * `review_note`               (string) — when supplied.
+pub(crate) fn stamp_resolution_payload(payload: &mut Value, input: &ReviewResolutionInput) {
+    let Some(map) = payload.as_object_mut() else {
+        return;
+    };
+    map.insert(
+        "review_question_id".to_string(),
+        json!(input.question_id),
+    );
+    map.insert(
+        "review_decision".to_string(),
+        json!(input.decision.as_str()),
+    );
+    map.insert(
+        "review_decision_outcome".to_string(),
+        json!(match input.decision.outcome() {
+            ResolutionOutcome::PerformTransition => "perform_transition",
+            ResolutionOutcome::KeepArtifact => "keep_artifact",
+            ResolutionOutcome::RequestChanges => "request_changes",
+        }),
+    );
+    if let Some(actor) = input.actor.as_ref() {
+        map.insert("review_actor".to_string(), json!(actor));
+    }
+    if let Some(note) = input.note.as_ref() {
+        map.insert("review_note".to_string(), json!(note));
+    }
+}
+
+/// Stamp the response payload for a `RequestChanges` (needs_changes)
+/// resolution: surface a default `next_step` so the caller knows what to
+/// do next.
+pub(crate) fn stamp_needs_changes_next_step(payload: &mut Value, scope: &str, action: &str) {
+    if let Some(map) = payload.as_object_mut() {
+        map.insert(
+            "next_step".to_string(),
+            json!(format!(
+                "rework the {scope} draft per `review_note`, then re-run `mission_{scope}(action={action})` against the new version"
+            )),
+        );
+    }
+}
+
+/// Build the structured event resolution string for a given decision.
+/// Centralises the wire vocabulary so directive / plan / workflow speak
+/// the same thing on the bus.
+pub(crate) fn resolution_wire_string(decision: ReviewDecision) -> &'static str {
+    decision.as_str()
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // tests — pure helpers only (no bus, no DB).
 // ───────────────────────────────────────────────────────────────────────
 
@@ -1283,6 +1787,392 @@ mod tests {
         assert_ne!(
             AutoEmitDecision::Emitted,
             AutoEmitDecision::EmitFailedBus
+        );
+    }
+
+    // ── wave-15 :: explicit review-resolution input ─────────────────────
+
+    #[test]
+    fn decision_parse_accepts_canonical_strings() {
+        assert_eq!(ReviewDecision::parse("approved").unwrap(), ReviewDecision::Approved);
+        assert_eq!(ReviewDecision::parse("rejected").unwrap(), ReviewDecision::Rejected);
+        assert_eq!(
+            ReviewDecision::parse("needs_changes").unwrap(),
+            ReviewDecision::NeedsChanges
+        );
+    }
+
+    #[test]
+    fn decision_parse_is_case_insensitive_and_trims() {
+        assert_eq!(ReviewDecision::parse("  Approved  ").unwrap(), ReviewDecision::Approved);
+        assert_eq!(ReviewDecision::parse("REJECTED").unwrap(), ReviewDecision::Rejected);
+        assert_eq!(
+            ReviewDecision::parse("Needs-Changes").unwrap(),
+            ReviewDecision::NeedsChanges
+        );
+    }
+
+    #[test]
+    fn decision_parse_accepts_short_aliases() {
+        assert_eq!(ReviewDecision::parse("approve").unwrap(), ReviewDecision::Approved);
+        assert_eq!(ReviewDecision::parse("reject").unwrap(), ReviewDecision::Rejected);
+        assert_eq!(ReviewDecision::parse("changes").unwrap(), ReviewDecision::NeedsChanges);
+    }
+
+    #[test]
+    fn decision_parse_rejects_unknown() {
+        let err = ReviewDecision::parse("approved-with-comments").unwrap_err();
+        assert!(matches!(err, ResolutionInputError::UnknownDecision(_)));
+        assert_eq!(err.code(), "INVALID_PARAM");
+        assert!(err.message().contains("approved-with-comments"));
+    }
+
+    #[test]
+    fn decision_outcome_mapping_is_total() {
+        assert_eq!(
+            ReviewDecision::Approved.outcome(),
+            ResolutionOutcome::PerformTransition
+        );
+        assert_eq!(
+            ReviewDecision::Rejected.outcome(),
+            ResolutionOutcome::KeepArtifact
+        );
+        assert_eq!(
+            ReviewDecision::NeedsChanges.outcome(),
+            ResolutionOutcome::RequestChanges
+        );
+    }
+
+    #[test]
+    fn decision_label_round_trips() {
+        assert_eq!(ReviewDecision::Approved.as_str(), "approved");
+        assert_eq!(ReviewDecision::Rejected.as_str(), "rejected");
+        assert_eq!(ReviewDecision::NeedsChanges.as_str(), "needs_changes");
+    }
+
+    #[test]
+    fn parse_resolution_input_returns_none_when_qid_absent() {
+        let out = parse_review_resolution_input(&json!({})).unwrap();
+        assert!(out.is_none());
+        // Even with a decision present, no qid → quiet path.
+        let out = parse_review_resolution_input(&json!({"review_decision": "approved"})).unwrap();
+        assert!(out.is_none());
+    }
+
+    #[test]
+    fn parse_resolution_input_full_shape() {
+        let out = parse_review_resolution_input(&json!({
+            "review_question_id": "review:directive:abc:v1:approve",
+            "review_decision": "approved",
+            "review_actor": "  alice  ",
+            "review_note": "  ship it  ",
+        }))
+        .unwrap()
+        .expect("full input present");
+        assert_eq!(out.question_id, "review:directive:abc:v1:approve");
+        assert_eq!(out.decision, ReviewDecision::Approved);
+        assert_eq!(out.actor.as_deref(), Some("alice"));
+        assert_eq!(out.note.as_deref(), Some("ship it"));
+    }
+
+    #[test]
+    fn parse_resolution_input_missing_decision_fails_fast() {
+        let err = parse_review_resolution_input(&json!({
+            "review_question_id": "review:directive:abc:v1:approve",
+        }))
+        .unwrap_err();
+        assert_eq!(err, ResolutionInputError::MissingDecision);
+        assert_eq!(err.code(), "MISSING_PARAM");
+        assert!(err.message().contains("review_decision"));
+    }
+
+    #[test]
+    fn parse_resolution_input_unknown_decision_fails_fast() {
+        let err = parse_review_resolution_input(&json!({
+            "review_question_id": "review:plan:p1:v1:approve",
+            "review_decision": "looks_good",
+        }))
+        .unwrap_err();
+        assert!(matches!(err, ResolutionInputError::UnknownDecision(_)));
+        assert_eq!(err.code(), "INVALID_PARAM");
+    }
+
+    #[test]
+    fn parse_resolution_input_blank_strings_collapse_to_none_for_actor_note() {
+        let out = parse_review_resolution_input(&json!({
+            "review_question_id": "review:plan:p1:v1:approve",
+            "review_decision": "approved",
+            "review_actor": "   ",
+            "review_note": "",
+        }))
+        .unwrap()
+        .unwrap();
+        assert!(out.actor.is_none());
+        assert!(out.note.is_none());
+    }
+
+    // ── wave-15 :: deterministic id parser ──────────────────────────────
+
+    #[test]
+    fn parse_qid_legacy_layout_no_topic_hash() {
+        let p = parse_review_question_id_struct("review:directive:abc-123:v1:compile").unwrap();
+        assert_eq!(p.scope, "directive");
+        assert_eq!(p.artifact_id, "abc-123");
+        assert_eq!(p.version, 1);
+        assert_eq!(p.action, "compile");
+        assert!(p.topic_hash.is_none());
+    }
+
+    #[test]
+    fn parse_qid_with_topic_hash_layout() {
+        let p =
+            parse_review_question_id_struct("review:plan:p-7:v3:compile:abcdef0123456789").unwrap();
+        assert_eq!(p.scope, "plan");
+        assert_eq!(p.artifact_id, "p-7");
+        assert_eq!(p.version, 3);
+        assert_eq!(p.action, "compile");
+        assert_eq!(p.topic_hash.as_deref(), Some("abcdef0123456789"));
+    }
+
+    #[test]
+    fn parse_qid_round_trips_against_derive() {
+        let original = derive_review_question_id_for_artifact(
+            "directive",
+            "abc",
+            7,
+            "compile",
+            Some("topic-foo"),
+        );
+        let p = parse_review_question_id_struct(&original).unwrap();
+        assert_eq!(p.scope, "directive");
+        assert_eq!(p.artifact_id, "abc");
+        assert_eq!(p.version, 7);
+        assert_eq!(p.action, "compile");
+        assert!(p.topic_hash.is_some());
+    }
+
+    #[test]
+    fn parse_qid_lowercases_action_for_match() {
+        let p = parse_review_question_id_struct("review:directive:abc:v1:Approve").unwrap();
+        assert_eq!(p.action, "approve");
+    }
+
+    #[test]
+    fn parse_qid_rejects_missing_prefix() {
+        let err = parse_review_question_id_struct("directive:abc:v1:compile").unwrap_err();
+        assert_eq!(err, ReviewIdParseError::MissingPrefix);
+    }
+
+    #[test]
+    fn parse_qid_rejects_too_few_segments() {
+        let err = parse_review_question_id_struct("review:directive:abc:v1").unwrap_err();
+        assert_eq!(err, ReviewIdParseError::InsufficientSegments);
+    }
+
+    #[test]
+    fn parse_qid_rejects_too_many_segments() {
+        let err = parse_review_question_id_struct(
+            "review:directive:abc:v1:compile:topic-hash:extra-trailing",
+        )
+        .unwrap_err();
+        assert_eq!(err, ReviewIdParseError::InsufficientSegments);
+    }
+
+    #[test]
+    fn parse_qid_rejects_empty_segments() {
+        assert_eq!(
+            parse_review_question_id_struct("review::abc:v1:compile").unwrap_err(),
+            ReviewIdParseError::EmptySegment("scope")
+        );
+        assert_eq!(
+            parse_review_question_id_struct("review:directive::v1:compile").unwrap_err(),
+            ReviewIdParseError::EmptySegment("artifact_id")
+        );
+        assert_eq!(
+            parse_review_question_id_struct("review:directive:abc:v1:").unwrap_err(),
+            ReviewIdParseError::EmptySegment("action")
+        );
+        assert_eq!(
+            parse_review_question_id_struct("review:directive:abc:v1:compile:").unwrap_err(),
+            ReviewIdParseError::EmptySegment("topic_hash")
+        );
+    }
+
+    #[test]
+    fn parse_qid_rejects_bad_version_segment() {
+        let err = parse_review_question_id_struct("review:directive:abc:1:compile").unwrap_err();
+        assert!(matches!(err, ReviewIdParseError::BadVersion(_)));
+        let err = parse_review_question_id_struct("review:directive:abc:vNaN:compile").unwrap_err();
+        assert!(matches!(err, ReviewIdParseError::BadVersion(_)));
+    }
+
+    // ── wave-15 :: validate_review_resolution_envelope ──────────────────
+
+    fn make_parsed(scope: &str, id: &str, version: i32, action: &str) -> ParsedReviewQuestionId {
+        ParsedReviewQuestionId {
+            scope: scope.to_string(),
+            artifact_id: id.to_string(),
+            version,
+            action: action.to_string(),
+            topic_hash: None,
+        }
+    }
+
+    #[test]
+    fn validate_envelope_accepts_matching_directive_approve() {
+        let parsed = make_parsed("directive", "abc", 1, "approve");
+        validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "abc",
+            1,
+            &["compile", "approve", "archive"],
+        )
+        .expect("happy path must succeed");
+    }
+
+    #[test]
+    fn validate_envelope_rejects_scope_mismatch() {
+        // qid says `plan` but submitted to directive surface.
+        let parsed = make_parsed("plan", "abc", 1, "approve");
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "abc",
+            1,
+            &["compile", "approve", "archive"],
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_SCOPE_MISMATCH");
+    }
+
+    #[test]
+    fn validate_envelope_rejects_unsupported_scope() {
+        let parsed = make_parsed("worker", "abc", 1, "approve");
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "worker",
+            "abc",
+            1,
+            &["approve"],
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_SCOPE_UNSUPPORTED");
+    }
+
+    #[test]
+    fn validate_envelope_rejects_artifact_id_mismatch() {
+        let parsed = make_parsed("directive", "xyz", 1, "approve");
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "abc",
+            1,
+            &["approve"],
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_ARTIFACT_MISMATCH");
+    }
+
+    #[test]
+    fn validate_envelope_rejects_stale_version() {
+        // qid says v1 but artifact is at v2.
+        let parsed = make_parsed("directive", "abc", 1, "approve");
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "abc",
+            2,
+            &["approve"],
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "STALE_REVIEW_VERSION");
+        assert!(err.message().contains("v1"));
+        assert!(err.message().contains("v2"));
+    }
+
+    #[test]
+    fn validate_envelope_rejects_unsupported_action() {
+        let parsed = make_parsed("directive", "abc", 1, "supersede");
+        let err = validate_review_resolution_envelope(
+            &parsed,
+            "directive",
+            "abc",
+            1,
+            &["compile", "approve", "archive"],
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_ACTION_UNSUPPORTED");
+        assert!(err.message().contains("supersede"));
+    }
+
+    // ── wave-15 :: payload stamping ─────────────────────────────────────
+
+    fn approved_input() -> ReviewResolutionInput {
+        ReviewResolutionInput {
+            question_id: "review:directive:abc:v1:approve".to_string(),
+            decision: ReviewDecision::Approved,
+            actor: Some("alice".to_string()),
+            note: Some("ship it".to_string()),
+        }
+    }
+
+    #[test]
+    fn stamp_resolution_payload_includes_decision_outcome_actor_note() {
+        let mut p = json!({"status": "approved"});
+        stamp_resolution_payload(&mut p, &approved_input());
+        assert_eq!(p["review_question_id"], "review:directive:abc:v1:approve");
+        assert_eq!(p["review_decision"], "approved");
+        assert_eq!(p["review_decision_outcome"], "perform_transition");
+        assert_eq!(p["review_actor"], "alice");
+        assert_eq!(p["review_note"], "ship it");
+    }
+
+    #[test]
+    fn stamp_resolution_payload_omits_actor_note_when_absent() {
+        let mut p = json!({"status": "rejected"});
+        let input = ReviewResolutionInput {
+            question_id: "review:plan:p1:v1:approve".to_string(),
+            decision: ReviewDecision::Rejected,
+            actor: None,
+            note: None,
+        };
+        stamp_resolution_payload(&mut p, &input);
+        assert_eq!(p["review_decision"], "rejected");
+        assert_eq!(p["review_decision_outcome"], "keep_artifact");
+        assert!(p.get("review_actor").is_none());
+        assert!(p.get("review_note").is_none());
+    }
+
+    #[test]
+    fn stamp_needs_changes_next_step_is_actionable() {
+        let mut p = json!({"status": "review"});
+        stamp_needs_changes_next_step(&mut p, "directive", "compile");
+        let next = p["next_step"].as_str().unwrap();
+        assert!(next.contains("rework"));
+        assert!(next.contains("directive"));
+        assert!(next.contains("compile"));
+    }
+
+    #[test]
+    fn resolution_wire_string_matches_decision_label() {
+        assert_eq!(resolution_wire_string(ReviewDecision::Approved), "approved");
+        assert_eq!(resolution_wire_string(ReviewDecision::Rejected), "rejected");
+        assert_eq!(
+            resolution_wire_string(ReviewDecision::NeedsChanges),
+            "needs_changes"
+        );
+    }
+
+    #[test]
+    fn resolution_outcome_variants_distinct() {
+        assert_ne!(
+            ResolutionOutcome::PerformTransition,
+            ResolutionOutcome::KeepArtifact
+        );
+        assert_ne!(
+            ResolutionOutcome::KeepArtifact,
+            ResolutionOutcome::RequestChanges
         );
     }
 }

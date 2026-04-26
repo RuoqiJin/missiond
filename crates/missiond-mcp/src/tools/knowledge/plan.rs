@@ -263,7 +263,7 @@ fn build_properties() -> Value {
 
     p.insert("review_question_id".into(), prop(
         "string",
-        "[compile persist=true | approve | mark | supersede] deterministic question-id override. On compile, replaces the auto-derived id (`review:plan:<id>:v<version>:compile[:<topic-hash>]`). On approve / mark / supersede, opts the action into emitting a follow-up QuestionEvent::Resolved (or DecisionResolved) with the supplied id — same fire-and-forget, bus-failure-warns semantics. Absent → no resolution emit (legacy quiet).",
+        "[compile persist=true | approve | mark | supersede] deterministic question-id override. On compile, replaces the auto-derived id (`review:plan:<id>:v<version>:compile[:<topic-hash>]`). On approve / mark / supersede WITHOUT `review_decision`, opts the action into emitting a follow-up QuestionEvent::Resolved (or DecisionResolved) with the supplied id — same fire-and-forget, bus-failure-warns semantics (legacy quiet path). On approve / mark / supersede WITH `review_decision`, switches to the wave-15 explicit-resolution bridge: validates the deterministic id (scope=plan, artifact=plan_id (or old_plan_id for supersede), version=plan.version, action ∈ {compile|approve|mark|supersede}) BEFORE mutating state; `review_decision=approved` runs the manager transition, `rejected`/`needs_changes` skip it. Absent → no resolution emit (legacy quiet).",
     ));
 
     // ── wave-15 / task 05 — workstation-dispatch v0 schema ──────────────
@@ -298,6 +298,23 @@ fn build_properties() -> Value {
     p.insert("commit_policy".into(), prop(
         "string",
         "[execute internal workstation_dispatch=true] commit handoff policy. Default `scoped` — the brief always carries the literal reminder `do not stage or commit outside the owned files declared above`. Plan-hint fallback: PLAN.lisp `:commit-policy`. Caller wins.",
+    ));
+
+    // ── wave-15 / task 04 — explicit review-resolution bridge schema ────
+    p.insert("review_decision".into(), prop_enum(
+        "string",
+        "[approve | mark | supersede] (wave-15 explicit-resolution bridge) explicit decision attached to the supplied `review_question_id`. Required when `review_question_id` is supplied; absence with the id triggers a structured MISSING_PARAM error. `approved` performs the manager transition (`plan_update_status(Approved)` for approve, `plan_update_status(<status>)` for mark, `plan_supersede(old, new)` for supersede); `rejected` keeps the plan at its current status and emits Resolved/rejected; `needs_changes` keeps it in review/draft and surfaces a `next_step` hint with Resolved/needs_changes. NOT auto-approve and NOT a poll for a QuestionEvent::Resolved answer — the helper consumes only this caller-supplied input.",
+        &["approved", "rejected", "needs_changes"],
+    ));
+
+    p.insert("review_actor".into(), prop(
+        "string",
+        "[approve | mark | supersede review_decision=*] (wave-15) free-form identity of the resolver. Echoed onto the response payload (`review_actor`) so callers can correlate the decision with whoever made it; never used for authentication.",
+    ));
+
+    p.insert("review_note".into(), prop(
+        "string",
+        "[approve | mark | supersede review_decision=*] (wave-15) free-form reason / next-step note. Echoed onto the response payload (`review_note`) and surfaced to downstream consumers as the human-readable resolution context.",
     ));
 
     Value::Object(p)
@@ -359,6 +376,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
          不实现 UI / 不等回答 / 不自动 approve; bus 失败 surface review_question_warning + 确定性 id 供重试。\
          approve / mark / supersede 接收 review_question_id → 触发 QuestionEvent::Resolved (或 DecisionResolved)。\
          响应总附 review_gate_policy / review_question_emitted (+ review_question_id / review_question_warning when applicable)。\
+         wave-15 / task 04 review-resolution bridge v0: approve / mark / supersede 同时传 review_question_id + review_decision \
+         (approved | rejected | needs_changes) 时，先 validate envelope (scope=plan, artifact=plan_id 或 supersede 用 old_plan_id, \
+         version=plan.version, action ∈ {compile|approve|mark|supersede}) 再决定: approved → 跑对应 manager 转换 \
+         (plan_update_status / plan_supersede); rejected → 保持当前 status + status=\"review_rejected\"; \
+         needs_changes → 保持当前 status + status=\"review_needs_changes\" + next_step。\
+         失败 (REVIEW_ID_MALFORMED / REVIEW_SCOPE_MISMATCH / REVIEW_SCOPE_UNSUPPORTED / REVIEW_ARTIFACT_MISMATCH / \
+         STALE_REVIEW_VERSION / REVIEW_ACTION_UNSUPPORTED) 在 mutate 前 fail-fast。\
+         不实现 UI / 不等 QuestionEvent::Resolved 回答 / 不自动 approve; bus 失败转 review_question_warning, DB 已 commit 时不回滚。\
+         可选 review_actor + review_note 仅作 audit 字符串透传到 response。\
          wave-15 / task 05 workstation-dispatch v0: execute internal target=mission_task_delegate 时再传 workstation_dispatch=true \
          (或 PLAN.lisp 写 :workstation-dispatch true) 即启用 workstation-dispatch 路径 — runner 用 \
          scope / owned_files / forbidden_files / acceptance_commands / commit_policy / dispatch_strategy 字段 \

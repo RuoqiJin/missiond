@@ -50,7 +50,10 @@ use crate::handlers::knowledge::file_artifacts::{
 };
 use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
-    parse_resolution_review_question_id, parse_review_gate_policy, review_gate_policy_was_explicit,
+    parse_resolution_review_question_id, parse_review_gate_policy,
+    parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
+    review_gate_policy_was_explicit, stamp_needs_changes_next_step, stamp_resolution_payload,
+    validate_review_resolution_envelope, ResolutionOutcome, ReviewResolutionInput,
 };
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
@@ -939,8 +942,35 @@ async fn action_by_task(state: &AppState, args: &Value) -> Result<ToolResult> {
 // approve / mark / supersede — control actions
 // ───────────────────────────────────────────────────────────────────────
 
+/// Action whitelist for the plan surface — the parsed
+/// `review:plan:<id>:v<v>:<action>` envelope's `<action>` segment must be
+/// in this list before we accept the resolution. Mirrors the manager
+/// state-changing actions: compile / approve / mark / supersede. (`get`
+/// / `list` / `by_task` / `record_evidence` / `execute` never resolve a
+/// gate.)
+const PLAN_REVIEW_ACTIONS: &[&str] = &["compile", "approve", "mark", "supersede"];
+
 async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "plan_id")?;
+
+    // wave-15 :: explicit resolution bridge. When the caller supplies
+    // `review_question_id` + `review_decision` we validate the envelope
+    // BEFORE mutating plan state. `Rejected` / `NeedsChanges` skip the
+    // approve transition entirely; `Approved` proceeds with the existing
+    // `plan_update_status(Approved)` call.
+    let resolution = match parse_review_resolution_input(args) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(e.code(), e.message()),
+            ))
+        }
+    };
+
+    if let Some(input) = resolution {
+        return action_approve_with_resolution(state, id, input).await;
+    }
+
     state
         .store
         .plan_update_status(id, PlanStatus::Approved)
@@ -950,13 +980,96 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         "status": "approved",
         "plan_id": id,
     });
-    // wave-11/14 resolution path — opt-in via `review_question_id`.
+    // wave-11/14 quiet emit path — kept for callers that fire a Resolved
+    // event without the wave-15 decision-bearing envelope.
     let qid = parse_resolution_review_question_id(args);
     maybe_emit_review_question_resolved(
         &mut payload,
         &state.bus,
         qid.as_deref(),
         "approved",
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
+/// Wave-15 explicit resolution bridge for `action=approve`. Validates the
+/// review envelope (scope / artifact / version / action) against the
+/// current plan row, then performs the manager transition only when the
+/// decision is `approved`.
+async fn action_approve_with_resolution(
+    state: &AppState,
+    id: uuid::Uuid,
+    input: ReviewResolutionInput,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&input.question_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let plan = match state
+        .store
+        .plan_get(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    {
+        Some(p) => p,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("plan `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    let current_version = plan.version;
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "plan",
+        &id.to_string(),
+        current_version,
+        PLAN_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "plan_id": id,
+        "version": current_version,
+    });
+
+    match input.decision.outcome() {
+        ResolutionOutcome::PerformTransition => {
+            state
+                .store
+                .plan_update_status(id, PlanStatus::Approved)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            payload["status"] = json!("approved");
+        }
+        ResolutionOutcome::KeepArtifact => {
+            payload["status"] = json!("review_rejected");
+        }
+        ResolutionOutcome::RequestChanges => {
+            payload["status"] = json!("review_needs_changes");
+            stamp_needs_changes_next_step(&mut payload, "plan", "compile");
+        }
+    }
+
+    stamp_resolution_payload(&mut payload, &input);
+    let resolution_str = resolution_wire_string(input.decision);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        Some(&input.question_id),
+        resolution_str,
         None,
     )
     .await;
@@ -973,6 +1086,21 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
             e
         )
     })?;
+
+    // wave-15 :: explicit resolution bridge — same pattern as approve.
+    let resolution = match parse_review_resolution_input(args) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(e.code(), e.message()),
+            ))
+        }
+    };
+
+    if let Some(input) = resolution {
+        return action_mark_with_resolution(state, id, target, input).await;
+    }
+
     state
         .store
         .plan_update_status(id, target)
@@ -994,9 +1122,113 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
     Ok(ToolResult::json_pretty(&payload))
 }
 
+/// Wave-15 explicit resolution bridge for `action=mark`. Validates the
+/// review envelope; on `approved` decision performs the requested
+/// `plan_update_status` transition; on `rejected`/`needs_changes` keeps
+/// the plan at its current status.
+async fn action_mark_with_resolution(
+    state: &AppState,
+    id: uuid::Uuid,
+    target: PlanStatus,
+    input: ReviewResolutionInput,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&input.question_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let plan = match state
+        .store
+        .plan_get(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    {
+        Some(p) => p,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("plan `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    let current_version = plan.version;
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "plan",
+        &id.to_string(),
+        current_version,
+        PLAN_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "plan_id": id,
+        "version": current_version,
+        "requested_status": target.as_str(),
+    });
+
+    match input.decision.outcome() {
+        ResolutionOutcome::PerformTransition => {
+            state
+                .store
+                .plan_update_status(id, target)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            payload["new_status"] = json!(target.as_str());
+        }
+        ResolutionOutcome::KeepArtifact => {
+            payload["new_status"] = json!(plan.status.as_str());
+            payload["status"] = json!("review_rejected");
+        }
+        ResolutionOutcome::RequestChanges => {
+            payload["new_status"] = json!(plan.status.as_str());
+            payload["status"] = json!("review_needs_changes");
+            stamp_needs_changes_next_step(&mut payload, "plan", "compile");
+        }
+    }
+
+    stamp_resolution_payload(&mut payload, &input);
+    let resolution_str = resolution_wire_string(input.decision);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        Some(&input.question_id),
+        resolution_str,
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
 async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> {
     let old_id = parse_id_arg(args, "old_plan_id")?;
     let new_id = parse_id_arg(args, "new_plan_id")?;
+
+    // wave-15 :: explicit resolution bridge. Supersede pivots two plan
+    // ids; the review envelope is anchored to `old_plan_id` (the artifact
+    // being closed out by the supersede). `Rejected` / `NeedsChanges` skip
+    // the supersede entirely.
+    let resolution = match parse_review_resolution_input(args) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(e.code(), e.message()),
+            ))
+        }
+    };
+
+    if let Some(input) = resolution {
+        return action_supersede_with_resolution(state, old_id, new_id, input).await;
+    }
+
     state
         .store
         .plan_supersede(old_id, new_id)
@@ -1013,6 +1245,90 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
         &state.bus,
         qid.as_deref(),
         "superseded",
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
+/// Wave-15 explicit resolution bridge for `action=supersede`. Validates
+/// the review envelope against the OLD plan (the artifact being closed),
+/// then performs the supersede transition only when the decision is
+/// `approved`.
+async fn action_supersede_with_resolution(
+    state: &AppState,
+    old_id: uuid::Uuid,
+    new_id: uuid::Uuid,
+    input: ReviewResolutionInput,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&input.question_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let plan = match state
+        .store
+        .plan_get(old_id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    {
+        Some(p) => p,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("old plan `{}` not found for resolution", old_id),
+                ),
+            ))
+        }
+    };
+    let current_version = plan.version;
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "plan",
+        &old_id.to_string(),
+        current_version,
+        PLAN_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "old_plan_id": old_id,
+        "new_plan_id": new_id,
+        "version": current_version,
+    });
+
+    match input.decision.outcome() {
+        ResolutionOutcome::PerformTransition => {
+            state
+                .store
+                .plan_supersede(old_id, new_id)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            payload["status"] = json!("superseded");
+        }
+        ResolutionOutcome::KeepArtifact => {
+            payload["status"] = json!("review_rejected");
+        }
+        ResolutionOutcome::RequestChanges => {
+            payload["status"] = json!("review_needs_changes");
+            stamp_needs_changes_next_step(&mut payload, "plan", "compile");
+        }
+    }
+
+    stamp_resolution_payload(&mut payload, &input);
+    let resolution_str = resolution_wire_string(input.decision);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        Some(&input.question_id),
+        resolution_str,
         None,
     )
     .await;
@@ -4163,5 +4479,211 @@ mod tests {
             &args,
             hints.workstation_dispatch_opt_in()
         ));
+    }
+
+    // ── wave-15 :: plan resolution bridge — pure handler-shape ──────────
+    //
+    // Same pattern as the directive tests: drive the validation /
+    // stamping helpers that the plan handler composes for approve / mark
+    // / supersede. The DB-touching path (plan_get) is exercised by the
+    // daemon test suite; here we pin the deterministic branch logic so a
+    // refactor that breaks the resolution contract fails loud.
+    use crate::handlers::knowledge::review_gate::{
+        parse_review_question_id_struct as wave15_parse_qid,
+        parse_review_resolution_input as wave15_parse_input,
+        stamp_needs_changes_next_step as wave15_stamp_next_step,
+        stamp_resolution_payload as wave15_stamp_payload,
+        validate_review_resolution_envelope as wave15_validate_envelope,
+        ResolutionInputError as Wave15ResolutionInputError,
+        ReviewDecision as Wave15ReviewDecision,
+        ReviewResolutionInput as Wave15ReviewResolutionInput,
+    };
+
+    #[test]
+    fn plan_action_whitelist_pins_state_changing_actions() {
+        // Pin the action whitelist for the plan surface. Update lockstep
+        // with the resolution wiring if a new state-changing action lands.
+        assert_eq!(PLAN_REVIEW_ACTIONS, &["compile", "approve", "mark", "supersede"]);
+    }
+
+    #[test]
+    fn plan_resolution_input_missing_decision_rejected_at_handler_boundary() {
+        let args = json!({
+            "plan_id": "00000000-0000-0000-0000-000000000abc",
+            "review_question_id": "review:plan:00000000-0000-0000-0000-000000000abc:v1:approve",
+        });
+        let err = wave15_parse_input(&args).unwrap_err();
+        assert_eq!(err, Wave15ResolutionInputError::MissingDecision);
+    }
+
+    #[test]
+    fn plan_resolution_envelope_accepts_canonical_approve() {
+        let qid = "review:plan:00000000-0000-0000-0000-000000000abc:v1:approve";
+        let parsed = wave15_parse_qid(qid).unwrap();
+        wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .expect("approve via valid review id must pass envelope validation");
+    }
+
+    #[test]
+    fn plan_resolution_envelope_accepts_canonical_mark() {
+        let qid = "review:plan:00000000-0000-0000-0000-000000000abc:v2:mark";
+        let parsed = wave15_parse_qid(qid).unwrap();
+        wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000abc",
+            2,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .expect("mark via valid review id must pass envelope validation");
+    }
+
+    #[test]
+    fn plan_resolution_envelope_accepts_canonical_supersede() {
+        let qid = "review:plan:00000000-0000-0000-0000-000000000abc:v1:supersede";
+        let parsed = wave15_parse_qid(qid).unwrap();
+        wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .expect("supersede via valid review id must pass envelope validation");
+    }
+
+    #[test]
+    fn plan_resolution_envelope_rejects_stale_version() {
+        let qid = "review:plan:00000000-0000-0000-0000-000000000abc:v1:approve";
+        let parsed = wave15_parse_qid(qid).unwrap();
+        let err = wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000abc",
+            3,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "STALE_REVIEW_VERSION");
+    }
+
+    #[test]
+    fn plan_resolution_envelope_rejects_scope_mismatch() {
+        // qid says scope=directive but submitted to the plan surface →
+        // REVIEW_SCOPE_MISMATCH (handler rejects before mutating state).
+        let qid = "review:directive:00000000-0000-0000-0000-000000000abc:v1:approve";
+        let parsed = wave15_parse_qid(qid).unwrap();
+        let err = wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_SCOPE_MISMATCH");
+    }
+
+    #[test]
+    fn plan_resolution_envelope_rejects_unsupported_action() {
+        // archive isn't a valid plan-surface action even though it's
+        // valid on the directive surface — must be REJECTED here.
+        let qid = "review:plan:00000000-0000-0000-0000-000000000abc:v1:archive";
+        let parsed = wave15_parse_qid(qid).unwrap();
+        let err = wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_ACTION_UNSUPPORTED");
+    }
+
+    #[test]
+    fn plan_rejected_decision_records_reason_in_payload_without_approving() {
+        let input = Wave15ReviewResolutionInput {
+            question_id: "review:plan:00000000-0000-0000-0000-000000000abc:v1:approve".to_string(),
+            decision: Wave15ReviewDecision::Rejected,
+            actor: Some("operator-1".to_string()),
+            note: Some("PLAN.lisp missing acceptance commands".to_string()),
+        };
+        // Replay the handler's keep-artifact branch.
+        let mut payload = json!({
+            "plan_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+        });
+        payload["status"] = json!("review_rejected");
+        wave15_stamp_payload(&mut payload, &input);
+        assert_eq!(payload["status"], "review_rejected");
+        assert_eq!(payload["review_decision"], "rejected");
+        assert_eq!(payload["review_decision_outcome"], "keep_artifact");
+        assert_eq!(payload["review_actor"], "operator-1");
+        assert!(payload["review_note"]
+            .as_str()
+            .unwrap()
+            .contains("acceptance commands"));
+    }
+
+    #[test]
+    fn plan_needs_changes_decision_surfaces_next_step() {
+        let input = Wave15ReviewResolutionInput {
+            question_id: "review:plan:00000000-0000-0000-0000-000000000abc:v1:approve".to_string(),
+            decision: Wave15ReviewDecision::NeedsChanges,
+            actor: Some("operator-1".to_string()),
+            note: Some("split DAG into smaller waves".to_string()),
+        };
+        let mut payload = json!({
+            "plan_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+        });
+        payload["status"] = json!("review_needs_changes");
+        wave15_stamp_next_step(&mut payload, "plan", "compile");
+        wave15_stamp_payload(&mut payload, &input);
+        assert_eq!(payload["status"], "review_needs_changes");
+        assert_eq!(payload["review_decision"], "needs_changes");
+        assert_eq!(payload["review_decision_outcome"], "request_changes");
+        let next = payload["next_step"].as_str().unwrap();
+        assert!(next.contains("rework"));
+        assert!(next.contains("plan"));
+        assert!(next.contains("compile"));
+    }
+
+    #[test]
+    fn plan_resolution_legacy_quiet_path_returns_none_when_no_qid() {
+        let args = json!({"plan_id": "00000000-0000-0000-0000-000000000abc"});
+        assert!(wave15_parse_input(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn plan_supersede_envelope_anchored_to_old_plan_id() {
+        // For supersede, the resolution envelope is anchored to the OLD
+        // plan id (the artifact being closed), not the new one.
+        let qid = "review:plan:00000000-0000-0000-0000-000000000aaa:v1:supersede";
+        let parsed = wave15_parse_qid(qid).unwrap();
+        wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000aaa",
+            1,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .expect("supersede must validate against old_plan_id");
+        let err = wave15_validate_envelope(
+            &parsed,
+            "plan",
+            "00000000-0000-0000-0000-000000000bbb", // new id — must fail
+            1,
+            PLAN_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_ARTIFACT_MISMATCH");
     }
 }
