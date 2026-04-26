@@ -127,7 +127,7 @@ const FAILURE_POLICY_CONTINUE: &str = "continue";
 /// One node in the executable DAG. Only fields on the v1 allowlist are kept
 /// here; unsupported fields land in `unsupported_fields` and are surfaced via
 /// `node_hint_summary` so author intent never disappears silently.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub(super) struct DagNode {
     pub id: String,
     pub target: String,
@@ -140,8 +140,35 @@ pub(super) struct DagNode {
     pub target_project: Option<String>,
     pub requested_cwd: Option<String>,
     pub flow_id: Option<String>,
+    /// wave-15 / task 05 — workstation-dispatch hint contract additions.
+    /// Each field is captured raw and only consumed by the
+    /// `workstation_dispatch` module when this node opts in. Storing them
+    /// on the node (rather than pushing into `unsupported_fields`) lets
+    /// the v2 scheduler route the node through the workstation-dispatch
+    /// substrate without a second parse pass.
+    pub scope: Option<String>,
+    pub commit_policy: Option<String>,
+    pub owned_files_raw: Option<String>,
+    pub forbidden_files_raw: Option<String>,
+    pub acceptance_commands_raw: Option<String>,
+    pub workstation_dispatch_flag: Option<String>,
     /// Per-node unsupported `:keyword value` pairs, kept in source order.
     pub unsupported_fields: Vec<(String, String)>,
+}
+
+impl DagNode {
+    /// True iff this node opted into workstation-dispatch v0 via
+    /// `:workstation-dispatch true` (or any bareword that lowercases to
+    /// `true`/`yes`/`on`/`1`).
+    pub(super) fn workstation_dispatch_opt_in(&self) -> bool {
+        match self.workstation_dispatch_flag.as_deref() {
+            Some(raw) => matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            ),
+            None => false,
+        }
+    }
 }
 
 /// Result of parsing a PLAN.lisp body for explicit `(node ...)` forms.
@@ -406,6 +433,12 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut target_project: Option<String> = None;
     let mut requested_cwd: Option<String> = None;
     let mut flow_id: Option<String> = None;
+    let mut scope: Option<String> = None;
+    let mut commit_policy: Option<String> = None;
+    let mut owned_files_raw: Option<String> = None;
+    let mut forbidden_files_raw: Option<String> = None;
+    let mut acceptance_commands_raw: Option<String> = None;
+    let mut workstation_dispatch_flag: Option<String> = None;
     let mut unsupported_fields: Vec<(String, String)> = Vec::new();
 
     for (raw_key, value) in pairs {
@@ -438,6 +471,22 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
                 set_first(&mut requested_cwd, &value)
             }
             "flow-id" | "flow_id" => set_first(&mut flow_id, &value),
+            // wave-15 / task 05 — workstation-dispatch hint contract.
+            // Captured here so the scheduler can route eligible nodes
+            // without a second parse pass; only consumed when
+            // `:workstation-dispatch true` is also set.
+            "scope" => set_first(&mut scope, &value),
+            "commit-policy" | "commit_policy" => set_first(&mut commit_policy, &value),
+            "owned-files" | "owned_files" => set_first(&mut owned_files_raw, &value),
+            "forbidden-files" | "forbidden_files" => {
+                set_first(&mut forbidden_files_raw, &value)
+            }
+            "acceptance-commands" | "acceptance_commands" => {
+                set_first(&mut acceptance_commands_raw, &value)
+            }
+            "workstation-dispatch" | "workstation_dispatch" => {
+                set_first(&mut workstation_dispatch_flag, &value)
+            }
             _ => {
                 unsupported_fields.push((raw_key, value));
             }
@@ -468,6 +517,12 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         target_project,
         requested_cwd,
         flow_id,
+        scope,
+        commit_policy,
+        owned_files_raw,
+        forbidden_files_raw,
+        acceptance_commands_raw,
+        workstation_dispatch_flag,
         unsupported_fields,
     })
 }
@@ -888,6 +943,27 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
         if let Some(f) = &n.flow_id {
             entry["flow_id"] = json!(f);
         }
+        // wave-15 / task 05 — workstation-dispatch hint contract surface.
+        // Each field is emitted only when present so summaries for nodes
+        // that do not opt in stay byte-identical with the v2 baseline.
+        if let Some(s) = &n.scope {
+            entry["scope"] = json!(s);
+        }
+        if let Some(c) = &n.commit_policy {
+            entry["commit_policy"] = json!(c);
+        }
+        if let Some(o) = &n.owned_files_raw {
+            entry["owned_files_raw"] = json!(o);
+        }
+        if let Some(f) = &n.forbidden_files_raw {
+            entry["forbidden_files_raw"] = json!(f);
+        }
+        if let Some(a) = &n.acceptance_commands_raw {
+            entry["acceptance_commands_raw"] = json!(a);
+        }
+        if n.workstation_dispatch_opt_in() {
+            entry["workstation_dispatch"] = json!(true);
+        }
         out.push(entry);
     }
     Value::Array(out)
@@ -1108,6 +1184,74 @@ struct DispatchOutcome {
     classification: std::result::Result<(), String>,
 }
 
+/// Project a parsed DAG node into the workstation-dispatch hint contract.
+/// Mirrors `ParsedPlanHints::to_workstation_hints` so the v0 DAG path and
+/// the v0 single-node runner build identical briefs for the same hints.
+fn node_to_workstation_hints(
+    node: &DagNode,
+) -> super::workstation_dispatch::WorkstationDispatchHints {
+    super::workstation_dispatch::WorkstationDispatchHints {
+        objective: node.objective.clone(),
+        scope: node.scope.clone(),
+        owned_files: super::plan::split_lisp_string_list(node.owned_files_raw.as_deref()),
+        forbidden_files: super::plan::split_lisp_string_list(node.forbidden_files_raw.as_deref()),
+        acceptance_commands: super::plan::split_lisp_string_list(
+            node.acceptance_commands_raw.as_deref(),
+        ),
+        commit_policy: node.commit_policy.clone(),
+        target_project: node.target_project.clone(),
+        requested_cwd: node.requested_cwd.clone(),
+        dispatch_strategy: node.dispatch_strategy.clone(),
+    }
+}
+
+/// Convert a workstation-dispatch outcome into the
+/// `(inner_payload, classification)` pair `dispatch_node` uses to populate
+/// `DispatchOutcome`. Keeps the per-node DAG contract intact: the response
+/// JSON carries the workstation-dispatch envelope under `inner_result`,
+/// and the outcome's status drives the success/failure classification.
+fn workstation_outcome_to_dispatch_pair(
+    node: &DagNode,
+    dispatch_strategy: &str,
+    outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
+) -> (Value, std::result::Result<(), String>) {
+    let status = outcome.status();
+    let envelope =
+        super::workstation_dispatch::outcome_to_response_fields(&outcome, dispatch_strategy);
+    let classification: std::result::Result<(), String> = match &outcome {
+        super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. } => Ok(()),
+        super::workstation_dispatch::WorkstationDispatchOutcome::DryRun { .. } => Ok(()),
+        super::workstation_dispatch::WorkstationDispatchOutcome::InnerError {
+            inner_payload,
+            ..
+        } => Err(inner_payload
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("workstation_dispatch inner handler returned error")
+            .to_string()),
+        super::workstation_dispatch::WorkstationDispatchOutcome::SafeDescriptor {
+            reason,
+            ..
+        } => Err(format!(
+            "workstation_dispatch refused to dispatch node `{}`: {}",
+            node.id,
+            reason.detail()
+        )),
+    };
+    let mut payload = json!({
+        "workstation_dispatch_status": status,
+        "node_id": node.id,
+    });
+    if let Some(map) = envelope.as_object() {
+        if let Some(payload_map) = payload.as_object_mut() {
+            for (k, v) in map {
+                payload_map.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    (payload, classification)
+}
+
 async fn dispatch_node(
     state: AppState,
     plan: Plan,
@@ -1115,6 +1259,37 @@ async fn dispatch_node(
 ) -> Result<DispatchOutcome> {
     let inner_args_built = build_node_inner_args(&node, &plan);
     let dispatch_strategy = inner_args_built.dispatch_strategy.clone();
+
+    // wave-15 / task 05 — when this node opts into workstation-dispatch v0
+    // AND targets `mission_task_delegate`, route through the workstation
+    // dispatcher (scoped task brief + scoped commit handoff) instead of
+    // the legacy passthrough. Other targets keep the legacy path so the
+    // DAG scheduler's overall contract is unchanged.
+    if node.workstation_dispatch_opt_in() && node.target == "mission_task_delegate" {
+        let merged = node_to_workstation_hints(&node);
+        let outcome = super::workstation_dispatch::run_workstation_dispatch(
+            &state,
+            &plan,
+            &node.target,
+            &dispatch_strategy,
+            merged,
+            false,
+        )
+        .await;
+        let (inner_payload, classification) = workstation_outcome_to_dispatch_pair(
+            &node,
+            &dispatch_strategy,
+            outcome,
+        );
+        return Ok(DispatchOutcome {
+            node_id: node.id.clone(),
+            target: node.target.clone(),
+            dispatch_strategy,
+            inner_payload,
+            classification,
+        });
+    }
+
     let inner_args = match inner_args_built.inner_args {
         Ok(v) => v,
         Err(err_payload) => {
@@ -2456,58 +2631,29 @@ mod tests {
             DagNode {
                 id: "a".into(),
                 target: "mission_execution".into(),
-                objective: None,
-                depends_on: vec![],
-                condition: None,
                 failure_policy: "fail-fast".into(),
-                timeout_ms: None,
-                dispatch_strategy: None,
-                target_project: None,
-                requested_cwd: None,
-                flow_id: None,
-                unsupported_fields: vec![],
+                ..Default::default()
             },
             DagNode {
                 id: "b".into(),
                 target: "mission_execution".into(),
-                objective: None,
                 depends_on: vec!["a".into()],
-                condition: None,
                 failure_policy: "fail-fast".into(),
-                timeout_ms: None,
-                dispatch_strategy: None,
-                target_project: None,
-                requested_cwd: None,
-                flow_id: None,
-                unsupported_fields: vec![],
+                ..Default::default()
             },
             DagNode {
                 id: "c".into(),
                 target: "mission_execution".into(),
-                objective: None,
                 depends_on: vec!["b".into()],
-                condition: None,
                 failure_policy: "fail-fast".into(),
-                timeout_ms: None,
-                dispatch_strategy: None,
-                target_project: None,
-                requested_cwd: None,
-                flow_id: None,
-                unsupported_fields: vec![],
+                ..Default::default()
             },
             DagNode {
                 id: "d".into(),
                 target: "mission_execution".into(),
-                objective: None,
                 depends_on: vec!["a".into()],
-                condition: None,
                 failure_policy: "fail-fast".into(),
-                timeout_ms: None,
-                dispatch_strategy: None,
-                target_project: None,
-                requested_cwd: None,
-                flow_id: None,
-                unsupported_fields: vec![],
+                ..Default::default()
             },
         ];
         let mut succs: HashMap<&str, Vec<&str>> = HashMap::new();
@@ -2530,15 +2676,11 @@ mod tests {
             id: "n1".into(),
             target: "mission_execution".into(),
             objective: Some("do thing".into()),
-            depends_on: vec![],
-            condition: None,
             failure_policy: "fail-fast".into(),
-            timeout_ms: None,
             dispatch_strategy: Some("fresh-code-alignment".into()),
             target_project: Some("missiond".into()),
             requested_cwd: Some("/abs/path".into()),
-            flow_id: None,
-            unsupported_fields: vec![],
+            ..Default::default()
         };
         let plan = fixture_plan("(plan)");
         let built = build_node_inner_args(&node, &plan);
@@ -2557,15 +2699,10 @@ mod tests {
             id: "n1".into(),
             target: "mission_task_delegate".into(),
             objective: Some("ship a thing".into()),
-            depends_on: vec![],
-            condition: None,
             failure_policy: "fail-fast".into(),
             timeout_ms: Some(15_000),
-            dispatch_strategy: None,
-            target_project: None,
             requested_cwd: Some("/abs/path".into()),
-            flow_id: None,
-            unsupported_fields: vec![],
+            ..Default::default()
         };
         let plan = fixture_plan("(plan)");
         let built = build_node_inner_args(&node, &plan);
@@ -2580,16 +2717,8 @@ mod tests {
         let node = DagNode {
             id: "n1".into(),
             target: "mission_flow_run".into(),
-            objective: None,
-            depends_on: vec![],
-            condition: None,
             failure_policy: "fail-fast".into(),
-            timeout_ms: None,
-            dispatch_strategy: None,
-            target_project: None,
-            requested_cwd: None,
-            flow_id: None,
-            unsupported_fields: vec![],
+            ..Default::default()
         };
         let plan = fixture_plan("(plan)");
         let built = build_node_inner_args(&node, &plan);
@@ -2680,16 +2809,9 @@ mod tests {
         DagNode {
             id: id.into(),
             target: target.into(),
-            objective: None,
-            depends_on: vec![],
-            condition: None,
             failure_policy: "fail-fast".into(),
-            timeout_ms: None,
             dispatch_strategy: Some("agent-team".into()),
-            target_project: None,
-            requested_cwd: None,
-            flow_id: None,
-            unsupported_fields: vec![],
+            ..Default::default()
         }
     }
 
@@ -3397,5 +3519,218 @@ mod tests {
         o.bus_publish_warnings.push("simulated bus drop for n2".into());
         assert_eq!(o.bus_publish_warnings.len(), 2);
         assert!(o.bus_publish_warnings[0].contains("n1"));
+    }
+
+    // ── wave-15 / task 05 — workstation-dispatch hint contract ───────────
+    //
+    // Pin the per-node parser additions: scope / commit-policy /
+    // owned-files / forbidden-files / acceptance-commands /
+    // workstation-dispatch land on the typed slots and never leak into
+    // `unsupported_fields` (which would mean the scheduler can't route
+    // the node through the workstation-dispatch substrate).
+
+    #[test]
+    fn parse_node_form_captures_workstation_dispatch_contract() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :objective "ship the wave"
+                    :scope "wave 15 task 05 only"
+                    :owned-files ["a.rs" "b.rs"]
+                    :forbidden-files ["c.rs"]
+                    :acceptance-commands ["cargo test" "git diff --check"]
+                    :commit-policy "scoped"
+                    :workstation-dispatch true
+                    :dispatch-strategy "fresh-code-alignment"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes.len(), 1);
+        let n = &parsed.nodes[0];
+        assert_eq!(n.scope.as_deref(), Some("wave 15 task 05 only"));
+        assert_eq!(n.commit_policy.as_deref(), Some("scoped"));
+        assert!(n.owned_files_raw.as_deref().unwrap().contains("a.rs"));
+        assert!(n.forbidden_files_raw.as_deref().unwrap().contains("c.rs"));
+        assert!(n
+            .acceptance_commands_raw
+            .as_deref()
+            .unwrap()
+            .contains("cargo test"));
+        assert!(n.workstation_dispatch_opt_in());
+        // None of the new keys should land in unsupported_fields — that
+        // would break workstation-dispatch routing.
+        let unsupported_keys: Vec<String> =
+            n.unsupported_fields.iter().map(|(k, _)| k.clone()).collect();
+        for forbidden in [
+            "scope",
+            "commit-policy",
+            "owned-files",
+            "forbidden-files",
+            "acceptance-commands",
+            "workstation-dispatch",
+        ] {
+            assert!(
+                !unsupported_keys.contains(&forbidden.to_string()),
+                "key `{}` must land on a typed slot, not unsupported_fields",
+                forbidden
+            );
+        }
+    }
+
+    #[test]
+    fn parse_node_form_workstation_dispatch_opt_in_recognises_truthy_values() {
+        for truthy in &["true", "TRUE", "yes", "on", "1"] {
+            let sexp = format!(
+                r#"(plan (node :id "n1" :target "mission_task_delegate" :workstation-dispatch {}))"#,
+                truthy
+            );
+            let parsed = parse_plan_dag(&sexp);
+            assert!(
+                parsed.nodes[0].workstation_dispatch_opt_in(),
+                "expected `{}` to be truthy",
+                truthy
+            );
+        }
+        for falsy in &["false", "no", "off", "0", "maybe"] {
+            let sexp = format!(
+                r#"(plan (node :id "n1" :target "mission_task_delegate" :workstation-dispatch {}))"#,
+                falsy
+            );
+            let parsed = parse_plan_dag(&sexp);
+            assert!(
+                !parsed.nodes[0].workstation_dispatch_opt_in(),
+                "expected `{}` to NOT be truthy",
+                falsy
+            );
+        }
+        // Absence is also off.
+        let sexp = r#"(plan (node :id "n1" :target "mission_task_delegate"))"#;
+        let parsed = parse_plan_dag(sexp);
+        assert!(!parsed.nodes[0].workstation_dispatch_opt_in());
+    }
+
+    /// `node_to_workstation_hints` is the bridge between the parsed node
+    /// and the workstation-dispatch substrate. Any divergence here means
+    /// per-node DAG dispatch and per-plan single-node dispatch would
+    /// produce different briefs for identical inputs.
+    #[test]
+    fn node_to_workstation_hints_projects_every_field() {
+        let node = DagNode {
+            id: "n1".into(),
+            target: "mission_task_delegate".into(),
+            objective: Some("ship".into()),
+            target_project: Some("missiond".into()),
+            requested_cwd: Some("/abs/missiond".into()),
+            dispatch_strategy: Some("agent-team".into()),
+            scope: Some("scope text".into()),
+            commit_policy: Some("scoped".into()),
+            owned_files_raw: Some(r#"["a.rs"]"#.into()),
+            forbidden_files_raw: Some(r#"["b.rs"]"#.into()),
+            acceptance_commands_raw: Some(r#"["cargo test"]"#.into()),
+            failure_policy: "fail-fast".into(),
+            ..Default::default()
+        };
+        let w = node_to_workstation_hints(&node);
+        assert_eq!(w.objective.as_deref(), Some("ship"));
+        assert_eq!(w.target_project.as_deref(), Some("missiond"));
+        assert_eq!(w.requested_cwd.as_deref(), Some("/abs/missiond"));
+        assert_eq!(w.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert_eq!(w.scope.as_deref(), Some("scope text"));
+        assert_eq!(w.commit_policy.as_deref(), Some("scoped"));
+        assert_eq!(w.owned_files, vec!["a.rs".to_string()]);
+        assert_eq!(w.forbidden_files, vec!["b.rs".to_string()]);
+        assert_eq!(w.acceptance_commands, vec!["cargo test".to_string()]);
+    }
+
+    /// Safe-descriptor outcomes from the workstation-dispatch substrate
+    /// must classify as failures so the DAG scheduler taints downstream
+    /// nodes (vs success which would falsely advance the wave).
+    #[test]
+    fn workstation_outcome_safe_descriptor_classifies_as_failure() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let node = DagNode {
+            id: "n1".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            ..Default::default()
+        };
+        let outcome = wd::WorkstationDispatchOutcome::SafeDescriptor {
+            reason: wd::SafeDescriptorReason::ProjectRootUnresolved(
+                "no signal".to_string(),
+            ),
+            task_brief: None,
+        };
+        let (payload, classification) =
+            workstation_outcome_to_dispatch_pair(&node, "fresh-code-alignment", outcome);
+        assert!(classification.is_err(), "safe descriptors must fail dispatch");
+        assert_eq!(payload["workstation_dispatch_status"], "skipped_project_root_unresolved");
+        assert_eq!(payload["node_id"], "n1");
+    }
+
+    /// Dispatched outcomes must classify as success (the inner handler
+    /// already returned non-error).
+    #[test]
+    fn workstation_outcome_dispatched_classifies_as_success() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let node = DagNode {
+            id: "n1".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            ..Default::default()
+        };
+        let outcome = wd::WorkstationDispatchOutcome::Dispatched {
+            task_brief: "## Objective\nship\n".to_string(),
+            task_brief_path: None,
+            evidence_path: Some("/tmp/sidecar.json".to_string()),
+            evidence_error: None,
+            inner_payload: json!({"task_id": "btk-7"}),
+        };
+        let (payload, classification) =
+            workstation_outcome_to_dispatch_pair(&node, "agent-team", outcome);
+        assert!(classification.is_ok(), "dispatched must succeed");
+        assert_eq!(payload["workstation_dispatch_status"], "dispatched");
+        assert_eq!(payload["dispatch_strategy"], "agent-team");
+        assert_eq!(payload["inner_result"]["task_id"], "btk-7");
+    }
+
+    /// `build_nodes_summary` must surface the new workstation-dispatch
+    /// hint fields when present (so dry-run callers can see them) and
+    /// stay quiet for nodes that did not opt in.
+    #[test]
+    fn build_nodes_summary_surfaces_workstation_dispatch_hints_when_present() {
+        let nodes = vec![
+            DagNode {
+                id: "wd".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                scope: Some("scope text".into()),
+                commit_policy: Some("scoped".into()),
+                owned_files_raw: Some(r#"["a.rs"]"#.into()),
+                forbidden_files_raw: Some(r#"["b.rs"]"#.into()),
+                acceptance_commands_raw: Some(r#"["cargo test"]"#.into()),
+                workstation_dispatch_flag: Some("true".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "plain".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["wd".to_string(), "plain".to_string()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        let wd = &arr[0];
+        assert_eq!(wd["scope"], "scope text");
+        assert_eq!(wd["commit_policy"], "scoped");
+        assert_eq!(wd["workstation_dispatch"], true);
+        assert!(wd["owned_files_raw"].as_str().unwrap().contains("a.rs"));
+        let plain = &arr[1];
+        // Plain node carries none of the workstation-dispatch fields so
+        // the summary stays quiet (regression guard for the v2 baseline).
+        assert!(plain.get("scope").is_none());
+        assert!(plain.get("commit_policy").is_none());
+        assert!(plain.get("workstation_dispatch").is_none());
     }
 }

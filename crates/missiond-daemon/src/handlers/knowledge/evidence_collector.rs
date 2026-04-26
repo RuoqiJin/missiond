@@ -92,6 +92,14 @@ pub(crate) mod source {
 
     /// Per-node DAG scheduler dispatch (plan_dag.rs).
     pub(crate) const PLAN_DAG_NODE_DISPATCH: &str = "plan_dag_node_dispatch";
+
+    /// Workstation-dispatch v0 (workstation_dispatch.rs) — the conservative
+    /// opt-in path that augments a `mission_task_delegate` call with a
+    /// scoped task brief (objective / owned-files / forbidden-files /
+    /// acceptance commands / commit policy). Distinguished from the bare
+    /// `plan_runner_dispatch` source so audit consumers can tell when the
+    /// task brief was injected and when only the legacy passthrough ran.
+    pub(crate) const WORKSTATION_DISPATCH: &str = "workstation_dispatch";
 }
 
 /// Canonical `kind` taxonomy. We keep this open (callers can pass arbitrary

@@ -16,3 +16,4 @@ pub(crate) mod review_gate;
 pub(crate) mod skill;
 pub(crate) mod unified_entry;
 pub(crate) mod workflow;
+pub(crate) mod workstation_dispatch;

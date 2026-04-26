@@ -266,6 +266,40 @@ fn build_properties() -> Value {
         "[compile persist=true | approve | mark | supersede] deterministic question-id override. On compile, replaces the auto-derived id (`review:plan:<id>:v<version>:compile[:<topic-hash>]`). On approve / mark / supersede, opts the action into emitting a follow-up QuestionEvent::Resolved (or DecisionResolved) with the supplied id — same fire-and-forget, bus-failure-warns semantics. Absent → no resolution emit (legacy quiet).",
     ));
 
+    // ── wave-15 / task 05 — workstation-dispatch v0 schema ──────────────
+    //
+    // These knobs are opt-in. The runner only invokes the workstation-
+    // dispatch substrate when `workstation_dispatch=true` (or the PLAN.lisp
+    // hint `:workstation-dispatch true`) AND the resolved target is
+    // `mission_task_delegate`. Anything else falls through to the legacy
+    // plan-runner internal dispatch contract documented above.
+    p.insert("workstation_dispatch".into(), prop(
+        "boolean",
+        "[execute internal target=mission_task_delegate] Wave 15 / Task 05 — opt into workstation-dispatch v0. When true (or PLAN.lisp carries `:workstation-dispatch true`) the runner builds a scoped task brief (objective / scope / owned-files / forbidden-files / acceptance-commands / commit policy / agent-team hint when dispatch_strategy=agent-team) and dispatches via the existing `mission_task_delegate` substrate (NEVER `claude -p`). Project root is resolved via `resolve_target_project_root` (project > absolute cwd > target_project; relative cwd refused; no process-cwd fallback). On safety failure (target!=mission_task_delegate, project root unresolved, missing objective) the runner returns a structured `workstation_dispatch_status=skipped_*` descriptor instead of silently falling back. Response surfaces workstation_dispatch_status / dispatch_strategy / task_brief_preview / inner_result / evidence_path.",
+    ));
+
+    p.insert("scope".into(), prop(
+        "string",
+        "[execute internal workstation_dispatch=true] free-form additional bounds spliced into the task brief's `## Scope` section. Plan-hint fallback: PLAN.lisp `:scope`. Caller wins.",
+    ));
+
+    p.insert("owned_files".into(), prop_no_type(
+        "[execute internal workstation_dispatch=true] string or array of file paths the delegated task is allowed to stage / commit. Spliced into the task brief's `## Owned files` section. Plan-hint fallback: PLAN.lisp `:owned-files [\"a.rs\" \"b.rs\"]` (also accepts paren list and bareword run). Caller wins. Capped at 32 entries; overflow surfaces in the response.",
+    ));
+
+    p.insert("forbidden_files".into(), prop_no_type(
+        "[execute internal workstation_dispatch=true] string or array of file paths the delegated task MUST NOT touch. Spliced into the task brief's `## Forbidden files` section (omitted from the brief when empty). Plan-hint fallback: PLAN.lisp `:forbidden-files [...]`. Capped at 32 entries.",
+    ));
+
+    p.insert("acceptance_commands".into(), prop_no_type(
+        "[execute internal workstation_dispatch=true] string or array of acceptance commands the delegated task must pass before commit (`cargo test ...`, `git diff --check`, ...). Spliced into the task brief's `## Acceptance commands` section. Plan-hint fallback: PLAN.lisp `:acceptance-commands [...]`. Capped at 32 entries.",
+    ));
+
+    p.insert("commit_policy".into(), prop(
+        "string",
+        "[execute internal workstation_dispatch=true] commit handoff policy. Default `scoped` — the brief always carries the literal reminder `do not stage or commit outside the owned files declared above`. Plan-hint fallback: PLAN.lisp `:commit-policy`. Caller wins.",
+    ));
+
     Value::Object(p)
 }
 
@@ -325,6 +359,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
          不实现 UI / 不等回答 / 不自动 approve; bus 失败 surface review_question_warning + 确定性 id 供重试。\
          approve / mark / supersede 接收 review_question_id → 触发 QuestionEvent::Resolved (或 DecisionResolved)。\
          响应总附 review_gate_policy / review_question_emitted (+ review_question_id / review_question_warning when applicable)。\
+         wave-15 / task 05 workstation-dispatch v0: execute internal target=mission_task_delegate 时再传 workstation_dispatch=true \
+         (或 PLAN.lisp 写 :workstation-dispatch true) 即启用 workstation-dispatch 路径 — runner 用 \
+         scope / owned_files / forbidden_files / acceptance_commands / commit_policy / dispatch_strategy 字段 \
+         拼装 scoped task brief，注入到 mission_task_delegate.objective (绝不 shell out claude -p)，\
+         project root 强制走 resolve_target_project_root (禁止 join relative cwd)，\
+         dispatch_strategy=agent-team 时 brief 内一次性插入字面提示「使用 agent-team提高效率」；\
+         安全失败 (target 错 / project root 未解 / 缺 objective) 返结构化 workstation_dispatch_status=skipped_* descriptor，\
+         不静默 fallback prompt mode；响应附 workstation_dispatch_status / dispatch_strategy / task_brief_preview / inner_result / evidence_path。\
+         同样的 hint contract 在 scheduler_mode=dag_v1 节点上生效 (per-node `:workstation-dispatch true`)，\
+         workstation-dispatch 节点 dispatch 走相同 substrate，evidence source=workstation_dispatch。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \

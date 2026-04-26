@@ -1037,18 +1037,30 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
 //   intent-tools.lisp       :: mission_plan :: :dispatch-strategy-consumer
 // ───────────────────────────────────────────────────────────────────────
 
-const AGENT_TEAM_OBJECTIVE_HINT: &str = "使用 agent-team提高效率";
+pub(super) const AGENT_TEAM_OBJECTIVE_HINT: &str = "使用 agent-team提高效率";
 
 #[derive(Debug, Default, Clone)]
 pub(super) struct ParsedPlanHints {
-    target: Option<String>,
-    flow_id: Option<String>,
-    dispatch_strategy: Option<String>,
-    parallelism: Option<String>,
-    target_project: Option<String>,
-    requested_cwd: Option<String>,
-    objective: Option<String>,
-    summary: Option<String>,
+    pub(super) target: Option<String>,
+    pub(super) flow_id: Option<String>,
+    pub(super) dispatch_strategy: Option<String>,
+    pub(super) parallelism: Option<String>,
+    pub(super) target_project: Option<String>,
+    pub(super) requested_cwd: Option<String>,
+    pub(super) objective: Option<String>,
+    pub(super) summary: Option<String>,
+    /// wave-15 / task 05 — workstation-dispatch hint contract. Captured
+    /// here so a single PLAN.lisp scan extracts every recognised field;
+    /// the workstation_dispatch module reads them via `to_workstation_*`.
+    pub(super) scope: Option<String>,
+    pub(super) commit_policy: Option<String>,
+    pub(super) owned_files_raw: Option<String>,
+    pub(super) forbidden_files_raw: Option<String>,
+    pub(super) acceptance_commands_raw: Option<String>,
+    /// `:workstation-dispatch true` opts into workstation_dispatch v0.
+    /// Stored as the parsed bareword so we keep the conservative
+    /// "no Lisp interpretation" stance.
+    pub(super) workstation_dispatch_flag: Option<String>,
 }
 
 impl ParsedPlanHints {
@@ -1067,8 +1079,125 @@ impl ParsedPlanHints {
         put("requested_cwd", &self.requested_cwd);
         put("objective", &self.objective);
         put("summary", &self.summary);
+        put("scope", &self.scope);
+        put("commit_policy", &self.commit_policy);
+        put("owned_files", &self.owned_files_raw);
+        put("forbidden_files", &self.forbidden_files_raw);
+        put("acceptance_commands", &self.acceptance_commands_raw);
+        put("workstation_dispatch", &self.workstation_dispatch_flag);
         Value::Object(map)
     }
+
+    /// True iff the PLAN.lisp surfaced `:workstation-dispatch true` (or any
+    /// bareword that lowercases to `true`/`yes`/`on`). False otherwise —
+    /// `:workstation-dispatch false` and absence both produce False.
+    pub(super) fn workstation_dispatch_opt_in(&self) -> bool {
+        match self.workstation_dispatch_flag.as_deref() {
+            Some(raw) => matches!(
+                raw.trim().to_ascii_lowercase().as_str(),
+                "true" | "yes" | "on" | "1"
+            ),
+            None => false,
+        }
+    }
+
+    /// Project the parsed PLAN.lisp scalars into the workstation-dispatch
+    /// hint struct. Lists (`owned-files`, `forbidden-files`,
+    /// `acceptance-commands`) round-trip through whitespace splitting on
+    /// the captured raw value because the conservative scanner records
+    /// the whole bracket span as one string.
+    pub(super) fn to_workstation_hints(&self) -> super::workstation_dispatch::WorkstationDispatchHints {
+        super::workstation_dispatch::WorkstationDispatchHints {
+            objective: self.objective.clone().or_else(|| self.summary.clone()),
+            scope: self.scope.clone(),
+            owned_files: split_lisp_string_list(self.owned_files_raw.as_deref()),
+            forbidden_files: split_lisp_string_list(self.forbidden_files_raw.as_deref()),
+            acceptance_commands: split_lisp_string_list(
+                self.acceptance_commands_raw.as_deref(),
+            ),
+            commit_policy: self.commit_policy.clone(),
+            target_project: self.target_project.clone(),
+            requested_cwd: self.requested_cwd.clone(),
+            dispatch_strategy: self.dispatch_strategy.clone(),
+        }
+    }
+}
+
+/// Split a captured PLAN.lisp list value (`["a" "b"]` / `(a b)` / bareword
+/// run) into a vector of strings. Quoted strings have their quotes
+/// stripped; bare words pass through. Whitespace and commas separate
+/// elements. Conservative on purpose: anything weird produces an empty
+/// slice rather than a partial parse.
+pub(super) fn split_lisp_string_list(raw: Option<&str>) -> Vec<String> {
+    let Some(raw) = raw else { return Vec::new() };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let inner = trimmed
+        .strip_prefix('[')
+        .and_then(|s| s.strip_suffix(']'))
+        .or_else(|| trimmed.strip_prefix('(').and_then(|s| s.strip_suffix(')')))
+        .unwrap_or(trimmed);
+    let mut out: Vec<String> = Vec::new();
+    let chars: Vec<char> = inner.chars().collect();
+    let n = chars.len();
+    let mut i = 0;
+    while i < n {
+        while i < n && (chars[i].is_whitespace() || chars[i] == ',') {
+            i += 1;
+        }
+        if i >= n {
+            break;
+        }
+        if chars[i] == '"' {
+            i += 1;
+            let start = i;
+            let mut esc = false;
+            while i < n {
+                let c = chars[i];
+                if esc {
+                    esc = false;
+                    i += 1;
+                    continue;
+                }
+                if c == '\\' {
+                    esc = true;
+                    i += 1;
+                    continue;
+                }
+                if c == '"' {
+                    break;
+                }
+                i += 1;
+            }
+            let s: String = chars[start..i].iter().collect();
+            if !s.trim().is_empty() {
+                out.push(s);
+            }
+            if i < n {
+                i += 1;
+            }
+        } else {
+            let start = i;
+            while i < n
+                && !chars[i].is_whitespace()
+                && chars[i] != ','
+                && chars[i] != '"'
+                && chars[i] != '('
+                && chars[i] != ')'
+                && chars[i] != '['
+                && chars[i] != ']'
+            {
+                i += 1;
+            }
+            let s: String = chars[start..i].iter().collect();
+            if !s.trim().is_empty() {
+                out.push(s);
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone)]
@@ -1113,17 +1242,36 @@ fn parse_plan_hints(sexp: &str) -> ParsedPlanHints {
             }
             "objective" => store_first(&mut h.objective, &value),
             "summary" => store_first(&mut h.summary, &value),
+            "scope" => store_first(&mut h.scope, &value),
+            "commit-policy" | "commit_policy" => {
+                store_first(&mut h.commit_policy, &value)
+            }
+            "owned-files" | "owned_files" => {
+                store_first(&mut h.owned_files_raw, &value)
+            }
+            "forbidden-files" | "forbidden_files" => {
+                store_first(&mut h.forbidden_files_raw, &value)
+            }
+            "acceptance-commands" | "acceptance_commands" => {
+                store_first(&mut h.acceptance_commands_raw, &value)
+            }
+            "workstation-dispatch" | "workstation_dispatch" => {
+                store_first(&mut h.workstation_dispatch_flag, &value)
+            }
             _ => {}
         }
     }
     h
 }
 
-/// Scan a string for `:keyword value` pairs. Two value shapes are recognised:
+/// Scan a string for `:keyword value` pairs. Three value shapes are recognised:
 ///   * double-quoted string literal — handles `\\` and `\"` escapes
-///   * bareword — terminates on whitespace / `(` / `)` / `"`
-/// List values (`:k (...)`), bare `:k` with no value, and `:k :next-key`
-/// patterns are skipped so the parser stays conservative.
+///   * bracket / paren list — `[a "b" c]` or `(a "b" c)` round-trip as one
+///     captured string spanning the whole bracket pair (wave-15 / task 05
+///     opt-in addition; readers split via `split_lisp_string_list`).
+///   * bareword — terminates on whitespace / `(` / `)` / `[` / `]` / `"`
+/// Bare `:k` with no value and `:k :next-key` patterns are still skipped so
+/// the parser stays conservative for non-list authoring.
 fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
     let chars: Vec<char> = sexp.chars().collect();
     let n = chars.len();
@@ -1163,7 +1311,14 @@ fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
         let mut j = key_start;
         while j < n {
             let cj = chars[j];
-            if cj.is_whitespace() || cj == '(' || cj == ')' || cj == '"' || cj == ':' {
+            if cj.is_whitespace()
+                || cj == '('
+                || cj == ')'
+                || cj == '['
+                || cj == ']'
+                || cj == '"'
+                || cj == ':'
+            {
                 break;
             }
             j += 1;
@@ -1209,14 +1364,66 @@ fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
                 out.push((key, value));
                 i = m;
             }
-            '(' | ')' | ':' => {
+            '[' | '(' => {
+                let open = next;
+                let close = if open == '[' { ']' } else { ')' };
+                let mut depth = 0i64;
+                let mut m = k;
+                let mut esc2 = false;
+                let mut in_str = false;
+                while m < n {
+                    let cm = chars[m];
+                    if in_str {
+                        if esc2 {
+                            esc2 = false;
+                            m += 1;
+                            continue;
+                        }
+                        if cm == '\\' {
+                            esc2 = true;
+                            m += 1;
+                            continue;
+                        }
+                        if cm == '"' {
+                            in_str = false;
+                        }
+                        m += 1;
+                        continue;
+                    }
+                    if cm == '"' {
+                        in_str = true;
+                        m += 1;
+                        continue;
+                    }
+                    if cm == open {
+                        depth += 1;
+                    } else if cm == close {
+                        depth -= 1;
+                        if depth == 0 {
+                            m += 1;
+                            break;
+                        }
+                    }
+                    m += 1;
+                }
+                let value: String = chars[k..m].iter().collect();
+                out.push((key, value));
+                i = m;
+            }
+            ')' | ':' => {
                 i = k;
             }
             _ => {
                 let mut m = k;
                 while m < n {
                     let cm = chars[m];
-                    if cm.is_whitespace() || cm == '(' || cm == ')' || cm == '"' {
+                    if cm.is_whitespace()
+                        || cm == '('
+                        || cm == ')'
+                        || cm == '['
+                        || cm == ']'
+                        || cm == '"'
+                    {
                         break;
                     }
                     m += 1;
@@ -1520,6 +1727,46 @@ async fn action_execute_internal(
 ) -> Result<ToolResult> {
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    // wave-15 / task 05 — workstation-dispatch v0 opt-in path. Only fires
+    // when the caller (or PLAN.lisp) explicitly opted in AND the resolved
+    // target is `mission_task_delegate`. Anything else falls through to
+    // the legacy plan-runner internal dispatch below.
+    if super::workstation_dispatch::opt_in_requested(args, hints.workstation_dispatch_opt_in())
+        && resolved.target == "mission_task_delegate"
+    {
+        let merged_hints = hints.to_workstation_hints().merge_args(args);
+        let outcome = super::workstation_dispatch::run_workstation_dispatch(
+            state,
+            plan,
+            resolved.target,
+            resolved.dispatch_strategy,
+            merged_hints,
+            dry_run,
+        )
+        .await;
+        // Only transition the plan FSM on the Dispatched branch — every
+        // other branch leaves the plan in its current status so the
+        // caller can fix the input and retry without manual cleanup.
+        if matches!(
+            outcome,
+            super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. }
+        ) && !matches!(plan.status, PlanStatus::Executing)
+        {
+            if let Err(e) = state
+                .store
+                .plan_update_status(plan.id, PlanStatus::Executing)
+                .await
+            {
+                tracing::warn!(
+                    plan_id = %plan.id,
+                    error = %e,
+                    "workstation_dispatch: failed to transition plan to executing"
+                );
+            }
+        }
+        return Ok(build_workstation_dispatch_response(plan, resolved, outcome));
+    }
+
     let inner_args = match build_internal_dispatch_args(
         args,
         plan,
@@ -1685,6 +1932,61 @@ async fn action_execute_internal(
         evidence_error,
         status_update_error,
     ))
+}
+
+/// Render a workstation-dispatch outcome into the same response envelope
+/// shape as `build_internal_dispatch_success_response` so callers see one
+/// consistent contract (plan-runner v0 fields + workstation-dispatch
+/// extension fields side-by-side).
+///
+/// Status semantics:
+///   * `Dispatched`         → "executing" (plan transitions to executing)
+///   * `InnerError`         → "dispatch_failed" (do not transition)
+///   * `DryRun`             → "dry_run"
+///   * `SafeDescriptor`     → "dispatch_skipped" (do not transition)
+///
+/// When `Dispatched`, this function does NOT itself update the plan
+/// status — the caller (action_execute_internal) handles that, mirroring
+/// the legacy success-response path. The status field is set so the wire
+/// shape matches the legacy executing branch.
+fn build_workstation_dispatch_response(
+    plan: &Plan,
+    resolved: &ResolvedExec,
+    outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
+) -> ToolResult {
+    let status = match &outcome {
+        super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. } => "executing",
+        super::workstation_dispatch::WorkstationDispatchOutcome::InnerError { .. } => {
+            "dispatch_failed"
+        }
+        super::workstation_dispatch::WorkstationDispatchOutcome::DryRun { .. } => "dry_run",
+        super::workstation_dispatch::WorkstationDispatchOutcome::SafeDescriptor { .. } => {
+            "dispatch_skipped"
+        }
+    };
+    let extension =
+        super::workstation_dispatch::outcome_to_response_fields(&outcome, resolved.dispatch_strategy);
+
+    let mut payload = json!({
+        "status": status,
+        "execute_mode": "internal",
+        "runner_status": "workstation_dispatch_v0",
+        "plan_id": plan.id,
+        "board_task_id": plan.board_task_id,
+        "target_tool": resolved.target,
+        "target_source": resolved.target_source,
+        "dispatch_strategy": resolved.dispatch_strategy,
+        "dispatch_strategy_source": resolved.dispatch_strategy_source,
+        "plan_hint_summary": resolved.plan_hint_summary,
+    });
+    if let Some(map) = extension.as_object() {
+        if let Some(payload_map) = payload.as_object_mut() {
+            for (k, v) in map {
+                payload_map.insert(k.clone(), v.clone());
+            }
+        }
+    }
+    ToolResult::json_pretty(&payload)
 }
 
 /// Build the response for a plan-runner internal dispatch where the inner
@@ -3654,5 +3956,212 @@ mod tests {
         assert_eq!(payload["file_written"], true);
         let path = payload["file_path"].as_str().unwrap();
         assert!(path.ends_with(".missiond/plans/btk-1/PLAN.lisp"));
+    }
+
+    // ── wave-15 / task 05 — workstation-dispatch hint contract surface ───
+    //
+    // These tests pin the integration contract between `ParsedPlanHints`
+    // and the `workstation_dispatch` module: the new keyword fields are
+    // captured, summary projection includes them, opt-in detection is
+    // gated, and lisp list values round-trip through `split_lisp_string_list`.
+
+    #[test]
+    fn parse_plan_hints_captures_workstation_dispatch_contract() {
+        let sexp = r#"
+            (plan
+              :target "mission_task_delegate"
+              :dispatch-strategy "fresh-code-alignment"
+              :scope "wave 15 task 05 only"
+              :owned-files ["a.rs" "b.rs"]
+              :forbidden-files ["c.rs"]
+              :acceptance-commands ["cargo test" "git diff --check"]
+              :commit-policy "scoped"
+              :workstation-dispatch true)
+        "#;
+        let h = parse_plan_hints(sexp);
+        assert_eq!(h.target.as_deref(), Some("mission_task_delegate"));
+        assert_eq!(h.dispatch_strategy.as_deref(), Some("fresh-code-alignment"));
+        assert_eq!(h.scope.as_deref(), Some("wave 15 task 05 only"));
+        assert_eq!(h.commit_policy.as_deref(), Some("scoped"));
+        assert!(h.owned_files_raw.as_deref().unwrap().contains("a.rs"));
+        assert!(h.forbidden_files_raw.as_deref().unwrap().contains("c.rs"));
+        assert!(h
+            .acceptance_commands_raw
+            .as_deref()
+            .unwrap()
+            .contains("cargo test"));
+        assert!(h.workstation_dispatch_opt_in());
+    }
+
+    #[test]
+    fn parsed_plan_hints_workstation_dispatch_opt_in_recognises_truthy_values() {
+        for truthy in &["true", "TRUE", "yes", "on", "1"] {
+            let mut h = ParsedPlanHints::default();
+            h.workstation_dispatch_flag = Some((*truthy).to_string());
+            assert!(
+                h.workstation_dispatch_opt_in(),
+                "expected `{}` to be truthy",
+                truthy
+            );
+        }
+        for falsy in &["false", "no", "off", "0", "maybe"] {
+            let mut h = ParsedPlanHints::default();
+            h.workstation_dispatch_flag = Some((*falsy).to_string());
+            assert!(
+                !h.workstation_dispatch_opt_in(),
+                "expected `{}` to NOT be truthy",
+                falsy
+            );
+        }
+    }
+
+    #[test]
+    fn split_lisp_string_list_handles_bracket_paren_and_bareword_shapes() {
+        assert!(split_lisp_string_list(None).is_empty());
+        assert!(split_lisp_string_list(Some("")).is_empty());
+        assert_eq!(
+            split_lisp_string_list(Some(r#"["a.rs" "b.rs"]"#)),
+            vec!["a.rs".to_string(), "b.rs".to_string()]
+        );
+        assert_eq!(
+            split_lisp_string_list(Some("(x y z)")),
+            vec!["x".to_string(), "y".to_string(), "z".to_string()]
+        );
+        // Bareword run with whitespace.
+        assert_eq!(
+            split_lisp_string_list(Some("a, b, c")),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
+    }
+
+    #[test]
+    fn parsed_plan_hints_to_workstation_hints_projects_every_field() {
+        let sexp = r#"
+            (plan
+              :objective "ship the wave"
+              :target-project "missiond"
+              :requested-cwd "/abs/missiond"
+              :dispatch-strategy "agent-team"
+              :scope "scope text"
+              :commit-policy "scoped"
+              :owned-files ["a.rs"]
+              :forbidden-files ["b.rs"]
+              :acceptance-commands ["cargo test"])
+        "#;
+        let h = parse_plan_hints(sexp);
+        let w = h.to_workstation_hints();
+        assert_eq!(w.objective.as_deref(), Some("ship the wave"));
+        assert_eq!(w.target_project.as_deref(), Some("missiond"));
+        assert_eq!(w.requested_cwd.as_deref(), Some("/abs/missiond"));
+        assert_eq!(w.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert_eq!(w.scope.as_deref(), Some("scope text"));
+        assert_eq!(w.commit_policy.as_deref(), Some("scoped"));
+        assert_eq!(w.owned_files, vec!["a.rs".to_string()]);
+        assert_eq!(w.forbidden_files, vec!["b.rs".to_string()]);
+        assert_eq!(w.acceptance_commands, vec!["cargo test".to_string()]);
+    }
+
+    #[test]
+    fn parsed_plan_hints_summary_includes_workstation_dispatch_fields() {
+        let mut h = ParsedPlanHints::default();
+        h.scope = Some("scope".to_string());
+        h.owned_files_raw = Some(r#"["a.rs"]"#.to_string());
+        h.commit_policy = Some("scoped".to_string());
+        h.workstation_dispatch_flag = Some("true".to_string());
+        let v = h.to_summary_json();
+        assert_eq!(v["scope"], "scope");
+        assert_eq!(v["commit_policy"], "scoped");
+        assert!(v["owned_files"].as_str().unwrap().contains("a.rs"));
+        assert_eq!(v["workstation_dispatch"], "true");
+    }
+
+    #[test]
+    fn build_workstation_dispatch_response_dispatched_marks_status_executing() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "agent-team");
+        let outcome = wd::WorkstationDispatchOutcome::Dispatched {
+            task_brief: "## Objective\nship\n".to_string(),
+            task_brief_path: None,
+            evidence_path: Some("/tmp/sidecar.json".to_string()),
+            evidence_error: None,
+            inner_payload: json!({"task_id": "btk-7"}),
+        };
+        let result = build_workstation_dispatch_response(&plan, &resolved, outcome);
+        let v = parse_payload(&result);
+        assert_eq!(v["status"], "executing");
+        assert_eq!(v["runner_status"], "workstation_dispatch_v0");
+        assert_eq!(v["target_tool"], "mission_task_delegate");
+        assert_eq!(v["dispatch_strategy"], "agent-team");
+        assert_eq!(v["workstation_dispatch_status"], "dispatched");
+        assert_eq!(v["evidence_path"], "/tmp/sidecar.json");
+        assert_eq!(v["inner_result"]["task_id"], "btk-7");
+    }
+
+    #[test]
+    fn build_workstation_dispatch_response_safe_descriptor_does_not_claim_executing() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let outcome = wd::WorkstationDispatchOutcome::SafeDescriptor {
+            reason: wd::SafeDescriptorReason::ProjectRootUnresolved(
+                "no signal".to_string(),
+            ),
+            task_brief: None,
+        };
+        let result = build_workstation_dispatch_response(&plan, &resolved, outcome);
+        let v = parse_payload(&result);
+        assert_ne!(v["status"], "executing");
+        assert_eq!(v["status"], "dispatch_skipped");
+        assert_eq!(v["workstation_dispatch_status"], "skipped_project_root_unresolved");
+        assert!(v.get("inner_result").is_none());
+    }
+
+    #[test]
+    fn build_workstation_dispatch_response_dry_run_status_is_dry_run() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let outcome = wd::WorkstationDispatchOutcome::DryRun {
+            task_brief: "## Objective\nship\n".to_string(),
+        };
+        let result = build_workstation_dispatch_response(&plan, &resolved, outcome);
+        let v = parse_payload(&result);
+        assert_eq!(v["status"], "dry_run");
+        assert_eq!(v["workstation_dispatch_status"], "dry_run_no_dispatch");
+    }
+
+    #[test]
+    fn workstation_dispatch_opt_in_off_when_arg_absent_and_plan_hint_absent() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let args = json!({});
+        let hints = ParsedPlanHints::default();
+        assert!(!wd::opt_in_requested(
+            &args,
+            hints.workstation_dispatch_opt_in()
+        ));
+    }
+
+    #[test]
+    fn workstation_dispatch_opt_in_on_when_plan_hint_only() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let args = json!({});
+        let mut hints = ParsedPlanHints::default();
+        hints.workstation_dispatch_flag = Some("true".to_string());
+        assert!(wd::opt_in_requested(
+            &args,
+            hints.workstation_dispatch_opt_in()
+        ));
+    }
+
+    #[test]
+    fn workstation_dispatch_opt_in_on_when_explicit_arg_only() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let args = json!({"workstation_dispatch": true});
+        let hints = ParsedPlanHints::default();
+        assert!(wd::opt_in_requested(
+            &args,
+            hints.workstation_dispatch_opt_in()
+        ));
     }
 }
