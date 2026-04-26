@@ -2452,6 +2452,115 @@ pub(super) fn parse_infer_plan_fields_mode(
     }
 }
 
+// ── wave-21 / task 04 — autonomous workstation LLM proposal v0 ─────────
+//
+// Wire-form constants for `workstation_inference_mode`. Strictly orthogonal
+// to `infer_plan_fields` (wave-18 / task 06 + wave-20 / task 07) which
+// targets the six PLAN field knobs. The workstation surface targets the
+// four core dispatch knobs (target / dispatch_strategy / objective / scope)
+// and ONLY fires when caller / PLAN supplied no signal at all.
+//
+// Default mode `off` ⇒ byte-compatible with wave-15..20 (no proposal pass,
+// no response augmentation, no Sonnet call). The new `sonnet_suggest`
+// mode triggers the wave-21 proposal pipeline implemented in
+// `workstation_dispatch::request_workstation_proposals`. Conservative
+// invariants pinned at the call-site:
+//   * proposals are SURFACED only, never auto-applied / never auto-spawn;
+//   * Sonnet unavailable ⇒ `LLM_UNAVAILABLE` bundle (NEVER falls back to
+//     `claude -p` or prompt mode);
+//   * DAG mode rejects sonnet_suggest at preflight (single-node-only in v0).
+pub(super) const WORKSTATION_INFER_MODE_OFF: &str = "off";
+pub(super) const WORKSTATION_INFER_MODE_SONNET_SUGGEST: &str = "sonnet_suggest";
+
+/// Resolved workstation-inference mode after argument validation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkstationInferenceMode {
+    /// Default — no proposal pass; response is byte-identical with
+    /// wave-15..20 callers.
+    Off,
+    /// Opt-in — when caller / PLAN supply no workstation hints AND
+    /// dispatch decision came back NotApplicable, ask Sonnet to propose
+    /// values for `target` / `dispatch_strategy` / `objective` / `scope`.
+    /// Proposals never alter the dispatch path; they are surfaced under
+    /// `workstation_proposals` for operator review.
+    SonnetSuggest,
+}
+
+impl WorkstationInferenceMode {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            WorkstationInferenceMode::Off => WORKSTATION_INFER_MODE_OFF,
+            WorkstationInferenceMode::SonnetSuggest => WORKSTATION_INFER_MODE_SONNET_SUGGEST,
+        }
+    }
+
+    /// True when the mode opts into the wave-21 / task 04 LLM proposal
+    /// pass. SonnetSuggest is the only opt-in mode in v0.
+    pub(super) fn is_sonnet_suggest(self) -> bool {
+        matches!(self, WorkstationInferenceMode::SonnetSuggest)
+    }
+}
+
+/// Strict allowlist for the `workstation_inference_mode` knob. Returns
+/// the canonical mode or a structured error message. Default (absent /
+/// blank / `off`) → `Off` which preserves the wave-15..20 byte-shape.
+pub(super) fn parse_workstation_inference_mode(
+    args: &Value,
+) -> std::result::Result<WorkstationInferenceMode, String> {
+    match args.get("workstation_inference_mode").and_then(|v| v.as_str()) {
+        None | Some("") | Some(WORKSTATION_INFER_MODE_OFF) => {
+            Ok(WorkstationInferenceMode::Off)
+        }
+        Some(WORKSTATION_INFER_MODE_SONNET_SUGGEST) => {
+            Ok(WorkstationInferenceMode::SonnetSuggest)
+        }
+        Some(other) => Err(format!(
+            "workstation_inference_mode must be one of [\"off\", \"sonnet_suggest\"]; got `{}`",
+            other
+        )),
+    }
+}
+
+/// Refuse `workstation_inference_mode=sonnet_suggest` when the DAG
+/// scheduler is engaged. v0 keeps the proposal pass single-node-only —
+/// the DAG path runs many nodes per execute and surfacing a per-node
+/// proposal block would balloon the response payload AND blur the
+/// "ONLY when no PLAN hints exist" invariant (each node has its own
+/// hint set). Mirrors the wave-20 / task 07 enforcement on the same
+/// path. Returns `Some(structured_error)` when refused, `None` otherwise.
+pub(super) fn refuse_workstation_inference_in_dag_mode(
+    args: &Value,
+) -> Option<ToolResult> {
+    let scheduler_mode = args
+        .get("scheduler_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if scheduler_mode != "dag_v1" {
+        return None;
+    }
+    let mode = args
+        .get("workstation_inference_mode")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .unwrap_or("");
+    if mode != WORKSTATION_INFER_MODE_SONNET_SUGGEST {
+        return None;
+    }
+    Some(ToolResult::structured_error(
+        ToolError::new(
+            error_codes::INVALID_PARAM,
+            "workstation_inference_mode=\"sonnet_suggest\" is single-node-execute-only \
+             in v0; combining it with scheduler_mode=\"dag_v1\" is unsupported",
+        )
+        .with_suggestion(
+            "drop scheduler_mode=\"dag_v1\" to run the proposal pass against the root \
+             plan, or run with workstation_inference_mode=\"off\" (default) to keep DAG \
+             behaviour byte-identical with wave-15..20",
+        ),
+    ))
+}
+
 /// Confidence tier for an inferred field. Only `High` is auto-applied
 /// under `apply_safe`; lower tiers always degrade to suggestions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -4257,6 +4366,27 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
 
+    // wave-21 / task 04 — pre-flight `workstation_inference_mode`
+    // validation. Strictly orthogonal to `infer_plan_fields`: the wave-21
+    // surface targets the four workstation knobs (target /
+    // dispatch_strategy / objective / scope) and ONLY fires when caller /
+    // PLAN supplied no signal. A typo (`workstation_inference_mode="sonet"`)
+    // fails fast here rather than after the DB read.
+    let workstation_infer_mode = match parse_workstation_inference_mode(args) {
+        Ok(m) => m,
+        Err(msg) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, msg),
+            ))
+        }
+    };
+    // DAG mode rejects sonnet_suggest at preflight (single-node-only in
+    // v0). Mirrors the wave-20 / task 07 enforcement on the plan-field
+    // surface.
+    if let Some(err) = refuse_workstation_inference_in_dag_mode(args) {
+        return Ok(err);
+    }
+
     let plan = match state
         .store
         .plan_get(id)
@@ -4511,13 +4641,166 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         plan_hint_summary: hints.to_summary_json(),
     };
 
+    // wave-21 / task 04 — autonomous workstation LLM proposal v0.
+    // Compute the proposal bundle BEFORE the dispatch path runs so it
+    // attaches uniformly to whichever response branch the dispatch lands
+    // on (executing / dispatch_skipped / dry_run / inner_error / safe-
+    // descriptor / bridge). The bundle is response-only metadata and
+    // NEVER alters the dispatch path. Default mode `Off` ⇒ no bundle,
+    // no Sonnet call, byte-compatible with wave-15..20.
+    let workstation_proposal_bundle = compute_workstation_proposal_bundle(
+        state,
+        workstation_infer_mode,
+        args,
+        &plan,
+        &hints,
+    )
+    .await;
+
     let final_result = if execute_mode == "bridge" {
         action_execute_bridge(&plan, &resolved)
     } else {
         action_execute_internal(state, args, &plan, &resolved, &hints).await?
     };
 
+    let final_result = attach_workstation_proposals_block(
+        final_result,
+        workstation_proposal_bundle.as_ref(),
+    );
+
     Ok(attach_inference_block(final_result, inference_block))
+}
+
+/// wave-21 / task 04 — compute the workstation proposal bundle for this
+/// execute call. Returns `None` for the default `Off` mode so callers
+/// observe byte-identical wave-15..20 behaviour. Returns `Some(bundle)`
+/// when the operator opted in via `workstation_inference_mode="sonnet_suggest"`,
+/// regardless of whether the gate fired (the bundle reports
+/// `PlanHintsPresent` when the gate suppressed the Sonnet call).
+async fn compute_workstation_proposal_bundle(
+    state: &AppState,
+    mode: WorkstationInferenceMode,
+    args: &Value,
+    plan: &Plan,
+    hints: &ParsedPlanHints,
+) -> Option<super::workstation_dispatch::WorkstationProposalBundle> {
+    if !mode.is_sonnet_suggest() {
+        return None;
+    }
+    // Gate: caller silent + PLAN silent + no `:workstation-dispatch` opt-in.
+    let merged_hints_for_gate = hints.to_workstation_hints().merge_args(args);
+    let plan_hints_present_signal = plan_hints_carry_workstation_signal(hints);
+    let caller_string = |k: &str| {
+        args.get(k)
+            .and_then(|v| v.as_str())
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false)
+    };
+    let gate = super::workstation_dispatch::WorkstationProposalGate {
+        caller_target_present: caller_string("target"),
+        caller_dispatch_strategy_present: caller_string("dispatch_strategy"),
+        caller_objective_present: caller_string("objective"),
+        caller_scope_present: caller_string("scope"),
+        // owned_files presence is derived from the merged hints: if the
+        // caller passed any non-empty list AND the merged set retained at
+        // least one entry, that counts as a signal. We deliberately ignore
+        // PLAN-supplied owned_files here because the plan-side list is
+        // already covered by `plan_hints_present_signal`.
+        caller_owned_files_present: !merged_hints_for_gate.owned_files.is_empty()
+            && args.get("owned_files").is_some(),
+        caller_project_signal_present: caller_string("target_project")
+            || caller_string("requested_cwd")
+            || caller_string("cwd"),
+        plan_hints_present: plan_hints_present_signal,
+        plan_workstation_opt_in: hints.workstation_dispatch_opt_in(),
+        _marker: std::marker::PhantomData,
+    };
+    if gate.is_fully_silent() {
+        // Fully silent ⇒ ask Sonnet to propose. Failure surfaces as an
+        // Unavailable bundle; we NEVER fall back to claude -p / prompt
+        // mode (the unavailable_reason text pins this invariant).
+        Some(
+            super::workstation_dispatch::request_workstation_proposals(
+                state,
+                &plan.sexp_text,
+                plan.compiled_from.as_deref(),
+            )
+            .await,
+        )
+    } else {
+        // Some signal present ⇒ skip the Sonnet pass and emit a typed
+        // PlanHintsPresent bundle so the response surface stays uniform.
+        Some(
+            super::workstation_dispatch::WorkstationProposalBundle::plan_hints_present(
+                gate.signal_summary(),
+            ),
+        )
+    }
+}
+
+/// wave-21 / task 04 — true when the parsed PLAN.lisp hints carry any
+/// workstation-relevant signal. Used by the proposal gate to decide
+/// whether to suppress the Sonnet pass (signal already exists ⇒ surface
+/// `PlanHintsPresent` instead).
+///
+/// "Signal" here means any of the eight workstation knobs the wave-15
+/// parser exposes via `to_workstation_hints` PLUS the explicit
+/// `:workstation-dispatch` flag (which `workstation_dispatch_opt_in`
+/// reads separately).
+fn plan_hints_carry_workstation_signal(h: &ParsedPlanHints) -> bool {
+    let nonblank = |o: &Option<String>| {
+        o.as_deref().map(|s| !s.trim().is_empty()).unwrap_or(false)
+    };
+    nonblank(&h.objective)
+        || nonblank(&h.summary)
+        || nonblank(&h.scope)
+        || nonblank(&h.owned_files_raw)
+        || nonblank(&h.forbidden_files_raw)
+        || nonblank(&h.acceptance_commands_raw)
+        || nonblank(&h.commit_policy)
+        || nonblank(&h.target_project)
+        || nonblank(&h.requested_cwd)
+        || nonblank(&h.dispatch_strategy)
+}
+
+/// wave-21 / task 04 — splice the `workstation_proposals` bundle onto a
+/// successful response. Mirrors `attach_inference_block`: errors and
+/// pre-existing keys are preserved untouched. The bundle is response-
+/// only metadata; nothing reads it on the daemon side.
+fn attach_workstation_proposals_block(
+    mut result: ToolResult,
+    bundle: Option<&super::workstation_dispatch::WorkstationProposalBundle>,
+) -> ToolResult {
+    let Some(bundle) = bundle else {
+        return result;
+    };
+    if result.is_error.unwrap_or(false) {
+        // Don't decorate structured errors with the proposal block — the
+        // caller needs the error path uncluttered.
+        return result;
+    }
+    let text = match result.content.first() {
+        Some(ToolContent::Text { text }) => text.clone(),
+        _ => return result,
+    };
+    let mut payload: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return result,
+    };
+    if let Some(map) = payload.as_object_mut() {
+        // Preserve any pre-existing block by NEVER overwriting (future
+        // DAG / resume paths may carry their own).
+        map.entry("workstation_proposals".to_string())
+            .or_insert_with(|| bundle.to_response_json());
+        // Mode echo so observers can pivot on the wire string without
+        // re-deriving it from the bundle status.
+        map.entry("workstation_inference_mode".to_string())
+            .or_insert_with(|| json!(WORKSTATION_INFER_MODE_SONNET_SUGGEST));
+    }
+    result.content = vec![ToolContent::Text {
+        text: serde_json::to_string_pretty(&payload).unwrap_or(text),
+    }];
+    result
 }
 
 /// Splice the `plan_field_inference` block onto a successful response.
@@ -11099,5 +11382,216 @@ mod tests {
         // No infer_plan_fields at all → also accepted.
         let args = json!({"scheduler_mode": "dag_v1"});
         assert!(super::super::plan_dag::refuse_llm_inference_in_dag_mode(&args).is_none());
+    }
+
+    // ── wave-21 / task 04 — autonomous workstation LLM proposal v0 ─────
+
+    #[test]
+    fn parse_workstation_inference_mode_default_is_off() {
+        let mode = parse_workstation_inference_mode(&json!({})).expect("default ok");
+        assert_eq!(mode, WorkstationInferenceMode::Off);
+        assert!(!mode.is_sonnet_suggest());
+        let mode_blank = parse_workstation_inference_mode(
+            &json!({"workstation_inference_mode": ""}),
+        )
+        .expect("blank ok");
+        assert_eq!(mode_blank, WorkstationInferenceMode::Off);
+        let mode_off = parse_workstation_inference_mode(
+            &json!({"workstation_inference_mode": "off"}),
+        )
+        .expect("off ok");
+        assert_eq!(mode_off, WorkstationInferenceMode::Off);
+    }
+
+    #[test]
+    fn parse_workstation_inference_mode_accepts_sonnet_suggest() {
+        let mode = parse_workstation_inference_mode(
+            &json!({"workstation_inference_mode": "sonnet_suggest"}),
+        )
+        .expect("sonnet_suggest ok");
+        assert_eq!(mode, WorkstationInferenceMode::SonnetSuggest);
+        assert!(mode.is_sonnet_suggest());
+    }
+
+    #[test]
+    fn parse_workstation_inference_mode_rejects_typo() {
+        let err = parse_workstation_inference_mode(
+            &json!({"workstation_inference_mode": "sonnet-suggest"}),
+        )
+        .expect_err("hyphenated form rejected");
+        assert!(err.contains("workstation_inference_mode"));
+        assert!(err.contains("sonnet_suggest"));
+        assert!(err.contains("sonnet-suggest"));
+    }
+
+    #[test]
+    fn workstation_inference_mode_wire_string_round_trips() {
+        assert_eq!(
+            WorkstationInferenceMode::Off.as_wire(),
+            WORKSTATION_INFER_MODE_OFF
+        );
+        assert_eq!(
+            WorkstationInferenceMode::SonnetSuggest.as_wire(),
+            WORKSTATION_INFER_MODE_SONNET_SUGGEST
+        );
+    }
+
+    #[test]
+    fn refuse_workstation_inference_in_dag_mode_blocks_sonnet_suggest() {
+        // wave-21 / task 04 — single-node-only enforcement on the DAG
+        // path. Mirrors the wave-20 / task 07 enforcement on the
+        // plan-field surface.
+        let args = json!({
+            "scheduler_mode": "dag_v1",
+            "workstation_inference_mode": "sonnet_suggest"
+        });
+        let err = refuse_workstation_inference_in_dag_mode(&args)
+            .expect("dag + sonnet_suggest combo refused");
+        assert_eq!(err.is_error, Some(true));
+        let payload = parse_payload(&err);
+        let reason = payload["reason"]
+            .as_str()
+            .expect("structured ToolError carries `reason`");
+        assert!(
+            reason.contains("single-node-execute-only"),
+            "reason: {}",
+            reason
+        );
+        assert_eq!(payload["error_code"], "INVALID_PARAM");
+    }
+
+    #[test]
+    fn refuse_workstation_inference_in_dag_mode_allows_off_mode() {
+        // Default `off` mode never trips the DAG refusal.
+        for mode in [
+            json!({"scheduler_mode": "dag_v1"}),
+            json!({"scheduler_mode": "dag_v1", "workstation_inference_mode": "off"}),
+            json!({"scheduler_mode": "dag_v1", "workstation_inference_mode": ""}),
+        ] {
+            assert!(
+                refuse_workstation_inference_in_dag_mode(&mode).is_none(),
+                "off-shaped mode must not be refused on DAG path: {}",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn refuse_workstation_inference_in_dag_mode_no_op_outside_dag() {
+        // sonnet_suggest WITHOUT scheduler_mode=dag_v1 is allowed (single-
+        // node executes are the canonical wave-21 / task 04 surface).
+        let args = json!({"workstation_inference_mode": "sonnet_suggest"});
+        assert!(refuse_workstation_inference_in_dag_mode(&args).is_none());
+    }
+
+    #[test]
+    fn plan_hints_carry_workstation_signal_detects_objective() {
+        let mut h = ParsedPlanHints::default();
+        assert!(!plan_hints_carry_workstation_signal(&h));
+        h.objective = Some("ship".to_string());
+        assert!(plan_hints_carry_workstation_signal(&h));
+    }
+
+    #[test]
+    fn plan_hints_carry_workstation_signal_detects_each_workstation_knob() {
+        // fn pointer (not closure) so the array elements all share one
+        // type. Each fn flips exactly one knob; the assertion confirms
+        // the predicate fires off any single knob.
+        type Mutator = fn(&mut ParsedPlanHints);
+        let cases: &[(Mutator, &str)] = &[
+            (|h| h.objective = Some("o".into()), "objective"),
+            (|h| h.summary = Some("s".into()), "summary"),
+            (|h| h.scope = Some("z".into()), "scope"),
+            (|h| h.owned_files_raw = Some("[a]".into()), "owned"),
+            (|h| h.forbidden_files_raw = Some("[b]".into()), "forbidden"),
+            (|h| h.acceptance_commands_raw = Some("[c]".into()), "accept"),
+            (|h| h.commit_policy = Some("p".into()), "policy"),
+            (|h| h.target_project = Some("missiond".into()), "tp"),
+            (|h| h.requested_cwd = Some("/x".into()), "cwd"),
+            (|h| h.dispatch_strategy = Some("agent-team".into()), "ds"),
+        ];
+        for (mutate, label) in cases {
+            let mut h = ParsedPlanHints::default();
+            mutate(&mut h);
+            assert!(
+                plan_hints_carry_workstation_signal(&h),
+                "{} hint should register as signal",
+                label
+            );
+        }
+    }
+
+    #[test]
+    fn plan_hints_carry_workstation_signal_ignores_blank_strings() {
+        let mut h = ParsedPlanHints::default();
+        h.objective = Some("   ".to_string());
+        h.scope = Some("".to_string());
+        assert!(!plan_hints_carry_workstation_signal(&h));
+    }
+
+    #[test]
+    fn attach_workstation_proposals_block_no_op_when_bundle_absent() {
+        let original = ToolResult::json_pretty(&json!({"status": "executing"}));
+        let r = attach_workstation_proposals_block(original, None);
+        let v = parse_payload(&r);
+        // Wire shape is unchanged when the bundle is absent.
+        assert!(v.get("workstation_proposals").is_none());
+        assert!(v.get("workstation_inference_mode").is_none());
+        assert_eq!(v["status"], "executing");
+    }
+
+    #[test]
+    fn attach_workstation_proposals_block_attaches_bundle_and_mode() {
+        let original = ToolResult::json_pretty(&json!({"status": "executing"}));
+        let bundle =
+            super::super::workstation_dispatch::WorkstationProposalBundle::unavailable(
+                "Sonnet gateway not initialized; (no fallback to claude -p / prompt mode in v0)",
+            );
+        let r = attach_workstation_proposals_block(original, Some(&bundle));
+        let v = parse_payload(&r);
+        assert_eq!(v["workstation_proposals"]["status"], "llm_unavailable");
+        assert_eq!(v["workstation_proposals"]["auto_spawn"], false);
+        assert!(
+            v["workstation_proposals"]["unavailable_reason"]
+                .as_str()
+                .unwrap_or("")
+                .contains("no fallback")
+        );
+        assert_eq!(
+            v["workstation_inference_mode"], "sonnet_suggest",
+            "the mode echo must land on the response when bundle is present"
+        );
+    }
+
+    #[test]
+    fn attach_workstation_proposals_block_preserves_pre_existing_block() {
+        // If the result already carries a `workstation_proposals` key
+        // (future DAG / resume path), we must NEVER overwrite.
+        let original = ToolResult::json_pretty(&json!({
+            "status": "executing",
+            "workstation_proposals": {"status": "preserved"},
+        }));
+        let bundle =
+            super::super::workstation_dispatch::WorkstationProposalBundle::unavailable("x");
+        let r = attach_workstation_proposals_block(original, Some(&bundle));
+        let v = parse_payload(&r);
+        assert_eq!(v["workstation_proposals"]["status"], "preserved");
+    }
+
+    #[test]
+    fn attach_workstation_proposals_block_skips_error_results() {
+        // Errors propagate untouched — never decorated with proposals.
+        let original = ToolResult::structured_error(ToolError::new(
+            error_codes::INVALID_PARAM,
+            "boom",
+        ));
+        assert_eq!(original.is_error, Some(true));
+        let bundle =
+            super::super::workstation_dispatch::WorkstationProposalBundle::unavailable("x");
+        let r = attach_workstation_proposals_block(original, Some(&bundle));
+        // The structured-error payload does NOT pick up the bundle keys.
+        let payload = parse_payload(&r);
+        assert!(payload.get("workstation_proposals").is_none());
+        assert!(payload.get("workstation_inference_mode").is_none());
     }
 }

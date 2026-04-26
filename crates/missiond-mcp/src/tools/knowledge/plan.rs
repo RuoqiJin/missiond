@@ -691,6 +691,32 @@ fn build_properties() -> Value {
         "[execute] (wave-20 / task 04) shorthand for `dispatch_contract_mode`. `false` ⇒ \"machine\" (workstation substrate consumes the emitted task.lisp directly when the wave-19 emitter wrote one); `true` / omitted ⇒ \"rendered\" (preserves the wave-15..19 byte-shape — markdown brief is the load-bearing artifact). When BOTH `dispatch_contract_mode` and `render_markdown` are supplied, `dispatch_contract_mode` wins. See `dispatch_contract_mode` for the full semantics, response shape, and failure modes (malformed contract → SafeDescriptor, never `claude -p` fallback).",
     ));
 
+    // ── wave-21 / task 04 — autonomous workstation LLM proposal v0 ──────
+    //
+    // Strictly orthogonal to `infer_plan_fields` (wave-18 / task 06 +
+    // wave-20 / task 07). This knob targets the FOUR core workstation
+    // dispatch fields (`target` / `dispatch_strategy` / `objective` /
+    // `scope`) and ONLY fires when caller / PLAN supplied no signal at
+    // all. Default `off` ⇒ byte-compatible with wave-15..20 (no
+    // proposal pass, no Sonnet call, no response augmentation).
+    //
+    // Conservative invariants pinned by the daemon-side validator:
+    //   * proposals are SURFACED only — every entry carries
+    //     `applied=false` and the bundle carries `auto_spawn=false`.
+    //   * Sonnet unavailable ⇒ `status=\"llm_unavailable\"` +
+    //     `unavailable_reason` (NEVER falls back to `claude -p` / prompt mode).
+    //   * DAG mode rejects `sonnet_suggest` at preflight (single-node
+    //     execute only in v0).
+    //   * Each proposal carries a `safety_status` ∈
+    //     {safe, ambiguous_value, unsupported_target, invalid_strategy}
+    //     so the operator can pivot on the conservative whitelists
+    //     without re-validating.
+    p.insert("workstation_inference_mode".into(), prop_enum(
+        "string",
+        "[execute] (wave-21 / task 04) opt into autonomous workstation LLM proposal v0. Default `off` preserves the wave-15..20 byte-shape — no proposal pass, no response augmentation, no Sonnet call. `sonnet_suggest` triggers a CONSERVATIVE Sonnet pass that PROPOSES values for the four core workstation knobs (`target` / `dispatch_strategy` / `objective` / `scope`) ONLY when caller passed no relevant args AND PLAN.lisp surfaced no workstation hints AND PLAN did not opt into `:workstation-dispatch`. The proposals are SURFACED on the response under `workstation_proposals` for operator review and are NEVER auto-applied — every proposal carries `applied=false` on the wire and the bundle carries `auto_spawn=false` so observers can `assert proposal.applied == false` and `assert workstation_proposals.auto_spawn == false` directly. The dispatch path stays exactly as the wave-15..20 deterministic engine resolved it (`workstation_dispatch_source` + `dispatch_strategy` are unchanged). Each proposal is validated into a structured object {field, value (string), confidence (high|medium|low), evidence (short justification), safety_status (safe|ambiguous_value|unsupported_target|invalid_strategy)}; the validator cap is 6 proposals per response. The conservative target whitelist is {mission_execution, mission_task_delegate, mission_flow_run}; the conservative dispatch_strategy whitelist is {resident-lisp, fresh-code-alignment, agent-team, mixed} (`prompt-fallback` and `unknown` are deliberately excluded). When Sonnet is unavailable (gateway not initialized, network failure) the bundle surfaces `status=\"llm_unavailable\"` + `unavailable_reason` and DOES NOT mutate plan state — there is NO silent fallback to `claude -p` or prompt mode in v0 (the unavailable_reason text pins this invariant). When caller / PLAN already supplied at least one signal the bundle surfaces `status=\"plan_hints_present\"` + a `unavailable_reason` summary listing which slots fired so observers can audit the suppression. DAG mode rejects `sonnet_suggest` at preflight (single-node execute only in v0): the response surface keeps the per-node bundle composition for a future wave. The mode echo `workstation_inference_mode=\"sonnet_suggest\"` lands on the response alongside the bundle so a single grep tells observers the mode was active.",
+        &["off", "sonnet_suggest"],
+    ));
+
     Value::Object(p)
 }
 
@@ -881,6 +907,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
          runner_status=\"task_contract_emit_failed\") — missing contract 绝不被 inner success 覆盖; DAG 节点 emit 失败 \
          non-retryable (IO 错误重试无意义)。task_contract_mode=\"emit_dry_run\" 写完 contract 就 return, 不调 substrate。\
          默认 mode=off ⇒ 与 pre-wave19 byte-shape 完全一致。\
+         wave-21 / task 04 autonomous workstation LLM proposal v0: execute (单节点) 接受 workstation_inference_mode \
+         (off | sonnet_suggest, 默认 off 保 wave-15..20 byte-shape) opt-in 启用 Sonnet workstation 字段提案 — \
+         严格在 caller 未传任何 workstation 参数 (target/dispatch_strategy/objective/scope/owned_files/target_project/requested_cwd/cwd) \
+         AND PLAN.lisp 无 workstation hints AND PLAN 无 :workstation-dispatch opt-in 时才调 Sonnet。\
+         提案 SURFACE-only, 永不 auto-apply / 永不 auto-spawn workstation: 每条 proposal 带 applied=false, bundle 带 auto_spawn=false, \
+         dispatch 路径与 wave-15..20 deterministic 完全一致。每条 proposal 含 {field, value, confidence (high|medium|low), evidence, \
+         safety_status (safe|ambiguous_value|unsupported_target|invalid_strategy)}; cap 6 条; \
+         conservative target whitelist {mission_execution, mission_task_delegate, mission_flow_run}; \
+         conservative dispatch_strategy whitelist {resident-lisp, fresh-code-alignment, agent-team, mixed} \
+         (prompt-fallback / unknown 故意排除)。Sonnet 不可用 surface status=\"llm_unavailable\" + unavailable_reason, \
+         绝不 fallback claude -p / prompt mode (unavailable_reason 文案钉死此 invariant)。\
+         caller / PLAN 已有 signal 时 surface status=\"plan_hints_present\" + signal_summary 列出哪些 slot 命中。\
+         scheduler_mode=dag_v1 preflight reject sonnet_suggest (v0 single-node only)。响应附 workstation_proposals 块 + \
+         workstation_inference_mode=\"sonnet_suggest\" 模式 echo (off 模式不 surface)。\
          Lisp 源 (forward ref): .missiond/tasks/schema/task-contract-v1.lisp + intent-tools.lisp :: implemented-surface \
          mission_plan :: :task-contract-emitter (wave-19/12 backfill)。",
         schema,
