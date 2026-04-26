@@ -45,7 +45,9 @@
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
 use missiond_core::event::events::ExecutionEvent;
-use missiond_core::event::log::{LogReadable, Seq};
+use missiond_core::event::log::{
+    EventLogQuery, EventLogQueryable, LogReadable, EVENT_LOG_QUERY_LIMIT_CAP,
+};
 use missiond_core::event::Domain;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
@@ -175,6 +177,46 @@ impl EventRefStatus {
     }
 }
 
+/// Wave-18 / task 01 — provenance tag describing **how** the resolver
+/// obtained the event ref. Surfaces on the JSON envelope as
+/// `event_ref_source` so audit consumers can pivot on the lookup path
+/// (passive cache vs persistent event-log query) without re-deriving it
+/// from the surrounding warning string.
+///
+/// Distinct from [`EventRefStatus`]: the status describes whether the ref
+/// is live / log-recovered / missing; the provenance describes *which*
+/// resolver tier produced it. A live ref skips the resolver entirely so
+/// its provenance is also `Live`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventRefProvenance {
+    /// Producer obtained the ref directly from a successful publish — no
+    /// resolver lookup was needed.
+    Live,
+    /// Recovered from the in-memory passive subscriber cache (the wave-16
+    /// `EventRefResolver` HashMap populated by
+    /// `bus::v2_subscribers::spawn_event_ref_cache_sub`).
+    PassiveCache,
+    /// Recovered from a bounded read-only event-log query (the wave-18
+    /// typed [`EventLogQueryable`] surface). Used after a passive-cache
+    /// miss so refs survive daemon restarts.
+    EventLogQuery,
+    /// Neither the cache nor the log query produced a match (or the query
+    /// itself errored). The ref is `unavailable` and the warning carries
+    /// the reason.
+    Unavailable,
+}
+
+impl EventRefProvenance {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            EventRefProvenance::Live => "live",
+            EventRefProvenance::PassiveCache => "passive_cache",
+            EventRefProvenance::EventLogQuery => "event_log_query",
+            EventRefProvenance::Unavailable => "unavailable",
+        }
+    }
+}
+
 /// Reference to an `ExecutionEvent` (or any other domain event) the caller
 /// observed while producing this evidence entry.
 ///
@@ -203,6 +245,11 @@ pub(crate) struct EventRef {
     pub kind: Option<String>,
     pub unavailable_reason: Option<String>,
     pub status: EventRefStatus,
+    /// Wave-18 / task 01 — which resolver tier produced this ref. Surfaces
+    /// on the top-level evidence envelope as `event_ref_source` so audit
+    /// consumers know whether the lookup hit the in-memory passive cache,
+    /// the persistent event-log query, or surrendered to `unavailable`.
+    pub provenance: EventRefProvenance,
 }
 
 impl EventRef {
@@ -231,6 +278,7 @@ impl EventRef {
             kind: Some(kind.into()),
             unavailable_reason: None,
             status: EventRefStatus::Live,
+            provenance: EventRefProvenance::Live,
         }
     }
 
@@ -248,12 +296,36 @@ impl EventRef {
     /// entry point. Exercised by `event_ref_log_status_round_trips`.
     #[allow(dead_code)]
     pub(crate) fn from_log(source: impl Into<String>, kind: impl Into<String>, event_id: impl Into<String>) -> Self {
+        // Default provenance for `from_log`: passive in-memory cache
+        // (the wave-16 single-tier resolver). The wave-18 query path uses
+        // `from_event_log_query` to stamp `EventRefProvenance::EventLogQuery`
+        // so audit consumers can tell which resolver tier produced the ref.
         Self {
             event_id: Some(event_id.into()),
             source: Some(source.into()),
             kind: Some(kind.into()),
             unavailable_reason: None,
             status: EventRefStatus::Log,
+            provenance: EventRefProvenance::PassiveCache,
+        }
+    }
+
+    /// Record an event id recovered from a bounded read-only event-log
+    /// query (the wave-18 typed query path). Same wire shape as
+    /// [`EventRef::from_log`] except provenance is stamped as
+    /// [`EventRefProvenance::EventLogQuery`].
+    pub(crate) fn from_event_log_query(
+        source: impl Into<String>,
+        kind: impl Into<String>,
+        event_id: impl Into<String>,
+    ) -> Self {
+        Self {
+            event_id: Some(event_id.into()),
+            source: Some(source.into()),
+            kind: Some(kind.into()),
+            unavailable_reason: None,
+            status: EventRefStatus::Log,
+            provenance: EventRefProvenance::EventLogQuery,
         }
     }
 
@@ -267,6 +339,7 @@ impl EventRef {
             kind: None,
             unavailable_reason: Some(reason.into()),
             status: EventRefStatus::Unavailable,
+            provenance: EventRefProvenance::Unavailable,
         }
     }
 
@@ -433,7 +506,12 @@ impl EvidenceEntry {
         warning: Option<String>,
     ) -> Self {
         self.event_ref_status = Some(event_ref.status.as_wire().to_string());
-        self.event_ref_source = event_ref.source.clone();
+        // Wave-18 / task 01 — `event_ref_source` now carries the resolver
+        // provenance (`live | passive_cache | event_log_query | unavailable`)
+        // instead of the raw wire source ("execution") so audit consumers
+        // can pivot directly on the lookup tier without re-deriving it from
+        // the warning string.
+        self.event_ref_source = Some(event_ref.provenance.as_wire().to_string());
         self.event_ref_warning = warning.or_else(|| {
             // Surface the unavailable_reason as the warning when no other
             // explicit warning was passed in — keeps the failure surface
@@ -967,20 +1045,33 @@ impl EventRefResolver {
         if cached.status == EventRefStatus::Log {
             return cached;
         }
-        // Tier 2 — bounded read-only scan of the persistent log.
-        match log
-            .read_from(Domain::Execution, Seq(0), EVENT_REF_LOG_QUERY_SCAN_LIMIT)
-            .await
-        {
+        // Tier 2 — bounded read-only typed query of the persistent event
+        // log. Wave-18 / task 01 replaces the prior raw
+        // `LogReadable::read_from(Domain::Execution, Seq(0), 512)` scan
+        // with the [`EventLogQueryable`] surface so the `kind=
+        // plan_node_state_changed` predicate is expressed declaratively
+        // and the limit is clamped through [`EVENT_LOG_QUERY_LIMIT_CAP`].
+        //
+        // We deliberately do NOT push the plan_id / node_id / from / to
+        // correlation into the query builder for *this* event — `serde`
+        // serializes [`ExecutionEvent`] in the externally-tagged form
+        // (`{"PlanNodeStateChanged": { plan_id, ... }}`) so the matchable
+        // fields live one level deeper than the top-level
+        // [`CorrelationPredicate::key`] surface supports. The bounded
+        // kind+limit query already cuts the scan budget; the deserialise
+        // loop below applies the per-field correlation. Future events that
+        // serialize with top-level scalar fields can lift the predicates
+        // straight into the query.
+        let query = EventLogQuery::new(Domain::Execution)
+            .kind("plan_node_state_changed")
+            .limit(EVENT_REF_LOG_QUERY_SCAN_LIMIT.min(EVENT_LOG_QUERY_LIMIT_CAP));
+        match EventLogQueryable::query(log, query).await {
             Ok(rows) => {
                 for row in rows.into_iter().rev() {
                     // Iterate newest-first so the latest matching row wins
                     // when the same correlation tuple was published more
                     // than once (e.g. attempt re-emit after a partial
                     // failure).
-                    if row.kind != "plan_node_state_changed" {
-                        continue;
-                    }
                     let ev: ExecutionEvent =
                         match serde_json::from_value(row.payload.clone()) {
                             Ok(e) => e,
@@ -1004,7 +1095,10 @@ impl EventRefResolver {
                             }
                         }
                         // Match. Populate the cache so subsequent lookups
-                        // skip the scan.
+                        // skip the query — the cached value reuses
+                        // [`EventRef::from_log`] which stamps
+                        // `EventRefProvenance::PassiveCache`, mirroring
+                        // the wave-16 single-tier resolver semantics.
                         let seq_id = row.seq.0.to_string();
                         self.record_plan_node_state_change(
                             plan_id,
@@ -1016,7 +1110,7 @@ impl EventRefResolver {
                             "plan_node_state_changed",
                             seq_id.clone(),
                         );
-                        return EventRef::from_log(
+                        return EventRef::from_event_log_query(
                             "execution",
                             "plan_node_state_changed",
                             seq_id,
@@ -1380,6 +1474,13 @@ mod tests {
             .lookup_or_query_plan_node_state_change(&log, plan_id, "n1", 1, "ready", "running")
             .await;
         assert_eq!(r.status, EventRefStatus::Log);
+        // Wave-18 / task 01 — first hit goes through the typed event-log
+        // query so provenance must be `EventLogQuery`.
+        assert_eq!(
+            r.provenance,
+            EventRefProvenance::EventLogQuery,
+            "first hit (cache miss → typed query) surfaces provenance=event_log_query"
+        );
         assert_eq!(r.event_id.as_deref(), Some("123"));
         assert_eq!(r.source.as_deref(), Some("execution"));
         assert_eq!(r.kind.as_deref(), Some("plan_node_state_changed"));
@@ -1390,6 +1491,13 @@ mod tests {
             .lookup_or_query_plan_node_state_change(&log, plan_id, "n1", 1, "ready", "running")
             .await;
         assert_eq!(r2.status, EventRefStatus::Log);
+        // Cache hit on the second call surfaces `passive_cache` provenance
+        // — distinct from the first call which went through the query.
+        assert_eq!(
+            r2.provenance,
+            EventRefProvenance::PassiveCache,
+            "second hit comes from the passive cache populated by the first call"
+        );
         assert_eq!(r2.event_id.as_deref(), Some("123"));
         let calls_after = log.calls.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(
@@ -1560,7 +1668,10 @@ mod tests {
             .add_execution_event(r)
             .into_json();
         assert_eq!(v["event_ref_status"], "live");
-        assert_eq!(v["event_ref_source"], "execution");
+        // Wave-18 / task 01 — `event_ref_source` now carries the resolver
+        // provenance vocabulary, not the raw wire source. A live ref skips
+        // the resolver entirely so its provenance is `live`.
+        assert_eq!(v["event_ref_source"], "live");
         assert!(
             v.get("event_ref_warning").is_none(),
             "live ref with no warning omits the warning key"
@@ -1568,15 +1679,33 @@ mod tests {
     }
 
     #[test]
-    fn primary_event_ref_surface_emits_status_source_for_log() {
+    fn primary_event_ref_surface_emits_status_source_for_log_passive_cache() {
+        // `EventRef::from_log` is the wave-16 cache-hit constructor; its
+        // provenance must surface as `passive_cache` so audit consumers can
+        // tell the ref came from the in-memory subscriber cache rather
+        // than from the persistent event-log query.
         let r = EventRef::from_log("execution", "plan_node_state_changed", "77");
         let v = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, kind::DISPATCH)
-            .with_primary_event_ref(&r, Some("recovered from event log".to_string()))
+            .with_primary_event_ref(&r, Some("recovered from passive cache".to_string()))
             .add_execution_event(r)
             .into_json();
         assert_eq!(v["event_ref_status"], "log");
-        assert_eq!(v["event_ref_source"], "execution");
-        assert_eq!(v["event_ref_warning"], "recovered from event log");
+        assert_eq!(v["event_ref_source"], "passive_cache");
+        assert_eq!(v["event_ref_warning"], "recovered from passive cache");
+    }
+
+    #[test]
+    fn primary_event_ref_surface_emits_status_source_for_event_log_query() {
+        // The wave-18 typed query path stamps `event_log_query` so the
+        // provenance vocabulary covers the persistent-log tier distinctly
+        // from the in-memory passive cache.
+        let r = EventRef::from_event_log_query("execution", "plan_node_state_changed", "99");
+        let v = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, kind::DISPATCH)
+            .with_primary_event_ref(&r, None)
+            .add_execution_event(r)
+            .into_json();
+        assert_eq!(v["event_ref_status"], "log");
+        assert_eq!(v["event_ref_source"], "event_log_query");
     }
 
     #[test]
@@ -1587,10 +1716,11 @@ mod tests {
             .add_execution_event(r)
             .into_json();
         assert_eq!(v["event_ref_status"], "unavailable");
-        assert!(
-            v.get("event_ref_source").is_none(),
-            "unavailable ref carries no source"
-        );
+        // Wave-18 / task 01 — unavailable refs surface `event_ref_source =
+        // "unavailable"` so the wire form is non-null and routable. Audit
+        // consumers can pivot directly on the provenance string without
+        // having to detect the absence of the field.
+        assert_eq!(v["event_ref_source"], "unavailable");
         assert_eq!(
             v["event_ref_warning"],
             EVENT_REF_LOG_QUERY_MISS_REASON,

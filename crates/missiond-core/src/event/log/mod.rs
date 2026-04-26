@@ -16,8 +16,13 @@
 //! under [`crate::event::lifecycle::retention`]. Both are re-exported here
 //! for backwards-compat with callers that still import the `log::` path.
 
+pub mod query;
 pub mod reader;
 
+pub use query::{
+    CorrelationPredicate, EventLogQuery, EventLogQueryable, EVENT_LOG_QUERY_DEFAULT_LIMIT,
+    EVENT_LOG_QUERY_LIMIT_CAP,
+};
 pub use reader::{LogReader, LoggedEvent};
 
 // Re-exports pointing at the pipeline / lifecycle modules so existing

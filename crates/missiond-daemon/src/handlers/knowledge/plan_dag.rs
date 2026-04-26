@@ -7939,12 +7939,18 @@ mod tests {
         .add_execution_event(event_ref)
         .into_json();
 
-        // Top-level surface fields carry the log provenance.
+        // Top-level surface fields carry the log provenance. Wave-18 /
+        // task 01 — `event_ref_source` now reports the resolver tier
+        // (`event_log_query`) instead of the raw wire source, so audit
+        // consumers can pivot directly on the lookup path.
         assert_eq!(
             entry["event_ref_status"], "log",
             "log-recovered ref surfaces status=log at top level"
         );
-        assert_eq!(entry["event_ref_source"], "execution");
+        assert_eq!(
+            entry["event_ref_source"], "event_log_query",
+            "wave-18 query-tier hit surfaces provenance=event_log_query"
+        );
         assert!(
             entry.get("event_ref_warning").is_none(),
             "no warning when recovery succeeded"
