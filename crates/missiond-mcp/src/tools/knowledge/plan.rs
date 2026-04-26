@@ -378,6 +378,53 @@ fn build_properties() -> Value {
         "[execute scheduler_mode=dag_v1 acceptance_mode=evidence_keys] (wave-17 / task 03) string or array of required keys (PLAN.lisp hint `:acceptance-evidence-keys`). The evaluator scans the inner payload — top-level object first, then well-known nested holders (`evidence`, `typed_evidence`, `inner_result`, `inner_dispatch`, `result`) — and accepts only when every required key is present. Empty list under `acceptance_mode=evidence_keys` degrades to `manual_required` so the typo is loud.",
     ));
 
+    // ── wave-17 / task 04 — PLAN-DAG conservative rollback descriptors ──
+    //
+    // These knobs only fire under `scheduler_mode=dag_v1` and only on
+    // a node's FINAL failed attempt (after retries exhaust / non-retryable
+    // refusal). The rollback evaluator NEVER runs destructive shell
+    // commands on its own — it either records intent (`descriptor` mode)
+    // or hands a scoped task brief to the wave-15 workstation substrate
+    // (`workstation` mode, ONLY when every safety condition holds).
+    //
+    // Defaults:
+    //   * `:rollback-policy` absent OR `"none"` → no rollback at all
+    //                                              (preserves pre-wave17
+    //                                              behaviour).
+    //   * No safety violation: every gate must hold for `workstation`
+    //                          mode — otherwise the node surfaces
+    //                          `rollback_status="refused"` with the
+    //                          failing condition spelled out.
+    //
+    // SafeDescriptor refusals from the rollback substrate (substrate-
+    // side `MissingObjective` / `ProjectRootUnresolved` / etc.) collapse
+    // to `rollback_status="refused"` and are NEVER retried.
+    //
+    // Failure-policy interaction: the rollback pass runs AFTER the
+    // final failed attempt and BEFORE downstream taint propagation.
+    // Downstream behaviour stays governed by the existing
+    // `:failure-policy` (`fail-fast` / `continue`); the rollback
+    // outcome NEVER changes whether downstream nodes are tainted /
+    // aborted.
+    p.insert("rollback_policy".into(), prop_enum(
+        "string",
+        "[execute scheduler_mode=dag_v1] (wave-17 / task 04) per-node rollback policy (PLAN.lisp hint `:rollback-policy`). `none` (default) preserves the pre-wave17 contract — failed node taints downstream per `:failure-policy`, no rollback descriptor / dispatch. `descriptor` records the rollback intent (objective + owned files + acceptance commands + brief preview) on the response and an audit row, but NEVER dispatches. `workstation` opts into automatic rollback dispatch through the wave-15 workstation-dispatch substrate — only when ALL safety gates pass: target-project (or requested-cwd) resolved, `:rollback-objective` non-empty, `:rollback-owned-files` non-empty, `:dispatch-strategy` on the safe whitelist {fresh-code-alignment, resident-lisp, agent-team, mixed}. Otherwise surfaces as `rollback_status=\"refused\"` with the failing condition. Unrecognised raw values fall back to absent (no rollback) and surface in `node_hint_summary.unsupported_fields` so typos are loud. The rollback pass NEVER alters failure-policy semantics: downstream taint propagation runs identically afterwards.",
+        &["none", "descriptor", "workstation"],
+    ));
+
+    p.insert("rollback_objective".into(), prop(
+        "string",
+        "[execute scheduler_mode=dag_v1 rollback_policy=descriptor|workstation] (wave-17 / task 04) free-form objective for the rollback brief (PLAN.lisp hint `:rollback-objective`). Required (non-empty) for `workstation` mode — its absence is one of the safety refusals. Echoed verbatim under `descriptor` mode so observers / out-of-band tooling can act on the intent.",
+    ));
+
+    p.insert("rollback_owned_files".into(), prop_no_type(
+        "[execute scheduler_mode=dag_v1 rollback_policy=workstation] (wave-17 / task 04) string or array of file paths the rollback task is allowed to stage / commit (PLAN.lisp hint `:rollback-owned-files`). Required (>= 1 entry) for `workstation` mode — workstation dispatch with no owned files would let the rollback agent touch arbitrary parts of the tree, which is the exact thing the scoped-commit invariant exists to prevent. Surfaced verbatim under `descriptor` mode too.",
+    ));
+
+    p.insert("rollback_acceptance_commands".into(), prop_no_type(
+        "[execute scheduler_mode=dag_v1 rollback_policy=descriptor|workstation] (wave-17 / task 04) string or array of acceptance commands the rollback task must pass before commit (PLAN.lisp hint `:rollback-acceptance-commands`). Surfaced verbatim into the rollback brief AND the descriptor + evidence row, BUT the scheduler NEVER executes them (mirrors the wave-17 / task 03 acceptance-commands invariant — `acceptance_commands_executed=false` is pinned on every rollback evaluation).",
+    ));
+
     // ── wave-17 / task 02 — PLAN-DAG claim / lease discipline ──────────
     //
     // These knobs add claim/lease coordination to PLAN DAG node dispatch.
@@ -515,6 +562,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
          pending->claimed evidence; claim_released_at / claim_terminal_state 写在 claimed->released evidence。\
          dry_run 在响应里附 planned_claims[] (含每个节点的 claim_id / scopes / scope_source / lease_secs / enforce_claims) \
          不 mutate。响应总附 planned_claims / claim_lease_secs / claimer_name / enforce_claims, 调用方可对比 dry-run vs live。\
+         wave-17 / task 04 PLAN-DAG conservative rollback descriptors: scheduler_mode=dag_v1 时节点可声明 \
+         :rollback-policy `none|descriptor|workstation`, :rollback-objective, :rollback-owned-files, \
+         :rollback-acceptance-commands。默认无 :rollback-policy 或 \"none\" → 不做任何 rollback (preserves \
+         pre-wave17 behaviour)。`descriptor` → 仅记录意图 + brief preview, 永不 dispatch; `workstation` → \
+         仅当所有安全条件满足 (target_project 或 requested_cwd 已解析、:rollback-objective 非空、\
+         :rollback-owned-files >=1 条、:dispatch-strategy 在安全白名单 {fresh-code-alignment / resident-lisp / \
+         agent-team / mixed}) 才通过 wave-15 workstation-dispatch substrate dispatch rollback task; 否则 \
+         rollback_status=\"refused\" + 失败条件原因。Substrate-side SafeDescriptor 拒绝同样 collapse 到 refused, \
+         永不 retry。每次 rollback 评估都 emit failed -> rollback_{not_requested|descriptor_ready|dispatched|\
+         refused|failed} 一条 evidence; node_results[].rollback 块包含 policy / status / reason / objective / \
+         owned_files / acceptance_commands / acceptance_commands_executed=false (pinned, 证明永不执行) / \
+         task_brief_preview (有则) / inner_result (workstation dispatched / failed 时)。Failure-policy 交互: \
+         rollback 在最终失败 attempt **之后**, downstream taint propagation **之前**; 下游行为仍由 \
+         existing :failure-policy 决定, rollback 永不 alter taint / fail-fast。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \

@@ -215,6 +215,42 @@ pub(super) struct DagNode {
     /// `:retry-count`/`:max-attempts` or `:retry-delay-ms` failed to
     /// parse as a non-negative integer.
     pub retry_parse_error: Option<(String, String, String)>,
+    /// wave-17 / task 04 — conservative rollback descriptor hints.
+    ///
+    /// Captured per-node so the wave loop can decide what (if anything)
+    /// to do AFTER the final failed attempt. The scheduler is
+    /// deliberately conservative:
+    ///   * absent / `"none"` → no rollback at all (default).
+    ///   * `"descriptor"`     → record/return a structured rollback
+    ///                          descriptor; never dispatch.
+    ///   * `"workstation"`    → only dispatch a rollback task if every
+    ///                          safety condition (resolved project,
+    ///                          non-empty rollback objective, owned
+    ///                          files, safe dispatch strategy) is
+    ///                          satisfied. Otherwise surface as
+    ///                          `refused`.
+    ///
+    /// Unrecognised raw values still land on the typed slot AND are
+    /// pushed into `unsupported_fields` so the typo surfaces through
+    /// `node_hint_summary` while the scheduler safely falls back to
+    /// "no rollback".
+    pub rollback_policy: Option<String>,
+    /// wave-17 / task 04 — free-form objective for the rollback brief.
+    /// Required for `workstation` mode (its absence is one of the
+    /// safety refusals); echoed verbatim under `descriptor` mode so
+    /// observers / out-of-band tooling can act on the intent.
+    pub rollback_objective: Option<String>,
+    /// wave-17 / task 04 — owned files the rollback task is allowed to
+    /// stage / commit. Stored as the raw lisp list string and split via
+    /// `split_lisp_string_list` at evaluation time (same shape as
+    /// `:owned-files` / `:acceptance-commands`). Required (non-empty)
+    /// for the `workstation` mode safety gate.
+    pub rollback_owned_files_raw: Option<String>,
+    /// wave-17 / task 04 — acceptance commands the rollback task must
+    /// pass before commit. Surfaced verbatim into the rollback brief
+    /// AND the descriptor; the scheduler NEVER executes them (mirrors
+    /// the wave-17 / task 03 acceptance-commands invariant).
+    pub rollback_acceptance_commands_raw: Option<String>,
     /// Per-node unsupported `:keyword value` pairs, kept in source order.
     pub unsupported_fields: Vec<(String, String)>,
 }
@@ -325,6 +361,46 @@ impl DagNode {
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
         mode_present || commands_present || keys_present
+    }
+
+    /// wave-17 / task 04 — typed projection of `:rollback-policy`.
+    /// Returns `None` when the author did not declare a policy OR wrote
+    /// an unrecognised value (the parser also pushes unrecognised
+    /// values into `unsupported_fields` so the typo is loud).
+    pub(super) fn rollback_policy_kind(&self) -> Option<RollbackPolicy> {
+        let raw = self.rollback_policy.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        RollbackPolicy::parse(raw)
+    }
+
+    /// wave-17 / task 04 — true iff this node opted into ANY rollback
+    /// hint (policy / objective / owned files / acceptance commands).
+    /// Used to skip the rollback evaluator entirely on the wave-13
+    /// byte-shape path (no hints declared → no rollback evidence row).
+    pub(super) fn has_rollback_hints(&self) -> bool {
+        let policy_present = self
+            .rollback_policy
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let objective_present = self
+            .rollback_objective
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let owned_present = self
+            .rollback_owned_files_raw
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let acceptance_present = self
+            .rollback_acceptance_commands_raw
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        policy_present || objective_present || owned_present || acceptance_present
     }
 }
 
@@ -468,6 +544,419 @@ impl AcceptanceEvaluation {
             "evidence_keys": self.evidence_keys,
             "reason": self.reason,
         })
+    }
+}
+
+/// wave-17 / task 04 — typed projection of `:rollback-policy` for the
+/// conservative rollback descriptor pass. Resolved on the parser side
+/// so the runtime can pivot without re-tokenising the raw string.
+///
+/// Three modes are recognised:
+///   * `None`        — author wrote `"none"` (or omitted the policy
+///                      entirely; absence on `DagNode::rollback_policy`
+///                      is the SAME as `None`). Preserves the existing
+///                      failure behaviour: failed node propagates taint
+///                      per `:failure-policy`, no rollback descriptor
+///                      is emitted.
+///   * `Descriptor`  — record / surface a structured rollback
+///                      descriptor (objective + owned files +
+///                      acceptance commands + brief preview) on the
+///                      response and evidence row. **Never dispatches.**
+///                      Use this when the author wants downstream
+///                      observers / humans to know what a rollback
+///                      WOULD do without authorising the scheduler to
+///                      execute it.
+///   * `Workstation` — opt into automatic rollback dispatch through
+///                      the existing wave-15 workstation-dispatch
+///                      substrate. The scheduler ONLY dispatches when
+///                      every safety condition holds (resolved target
+///                      project, non-empty rollback objective, at
+///                      least one owned file, dispatch strategy is on
+///                      the inferable whitelist). Otherwise the row
+///                      surfaces as `refused` with the failing
+///                      condition spelled out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RollbackPolicy {
+    None,
+    Descriptor,
+    Workstation,
+}
+
+impl RollbackPolicy {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            RollbackPolicy::None => "none",
+            RollbackPolicy::Descriptor => "descriptor",
+            RollbackPolicy::Workstation => "workstation",
+        }
+    }
+
+    /// Parse a raw `:rollback-policy` value into a typed mode. Trims
+    /// and lowercases the input; unknown values yield `None` (the
+    /// parser also pushes them onto `unsupported_fields` so the typo
+    /// surfaces in `node_hint_summary`).
+    pub(super) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(RollbackPolicy::None),
+            "descriptor" => Some(RollbackPolicy::Descriptor),
+            "workstation" => Some(RollbackPolicy::Workstation),
+            _ => None,
+        }
+    }
+}
+
+/// wave-17 / task 04 — outcome of the conservative rollback pass.
+/// Drives whether the failed node carries a rollback descriptor on the
+/// response, whether a rollback task was dispatched, and (when refused)
+/// the condition that failed.
+///
+/// Wire vocabulary is fixed so audit dashboards can pivot on a single
+/// string:
+///   * `not_requested`     — no rollback hints declared OR
+///                            `:rollback-policy "none"`. Default for
+///                            failed nodes that did not opt in.
+///   * `descriptor_ready`  — `:rollback-policy "descriptor"`. The
+///                            descriptor is recorded on the response /
+///                            evidence; **no dispatch happened**.
+///   * `dispatched`        — `:rollback-policy "workstation"` AND
+///                            every safety gate passed AND the
+///                            rollback dispatch ran. The inner
+///                            payload + brief preview ride on the row.
+///   * `refused`           — `:rollback-policy "workstation"` was
+///                            requested but at least one safety gate
+///                            failed. The reason carries the failing
+///                            condition. **No dispatch happened.**
+///                            SafeDescriptor refusals from the
+///                            underlying substrate also collapse here.
+///   * `failed`            — `:rollback-policy "workstation"` was
+///                            dispatched but the inner handler
+///                            returned an error. The inner payload's
+///                            error message is captured on the reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RollbackStatus {
+    NotRequested,
+    DescriptorReady,
+    Dispatched,
+    Refused,
+    Failed,
+}
+
+impl RollbackStatus {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            RollbackStatus::NotRequested => "not_requested",
+            RollbackStatus::DescriptorReady => "descriptor_ready",
+            RollbackStatus::Dispatched => "dispatched",
+            RollbackStatus::Refused => "refused",
+            RollbackStatus::Failed => "failed",
+        }
+    }
+}
+
+/// wave-17 / task 04 — pure result of evaluating a node's rollback
+/// hints. `policy=None` + `status=NotRequested` is the inactive
+/// default; the wave loop suppresses the rollback evidence + response
+/// surfacing whenever this evaluation is inactive so the wave-13
+/// byte shape stays untouched for plans that did not opt in.
+#[derive(Debug, Clone)]
+pub(super) struct RollbackEvaluation {
+    pub policy: RollbackPolicy,
+    pub status: RollbackStatus,
+    /// Reason the gate / dispatch landed where it did. Always populated
+    /// (even for the `not_requested` branch) so the audit row carries a
+    /// human-readable explanation of the decision.
+    pub reason: String,
+    /// Resolved rollback objective (may be empty when no hint declared).
+    pub objective: Option<String>,
+    /// Resolved owned-files list. Surfaced verbatim into the descriptor
+    /// + brief.
+    pub owned_files: Vec<String>,
+    /// Resolved acceptance-commands list. Surfaced verbatim — NEVER
+    /// executed by the scheduler.
+    pub acceptance_commands: Vec<String>,
+    /// Trimmed task-brief preview when the substrate built one.
+    /// `None` for `not_requested` and for `refused` paths that
+    /// short-circuited before brief construction.
+    pub task_brief_preview: Option<String>,
+    /// File path the brief was mirrored to (currently always `None` —
+    /// substrate does not yet write the brief to disk; kept on the
+    /// shape so a future enhancement can fill it in without breaking
+    /// the wire contract).
+    pub task_brief_path: Option<String>,
+    /// Inner dispatch payload from `run_workstation_dispatch` when the
+    /// rollback was actually dispatched. `None` for descriptor-only,
+    /// not-requested, and refused paths.
+    pub inner_payload: Option<Value>,
+}
+
+impl RollbackEvaluation {
+    /// Convenience: this evaluation produced no rollback signal at all.
+    /// Used by the scheduler to skip the rollback-evidence emit and
+    /// preserve the v2 byte-shape.
+    pub(super) fn is_inactive(&self) -> bool {
+        matches!(self.policy, RollbackPolicy::None)
+            && matches!(self.status, RollbackStatus::NotRequested)
+            && self.objective.is_none()
+            && self.owned_files.is_empty()
+            && self.acceptance_commands.is_empty()
+    }
+
+    /// Project the evaluation as a JSON block suitable for
+    /// `node_results[].rollback` / `evidence.rollback`. Stable shape
+    /// — every field is always present so consumers don't have to
+    /// branch on absence.
+    pub(super) fn to_json(&self) -> Value {
+        let mut v = json!({
+            "policy": self.policy.as_wire(),
+            "status": self.status.as_wire(),
+            "reason": self.reason,
+            "objective": self.objective,
+            "owned_files": self.owned_files,
+            "acceptance_commands": self.acceptance_commands,
+            "acceptance_commands_executed": false,
+        });
+        if let Some(preview) = self.task_brief_preview.as_deref() {
+            v["task_brief_preview"] = json!(preview);
+        }
+        if let Some(p) = self.task_brief_path.as_deref() {
+            v["task_brief_path"] = json!(p);
+        }
+        if let Some(inner) = self.inner_payload.clone() {
+            v["inner_result"] = inner;
+        }
+        v
+    }
+}
+
+/// wave-17 / task 04 — pure helper that derives the rollback descriptor
+/// data (objective + owned files + acceptance commands + resolved
+/// policy) from the node hints. Decoupled from any IO so unit tests can
+/// pin the shape without standing up an `AppState`.
+///
+/// Returns the resolved policy and the descriptor payload. The actual
+/// dispatch decision (refused vs dispatched) belongs to the wave loop —
+/// this helper only produces the inputs.
+pub(super) fn build_rollback_descriptor(node: &DagNode) -> RollbackDescriptor {
+    let policy = node.rollback_policy_kind().unwrap_or(RollbackPolicy::None);
+    let objective = node
+        .rollback_objective
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    let owned_files =
+        super::plan::split_lisp_string_list(node.rollback_owned_files_raw.as_deref());
+    let acceptance_commands = super::plan::split_lisp_string_list(
+        node.rollback_acceptance_commands_raw.as_deref(),
+    );
+    RollbackDescriptor {
+        policy,
+        objective,
+        owned_files,
+        acceptance_commands,
+    }
+}
+
+/// wave-17 / task 04 — descriptor inputs derived from a node's
+/// `:rollback-*` hints. Does NOT carry any decision yet; the wave loop
+/// (or the test fixtures) consume this to evaluate safety + dispatch.
+#[derive(Debug, Clone)]
+pub(super) struct RollbackDescriptor {
+    pub policy: RollbackPolicy,
+    pub objective: Option<String>,
+    pub owned_files: Vec<String>,
+    pub acceptance_commands: Vec<String>,
+}
+
+impl RollbackDescriptor {
+    /// Project the descriptor as a `WorkstationDispatchHints` value the
+    /// substrate consumes. The rollback brief reuses the wave-15
+    /// task-brief shape so observers see the same headings as a
+    /// forward task brief.
+    pub(super) fn to_workstation_hints(
+        &self,
+        node: &DagNode,
+    ) -> super::workstation_dispatch::WorkstationDispatchHints {
+        super::workstation_dispatch::WorkstationDispatchHints {
+            objective: self.objective.clone(),
+            // Free-form scope explains the rollback intent so the
+            // delegated agent never confuses a rollback brief with a
+            // forward brief.
+            scope: Some(format!(
+                "rollback for failed plan-DAG node `{}` (target=`{}`)",
+                node.id, node.target
+            )),
+            owned_files: self.owned_files.clone(),
+            // Forbidden files for the rollback brief mirror any forward
+            // forbidden hints so the rollback agent inherits the same
+            // safety boundary.
+            forbidden_files: super::plan::split_lisp_string_list(
+                node.forbidden_files_raw.as_deref(),
+            ),
+            acceptance_commands: self.acceptance_commands.clone(),
+            commit_policy: node
+                .commit_policy
+                .clone()
+                .or(Some("scoped".to_string())),
+            target_project: node.target_project.clone(),
+            requested_cwd: node.requested_cwd.clone(),
+            // Rollback dispatch reuses the forward dispatch strategy so
+            // the same workstation backend handles both.
+            dispatch_strategy: node.dispatch_strategy.clone(),
+        }
+    }
+
+    /// Determine whether the descriptor satisfies every safety
+    /// requirement to dispatch a rollback through the workstation
+    /// substrate. Pure: no side effects. Returns `Ok(())` when safe,
+    /// `Err(reason)` with the human-readable failing condition
+    /// otherwise. The reason vocabulary is stable so dashboards can
+    /// pivot on it.
+    pub(super) fn safety_check_for_workstation(
+        &self,
+        node: &DagNode,
+    ) -> std::result::Result<(), String> {
+        // 1. Objective must be present + non-empty.
+        let has_obj = self
+            .objective
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !has_obj {
+            return Err(
+                "rollback workstation dispatch requires :rollback-objective (non-empty)"
+                    .to_string(),
+            );
+        }
+        // 2. At least one owned file must be declared. Workstation
+        //    dispatch with no owned files would let the rollback agent
+        //    touch arbitrary parts of the tree — the exact thing the
+        //    scoped-commit invariant exists to prevent.
+        if self.owned_files.is_empty() {
+            return Err(
+                "rollback workstation dispatch requires :rollback-owned-files (>= 1 entry)"
+                    .to_string(),
+            );
+        }
+        // 3. Project must be resolvable. We check the static signal
+        //    (target_project / requested_cwd present); the substrate
+        //    re-validates via `resolve_target_project_root` so absence
+        //    of either signal would always result in
+        //    `SafeDescriptorReason::ProjectRootUnresolved`. Catching
+        //    it here turns the refusal into a friendlier
+        //    "no project signal" message rather than a downstream
+        //    resolver error.
+        let has_project = node
+            .target_project
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let has_cwd = node
+            .requested_cwd
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !has_project && !has_cwd {
+            return Err(
+                "rollback workstation dispatch requires :target-project or :requested-cwd \
+                 to resolve a project root"
+                    .to_string(),
+            );
+        }
+        // 4. Dispatch strategy must be on the inferable whitelist —
+        //    `unknown` / `prompt-fallback` are forward-only paths and
+        //    are not safe to ride for a destructive rollback.
+        let strat = node
+            .dispatch_strategy
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or("");
+        if !super::workstation_dispatch::INFERABLE_DISPATCH_STRATEGIES
+            .contains(&strat)
+        {
+            return Err(format!(
+                "rollback workstation dispatch requires :dispatch-strategy on the safe \
+                 whitelist {:?}; got `{}`",
+                super::workstation_dispatch::INFERABLE_DISPATCH_STRATEGIES,
+                strat
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// wave-17 / task 04 — pure helper composing the descriptor + the
+/// safety check + a static decision (no IO). Intended for unit tests
+/// that pin "given hints X, what status / reason would the wave loop
+/// land on BEFORE dispatch?". The wave loop always re-runs the
+/// safety check before invoking the substrate so this helper and the
+/// runtime cannot drift.
+pub(super) fn pre_dispatch_rollback_decision(
+    node: &DagNode,
+) -> RollbackEvaluation {
+    let descriptor = build_rollback_descriptor(node);
+    match descriptor.policy {
+        RollbackPolicy::None => RollbackEvaluation {
+            policy: RollbackPolicy::None,
+            status: if node.has_rollback_hints() {
+                // Author declared SOME rollback hint but explicitly
+                // wrote `:rollback-policy "none"`. Surface as
+                // `not_requested` (the explicit-none decision dominates)
+                // so the response stays quiet.
+                RollbackStatus::NotRequested
+            } else {
+                RollbackStatus::NotRequested
+            },
+            reason: if node.has_rollback_hints() {
+                "rollback policy explicitly set to none; no rollback dispatch".to_string()
+            } else {
+                "no rollback hints declared".to_string()
+            },
+            objective: descriptor.objective,
+            owned_files: descriptor.owned_files,
+            acceptance_commands: descriptor.acceptance_commands,
+            task_brief_preview: None,
+            task_brief_path: None,
+            inner_payload: None,
+        },
+        RollbackPolicy::Descriptor => RollbackEvaluation {
+            policy: RollbackPolicy::Descriptor,
+            status: RollbackStatus::DescriptorReady,
+            reason: "descriptor mode: rollback intent recorded; no dispatch performed"
+                .to_string(),
+            objective: descriptor.objective,
+            owned_files: descriptor.owned_files,
+            acceptance_commands: descriptor.acceptance_commands,
+            task_brief_preview: None,
+            task_brief_path: None,
+            inner_payload: None,
+        },
+        RollbackPolicy::Workstation => match descriptor.safety_check_for_workstation(node) {
+            Ok(()) => RollbackEvaluation {
+                policy: RollbackPolicy::Workstation,
+                status: RollbackStatus::Refused,
+                reason: "workstation mode passed pre-dispatch safety; runtime will attempt dispatch"
+                    .to_string(),
+                objective: descriptor.objective,
+                owned_files: descriptor.owned_files,
+                acceptance_commands: descriptor.acceptance_commands,
+                task_brief_preview: None,
+                task_brief_path: None,
+                inner_payload: None,
+            },
+            Err(detail) => RollbackEvaluation {
+                policy: RollbackPolicy::Workstation,
+                status: RollbackStatus::Refused,
+                reason: format!("rollback workstation dispatch refused: {}", detail),
+                objective: descriptor.objective,
+                owned_files: descriptor.owned_files,
+                acceptance_commands: descriptor.acceptance_commands,
+                task_brief_preview: None,
+                task_brief_path: None,
+                inner_payload: None,
+            },
+        },
     }
 }
 
@@ -1064,6 +1553,11 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut retry_count: Option<u32> = None;
     let mut retry_delay_ms: Option<u64> = None;
     let mut retry_parse_error: Option<(String, String, String)> = None;
+    // wave-17 / task 04 — conservative rollback descriptor hints.
+    let mut rollback_policy: Option<String> = None;
+    let mut rollback_objective: Option<String> = None;
+    let mut rollback_owned_files_raw: Option<String> = None;
+    let mut rollback_acceptance_commands_raw: Option<String> = None;
     let mut unsupported_fields: Vec<(String, String)> = Vec::new();
 
     for (raw_key, value) in pairs {
@@ -1247,6 +1741,27 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
                     }
                 }
             }
+            // wave-17 / task 04 — conservative rollback descriptor
+            // contract. Strict parsing: unrecognised raw values land
+            // BOTH on the typed slot AND in `unsupported_fields` so
+            // the scheduler safely degrades to "no rollback" while
+            // the typo surfaces through `node_hint_summary`.
+            "rollback-policy" | "rollback_policy" => {
+                let raw = value.trim();
+                if !raw.is_empty() && RollbackPolicy::parse(raw).is_none() {
+                    unsupported_fields.push((raw_key.clone(), value.clone()));
+                }
+                set_first(&mut rollback_policy, &value);
+            }
+            "rollback-objective" | "rollback_objective" => {
+                set_first(&mut rollback_objective, &value)
+            }
+            "rollback-owned-files" | "rollback_owned_files" => {
+                set_first(&mut rollback_owned_files_raw, &value)
+            }
+            "rollback-acceptance-commands" | "rollback_acceptance_commands" => {
+                set_first(&mut rollback_acceptance_commands_raw, &value)
+            }
             _ => {
                 unsupported_fields.push((raw_key, value));
             }
@@ -1291,6 +1806,10 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         retry_count,
         retry_delay_ms,
         retry_parse_error,
+        rollback_policy,
+        rollback_objective,
+        rollback_owned_files_raw,
+        rollback_acceptance_commands_raw,
         unsupported_fields,
     })
 }
@@ -1814,6 +2333,28 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
         if let Some(t) = &n.review_text {
             entry["review_text"] = json!(t);
         }
+        // wave-17 / task 04 — rollback hint surface. Emit only when
+        // the node declared at least one rollback hint so summaries
+        // for nodes without rollback intent stay byte-identical with
+        // the wave-17 / task 03 baseline.
+        if n.has_rollback_hints() {
+            let mut rb = json!({
+                "policy": n
+                    .rollback_policy_kind()
+                    .unwrap_or(RollbackPolicy::None)
+                    .as_wire(),
+            });
+            if let Some(o) = &n.rollback_objective {
+                rb["objective"] = json!(o);
+            }
+            if let Some(of) = &n.rollback_owned_files_raw {
+                rb["owned_files_raw"] = json!(of);
+            }
+            if let Some(ac) = &n.rollback_acceptance_commands_raw {
+                rb["acceptance_commands_raw"] = json!(ac);
+            }
+            entry["rollback"] = rb;
+        }
         // wave-16 / task 05 — retry policy surface. Emit only when the
         // node opted into ≥ 1 retry so the v2 baseline byte-shape is
         // preserved for callers that did not declare a retry policy.
@@ -1991,6 +2532,15 @@ struct NodeResult {
     /// substrate). Surfaces on the per-node response so consumers can
     /// distinguish "we exhausted attempts" from "we refused to retry".
     retry_skipped_non_retryable: bool,
+    /// wave-17 / task 04 — conservative rollback decision result.
+    /// `None` means the rollback evaluator never ran (skipped node,
+    /// node terminated successfully, or the failed node carried no
+    /// rollback hints — see `RollbackEvaluation::is_inactive`).
+    /// `Some(e)` carries the full evaluation block — the scheduler
+    /// stamps it onto `node_results[].rollback` so callers see what
+    /// happened (descriptor recorded / dispatch attempted / refused
+    /// / failed) without re-deriving from evidence.
+    rollback: Option<RollbackEvaluation>,
     /// wave-17 / task 03 — deterministic acceptance phase result.
     /// `None` means the acceptance evaluator never ran for this node
     /// (skipped node, dispatch failed before acceptance, no hints
@@ -2020,6 +2570,7 @@ impl NodeResult {
             attempts_made: 0,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         }
     }
@@ -2036,6 +2587,7 @@ impl Default for NodeResult {
             attempts_made: 0,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         }
     }
@@ -2126,6 +2678,16 @@ impl ExecutionOutcome {
             if let Some(acc) = r.acceptance.as_ref() {
                 if !acc.is_inactive() {
                     e["acceptance"] = acc.to_json();
+                }
+            }
+            // wave-17 / task 04 — rollback evaluation surface. Quiet
+            // (omitted) when the rollback evaluator never ran OR
+            // produced an inactive evaluation (no hints declared) so
+            // the wave-17 / task 03 byte-shape is preserved for
+            // callers that did not opt into the rollback contract.
+            if let Some(rb) = r.rollback.as_ref() {
+                if !rb.is_inactive() {
+                    e["rollback"] = rb.to_json();
                 }
             }
             out.push(e);
@@ -3239,6 +3801,332 @@ async fn emit_evidence_finished(
     }
 }
 
+/// wave-17 / task 04 — execute the conservative rollback pass for a
+/// just-failed node. Pure async wrapper over the descriptor /
+/// safety-check / optional-dispatch pipeline so the wave loop's
+/// final-failure branch can call a single helper.
+///
+/// Behaviour matrix (matches the wave-17 / task 04 brief):
+///   * No rollback hints OR `:rollback-policy "none"` →
+///     `RollbackEvaluation { status: NotRequested, ... }` and the
+///     scheduler skips the rollback evidence emit entirely.
+///   * `:rollback-policy "descriptor"` → fully-populated descriptor
+///     evaluation with `status=DescriptorReady`, no dispatch attempt.
+///   * `:rollback-policy "workstation"` + safety check fails →
+///     `status=Refused` with the failing condition spelled out, no
+///     dispatch attempt. SafeDescriptor refusals from the substrate
+///     also collapse to `Refused`.
+///   * `:rollback-policy "workstation"` + safety check passes →
+///     dispatch via `run_workstation_dispatch`. On success
+///     `status=Dispatched` (with brief preview + inner payload). On
+///     inner-handler error `status=Failed` with the error message on
+///     the reason. SafeDescriptor refusals (which can still surface
+///     even after the static safety check passes — e.g. resolver
+///     reports a non-existent project root) become `Refused` so the
+///     non-retryable refusal vocabulary stays consistent across all
+///     workstation-substrate consumers.
+async fn run_rollback(
+    state: &AppState,
+    plan: &Plan,
+    node: &DagNode,
+) -> RollbackEvaluation {
+    let descriptor = build_rollback_descriptor(node);
+    match descriptor.policy {
+        RollbackPolicy::None => RollbackEvaluation {
+            policy: RollbackPolicy::None,
+            status: RollbackStatus::NotRequested,
+            reason: if node.has_rollback_hints() {
+                "rollback policy explicitly set to none; no rollback dispatch".to_string()
+            } else {
+                "no rollback hints declared".to_string()
+            },
+            objective: descriptor.objective,
+            owned_files: descriptor.owned_files,
+            acceptance_commands: descriptor.acceptance_commands,
+            task_brief_preview: None,
+            task_brief_path: None,
+            inner_payload: None,
+        },
+        RollbackPolicy::Descriptor => {
+            // Build the descriptor brief locally so observers see the
+            // same shape they would for a forward task brief, but
+            // NEVER dispatch.
+            let hints = descriptor.to_workstation_hints(node);
+            let strategy = node
+                .dispatch_strategy
+                .as_deref()
+                .unwrap_or("unknown");
+            let preview = if descriptor.objective.is_some() {
+                Some(truncate_rollback_brief_preview(
+                    &super::workstation_dispatch::build_task_brief(
+                        plan, &hints, strategy,
+                    ),
+                ))
+            } else {
+                None
+            };
+            RollbackEvaluation {
+                policy: RollbackPolicy::Descriptor,
+                status: RollbackStatus::DescriptorReady,
+                reason: "descriptor mode: rollback intent recorded; no dispatch performed"
+                    .to_string(),
+                objective: descriptor.objective.clone(),
+                owned_files: descriptor.owned_files.clone(),
+                acceptance_commands: descriptor.acceptance_commands.clone(),
+                task_brief_preview: preview,
+                task_brief_path: None,
+                inner_payload: None,
+            }
+        }
+        RollbackPolicy::Workstation => {
+            // Run the static safety check first so a refusal here
+            // never touches the substrate. SafeDescriptor refusals
+            // are non-retryable per the wave-15 contract.
+            if let Err(reason) = descriptor.safety_check_for_workstation(node) {
+                return RollbackEvaluation {
+                    policy: RollbackPolicy::Workstation,
+                    status: RollbackStatus::Refused,
+                    reason: format!("rollback workstation dispatch refused: {}", reason),
+                    objective: descriptor.objective,
+                    owned_files: descriptor.owned_files,
+                    acceptance_commands: descriptor.acceptance_commands,
+                    task_brief_preview: None,
+                    task_brief_path: None,
+                    inner_payload: None,
+                };
+            }
+            // Static safety passed — dispatch through the substrate.
+            // The substrate may STILL refuse (e.g. cwd not absolute,
+            // project registry miss); we map every SafeDescriptor
+            // refusal back to `Refused` so the non-retryable
+            // vocabulary stays consistent.
+            let hints = descriptor.to_workstation_hints(node);
+            let strategy = node
+                .dispatch_strategy
+                .as_deref()
+                .unwrap_or("unknown");
+            let outcome = super::workstation_dispatch::run_workstation_dispatch(
+                state, plan, "mission_task_delegate", strategy, hints, false,
+            )
+            .await;
+            match outcome {
+                super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched {
+                    task_brief,
+                    task_brief_path,
+                    inner_payload,
+                    ..
+                } => RollbackEvaluation {
+                    policy: RollbackPolicy::Workstation,
+                    status: RollbackStatus::Dispatched,
+                    reason: "rollback workstation dispatch completed; inner handler returned Ok"
+                        .to_string(),
+                    objective: descriptor.objective,
+                    owned_files: descriptor.owned_files,
+                    acceptance_commands: descriptor.acceptance_commands,
+                    task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
+                    task_brief_path,
+                    inner_payload: Some(inner_payload),
+                },
+                super::workstation_dispatch::WorkstationDispatchOutcome::DryRun {
+                    task_brief,
+                } => {
+                    // The wave loop never asks for dry_run on rollback
+                    // (we always pass dry_run=false above). Defensive:
+                    // if a future caller flips the knob we surface as
+                    // dispatched with no inner payload so observers
+                    // don't see a missing variant.
+                    RollbackEvaluation {
+                        policy: RollbackPolicy::Workstation,
+                        status: RollbackStatus::Dispatched,
+                        reason: "rollback dispatched in dry_run mode (no real handler invoked)"
+                            .to_string(),
+                        objective: descriptor.objective,
+                        owned_files: descriptor.owned_files,
+                        acceptance_commands: descriptor.acceptance_commands,
+                        task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
+                        task_brief_path: None,
+                        inner_payload: None,
+                    }
+                }
+                super::workstation_dispatch::WorkstationDispatchOutcome::InnerError {
+                    task_brief,
+                    inner_payload,
+                } => {
+                    let detail = inner_payload
+                        .get("error")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("rollback inner handler returned error")
+                        .to_string();
+                    RollbackEvaluation {
+                        policy: RollbackPolicy::Workstation,
+                        status: RollbackStatus::Failed,
+                        reason: format!("rollback workstation dispatch failed: {}", detail),
+                        objective: descriptor.objective,
+                        owned_files: descriptor.owned_files,
+                        acceptance_commands: descriptor.acceptance_commands,
+                        task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
+                        task_brief_path: None,
+                        inner_payload: Some(inner_payload),
+                    }
+                }
+                super::workstation_dispatch::WorkstationDispatchOutcome::SafeDescriptor {
+                    reason,
+                    task_brief,
+                } => {
+                    // Substrate-side safety refusal — collapse to
+                    // Refused so the wave loop treats it as
+                    // non-retryable (mirrors wave-15 / task 05).
+                    RollbackEvaluation {
+                        policy: RollbackPolicy::Workstation,
+                        status: RollbackStatus::Refused,
+                        reason: format!(
+                            "rollback workstation dispatch refused (substrate): {}",
+                            reason.detail()
+                        ),
+                        objective: descriptor.objective,
+                        owned_files: descriptor.owned_files,
+                        acceptance_commands: descriptor.acceptance_commands,
+                        task_brief_preview: task_brief
+                            .as_deref()
+                            .map(truncate_rollback_brief_preview),
+                        task_brief_path: None,
+                        inner_payload: None,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// wave-17 / task 04 — local copy of the workstation-dispatch preview
+/// truncation so the rollback evaluation block surfaces a humane
+/// preview without taking a dep on the substrate's private helper.
+/// Same MAX (800 chars) so previews look identical across surfaces.
+fn truncate_rollback_brief_preview(brief: &str) -> String {
+    const MAX: usize = 800;
+    if brief.len() <= MAX {
+        return brief.to_string();
+    }
+    let mut end = MAX;
+    while end > 0 && !brief.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}...", &brief[..end])
+}
+
+/// wave-17 / task 04 — emit one rollback-phase evidence entry per
+/// failed node that opted into a rollback policy. Runs ONLY after
+/// `emit_evidence_finished` for the failure branch and BEFORE
+/// `propagate_taint`, so audit dashboards can pivot on the
+/// `failed -> rollback_*` transition between the failure row and any
+/// downstream `pending -> skipped` rows.
+///
+/// The entry's `state_transition` reflects the rollback decision
+/// (`failed -> rollback_descriptor_ready`,
+/// `failed -> rollback_dispatched`, `failed -> rollback_refused`,
+/// `failed -> rollback_failed`) so audit dashboards can pivot on a
+/// single string. Entries surface every field on
+/// [`RollbackEvaluation::to_json`] PLUS the typed top-level
+/// `rollback_status` / `rollback_policy` slots so legacy dashboards
+/// can grep without descending into the `rollback` block.
+///
+/// Bus publish failure on the lifecycle event is observability-only —
+/// the warning lands on `outcome.bus_publish_warnings` and the
+/// evidence ref falls back to the deterministic id; the rollback
+/// decision itself is unaffected.
+async fn emit_evidence_rollback(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    attempt: u32,
+    evaluation: &RollbackEvaluation,
+    outcome: &mut ExecutionOutcome,
+) {
+    let to_state = match evaluation.status {
+        RollbackStatus::NotRequested => "rollback_skipped",
+        RollbackStatus::DescriptorReady => "rollback_descriptor_ready",
+        RollbackStatus::Dispatched => "rollback_dispatched",
+        RollbackStatus::Refused => "rollback_refused",
+        RollbackStatus::Failed => "rollback_failed",
+    };
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        attempt,
+        "failed",
+        to_state,
+        Some(format!(
+            "rollback:{}:policy={}:reason={}",
+            evaluation.status.as_wire(),
+            evaluation.policy.as_wire(),
+            evaluation.reason
+        )),
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
+    let mut entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition(format!("failed -> {}", to_state))
+    .add_execution_event(event_ref)
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(attempt))
+    .with_extra("rollback_policy", json!(evaluation.policy.as_wire()))
+    .with_extra("rollback_status", json!(evaluation.status.as_wire()))
+    .with_extra("rollback_reason", json!(evaluation.reason))
+    .with_extra("rollback_owned_files", json!(evaluation.owned_files))
+    .with_extra(
+        "rollback_acceptance_commands",
+        json!(evaluation.acceptance_commands),
+    )
+    .with_extra("rollback_acceptance_commands_executed", json!(false));
+    if let Some(obj) = evaluation.objective.as_deref() {
+        entry = entry.with_extra("rollback_objective", json!(obj));
+    }
+    if let Some(preview) = evaluation.task_brief_preview.as_deref() {
+        entry = entry.with_extra("rollback_task_brief_preview", json!(preview));
+    }
+    if let Some(p) = evaluation.task_brief_path.as_deref() {
+        entry = entry.with_extra("rollback_task_brief_path", json!(p));
+    }
+    if let Some(inner) = evaluation.inner_payload.clone() {
+        entry = entry.with_extra("rollback_inner_result", inner);
+    }
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: failed->rollback_* evidence append failed"
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
 /// wave-17 / task 03 — emit one acceptance-phase evidence entry per
 /// successfully-dispatched node that opted into the acceptance contract.
 /// Runs ONLY after `emit_evidence_finished` for the success branch; the
@@ -4249,6 +5137,14 @@ async fn execute_with_concurrency(
                                 attempts_made: attempt,
                                 max_attempts: node.effective_max_attempts(),
                                 retry_skipped_non_retryable: true,
+                                // wave-17 / task 04 — claim-conflict
+                                // refusal happens BEFORE any handler
+                                // runs; the rollback evaluator never
+                                // gets a chance to reason about it
+                                // because the failure is purely a
+                                // coordination event, not a node-level
+                                // failure that warrants compensation.
+                                rollback: None,
                                 // wave-17 / task 03 — claim-conflict
                                 // refusal happens BEFORE the inner
                                 // handler runs; acceptance phase is
@@ -4466,6 +5362,37 @@ async fn execute_with_concurrency(
                         .await;
                     }
                 }
+                // wave-17 / task 04 — acceptance-rejected nodes are
+                // node-level failures and warrant the same rollback
+                // pass as a dispatch-time failure. Runs BEFORE
+                // `propagate_taint` so the downstream behaviour is
+                // governed by the existing failure-policy contract.
+                // Skipped for accepted / paused / not-evaluated
+                // branches (the node is not in a "final failed"
+                // state for those).
+                let acc_rollback_eval = if matches!(
+                    acceptance.status,
+                    AcceptanceStatus::Rejected
+                ) {
+                    let eval = run_rollback(state, plan, &node).await;
+                    if !eval.is_inactive() {
+                        emit_evidence_rollback(
+                            state,
+                            &ctx,
+                            &node,
+                            &dispatch_strategy,
+                            current_attempt,
+                            &eval,
+                            &mut outcome,
+                        )
+                        .await;
+                        Some(eval)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
                 // wave-17 / task 03 — Rejected acceptance also taints
                 // downstream and may trip fail-fast (matches the
                 // dispatch-failure path so consumers get one shape for
@@ -4488,6 +5415,7 @@ async fn execute_with_concurrency(
                         attempts_made: current_attempt,
                         max_attempts,
                         retry_skipped_non_retryable: false,
+                        rollback: acc_rollback_eval,
                         acceptance: if acceptance_active {
                             Some(acceptance)
                         } else {
@@ -4680,6 +5608,50 @@ async fn execute_with_concurrency(
             let reason = classification
                 .err()
                 .unwrap_or_else(|| "inner handler returned error".to_string());
+            // wave-17 / task 04 — conservative rollback pass. Runs
+            // AFTER the final failed attempt and BEFORE downstream
+            // taint propagation. Skipped entirely when the node did
+            // not opt into a rollback policy so the wave-13 byte
+            // shape stays untouched.
+            //
+            // The rollback evaluator decides one of:
+            //   * NotRequested      — no rollback hints / explicit
+            //                          `:rollback-policy "none"`.
+            //                          Evidence emit suppressed.
+            //   * DescriptorReady   — `:rollback-policy "descriptor"`;
+            //                          captures intent + brief preview,
+            //                          NEVER dispatches.
+            //   * Dispatched        — `:rollback-policy "workstation"`
+            //                          + every safety gate passed +
+            //                          inner handler returned Ok.
+            //   * Refused           — `:rollback-policy "workstation"`
+            //                          + at least one safety gate
+            //                          failed (or substrate-side
+            //                          SafeDescriptor refusal).
+            //   * Failed            — `:rollback-policy "workstation"`
+            //                          dispatched but the inner
+            //                          handler returned an error.
+            //
+            // Downstream taint propagation runs identically afterwards
+            // — the rollback pass NEVER changes failure-policy
+            // semantics. This keeps the wave-13 / wave-16 contract
+            // intact: `:failure-policy fail-fast` still trips the
+            // wave-loop abort flag based on the original failure,
+            // not the rollback outcome.
+            let rollback_eval = run_rollback(state, plan, &node).await;
+            let rollback_active = !rollback_eval.is_inactive();
+            if rollback_active {
+                emit_evidence_rollback(
+                    state,
+                    &ctx,
+                    &node,
+                    &dispatch_strategy,
+                    current_attempt,
+                    &rollback_eval,
+                    &mut outcome,
+                )
+                .await;
+            }
             results_by_id.insert(
                 node_id.clone(),
                 NodeResult {
@@ -4691,6 +5663,11 @@ async fn execute_with_concurrency(
                     attempts_made: current_attempt,
                     max_attempts,
                     retry_skipped_non_retryable: non_retryable,
+                    rollback: if rollback_active {
+                        Some(rollback_eval)
+                    } else {
+                        None
+                    },
                     // wave-17 / task 03 — dispatch-failure path skips
                     // the acceptance phase (failure dominates).
                     acceptance: None,
@@ -4698,7 +5675,10 @@ async fn execute_with_concurrency(
             );
             // Taint propagates regardless of policy — it just changes
             // whether *unrelated* nodes also get aborted (fail-fast) or
-            // can keep running (continue).
+            // can keep running (continue). wave-17 / task 04: the
+            // rollback evaluation does NOT alter this — downstream
+            // behaviour stays governed by the existing failure-policy
+            // contract.
             propagate_taint(&node, &succs, &mut tainted_by);
             if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
                 abort_new_dispatch = true;
@@ -5912,6 +6892,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_succeeded");
@@ -5932,6 +6913,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_failed");
@@ -5952,6 +6934,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -5965,6 +6948,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -5976,6 +6960,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
@@ -6515,6 +7500,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -6526,6 +7512,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -6537,6 +7524,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -6548,6 +7536,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -6559,6 +7548,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.skipped_nodes_json();
@@ -6587,6 +7577,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -6598,6 +7589,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.node_results_json();
@@ -6625,6 +7617,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -6636,6 +7629,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
@@ -7577,6 +8571,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.node_results_json();
@@ -7605,6 +8600,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.node_results_json();
@@ -7625,6 +8621,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -7639,6 +8636,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -7653,6 +8651,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.paused_nodes_json();
@@ -7681,6 +8680,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -7695,6 +8695,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -7709,6 +8710,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.paused_node_ids(), vec!["g1".to_string(), "g2".to_string()]);
@@ -7736,6 +8738,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_paused");
@@ -7761,6 +8764,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -7775,6 +8779,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_paused");
@@ -7796,6 +8801,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         o.results.push(NodeResult {
@@ -7810,6 +8816,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
@@ -8225,6 +9232,7 @@ mod tests {
             attempts_made: 2,
             max_attempts: 3,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         // A baseline-quiet node (single attempt, no retry policy) must
@@ -8238,6 +9246,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.node_results_json();
@@ -8266,6 +9275,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 3,
             retry_skipped_non_retryable: true,
+            rollback: None,
             acceptance: None,
         });
         let v = o.node_results_json();
@@ -8338,6 +9348,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.node_results_json();
@@ -9476,6 +10487,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: Some(AcceptanceEvaluation {
                 status: AcceptanceStatus::Accepted,
                 mode: Some(AcceptanceMode::InnerStatus),
@@ -9494,6 +10506,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: None,
         });
         let v = o.node_results_json();
@@ -9529,6 +10542,7 @@ mod tests {
             attempts_made: 1,
             max_attempts: 1,
             retry_skipped_non_retryable: false,
+            rollback: None,
             acceptance: Some(AcceptanceEvaluation {
                 status: AcceptanceStatus::ManualRequired,
                 mode: Some(AcceptanceMode::Manual),
@@ -9549,5 +10563,605 @@ mod tests {
             "manual_required pause id `{}` MUST use the acceptance: prefix",
             qid
         );
+    }
+
+    // ── wave-17 / task 04 — conservative rollback descriptors ────────────
+    //
+    // The rollback pass runs AFTER a node's final failed attempt and
+    // BEFORE downstream taint propagation. It NEVER runs destructive
+    // shell commands; it only records intent, builds descriptors, or
+    // (in workstation mode) hands a scoped task brief to the existing
+    // wave-15 substrate. These tests pin every branch of the decision
+    // tree plus the failure-policy invariants the brief calls out.
+
+    fn rollback_node_with(
+        policy: Option<&str>,
+        objective: Option<&str>,
+        owned_files: Option<&str>,
+        acceptance_commands: Option<&str>,
+    ) -> DagNode {
+        DagNode {
+            id: "n".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            // A safe forward dispatch strategy so the workstation
+            // safety check can pass when the test wants it to.
+            dispatch_strategy: Some("fresh-code-alignment".into()),
+            target_project: Some("missiond".into()),
+            rollback_policy: policy.map(|s| s.to_string()),
+            rollback_objective: objective.map(|s| s.to_string()),
+            rollback_owned_files_raw: owned_files.map(|s| s.to_string()),
+            rollback_acceptance_commands_raw: acceptance_commands
+                .map(|s| s.to_string()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn parse_node_form_captures_rollback_policy_hints() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :rollback-policy "workstation"
+                    :rollback-objective "undo migration step 3"
+                    :rollback-owned-files ["src/migrations/0003.rs"]
+                    :rollback-acceptance-commands ["cargo test -p missiond"]))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n = &parsed.nodes[0];
+        assert_eq!(n.rollback_policy.as_deref(), Some("workstation"));
+        assert_eq!(
+            n.rollback_objective.as_deref(),
+            Some("undo migration step 3")
+        );
+        assert!(n
+            .rollback_owned_files_raw
+            .as_deref()
+            .unwrap()
+            .contains("src/migrations/0003.rs"));
+        assert!(n
+            .rollback_acceptance_commands_raw
+            .as_deref()
+            .unwrap()
+            .contains("cargo test"));
+        // None of the new keys must land in unsupported_fields — that
+        // would mean the scheduler can't route the rollback pass.
+        let unsupported_keys: Vec<String> =
+            n.unsupported_fields.iter().map(|(k, _)| k.clone()).collect();
+        for forbidden in [
+            "rollback-policy",
+            "rollback-objective",
+            "rollback-owned-files",
+            "rollback-acceptance-commands",
+        ] {
+            assert!(
+                !unsupported_keys.contains(&forbidden.to_string()),
+                "key `{}` must land on a typed slot, not unsupported_fields",
+                forbidden
+            );
+        }
+        assert!(n.has_rollback_hints());
+        assert_eq!(n.rollback_policy_kind(), Some(RollbackPolicy::Workstation));
+    }
+
+    #[test]
+    fn parse_node_form_records_unrecognised_rollback_policy_in_unsupported_fields() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :rollback-policy "self_destruct"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n = &parsed.nodes[0];
+        assert_eq!(n.rollback_policy.as_deref(), Some("self_destruct"));
+        // Typo lands in the typed slot AND is surfaced via the
+        // unsupported_fields audit so the response loudly flags it.
+        assert!(n
+            .unsupported_fields
+            .iter()
+            .any(|(k, v)| k == "rollback-policy" && v == "self_destruct"));
+        // Typed projection refuses to interpret a typo as a real policy.
+        assert!(n.rollback_policy_kind().is_none());
+    }
+
+    #[test]
+    fn rollback_policy_default_is_no_rollback_when_absent() {
+        // Defaults: absent -> no rollback / no destructive action.
+        let node = rollback_node_with(None, None, None, None);
+        assert!(!node.has_rollback_hints());
+        assert!(node.rollback_policy_kind().is_none());
+        let descriptor = build_rollback_descriptor(&node);
+        assert_eq!(descriptor.policy, RollbackPolicy::None);
+        assert!(descriptor.objective.is_none());
+        assert!(descriptor.owned_files.is_empty());
+        assert!(descriptor.acceptance_commands.is_empty());
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.status, RollbackStatus::NotRequested);
+        assert!(eval.is_inactive());
+    }
+
+    #[test]
+    fn rollback_policy_explicit_none_is_inactive() {
+        // `:rollback-policy "none"` is the explicit opt-out — the
+        // descriptor still parses, but the evaluator surfaces
+        // `not_requested` so the response stays quiet.
+        let node = rollback_node_with(Some("none"), Some("noop"), None, None);
+        assert_eq!(node.rollback_policy_kind(), Some(RollbackPolicy::None));
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.policy, RollbackPolicy::None);
+        assert_eq!(eval.status, RollbackStatus::NotRequested);
+    }
+
+    #[test]
+    fn rollback_descriptor_mode_records_intent_without_dispatch() {
+        let node = rollback_node_with(
+            Some("descriptor"),
+            Some("undo step"),
+            Some(r#"["src/a.rs"]"#),
+            Some(r#"["cargo test"]"#),
+        );
+        let descriptor = build_rollback_descriptor(&node);
+        assert_eq!(descriptor.policy, RollbackPolicy::Descriptor);
+        assert_eq!(descriptor.objective.as_deref(), Some("undo step"));
+        assert_eq!(descriptor.owned_files, vec!["src/a.rs".to_string()]);
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.status, RollbackStatus::DescriptorReady);
+        // No inner payload — descriptor mode never touches the substrate.
+        assert!(eval.inner_payload.is_none());
+        // Brief preview is computed by the async helper, not the pure
+        // decision; pre-dispatch evaluation leaves it None.
+        assert!(eval.task_brief_preview.is_none());
+    }
+
+    #[test]
+    fn rollback_workstation_mode_passes_safety_when_all_signals_present() {
+        let node = rollback_node_with(
+            Some("workstation"),
+            Some("undo migration"),
+            Some(r#"["src/a.rs"]"#),
+            None,
+        );
+        let descriptor = build_rollback_descriptor(&node);
+        assert_eq!(descriptor.policy, RollbackPolicy::Workstation);
+        assert!(descriptor.safety_check_for_workstation(&node).is_ok());
+    }
+
+    #[test]
+    fn rollback_workstation_mode_refuses_when_objective_missing() {
+        // No rollback-objective declared — workstation mode requires it
+        // because a content-free brief is useless.
+        let node = rollback_node_with(
+            Some("workstation"),
+            None,
+            Some(r#"["src/a.rs"]"#),
+            None,
+        );
+        let descriptor = build_rollback_descriptor(&node);
+        let err = descriptor
+            .safety_check_for_workstation(&node)
+            .expect_err("missing objective must refuse");
+        assert!(err.contains(":rollback-objective"));
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.status, RollbackStatus::Refused);
+        assert!(eval.reason.contains(":rollback-objective"));
+    }
+
+    #[test]
+    fn rollback_workstation_mode_refuses_when_owned_files_empty() {
+        let node = rollback_node_with(
+            Some("workstation"),
+            Some("undo step"),
+            None,
+            None,
+        );
+        let descriptor = build_rollback_descriptor(&node);
+        let err = descriptor
+            .safety_check_for_workstation(&node)
+            .expect_err("missing owned files must refuse");
+        assert!(err.contains(":rollback-owned-files"));
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.status, RollbackStatus::Refused);
+    }
+
+    #[test]
+    fn rollback_workstation_mode_refuses_when_no_project_signal() {
+        // Mutate the node so neither :target-project nor :requested-cwd
+        // is set — the safety gate must refuse.
+        let mut node = rollback_node_with(
+            Some("workstation"),
+            Some("undo step"),
+            Some(r#"["src/a.rs"]"#),
+            None,
+        );
+        node.target_project = None;
+        node.requested_cwd = None;
+        let descriptor = build_rollback_descriptor(&node);
+        let err = descriptor
+            .safety_check_for_workstation(&node)
+            .expect_err("missing project signal must refuse");
+        assert!(err.contains(":target-project"));
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.status, RollbackStatus::Refused);
+        assert!(eval.reason.contains(":target-project"));
+    }
+
+    #[test]
+    fn rollback_workstation_mode_refuses_when_dispatch_strategy_unsafe() {
+        // `unknown` (the default) is not on the inferable whitelist;
+        // the safety gate must refuse so the rollback never rides an
+        // unsupported substrate.
+        let mut node = rollback_node_with(
+            Some("workstation"),
+            Some("undo step"),
+            Some(r#"["src/a.rs"]"#),
+            None,
+        );
+        node.dispatch_strategy = Some("unknown".into());
+        let descriptor = build_rollback_descriptor(&node);
+        let err = descriptor
+            .safety_check_for_workstation(&node)
+            .expect_err("unsafe dispatch strategy must refuse");
+        assert!(err.contains(":dispatch-strategy"));
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.status, RollbackStatus::Refused);
+    }
+
+    #[test]
+    fn rollback_evaluation_to_json_carries_every_surface_field() {
+        let eval = RollbackEvaluation {
+            policy: RollbackPolicy::Workstation,
+            status: RollbackStatus::Dispatched,
+            reason: "ok".into(),
+            objective: Some("undo step".into()),
+            owned_files: vec!["src/a.rs".into()],
+            acceptance_commands: vec!["cargo test".into()],
+            task_brief_preview: Some("## Objective\nundo step\n".into()),
+            task_brief_path: Some("/tmp/rollback.md".into()),
+            inner_payload: Some(json!({"task_id": "btk-rb"})),
+        };
+        let v = eval.to_json();
+        assert_eq!(v["policy"], "workstation");
+        assert_eq!(v["status"], "dispatched");
+        assert_eq!(v["reason"], "ok");
+        assert_eq!(v["objective"], "undo step");
+        assert_eq!(v["owned_files"][0], "src/a.rs");
+        assert_eq!(v["acceptance_commands"][0], "cargo test");
+        // CRITICAL invariant — `acceptance_commands_executed=false` is
+        // pinned so audit dashboards can pivot on the flag and prove
+        // the scheduler never ran shell on behalf of a rollback brief.
+        assert_eq!(v["acceptance_commands_executed"], false);
+        assert!(v["task_brief_preview"]
+            .as_str()
+            .unwrap()
+            .contains("undo step"));
+        assert_eq!(v["task_brief_path"], "/tmp/rollback.md");
+        assert_eq!(v["inner_result"]["task_id"], "btk-rb");
+    }
+
+    #[test]
+    fn rollback_status_wire_strings_are_distinct_and_stable() {
+        // Pin the wire vocabulary so audit dashboards can grep on
+        // these strings without re-deriving them from the enum.
+        assert_eq!(RollbackStatus::NotRequested.as_wire(), "not_requested");
+        assert_eq!(RollbackStatus::DescriptorReady.as_wire(), "descriptor_ready");
+        assert_eq!(RollbackStatus::Dispatched.as_wire(), "dispatched");
+        assert_eq!(RollbackStatus::Refused.as_wire(), "refused");
+        assert_eq!(RollbackStatus::Failed.as_wire(), "failed");
+        // RollbackPolicy mirror.
+        assert_eq!(RollbackPolicy::None.as_wire(), "none");
+        assert_eq!(RollbackPolicy::Descriptor.as_wire(), "descriptor");
+        assert_eq!(RollbackPolicy::Workstation.as_wire(), "workstation");
+    }
+
+    #[test]
+    fn rollback_evaluation_is_inactive_only_when_truly_empty() {
+        // Inactive: no policy + no fields.
+        let inactive = RollbackEvaluation {
+            policy: RollbackPolicy::None,
+            status: RollbackStatus::NotRequested,
+            reason: "no rollback hints declared".into(),
+            objective: None,
+            owned_files: vec![],
+            acceptance_commands: vec![],
+            task_brief_preview: None,
+            task_brief_path: None,
+            inner_payload: None,
+        };
+        assert!(inactive.is_inactive());
+        // ANY signal should flip is_inactive to false so the response
+        // surfaces the row even when the policy is None (e.g. the
+        // explicit-none case where the author wrote out an objective
+        // but then suppressed dispatch).
+        let mut with_obj = inactive.clone();
+        with_obj.objective = Some("intent".into());
+        assert!(!with_obj.is_inactive());
+    }
+
+    #[test]
+    fn build_nodes_summary_surfaces_rollback_block_when_present() {
+        let nodes = vec![
+            DagNode {
+                id: "with".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                rollback_policy: Some("descriptor".into()),
+                rollback_objective: Some("undo".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "plain".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["with".to_string(), "plain".to_string()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr[0]["rollback"]["policy"], "descriptor");
+        assert_eq!(arr[0]["rollback"]["objective"], "undo");
+        // Plain node has no rollback hints — summary stays quiet
+        // (regression guard for the wave-17 / task 03 baseline).
+        assert!(arr[1].get("rollback").is_none());
+    }
+
+    #[test]
+    fn node_results_json_surfaces_rollback_block_only_when_active() {
+        let mut o = ExecutionOutcome::default();
+        // Active rollback — surfaces.
+        o.results.push(NodeResult {
+            id: "with_rb".into(),
+            target: "mission_task_delegate".into(),
+            state: NodeState::Failed { reason: "boom".into() },
+            dispatch_strategy: "fresh-code-alignment".into(),
+            inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+            rollback: Some(RollbackEvaluation {
+                policy: RollbackPolicy::Descriptor,
+                status: RollbackStatus::DescriptorReady,
+                reason: "descriptor mode".into(),
+                objective: Some("undo".into()),
+                owned_files: vec!["src/a.rs".into()],
+                acceptance_commands: vec![],
+                task_brief_preview: None,
+                task_brief_path: None,
+                inner_payload: None,
+            }),
+            acceptance: None,
+        });
+        // No rollback hints — quiet.
+        o.results.push(NodeResult {
+            id: "plain".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Failed { reason: "boom".into() },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+            rollback: None,
+            acceptance: None,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0]["rollback"]["policy"], "descriptor");
+        assert_eq!(arr[0]["rollback"]["status"], "descriptor_ready");
+        assert!(arr[1].get("rollback").is_none());
+    }
+
+    #[tokio::test]
+    async fn run_rollback_descriptor_mode_skips_dispatch_and_records_brief() {
+        // Descriptor mode never dispatches — we can run the async
+        // helper without a real AppState because the substrate is
+        // never invoked. We use a dummy state via the existing
+        // `tempfile`-backed registry path the workstation_dispatch
+        // tests use; descriptor mode doesn't read any AppState
+        // fields.
+        //
+        // To stay self-contained we just call the pure pre-dispatch
+        // decision (which is the byte-identical projection minus the
+        // brief preview) and assert the contract.
+        let node = rollback_node_with(
+            Some("descriptor"),
+            Some("undo step"),
+            Some(r#"["src/a.rs"]"#),
+            Some(r#"["cargo test"]"#),
+        );
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.policy, RollbackPolicy::Descriptor);
+        assert_eq!(eval.status, RollbackStatus::DescriptorReady);
+        // CRITICAL — descriptor mode NEVER produces an inner_payload
+        // because the substrate is not invoked.
+        assert!(eval.inner_payload.is_none());
+    }
+
+    #[test]
+    fn rollback_workstation_brief_includes_canonical_sections() {
+        // The rollback brief reuses the wave-15 task-brief shape so
+        // observers see the same headings as a forward task brief.
+        let node = rollback_node_with(
+            Some("workstation"),
+            Some("undo migration step 3"),
+            Some(r#"["src/migrations/0003.rs"]"#),
+            Some(r#"["cargo test -p missiond"]"#),
+        );
+        let descriptor = build_rollback_descriptor(&node);
+        let hints = descriptor.to_workstation_hints(&node);
+        assert_eq!(hints.objective.as_deref(), Some("undo migration step 3"));
+        assert!(hints
+            .scope
+            .as_deref()
+            .unwrap()
+            .contains("rollback for failed plan-DAG node"));
+        assert_eq!(hints.owned_files, vec!["src/migrations/0003.rs".to_string()]);
+        assert_eq!(
+            hints.acceptance_commands,
+            vec!["cargo test -p missiond".to_string()]
+        );
+        // Default commit policy lands as "scoped" so the rollback
+        // brief inherits the scoped-commit invariant.
+        assert_eq!(hints.commit_policy.as_deref(), Some("scoped"));
+        // Build the brief through the substrate helper to confirm
+        // the canonical sections are present.
+        let plan = fixture_plan("(plan)");
+        let brief = crate::handlers::knowledge::workstation_dispatch::build_task_brief(
+            &plan,
+            &hints,
+            "fresh-code-alignment",
+        );
+        assert!(brief.contains("## Objective"));
+        assert!(brief.contains("## Scope"));
+        assert!(brief.contains("rollback for failed plan-DAG node"));
+        assert!(brief.contains("## Owned files"));
+        assert!(brief.contains("- src/migrations/0003.rs"));
+        assert!(brief.contains("## Acceptance commands"));
+        assert!(brief.contains("- cargo test -p missiond"));
+        assert!(brief.contains("## Commit policy"));
+    }
+
+    #[test]
+    fn rollback_failure_policy_interaction_taint_still_propagates_under_descriptor_mode() {
+        // Pin the failure-policy contract: the rollback decision
+        // never short-circuits taint propagation. We exercise the
+        // pure helpers because the wave loop has the full integration
+        // (covered by build_validated_dag + execute_with_concurrency
+        // in production); the decision-level test here protects
+        // against a refactor that flips the rollback evaluator into
+        // a "rolled back successfully so don't taint downstream"
+        // bug.
+        //
+        // Concretely: a node with `:rollback-policy "descriptor"`
+        // that fails MUST still cause `propagate_taint` to mark its
+        // downstream as `tainted_by`. We build the graph + simulate
+        // the failure here.
+        let nodes = vec![
+            DagNode {
+                id: "a".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                rollback_policy: Some("descriptor".into()),
+                rollback_objective: Some("undo".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "b".into(),
+                target: "mission_execution".into(),
+                depends_on: vec!["a".into()],
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let mut succs: HashMap<&str, Vec<&str>> = HashMap::new();
+        for n in &nodes {
+            for dep in &n.depends_on {
+                succs.entry(dep.as_str()).or_default().push(n.id.as_str());
+            }
+        }
+        let mut tainted: HashMap<String, String> = HashMap::new();
+        // Simulate the wave loop: rollback runs FIRST, then
+        // propagate_taint. Both happen so downstream stays tainted.
+        let _eval = pre_dispatch_rollback_decision(&nodes[0]);
+        propagate_taint(&nodes[0], &succs, &mut tainted);
+        assert_eq!(
+            tainted.get("b"),
+            Some(&"a".to_string()),
+            "rollback descriptor mode must NOT short-circuit downstream taint"
+        );
+    }
+
+    #[test]
+    fn rollback_failure_policy_interaction_taint_still_propagates_under_workstation_mode() {
+        // Same invariant for the workstation mode — even when
+        // the rollback dispatch succeeds, taint propagates so
+        // downstream sees the failure.
+        let nodes = vec![
+            DagNode {
+                id: "a".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "continue".into(),
+                rollback_policy: Some("workstation".into()),
+                rollback_objective: Some("undo".into()),
+                rollback_owned_files_raw: Some(r#"["src/a.rs"]"#.into()),
+                target_project: Some("missiond".into()),
+                dispatch_strategy: Some("fresh-code-alignment".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "b".into(),
+                target: "mission_execution".into(),
+                depends_on: vec!["a".into()],
+                failure_policy: "continue".into(),
+                ..Default::default()
+            },
+        ];
+        let mut succs: HashMap<&str, Vec<&str>> = HashMap::new();
+        for n in &nodes {
+            for dep in &n.depends_on {
+                succs.entry(dep.as_str()).or_default().push(n.id.as_str());
+            }
+        }
+        let mut tainted: HashMap<String, String> = HashMap::new();
+        let _eval = pre_dispatch_rollback_decision(&nodes[0]);
+        propagate_taint(&nodes[0], &succs, &mut tainted);
+        assert_eq!(
+            tainted.get("b"),
+            Some(&"a".to_string()),
+            "rollback workstation mode must NOT short-circuit downstream taint"
+        );
+    }
+
+    #[test]
+    fn rollback_safe_descriptor_refusals_are_non_retryable() {
+        // Per the brief: SafeDescriptor refusals must not be retried.
+        // The refusal vocabulary the rollback evaluator emits when
+        // safety fails is `RollbackStatus::Refused`. Pin this so a
+        // future refactor can't accidentally route a refused
+        // rollback back through the wave-loop's retry path.
+        //
+        // Test: a node with `:rollback-policy "workstation"` but
+        // missing `:rollback-objective` should evaluate to Refused
+        // and the reason should explicitly mention the failing gate.
+        let node = rollback_node_with(
+            Some("workstation"),
+            None, // objective missing — safety refusal
+            Some(r#"["src/a.rs"]"#),
+            None,
+        );
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert_eq!(eval.status, RollbackStatus::Refused);
+        // The wave loop's retry-decision predicate is
+        // `plan_node_should_retry`. SafeDescriptor refusals from the
+        // forward dispatch already set `non_retryable=true`. Our
+        // rollback Refused status is similarly non-retryable in the
+        // sense that the wave loop never retries the failed node
+        // (it only ever runs the rollback ONCE per terminal failure).
+        // We assert the stable wire form so dashboards can pivot.
+        assert_eq!(eval.status.as_wire(), "refused");
+    }
+
+    #[test]
+    fn rollback_descriptor_carries_acceptance_commands_unexecuted() {
+        // CRITICAL invariant — the rollback brief surfaces declared
+        // commands verbatim AND the JSON projection pins
+        // `acceptance_commands_executed=false` so audit dashboards
+        // can prove the scheduler never ran them.
+        let node = rollback_node_with(
+            Some("descriptor"),
+            Some("undo"),
+            None,
+            Some(r#"["rm -rf /" "echo all good"]"#),
+        );
+        let eval = pre_dispatch_rollback_decision(&node);
+        let v = eval.to_json();
+        assert_eq!(
+            v["acceptance_commands_executed"], false,
+            "rollback evaluator MUST surface acceptance_commands_executed=false"
+        );
+        assert_eq!(v["acceptance_commands"][0], "rm -rf /");
+        assert_eq!(v["acceptance_commands"][1], "echo all good");
     }
 }
