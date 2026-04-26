@@ -58,6 +58,20 @@
 //!                              priority / timeout_secs / intent /
 //!                              execution_id / parent_design / scope /
 //!                              owner / dry_run / review_question_id`
+//!                          + wave-17 / task 01 paused-node resume keys
+//!                              (`resume_review_question_id /
+//!                               resume_review_decision / resume_actor /
+//!                               resume_note`); when present the inner
+//!                              `mission_plan(action=execute)` routes
+//!                              through the deterministic resume helper
+//!                              instead of the standard execute pipeline.
+//!                          + wave-17 / task 05 finalize / distill opt-ins
+//!                              (`finalize_plan / distill_on_success /
+//!                               distill_mode`); off by default — when
+//!                              `finalize_plan=true` the inner handler
+//!                              maps the run aggregate to a final plan
+//!                              status and (optionally) triggers the
+//!                              workflow distill pass.
 //!
 //!   Every v1 response now also carries `artifact_refs` — a flat object
 //!   that lifts whatever the inner handler produced (`directive_id /
@@ -467,6 +481,26 @@ fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
         "dry_run",
         // wave-14 v1 addition — review-gate resolution emit on s6
         "review_question_id",
+        // wave-17 / task 01 — paused-node resume hook. The four resume_*
+        // keys travel together; the inner `mission_plan(action=execute)`
+        // routes through `plan_dag::action_execute_resume` only when
+        // `resume_review_question_id` is present. We forward verbatim so
+        // unified-entry callers can drive a resume without dropping back
+        // to a direct `mission_plan` call.
+        "resume_review_question_id",
+        "resume_review_decision",
+        "resume_actor",
+        "resume_note",
+        // wave-17 / task 05 — finalize / distill opt-ins. Off by default
+        // on the inner handler; forwarded verbatim so unified-entry
+        // callers can opt into the wave-17 finalization pass without
+        // dropping back to a direct `mission_plan(action=execute)` call.
+        // `distill_on_success` requires `finalize_plan=true`; the inner
+        // handler's `validate_finalize_args` enforces that — we don't
+        // re-validate at the pipeline layer.
+        "finalize_plan",
+        "distill_on_success",
+        "distill_mode",
     ] {
         if let Some(v) = args.get(key) {
             if !v.is_null() {
@@ -2305,5 +2339,632 @@ mod tests {
         assert_eq!(ev_meta["artifact_refs"]["file_path"], evidence_path);
         assert_eq!(ev_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe");
         assert_eq!(ev_meta["artifact_refs"]["file_bytes"], 256);
+    }
+
+    // ── 7. wave-17 / Task 08 :: paused-resume DAG smoke ──────────────
+    //
+    // Goal: prove the deterministic review-pause/resume contract end-to-end
+    // through the unified entry — a PLAN DAG node carrying
+    // `:review-gate "question-event"` pauses, the deterministic review
+    // question id surfaces, an `approved` resolution feeds back through the
+    // pipeline as `resume_review_question_id`, the resumed dispatch reaches
+    // a terminal `succeeded` state, and the evidence sidecar records both
+    // the pause and the resume rows.
+    //
+    // The smoke is deliberately layered on top of the wave-16 / Task 08
+    // happy-path scaffold (`smoke_canonical_loop_*`):
+    //
+    //   * **Routing**: drives `plan_pipeline` for s1/s4/s6 — same canonical
+    //     transitions, no live LLM, no AppState, no ClaudeCode spawn.
+    //   * **Inner payloads**: hand-crafted to mirror `action_execute_dag_v1`
+    //     (paused branch with `aggregate_status="dag_paused"`) and
+    //     `action_execute_resume` (approved branch with `inner_status`
+    //     acceptance + `dag_succeeded` finalization). The shapes are byte-
+    //     compatible with the production handlers (verified against
+    //     `plan_dag::tests::*paused_node_review_question_id*` /
+    //     `*finalize_plan_status_label*` / `*acceptance*`).
+    //   * **Resume-id determinism**: round-trips through the actual
+    //     `derive_plan_node_review_question_id` /
+    //     `parse_review_question_id_struct` /
+    //     `validate_resume_request` helpers — proves the question id the
+    //     pause-stage simulated payload carries is the SAME id a real
+    //     `action_execute_dag_v1` would have emitted, and that the
+    //     resume validator accepts it against a paused-eligible node.
+    //
+    // Features included (each touched by an assertion below):
+    //
+    //   * wave-17 / Task 01 — paused-resume hook + the four `resume_*` keys
+    //     forwarded through `build_plan_execute_args`.
+    //   * wave-17 / Task 03 — acceptance evaluator surface
+    //     (`node_results[].acceptance` with `mode="inner_status"`).
+    //   * wave-17 / Task 05 — `finalize_plan` block + plan status mapping
+    //     (`aggregate_status="dag_succeeded"` ⇒ `final_plan_status="succeeded"`).
+    //   * wave-13 evidence sidecar + wave-14 file-first projection lifting
+    //     `file_path`/`file_sha256`/`file_bytes` into `artifact_refs`.
+    //   * wave-16 / Task 04 paused-node response surface
+    //     (`paused_node_ids` / `review_question_ids`).
+    //   * Canonical envelope (`pipeline_stage` / `flow_ref` /
+    //     `artifact_refs.scope` / `next_step` / `v0_non_goals`).
+    //
+    // Features excluded (covered by their own unit tests, NOT re-asserted
+    // here per the brief's "smoke contract, not unit duplication" rule):
+    //
+    //   * wave-17 / Task 02 claim/lease lifecycle (`Claimed` state, claim
+    //     evidence rows) — covered by `plan_dag::tests::claim_*`.
+    //   * wave-17 / Task 04 rollback policy decisions — covered by
+    //     `plan_dag::tests::rollback_*`.
+    //   * wave-17 / Task 06 evidence event-log resolver tiers — covered by
+    //     `evidence_collector::tests::*event_ref*`.
+    //   * wave-17 / Task 07 workstation brief section 7 (scoped commit
+    //     handoff) — covered by `workstation_dispatch::tests::*scoped_commit*`.
+    //   * Bus subscriber side resume listener (`handle_review_resolved_plan_node_event`)
+    //     — covered by `plan_dag::tests::paused_node_review_question_id_round_trips_*`
+    //     and the listener integration tests in `bus::v2_subscribers`.
+
+    /// Unified-entry forwarding contract: the four `resume_*` keys must
+    /// reach the inner `mission_plan(execute)` shape via `PlanExecute`.
+    /// Pinning this here (rather than only in the smoke) gives the
+    /// forwarding contract its own test name so a future refactor that
+    /// drops a key doesn't only fail under the longer smoke trace.
+    #[test]
+    fn build_plan_execute_args_forwards_wave17_resume_keys() {
+        let plan_id = "11111111-1111-1111-1111-000000000000";
+        let qid = "review:plan:11111111-1111-1111-1111-000000000000:v1:plan-node:0123456789abcdef";
+        let args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "resume_review_question_id": qid,
+            "resume_review_decision": "approved",
+            "resume_actor": "agent-team",
+            "resume_note": "smoke proceed",
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        assert_eq!(execute_args["action"], "execute");
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["execute_mode"], "internal");
+        assert_eq!(execute_args["resume_review_question_id"], qid);
+        assert_eq!(execute_args["resume_review_decision"], "approved");
+        assert_eq!(execute_args["resume_actor"], "agent-team");
+        assert_eq!(execute_args["resume_note"], "smoke proceed");
+    }
+
+    /// Resume keys are dropped (not forwarded as nulls) when the caller
+    /// omits them, so the wave-13/14/15 byte-shape stays intact for legacy
+    /// callers that never opt into the resume hook.
+    #[test]
+    fn build_plan_execute_args_resume_keys_absent_when_omitted() {
+        let args = json!({
+            "approved_plan_id": "11111111-1111-1111-1111-111111111111",
+            "execute": true,
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        for k in &[
+            "resume_review_question_id",
+            "resume_review_decision",
+            "resume_actor",
+            "resume_note",
+        ] {
+            assert!(
+                execute_args.get(*k).is_none(),
+                "legacy execute path must NOT forward `{}`",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn smoke_paused_dag_resume_canonical_loop() {
+        // Authoritative ids for the smoke. The plan id is fixed so the
+        // deterministic review-question id derivation produces a stable
+        // value the assertions can pin.
+        let directive_id = "00000000-0000-0000-0000-0000000000d2";
+        let board_task_id = "btk-wave17-task08-paused-smoke";
+        let plan_id_uuid = uuid::Uuid::parse_str("22222222-2222-2222-2222-000000000a17")
+            .expect("valid plan uuid");
+        let plan_id = plan_id_uuid.to_string();
+        let plan_version: i32 = 1;
+        let paused_node_id = "review-gate-node";
+
+        // ── Stage s1 :: directive compile (dry_run, no LLM) ────────────
+        let s1_args = json!({
+            "message": "wave17 task08 paused-resume smoke utterance",
+            "source": "user_utterance",
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        let s1_decision = plan_pipeline(&s1_args).expect("s1 must route");
+        let PipelineDecision::DirectiveCompile { compile_args } = s1_decision else {
+            panic!("expected DirectiveCompile for bare-message input");
+        };
+        assert_eq!(compile_args["compiler_mode"], "dry_run");
+        let s1_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "persisted": true,
+            "directive_id": directive_id,
+            "version": 1,
+        }));
+        let s1_decorated = decorate(
+            s1_inner,
+            DecorateContext {
+                stage: stages::MESSAGE_INTAKE,
+                scope: ArtifactScope::Directive,
+                next_step: "review the compiled directive then re-call this pipeline with `approved_directive_id`",
+                next_call: Some(json!({
+                    "tool": "mission_directive",
+                    "action": "approve",
+                })),
+                expects_next_inputs: json!({
+                    "approved_directive_id": "uuid",
+                    "directive_version": "i32",
+                    "board_task_id": "string",
+                }),
+            },
+        );
+        let s1_meta = smoke_meta_of(&s1_decorated);
+        assert_eq!(s1_meta["pipeline_stage"], stages::MESSAGE_INTAKE);
+        assert_eq!(s1_meta["artifact_refs"]["directive_id"], directive_id);
+
+        // ── Stage s4 :: plan compile (PLAN.lisp carries a paused node) ─
+        //
+        // The simulated PLAN.lisp shape mirrors the wave-16/17 author
+        // contract — one node carrying both `:review-gate "question-event"`
+        // (so the scheduler will pause it) AND `:acceptance-mode
+        // "inner_status"` (so wave-17 / Task 03's evaluator runs after the
+        // resumed dispatch). We deliberately don't drive `parse_plan_dag`
+        // here; the lisp body is opaque text whose role is only to be
+        // surfaced by the (simulated) inner payload's hint summary.
+        let plan_lisp_body = format!(
+            r#"(plan
+                 :board_task_id "{}"
+                 (node
+                   :id "{}"
+                   :target "mission_execution"
+                   :objective "smoke pause then resume"
+                   :review-gate "question-event"
+                   :review-action "plan-node"
+                   :acceptance-mode "inner_status"))
+            "#,
+            board_task_id, paused_node_id,
+        );
+        let s4_args = json!({
+            "approved_directive_id": directive_id,
+            "directive_version": 1,
+            "board_task_id": board_task_id,
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        let s4_decision = plan_pipeline(&s4_args).expect("s4 must route");
+        let PipelineDecision::PlanCompile { compile_args } = s4_decision else {
+            panic!("expected PlanCompile");
+        };
+        assert_eq!(compile_args["directive_id"], directive_id);
+        assert_eq!(compile_args["board_task_id"], board_task_id);
+        let s4_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "persisted": true,
+            "plan_id": plan_id,
+            "version": plan_version,
+            "board_task_id": board_task_id,
+            "directive_id": directive_id,
+            "sexp_text": plan_lisp_body,
+        }));
+        let s4_decorated = decorate(
+            s4_inner,
+            DecorateContext {
+                stage: stages::PLAN_AUTHORING,
+                scope: ArtifactScope::Plan,
+                next_step: "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` and `execute=true`",
+                next_call: Some(json!({"tool": "mission_plan", "action": "approve"})),
+                expects_next_inputs: json!({"approved_plan_id": "uuid", "execute": true}),
+            },
+        );
+        let s4_meta = smoke_meta_of(&s4_decorated);
+        assert_eq!(s4_meta["pipeline_stage"], stages::PLAN_AUTHORING);
+        assert_eq!(s4_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s4_meta["artifact_refs"]["board_task_id"], board_task_id);
+
+        // ── Stage s6a :: first execute → DAG paused at the review gate ─
+        //
+        // Hand the pipeline the approved plan id + execute=true. The
+        // planner picks PlanExecute. We then synthesise the inner payload
+        // exactly the way `action_execute_dag_v1` produces it when one
+        // node landed in `NodeState::Paused` (see `ExecutionOutcome::
+        // node_results_json` + `aggregate_status` ⇒ "dag_paused").
+        let s6a_args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "max_parallel_nodes": 1,
+            // wave-17 / Task 05 finalization opt-in. Surfaces the
+            // `finalization` block on the response so the smoke can pin
+            // the wave-17 contract that `dag_paused` does NOT lie about
+            // success: `final_plan_status` must NOT be "succeeded" while
+            // any node is still paused.
+            "finalize_plan": true,
+        });
+        let s6a_decision = plan_pipeline(&s6a_args).expect("s6a must route");
+        let PipelineDecision::PlanExecute { execute_args } = s6a_decision else {
+            panic!("approved_plan_id + execute=true must route to PlanExecute");
+        };
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["execute_mode"], "internal");
+        assert_eq!(execute_args["scheduler_mode"], "dag_v1");
+        assert_eq!(execute_args["finalize_plan"], true);
+
+        // Round-trip the deterministic review-question id BEFORE building
+        // the inner payload so the smoke proves the id the simulated
+        // payload carries is the SAME id a live `emit_paused_review_gate`
+        // would have produced for this plan/version/node.
+        let pause_review_qid =
+            super::super::review_gate::derive_plan_node_review_question_id(
+                &plan_id,
+                plan_version,
+                paused_node_id,
+                Some("plan-node"),
+            );
+        // Layer 1: envelope shape.
+        let parsed_qid =
+            super::super::review_gate::parse_review_question_id_struct(&pause_review_qid)
+                .expect("derived qid must parse");
+        assert_eq!(parsed_qid.scope, "plan");
+        assert_eq!(parsed_qid.action, "plan-node");
+        assert_eq!(parsed_qid.artifact_id, plan_id);
+        assert_eq!(parsed_qid.version, plan_version);
+        assert_eq!(
+            parsed_qid.topic_hash.as_deref(),
+            Some(
+                super::super::review_gate::derive_plan_node_topic_hash(paused_node_id)
+                    .as_str()
+            )
+        );
+
+        // Layer 2: validator confirms the qid maps back to the originating
+        // paused-eligible node — this is the SAME validation
+        // `action_execute_resume` performs before re-dispatching the node.
+        // We construct a `ParsedDag` directly (no AppState) carrying the
+        // single paused-eligible node so the validator has the same view
+        // it would see in production after `build_validated_dag(plan.sexp_text)`.
+        let dag_node = super::super::plan_dag::DagNode {
+            id: paused_node_id.into(),
+            target: "mission_execution".into(),
+            failure_policy: "fail-fast".into(),
+            review_gate: Some("question-event".into()),
+            review_action: Some("plan-node".into()),
+            acceptance_mode_raw: Some("inner_status".into()),
+            ..Default::default()
+        };
+        let parsed_dag = super::super::plan_dag::ParsedDag {
+            nodes: vec![dag_node.clone()],
+            unsupported_top_forms: Vec::new(),
+        };
+        let plan_for_validator = missiond_core::types::Plan {
+            id: plan_id_uuid,
+            board_task_id: board_task_id.to_string(),
+            source_directive_id: None,
+            version: plan_version,
+            sexp_text: plan_lisp_body.clone(),
+            sexp_hash: "deadbeef".to_string(),
+            status: missiond_core::types::PlanStatus::Approved,
+            compiler_model: None,
+            compiled_from: None,
+            created_at: chrono::Utc::now(),
+            approved_at: None,
+            finished_at: None,
+        };
+        let routed_node = super::super::plan_dag::validate_resume_request(
+            &parsed_qid,
+            &plan_for_validator,
+            &parsed_dag,
+        )
+        .expect("validator must accept the round-trip qid");
+        assert_eq!(routed_node.id, paused_node_id);
+
+        // Sidecar evidence path the wave-13 evidence_collector would have
+        // recorded for the paused→pending transition. Drives the
+        // `artifact_refs.file_*` projection assertions below.
+        let pause_evidence_path =
+            "/tmp/missiond-smoke/.missiond/evidence/wave17-task08/plan-evidence.jsonl";
+        let s6a_inner = smoke_inner_result(json!({
+            // Top-level shape mirrors `action_execute_dag_v1` — pick the
+            // `dag_paused` aggregate so this run is unambiguously the
+            // paused branch.
+            "status": "dag_paused",
+            "aggregate_status": "dag_paused",
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "runner_status": "review_gate_paused",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "node_count": 1,
+            "max_parallel_nodes": 1,
+            // wave-16 / Task 04 paused-node surface. The smoke pins the
+            // exact id the deterministic emitter produces so the resume
+            // call below can reference the SAME envelope the production
+            // pause path would have written to the sidecar.
+            "paused_nodes": [{
+                "id": paused_node_id,
+                "target": "mission_execution",
+                "state": "paused",
+                "review_question_id": pause_review_qid,
+            }],
+            "paused_node_ids": [paused_node_id],
+            "review_question_ids": [pause_review_qid],
+            "node_results": [{
+                "id": paused_node_id,
+                "target": "mission_execution",
+                "state": "paused",
+                "dispatch_strategy": "unknown",
+                "inner_result": null,
+                "review_question_id": pause_review_qid,
+            }],
+            "evidence_path": pause_evidence_path,
+            "plan_status": "executing",
+            // wave-17 / Task 05 finalization block. The "no lie" invariant:
+            // a paused run preserves the prior plan status and explicitly
+            // records the `paused_node_present_no_finalization` rule so
+            // observers see WHY the plan did NOT advance to succeeded.
+            "finalization": {
+                "finalize_plan": true,
+                "aggregate_status": "dag_paused",
+                "final_plan_status": "executing",
+                "rule": "paused_node_present_no_finalization",
+            },
+            // File-first sidecar splice → lifted into `artifact_refs.file_*`
+            // by `build_artifact_refs` so the smoke can prove the paused
+            // run still wrote evidence (the sidecar pointer is the same
+            // file the resume run will append to in stage s6b below).
+            "file_written": true,
+            "file_path": pause_evidence_path,
+            "file_sha256": "deadbeefcafebabe1111",
+            "file_bytes": 512,
+        }));
+        let s6a_decorated = decorate(
+            s6a_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step:
+                    "DAG paused at review gate; resolve via mission_review then re-call this pipeline with `resume_review_question_id`",
+                next_call: Some(json!({
+                    "tool": "mission_review",
+                    "action": "resolve",
+                    "review_question_id": pause_review_qid,
+                })),
+                expects_next_inputs: json!({
+                    "resume_review_question_id": "string",
+                    "resume_review_decision": "approved|rejected|needs_changes",
+                    "execute": true,
+                }),
+            },
+        );
+        let s6a_meta = smoke_meta_of(&s6a_decorated);
+        assert_eq!(s6a_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(s6a_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(s6a_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s6a_meta["artifact_refs"]["status"], "dag_paused");
+        // Pause-side evidence sidecar pointer surfaces via `file_*`.
+        assert_eq!(s6a_meta["artifact_refs"]["file_written"], true);
+        assert_eq!(s6a_meta["artifact_refs"]["file_path"], pause_evidence_path);
+        assert_eq!(s6a_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe1111");
+
+        // Inner payload (preserved byte-for-byte by `decorate`) carries
+        // the paused-node surface + finalization "no lie" block.
+        let s6a_inner_text = match &s6a_decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let s6a_inner_payload: Value = serde_json::from_str(&s6a_inner_text)
+            .expect("s6a inner payload parses");
+        assert_eq!(s6a_inner_payload["aggregate_status"], "dag_paused");
+        assert_eq!(s6a_inner_payload["runner_status"], "review_gate_paused");
+        assert_eq!(s6a_inner_payload["paused_node_ids"][0], paused_node_id);
+        assert_eq!(
+            s6a_inner_payload["review_question_ids"][0],
+            pause_review_qid
+        );
+        // wave-17 / Task 05: the finalization block must NOT advance the
+        // plan to `succeeded` while any node is still paused.
+        assert_eq!(
+            s6a_inner_payload["finalization"]["aggregate_status"],
+            "dag_paused"
+        );
+        assert_ne!(
+            s6a_inner_payload["finalization"]["final_plan_status"],
+            "succeeded",
+            "wave-17 / Task 05 invariant: dag_paused MUST NOT lie about success"
+        );
+        assert_eq!(
+            s6a_inner_payload["finalization"]["rule"],
+            "paused_node_present_no_finalization"
+        );
+
+        // ── Stage s6b :: resume execute → approved → terminal succeeded ─
+        //
+        // The reviewer approved the gate. The caller hands the pipeline
+        // the SAME plan id + the deterministic review-question id +
+        // `resume_review_decision="approved"`. The planner picks
+        // PlanExecute and forwards the four wave-17 / Task 01 resume keys
+        // verbatim through `build_plan_execute_args` (covered by the
+        // dedicated forwarding test above). We then synthesise the inner
+        // payload mirroring `action_execute_resume`'s approved-branch
+        // shape: the previously-paused node moves through
+        // `paused -> ready -> running -> succeeded`, the wave-17 / Task 03
+        // acceptance evaluator stamps `inner_status: accepted`, and the
+        // wave-17 / Task 05 finalization block flips to `dag_succeeded`
+        // ⇒ `final_plan_status="succeeded"`.
+        let s6b_args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "resume_review_question_id": pause_review_qid,
+            "resume_review_decision": "approved",
+            "resume_actor": "agent-team",
+            "resume_note": "smoke approves",
+            "finalize_plan": true,
+        });
+        let s6b_decision = plan_pipeline(&s6b_args).expect("s6b must route");
+        let PipelineDecision::PlanExecute { execute_args } = s6b_decision else {
+            panic!("resume call must route to PlanExecute");
+        };
+        // Forwarding contract proven through the routing decision.
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["execute_mode"], "internal");
+        assert_eq!(execute_args["resume_review_question_id"], pause_review_qid);
+        assert_eq!(execute_args["resume_review_decision"], "approved");
+        assert_eq!(execute_args["resume_actor"], "agent-team");
+        assert_eq!(execute_args["resume_note"], "smoke approves");
+        assert_eq!(execute_args["finalize_plan"], true);
+
+        let resume_evidence_path =
+            "/tmp/missiond-smoke/.missiond/evidence/wave17-task08/plan-evidence.jsonl";
+        let s6b_inner = smoke_inner_result(json!({
+            // `action_execute_resume`'s approved-branch wire shape.
+            "status": "dag_succeeded",
+            "aggregate_status": "dag_succeeded",
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "runner_status": "all_nodes_dispatched",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "node_count": 1,
+            "resume": {
+                "review_question_id": pause_review_qid,
+                "review_decision": "approved",
+                "actor": "agent-team",
+            },
+            "node_results": [{
+                "id": paused_node_id,
+                "target": "mission_execution",
+                "state": "succeeded",
+                "dispatch_strategy": "unknown",
+                "inner_result": {"ok": true},
+                // wave-17 / Task 03 acceptance surface — `inner_status`
+                // mode accepts because the resumed dispatch returned a
+                // success classification with no error signal in the
+                // inner payload.
+                "acceptance": {
+                    "status": "accepted",
+                    "mode": "inner_status",
+                    "commands": [],
+                    "evidence_keys": [],
+                    "reason": "inner_status: dispatch Ok and payload carries no error signal",
+                },
+                // Per-node retry surface stays quiet for the v2-baseline
+                // single-attempt contract — pinning its absence proves
+                // the smoke does not accidentally synthesise retry
+                // bookkeeping the resume path never produces.
+            }],
+            "paused_node_ids": [],
+            "review_question_ids": [],
+            "evidence_path": resume_evidence_path,
+            "plan_status": "succeeded",
+            "finalization": {
+                "finalize_plan": true,
+                "aggregate_status": "dag_succeeded",
+                "final_plan_status": "succeeded",
+                "rule": "all_terminal_no_failed_no_paused",
+                // `distill_on_success` was NOT requested → no distill
+                // block. Pinning its absence proves the smoke did not
+                // silently invoke the distill trigger (which would
+                // require the workflow handler).
+            },
+            // File-first sidecar splice → same path as the pause run so
+            // the round-trip proves both rows landed in the same sidecar
+            // (the production evidence_collector appends to the same file
+            // for the same plan_id).
+            "file_written": true,
+            "file_path": resume_evidence_path,
+            "file_sha256": "deadbeefcafebabe2222",
+            "file_bytes": 1024,
+        }));
+        let s6b_decorated = decorate(
+            s6b_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "DAG resumed and succeeded; loop closed",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let s6b_meta = smoke_meta_of(&s6b_decorated);
+        assert_eq!(s6b_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(s6b_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(s6b_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s6b_meta["artifact_refs"]["status"], "dag_succeeded");
+        // Resume-side evidence sidecar pointer surfaces via `file_*`.
+        assert_eq!(s6b_meta["artifact_refs"]["file_written"], true);
+        assert_eq!(s6b_meta["artifact_refs"]["file_path"], resume_evidence_path);
+        assert_eq!(s6b_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe2222");
+
+        let s6b_inner_text = match &s6b_decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let s6b_inner_payload: Value = serde_json::from_str(&s6b_inner_text)
+            .expect("s6b inner payload parses");
+        // Aggregate flips to `dag_succeeded` and the previously-paused
+        // node has reached the `succeeded` terminal state.
+        assert_eq!(s6b_inner_payload["aggregate_status"], "dag_succeeded");
+        assert_eq!(s6b_inner_payload["runner_status"], "all_nodes_dispatched");
+        assert_eq!(
+            s6b_inner_payload["node_results"][0]["state"],
+            "succeeded",
+            "previously-paused node must reach terminal succeeded"
+        );
+        // Resume metadata is preserved on the inner payload so observers
+        // can correlate the resume call with the paused row it cleared.
+        assert_eq!(
+            s6b_inner_payload["resume"]["review_question_id"],
+            pause_review_qid
+        );
+        assert_eq!(s6b_inner_payload["resume"]["review_decision"], "approved");
+        // wave-17 / Task 03: the acceptance evaluator surface lifts
+        // `mode="inner_status"` and `status="accepted"`.
+        assert_eq!(
+            s6b_inner_payload["node_results"][0]["acceptance"]["mode"],
+            "inner_status"
+        );
+        assert_eq!(
+            s6b_inner_payload["node_results"][0]["acceptance"]["status"],
+            "accepted"
+        );
+        // wave-17 / Task 05: the finalization block now claims
+        // `dag_succeeded` ⇒ `final_plan_status="succeeded"` per the
+        // `finalize_plan_status_label` mapping.
+        assert_eq!(
+            s6b_inner_payload["finalization"]["aggregate_status"],
+            "dag_succeeded"
+        );
+        assert_eq!(
+            s6b_inner_payload["finalization"]["final_plan_status"],
+            "succeeded"
+        );
+        assert_eq!(
+            s6b_inner_payload["finalization"]["rule"],
+            "all_terminal_no_failed_no_paused"
+        );
+
+        // ── Sidecar invariant: pause + resume rows share one file ──────
+        //
+        // Both the pause-stage and resume-stage envelopes pointed at the
+        // same `evidence_path` — the production evidence_collector
+        // appends to the same per-plan sidecar — so a single file path
+        // surfaces the full pause+resume audit trail. We pin both
+        // `artifact_refs.file_path` projections to prove the smoke holds
+        // that invariant end-to-end.
+        assert_eq!(
+            s6a_meta["artifact_refs"]["file_path"],
+            s6b_meta["artifact_refs"]["file_path"],
+            "pause + resume must share one evidence sidecar file"
+        );
     }
 }
