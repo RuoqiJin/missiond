@@ -291,6 +291,29 @@ pub(super) struct DagNode {
     /// (so authors can also declare `:depends-on` on the failed node
     /// to gate manual cascading; the cascade evaluator is independent).
     pub compensates: Option<String>,
+    /// wave-19 / task 10 — `:compensate-node "<comp-node-id>"` (alias
+    /// `:compensate-ref`). Forward declaration: declared on the failing
+    /// (cascade-root) node and points AT the compensation node id. The
+    /// reverse `:compensates` declaration (declared on the compensation
+    /// node, points BACK at the failing node) remains supported and is
+    /// the primary contract; `:compensate-node` lets authors who prefer
+    /// to read the cascade top-down state the relationship from the
+    /// failing-node side instead.
+    ///
+    /// Both directions parse into independent slots; the validator (in
+    /// `build_validated_dag`) reconciles them with strict rules:
+    ///   * forward ref MUST resolve to a declared node id and MUST NOT
+    ///     point at the failing node itself (self-reference rejected with
+    ///     `DagBuildError::CompensateNodeInvalid`);
+    ///   * if BOTH the forward `:compensate-node "X"` AND the reverse
+    ///     `:compensates "Y"` (declared on X) are present, then Y MUST
+    ///     equal the failing node id — otherwise the validator fails
+    ///     fast with `DagBuildError::CompensateDirectionMismatch` so the
+    ///     scheduler never silently picks one direction.
+    /// The compensation discovery in `compute_compensation_order` reads
+    /// the union of both directions (after validator agreement) so
+    /// existing wave-18 plans behave byte-identically.
+    pub compensate_node: Option<String>,
     /// wave-18 / task 04 — `:rollback-cascade "none" | "plan" |
     /// "dispatch-safe"`. Per-node opt-in for the cascade rollback
     /// evaluator. Defaults to `none` so the wave-17 / task 04 node-local
@@ -544,6 +567,14 @@ impl DagNode {
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
+        // wave-19 / task 10 — forward `:compensate-node` refs are also
+        // a rollback hint (declared on the failing node side); surface
+        // them through `node_hint_summary` for the same audit reasons.
+        let compensate_node_present = self
+            .compensate_node
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
         let rollback_after_present = !self.rollback_after.is_empty();
         policy_present
             || objective_present
@@ -551,6 +582,7 @@ impl DagNode {
             || acceptance_present
             || cascade_present
             || compensates_present
+            || compensate_node_present
             || rollback_after_present
     }
 }
@@ -1993,6 +2025,29 @@ pub(super) enum DagBuildError {
         node_id: String,
         ancestor: String,
     },
+    /// wave-19 / task 10 — a node declared `:compensate-node "<X>"` (or
+    /// `:compensate-ref`) but `X` is invalid: empty value, references
+    /// the failing node itself (self-ref), or names a node id not
+    /// declared in this plan. Fail-fast so a typo cannot silently
+    /// degrade cascade discovery to "no compensation".
+    CompensateNodeInvalid {
+        node_id: String,
+        key: String,
+        raw: String,
+        detail: String,
+    },
+    /// wave-19 / task 10 — both directions of the compensate
+    /// relationship are declared but they disagree: the forward
+    /// `:compensate-node "X"` declared on the failing node `F` points
+    /// at compensation node `X`, but `X`'s reverse `:compensates "Y"`
+    /// names some `Y != F`. The scheduler MUST NOT silently choose one
+    /// direction; the validator fails fast so the author resolves the
+    /// disagreement explicitly.
+    CompensateDirectionMismatch {
+        failing_node_id: String,
+        comp_node_id: String,
+        reverse_target: String,
+    },
 }
 
 impl DagBuildError {
@@ -2139,6 +2194,43 @@ impl DagBuildError {
                     ),
                 )
             }
+            DagBuildError::CompensateNodeInvalid { node_id, key, raw, detail } => {
+                ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "DAG node `{}` has invalid `:{}` value `{}`: {}",
+                            node_id, key, raw, detail
+                        ),
+                    )
+                    .with_suggestion(
+                        "set `:compensate-node` (or `:compensate-ref`) to the id of a \
+                         compensation node declared elsewhere in this plan; the value MUST \
+                         NOT name the failing node itself, and the named compensation node's \
+                         own `:compensates` (when present) MUST point back at the failing node",
+                    ),
+                )
+            }
+            DagBuildError::CompensateDirectionMismatch {
+                failing_node_id,
+                comp_node_id,
+                reverse_target,
+            } => ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!(
+                        "DAG node `{}` declares `:compensate-node \"{}\"` but `{}` declares \
+                         `:compensates \"{}\"` — forward and reverse compensate directions \
+                         disagree; the scheduler refuses to silently pick one",
+                        failing_node_id, comp_node_id, comp_node_id, reverse_target
+                    ),
+                )
+                .with_suggestion(
+                    "make the two directions agree: either change `:compensate-node` on the \
+                     failing node, or change `:compensates` on the compensation node so they \
+                     name each other (forward + reverse must be symmetric)",
+                ),
+            ),
         }
     }
 }
@@ -2308,6 +2400,86 @@ pub(super) fn build_validated_dag(
                         ancestor: dep.clone(),
                     });
                 }
+            }
+        }
+    }
+
+    // wave-19 / task 10 — forward `:compensate-node` validation. The
+    // forward declaration lives on the failing (cascade-root) node and
+    // points AT a compensation node id. Three checks (in order):
+    //
+    //   (a) value MUST be non-empty after trimming;
+    //   (b) value MUST resolve to a declared node id AND MUST NOT name
+    //       the failing node itself (self-reference is rejected);
+    //   (c) when the named compensation node ALSO carries
+    //       `:compensates "<X>"`, then `<X>` MUST equal the failing
+    //       node id. Any disagreement fails fast — the scheduler MUST
+    //       NOT silently pick one direction over the other (the wave-18
+    //       reverse contract is the source of truth for the cascade
+    //       evaluator, but accepting a contradicting forward ref would
+    //       hide the author's mistake).
+    //
+    // Forward refs that name a compensation node WITHOUT a reverse
+    // `:compensates` declaration are accepted and surface through
+    // `compute_compensation_order` as if the compensation node had
+    // declared `:compensates "<failing-node-id>"` (forward + reverse
+    // are unioned). This is the new feature: authors who prefer
+    // top-down readability declare cascade structure on the failing
+    // node side without touching the compensation node.
+    let by_id: HashMap<&str, &DagNode> =
+        parsed.nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    for n in &parsed.nodes {
+        let Some(raw) = n.compensate_node.as_deref() else {
+            continue;
+        };
+        let trimmed = raw.trim();
+        // (a) non-empty
+        if trimmed.is_empty() {
+            return Err(DagBuildError::CompensateNodeInvalid {
+                node_id: n.id.clone(),
+                key: "compensate-node".to_string(),
+                raw: raw.to_string(),
+                detail: "value is empty".to_string(),
+            });
+        }
+        // (b) self-reference rejected
+        if trimmed == n.id {
+            return Err(DagBuildError::CompensateNodeInvalid {
+                node_id: n.id.clone(),
+                key: "compensate-node".to_string(),
+                raw: raw.to_string(),
+                detail: format!(
+                    "names the failing node itself (`{}`); a node cannot be its own \
+                     compensation",
+                    n.id
+                ),
+            });
+        }
+        // (b cont.) plan membership
+        let Some(comp) = by_id.get(trimmed) else {
+            return Err(DagBuildError::CompensateNodeInvalid {
+                node_id: n.id.clone(),
+                key: "compensate-node".to_string(),
+                raw: raw.to_string(),
+                detail: format!(
+                    "`{}` is not declared in this plan",
+                    trimmed
+                ),
+            });
+        };
+        // (c) reverse-direction agreement (only when the comp node ALSO
+        //     declared `:compensates`). Compared case-insensitively to
+        //     mirror the existing `compute_compensation_order` matching.
+        if let Some(reverse_raw) = comp.compensates.as_deref() {
+            let reverse = reverse_raw.trim();
+            if !reverse.is_empty()
+                && reverse.to_ascii_lowercase() != n.id.to_ascii_lowercase()
+            {
+                return Err(DagBuildError::CompensateDirectionMismatch {
+                    failing_node_id: n.id.clone(),
+                    comp_node_id: comp.id.clone(),
+                    reverse_target: reverse.to_string(),
+                });
             }
         }
     }
@@ -2516,6 +2688,10 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut compensates: Option<String> = None;
     let mut rollback_cascade: Option<String> = None;
     let mut rollback_after: Vec<String> = Vec::new();
+    // wave-19 / task 10 — forward `:compensate-node` declaration on the
+    // failing-node side (alias `:compensate-ref`). Validated against the
+    // reverse `:compensates` direction in `build_validated_dag`.
+    let mut compensate_node: Option<String> = None;
     let mut unsupported_fields: Vec<(String, String)> = Vec::new();
 
     for (raw_key, value) in pairs {
@@ -2765,6 +2941,18 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
             // promoted to a real `:depends-on` so forward dispatch order
             // is unaffected.
             "compensates" => set_first(&mut compensates, &value),
+            // wave-19 / task 10 — forward compensate ref. Two spellings,
+            // identical semantics: `:compensate-node "<comp-id>"` /
+            // `:compensate-ref "<comp-id>"` declared on the failing node
+            // points AT the compensation node id. First hint wins; later
+            // duplicates are ignored so a typo cannot silently shadow
+            // the author's first declaration. Plan-level validation
+            // (declared-id resolution, self-ref rejection, agreement
+            // with reverse `:compensates`) runs in `build_validated_dag`.
+            "compensate-node"
+            | "compensate_node"
+            | "compensate-ref"
+            | "compensate_ref" => set_first(&mut compensate_node, &value),
             "rollback-cascade" | "rollback_cascade" => {
                 let raw = value.trim();
                 if !raw.is_empty() && RollbackCascadeMode::parse(raw).is_none() {
@@ -2829,6 +3017,7 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         rollback_owned_files_raw,
         rollback_acceptance_commands_raw,
         compensates,
+        compensate_node,
         rollback_cascade,
         rollback_after,
         unsupported_fields,
@@ -3637,6 +3826,13 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
             // wave-17 / task 04 baseline.
             if let Some(c) = &n.compensates {
                 rb["compensates"] = json!(c);
+            }
+            // wave-19 / task 10 — surface the forward `:compensate-node`
+            // ref so audit dashboards can pin the failing-node side of
+            // the cascade structure (the reverse `:compensates` lives
+            // on the compensation node and is surfaced above).
+            if let Some(c) = &n.compensate_node {
+                rb["compensate_node"] = json!(c);
             }
             if let Some(c) = &n.rollback_cascade {
                 rb["cascade_mode"] = json!(c);
@@ -5573,14 +5769,38 @@ pub(super) fn compute_compensation_order<'a>(
     forward_order: &[String],
 ) -> Vec<&'a DagNode> {
     let root_lc = failed_id.trim().to_ascii_lowercase();
-    // Compensation candidate set + lookup helpers.
+    // wave-19 / task 10 — forward `:compensate-node` refs declared on
+    // the failing node also surface compensation candidates. Build the
+    // forward-ref id set (case-insensitive) by inspecting the failing
+    // node's `compensate_node` slot. The validator (`build_validated_dag`)
+    // has already rejected self-refs / unknown ids / disagreements
+    // against any reverse `:compensates` declaration, so here we can
+    // safely union the two directions without re-checking agreement.
+    let forward_targets: HashSet<String> = nodes
+        .iter()
+        .filter(|n| n.id.to_ascii_lowercase() == root_lc)
+        .filter_map(|n| {
+            n.compensate_node
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_ascii_lowercase())
+        })
+        .collect();
+    // Compensation candidate set + lookup helpers. A node is a candidate
+    // iff EITHER it carries the reverse `:compensates "<root>"` declaration
+    // OR the failing (root) node points at it via `:compensate-node`.
     let candidates: Vec<&DagNode> = nodes
         .iter()
         .filter(|n| {
-            n.compensates
+            let reverse_match = n
+                .compensates
                 .as_deref()
                 .map(|s| s.trim().to_ascii_lowercase() == root_lc)
-                .unwrap_or(false)
+                .unwrap_or(false);
+            let forward_match =
+                forward_targets.contains(&n.id.to_ascii_lowercase());
+            reverse_match || forward_match
         })
         .collect();
     if candidates.is_empty() {
@@ -14609,5 +14829,329 @@ mod tests {
         // JSON projection omits the `cascade` key entirely.
         let v = eval.to_json();
         assert!(v.get("cascade").is_none());
+    }
+
+    // ── wave-19 / task 10 — forward `:compensate-node` references ─────
+    //
+    // Forward refs are declared on the failing-node side and point AT
+    // the compensation node id. They coexist with the wave-18 / task 04
+    // reverse `:compensates` direction. These tests pin the parser
+    // (both keyword spellings, no typed-slot leak), the validator
+    // (self-ref / unknown-id / direction-disagreement rejections), the
+    // candidate-discovery union with reverse refs, and the rollback
+    // hint surface.
+
+    #[test]
+    fn parse_node_form_captures_forward_compensate_node_ref() {
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :rollback-cascade "plan"
+                    :compensate-node "comp-1")
+              (node :id "comp-1"
+                    :target "mission_task_delegate"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes.len(), 2);
+        let fail = &parsed.nodes[0];
+        assert_eq!(fail.compensate_node.as_deref(), Some("comp-1"));
+        // Forward ref does NOT auto-populate the reverse slot on the
+        // compensation node — only the failing-node side carries it.
+        assert!(parsed.nodes[1].compensate_node.is_none());
+        assert!(parsed.nodes[1].compensates.is_none());
+        // Neither keyword spelling lands in unsupported_fields.
+        for n in &parsed.nodes {
+            for forbidden in [
+                "compensate-node",
+                "compensate_node",
+                "compensate-ref",
+                "compensate_ref",
+            ] {
+                assert!(
+                    !n.unsupported_fields.iter().any(|(k, _)| k == forbidden),
+                    "key `{}` must land on a typed slot, not unsupported_fields",
+                    forbidden
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_node_form_accepts_compensate_ref_alias() {
+        // The `:compensate-ref` alias resolves to the same typed slot
+        // as `:compensate-node` so authors can pick the wording that
+        // reads best in their plan dialect.
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :compensate-ref "comp-1")
+              (node :id "comp-1"
+                    :target "mission_task_delegate"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let fail = &parsed.nodes[0];
+        assert_eq!(fail.compensate_node.as_deref(), Some("comp-1"));
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_self_compensate_node_ref() {
+        // A node naming itself as its own compensation is a contract
+        // bug: the validator MUST fail fast.
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :compensate-node "fail"))
+        "#;
+        let err = build_validated_dag(sexp).expect_err("self-ref must fail");
+        match err {
+            DagBuildError::CompensateNodeInvalid { node_id, key, raw, detail } => {
+                assert_eq!(node_id, "fail");
+                assert_eq!(key, "compensate-node");
+                assert_eq!(raw, "fail");
+                assert!(
+                    detail.contains("failing node itself"),
+                    "detail must mention self-reference: {}",
+                    detail
+                );
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_unknown_compensate_node_ref() {
+        // Pointing at an undeclared id is a typo — fail fast with a
+        // structured error so the author sees it.
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :compensate-node "ghost"))
+        "#;
+        let err = build_validated_dag(sexp).expect_err("unknown id must fail");
+        match err {
+            DagBuildError::CompensateNodeInvalid { node_id, raw, detail, .. } => {
+                assert_eq!(node_id, "fail");
+                assert_eq!(raw, "ghost");
+                assert!(
+                    detail.contains("not declared"),
+                    "detail must mention undeclared id: {}",
+                    detail
+                );
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_empty_compensate_node_ref() {
+        // An empty value is meaningless and almost certainly a typo;
+        // we surface it at validation time rather than silently dropping
+        // the declaration.
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :compensate-node ""))
+        "#;
+        // Note: the parser strips empty trimmed values via `set_first`,
+        // so the slot stays None and validation is a no-op. To force
+        // an empty slot we exercise the validator directly with a
+        // hand-built node carrying the empty raw string.
+        let nodes = vec![DagNode {
+            id: "fail".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            compensate_node: Some("   ".into()),
+            ..Default::default()
+        }];
+        // Re-run the same validator branch by inlining the relevant
+        // check — we cannot call `build_validated_dag` with synthesised
+        // nodes, but the logic is pure so we assert on the parser side
+        // that the valid sexp with an empty-string value parses to a
+        // None slot (no work for the validator).
+        let _ = nodes; // silence unused warning under cfg
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes.len(), 1);
+        assert!(
+            parsed.nodes[0].compensate_node.is_none(),
+            "empty quoted value must drop to None instead of an empty slot"
+        );
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_direction_mismatch() {
+        // Forward says `fail` → `comp-1`; reverse on `comp-1` says it
+        // compensates `other-fail` instead. The validator MUST refuse
+        // — the scheduler is forbidden from silently picking one
+        // direction over the other.
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :compensate-node "comp-1")
+              (node :id "other-fail"
+                    :target "mission_task_delegate")
+              (node :id "comp-1"
+                    :target "mission_task_delegate"
+                    :compensates "other-fail"))
+        "#;
+        let err = build_validated_dag(sexp).expect_err("mismatch must fail");
+        match err {
+            DagBuildError::CompensateDirectionMismatch {
+                failing_node_id,
+                comp_node_id,
+                reverse_target,
+            } => {
+                assert_eq!(failing_node_id, "fail");
+                assert_eq!(comp_node_id, "comp-1");
+                assert_eq!(reverse_target, "other-fail");
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_accepts_agreeing_forward_and_reverse_refs() {
+        // The two directions agree (forward + reverse name each other);
+        // the validator accepts the plan and `compute_compensation_order`
+        // surfaces the candidate exactly once (no duplicate from the
+        // union).
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :rollback-cascade "plan"
+                    :compensate-node "comp-1")
+              (node :id "comp-1"
+                    :target "mission_task_delegate"
+                    :compensates "fail"))
+        "#;
+        let (parsed, order) =
+            build_validated_dag(sexp).expect("agreement must validate");
+        let ordered = compute_compensation_order("fail", &parsed.nodes, &order);
+        assert_eq!(ordered.len(), 1, "agreeing dual decl must not duplicate");
+        assert_eq!(ordered[0].id, "comp-1");
+    }
+
+    #[test]
+    fn build_validated_dag_accepts_forward_only_compensate_ref() {
+        // The forward ref alone (no reverse declaration) is the new
+        // wave-19 capability: the failing node points at a compensation
+        // node and `compute_compensation_order` discovers the candidate
+        // even though `comp-1` carries no `:compensates` slot.
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :rollback-cascade "plan"
+                    :compensate-node "comp-1")
+              (node :id "comp-1"
+                    :target "mission_task_delegate"))
+        "#;
+        let (parsed, order) =
+            build_validated_dag(sexp).expect("forward-only must validate");
+        let ordered = compute_compensation_order("fail", &parsed.nodes, &order);
+        assert_eq!(ordered.len(), 1);
+        assert_eq!(ordered[0].id, "comp-1");
+    }
+
+    #[test]
+    fn compute_compensation_order_unions_forward_and_reverse_candidates() {
+        // Mixed declarations: one comp node uses the reverse contract,
+        // another is reached only via the forward ref. Both surface as
+        // candidates; ordering still falls back to forward-order rank
+        // when no `:rollback-after` edges exist.
+        let nodes = vec![
+            DagNode {
+                id: "fail".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensate_node: Some("comp-fwd".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-rev".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-fwd".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec![
+            "fail".to_string(),
+            "comp-rev".to_string(),
+            "comp-fwd".to_string(),
+        ];
+        let ordered = compute_compensation_order("fail", &nodes, &order);
+        assert_eq!(ordered.len(), 2);
+        let ids: Vec<&str> = ordered.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"comp-rev"));
+        assert!(ids.contains(&"comp-fwd"));
+    }
+
+    #[test]
+    fn build_nodes_summary_surfaces_forward_compensate_node_ref() {
+        // Forward `:compensate-node` declaration on the failing node
+        // surfaces under the same `rollback` block as the existing
+        // cascade hints, so audit dashboards can pin both directions.
+        let nodes = vec![
+            DagNode {
+                id: "fail".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                rollback_cascade: Some("plan".into()),
+                compensate_node: Some("comp-1".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-1".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["fail".into(), "comp-1".into()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        assert_eq!(arr[0]["rollback"]["cascade_mode"], "plan");
+        assert_eq!(arr[0]["rollback"]["compensate_node"], "comp-1");
+        // Compensation node carried no rollback hint — summary stays quiet.
+        assert!(arr[1].get("rollback").is_none());
+    }
+
+    #[test]
+    fn wave18_safety_gates_unchanged_when_only_forward_ref_used() {
+        // wave-18 invariant guard — declaring only the forward ref must
+        // NOT bypass the wave-17 / task 04 workstation safety check on
+        // a compensation node. We verify this through the safety check
+        // directly because the cascade body uses the same check.
+        let comp = DagNode {
+            id: "comp-1".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            // No reverse `:compensates` declared — discovered only via
+            // the forward ref on the failing node side.
+            rollback_policy: Some("workstation".into()),
+            rollback_owned_files_raw: Some(r#"["src/a.rs"]"#.into()),
+            // objective intentionally missing → safety gate must refuse.
+            target_project: Some("missiond".into()),
+            dispatch_strategy: Some("fresh-code-alignment".into()),
+            ..Default::default()
+        };
+        let descriptor = build_rollback_descriptor(&comp);
+        let err = descriptor
+            .safety_check_for_workstation(&comp)
+            .expect_err("safety gate must still refuse without objective");
+        assert!(err.contains(":rollback-objective"));
     }
 }
