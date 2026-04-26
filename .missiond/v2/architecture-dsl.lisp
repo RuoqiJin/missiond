@@ -94,7 +94,7 @@
        (absent :meaning "缺省视为 unknown, 默认按 false 处理 — 必须先显式标 true 才允许压缩"))
     :rename-policy "改名走 :prev-id 字段, 旧 entry 不删 — 与 R008 保持一致"
     :back-compat "v0.2 的 baseline 7 pillar entry 没有 :compression-safe?, 后续可 lazy 补; 不视为 lint 阻断"
-    :checker-future-rule "phase-3.1-precompression-coverage; 详 checker-contract")
+    :checker-status "phase-3.1-precompression-coverage IMPLEMENTED in scripts/check-architecture-lisp.mjs (wave 14 task 05) — R015 mandatory-fields + R016 section-id-uniqueness + :compression-safe? value enum (true|false|yes|no|safe|unsafe|defer) enforced on intent-pillar-source-index.lisp under --all-v2; :local-path prefix soft rule still warn-only deferred")
 
   (required-shape
     (pillar   [pillar-ingress pillar-core pillar-egress])
@@ -267,6 +267,7 @@
        ":compression-safe? 字段若出现, 值必须是 true / false 之一; 缺省按 false 处理 (无强制要求)"
        ":local-path 字符串必须以 'pillar ' 或 'defdsl ' 开头, 表示从 root context 起算的语义路径 (软规则, warn-only)"
        ":implements 路径都是仓库根起算相对路径 (R011 复用)"]
+    :phase-3.1-status "IMPLEMENTED in scripts/check-architecture-lisp.mjs (wave 14 task 05) — R015 mandatory-fields + R016 section-id-uniqueness enforced; :compression-safe? value enum widened to true|false|yes|no|safe|unsafe|defer; :local-path prefix soft rule deferred"
     :future-phases ["load this defdsl as data"
                     "validate required-shape dynamically"
                     "emit JSON IR"
