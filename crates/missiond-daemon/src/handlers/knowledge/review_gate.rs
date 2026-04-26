@@ -321,6 +321,55 @@ pub(crate) fn derive_review_question_id_for_artifact(
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// wave-16 / task 04 — per-node DAG review-gate helpers
+//
+// PLAN DAG runtime now supports a per-node `:review-gate "question-event"`
+// hint. When a node carries that hint and becomes ready, the scheduler
+// emits a `QuestionEvent::Created` and pauses the node instead of
+// dispatching the target tool. The deterministic id mirrors the wave-14
+// layout so the wave-16 / task 02 `QuestionEvent::Resolved` listener can
+// route resolutions back to the same node without bespoke parsing.
+//
+// Scope = `"plan"` keeps the id under the wave-14 supported-scope set so
+// the existing subscriber dispatcher (`plan_review_resolved_dispatch`)
+// surfaces it as a `Route { scope=plan, ... }` outcome — auto-resume
+// wiring is wave-16 / task 02's territory; this helper only ships the id
+// shape.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Default `:review-action` keyword used when the node author omits the
+/// hint. Folded into the deterministic id so authors can override per-node
+/// (e.g. `:review-action "human-checkpoint"`) without colliding across
+/// nodes.
+pub(crate) const PLAN_NODE_REVIEW_DEFAULT_ACTION: &str = "plan-node";
+
+/// Build the deterministic review-question id for a paused PLAN DAG node.
+/// Layout: `review:plan:<plan_id>:v<version>:<action>:<node-id-hash>`.
+///
+/// `node_id` is folded into the trailing topic-hash slot so the same plan
+/// can pause many nodes without colliding ids; `action` defaults to
+/// [`PLAN_NODE_REVIEW_DEFAULT_ACTION`] when the caller's `:review-action`
+/// is empty / absent.
+pub(crate) fn derive_plan_node_review_question_id(
+    plan_id: &str,
+    plan_version: i32,
+    node_id: &str,
+    action: Option<&str>,
+) -> String {
+    let action = action
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(PLAN_NODE_REVIEW_DEFAULT_ACTION);
+    derive_review_question_id_for_artifact(
+        "plan",
+        plan_id,
+        plan_version,
+        action,
+        Some(node_id),
+    )
+}
+
 /// SHA-256 over the input, truncated to the leading 16 hex chars. Bounded
 /// length keeps log lines + retro queries readable while still giving us
 /// 64 bits of collision space across topic/path strings.
@@ -1711,6 +1760,74 @@ mod tests {
             Some("/abs/path/.missiond/workflows/foo.lisp"),
         );
         assert_eq!(a, b);
+    }
+
+    // ── wave-16 / task 04 — plan-node review-gate id helper ────────────
+
+    #[test]
+    fn plan_node_review_id_uses_plan_scope_and_topic_hash() {
+        let id = derive_plan_node_review_question_id(
+            "00000000-0000-0000-0000-000000000abc",
+            3,
+            "n1",
+            None,
+        );
+        // scope=plan → wave-14 supported scope; topic-hash suffix folds in node_id.
+        assert!(
+            id.starts_with(
+                "review:plan:00000000-0000-0000-0000-000000000abc:v3:plan-node:"
+            ),
+            "unexpected layout: {id}"
+        );
+        let suffix = id.rsplit(':').next().unwrap();
+        assert_eq!(suffix.len(), 16, "16-hex topic hash expected");
+    }
+
+    #[test]
+    fn plan_node_review_id_action_override_changes_id() {
+        let default = derive_plan_node_review_question_id("p1", 1, "n1", None);
+        let override_action =
+            derive_plan_node_review_question_id("p1", 1, "n1", Some("human-checkpoint"));
+        assert_ne!(default, override_action);
+        assert!(override_action.contains(":human-checkpoint:"));
+    }
+
+    #[test]
+    fn plan_node_review_id_blank_action_falls_back_to_default() {
+        let blank = derive_plan_node_review_question_id("p1", 1, "n1", Some("   "));
+        let default = derive_plan_node_review_question_id("p1", 1, "n1", None);
+        assert_eq!(blank, default);
+    }
+
+    #[test]
+    fn plan_node_review_id_distinct_per_node_under_same_plan() {
+        let a = derive_plan_node_review_question_id("p1", 1, "node-a", None);
+        let b = derive_plan_node_review_question_id("p1", 1, "node-b", None);
+        assert_ne!(a, b, "different nodes must produce distinct ids");
+    }
+
+    #[test]
+    fn plan_node_review_id_routes_under_plan_scope_via_subscriber() {
+        // Forward-compat with wave16-02: the deterministic id must dispatch
+        // under the existing `Route { scope=plan, ... }` outcome so the
+        // QuestionEvent::Resolved listener can reach the per-scope handler
+        // when auto-resume lands.
+        let id = derive_plan_node_review_question_id(
+            "00000000-0000-0000-0000-000000000abc",
+            1,
+            "n1",
+            Some("plan-node"),
+        );
+        let dispatch = plan_review_resolved_dispatch(&id, "approved");
+        match dispatch {
+            ReviewResolvedDispatch::Route { parsed, decision } => {
+                assert_eq!(parsed.scope, "plan");
+                assert_eq!(parsed.action, "plan-node");
+                assert!(parsed.topic_hash.is_some());
+                assert_eq!(decision, ReviewDecision::Approved);
+            }
+            other => panic!("expected Route under plan scope, got {:?}", other),
+        }
     }
 
     #[test]

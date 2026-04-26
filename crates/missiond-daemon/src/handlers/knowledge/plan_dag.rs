@@ -100,7 +100,7 @@
 //! observability path.
 
 use anyhow::Result;
-use missiond_core::event::events::ExecutionEvent;
+use missiond_core::event::events::{ExecutionEvent, QuestionEvent};
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -152,6 +152,16 @@ pub(super) struct DagNode {
     pub forbidden_files_raw: Option<String>,
     pub acceptance_commands_raw: Option<String>,
     pub workstation_dispatch_flag: Option<String>,
+    /// wave-16 / task 04 — per-node review-gate hint contract.
+    /// `:review-gate` is the gate kind ("none" default, "question-event"
+    /// pauses the node and emits `QuestionEvent::Created`); `:review-action`
+    /// is folded into the deterministic question id so authors can
+    /// override the default `plan-node` action label per node;
+    /// `:review-text` is a free-form prompt echoed back on the response so
+    /// reviewers see what the author wanted answered before resume.
+    pub review_gate: Option<String>,
+    pub review_action: Option<String>,
+    pub review_text: Option<String>,
     /// Per-node unsupported `:keyword value` pairs, kept in source order.
     pub unsupported_fields: Vec<(String, String)>,
 }
@@ -169,6 +179,46 @@ impl DagNode {
             None => false,
         }
     }
+
+    /// Resolve the parsed `:review-gate` hint to a typed kind. Pure helper
+    /// — the scheduler routes on this enum so unsupported / typo'd values
+    /// fall through to `None` instead of silently pausing a node the
+    /// author meant to dispatch.
+    pub(super) fn review_gate_kind(&self) -> ReviewGateKind {
+        match self
+            .review_gate
+            .as_deref()
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            // Default (absent / "none" / blank) keeps v2 behaviour
+            // byte-compatible — the scheduler dispatches as before.
+            None | Some("") | Some("none") => ReviewGateKind::None,
+            Some("question-event") | Some("question_event") => {
+                ReviewGateKind::QuestionEvent
+            }
+            // Unknown gate kinds are recorded into `unsupported_fields`
+            // by the parser so the audit trail keeps author intent; the
+            // scheduler treats them as `None` to avoid pausing a node
+            // for a typo. The author sees the typo in the response's
+            // `node_hint_summary.unsupported_fields`.
+            Some(_) => ReviewGateKind::None,
+        }
+    }
+}
+
+/// wave-16 / task 04 — typed projection of `:review-gate` for the
+/// scheduler. Kept on the parser side so dispatch-time logic can match
+/// without re-tokenising the raw string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ReviewGateKind {
+    /// No gate — node dispatches as before. Default for absent / "none"
+    /// / blank values, AND for unrecognised values (which are also
+    /// captured into `unsupported_fields` so the typo is observable).
+    None,
+    /// Pause the node and emit `QuestionEvent::Created` instead of
+    /// dispatching the target tool.
+    QuestionEvent,
 }
 
 /// Result of parsing a PLAN.lisp body for explicit `(node ...)` forms.
@@ -439,6 +489,9 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut forbidden_files_raw: Option<String> = None;
     let mut acceptance_commands_raw: Option<String> = None;
     let mut workstation_dispatch_flag: Option<String> = None;
+    let mut review_gate: Option<String> = None;
+    let mut review_action: Option<String> = None;
+    let mut review_text: Option<String> = None;
     let mut unsupported_fields: Vec<(String, String)> = Vec::new();
 
     for (raw_key, value) in pairs {
@@ -487,6 +540,24 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
             "workstation-dispatch" | "workstation_dispatch" => {
                 set_first(&mut workstation_dispatch_flag, &value)
             }
+            // wave-16 / task 04 — review-gate hint contract. `:review-gate`
+            // is the gate kind (recognised: "none", "question-event");
+            // unrecognised raw values still land on the typed slot AND
+            // get recorded into `unsupported_fields` so the typo surfaces
+            // through `node_hint_summary` while the scheduler safely
+            // dispatches as if no gate was set.
+            "review-gate" | "review_gate" => {
+                let raw = value.trim();
+                if !raw.is_empty() {
+                    let lc = raw.to_ascii_lowercase();
+                    if !matches!(lc.as_str(), "none" | "question-event" | "question_event") {
+                        unsupported_fields.push((raw_key.clone(), value.clone()));
+                    }
+                }
+                set_first(&mut review_gate, &value);
+            }
+            "review-action" | "review_action" => set_first(&mut review_action, &value),
+            "review-text" | "review_text" => set_first(&mut review_text, &value),
             _ => {
                 unsupported_fields.push((raw_key, value));
             }
@@ -523,6 +594,9 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         forbidden_files_raw,
         acceptance_commands_raw,
         workstation_dispatch_flag,
+        review_gate,
+        review_action,
+        review_text,
         unsupported_fields,
     })
 }
@@ -878,6 +952,16 @@ pub(super) async fn action_execute_dag_v1(
         None => Ok(plan.status.as_str().to_string()),
     };
 
+    // wave-16 / task 04 — paused-node response surfaces. We compute these
+    // unconditionally so callers see a stable shape: empty arrays when no
+    // node carried a review gate, populated arrays when at least one
+    // node paused. Keeping the keys present (even when empty) lets
+    // downstream consumers `?.length` instead of branching on key
+    // existence.
+    let paused_nodes = outcome.paused_nodes_json();
+    let paused_node_ids = outcome.paused_node_ids();
+    let review_question_ids = outcome.review_question_ids();
+
     let mut payload = json!({
         "status": aggregate_status,
         "aggregate_status": aggregate_status,
@@ -893,6 +977,11 @@ pub(super) async fn action_execute_dag_v1(
         // any caller that already pivots on the older field keeps working.
         "nodes": outcome.node_results_json(),
         "skipped_nodes": outcome.skipped_nodes_json(),
+        // wave-16 / task 04 — paused-node surfaces (always present so the
+        // shape is stable; empty when no review-gate paused this run).
+        "paused_nodes": paused_nodes,
+        "paused_node_ids": paused_node_ids,
+        "review_question_ids": review_question_ids,
         "topological_order": order,
         "concurrency_plan": concurrency_plan,
         "node_hint_summary": node_hint_summary,
@@ -964,6 +1053,18 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
         if n.workstation_dispatch_opt_in() {
             entry["workstation_dispatch"] = json!(true);
         }
+        // wave-16 / task 04 — review-gate hint surface. Emit only when the
+        // node carries a gate so summaries for nodes without a gate stay
+        // byte-identical with the wave-15 baseline.
+        if let Some(g) = &n.review_gate {
+            entry["review_gate"] = json!(g);
+        }
+        if let Some(a) = &n.review_action {
+            entry["review_action"] = json!(a);
+        }
+        if let Some(t) = &n.review_text {
+            entry["review_text"] = json!(t);
+        }
         out.push(entry);
     }
     Value::Array(out)
@@ -992,9 +1093,13 @@ fn build_node_hint_summary(parsed: &ParsedDag) -> Value {
 
 /// Terminal node state recorded in `NodeResult`. Mirrors the v1 enum so the
 /// per-node JSON shape (`state` discriminant + `failed_dep` extra) stays
-/// byte-identical for downstream readers; v2 only adds `SkippedFailFastAbort`
+/// byte-identical for downstream readers; v2 added `SkippedFailFastAbort`
 /// to distinguish "we never dispatched you because an unrelated upstream
-/// failed under fail-fast" from "your direct dependency failed".
+/// failed under fail-fast" from "your direct dependency failed", and
+/// wave-16 / task 04 added `Paused` for the per-node `:review-gate
+/// "question-event"` state. `Paused` is the first non-terminal state that
+/// surfaces in the per-node JSON — the resume listener (wave-16 / task 02
+/// territory) is expected to revive the node in a follow-up dispatch.
 #[derive(Debug, Clone)]
 enum NodeState {
     Succeeded,
@@ -1006,6 +1111,17 @@ enum NodeState {
     /// upstream is not necessarily a transitive dependency — under fail-fast
     /// every still-pending node is force-skipped once the abort flag flips.
     SkippedFailFastAbort { aborter: String },
+    /// wave-16 / task 04 — node carried `:review-gate "question-event"`,
+    /// the scheduler emitted (or attempted to emit) `QuestionEvent::Created`
+    /// with [`question_id`] and STOPPED at this node instead of dispatching
+    /// the target tool. `bus_publish_warning` carries the warning string
+    /// when the publish call errored — the node still pauses (a failed
+    /// gate is a real gate; downstream cannot advance) but the response
+    /// surfaces the degraded observability path so callers can retry.
+    Paused {
+        question_id: String,
+        bus_publish_warning: Option<String>,
+    },
 }
 
 /// Per-node lifecycle phase. Drives the wave-scheduler bookkeeping; mapped to
@@ -1029,6 +1145,13 @@ enum NodeLifecycle {
     Succeeded,
     Failed,
     Skipped,
+    /// wave-16 / task 04 — node opted into a `:review-gate "question-event"`
+    /// gate and the scheduler emitted `QuestionEvent::Created` instead of
+    /// dispatching the target tool. Treated as a non-terminal "stop"
+    /// state by the wave loop: the scheduler does NOT retry it within
+    /// the same call (auto-resume is wave-16 / task 02 territory), and
+    /// the node's downstream stays pending until a follow-up resume.
+    Paused,
 }
 
 #[derive(Debug, Clone)]
@@ -1073,6 +1196,10 @@ impl ExecutionOutcome {
                     "skipped_fail_fast_abort",
                     Some(("aborter", aborter.clone())),
                 ),
+                NodeState::Paused { question_id, .. } => (
+                    "paused",
+                    Some(("review_question_id", question_id.clone())),
+                ),
             };
             let mut e = json!({
                 "id": r.id,
@@ -1084,9 +1211,83 @@ impl ExecutionOutcome {
             if let Some((k, v)) = extra {
                 e[k] = json!(v);
             }
+            // wave-16 / task 04 — surface the optional bus warning on
+            // paused nodes so callers can grep one place for "the gate
+            // emit was degraded for this node".
+            if let NodeState::Paused {
+                bus_publish_warning: Some(w),
+                ..
+            } = &r.state
+            {
+                e["review_question_warning"] = json!(w);
+            }
             out.push(e);
         }
         Value::Array(out)
+    }
+
+    /// wave-16 / task 04 — project the subset of results that landed in
+    /// the `paused` non-terminal state so callers (and the wave-16 / task
+    /// 02 resume listener) can address them without re-walking the full
+    /// results array. Order matches the topological-order placement of
+    /// each result.
+    fn paused_nodes_json(&self) -> Value {
+        let mut out: Vec<Value> = Vec::new();
+        for r in &self.results {
+            if let NodeState::Paused {
+                question_id,
+                bus_publish_warning,
+            } = &r.state
+            {
+                let mut e = json!({
+                    "id": r.id,
+                    "target": r.target,
+                    "state": "paused",
+                    "review_question_id": question_id,
+                });
+                if let Some(w) = bus_publish_warning {
+                    e["review_question_warning"] = json!(w);
+                }
+                out.push(e);
+            }
+        }
+        Value::Array(out)
+    }
+
+    /// wave-16 / task 04 — paused node ids in topological-order placement.
+    /// Surfaced as a separate flat array on the response so callers that
+    /// just want "which nodes need a follow-up resume" don't have to walk
+    /// the richer `paused_nodes` block.
+    fn paused_node_ids(&self) -> Vec<String> {
+        self.results
+            .iter()
+            .filter_map(|r| match &r.state {
+                NodeState::Paused { .. } => Some(r.id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// wave-16 / task 04 — review-question ids for every paused node, in
+    /// the same order as `paused_node_ids`. The two arrays are the
+    /// ergonomic split of the richer `paused_nodes` block.
+    fn review_question_ids(&self) -> Vec<String> {
+        self.results
+            .iter()
+            .filter_map(|r| match &r.state {
+                NodeState::Paused { question_id, .. } => Some(question_id.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// True iff at least one node landed in the `paused` state for this
+    /// run — used by aggregate_status / runner_status to surface
+    /// `dag_paused` so callers can route on a single status discriminant.
+    fn any_paused(&self) -> bool {
+        self.results
+            .iter()
+            .any(|r| matches!(r.state, NodeState::Paused { .. }))
     }
 
     /// Project the subset of results that ended in a `skipped_*` discriminant
@@ -1142,6 +1343,14 @@ impl ExecutionOutcome {
         if self.any_failed() {
             return "dag_partial";
         }
+        // wave-16 / task 04 — paused-only runs surface a dedicated
+        // aggregate so callers can route on a single status. We pick
+        // `dag_paused` (rather than `dag_partial`) only when no failure
+        // is present; a mixed paused+failed run still reads as partial
+        // because failure is the louder signal.
+        if self.any_paused() {
+            return "dag_paused";
+        }
         // Some nodes may have been skipped without any outright failure
         // (e.g. condition gating). Treat that as partial too.
         "dag_partial"
@@ -1152,6 +1361,8 @@ impl ExecutionOutcome {
             "fail_fast_aborted"
         } else if self.all_succeeded() {
             "all_nodes_dispatched"
+        } else if !self.any_failed() && self.any_paused() {
+            "review_gate_paused"
         } else {
             "partial_dispatched"
         }
@@ -1163,6 +1374,10 @@ impl ExecutionOutcome {
         } else if self.aborted_fail_fast || self.any_failed() {
             Some(PlanStatus::Failed)
         } else {
+            // Paused runs leave the plan in its current Executing /
+            // Approved state so a follow-up resume can advance the DAG.
+            // Returning None here means `action_execute_dag_v1` won't
+            // call `plan_update_status` for this run.
             None
         }
     }
@@ -1794,6 +2009,125 @@ async fn emit_evidence_skipped(
     }
 }
 
+/// wave-16 / task 04 — emit a `pending -> paused` evidence entry and best-
+/// effort `QuestionEvent::Created` for a node that opted into a
+/// `:review-gate "question-event"` gate. The deterministic question id is
+/// derived via `derive_plan_node_review_question_id` (scope=`plan`,
+/// topic-hash=node_id) so wave-16 / task 02's resolution listener can
+/// route on the existing `Route { scope=plan, ... }` outcome.
+///
+/// Bus publish failure is a real gate — the node still pauses (we refuse
+/// to dispatch past a failed gate, mirroring the wave-14 fail-fast posture
+/// for review-gates) but the warning lands on the response via
+/// `outcome.bus_publish_warnings` AND on the per-node `NodeState::Paused`
+/// payload so the row can be re-emitted later without losing the id.
+async fn emit_paused_review_gate(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    plan: &Plan,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    outcome: &mut ExecutionOutcome,
+) -> (String, Option<String>) {
+    let question_id = super::review_gate::derive_plan_node_review_question_id(
+        &plan.id.to_string(),
+        plan.version,
+        &node.id,
+        node.review_action.as_deref(),
+    );
+    // Best-effort `QuestionEvent::Created` publish. Bus failure DOES NOT
+    // dispatch the node — a failed gate is still a real gate (we refuse
+    // to advance past it). The warning goes to both the per-node payload
+    // AND the run-level `bus_publish_warnings` array so callers can
+    // grep one place for every degraded gate emit.
+    let mut bus_warning: Option<String> = None;
+    let ev = QuestionEvent::Created {
+        question_id: question_id.clone(),
+    };
+    if let Err(err) = state.bus.publish_question(ev).await {
+        let warning = format!(
+            "plan_node_review_gate question publish failed for node `{}` (qid `{}`): {}; \
+             node remains paused — review gate is enforced even when the bus is degraded",
+            node.id, question_id, err
+        );
+        tracing::warn!(
+            plan_id = %plan.id,
+            node_id = %node.id,
+            question_id = %question_id,
+            error = %err,
+            "DAG scheduler: review-gate QuestionEvent::Created publish failed; node still paused"
+        );
+        outcome.bus_publish_warnings.push(warning.clone());
+        bus_warning = Some(warning);
+    }
+
+    // Also publish the lifecycle `pending -> paused` transition on the
+    // execution bus so observers see the same state-change notification
+    // they get for every other lifecycle move.
+    let (event_ref, lifecycle_warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        PLAN_NODE_DEFAULT_ATTEMPT,
+        "pending",
+        "paused",
+        Some(format!("review_gate:question-event:{}", question_id)),
+    )
+    .await;
+    if let Some(w) = lifecycle_warning {
+        outcome.bus_publish_warnings.push(w);
+    }
+
+    let mut entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition("pending -> paused")
+    .add_execution_event(event_ref)
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT))
+    .with_extra("review_gate", json!("question-event"))
+    .with_extra("review_question_id", json!(question_id));
+    if let Some(action) = node.review_action.as_deref() {
+        entry = entry.with_extra("review_action", json!(action));
+    }
+    if let Some(text) = node.review_text.as_deref() {
+        entry = entry.with_extra("review_text", json!(text));
+    }
+    if let Some(w) = bus_warning.as_deref() {
+        entry = entry.with_extra("review_question_warning", json!(w));
+    }
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: pending->paused evidence append failed"
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+    (question_id, bus_warning)
+}
+
 /// Wave-based scheduler. Drains up to `max_parallel_nodes` ready nodes per
 /// wave through a `tokio::task::JoinSet`, awaits the wave, records the
 /// transitions in the order results land, then recomputes ready set and
@@ -1973,8 +2307,15 @@ async fn execute_with_concurrency(
             break;
         }
 
-        // 5. Filter ready set by condition gate. Nodes with non-empty
-        //    `:condition` skip in v2 just like v1 — taint propagated.
+        // 5. Filter ready set by condition gate, then review gate. Nodes
+        //    with non-empty `:condition` skip in v2 just like v1 — taint
+        //    propagated. Nodes with `:review-gate "question-event"` pause
+        //    in place (wave-16 / task 04) — the scheduler emits
+        //    `QuestionEvent::Created` and refuses to dispatch the target
+        //    tool. Paused nodes do NOT propagate taint (they are not a
+        //    failure — auto-resume is wave-16 / task 02 territory) but
+        //    their downstream stays Pending until a follow-up call
+        //    revives them.
         let mut to_dispatch: Vec<DagNode> = Vec::new();
         for id in &ready_ids {
             let node = match by_id.get(id.as_str()) {
@@ -2015,6 +2356,42 @@ async fn execute_with_concurrency(
                     },
                 );
                 propagate_taint(node, &succs, &mut tainted_by);
+                continue;
+            }
+            // wave-16 / task 04 — review-gate paused state. The first real
+            // non-terminal node state in v2: emit `QuestionEvent::Created`
+            // (best-effort; failure still pauses) + a pending->paused
+            // evidence row, mark the node `Paused`, do NOT call the
+            // target tool. Downstream stays pending; auto-resume lives
+            // in wave-16 / task 02's `QuestionEvent::Resolved` listener.
+            if let ReviewGateKind::QuestionEvent = node.review_gate_kind() {
+                lifecycle.insert(id.clone(), NodeLifecycle::Paused);
+                let dispatch_strategy = node
+                    .dispatch_strategy
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let (question_id, bus_publish_warning) = emit_paused_review_gate(
+                    state,
+                    &ctx,
+                    plan,
+                    node,
+                    &dispatch_strategy,
+                    &mut outcome,
+                )
+                .await;
+                results_by_id.insert(
+                    id.clone(),
+                    NodeResult {
+                        id: id.clone(),
+                        target: node.target.clone(),
+                        state: NodeState::Paused {
+                            question_id,
+                            bus_publish_warning,
+                        },
+                        dispatch_strategy,
+                        inner_payload: Value::Null,
+                    },
+                );
                 continue;
             }
             to_dispatch.push(node.clone());
@@ -3955,5 +4332,493 @@ mod tests {
         assert!(plain.get("scope").is_none());
         assert!(plain.get("commit_policy").is_none());
         assert!(plain.get("workstation_dispatch").is_none());
+    }
+
+    // ── wave-16 / task 04 — review-gate hint contract ────────────────────
+    //
+    // PLAN DAG runtime now supports a per-node `:review-gate
+    // "question-event"` hint that pauses the node and emits
+    // `QuestionEvent::Created` instead of dispatching the target tool.
+    // Pure tests pin (a) parser captures the new fields without leaking
+    // them into `unsupported_fields`, (b) the `review_gate_kind` typed
+    // projection routes correctly, (c) `build_nodes_summary` surfaces
+    // the hints, (d) the response shape for paused nodes.
+
+    #[test]
+    fn parse_node_form_captures_review_gate_contract() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_execution"
+                    :objective "ship"
+                    :review-gate "question-event"
+                    :review-action "human-checkpoint"
+                    :review-text "Look at the diff before merging."))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n = &parsed.nodes[0];
+        assert_eq!(n.review_gate.as_deref(), Some("question-event"));
+        assert_eq!(n.review_action.as_deref(), Some("human-checkpoint"));
+        assert_eq!(n.review_text.as_deref(), Some("Look at the diff before merging."));
+        // None of the new keys must land in unsupported_fields — that
+        // would mean the scheduler can't route the node through the
+        // pause path.
+        let unsupported_keys: Vec<String> =
+            n.unsupported_fields.iter().map(|(k, _)| k.clone()).collect();
+        for forbidden in ["review-gate", "review-action", "review-text"] {
+            assert!(
+                !unsupported_keys.contains(&forbidden.to_string()),
+                "key `{}` must land on a typed slot, not unsupported_fields",
+                forbidden
+            );
+        }
+        assert_eq!(n.review_gate_kind(), ReviewGateKind::QuestionEvent);
+    }
+
+    #[test]
+    fn parse_node_form_review_gate_default_is_none() {
+        // Absent `:review-gate` keeps the wave-15 baseline: scheduler
+        // dispatches as before, no field surfaces in the response.
+        let sexp = r#"(plan (node :id "n1" :target "mission_execution"))"#;
+        let parsed = parse_plan_dag(sexp);
+        assert!(parsed.nodes[0].review_gate.is_none());
+        assert_eq!(parsed.nodes[0].review_gate_kind(), ReviewGateKind::None);
+    }
+
+    #[test]
+    fn parse_node_form_review_gate_explicit_none_resolves_to_none() {
+        let sexp = r#"
+            (plan
+              (node :id "n1" :target "mission_execution" :review-gate "none"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].review_gate.as_deref(), Some("none"));
+        assert_eq!(parsed.nodes[0].review_gate_kind(), ReviewGateKind::None);
+        // "none" is recognised, must NOT pollute unsupported_fields.
+        assert!(parsed.nodes[0]
+            .unsupported_fields
+            .iter()
+            .all(|(k, _)| k != "review-gate"));
+    }
+
+    #[test]
+    fn parse_node_form_review_gate_unknown_kind_safely_falls_back_and_records_typo() {
+        // Defensive: an unrecognised gate kind (typo) must NOT silently
+        // pause the node. The scheduler treats it as `None` and the
+        // parser records the raw value into `unsupported_fields` so
+        // `node_hint_summary` surfaces the typo in the response.
+        let sexp = r#"
+            (plan
+              (node :id "n1" :target "mission_execution" :review-gate "questoin-event"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].review_gate_kind(), ReviewGateKind::None);
+        assert!(parsed.nodes[0]
+            .unsupported_fields
+            .iter()
+            .any(|(k, v)| k == "review-gate" && v == "questoin-event"));
+    }
+
+    #[test]
+    fn parse_node_form_review_gate_underscore_alias_works() {
+        // Authors that prefer snake_case keys still get the typed slot.
+        let sexp = r#"
+            (plan
+              (node :id "n1" :target "mission_execution"
+                    :review_gate "question_event"
+                    :review_action "ship-it"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].review_gate_kind(), ReviewGateKind::QuestionEvent);
+        assert_eq!(parsed.nodes[0].review_action.as_deref(), Some("ship-it"));
+    }
+
+    #[test]
+    fn build_nodes_summary_surfaces_review_gate_hints_when_present() {
+        let nodes = vec![
+            DagNode {
+                id: "g".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                review_gate: Some("question-event".into()),
+                review_action: Some("human-checkpoint".into()),
+                review_text: Some("eyeball it".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "plain".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["g".to_string(), "plain".to_string()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        let g = &arr[0];
+        assert_eq!(g["review_gate"], "question-event");
+        assert_eq!(g["review_action"], "human-checkpoint");
+        assert_eq!(g["review_text"], "eyeball it");
+        let plain = &arr[1];
+        // Quiet for nodes without a gate — protects the wave-15 baseline
+        // shape so consumers that pivot on key presence keep working.
+        assert!(plain.get("review_gate").is_none());
+        assert!(plain.get("review_action").is_none());
+        assert!(plain.get("review_text").is_none());
+    }
+
+    #[test]
+    fn node_results_json_includes_paused_state_with_review_question_id() {
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:abcdef0123456789".into(),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0]["state"], "paused");
+        assert_eq!(
+            arr[0]["review_question_id"],
+            "review:plan:p1:v1:plan-node:abcdef0123456789"
+        );
+        // No warning attached here — must NOT surface the field.
+        assert!(arr[0].get("review_question_warning").is_none());
+    }
+
+    #[test]
+    fn node_results_json_paused_with_bus_warning_surfaces_warning_field() {
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:abcdef0123456789".into(),
+                bus_publish_warning: Some("simulated bus drop".into()),
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0]["state"], "paused");
+        assert_eq!(arr[0]["review_question_warning"], "simulated bus drop");
+    }
+
+    #[test]
+    fn paused_nodes_json_filters_only_paused_results() {
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "a".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({}),
+        });
+        o.results.push(NodeResult {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:abcdef0123456789".into(),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        o.results.push(NodeResult {
+            id: "g2".into(),
+            target: "mission_task_delegate".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:0011223344556677".into(),
+                bus_publish_warning: Some("bus dropped".into()),
+            },
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: Value::Null,
+        });
+        let v = o.paused_nodes_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "only the two paused entries surface here");
+        assert_eq!(arr[0]["id"], "g");
+        assert_eq!(arr[0]["state"], "paused");
+        assert_eq!(
+            arr[0]["review_question_id"],
+            "review:plan:p1:v1:plan-node:abcdef0123456789"
+        );
+        assert!(arr[0].get("review_question_warning").is_none());
+        assert_eq!(arr[1]["id"], "g2");
+        assert_eq!(arr[1]["review_question_warning"], "bus dropped");
+    }
+
+    #[test]
+    fn paused_node_ids_and_review_question_ids_align_in_topo_order() {
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "a".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({}),
+        });
+        o.results.push(NodeResult {
+            id: "g1".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:0000000000000001".into(),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        o.results.push(NodeResult {
+            id: "g2".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:0000000000000002".into(),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        assert_eq!(o.paused_node_ids(), vec!["g1".to_string(), "g2".to_string()]);
+        assert_eq!(
+            o.review_question_ids(),
+            vec![
+                "review:plan:p1:v1:plan-node:0000000000000001".to_string(),
+                "review:plan:p1:v1:plan-node:0000000000000002".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn aggregate_status_dag_paused_when_only_paused_no_failure() {
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:abcdef0123456789".into(),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        assert_eq!(o.aggregate_status(), "dag_paused");
+        assert_eq!(o.runner_status(), "review_gate_paused");
+        // Paused runs MUST NOT mutate the plan status — auto-resume
+        // (wave-16 / task 02 territory) revives the node in a follow-up
+        // call, so the plan stays Approved/Executing.
+        assert_eq!(o.target_plan_status(), None);
+    }
+
+    #[test]
+    fn aggregate_status_partial_when_paused_and_succeeded_mix() {
+        // A successful node alongside a paused gate still surfaces as
+        // dag_paused — paused is the dominant signal (the run cannot
+        // complete until resume).
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "a".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({}),
+        });
+        o.results.push(NodeResult {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:abcdef0123456789".into(),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        assert_eq!(o.aggregate_status(), "dag_paused");
+        assert_eq!(o.target_plan_status(), None);
+    }
+
+    #[test]
+    fn aggregate_status_failure_dominates_paused() {
+        // Mixed paused + failed run reads as dag_partial (failure is the
+        // louder signal). The failing node also flips the plan status to
+        // Failed so the caller knows the DAG cannot resume cleanly.
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "f".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Failed { reason: "boom".into() },
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({"error": "boom"}),
+        });
+        o.results.push(NodeResult {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Paused {
+                question_id: "review:plan:p1:v1:plan-node:abcdef0123456789".into(),
+                bus_publish_warning: None,
+            },
+            dispatch_strategy: "unknown".into(),
+            inner_payload: Value::Null,
+        });
+        assert_eq!(o.aggregate_status(), "dag_partial");
+        assert_eq!(o.target_plan_status(), Some(PlanStatus::Failed));
+    }
+
+    /// Helper that mirrors `emit_paused_review_gate`'s evidence entry
+    /// shape (without standing up an AppState/bus). Pins the wire form
+    /// auditors / dashboards will route on.
+    fn build_paused_evidence_entry(
+        node: &DagNode,
+        plan: &Plan,
+        dispatch_strategy: &str,
+        question_id: &str,
+        bus_warning: Option<&str>,
+    ) -> Value {
+        let det = deterministic_plan_node_event_id(
+            plan.id,
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "pending",
+            "paused",
+        );
+        let mut entry = EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_state_transition("pending -> paused")
+        .add_execution_event(EventRef::new(
+            EVENT_REF_SOURCE_EXECUTION,
+            EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+            det,
+        ))
+        .with_extra("scheduler_mode", json!("dag_v1"))
+        .with_extra("node_id", json!(node.id))
+        .with_extra("plan_id", json!(plan.id))
+        .with_extra("target_tool", json!(node.target))
+        .with_extra("target", json!(node.target))
+        .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT))
+        .with_extra("review_gate", json!("question-event"))
+        .with_extra("review_question_id", json!(question_id));
+        if let Some(action) = node.review_action.as_deref() {
+            entry = entry.with_extra("review_action", json!(action));
+        }
+        if let Some(text) = node.review_text.as_deref() {
+            entry = entry.with_extra("review_text", json!(text));
+        }
+        if let Some(w) = bus_warning {
+            entry = entry.with_extra("review_question_warning", json!(w));
+        }
+        entry.into_json()
+    }
+
+    #[test]
+    fn evidence_paused_entry_carries_pending_to_paused_transition_and_qid() {
+        let node = DagNode {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            failure_policy: "fail-fast".into(),
+            dispatch_strategy: Some("agent-team".into()),
+            review_gate: Some("question-event".into()),
+            review_action: Some("plan-node".into()),
+            review_text: Some("eyeball it".into()),
+            ..Default::default()
+        };
+        let plan = fixture_plan("(plan)");
+        let qid = super::super::review_gate::derive_plan_node_review_question_id(
+            &plan.id.to_string(),
+            plan.version,
+            &node.id,
+            node.review_action.as_deref(),
+        );
+        let entry = build_paused_evidence_entry(&node, &plan, "agent-team", &qid, None);
+        assert_eq!(entry["source"], "plan_dag_node_dispatch");
+        assert_eq!(entry["kind"], "dispatch");
+        assert_eq!(entry["state_transition"], "pending -> paused");
+        assert_eq!(entry["review_gate"], "question-event");
+        assert_eq!(entry["review_question_id"], qid);
+        assert_eq!(entry["review_action"], "plan-node");
+        assert_eq!(entry["review_text"], "eyeball it");
+        // The deterministic id format pinned for the lifecycle event ref.
+        let event_id = entry["execution_events"][0]["event_id"]
+            .as_str()
+            .expect("event_id");
+        assert!(event_id.starts_with(&format!(
+            "plan-node:{}:{}:{}:pending-paused",
+            plan.id, node.id, PLAN_NODE_DEFAULT_ATTEMPT
+        )));
+    }
+
+    #[test]
+    fn evidence_paused_entry_with_bus_warning_records_review_question_warning() {
+        let node = DagNode {
+            id: "g".into(),
+            target: "mission_execution".into(),
+            failure_policy: "fail-fast".into(),
+            dispatch_strategy: Some("agent-team".into()),
+            review_gate: Some("question-event".into()),
+            ..Default::default()
+        };
+        let plan = fixture_plan("(plan)");
+        let qid = super::super::review_gate::derive_plan_node_review_question_id(
+            &plan.id.to_string(),
+            plan.version,
+            &node.id,
+            None,
+        );
+        let entry = build_paused_evidence_entry(
+            &node,
+            &plan,
+            "agent-team",
+            &qid,
+            Some("simulated bus drop"),
+        );
+        // Bus failure DOES NOT change the transition string — the gate
+        // is still real, the warning is observability-only.
+        assert_eq!(entry["state_transition"], "pending -> paused");
+        assert_eq!(entry["review_question_warning"], "simulated bus drop");
+    }
+
+    /// Forward-compat smoke test: the deterministic id we stamp on the
+    /// paused state must round-trip through wave-15's
+    /// `parse_review_question_id_struct` AND wave-16's subscriber
+    /// dispatcher so the wave-16 / task 02 resolution listener can route
+    /// it back to this plan when auto-resume lands. This task does NOT
+    /// implement resume; the test is the contract handshake.
+    #[test]
+    fn paused_node_review_question_id_round_trips_through_subscriber_dispatcher() {
+        use super::super::review_gate::{
+            derive_plan_node_review_question_id, parse_review_question_id_struct,
+            plan_review_resolved_dispatch, ReviewDecision, ReviewResolvedDispatch,
+        };
+        let plan = fixture_plan("(plan)");
+        let qid = derive_plan_node_review_question_id(
+            &plan.id.to_string(),
+            plan.version,
+            "node-g",
+            Some("plan-node"),
+        );
+        // Layer 1: wave-15 envelope parser.
+        let parsed = parse_review_question_id_struct(&qid).expect("valid envelope");
+        assert_eq!(parsed.scope, "plan");
+        assert_eq!(parsed.action, "plan-node");
+        assert!(parsed.topic_hash.is_some());
+        // Layer 2: wave-16 subscriber dispatcher routes under the plan
+        // scope so a future resume hook can match the deterministic id
+        // to its origin node.
+        let dispatch = plan_review_resolved_dispatch(&qid, "approved");
+        match dispatch {
+            ReviewResolvedDispatch::Route { parsed, decision } => {
+                assert_eq!(parsed.scope, "plan");
+                assert_eq!(parsed.action, "plan-node");
+                assert_eq!(decision, ReviewDecision::Approved);
+            }
+            other => panic!("expected Route under plan scope, got {:?}", other),
+        }
     }
 }
