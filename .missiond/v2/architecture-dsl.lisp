@@ -6,8 +6,8 @@
 ;; ═════════════════════════════════════════════════════════════
 
 (defdsl architecture-v1
-  :version "v0.5"
-  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule; v0.4 (wave 12 task 06) adds source-index entry mandatory-fields rule + section-id uniqueness rule + :compression-safe? optional field; v0.5 (wave 14 task 07) adds l2-shard-split-plan (5 candidate shards designed, NOT executed; execution-gate + per-shard moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan)"
+  :version "v0.6"
+  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule; v0.4 (wave 12 task 06) adds source-index entry mandatory-fields rule + section-id uniqueness rule + :compression-safe? optional field; v0.5 (wave 14 task 07) adds l2-shard-split-plan (5 candidate shards designed, NOT executed; execution-gate + per-shard moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan); v0.6 (wave 15 task 03) adds R017 source-file-must-exist + R018 source-file-must-live-under-v2 + shard auto-discovery via collectSourceFileRefs (data-driven, no hardcoded shard paths)"
   :checker "scripts/check-architecture-lisp.mjs"
 
   (purpose
@@ -16,7 +16,8 @@
     "        让 pillar source index 可机器读, 后续压缩不丢 cross-ref"
     "v0.3 扩: 执行型 flow 可声明 control-plane / durability-plane handoff, 防止 operational report 与代码成果脱节"
     "v0.4 扩: source-index entry 强制三必填 (file / local-path / status), section-id 全局唯一; 加 :compression-safe? 字段, 让未来批量压缩可白名单驱动"
-    "v0.5 扩: 加 l2-shard-split-plan, 设计 5 候选 shard (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); 每 shard 含 moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan; execution-gate 全满足才允许实际拆分; 本 v0.5 不移动任何 shard 内容")
+    "v0.5 扩: 加 l2-shard-split-plan, 设计 5 候选 shard (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); 每 shard 含 moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan; execution-gate 全满足才允许实际拆分; 本 v0.5 不移动任何 shard 内容"
+    "v0.6 扩: shard-aware checker — R017 (source-file 必存在) + R018 (source-file 必 .missiond/v2/) + checker 通过 source-index 自动发现 shard 文件 (data-driven, 不 hardcode); 报告行显示 initial + auto-discovered shard 数, 方便 review 验证 wave 15 后 5 shard 实际接入")
 
   (reader-contract
     :syntax "S-expression + bracket vector"
@@ -248,7 +249,12 @@
     (R015 :name "source-index-entry-mandatory-fields"
           :rule "intent-pillar-source-index.lisp 内每个 section-entry 必须三必填: :source-file (file) + :local-path + :status; 缺任一字段 checker phase-3.1 报 missing-required-field")
     (R016 :name "section-id-global-unique"
-          :rule "intent-pillar-source-index.lisp 内 :section-id 全局唯一; 重名 checker phase-3.1 报 duplicate-section-id; 改名走 :prev-id, 不删旧 entry"))
+          :rule "intent-pillar-source-index.lisp 内 :section-id 全局唯一; 重名 checker phase-3.1 报 duplicate-section-id; 改名走 :prev-id, 不删旧 entry")
+    ;; ── v0.6 新增 (wave 15 task 03) — shard-aware source-file 校验 ──
+    (R017 :name "source-file-must-exist"
+          :rule "intent-pillar-source-index.lisp 内 (pillar-section-index :source-file ...) 与 (section-entry :source-file ...) 引用的路径必须真实存在; 缺失 checker phase-3.2 报 source-file-does-not-exist; 防止 L2 shard rename / move 后留下死链")
+    (R018 :name "source-file-must-live-under-v2"
+          :rule "intent-pillar-source-index.lisp 内 :source-file 必须以 '.missiond/v2/' 起头; 跨目录引用先归并到 v2/ 下的 shard, 再在 source-index 注册; 防止 source-index 退化为通用文件清单"))
 
   (checker-contract
     :phase-1 ["parse all files" "balanced () and []" "unterminated string" "unexpected delimiter"]
@@ -269,6 +275,14 @@
        ":local-path 字符串必须以 'pillar ' 或 'defdsl ' 开头, 表示从 root context 起算的语义路径 (软规则, warn-only)"
        ":implements 路径都是仓库根起算相对路径 (R011 复用)"]
     :phase-3.1-status "IMPLEMENTED in scripts/check-architecture-lisp.mjs (wave 14 task 05) — R015 mandatory-fields + R016 section-id-uniqueness enforced; :compression-safe? value enum widened to true|false|yes|no|safe|unsafe|defer; :local-path prefix soft rule deferred"
+    ;; ── v0.6 新增 (wave 15 task 03) — shard-aware checker ──
+    :phase-3.2-shard-aware
+      ["每个 :source-file 路径必须真实存在 (R017) — 防止 L2 shard rename / move 留下死链"
+       "每个 :source-file 必须以 '.missiond/v2/' 起头 (R018) — source-index 不退化为跨目录通用清单"
+       "checker 自动从 intent-pillar-source-index.lisp 内 :source-file 引用集合反向拉入待检查 shard 文件 — 不在 checker 源码中 hardcode shard 路径"
+       "当只传 intent-pillar-source-index.lisp 给 checker 时, 自动 union shard 文件; --all-v2 仍兜底全量"
+       "report 行明确显示初始文件数 + 自动发现 shard 数, 让 reviewer 能验证 wave 15 后多了几张 shard"]
+    :phase-3.2-status "IMPLEMENTED in scripts/check-architecture-lisp.mjs (wave 15 task 03) — R017 source-file-must-exist + R018 source-file-must-live-under-v2 enforced on (pillar-section-index :source-file ...) and (section-entry :source-file ...); shard auto-discovery via collectSourceFileRefs; --dry-fixture 扩 10 fixture (含 R017 missing / R018 outside / R018 短路 / pillar-section-index header / shard auto-discovery)"
     :future-phases ["load this defdsl as data"
                     "validate required-shape dynamically"
                     "emit JSON IR"

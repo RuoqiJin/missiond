@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const usage = `Usage:
@@ -11,13 +12,21 @@ Checks MissionD architecture Lisp files:
   - reports file:line:column for reader errors
   - validates recursive architecture shape for files declaring
     (recursive-architecture-contract ...)
-  - validates source-index entries (R015 / R016) for
+  - validates source-index entries (R015 / R016 / R017 / R018) for
     intent-pillar-source-index.lisp:
       * each (section-entry ...) must carry :section-id, :source-file,
-        :local-path, :status
-      * :section-id must be globally unique inside the file
+        :local-path, :status (R015)
+      * :section-id must be globally unique inside the file (R016)
+      * every :source-file path must exist on disk (R017)
+      * every :source-file path must live under .missiond/v2/ (R018)
       * if :compression-safe? appears, value must be one of
         true|false|yes|no|safe|unsafe|defer
+
+Shard discovery:
+  - When --all-v2 is set, all .lisp files under .missiond/v2/ are scanned.
+  - When intent-pillar-source-index.lisp is in the input set (directly or
+    via --all-v2), every distinct :source-file it references is auto-added
+    to the scan list — no shard path is hardcoded in this script.
 
 Use --dry-fixture to run an internal fixture-based self-test that
 exercises the source-index checker on synthetic inputs and exits.
@@ -54,15 +63,42 @@ function main() {
   }
 
   const cwd = process.cwd();
-  const files = unique([
+  const initialFiles = unique([
     ...(allV2 ? listV2LispFiles(cwd) : []),
     ...expandInputs(inputArgs, cwd),
   ]);
 
-  if (files.length === 0) {
+  if (initialFiles.length === 0) {
     console.error(usage);
     process.exit(2);
   }
+
+  // ── Pass 1: pre-parse intent-pillar-source-index.lisp (if present) to
+  // auto-discover any shard files it references via :source-file. The set is
+  // unioned with --all-v2 / explicit inputs and deduplicated. No shard path
+  // is hardcoded — discovery flows entirely from source-index data.
+  const discovered = new Set(initialFiles);
+  let discoveredFromSourceIndex = 0;
+  for (const file of initialFiles) {
+    if (path.basename(file) !== 'intent-pillar-source-index.lisp') continue;
+    try {
+      const source = fs.readFileSync(file, 'utf8');
+      const forms = parse(source, file);
+      const refs = collectSourceFileRefs(forms);
+      for (const ref of refs) {
+        const abs = path.resolve(cwd, ref);
+        if (!discovered.has(abs)) {
+          discovered.add(abs);
+          discoveredFromSourceIndex += 1;
+        }
+      }
+    } catch {
+      // Reader/parse errors will resurface in pass 2; silently skip
+      // discovery here so we don't double-report.
+    }
+  }
+
+  const files = [...discovered];
 
   const diagnostics = [];
   let parsedCount = 0;
@@ -81,7 +117,7 @@ function main() {
         path.basename(file) === 'intent-pillar-source-index.lisp'
       ) {
         const forms = parse(source, file);
-        validateSourceIndex(file, forms, diagnostics);
+        validateSourceIndex(file, forms, diagnostics, { repoRoot: cwd });
       }
     } catch (err) {
       diagnostics.push({
@@ -94,14 +130,36 @@ function main() {
     }
   }
 
+  const summary = {
+    files: parsedCount,
+    discoveredFromSourceIndex,
+    initialFiles: initialFiles.length,
+  };
+
   if (json) {
-    console.log(JSON.stringify({ ok: diagnostics.length === 0, files: parsedCount, diagnostics }, null, 2));
+    console.log(
+      JSON.stringify(
+        { ok: diagnostics.length === 0, ...summary, diagnostics },
+        null,
+        2,
+      ),
+    );
   } else if (diagnostics.length === 0) {
-    console.log(`architecture-lisp check OK (${parsedCount} files)`);
+    const tail =
+      discoveredFromSourceIndex > 0
+        ? ` (${initialFiles.length} initial + ${discoveredFromSourceIndex} shard(s) auto-discovered from source-index)`
+        : '';
+    console.log(`architecture-lisp check OK (${parsedCount} files)${tail}`);
   } else {
     for (const d of diagnostics) {
       console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
     }
+    console.error(
+      `architecture-lisp check FAILED — ${diagnostics.length} diagnostic(s) across ${parsedCount} file(s)` +
+        (discoveredFromSourceIndex > 0
+          ? ` (${initialFiles.length} initial + ${discoveredFromSourceIndex} shard(s) auto-discovered from source-index)`
+          : ''),
+    );
   }
 
   process.exit(diagnostics.some((d) => d.severity === 'error') ? 1 : 0);
@@ -370,11 +428,13 @@ function validateStepSequence(file, logicCore, diagnostics, context) {
   }
 }
 
-// ── source-index checker (R015 / R016) ─────────────────────────────
+// ── source-index checker (R015 / R016 / R017 / R018) ──────────────
 // Validates intent-pillar-source-index.lisp:
 //   * each (section-entry ...) carries :section-id, :source-file,
-//     :local-path, :status
-//   * :section-id values are globally unique
+//     :local-path, :status (R015)
+//   * :section-id values are globally unique (R016)
+//   * every :source-file path exists on disk (R017, shard-aware)
+//   * every :source-file path lives under .missiond/v2/ (R018, shard-aware)
 //   * if :compression-safe? appears, value is one of
 //     true|false|yes|no|safe|unsafe|defer
 const SOURCE_INDEX_REQUIRED_FIELDS = [
@@ -394,9 +454,13 @@ const COMPRESSION_SAFE_ALLOWED = new Set([
   'defer',
 ]);
 
-function validateSourceIndex(file, forms, diagnostics) {
+const V2_DIR_PREFIX = '.missiond/v2/';
+
+function validateSourceIndex(file, forms, diagnostics, opts = {}) {
+  const repoRoot = opts.repoRoot ?? process.cwd();
   const entries = collectSectionEntries(forms);
   const seenIds = new Map();
+  const seenSourceFileExistence = new Map();
 
   for (const entry of entries) {
     const props = readKeywordProps(entry);
@@ -435,6 +499,17 @@ function validateSourceIndex(file, forms, diagnostics) {
       }
     }
 
+    const sourceEntry = props[':source-file'];
+    if (sourceEntry && sourceEntry.value) {
+      validateSourceFileRef(
+        file,
+        sourceEntry.value,
+        diagnostics,
+        repoRoot,
+        seenSourceFileExistence,
+      );
+    }
+
     const compEntry = props[':compression-safe?'];
     if (compEntry) {
       const raw = nodeText(compEntry.value);
@@ -449,6 +524,114 @@ function validateSourceIndex(file, forms, diagnostics) {
       }
     }
   }
+
+  // ── R017+R018 also apply to the (pillar-section-index :source-file ...)
+  // header, which carries the shard/parent file pointer for the whole pillar.
+  for (const psi of collectPillarSectionIndexes(forms)) {
+    const props = readKeywordProps(psi);
+    const sourceEntry = props[':source-file'];
+    if (sourceEntry && sourceEntry.value) {
+      validateSourceFileRef(
+        file,
+        sourceEntry.value,
+        diagnostics,
+        repoRoot,
+        seenSourceFileExistence,
+      );
+    }
+  }
+}
+
+// Per-source-index-file cache so we only stat each path once even when
+// many section-entries share it.
+function validateSourceFileRef(file, valueNode, diagnostics, repoRoot, cache) {
+  const raw = nodeText(valueNode);
+  if (raw == null) {
+    addError(
+      diagnostics,
+      file,
+      valueNode.loc,
+      `:source-file must be a string path`,
+    );
+    return;
+  }
+
+  // R018: under .missiond/v2/. Compare on the declared path, not the
+  // resolved one — the declared form is the contract surface that humans
+  // and tools cross-reference.
+  const normalized = raw.replace(/\\/g, '/');
+  if (!normalized.startsWith(V2_DIR_PREFIX)) {
+    addError(
+      diagnostics,
+      file,
+      valueNode.loc,
+      `:source-file "${raw}" must live under ${V2_DIR_PREFIX} (R018)`,
+    );
+    return;
+  }
+
+  // R017: file must exist on disk (resolved against repo root).
+  if (cache.has(normalized)) {
+    if (cache.get(normalized) === false) {
+      addError(
+        diagnostics,
+        file,
+        valueNode.loc,
+        `:source-file "${raw}" does not exist on disk (R017)`,
+      );
+    }
+    return;
+  }
+  const abs = path.resolve(repoRoot, normalized);
+  let exists = false;
+  try {
+    exists = fs.statSync(abs).isFile();
+  } catch {
+    exists = false;
+  }
+  cache.set(normalized, exists);
+  if (!exists) {
+    addError(
+      diagnostics,
+      file,
+      valueNode.loc,
+      `:source-file "${raw}" does not exist on disk (R017)`,
+    );
+  }
+}
+
+// Walk source-index forms and return the distinct set of declared
+// :source-file string values across (pillar-section-index ...) headers and
+// (section-entry ...) bodies. Discovery is data-driven so adding a new
+// shard is a one-line source-index edit, not a checker change.
+function collectSourceFileRefs(forms) {
+  const seen = new Set();
+  const stack = [...forms];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || node.type !== 'list') continue;
+    const tag = head(node);
+    if (tag === 'section-entry' || tag === 'pillar-section-index') {
+      const props = readKeywordProps(node);
+      const sourceEntry = props[':source-file'];
+      const raw = sourceEntry ? nodeText(sourceEntry.value) : null;
+      if (raw) seen.add(raw.replace(/\\/g, '/'));
+    }
+    for (const child of node.children) stack.push(child);
+  }
+  return [...seen];
+}
+
+function collectPillarSectionIndexes(forms) {
+  const out = [];
+  const stack = [...forms];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || node.type !== 'list') continue;
+    if (head(node) === 'pillar-section-index') out.push(node);
+    for (const child of node.children) stack.push(child);
+  }
+  return out;
 }
 
 function collectSectionEntries(forms) {
@@ -487,11 +670,22 @@ function readKeywordProps(entry) {
 // `--dry-fixture` exercises the new rules without relying on the live
 // .missiond/v2/ tree. Exits 0 on success, 1 on assertion failure.
 function runSourceIndexFixtures() {
+  // R017/R018 fixtures need a temp repo root with controlled files. We make
+  // a sandbox under the OS temp dir so tests do not depend on the live
+  // .missiond/v2/ tree.
+  const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'archlisp-fixture-'));
+  const v2Dir = path.join(sandbox, '.missiond', 'v2');
+  fs.mkdirSync(v2Dir, { recursive: true });
+  fs.writeFileSync(path.join(v2Dir, 'intent-memory.lisp'), '(stub)');
+  fs.writeFileSync(path.join(v2Dir, 'intent-flow.lisp'), '(stub)');
+  // Note: no intent-missing.lisp on purpose — used by the R017 fixture.
+
   const fixtures = [
     {
       name: 'happy-path: full entry passes all rules',
+      repoRoot: sandbox,
       source: `(source-index v2
-        (pillar-section-index :pillar memory :source-file "x.lisp"
+        (pillar-section-index :pillar memory :source-file ".missiond/v2/intent-memory.lisp"
           (section-entry
             :section-id "memory.demo"
             :title "demo"
@@ -503,6 +697,7 @@ function runSourceIndexFixtures() {
     },
     {
       name: 'missing required fields surface R015',
+      repoRoot: sandbox,
       source: `(source-index v2
         (section-entry
           :title "no required fields"))`,
@@ -515,25 +710,27 @@ function runSourceIndexFixtures() {
     },
     {
       name: 'duplicate section-id triggers R016',
+      repoRoot: sandbox,
       source: `(source-index v2
         (section-entry
           :section-id "dup.id"
-          :source-file "a.lisp"
+          :source-file ".missiond/v2/intent-memory.lisp"
           :local-path "pillar a"
           :status code-aligned)
         (section-entry
           :section-id "dup.id"
-          :source-file "b.lisp"
+          :source-file ".missiond/v2/intent-flow.lisp"
           :local-path "pillar b"
           :status code-aligned))`,
       expectMessages: ['duplicate :section-id "dup.id"'],
     },
     {
       name: 'compression-safe? rejects unknown values',
+      repoRoot: sandbox,
       source: `(source-index v2
         (section-entry
           :section-id "bad.compsafe"
-          :source-file "x.lisp"
+          :source-file ".missiond/v2/intent-memory.lisp"
           :local-path "pillar x"
           :status code-aligned
           :compression-safe? maybe))`,
@@ -541,28 +738,90 @@ function runSourceIndexFixtures() {
     },
     {
       name: 'compression-safe? accepts atom alias safe/defer/yes/no/unsafe',
+      repoRoot: sandbox,
       source: `(source-index v2
         (section-entry
           :section-id "alias.safe"
-          :source-file "x.lisp" :local-path "pillar x" :status code-aligned
+          :source-file ".missiond/v2/intent-memory.lisp" :local-path "pillar x" :status code-aligned
           :compression-safe? safe)
         (section-entry
           :section-id "alias.defer"
-          :source-file "x.lisp" :local-path "pillar x" :status code-aligned
+          :source-file ".missiond/v2/intent-memory.lisp" :local-path "pillar x" :status code-aligned
           :compression-safe? defer)
         (section-entry
           :section-id "alias.yes"
-          :source-file "x.lisp" :local-path "pillar x" :status code-aligned
+          :source-file ".missiond/v2/intent-memory.lisp" :local-path "pillar x" :status code-aligned
           :compression-safe? yes)
         (section-entry
           :section-id "alias.no"
-          :source-file "x.lisp" :local-path "pillar x" :status code-aligned
+          :source-file ".missiond/v2/intent-memory.lisp" :local-path "pillar x" :status code-aligned
           :compression-safe? no)
         (section-entry
           :section-id "alias.unsafe"
-          :source-file "x.lisp" :local-path "pillar x" :status code-aligned
+          :source-file ".missiond/v2/intent-memory.lisp" :local-path "pillar x" :status code-aligned
           :compression-safe? unsafe))`,
       expectMessages: [],
+    },
+    {
+      name: 'R017 missing :source-file path triggers does-not-exist',
+      repoRoot: sandbox,
+      source: `(source-index v2
+        (section-entry
+          :section-id "r017.missing"
+          :source-file ".missiond/v2/intent-missing.lisp"
+          :local-path "pillar x"
+          :status code-aligned))`,
+      expectMessages: ['intent-missing.lisp" does not exist on disk (R017)'],
+    },
+    {
+      name: 'R018 :source-file outside .missiond/v2/ rejected',
+      repoRoot: sandbox,
+      source: `(source-index v2
+        (section-entry
+          :section-id "r018.outside"
+          :source-file "crates/missiond-core/src/lib.rs"
+          :local-path "pillar x"
+          :status code-aligned))`,
+      expectMessages: ['must live under .missiond/v2/ (R018)'],
+    },
+    {
+      name: 'R018 takes precedence — out-of-tree path does not trigger R017',
+      repoRoot: sandbox,
+      source: `(source-index v2
+        (section-entry
+          :section-id "r018.short-circuits"
+          :source-file "/etc/passwd"
+          :local-path "pillar x"
+          :status code-aligned))`,
+      expectMessages: ['must live under .missiond/v2/ (R018)'],
+      forbidMessages: ['(R017)'],
+    },
+    {
+      name: 'R017 also enforced on (pillar-section-index ...) header',
+      repoRoot: sandbox,
+      source: `(source-index v2
+        (pillar-section-index :pillar memory :source-file ".missiond/v2/intent-missing.lisp"))`,
+      expectMessages: ['intent-missing.lisp" does not exist on disk (R017)'],
+    },
+    {
+      name: 'shard auto-discovery: collectSourceFileRefs returns shard set',
+      repoRoot: sandbox,
+      source: `(source-index v2
+        (pillar-section-index :pillar memory :source-file ".missiond/v2/intent-memory.lisp"
+          (section-entry
+            :section-id "memory.demo"
+            :title "demo"
+            :source-file ".missiond/v2/intent-memory.lisp"
+            :local-path "pillar memory :: demo"
+            :status code-aligned)
+          (section-entry
+            :section-id "memory.shard.x"
+            :title "shard x"
+            :source-file ".missiond/v2/intent-flow.lisp"
+            :local-path "pillar memory :: shard x"
+            :status code-aligned)))`,
+      expectMessages: [],
+      assertRefs: ['.missiond/v2/intent-memory.lisp', '.missiond/v2/intent-flow.lisp'],
     },
   ];
 
@@ -571,29 +830,60 @@ function runSourceIndexFixtures() {
     const file = '<fixture>';
     const diagnostics = [];
     const forms = parse(fx.source, file);
-    validateSourceIndex(file, forms, diagnostics);
+    validateSourceIndex(file, forms, diagnostics, { repoRoot: fx.repoRoot });
     const messages = diagnostics.map((d) => d.message);
     const missing = fx.expectMessages.filter(
       (needle) => !messages.some((m) => m.includes(needle)),
+    );
+    const forbidden = (fx.forbidMessages ?? []).filter((needle) =>
+      messages.some((m) => m.includes(needle)),
     );
     const extra =
       fx.expectMessages.length === 0 && messages.length > 0
         ? messages
         : [];
-    if (missing.length > 0 || extra.length > 0) {
-      failed += 1;
-      console.error(`FAIL  ${fx.name}`);
-      if (missing.length > 0) {
-        console.error(`  missing expected substrings:`);
-        for (const m of missing) console.error(`    - ${m}`);
+
+    let refsOk = true;
+    if (fx.assertRefs) {
+      const refs = new Set(collectSourceFileRefs(forms));
+      const missingRefs = fx.assertRefs.filter((r) => !refs.has(r));
+      if (missingRefs.length > 0) {
+        refsOk = false;
+        console.error(`FAIL  ${fx.name}`);
+        console.error(`  collectSourceFileRefs missing:`);
+        for (const r of missingRefs) console.error(`    - ${r}`);
       }
-      if (extra.length > 0) {
-        console.error(`  unexpected diagnostics:`);
-        for (const m of extra) console.error(`    - ${m}`);
+    }
+
+    if (missing.length > 0 || forbidden.length > 0 || extra.length > 0 || !refsOk) {
+      if (missing.length > 0 || forbidden.length > 0 || extra.length > 0) {
+        failed += 1;
+        console.error(`FAIL  ${fx.name}`);
+        if (missing.length > 0) {
+          console.error(`  missing expected substrings:`);
+          for (const m of missing) console.error(`    - ${m}`);
+        }
+        if (forbidden.length > 0) {
+          console.error(`  forbidden substrings present:`);
+          for (const m of forbidden) console.error(`    - ${m}`);
+        }
+        if (extra.length > 0) {
+          console.error(`  unexpected diagnostics:`);
+          for (const m of extra) console.error(`    - ${m}`);
+        }
+      } else if (!refsOk) {
+        failed += 1;
       }
     } else {
       console.log(`OK    ${fx.name}`);
     }
+  }
+
+  // Best-effort cleanup of the sandbox; ignore errors.
+  try {
+    fs.rmSync(sandbox, { recursive: true, force: true });
+  } catch {
+    /* ignore */
   }
 
   if (failed > 0) {
