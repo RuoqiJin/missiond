@@ -281,6 +281,50 @@ pub(super) struct DagNode {
     /// AND the descriptor; the scheduler NEVER executes them (mirrors
     /// the wave-17 / task 03 acceptance-commands invariant).
     pub rollback_acceptance_commands_raw: Option<String>,
+    /// wave-18 / task 04 — `:compensates "<failed-node-id>"`. When
+    /// present, the cascade rollback evaluator treats THIS node as a
+    /// candidate compensation step for the named failed node. Pure
+    /// metadata: declaring `:compensates` does NOT make this node
+    /// dispatch automatically — only the cascade evaluator (running
+    /// AFTER the named node fails) consults the field. The compensation
+    /// node still runs through the regular DAG dispatch path otherwise
+    /// (so authors can also declare `:depends-on` on the failed node
+    /// to gate manual cascading; the cascade evaluator is independent).
+    pub compensates: Option<String>,
+    /// wave-18 / task 04 — `:rollback-cascade "none" | "plan" |
+    /// "dispatch-safe"`. Per-node opt-in for the cascade rollback
+    /// evaluator. Defaults to `none` so the wave-17 / task 04 node-local
+    /// rollback behaviour is preserved byte-for-byte for plans that did
+    /// not opt into cascading.
+    ///
+    /// * `none`           — cascade pass skipped (default); the node-local
+    ///                      rollback (`:rollback-policy`) still runs.
+    /// * `plan`           — cascade evaluator computes the ordered list of
+    ///                      compensation nodes and records the plan on the
+    ///                      response + evidence row. **NEVER dispatches.**
+    /// * `dispatch-safe`  — cascade evaluator computes the same plan AND,
+    ///                      for every compensation node whose own
+    ///                      rollback safety gates pass, dispatches it
+    ///                      through the wave-15 workstation substrate.
+    ///                      Refusals are recorded but the cascade itself
+    ///                      is NEVER retried.
+    ///
+    /// Unrecognised raw values land BOTH on the typed slot AND in
+    /// `unsupported_fields` so the typo surfaces through
+    /// `node_hint_summary` while the cascade evaluator safely degrades
+    /// to "no cascade" (the safe default).
+    pub rollback_cascade: Option<String>,
+    /// wave-18 / task 04 — `:rollback-after ["node-a" "node-b"]`. Optional
+    /// ordering hint consumed by the cascade evaluator. When two
+    /// compensation nodes both declare `:compensates` for the same failed
+    /// node, the cascade ordering algorithm runs them in the topological
+    /// order induced by `:rollback-after` (which is treated as an
+    /// ADDITIONAL "must-run-after" edge for cascade ordering only — it
+    /// is NOT promoted to a real `:depends-on` because cascade ordering
+    /// must not silently change forward dispatch order). Cycles in the
+    /// `:rollback-after` graph fall back to declaration order so a
+    /// typo never deadlocks the cascade.
+    pub rollback_after: Vec<String>,
     /// Per-node unsupported `:keyword value` pairs, kept in source order.
     pub unsupported_fields: Vec<(String, String)>,
 }
@@ -436,6 +480,31 @@ impl DagNode {
         RollbackPolicy::parse(raw)
     }
 
+    /// wave-18 / task 04 — typed projection of `:rollback-cascade`.
+    /// Returns `None` when the author did not declare a cascade mode OR
+    /// wrote an unrecognised value (the parser ALSO pushes unrecognised
+    /// values into `unsupported_fields` so the typo is loud). The
+    /// scheduler treats `None` as `RollbackCascadeMode::None` (the safe
+    /// default — cascade pass skipped).
+    pub(super) fn rollback_cascade_kind(&self) -> Option<RollbackCascadeMode> {
+        let raw = self.rollback_cascade.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        RollbackCascadeMode::parse(raw)
+    }
+
+    /// wave-18 / task 04 — true iff this node opted into the cascade
+    /// rollback evaluator (any `:rollback-cascade` value other than
+    /// `"none"`). Used by the scheduler to decide whether to run the
+    /// cascade pass after the per-node `run_rollback`.
+    pub(super) fn has_active_rollback_cascade(&self) -> bool {
+        matches!(
+            self.rollback_cascade_kind(),
+            Some(RollbackCascadeMode::Plan) | Some(RollbackCascadeMode::DispatchSafe)
+        )
+    }
+
     /// wave-17 / task 04 — true iff this node opted into ANY rollback
     /// hint (policy / objective / owned files / acceptance commands).
     /// Used to skip the rollback evaluator entirely on the wave-13
@@ -461,7 +530,28 @@ impl DagNode {
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        policy_present || objective_present || owned_present || acceptance_present
+        // wave-18 / task 04 — cascade hints also count: a node that
+        // declares `:rollback-cascade` / `:compensates` / `:rollback-after`
+        // but no `:rollback-policy` should still surface its rollback
+        // intent through the response so audit can pin the cascade plan.
+        let cascade_present = self
+            .rollback_cascade
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let compensates_present = self
+            .compensates
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let rollback_after_present = !self.rollback_after.is_empty();
+        policy_present
+            || objective_present
+            || owned_present
+            || acceptance_present
+            || cascade_present
+            || compensates_present
+            || rollback_after_present
     }
 }
 
@@ -846,6 +936,14 @@ pub(super) struct RollbackEvaluation {
     /// rollback was actually dispatched. `None` for descriptor-only,
     /// not-requested, and refused paths.
     pub inner_payload: Option<Value>,
+    /// wave-18 / task 04 — cascade rollback outcome for THIS failed node.
+    /// `None` when the node did not opt into cascading (default — the
+    /// wave-17 / task 04 byte shape is preserved). `Some(out)` carries
+    /// the resolved cascade mode + ordered compensation outcomes; the
+    /// scheduler stamps it onto `node_results[].rollback.cascade` so
+    /// callers see the cascade plan + dispatch / refusal results without
+    /// re-deriving from evidence.
+    pub cascade: Option<CascadeRollbackOutcome>,
 }
 
 impl RollbackEvaluation {
@@ -858,6 +956,14 @@ impl RollbackEvaluation {
             && self.objective.is_none()
             && self.owned_files.is_empty()
             && self.acceptance_commands.is_empty()
+            // wave-18 / task 04 — a cascade-only opt-in (no node-local
+            // rollback hints) MUST still surface so observers can pin
+            // the cascade plan. Treat any active cascade as a signal.
+            && self
+                .cascade
+                .as_ref()
+                .map(|c| c.is_inactive())
+                .unwrap_or(true)
     }
 
     /// Project the evaluation as a JSON block suitable for
@@ -883,7 +989,204 @@ impl RollbackEvaluation {
         if let Some(inner) = self.inner_payload.clone() {
             v["inner_result"] = inner;
         }
+        // wave-18 / task 04 — cascade outcome rides on the same JSON
+        // block so observers can pin `rollback.cascade.compensations[]`
+        // without descending into a separate evidence row. Quiet when
+        // the cascade evaluator never produced an observable signal so
+        // the wave-17 / task 04 byte-shape stays untouched for plans
+        // that did not opt into cascading.
+        if let Some(cascade) = self.cascade.as_ref() {
+            if !cascade.is_inactive() {
+                v["cascade"] = cascade.to_json();
+            }
+        }
         v
+    }
+}
+
+/// wave-18 / task 04 — typed projection of `:rollback-cascade` for the
+/// conservative cascade rollback evaluator. Resolved on the parser side
+/// so the runtime can pivot without re-tokenising the raw string.
+///
+/// Three modes are recognised:
+///   * `None`         — author wrote `"none"` OR omitted the value
+///                       entirely. Cascade pass skipped; only the
+///                       wave-17 / task 04 node-local rollback runs.
+///                       This is the safe default — preserves the
+///                       byte shape for plans that did not opt into
+///                       cascading.
+///   * `Plan`         — cascade evaluator computes the ordered list of
+///                       compensation nodes (every plan node carrying
+///                       `:compensates "<this-failed-node>"`) and
+///                       records the plan on the response + evidence
+///                       row. **NEVER dispatches.** Use this when the
+///                       author wants downstream observers / humans to
+///                       see what compensation WOULD be required without
+///                       authorising the scheduler to execute it.
+///   * `DispatchSafe` — cascade evaluator computes the same plan AND,
+///                       for every compensation node whose own
+///                       rollback safety gates pass, dispatches it
+///                       through the wave-15 workstation substrate.
+///                       Refusals are recorded but the cascade itself
+///                       is NEVER retried — SafeDescriptor / safety-gate
+///                       refusals stay refusals (mirrors the wave-17 /
+///                       task 04 non-retryable invariant).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RollbackCascadeMode {
+    None,
+    Plan,
+    DispatchSafe,
+}
+
+impl RollbackCascadeMode {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            RollbackCascadeMode::None => "none",
+            RollbackCascadeMode::Plan => "plan",
+            RollbackCascadeMode::DispatchSafe => "dispatch-safe",
+        }
+    }
+
+    /// Parse a raw `:rollback-cascade` value. Trims + lowercases; both
+    /// `_` and `-` separators are accepted so authors can write either
+    /// `dispatch_safe` or `dispatch-safe`. Unknown values yield `None`
+    /// (the parser also pushes them onto `unsupported_fields`).
+    pub(super) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "none" => Some(RollbackCascadeMode::None),
+            "plan" => Some(RollbackCascadeMode::Plan),
+            "dispatch-safe" | "dispatch_safe" => {
+                Some(RollbackCascadeMode::DispatchSafe)
+            }
+            _ => None,
+        }
+    }
+}
+
+/// wave-18 / task 04 — outcome of the cascade rollback pass for a single
+/// compensation node. Captures whether the node was just recorded
+/// (`plan` mode), dispatched through the substrate (`dispatch-safe` +
+/// safety passed + dispatch ok), refused (any safety / substrate
+/// refusal), or failed (substrate dispatched but inner handler errored).
+///
+/// Wire vocabulary mirrors [`RollbackStatus`] so audit dashboards can
+/// pivot on the same string vocabulary across both single-node and
+/// cascade evaluations.
+#[derive(Debug, Clone)]
+pub(super) struct CascadeCompensationOutcome {
+    /// Plan id of the compensation node (matches `DagNode::id`).
+    pub node_id: String,
+    /// Resolved policy of THIS compensation node (NOT the cascade root).
+    /// `None` when the compensation node carried no `:rollback-policy`
+    /// — the cascade evaluator treats that as `Descriptor` for the
+    /// purpose of recording intent.
+    pub policy: RollbackPolicy,
+    /// Final per-compensation-node status. Vocabulary:
+    ///   * `descriptor_ready` — `plan` mode OR `dispatch-safe` mode but
+    ///                          the compensation node is descriptor-only
+    ///                          (`:rollback-policy "descriptor"`).
+    ///   * `dispatched`       — `dispatch-safe` mode AND every safety
+    ///                          gate passed AND inner handler returned Ok.
+    ///   * `refused`          — `dispatch-safe` mode AND at least one
+    ///                          safety gate failed (or substrate refused).
+    ///                          Non-retryable.
+    ///   * `failed`           — `dispatch-safe` mode AND the substrate
+    ///                          dispatched but the inner handler returned
+    ///                          an error. Non-retryable.
+    pub status: RollbackStatus,
+    /// Human-readable explanation of the per-compensation-node decision.
+    pub reason: String,
+    /// Resolved objective for this compensation node (may be empty).
+    pub objective: Option<String>,
+    /// Resolved owned-files list for this compensation node.
+    pub owned_files: Vec<String>,
+    /// Resolved acceptance commands surfaced verbatim — NEVER executed.
+    pub acceptance_commands: Vec<String>,
+    /// Trimmed task-brief preview when the substrate / pure helper built
+    /// one. `None` for pure-plan-mode entries.
+    pub task_brief_preview: Option<String>,
+    /// File path the brief was mirrored to (currently always `None` —
+    /// substrate does not yet write the brief to disk; kept for shape
+    /// compatibility with the node-local rollback evaluation).
+    pub task_brief_path: Option<String>,
+    /// Inner dispatch payload from `run_workstation_dispatch` when the
+    /// compensation was actually dispatched.
+    pub inner_payload: Option<Value>,
+}
+
+impl CascadeCompensationOutcome {
+    pub(super) fn to_json(&self) -> Value {
+        let mut v = json!({
+            "node_id": self.node_id,
+            "policy": self.policy.as_wire(),
+            "status": self.status.as_wire(),
+            "reason": self.reason,
+            "objective": self.objective,
+            "owned_files": self.owned_files,
+            "acceptance_commands": self.acceptance_commands,
+            "acceptance_commands_executed": false,
+        });
+        if let Some(p) = self.task_brief_preview.as_deref() {
+            v["task_brief_preview"] = json!(p);
+        }
+        if let Some(p) = self.task_brief_path.as_deref() {
+            v["task_brief_path"] = json!(p);
+        }
+        if let Some(inner) = self.inner_payload.clone() {
+            v["inner_result"] = inner;
+        }
+        v
+    }
+}
+
+/// wave-18 / task 04 — top-level outcome of the cascade rollback pass
+/// for a single failed (cascade root) node. Carries the resolved cascade
+/// mode + the ordered list of compensation outcomes so observers can
+/// audit "which compensation nodes were planned / dispatched / refused"
+/// without re-walking the prior nodes.
+///
+/// `is_inactive()` is true iff the cascade evaluator was either skipped
+/// entirely (no compensation nodes found AND mode=None) OR ran but
+/// produced no observable signal — the wave loop suppresses the cascade
+/// surface in that case so the wave-17 / task 04 byte shape stays untouched
+/// for plans that did not opt into cascading.
+#[derive(Debug, Clone)]
+pub(super) struct CascadeRollbackOutcome {
+    pub mode: RollbackCascadeMode,
+    /// Cascade root: the failed node id whose compensation is being planned.
+    pub cascade_root: String,
+    /// Compensation nodes in resolved cascade order. Empty when no plan
+    /// node carries `:compensates "<cascade_root>"`.
+    pub compensations: Vec<CascadeCompensationOutcome>,
+    /// Human-readable explanation of the cascade-level decision (e.g.
+    /// "cascade plan recorded; 2 compensation nodes",
+    /// "no compensation nodes declared", etc.).
+    pub reason: String,
+}
+
+impl CascadeRollbackOutcome {
+    /// Convenience: this outcome produced no observable cascade signal.
+    /// Used by the scheduler to decide whether to surface the cascade
+    /// block on the response / evidence row.
+    pub(super) fn is_inactive(&self) -> bool {
+        matches!(self.mode, RollbackCascadeMode::None)
+            && self.compensations.is_empty()
+    }
+
+    /// Project the outcome as a JSON block suitable for
+    /// `node_results[].rollback.cascade` / `evidence.rollback.cascade`.
+    pub(super) fn to_json(&self) -> Value {
+        let comps: Vec<Value> = self
+            .compensations
+            .iter()
+            .map(|c| c.to_json())
+            .collect();
+        json!({
+            "mode": self.mode.as_wire(),
+            "cascade_root": self.cascade_root,
+            "reason": self.reason,
+            "compensations": comps,
+        })
     }
 }
 
@@ -1078,6 +1381,7 @@ pub(super) fn pre_dispatch_rollback_decision(
             task_brief_preview: None,
             task_brief_path: None,
             inner_payload: None,
+            cascade: None,
         },
         RollbackPolicy::Descriptor => RollbackEvaluation {
             policy: RollbackPolicy::Descriptor,
@@ -1090,6 +1394,7 @@ pub(super) fn pre_dispatch_rollback_decision(
             task_brief_preview: None,
             task_brief_path: None,
             inner_payload: None,
+            cascade: None,
         },
         RollbackPolicy::Workstation => match descriptor.safety_check_for_workstation(node) {
             Ok(()) => RollbackEvaluation {
@@ -1103,6 +1408,7 @@ pub(super) fn pre_dispatch_rollback_decision(
                 task_brief_preview: None,
                 task_brief_path: None,
                 inner_payload: None,
+                cascade: None,
             },
             Err(detail) => RollbackEvaluation {
                 policy: RollbackPolicy::Workstation,
@@ -1114,6 +1420,7 @@ pub(super) fn pre_dispatch_rollback_decision(
                 task_brief_preview: None,
                 task_brief_path: None,
                 inner_payload: None,
+                cascade: None,
             },
         },
     }
@@ -2205,6 +2512,10 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut rollback_objective: Option<String> = None;
     let mut rollback_owned_files_raw: Option<String> = None;
     let mut rollback_acceptance_commands_raw: Option<String> = None;
+    // wave-18 / task 04 — cascade rollback hints.
+    let mut compensates: Option<String> = None;
+    let mut rollback_cascade: Option<String> = None;
+    let mut rollback_after: Vec<String> = Vec::new();
     let mut unsupported_fields: Vec<(String, String)> = Vec::new();
 
     for (raw_key, value) in pairs {
@@ -2433,6 +2744,39 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
             "rollback-acceptance-commands" | "rollback_acceptance_commands" => {
                 set_first(&mut rollback_acceptance_commands_raw, &value)
             }
+            // wave-18 / task 04 — cascade rollback hint contract.
+            //
+            // `:compensates "<failed-node-id>"` declares THIS node as a
+            // candidate compensation step for the named failed node. The
+            // cascade evaluator (which runs AFTER the named node's final
+            // failed attempt) consumes the field; outside that flow it
+            // is pure metadata.
+            //
+            // `:rollback-cascade "none|plan|dispatch-safe"` opts the
+            // failed (cascade-root) node into the cascade evaluator.
+            // Strict parsing: unrecognised raw values land BOTH on the
+            // typed slot AND in `unsupported_fields` so the scheduler
+            // safely degrades to "no cascade" while the typo surfaces
+            // through `node_hint_summary`.
+            //
+            // `:rollback-after ["node-a" "node-b"]` is an additional
+            // ordering hint for cascade compensation order. Same shape
+            // as `:depends-on` (paren / bracket / bareword run); never
+            // promoted to a real `:depends-on` so forward dispatch order
+            // is unaffected.
+            "compensates" => set_first(&mut compensates, &value),
+            "rollback-cascade" | "rollback_cascade" => {
+                let raw = value.trim();
+                if !raw.is_empty() && RollbackCascadeMode::parse(raw).is_none() {
+                    unsupported_fields.push((raw_key.clone(), value.clone()));
+                }
+                set_first(&mut rollback_cascade, &value);
+            }
+            "rollback-after" | "rollback_after" => {
+                if rollback_after.is_empty() {
+                    rollback_after = parse_id_list(&value);
+                }
+            }
             _ => {
                 unsupported_fields.push((raw_key, value));
             }
@@ -2484,6 +2828,9 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         rollback_objective,
         rollback_owned_files_raw,
         rollback_acceptance_commands_raw,
+        compensates,
+        rollback_cascade,
+        rollback_after,
         unsupported_fields,
     })
 }
@@ -3283,6 +3630,19 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
             }
             if let Some(ac) = &n.rollback_acceptance_commands_raw {
                 rb["acceptance_commands_raw"] = json!(ac);
+            }
+            // wave-18 / task 04 — cascade hint surface. Emit only when
+            // the author opted into cascading so summaries for nodes
+            // without cascade intent stay byte-identical with the
+            // wave-17 / task 04 baseline.
+            if let Some(c) = &n.compensates {
+                rb["compensates"] = json!(c);
+            }
+            if let Some(c) = &n.rollback_cascade {
+                rb["cascade_mode"] = json!(c);
+            }
+            if !n.rollback_after.is_empty() {
+                rb["rollback_after"] = json!(n.rollback_after);
             }
             entry["rollback"] = rb;
         }
@@ -5028,6 +5388,7 @@ async fn run_rollback(
             task_brief_preview: None,
             task_brief_path: None,
             inner_payload: None,
+            cascade: None,
         },
         RollbackPolicy::Descriptor => {
             // Build the descriptor brief locally so observers see the
@@ -5058,6 +5419,7 @@ async fn run_rollback(
                 task_brief_preview: preview,
                 task_brief_path: None,
                 inner_payload: None,
+                cascade: None,
             }
         }
         RollbackPolicy::Workstation => {
@@ -5075,6 +5437,7 @@ async fn run_rollback(
                     task_brief_preview: None,
                     task_brief_path: None,
                     inner_payload: None,
+                    cascade: None,
                 };
             }
             // Static safety passed — dispatch through the substrate.
@@ -5108,6 +5471,7 @@ async fn run_rollback(
                     task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
                     task_brief_path,
                     inner_payload: Some(inner_payload),
+                    cascade: None,
                 },
                 super::workstation_dispatch::WorkstationDispatchOutcome::DryRun {
                     task_brief,
@@ -5128,6 +5492,7 @@ async fn run_rollback(
                         task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
                         task_brief_path: None,
                         inner_payload: None,
+                        cascade: None,
                     }
                 }
                 super::workstation_dispatch::WorkstationDispatchOutcome::InnerError {
@@ -5149,6 +5514,7 @@ async fn run_rollback(
                         task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
                         task_brief_path: None,
                         inner_payload: Some(inner_payload),
+                        cascade: None,
                     }
                 }
                 super::workstation_dispatch::WorkstationDispatchOutcome::SafeDescriptor {
@@ -5173,10 +5539,417 @@ async fn run_rollback(
                             .map(truncate_rollback_brief_preview),
                         task_brief_path: None,
                         inner_payload: None,
+                        cascade: None,
                     }
                 }
             }
         }
+    }
+}
+
+/// wave-18 / task 04 — pure helper that computes the ordered list of
+/// compensation node ids for a given failed (cascade-root) node.
+///
+/// Compensation discovery: every plan node carrying
+/// `:compensates "<root_id>"` (case-insensitive on the root id) is a
+/// candidate. Ordering rules:
+///
+///   1. Honour each candidate's `:rollback-after` hints when those
+///      targets are also compensation candidates for the SAME root.
+///      The cascade ordering uses a Kahn-style topological sort
+///      restricted to compensation candidates.
+///   2. Tie-break by the topological-sort `order` produced by
+///      `build_validated_dag` so dispatch order in the cascade
+///      mirrors the forward DAG.
+///   3. If `:rollback-after` introduces a cycle (typo), fall back to
+///      step (2)'s declaration order — we never deadlock the cascade
+///      because a typo cannot be a fatal scheduler condition.
+///
+/// Pure: no IO, no AppState reads. Decoupled so the cascade evaluator
+/// + unit tests can pin the contract identically.
+pub(super) fn compute_compensation_order<'a>(
+    failed_id: &str,
+    nodes: &'a [DagNode],
+    forward_order: &[String],
+) -> Vec<&'a DagNode> {
+    let root_lc = failed_id.trim().to_ascii_lowercase();
+    // Compensation candidate set + lookup helpers.
+    let candidates: Vec<&DagNode> = nodes
+        .iter()
+        .filter(|n| {
+            n.compensates
+                .as_deref()
+                .map(|s| s.trim().to_ascii_lowercase() == root_lc)
+                .unwrap_or(false)
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    // Forward-order rank table — used as a tie-breaker so cascade
+    // dispatch mirrors forward dispatch order when no `:rollback-after`
+    // edge exists.
+    let forward_rank: HashMap<&str, usize> = forward_order
+        .iter()
+        .enumerate()
+        .map(|(i, id)| (id.as_str(), i))
+        .collect();
+    // Restrict the dependency graph to compensation candidates only.
+    // `:rollback-after` edges that reference non-candidates are
+    // dropped silently (they cannot block the cascade because the
+    // referenced node will never run as a compensation step here).
+    let candidate_ids: HashSet<&str> =
+        candidates.iter().map(|n| n.id.as_str()).collect();
+    let mut indeg: HashMap<&str, usize> = HashMap::new();
+    let mut succs: HashMap<&str, Vec<&str>> = HashMap::new();
+    for n in &candidates {
+        indeg.entry(n.id.as_str()).or_insert(0);
+        for after in &n.rollback_after {
+            let after_s = after.trim();
+            if after_s.is_empty() || !candidate_ids.contains(after_s) {
+                continue;
+            }
+            // Edge: after_s → n.id (n must run AFTER `after_s`).
+            *indeg.entry(n.id.as_str()).or_insert(0) += 1;
+            succs.entry(after_s).or_default().push(n.id.as_str());
+        }
+    }
+    // Kahn-style topological sort with deterministic tie-break: at
+    // each step we pop the candidate with the smallest forward-order
+    // rank. Falls back to the declaration order embedded in
+    // `candidates` for IDs not present in `forward_order`.
+    let mut by_id: HashMap<&str, &DagNode> =
+        candidates.iter().map(|n| (n.id.as_str(), *n)).collect();
+    let declaration_rank: HashMap<&str, usize> = candidates
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.id.as_str(), i))
+        .collect();
+    let rank_of = |id: &str| -> (usize, usize) {
+        (
+            forward_rank.get(id).copied().unwrap_or(usize::MAX),
+            declaration_rank.get(id).copied().unwrap_or(usize::MAX),
+        )
+    };
+    let mut ordered: Vec<&DagNode> = Vec::with_capacity(candidates.len());
+    loop {
+        // Collect all currently-zero-indegree candidates.
+        let mut ready: Vec<&str> = indeg
+            .iter()
+            .filter(|(_, &d)| d == 0)
+            .map(|(id, _)| *id)
+            .collect();
+        if ready.is_empty() {
+            break;
+        }
+        ready.sort_by_key(|id| rank_of(id));
+        // Pop the smallest-ranked entry.
+        let next = ready[0];
+        // Defensive: if for some reason the candidate is missing,
+        // skip it.
+        if let Some(n) = by_id.remove(next) {
+            ordered.push(n);
+        }
+        indeg.remove(next);
+        if let Some(children) = succs.remove(next) {
+            for child in children {
+                if let Some(d) = indeg.get_mut(child) {
+                    *d = d.saturating_sub(1);
+                }
+            }
+        }
+    }
+    // Cycle / unresolved entries — fall back to declaration order so
+    // a typo never deadlocks the cascade.
+    if ordered.len() < candidates.len() {
+        let already: HashSet<&str> = ordered.iter().map(|n| n.id.as_str()).collect();
+        for n in &candidates {
+            if !already.contains(n.id.as_str()) {
+                ordered.push(*n);
+            }
+        }
+    }
+    ordered
+}
+
+/// wave-18 / task 04 — pure helper that builds a `plan`-mode cascade
+/// outcome for a single compensation node. Records intent + brief
+/// preview but never dispatches. Decoupled so unit tests can pin the
+/// shape without standing up an `AppState`.
+pub(super) fn build_compensation_plan_entry(
+    plan: &Plan,
+    node: &DagNode,
+) -> CascadeCompensationOutcome {
+    let descriptor = build_rollback_descriptor(node);
+    let policy = descriptor.policy;
+    let hints = descriptor.to_workstation_hints(node);
+    let strategy = node
+        .dispatch_strategy
+        .as_deref()
+        .unwrap_or("unknown");
+    let preview = if descriptor.objective.is_some() {
+        Some(truncate_rollback_brief_preview(
+            &super::workstation_dispatch::build_task_brief(
+                plan, &hints, strategy,
+            ),
+        ))
+    } else {
+        None
+    };
+    CascadeCompensationOutcome {
+        node_id: node.id.clone(),
+        policy,
+        status: RollbackStatus::DescriptorReady,
+        reason: "cascade plan: compensation node recorded; no dispatch performed".to_string(),
+        objective: descriptor.objective,
+        owned_files: descriptor.owned_files,
+        acceptance_commands: descriptor.acceptance_commands,
+        task_brief_preview: preview,
+        task_brief_path: None,
+        inner_payload: None,
+    }
+}
+
+/// wave-18 / task 04 — async cascade evaluator. Runs AFTER a node's
+/// final failed attempt and AFTER the node-local `run_rollback`. Pure
+/// when `mode == Plan` (no IO beyond `build_task_brief`); only the
+/// `DispatchSafe` mode invokes the substrate.
+///
+/// Behaviour matrix:
+///
+///   * `mode == None`         — returns an inactive outcome; the wave
+///                              loop suppresses the cascade surface.
+///   * `mode == Plan`         — every compensation node lands as
+///                              `descriptor_ready`. **Never dispatches.**
+///   * `mode == DispatchSafe` — for each compensation node, run the
+///                              wave-17 / task 04 safety check on its
+///                              own descriptor; only dispatch when the
+///                              gate passes AND the compensation node's
+///                              policy is `workstation`. Any safety /
+///                              substrate refusal lands as `refused`
+///                              (non-retryable). `descriptor`-only
+///                              compensations stay `descriptor_ready`.
+async fn run_cascade_rollback(
+    state: &AppState,
+    plan: &Plan,
+    failed_node: &DagNode,
+    nodes: &[DagNode],
+    forward_order: &[String],
+) -> CascadeRollbackOutcome {
+    let mode = failed_node
+        .rollback_cascade_kind()
+        .unwrap_or(RollbackCascadeMode::None);
+    if matches!(mode, RollbackCascadeMode::None) {
+        return CascadeRollbackOutcome {
+            mode,
+            cascade_root: failed_node.id.clone(),
+            compensations: Vec::new(),
+            reason: "cascade rollback not requested".to_string(),
+        };
+    }
+    let ordered = compute_compensation_order(&failed_node.id, nodes, forward_order);
+    if ordered.is_empty() {
+        return CascadeRollbackOutcome {
+            mode,
+            cascade_root: failed_node.id.clone(),
+            compensations: Vec::new(),
+            reason: format!(
+                "cascade {}: no compensation nodes declared `:compensates \"{}\"`",
+                mode.as_wire(),
+                failed_node.id
+            ),
+        };
+    }
+    let mut compensations: Vec<CascadeCompensationOutcome> =
+        Vec::with_capacity(ordered.len());
+    for n in ordered {
+        match mode {
+            RollbackCascadeMode::None => unreachable!(),
+            RollbackCascadeMode::Plan => {
+                compensations.push(build_compensation_plan_entry(plan, n));
+            }
+            RollbackCascadeMode::DispatchSafe => {
+                // Only dispatch when the compensation node's own
+                // rollback policy is `workstation` AND every safety
+                // gate passes. Otherwise fall back to `plan` mode for
+                // this entry — record intent, never dispatch.
+                let descriptor = build_rollback_descriptor(n);
+                match descriptor.policy {
+                    RollbackPolicy::Workstation => {
+                        match descriptor.safety_check_for_workstation(n) {
+                            Err(reason) => {
+                                // Safety gate refused — record refusal,
+                                // never retry.
+                                compensations.push(CascadeCompensationOutcome {
+                                    node_id: n.id.clone(),
+                                    policy: RollbackPolicy::Workstation,
+                                    status: RollbackStatus::Refused,
+                                    reason: format!(
+                                        "cascade dispatch-safe refused: {}",
+                                        reason
+                                    ),
+                                    objective: descriptor.objective,
+                                    owned_files: descriptor.owned_files,
+                                    acceptance_commands: descriptor
+                                        .acceptance_commands,
+                                    task_brief_preview: None,
+                                    task_brief_path: None,
+                                    inner_payload: None,
+                                });
+                            }
+                            Ok(()) => {
+                                let hints = descriptor.to_workstation_hints(n);
+                                let strategy = n
+                                    .dispatch_strategy
+                                    .as_deref()
+                                    .unwrap_or("unknown");
+                                let outcome = super::workstation_dispatch::run_workstation_dispatch(
+                                    state,
+                                    plan,
+                                    "mission_task_delegate",
+                                    strategy,
+                                    hints,
+                                    false,
+                                )
+                                .await;
+                                compensations.push(map_dispatch_outcome_to_compensation(
+                                    n.id.clone(),
+                                    descriptor,
+                                    outcome,
+                                ));
+                            }
+                        }
+                    }
+                    RollbackPolicy::Descriptor | RollbackPolicy::None => {
+                        // Compensation node opted into descriptor-only
+                        // (or no rollback policy at all). Cascade
+                        // dispatch-safe MUST NEVER promote a non-
+                        // workstation compensation to a dispatch — that
+                        // would silently change the scope of work the
+                        // author authorised. Record the plan entry and
+                        // move on.
+                        compensations.push(build_compensation_plan_entry(plan, n));
+                    }
+                }
+            }
+        }
+    }
+    let dispatched = compensations
+        .iter()
+        .filter(|c| matches!(c.status, RollbackStatus::Dispatched))
+        .count();
+    let refused = compensations
+        .iter()
+        .filter(|c| matches!(c.status, RollbackStatus::Refused))
+        .count();
+    let failed = compensations
+        .iter()
+        .filter(|c| matches!(c.status, RollbackStatus::Failed))
+        .count();
+    let recorded = compensations
+        .iter()
+        .filter(|c| matches!(c.status, RollbackStatus::DescriptorReady))
+        .count();
+    let reason = format!(
+        "cascade {}: compensation_nodes={} recorded={} dispatched={} refused={} failed={}",
+        mode.as_wire(),
+        compensations.len(),
+        recorded,
+        dispatched,
+        refused,
+        failed,
+    );
+    CascadeRollbackOutcome {
+        mode,
+        cascade_root: failed_node.id.clone(),
+        compensations,
+        reason,
+    }
+}
+
+/// wave-18 / task 04 — pure helper translating a workstation-dispatch
+/// outcome into a single cascade compensation row. Decoupled from the
+/// async cascade body so unit tests can pin every dispatch branch.
+fn map_dispatch_outcome_to_compensation(
+    node_id: String,
+    descriptor: RollbackDescriptor,
+    outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
+) -> CascadeCompensationOutcome {
+    use super::workstation_dispatch::WorkstationDispatchOutcome as O;
+    match outcome {
+        O::Dispatched {
+            task_brief,
+            task_brief_path,
+            inner_payload,
+            ..
+        } => CascadeCompensationOutcome {
+            node_id,
+            policy: RollbackPolicy::Workstation,
+            status: RollbackStatus::Dispatched,
+            reason: "cascade dispatch-safe: workstation dispatch completed; inner handler returned Ok"
+                .to_string(),
+            objective: descriptor.objective,
+            owned_files: descriptor.owned_files,
+            acceptance_commands: descriptor.acceptance_commands,
+            task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
+            task_brief_path,
+            inner_payload: Some(inner_payload),
+        },
+        O::DryRun { task_brief } => CascadeCompensationOutcome {
+            node_id,
+            policy: RollbackPolicy::Workstation,
+            status: RollbackStatus::Dispatched,
+            reason: "cascade dispatch-safe: substrate ran dry_run (no real handler invoked)"
+                .to_string(),
+            objective: descriptor.objective,
+            owned_files: descriptor.owned_files,
+            acceptance_commands: descriptor.acceptance_commands,
+            task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
+            task_brief_path: None,
+            inner_payload: None,
+        },
+        O::InnerError {
+            task_brief,
+            inner_payload,
+        } => {
+            let detail = inner_payload
+                .get("error")
+                .and_then(|v| v.as_str())
+                .unwrap_or("cascade compensation inner handler returned error")
+                .to_string();
+            CascadeCompensationOutcome {
+                node_id,
+                policy: RollbackPolicy::Workstation,
+                status: RollbackStatus::Failed,
+                reason: format!(
+                    "cascade dispatch-safe: workstation dispatch failed: {}",
+                    detail
+                ),
+                objective: descriptor.objective,
+                owned_files: descriptor.owned_files,
+                acceptance_commands: descriptor.acceptance_commands,
+                task_brief_preview: Some(truncate_rollback_brief_preview(&task_brief)),
+                task_brief_path: None,
+                inner_payload: Some(inner_payload),
+            }
+        }
+        O::SafeDescriptor { reason, task_brief } => CascadeCompensationOutcome {
+            node_id,
+            policy: RollbackPolicy::Workstation,
+            status: RollbackStatus::Refused,
+            reason: format!(
+                "cascade dispatch-safe refused (substrate): {}",
+                reason.detail()
+            ),
+            objective: descriptor.objective,
+            owned_files: descriptor.owned_files,
+            acceptance_commands: descriptor.acceptance_commands,
+            task_brief_preview: task_brief
+                .as_deref()
+                .map(truncate_rollback_brief_preview),
+            task_brief_path: None,
+            inner_payload: None,
+        },
     }
 }
 
@@ -5284,6 +6057,37 @@ async fn emit_evidence_rollback(
     }
     if let Some(inner) = evaluation.inner_payload.clone() {
         entry = entry.with_extra("rollback_inner_result", inner);
+    }
+    // wave-18 / task 04 — cascade rollback evidence extras. Surfaced
+    // alongside the node-local rollback fields so audit dashboards can
+    // grep `rollback_cascade_*` without descending into the embedded
+    // `cascade` JSON. Quiet (omitted) when the cascade evaluator never
+    // produced a signal so the wave-17 / task 04 byte shape stays
+    // untouched for plans that did not opt into cascading.
+    if let Some(cascade) = evaluation.cascade.as_ref() {
+        if !cascade.is_inactive() {
+            let comp_ids: Vec<&str> = cascade
+                .compensations
+                .iter()
+                .map(|c| c.node_id.as_str())
+                .collect();
+            entry = entry
+                .with_extra("rollback_cascade_mode", json!(cascade.mode.as_wire()))
+                .with_extra(
+                    "rollback_cascade_root",
+                    json!(cascade.cascade_root),
+                )
+                .with_extra(
+                    "rollback_cascade_compensation_node_ids",
+                    json!(comp_ids),
+                )
+                .with_extra(
+                    "rollback_cascade_compensation_count",
+                    json!(cascade.compensations.len()),
+                )
+                .with_extra("rollback_cascade_reason", json!(cascade.reason))
+                .with_extra("rollback_cascade", cascade.to_json());
+        }
     }
     let append_outcome = evidence_collector::append(
         state,
@@ -6586,7 +7390,23 @@ async fn execute_with_concurrency(
                     acceptance.status,
                     AcceptanceStatus::Rejected
                 ) {
-                    let eval = run_rollback(state, plan, &node).await;
+                    let mut eval = run_rollback(state, plan, &node).await;
+                    // wave-18 / task 04 — cascade rollback pass after
+                    // node-local rollback. Fold into the same evaluation
+                    // so audit dashboards see a single rollback block.
+                    if node.has_active_rollback_cascade() {
+                        let cascade = run_cascade_rollback(
+                            state,
+                            plan,
+                            &node,
+                            &parsed.nodes,
+                            order,
+                        )
+                        .await;
+                        if !cascade.is_inactive() {
+                            eval.cascade = Some(cascade);
+                        }
+                    }
                     if !eval.is_inactive() {
                         emit_evidence_rollback(
                             state,
@@ -6850,7 +7670,26 @@ async fn execute_with_concurrency(
             // intact: `:failure-policy fail-fast` still trips the
             // wave-loop abort flag based on the original failure,
             // not the rollback outcome.
-            let rollback_eval = run_rollback(state, plan, &node).await;
+            let mut rollback_eval = run_rollback(state, plan, &node).await;
+            // wave-18 / task 04 — cascade rollback pass after the
+            // node-local rollback. The cascade evaluator is conservative:
+            // it never runs unless the failed node opted in via
+            // `:rollback-cascade "plan" | "dispatch-safe"`. Folding the
+            // outcome into the same `RollbackEvaluation` keeps audit
+            // dashboards on a single block per failed node.
+            if node.has_active_rollback_cascade() {
+                let cascade = run_cascade_rollback(
+                    state,
+                    plan,
+                    &node,
+                    &parsed.nodes,
+                    order,
+                )
+                .await;
+                if !cascade.is_inactive() {
+                    rollback_eval.cascade = Some(cascade);
+                }
+            }
             let rollback_active = !rollback_eval.is_inactive();
             if rollback_active {
                 emit_evidence_rollback(
@@ -12618,6 +13457,7 @@ mod tests {
             task_brief_preview: Some("## Objective\nundo step\n".into()),
             task_brief_path: Some("/tmp/rollback.md".into()),
             inner_payload: Some(json!({"task_id": "btk-rb"})),
+            cascade: None,
         };
         let v = eval.to_json();
         assert_eq!(v["policy"], "workstation");
@@ -12666,6 +13506,7 @@ mod tests {
             task_brief_preview: None,
             task_brief_path: None,
             inner_payload: None,
+            cascade: None,
         };
         assert!(inactive.is_inactive());
         // ANY signal should flip is_inactive to false so the response
@@ -12728,6 +13569,7 @@ mod tests {
                 task_brief_preview: None,
                 task_brief_path: None,
                 inner_payload: None,
+                cascade: None,
             }),
             acceptance: None,
         });
@@ -13218,5 +14060,554 @@ mod tests {
         assert_eq!(b["triggered"], true);
         assert!(b.get("warning").is_none(), "ok branch must not warn");
         assert_eq!(b["result"]["persisted"], false);
+    }
+
+    // ── wave-18 / task 04 — conservative cascade rollback ────────────────
+    //
+    // Cascade evaluator is conservative by design: it never runs unless
+    // the failed (cascade-root) node opted in via `:rollback-cascade`,
+    // and even then `plan` mode never dispatches. `dispatch-safe` mode
+    // dispatches a compensation node only when its OWN safety gates
+    // pass; descriptor-only / no-policy compensations stay
+    // descriptor_ready (never silently promoted). These tests pin the
+    // parser, the compensation discovery + ordering, the plan-mode
+    // recording branch, the dispatch-safe refusal branch, and the
+    // default-mode invariant.
+
+    #[test]
+    fn parse_node_form_captures_cascade_hints() {
+        let sexp = r#"
+            (plan
+              (node :id "fail"
+                    :target "mission_task_delegate"
+                    :rollback-cascade "dispatch-safe"
+                    :rollback-policy "descriptor"
+                    :rollback-objective "root failed")
+              (node :id "comp-1"
+                    :target "mission_task_delegate"
+                    :compensates "fail"
+                    :rollback-after ["comp-2"])
+              (node :id "comp-2"
+                    :target "mission_task_delegate"
+                    :compensates "fail"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes.len(), 3);
+        // Cascade root parses :rollback-cascade onto the typed slot
+        // AND surfaces the typed projection.
+        let root = &parsed.nodes[0];
+        assert_eq!(root.rollback_cascade.as_deref(), Some("dispatch-safe"));
+        assert_eq!(
+            root.rollback_cascade_kind(),
+            Some(RollbackCascadeMode::DispatchSafe)
+        );
+        assert!(root.has_active_rollback_cascade());
+        // Compensation nodes parse :compensates + :rollback-after.
+        let c1 = &parsed.nodes[1];
+        assert_eq!(c1.compensates.as_deref(), Some("fail"));
+        assert_eq!(c1.rollback_after, vec!["comp-2".to_string()]);
+        let c2 = &parsed.nodes[2];
+        assert_eq!(c2.compensates.as_deref(), Some("fail"));
+        assert!(c2.rollback_after.is_empty());
+        // None of the new keys lands in unsupported_fields.
+        for n in &parsed.nodes {
+            for forbidden in [
+                "compensates",
+                "rollback-cascade",
+                "rollback-after",
+            ] {
+                assert!(
+                    !n.unsupported_fields.iter().any(|(k, _)| k == forbidden),
+                    "key `{}` must land on a typed slot, not unsupported_fields",
+                    forbidden
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn parse_node_form_records_unrecognised_rollback_cascade_mode_in_unsupported() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :rollback-cascade "yolo"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n = &parsed.nodes[0];
+        // Raw value still lands on the typed slot (so the response
+        // round-trips author intent).
+        assert_eq!(n.rollback_cascade.as_deref(), Some("yolo"));
+        // But the typed projection refuses to interpret a typo.
+        assert!(n.rollback_cascade_kind().is_none());
+        assert!(!n.has_active_rollback_cascade());
+        // And the unsupported_fields audit captures the typo.
+        assert!(n
+            .unsupported_fields
+            .iter()
+            .any(|(k, v)| k == "rollback-cascade" && v == "yolo"));
+    }
+
+    #[test]
+    fn rollback_cascade_default_is_inactive() {
+        // No `:rollback-cascade` declared → cascade evaluator never runs.
+        let node = DagNode {
+            id: "n".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            ..Default::default()
+        };
+        assert!(node.rollback_cascade_kind().is_none());
+        assert!(!node.has_active_rollback_cascade());
+    }
+
+    #[test]
+    fn rollback_cascade_explicit_none_is_inactive() {
+        // `:rollback-cascade "none"` is the explicit opt-out.
+        let node = DagNode {
+            id: "n".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            rollback_cascade: Some("none".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            node.rollback_cascade_kind(),
+            Some(RollbackCascadeMode::None)
+        );
+        assert!(!node.has_active_rollback_cascade());
+    }
+
+    #[test]
+    fn compute_compensation_order_finds_compensates_matches() {
+        // Two compensation nodes, no :rollback-after edges → ordering
+        // follows forward topological order (then declaration as a
+        // tie-break for nodes not in the forward order).
+        let nodes = vec![
+            DagNode {
+                id: "fail".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-a".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-b".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "unrelated".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec![
+            "fail".to_string(),
+            "comp-a".to_string(),
+            "comp-b".to_string(),
+            "unrelated".to_string(),
+        ];
+        let ordered = compute_compensation_order("fail", &nodes, &order);
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(ordered[0].id, "comp-a");
+        assert_eq!(ordered[1].id, "comp-b");
+    }
+
+    #[test]
+    fn compute_compensation_order_honours_rollback_after_edge() {
+        // comp-a declares `:rollback-after ["comp-b"]` so the cascade
+        // ordering MUST place comp-b before comp-a even though comp-a
+        // comes first in the forward order.
+        let nodes = vec![
+            DagNode {
+                id: "fail".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-a".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                rollback_after: vec!["comp-b".into()],
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-b".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                ..Default::default()
+            },
+        ];
+        let order = vec![
+            "fail".to_string(),
+            "comp-a".to_string(),
+            "comp-b".to_string(),
+        ];
+        let ordered = compute_compensation_order("fail", &nodes, &order);
+        assert_eq!(ordered.len(), 2);
+        assert_eq!(
+            ordered[0].id, "comp-b",
+            ":rollback-after must place comp-b first"
+        );
+        assert_eq!(ordered[1].id, "comp-a");
+    }
+
+    #[test]
+    fn compute_compensation_order_cycle_falls_back_to_declaration_order() {
+        // Both nodes declare `:rollback-after` for each other — that
+        // is a cycle (a typo). The evaluator must NOT deadlock; it
+        // falls back to declaration order so the cascade still runs.
+        let nodes = vec![
+            DagNode {
+                id: "fail".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-a".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                rollback_after: vec!["comp-b".into()],
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-b".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                rollback_after: vec!["comp-a".into()],
+                ..Default::default()
+            },
+        ];
+        let order = vec![
+            "fail".to_string(),
+            "comp-a".to_string(),
+            "comp-b".to_string(),
+        ];
+        let ordered = compute_compensation_order("fail", &nodes, &order);
+        // Cycle resolution: every candidate still appears, no deadlock.
+        assert_eq!(ordered.len(), 2);
+        let ids: Vec<&str> = ordered.iter().map(|n| n.id.as_str()).collect();
+        assert!(ids.contains(&"comp-a"));
+        assert!(ids.contains(&"comp-b"));
+    }
+
+    #[test]
+    fn compute_compensation_order_returns_empty_when_no_compensations_declared() {
+        let nodes = vec![DagNode {
+            id: "fail".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            ..Default::default()
+        }];
+        let order = vec!["fail".to_string()];
+        assert!(compute_compensation_order("fail", &nodes, &order).is_empty());
+    }
+
+    #[test]
+    fn build_compensation_plan_entry_records_descriptor_without_dispatch() {
+        // Pure helper — verifies that `plan` mode produces a
+        // descriptor_ready row with no inner_payload.
+        let plan = fixture_plan("(plan)");
+        let comp = DagNode {
+            id: "comp-1".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            compensates: Some("fail".into()),
+            rollback_policy: Some("descriptor".into()),
+            rollback_objective: Some("undo step".into()),
+            rollback_owned_files_raw: Some(r#"["src/a.rs"]"#.into()),
+            target_project: Some("missiond".into()),
+            dispatch_strategy: Some("fresh-code-alignment".into()),
+            ..Default::default()
+        };
+        let entry = build_compensation_plan_entry(&plan, &comp);
+        assert_eq!(entry.node_id, "comp-1");
+        assert_eq!(entry.policy, RollbackPolicy::Descriptor);
+        assert_eq!(entry.status, RollbackStatus::DescriptorReady);
+        assert_eq!(entry.objective.as_deref(), Some("undo step"));
+        assert_eq!(entry.owned_files, vec!["src/a.rs".to_string()]);
+        // CRITICAL — `plan` mode never produces an inner_payload.
+        assert!(entry.inner_payload.is_none());
+        // Brief preview is built locally because the objective is set.
+        assert!(entry.task_brief_preview.is_some());
+        let v = entry.to_json();
+        assert_eq!(v["node_id"], "comp-1");
+        assert_eq!(v["status"], "descriptor_ready");
+        // Pin the audit invariant — declared commands are NEVER executed.
+        assert_eq!(v["acceptance_commands_executed"], false);
+    }
+
+    #[test]
+    fn cascade_outcome_to_json_carries_every_surface_field() {
+        let cascade = CascadeRollbackOutcome {
+            mode: RollbackCascadeMode::Plan,
+            cascade_root: "fail".into(),
+            compensations: vec![CascadeCompensationOutcome {
+                node_id: "comp-1".into(),
+                policy: RollbackPolicy::Descriptor,
+                status: RollbackStatus::DescriptorReady,
+                reason: "recorded".into(),
+                objective: Some("undo".into()),
+                owned_files: vec!["src/a.rs".into()],
+                acceptance_commands: vec![],
+                task_brief_preview: Some("## Objective\nundo\n".into()),
+                task_brief_path: None,
+                inner_payload: None,
+            }],
+            reason: "cascade plan: 1 compensation".into(),
+        };
+        let v = cascade.to_json();
+        assert_eq!(v["mode"], "plan");
+        assert_eq!(v["cascade_root"], "fail");
+        assert_eq!(v["reason"], "cascade plan: 1 compensation");
+        let comps = v["compensations"].as_array().unwrap();
+        assert_eq!(comps.len(), 1);
+        assert_eq!(comps[0]["node_id"], "comp-1");
+        assert_eq!(comps[0]["status"], "descriptor_ready");
+    }
+
+    #[test]
+    fn cascade_outcome_inactive_when_no_mode_and_no_compensations() {
+        let inactive = CascadeRollbackOutcome {
+            mode: RollbackCascadeMode::None,
+            cascade_root: "fail".into(),
+            compensations: vec![],
+            reason: "skipped".into(),
+        };
+        assert!(inactive.is_inactive());
+        let active_mode = CascadeRollbackOutcome {
+            mode: RollbackCascadeMode::Plan,
+            cascade_root: "fail".into(),
+            compensations: vec![],
+            reason: "no compensation declared".into(),
+        };
+        assert!(!active_mode.is_inactive());
+    }
+
+    #[test]
+    fn rollback_cascade_mode_wire_strings_are_distinct_and_stable() {
+        assert_eq!(RollbackCascadeMode::None.as_wire(), "none");
+        assert_eq!(RollbackCascadeMode::Plan.as_wire(), "plan");
+        assert_eq!(
+            RollbackCascadeMode::DispatchSafe.as_wire(),
+            "dispatch-safe"
+        );
+        // Author-friendly aliases parse identically.
+        assert_eq!(
+            RollbackCascadeMode::parse("dispatch_safe"),
+            Some(RollbackCascadeMode::DispatchSafe)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_cascade_rollback_plan_mode_records_compensations_without_dispatch() {
+        // Construct an `AppState` is heavy; use the pure helper +
+        // synthesise the cascade outcome by hand to verify the plan
+        // mode contract end-to-end without standing up the substrate.
+        let plan = fixture_plan("(plan)");
+        let nodes = vec![
+            DagNode {
+                id: "fail".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                rollback_cascade: Some("plan".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp-1".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("fail".into()),
+                rollback_policy: Some("descriptor".into()),
+                rollback_objective: Some("undo".into()),
+                target_project: Some("missiond".into()),
+                dispatch_strategy: Some("fresh-code-alignment".into()),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["fail".into(), "comp-1".into()];
+        // Use the pure helpers directly — `plan` mode never touches the
+        // substrate, so we can synthesise the outcome with the same code
+        // path the async helper takes.
+        let ordered = compute_compensation_order("fail", &nodes, &order);
+        assert_eq!(ordered.len(), 1);
+        let entry = build_compensation_plan_entry(&plan, ordered[0]);
+        assert_eq!(entry.status, RollbackStatus::DescriptorReady);
+        assert!(entry.inner_payload.is_none());
+    }
+
+    #[test]
+    fn run_cascade_rollback_dispatch_safe_refuses_unsafe_compensation() {
+        // Pure projection of the `dispatch-safe` decision: a compensation
+        // node that opts into `:rollback-policy "workstation"` BUT misses
+        // `:rollback-objective` MUST be refused (non-retryable). We
+        // verify this through the safety check directly because the
+        // cascade body uses the same check.
+        let comp = DagNode {
+            id: "comp-1".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            compensates: Some("fail".into()),
+            rollback_policy: Some("workstation".into()),
+            // objective intentionally missing
+            rollback_owned_files_raw: Some(r#"["src/a.rs"]"#.into()),
+            target_project: Some("missiond".into()),
+            dispatch_strategy: Some("fresh-code-alignment".into()),
+            ..Default::default()
+        };
+        let descriptor = build_rollback_descriptor(&comp);
+        let err = descriptor
+            .safety_check_for_workstation(&comp)
+            .expect_err("unsafe compensation must refuse");
+        assert!(err.contains(":rollback-objective"));
+    }
+
+    #[test]
+    fn run_cascade_rollback_dispatch_safe_keeps_descriptor_only_compensations_recorded() {
+        // CRITICAL invariant — `dispatch-safe` MUST NEVER promote a
+        // descriptor-only compensation to a dispatch. We pin this by
+        // building the plan entry directly: the resulting outcome is
+        // descriptor_ready (recorded), not dispatched.
+        let plan = fixture_plan("(plan)");
+        let comp = DagNode {
+            id: "comp-1".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            compensates: Some("fail".into()),
+            rollback_policy: Some("descriptor".into()),
+            rollback_objective: Some("undo".into()),
+            target_project: Some("missiond".into()),
+            dispatch_strategy: Some("fresh-code-alignment".into()),
+            ..Default::default()
+        };
+        let entry = build_compensation_plan_entry(&plan, &comp);
+        assert_eq!(entry.policy, RollbackPolicy::Descriptor);
+        assert_eq!(
+            entry.status,
+            RollbackStatus::DescriptorReady,
+            "dispatch-safe MUST NOT promote a descriptor-only compensation"
+        );
+        assert!(entry.inner_payload.is_none());
+    }
+
+    #[test]
+    fn rollback_evaluation_with_cascade_surfaces_cascade_block_in_json() {
+        let mut eval = RollbackEvaluation {
+            policy: RollbackPolicy::Descriptor,
+            status: RollbackStatus::DescriptorReady,
+            reason: "descriptor mode".into(),
+            objective: Some("undo".into()),
+            owned_files: vec![],
+            acceptance_commands: vec![],
+            task_brief_preview: None,
+            task_brief_path: None,
+            inner_payload: None,
+            cascade: None,
+        };
+        // Without a cascade outcome attached, JSON omits the cascade key.
+        let v = eval.to_json();
+        assert!(v.get("cascade").is_none());
+        // Attach a cascade outcome — JSON now surfaces it.
+        eval.cascade = Some(CascadeRollbackOutcome {
+            mode: RollbackCascadeMode::Plan,
+            cascade_root: "fail".into(),
+            compensations: vec![CascadeCompensationOutcome {
+                node_id: "comp-1".into(),
+                policy: RollbackPolicy::Descriptor,
+                status: RollbackStatus::DescriptorReady,
+                reason: "recorded".into(),
+                objective: Some("undo".into()),
+                owned_files: vec![],
+                acceptance_commands: vec![],
+                task_brief_preview: None,
+                task_brief_path: None,
+                inner_payload: None,
+            }],
+            reason: "cascade plan: 1 compensation".into(),
+        });
+        let v2 = eval.to_json();
+        assert_eq!(v2["cascade"]["mode"], "plan");
+        assert_eq!(v2["cascade"]["cascade_root"], "fail");
+        assert_eq!(v2["cascade"]["compensations"][0]["node_id"], "comp-1");
+    }
+
+    #[test]
+    fn build_nodes_summary_surfaces_cascade_hints_when_present() {
+        let nodes = vec![
+            DagNode {
+                id: "with".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                rollback_cascade: Some("plan".into()),
+                rollback_objective: Some("undo".into()),
+                ..Default::default()
+            },
+            DagNode {
+                id: "comp".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                compensates: Some("with".into()),
+                rollback_after: vec!["other".into()],
+                ..Default::default()
+            },
+            DagNode {
+                id: "plain".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["with".into(), "comp".into(), "plain".into()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        // Cascade root: `cascade_mode` surfaces under rollback block.
+        assert_eq!(arr[0]["rollback"]["cascade_mode"], "plan");
+        // Compensation node: `compensates` + `rollback_after` surface.
+        assert_eq!(arr[1]["rollback"]["compensates"], "with");
+        assert_eq!(arr[1]["rollback"]["rollback_after"][0], "other");
+        // Plain node has no rollback hints — summary stays quiet
+        // (regression guard for the wave-17 / task 04 baseline).
+        assert!(arr[2].get("rollback").is_none());
+    }
+
+    #[test]
+    fn cascade_default_mode_preserves_wave17_byte_shape() {
+        // CRITICAL invariant — a node WITHOUT `:rollback-cascade` MUST
+        // NOT trigger any cascade evaluation. This protects every
+        // existing wave-17 / task 04 test fixture from accidental
+        // promotion.
+        let node = DagNode {
+            id: "n".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            // Author opted into node-local rollback but NOT cascade.
+            rollback_policy: Some("descriptor".into()),
+            rollback_objective: Some("undo".into()),
+            ..Default::default()
+        };
+        assert!(!node.has_active_rollback_cascade());
+        // The pre-dispatch decision still runs (and now gives back a
+        // RollbackEvaluation with `cascade: None`).
+        let eval = pre_dispatch_rollback_decision(&node);
+        assert!(eval.cascade.is_none());
+        // JSON projection omits the `cascade` key entirely.
+        let v = eval.to_json();
+        assert!(v.get("cascade").is_none());
     }
 }

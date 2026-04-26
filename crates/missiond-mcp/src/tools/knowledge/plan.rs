@@ -475,7 +475,7 @@ fn build_properties() -> Value {
     // aborted.
     p.insert("rollback_policy".into(), prop_enum(
         "string",
-        "[execute scheduler_mode=dag_v1] (wave-17 / task 04) per-node rollback policy (PLAN.lisp hint `:rollback-policy`). `none` (default) preserves the pre-wave17 contract — failed node taints downstream per `:failure-policy`, no rollback descriptor / dispatch. `descriptor` records the rollback intent (objective + owned files + acceptance commands + brief preview) on the response and an audit row, but NEVER dispatches. `workstation` opts into automatic rollback dispatch through the wave-15 workstation-dispatch substrate — only when ALL safety gates pass: target-project (or requested-cwd) resolved, `:rollback-objective` non-empty, `:rollback-owned-files` non-empty, `:dispatch-strategy` on the safe whitelist {fresh-code-alignment, resident-lisp, agent-team, mixed}. Otherwise surfaces as `rollback_status=\"refused\"` with the failing condition. Unrecognised raw values fall back to absent (no rollback) and surface in `node_hint_summary.unsupported_fields` so typos are loud. The rollback pass NEVER alters failure-policy semantics: downstream taint propagation runs identically afterwards.",
+        "[execute scheduler_mode=dag_v1] (wave-17 / task 04) per-node rollback policy (PLAN.lisp hint `:rollback-policy`). `none` (default) preserves the pre-wave17 contract — failed node taints downstream per `:failure-policy`, no rollback descriptor / dispatch. `descriptor` records the rollback intent (objective + owned files + acceptance commands + brief preview) on the response and an audit row, but NEVER dispatches. `workstation` opts into automatic rollback dispatch through the wave-15 workstation-dispatch substrate — only when ALL safety gates pass: target-project (or requested-cwd) resolved, `:rollback-objective` non-empty, `:rollback-owned-files` non-empty, `:dispatch-strategy` on the safe whitelist {fresh-code-alignment, resident-lisp, agent-team, mixed}. Otherwise surfaces as `rollback_status=\"refused\"` with the failing condition. Unrecognised raw values fall back to absent (no rollback) and surface in `node_hint_summary.unsupported_fields` so typos are loud. The rollback pass NEVER alters failure-policy semantics: downstream taint propagation runs identically afterwards. Wave 18 / Task 04: when a failed node ALSO declares `:rollback-cascade \"plan\"` or `\"dispatch-safe\"`, the cascade evaluator runs AFTER the node-local rollback and folds an ordered compensation plan onto `node_results[].rollback.cascade` (every plan node carrying `:compensates \"<failed-node-id>\"`, ordered by `:rollback-after`). `plan` mode never dispatches; `dispatch-safe` only dispatches compensation nodes that pass the wave-17 / task 04 safety gate (descriptor-only or absent compensations stay `descriptor_ready` — never silently promoted). Refusals are non-retryable; the cascade NEVER prompts the fallback path.",
         &["none", "descriptor", "workstation"],
     ));
 
@@ -490,6 +490,43 @@ fn build_properties() -> Value {
 
     p.insert("rollback_acceptance_commands".into(), prop_no_type(
         "[execute scheduler_mode=dag_v1 rollback_policy=descriptor|workstation] (wave-17 / task 04) string or array of acceptance commands the rollback task must pass before commit (PLAN.lisp hint `:rollback-acceptance-commands`). Surfaced verbatim into the rollback brief AND the descriptor + evidence row, BUT the scheduler NEVER executes them (mirrors the wave-17 / task 03 acceptance-commands invariant — `acceptance_commands_executed=false` is pinned on every rollback evaluation).",
+    ));
+
+    // ── wave-18 / task 04 — PLAN-DAG conservative cascade rollback ──────
+    //
+    // These knobs only fire under `scheduler_mode=dag_v1` and only on
+    // a node's FINAL failed attempt, AFTER the wave-17 / task 04 node-local
+    // rollback evaluator. The cascade evaluator is conservative:
+    //
+    //   * Defaults to `none` — node-local rollback behaviour is preserved
+    //     byte-for-byte for plans that did not opt in.
+    //   * `plan` mode ONLY records intent (which compensation nodes WOULD
+    //     run, in what order). NEVER dispatches.
+    //   * `dispatch-safe` mode dispatches a compensation node ONLY when
+    //     that compensation node's own rollback safety gates pass
+    //     (`:rollback-policy "workstation"` + every wave-17 / task 04 gate).
+    //     SafeDescriptor / safety-gate refusals are recorded as
+    //     `refused`, NEVER retried, and the cascade NEVER prompts the
+    //     fallback path.
+    //
+    // Compensation discovery: every plan node carrying
+    // `:compensates "<failed-node-id>"` is a candidate. Ordering
+    // follows the topological order induced by `:rollback-after`
+    // (cycle-tolerant — falls back to declaration order when a typo
+    // creates a cycle so the cascade never deadlocks).
+    p.insert("compensates".into(), prop(
+        "string",
+        "[PLAN.lisp node hint only — not a top-level arg] (wave-18 / task 04) failed-node id this node compensates for. Spelled `:compensates \"<failed-node-id>\"` in PLAN.lisp. Pure metadata: declaring `:compensates` does NOT make this node dispatch automatically — only the cascade evaluator (running AFTER the named node fails AND only when the failed node opted into `:rollback-cascade`) consults the field.",
+    ));
+
+    p.insert("rollback_cascade".into(), prop_enum(
+        "string",
+        "[PLAN.lisp node hint only — not a top-level arg] (wave-18 / task 04) per-node cascade rollback mode (PLAN.lisp hint `:rollback-cascade`). `none` (default) preserves the wave-17 / task 04 byte shape — only the node-local rollback runs. `plan` records the ordered cascade plan (every compensation node carrying `:compensates \"<this-failed-node>\"`) on the response + an audit row, but NEVER dispatches. `dispatch-safe` records the same plan AND, for every compensation node whose own rollback safety gates pass (`:rollback-policy \"workstation\"` + the wave-17 / task 04 gates), dispatches it through the wave-15 workstation substrate. SafeDescriptor / safety-gate refusals are non-retryable; the cascade NEVER prompts the fallback path. Compensation nodes that did not opt into `:rollback-policy \"workstation\"` (descriptor-only or absent) stay `descriptor_ready` — `dispatch-safe` will NOT promote a non-workstation compensation to a dispatch. Unrecognised raw values fall back to `none` and surface in `node_hint_summary.unsupported_fields` so typos are loud. Cascade ordering follows `:rollback-after` (cycle-tolerant — typos fall back to declaration order so the cascade never deadlocks).",
+        &["none", "plan", "dispatch-safe"],
+    ));
+
+    p.insert("rollback_after".into(), prop_no_type(
+        "[PLAN.lisp node hint only — not a top-level arg] (wave-18 / task 04) ordering hint for cascade compensation order. Spelled `:rollback-after [\"node-a\" \"node-b\"]` in PLAN.lisp (also accepts paren list and bareword run). When two compensation nodes both declare `:compensates` for the same failed node, the cascade evaluator runs them in the topological order induced by `:rollback-after`. NOT promoted to a real `:depends-on` — cascade ordering MUST NOT silently change forward dispatch order. Cycles in the `:rollback-after` graph fall back to declaration order so a typo never deadlocks the cascade.",
     ));
 
     // ── wave-17 / task 02 — PLAN-DAG claim / lease discipline ──────────
@@ -674,6 +711,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
          task_brief_preview (有则) / inner_result (workstation dispatched / failed 时)。Failure-policy 交互: \
          rollback 在最终失败 attempt **之后**, downstream taint propagation **之前**; 下游行为仍由 \
          existing :failure-policy 决定, rollback 永不 alter taint / fail-fast。\
+         wave-18 / task 04 PLAN-DAG conservative cascade rollback: 节点可声明 \
+         :rollback-cascade `none|plan|dispatch-safe` (默认 none, 保留 wave-17/04 byte shape), \
+         :compensates `<failed-node-id>` (其它节点声明此字段表示 compensate 该 failed node), \
+         :rollback-after [...] (compensation 节点之间可选 ordering hint, 永不提升为 :depends-on)。\
+         `plan` 模式仅记录 ordered compensation plan (每个 compensation 节点的 descriptor + brief preview), \
+         绝不 dispatch; `dispatch-safe` 模式仅在每个 compensation 节点自身 rollback safety gates 全过 \
+         (:rollback-policy \"workstation\" + 全部 wave-17/04 gates) 时才 dispatch, 否则 refused 不 retry。\
+         Compensation 节点没有 :rollback-policy \"workstation\" (descriptor 或缺省) 在 dispatch-safe 模式下 \
+         也只记 descriptor_ready, 绝不被自动升级 dispatch。SafeDescriptor / safety-gate 拒绝同样 collapse 到 \
+         refused, 永不 prompt fallback。Cascade ordering 用 :rollback-after 拓扑排序 (cycle-tolerant, \
+         typo 出现 cycle 时 fallback 到 declaration order 防 deadlock)。Cascade 结果挂在 \
+         node_results[].rollback.cascade + evidence.rollback_cascade_* 字段 \
+         (mode / cascade_root / compensations[] / reason)。绝不 arbitrary rollback code execution: \
+         cascade 评估者只 dispatch wave-15 workstation substrate, 绝不直接 shell out 或 prompt fallback。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \
