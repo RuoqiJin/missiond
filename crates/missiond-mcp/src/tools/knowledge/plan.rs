@@ -375,7 +375,74 @@ fn build_properties() -> Value {
     ));
 
     p.insert("acceptance_evidence_keys".into(), prop_no_type(
-        "[execute scheduler_mode=dag_v1 acceptance_mode=evidence_keys] (wave-17 / task 03) string or array of required keys (PLAN.lisp hint `:acceptance-evidence-keys`). The evaluator scans the inner payload — top-level object first, then well-known nested holders (`evidence`, `typed_evidence`, `inner_result`, `inner_dispatch`, `result`) — and accepts only when every required key is present. Empty list under `acceptance_mode=evidence_keys` degrades to `manual_required` so the typo is loud.",
+        "[execute scheduler_mode=dag_v1 acceptance_mode=evidence_keys] (wave-17 / task 03) string or array of required keys (PLAN.lisp hint `:acceptance-evidence-keys`). The evaluator scans the inner payload — top-level object first, then well-known nested holders (`evidence`, `typed_evidence`, `inner_result`, `inner_dispatch`, `result`) — and accepts only when every required key is present. Empty list under `acceptance_mode=evidence_keys` degrades to `manual_required` so the typo is loud. Wave 18 / Task 03: in cross-node fan-in mode (`:acceptance-requires \"evidence_keys\"`) the SAME list is used to inspect the source node's `inner_payload`.",
+    ));
+
+    // ── wave-18 / task 03 — PLAN-DAG cross-node acceptance fan-in ──────
+    //
+    // These knobs are PLAN.lisp node hints (parsed from `(node ...)`)
+    // and are NOT plumbed as top-level args. They opt the node's
+    // acceptance phase into a conservative dependency on prior nodes'
+    // terminal status / evidence. Documented here so callers can pin
+    // the shape against `node_results[].acceptance.fan_in` without
+    // hunting through the source.
+    //
+    // PLAN.lisp surface:
+    //   `:acceptance-depends-on ["node-a" "node-b"]`
+    //   `:acceptance-requires "all_succeeded" | "any_succeeded" | "evidence_keys"`
+    //   `:acceptance-source-node "node-a"`   (only under `evidence_keys`)
+    //
+    // Constraints (validator raises structured errors otherwise):
+    //   * Every entry in `:acceptance-depends-on` MUST be a declared
+    //     plan node id AND a (transitive) `:depends-on` ancestor of
+    //     the current node — acceptance deps NEVER silently change
+    //     dispatch order.
+    //   * Non-empty `:acceptance-depends-on` requires a recognised
+    //     `:acceptance-requires` mode.
+    //   * `evidence_keys` mode requires `:acceptance-source-node` to
+    //     point at one of the deps.
+    //
+    // Evaluator behaviour:
+    //   * `all_succeeded` — fan-in passes when every listed node is
+    //     `Succeeded`.
+    //   * `any_succeeded` — fan-in passes when at least one listed node
+    //     is `Succeeded`.
+    //   * `evidence_keys` — fan-in passes when the source node's
+    //     `inner_payload` contains every key declared in
+    //     `:acceptance-evidence-keys` (descends into the same
+    //     well-known nested holders the wave-17 evidence_keys mode
+    //     uses).
+    //
+    // Interaction with the wave-17 per-node evaluator:
+    //   * Per-node `Rejected` / `ManualRequired` always dominates;
+    //     fan-in is recorded for audit but does NOT promote a node.
+    //   * Per-node `Accepted` / `NotEvaluated` paired with a fan-in
+    //     PASS keeps / promotes the node to `Accepted`.
+    //   * Fan-in FAIL flips the node to `Rejected` (taint propagates,
+    //     fail-fast trips per `:failure-policy`).
+    //
+    // Surface (per-node response + evidence row):
+    //   `node_results[].acceptance.fan_in = {
+    //       mode, source_nodes, passed, reason
+    //   }`
+    //   evidence extra fields:
+    //     `acceptance_fan_in` / `acceptance_fan_in_mode` /
+    //     `acceptance_fan_in_source_nodes` /
+    //     `acceptance_fan_in_passed` / `acceptance_fan_in_reason`.
+
+    p.insert("acceptance_depends_on".into(), prop_no_type(
+        "[PLAN.lisp node hint only — not a top-level arg] (wave-18 / task 03) array of prior node ids the current node's acceptance phase depends on. Spelled `:acceptance-depends-on` in PLAN.lisp. Every entry MUST be a (transitive) `:depends-on` ancestor of the current node — the validator raises a structured error otherwise so acceptance deps cannot silently change execution order.",
+    ));
+
+    p.insert("acceptance_requires".into(), prop_enum(
+        "string",
+        "[PLAN.lisp node hint only — not a top-level arg] (wave-18 / task 03) cross-node acceptance fan-in mode. Spelled `:acceptance-requires` in PLAN.lisp. `all_succeeded` accepts when every node in `:acceptance-depends-on` is Succeeded; `any_succeeded` accepts when at least one is Succeeded; `evidence_keys` reads `:acceptance-evidence-keys` from the `:acceptance-source-node`'s inner payload. Required when `:acceptance-depends-on` is non-empty; unrecognised values fail the build with a structured error.",
+        &["all_succeeded", "any_succeeded", "evidence_keys"],
+    ));
+
+    p.insert("acceptance_source_node".into(), prop(
+        "string",
+        "[PLAN.lisp node hint only — not a top-level arg] (wave-18 / task 03) single source node id for `:acceptance-requires \"evidence_keys\"` fan-in. Spelled `:acceptance-source-node` in PLAN.lisp. MUST appear in the same node's `:acceptance-depends-on` list.",
     ));
 
     // ── wave-17 / task 04 — PLAN-DAG conservative rollback descriptors ──

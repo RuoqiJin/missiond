@@ -183,6 +183,36 @@ pub(super) struct DagNode {
     /// string and split via `split_lisp_string_list` at evaluation time
     /// (same shape as `:owned-files` / `:acceptance-commands`).
     pub acceptance_evidence_keys_raw: Option<String>,
+    /// wave-18 / task 03 — cross-node acceptance fan-in dependencies.
+    /// `:acceptance-depends-on ["node-a" "node-b"]`. When non-empty, the
+    /// node's acceptance phase additionally inspects the listed prior
+    /// nodes' terminal state / evidence per `acceptance_requires_raw`
+    /// before deciding accept / reject. Each entry MUST also appear as
+    /// a (transitive) `:depends-on` ancestor of this node — otherwise
+    /// the prior node's evidence may not yet exist when this node's
+    /// acceptance phase runs (validator raises
+    /// `DagBuildError::AcceptanceFanInDepNotAncestor`).
+    pub acceptance_depends_on: Vec<String>,
+    /// wave-18 / task 03 — fan-in policy. Recognised:
+    ///   `all_succeeded` — every listed node must be Succeeded.
+    ///   `any_succeeded` — at least one listed node must be Succeeded.
+    ///   `evidence_keys` — read keys (`:acceptance-evidence-keys`) from
+    ///                     the source node's `inner_payload`. Source
+    ///                     resolves to `:acceptance-source-node` (single
+    ///                     id, must be in `acceptance_depends_on`).
+    /// Absent / blank with NO `:acceptance-depends-on` is the wave-17
+    /// shape (no fan-in); absent with `:acceptance-depends-on` declared
+    /// raises `DagBuildError::AcceptanceFanInRequiresMissing`.
+    /// Unknown raw values land BOTH on the typed slot AND in
+    /// `unsupported_fields` so the typo surfaces through
+    /// `node_hint_summary`; the validator then raises a structured
+    /// error so the typo cannot silently degrade fan-in to "no check".
+    pub acceptance_requires_raw: Option<String>,
+    /// wave-18 / task 03 — single source-node id for `evidence_keys`
+    /// fan-in mode. MUST be present in `acceptance_depends_on` and the
+    /// plan node set; the validator raises a structured error otherwise.
+    /// Ignored under `all_succeeded` / `any_succeeded` modes.
+    pub acceptance_source_node: Option<String>,
     pub workstation_dispatch_flag: Option<String>,
     /// wave-16 / task 04 — per-node review-gate hint contract.
     /// `:review-gate` is the gate kind ("none" default, "question-event"
@@ -341,8 +371,8 @@ impl DagNode {
     }
 
     /// wave-17 / task 03 — true iff this node carries any acceptance
-    /// hint at all (mode / commands / evidence keys). Used by the
-    /// scheduler to skip the acceptance-evidence emit when the node
+    /// hint at all (mode / commands / evidence keys / fan-in). Used by
+    /// the scheduler to skip the acceptance-evidence emit when the node
     /// did not opt in (preserves the wave-13 byte shape).
     pub(super) fn has_acceptance_hints(&self) -> bool {
         let mode_present = self
@@ -360,7 +390,38 @@ impl DagNode {
             .as_deref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        mode_present || commands_present || keys_present
+        // wave-18 / task 03 — fan-in declarations also count as hints
+        // so the scheduler emits the acceptance evidence row even when
+        // the per-node acceptance is `not_evaluated`.
+        let fan_in_present = !self.acceptance_depends_on.is_empty()
+            || self
+                .acceptance_requires_raw
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+        mode_present || commands_present || keys_present || fan_in_present
+    }
+
+    /// wave-18 / task 03 — typed projection of `:acceptance-requires`.
+    /// Returns `None` when the author did not declare a value OR wrote an
+    /// unrecognised one (the parser also pushes unrecognised values into
+    /// `unsupported_fields`). The validator turns "fan-in deps declared
+    /// but no recognised mode" into a structured error so the typo cannot
+    /// silently disable the gate.
+    pub(super) fn acceptance_requires_kind(&self) -> Option<AcceptanceRequires> {
+        let raw = self.acceptance_requires_raw.as_deref()?.trim();
+        if raw.is_empty() {
+            return None;
+        }
+        AcceptanceRequires::parse(raw)
+    }
+
+    /// wave-18 / task 03 — true iff this node opted into cross-node
+    /// acceptance fan-in (one or more `:acceptance-depends-on` entries
+    /// AND a recognised `:acceptance-requires` mode).
+    pub(super) fn has_acceptance_fan_in(&self) -> bool {
+        !self.acceptance_depends_on.is_empty()
+            && self.acceptance_requires_kind().is_some()
     }
 
     /// wave-17 / task 04 — typed projection of `:rollback-policy`.
@@ -470,6 +531,61 @@ impl AcceptanceMode {
     }
 }
 
+/// wave-18 / task 03 — typed projection of `:acceptance-requires` for
+/// the cross-node acceptance fan-in evaluator. Resolved on the parser
+/// side so the runtime can pivot without re-tokenising the raw string.
+///
+/// Three modes are recognised:
+///   * `AllSucceeded` — fan-in passes when every node listed in
+///                      `:acceptance-depends-on` reached terminal state
+///                      `Succeeded`.
+///   * `AnySucceeded` — fan-in passes when at least one listed node
+///                      reached terminal state `Succeeded`.
+///   * `EvidenceKeys` — fan-in passes when the `:acceptance-source-node`'s
+///                      `inner_payload` contains every key declared in
+///                      `:acceptance-evidence-keys`. Reuses the wave-17
+///                      sidecar shape (top-level + well-known nested
+///                      holders); the scheduler NEVER re-runs the source
+///                      node — it only inspects the recorded payload.
+///
+/// `None` (returned by [`DagNode::acceptance_requires_kind`]) means the
+/// author either did not declare the field OR wrote an unrecognised
+/// value. The validator raises a structured error in that case if the
+/// node also declared `:acceptance-depends-on`, so the typo cannot
+/// silently degrade fan-in to "no gate".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum AcceptanceRequires {
+    AllSucceeded,
+    AnySucceeded,
+    EvidenceKeys,
+}
+
+impl AcceptanceRequires {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            AcceptanceRequires::AllSucceeded => "all_succeeded",
+            AcceptanceRequires::AnySucceeded => "any_succeeded",
+            AcceptanceRequires::EvidenceKeys => "evidence_keys",
+        }
+    }
+
+    /// Parse a raw `:acceptance-requires` value. Trims + lowercases;
+    /// `_` and `-` separators are interchangeable so authors can write
+    /// either `all_succeeded` or `all-succeeded`. Unknown values yield
+    /// `None` so the parser can land them in `unsupported_fields` AND
+    /// the validator can raise a structured error instead of silently
+    /// degrading fan-in to a no-op.
+    pub(super) fn parse(raw: &str) -> Option<Self> {
+        let lc = raw.trim().to_ascii_lowercase();
+        match lc.as_str() {
+            "all_succeeded" | "all-succeeded" => Some(AcceptanceRequires::AllSucceeded),
+            "any_succeeded" | "any-succeeded" => Some(AcceptanceRequires::AnySucceeded),
+            "evidence_keys" | "evidence-keys" => Some(AcceptanceRequires::EvidenceKeys),
+            _ => None,
+        }
+    }
+}
+
 /// wave-17 / task 03 — outcome of the deterministic acceptance phase.
 /// Drives whether a successful dispatch becomes `Succeeded`, `Failed`,
 /// or `Paused (manual_required)`.
@@ -519,6 +635,12 @@ pub(super) struct AcceptanceEvaluation {
     pub evidence_keys: Vec<String>,
     /// Human-readable explanation of the decision. Always populated.
     pub reason: String,
+    /// wave-18 / task 03 — cross-node acceptance fan-in outcome. `None`
+    /// when the author did not declare any fan-in hints; `Some(...)`
+    /// captures the resolved mode + source nodes + result + reason so
+    /// downstream observers can audit the decision without re-deriving
+    /// it from the prior nodes' evidence.
+    pub fan_in: Option<AcceptanceFanInOutcome>,
 }
 
 impl AcceptanceEvaluation {
@@ -530,18 +652,55 @@ impl AcceptanceEvaluation {
             && self.mode.is_none()
             && self.commands.is_empty()
             && self.evidence_keys.is_empty()
+            && self.fan_in.is_none()
     }
 
     /// Project the evaluation as a JSON block suitable for
     /// `node_results[].acceptance` / `evidence.acceptance`. Stable shape
     /// — every field is always present so consumers don't have to
-    /// branch on absence.
+    /// branch on absence. The `fan_in` block is omitted when the
+    /// author did not opt into cross-node fan-in so the wave-17
+    /// byte-shape is preserved for callers that did not declare it.
     pub(super) fn to_json(&self) -> Value {
-        json!({
+        let mut v = json!({
             "status": self.status.as_wire(),
             "mode": self.mode.map(|m| m.as_wire()),
             "commands": self.commands,
             "evidence_keys": self.evidence_keys,
+            "reason": self.reason,
+        });
+        if let Some(f) = &self.fan_in {
+            v["fan_in"] = f.to_json();
+        }
+        v
+    }
+}
+
+/// wave-18 / task 03 — pure result of evaluating cross-node acceptance
+/// fan-in. Always carries the resolved mode + source nodes + decision
+/// so observers can audit the gate without re-walking prior nodes'
+/// evidence.
+#[derive(Debug, Clone)]
+pub(super) struct AcceptanceFanInOutcome {
+    pub mode: AcceptanceRequires,
+    /// Source nodes that participated in this fan-in evaluation, in
+    /// the order the author declared them. For `evidence_keys` mode
+    /// this is a single-element list (the resolved
+    /// `:acceptance-source-node`).
+    pub source_nodes: Vec<String>,
+    /// `true` iff the fan-in passed (gate satisfied). When `false`,
+    /// the parent acceptance evaluation flips its status to `Rejected`.
+    pub passed: bool,
+    /// Human-readable explanation of the decision. Always populated.
+    pub reason: String,
+}
+
+impl AcceptanceFanInOutcome {
+    pub(super) fn to_json(&self) -> Value {
+        json!({
+            "mode": self.mode.as_wire(),
+            "source_nodes": self.source_nodes,
+            "passed": self.passed,
             "reason": self.reason,
         })
     }
@@ -1012,6 +1171,28 @@ pub(super) fn evaluate_node_acceptance(
             commands,
             evidence_keys,
             reason: "no acceptance hints declared".to_string(),
+            fan_in: None,
+        };
+    }
+
+    // wave-18 / task 03 — when the node opted into cross-node fan-in
+    // AND did NOT declare a per-node `:acceptance-mode`, the
+    // `:acceptance-evidence-keys` list is owned by the fan-in
+    // evaluator (its `evidence_keys` mode reads them off the source
+    // node's payload). Surface a `NotEvaluated` per-node decision in
+    // that case so `apply_acceptance_fan_in` is the sole decider; the
+    // wave-17 "keys without mode → manual_required" warning would
+    // otherwise pre-empt fan-in.
+    if mode.is_none() && commands.is_empty() && node.has_acceptance_fan_in() {
+        return AcceptanceEvaluation {
+            status: AcceptanceStatus::NotEvaluated,
+            mode: None,
+            commands,
+            evidence_keys,
+            reason:
+                "per-node acceptance deferred to cross-node fan-in evaluator"
+                    .to_string(),
+            fan_in: None,
         };
     }
 
@@ -1022,6 +1203,7 @@ pub(super) fn evaluate_node_acceptance(
             commands,
             evidence_keys,
             reason: "acceptance-mode=manual; human approval required".to_string(),
+            fan_in: None,
         },
         Some(AcceptanceMode::InnerStatus) => {
             if !dispatch_succeeded {
@@ -1031,6 +1213,7 @@ pub(super) fn evaluate_node_acceptance(
                     commands,
                     evidence_keys,
                     reason: "inner_status: dispatch classification was not Ok".to_string(),
+                    fan_in: None,
                 };
             }
             if let Some(detail) = inner_payload_failure_signal(inner_payload) {
@@ -1043,6 +1226,7 @@ pub(super) fn evaluate_node_acceptance(
                         "inner_status: inner payload reports non-success ({})",
                         detail
                     ),
+                    fan_in: None,
                 }
             } else {
                 AcceptanceEvaluation {
@@ -1052,6 +1236,7 @@ pub(super) fn evaluate_node_acceptance(
                     evidence_keys,
                     reason: "inner_status: dispatch Ok and payload carries no error signal"
                         .to_string(),
+                    fan_in: None,
                 }
             }
         }
@@ -1065,6 +1250,7 @@ pub(super) fn evaluate_node_acceptance(
                     reason:
                         "evidence_keys mode declared but :acceptance-evidence-keys is empty"
                             .to_string(),
+                    fan_in: None,
                 };
             }
             let missing = inner_payload_missing_keys(inner_payload, &evidence_keys);
@@ -1076,6 +1262,7 @@ pub(super) fn evaluate_node_acceptance(
                     evidence_keys,
                     reason: "evidence_keys: all required keys present in inner payload"
                         .to_string(),
+                    fan_in: None,
                 }
             } else {
                 AcceptanceEvaluation {
@@ -1087,6 +1274,7 @@ pub(super) fn evaluate_node_acceptance(
                         "evidence_keys: missing required keys {:?}",
                         missing
                     ),
+                    fan_in: None,
                 }
             }
         }
@@ -1113,9 +1301,214 @@ pub(super) fn evaluate_node_acceptance(
                 commands,
                 evidence_keys,
                 reason,
+                fan_in: None,
             }
         }
     }
+}
+
+/// wave-18 / task 03 — apply cross-node acceptance fan-in on top of the
+/// per-node evaluation. Pure: never touches the bus, never executes
+/// shell, only inspects the prior nodes' terminal lifecycle state and
+/// recorded `inner_payload`. Runs AFTER `evaluate_node_acceptance`; the
+/// per-node status acts as a precondition:
+///
+///   * `NotEvaluated` (no per-node hints) — fan-in still runs because
+///     `:acceptance-depends-on` is itself an opt-in. Pass flips status
+///     to `Accepted`; fail flips it to `Rejected`.
+///   * `Accepted`     — fan-in pass keeps `Accepted`; fail flips to
+///                       `Rejected`.
+///   * `Rejected` / `ManualRequired` — the per-node decision dominates.
+///                       Fan-in is recorded for audit but does NOT
+///                       override the parent decision (we don't promote
+///                       a rejected node to accepted, and we don't
+///                       de-pause a manual_required node).
+///
+/// `prior_results` is the scheduler's `results_by_id` snapshot keyed by
+/// node id; each entry's `state` and `inner_payload` are the source of
+/// truth. Missing source entries (which the validator forbids at build
+/// time) collapse to a fan-in failure with a loud reason — defence in
+/// depth in case the scheduler ever calls this without the validator.
+pub(super) fn apply_acceptance_fan_in(
+    base: AcceptanceEvaluation,
+    node: &DagNode,
+    prior_results: &HashMap<String, &NodeResult>,
+) -> AcceptanceEvaluation {
+    if !node.has_acceptance_fan_in() {
+        return base;
+    }
+    // SAFETY: `has_acceptance_fan_in` already proved both halves are
+    // present + recognised, so the unwraps below cannot fire.
+    let mode = node.acceptance_requires_kind().expect(
+        "has_acceptance_fan_in implies acceptance_requires_kind() is Some — \
+         validator must have raised earlier",
+    );
+    let source_nodes: Vec<String> = node.acceptance_depends_on.clone();
+
+    // Per-node evaluation must dominate when it already produced a
+    // terminal "do not accept" signal. We still record the fan-in for
+    // audit so observers can see what the gate would have decided.
+    let parent_dominates = matches!(
+        base.status,
+        AcceptanceStatus::Rejected | AcceptanceStatus::ManualRequired
+    );
+
+    let outcome = match mode {
+        AcceptanceRequires::AllSucceeded => {
+            let mut failing: Vec<String> = Vec::new();
+            for id in &source_nodes {
+                let succeeded = prior_results
+                    .get(id)
+                    .map(|r| matches!(r.state, NodeState::Succeeded))
+                    .unwrap_or(false);
+                if !succeeded {
+                    failing.push(id.clone());
+                }
+            }
+            if failing.is_empty() {
+                AcceptanceFanInOutcome {
+                    mode,
+                    source_nodes: source_nodes.clone(),
+                    passed: true,
+                    reason: format!(
+                        "all_succeeded: every source node ({}) reached succeeded",
+                        source_nodes.len()
+                    ),
+                }
+            } else {
+                AcceptanceFanInOutcome {
+                    mode,
+                    source_nodes: source_nodes.clone(),
+                    passed: false,
+                    reason: format!(
+                        "all_succeeded: source node(s) not succeeded: {:?}",
+                        failing
+                    ),
+                }
+            }
+        }
+        AcceptanceRequires::AnySucceeded => {
+            let mut succeeded_any = false;
+            for id in &source_nodes {
+                if let Some(r) = prior_results.get(id) {
+                    if matches!(r.state, NodeState::Succeeded) {
+                        succeeded_any = true;
+                        break;
+                    }
+                }
+            }
+            if succeeded_any {
+                AcceptanceFanInOutcome {
+                    mode,
+                    source_nodes: source_nodes.clone(),
+                    passed: true,
+                    reason: "any_succeeded: at least one source node reached succeeded"
+                        .to_string(),
+                }
+            } else {
+                AcceptanceFanInOutcome {
+                    mode,
+                    source_nodes: source_nodes.clone(),
+                    passed: false,
+                    reason: format!(
+                        "any_succeeded: no source node ({}) reached succeeded",
+                        source_nodes.len()
+                    ),
+                }
+            }
+        }
+        AcceptanceRequires::EvidenceKeys => {
+            // Validator guarantees `acceptance_source_node` is set AND
+            // present in `acceptance_depends_on` AND in the plan, but
+            // we defend in depth — a missing entry fails the gate
+            // loudly instead of silently passing.
+            let source_id = node
+                .acceptance_source_node
+                .clone()
+                .unwrap_or_default();
+            let single_source = vec![source_id.clone()];
+            let keys = super::plan::split_lisp_string_list(
+                node.acceptance_evidence_keys_raw.as_deref(),
+            );
+            if source_id.is_empty() {
+                AcceptanceFanInOutcome {
+                    mode,
+                    source_nodes: source_nodes.clone(),
+                    passed: false,
+                    reason: "evidence_keys: :acceptance-source-node is missing"
+                        .to_string(),
+                }
+            } else if keys.is_empty() {
+                AcceptanceFanInOutcome {
+                    mode,
+                    source_nodes: single_source,
+                    passed: false,
+                    reason:
+                        "evidence_keys: :acceptance-evidence-keys is empty — nothing to prove"
+                            .to_string(),
+                }
+            } else {
+                match prior_results.get(&source_id) {
+                    None => AcceptanceFanInOutcome {
+                        mode,
+                        source_nodes: single_source,
+                        passed: false,
+                        reason: format!(
+                            "evidence_keys: source node `{}` produced no result",
+                            source_id
+                        ),
+                    },
+                    Some(r) => {
+                        let missing =
+                            inner_payload_missing_keys(&r.inner_payload, &keys);
+                        if missing.is_empty() {
+                            AcceptanceFanInOutcome {
+                                mode,
+                                source_nodes: single_source,
+                                passed: true,
+                                reason: format!(
+                                    "evidence_keys: source node `{}` carries every required key",
+                                    source_id
+                                ),
+                            }
+                        } else {
+                            AcceptanceFanInOutcome {
+                                mode,
+                                source_nodes: single_source,
+                                passed: false,
+                                reason: format!(
+                                    "evidence_keys: source node `{}` missing keys {:?}",
+                                    source_id, missing
+                                ),
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let mut next = base;
+    let fan_in_passed = outcome.passed;
+    let fan_in_reason = outcome.reason.clone();
+    next.fan_in = Some(outcome);
+
+    if parent_dominates {
+        // Per-node decision wins; fan-in is informational only.
+        return next;
+    }
+
+    if fan_in_passed {
+        // NotEvaluated → Accepted, Accepted → Accepted (status stable).
+        if matches!(next.status, AcceptanceStatus::NotEvaluated) {
+            next.status = AcceptanceStatus::Accepted;
+            next.reason = format!("acceptance_fan_in: {}", fan_in_reason);
+        }
+    } else {
+        next.status = AcceptanceStatus::Rejected;
+        next.reason = format!("acceptance_fan_in: {}", fan_in_reason);
+    }
+    next
 }
 
 /// wave-17 / task 03 — best-effort detection of an explicit failure
@@ -1262,6 +1655,37 @@ pub(super) enum DagBuildError {
         raw: String,
         detail: String,
     },
+    /// wave-18 / task 03 — `:acceptance-depends-on` references a node id
+    /// that is not declared in this plan. Fail-fast so the typo cannot
+    /// silently degrade fan-in to "no gate".
+    AcceptanceDependencyMissing {
+        node_id: String,
+        missing: String,
+    },
+    /// wave-18 / task 03 — `:acceptance-source-node` either references a
+    /// node id that is not declared in this plan OR was omitted while
+    /// `:acceptance-requires "evidence_keys"` was declared.
+    AcceptanceSourceNodeInvalid {
+        node_id: String,
+        detail: String,
+    },
+    /// wave-18 / task 03 — `:acceptance-depends-on` is non-empty but
+    /// `:acceptance-requires` is absent / unrecognised. The fan-in
+    /// evaluator cannot decide accept / reject without a recognised
+    /// mode, so we fail-fast.
+    AcceptanceFanInRequiresMissing {
+        node_id: String,
+        raw: Option<String>,
+    },
+    /// wave-18 / task 03 — a node listed in `:acceptance-depends-on`
+    /// is NOT (transitively) an ancestor of this node via the existing
+    /// `:depends-on` topology. Acceptance dependencies must not silently
+    /// introduce new execution-ordering: the source node's evidence
+    /// must already exist when this node's acceptance phase runs.
+    AcceptanceFanInDepNotAncestor {
+        node_id: String,
+        ancestor: String,
+    },
 }
 
 impl DagBuildError {
@@ -1333,6 +1757,81 @@ impl DagBuildError {
                     ),
                 ),
             ),
+            DagBuildError::AcceptanceDependencyMissing { node_id, missing } => {
+                ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "DAG node `{}` declares `:acceptance-depends-on` referencing `{}` \
+                             which is not declared in this plan",
+                            node_id, missing
+                        ),
+                    )
+                    .with_suggestion(
+                        "every entry in `:acceptance-depends-on` MUST be a node id declared \
+                         elsewhere in this plan and MUST also be a (transitive) `:depends-on` \
+                         ancestor of the current node",
+                    ),
+                )
+            }
+            DagBuildError::AcceptanceSourceNodeInvalid { node_id, detail } => {
+                ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "DAG node `{}` has invalid `:acceptance-source-node`: {}",
+                            node_id, detail
+                        ),
+                    )
+                    .with_suggestion(
+                        "set `:acceptance-source-node` to a node id that also appears in this \
+                         node's `:acceptance-depends-on` list (only used under \
+                         `:acceptance-requires \"evidence_keys\"`)",
+                    ),
+                )
+            }
+            DagBuildError::AcceptanceFanInRequiresMissing { node_id, raw } => {
+                let detail = match raw {
+                    Some(r) if !r.trim().is_empty() => format!(
+                        "got `{}`; expected one of: all_succeeded | any_succeeded | evidence_keys",
+                        r
+                    ),
+                    _ => "field is missing".to_string(),
+                };
+                ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "DAG node `{}` declares `:acceptance-depends-on` but \
+                             `:acceptance-requires` {}",
+                            node_id, detail
+                        ),
+                    )
+                    .with_suggestion(
+                        "add `:acceptance-requires \"all_succeeded\"` (or `any_succeeded` / \
+                         `evidence_keys`) to specify how the fan-in gate decides; remove \
+                         `:acceptance-depends-on` if no fan-in is intended",
+                    ),
+                )
+            }
+            DagBuildError::AcceptanceFanInDepNotAncestor { node_id, ancestor } => {
+                ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "DAG node `{}` declares `:acceptance-depends-on` referencing `{}` \
+                             which is not a (transitive) `:depends-on` ancestor of `{}`",
+                            node_id, ancestor, node_id
+                        ),
+                    )
+                    .with_suggestion(
+                        "the source node's evidence must already exist when this node's \
+                         acceptance phase runs — add the source to this node's `:depends-on` \
+                         (directly or via an existing chain) so the scheduler dispatches them \
+                         in the correct order",
+                    ),
+                )
+            }
         }
     }
 }
@@ -1393,7 +1892,151 @@ pub(super) fn build_validated_dag(
     }
 
     let order = kahn_topo_sort(&parsed.nodes)?;
+
+    // wave-18 / task 03 — cross-node acceptance fan-in validation.
+    // Runs AFTER topo sort so we can compute transitive ancestors via
+    // the existing dependency graph. The four checks (in order):
+    //
+    //   1. Every entry in `:acceptance-depends-on` must be a declared
+    //      node id.
+    //   2. If `:acceptance-depends-on` is non-empty, `:acceptance-requires`
+    //      must be a recognised mode.
+    //   3. Under `evidence_keys` mode, `:acceptance-source-node` must
+    //      be set AND must appear in `:acceptance-depends-on` (and
+    //      therefore in the plan; the depends-on check handles plan
+    //      membership).
+    //   4. Every entry in `:acceptance-depends-on` must be a (transitive)
+    //      `:depends-on` ancestor of the current node — otherwise the
+    //      source node's evidence may not yet exist when this node's
+    //      acceptance phase runs (we deliberately do NOT promote
+    //      acceptance deps to execution deps; that would silently
+    //      change dispatch order).
+    let ancestors = compute_transitive_ancestors(&parsed.nodes);
+    for n in &parsed.nodes {
+        if n.acceptance_depends_on.is_empty()
+            && n.acceptance_requires_raw.as_deref().map(str::trim).unwrap_or("").is_empty()
+            && n.acceptance_source_node.as_deref().map(str::trim).unwrap_or("").is_empty()
+        {
+            continue;
+        }
+        // (1) plan membership
+        for dep in &n.acceptance_depends_on {
+            if !id_set.contains(dep.as_str()) {
+                return Err(DagBuildError::AcceptanceDependencyMissing {
+                    node_id: n.id.clone(),
+                    missing: dep.clone(),
+                });
+            }
+        }
+        // (2) requires mode
+        if !n.acceptance_depends_on.is_empty() {
+            if n.acceptance_requires_kind().is_none() {
+                return Err(DagBuildError::AcceptanceFanInRequiresMissing {
+                    node_id: n.id.clone(),
+                    raw: n.acceptance_requires_raw.clone(),
+                });
+            }
+        } else if n.acceptance_source_node.is_some()
+            || n.acceptance_requires_raw
+                .as_deref()
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false)
+        {
+            // Author wrote :acceptance-requires / :acceptance-source-node
+            // without :acceptance-depends-on. Treat as a fan-in declaration
+            // missing its dependency list — still fail-fast so the typo
+            // surfaces at build time instead of silently doing nothing.
+            return Err(DagBuildError::AcceptanceFanInRequiresMissing {
+                node_id: n.id.clone(),
+                raw: Some(
+                    "fan-in declared without :acceptance-depends-on".to_string(),
+                ),
+            });
+        }
+        // (3) source node (only meaningful under evidence_keys; we
+        //     surface a structured error if it's set under a wrong
+        //     mode so the typo doesn't go silent).
+        if let Some(src_raw) = n.acceptance_source_node.as_deref() {
+            let src = src_raw.trim();
+            if src.is_empty() {
+                return Err(DagBuildError::AcceptanceSourceNodeInvalid {
+                    node_id: n.id.clone(),
+                    detail: "value is empty".to_string(),
+                });
+            }
+            if !id_set.contains(src) {
+                return Err(DagBuildError::AcceptanceSourceNodeInvalid {
+                    node_id: n.id.clone(),
+                    detail: format!("`{}` is not declared in this plan", src),
+                });
+            }
+            if !n.acceptance_depends_on.iter().any(|d| d == src) {
+                return Err(DagBuildError::AcceptanceSourceNodeInvalid {
+                    node_id: n.id.clone(),
+                    detail: format!(
+                        "`{}` must also appear in this node's `:acceptance-depends-on`",
+                        src
+                    ),
+                });
+            }
+        }
+        if matches!(
+            n.acceptance_requires_kind(),
+            Some(AcceptanceRequires::EvidenceKeys)
+        ) && n.acceptance_source_node.is_none()
+        {
+            return Err(DagBuildError::AcceptanceSourceNodeInvalid {
+                node_id: n.id.clone(),
+                detail:
+                    ":acceptance-requires \"evidence_keys\" requires `:acceptance-source-node`"
+                        .to_string(),
+            });
+        }
+        // (4) every fan-in dep must be a transitive :depends-on ancestor
+        if let Some(set) = ancestors.get(n.id.as_str()) {
+            for dep in &n.acceptance_depends_on {
+                if !set.contains(dep.as_str()) {
+                    return Err(DagBuildError::AcceptanceFanInDepNotAncestor {
+                        node_id: n.id.clone(),
+                        ancestor: dep.clone(),
+                    });
+                }
+            }
+        }
+    }
+
     Ok((parsed, order))
+}
+
+/// wave-18 / task 03 — compute the set of transitive `:depends-on`
+/// ancestors for every node, keyed by node id. Pure helper; runs once
+/// per `build_validated_dag` call so the cross-node acceptance fan-in
+/// validator can verify each `:acceptance-depends-on` entry already
+/// sits upstream in the execution-ordering DAG.
+fn compute_transitive_ancestors(
+    nodes: &[DagNode],
+) -> HashMap<String, HashSet<String>> {
+    let by_id: HashMap<&str, &DagNode> =
+        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut out: HashMap<String, HashSet<String>> = HashMap::new();
+    for n in nodes {
+        let mut acc: HashSet<String> = HashSet::new();
+        let mut stack: Vec<String> = n.depends_on.clone();
+        while let Some(id) = stack.pop() {
+            if !acc.insert(id.clone()) {
+                continue;
+            }
+            if let Some(parent) = by_id.get(id.as_str()) {
+                for p in &parent.depends_on {
+                    if !acc.contains(p) {
+                        stack.push(p.clone());
+                    }
+                }
+            }
+        }
+        out.insert(n.id.clone(), acc);
+    }
+    out
 }
 
 /// Top-level entry: parse plan.sexp_text for `(node ...)` forms only.
@@ -1539,6 +2182,10 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     // wave-17 / task 03 — declarative acceptance evaluator hints.
     let mut acceptance_mode_raw: Option<String> = None;
     let mut acceptance_evidence_keys_raw: Option<String> = None;
+    // wave-18 / task 03 — cross-node acceptance fan-in hints.
+    let mut acceptance_depends_on: Vec<String> = Vec::new();
+    let mut acceptance_requires_raw: Option<String> = None;
+    let mut acceptance_source_node: Option<String> = None;
     let mut workstation_dispatch_flag: Option<String> = None;
     let mut review_gate: Option<String> = None;
     let mut review_action: Option<String> = None;
@@ -1617,6 +2264,30 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
             }
             "acceptance-evidence-keys" | "acceptance_evidence_keys" => {
                 set_first(&mut acceptance_evidence_keys_raw, &value)
+            }
+            // wave-18 / task 03 — cross-node acceptance fan-in hints.
+            // `:acceptance-depends-on` accepts the same shapes as
+            // `:depends-on` (`["a" "b"]` / `(a b)` / bareword run);
+            // `:acceptance-requires` is parsed strictly so a typo lands
+            // BOTH on the typed slot AND in `unsupported_fields` while
+            // the validator raises a structured error before the
+            // scheduler dispatches the node. Single
+            // `:acceptance-source-node` is captured verbatim; only
+            // consumed under `evidence_keys` mode.
+            "acceptance-depends-on" | "acceptance_depends_on" => {
+                if acceptance_depends_on.is_empty() {
+                    acceptance_depends_on = parse_id_list(&value);
+                }
+            }
+            "acceptance-requires" | "acceptance_requires" => {
+                let raw = value.trim();
+                if !raw.is_empty() && AcceptanceRequires::parse(raw).is_none() {
+                    unsupported_fields.push((raw_key.clone(), value.clone()));
+                }
+                set_first(&mut acceptance_requires_raw, &value);
+            }
+            "acceptance-source-node" | "acceptance_source_node" => {
+                set_first(&mut acceptance_source_node, &value)
             }
             "workstation-dispatch" | "workstation_dispatch" => {
                 set_first(&mut workstation_dispatch_flag, &value)
@@ -1799,6 +2470,9 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         acceptance_commands_raw,
         acceptance_mode_raw,
         acceptance_evidence_keys_raw,
+        acceptance_depends_on,
+        acceptance_requires_raw,
+        acceptance_source_node,
         workstation_dispatch_flag,
         review_gate,
         review_action,
@@ -2562,6 +3236,18 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
         }
         if let Some(k) = &n.acceptance_evidence_keys_raw {
             entry["acceptance_evidence_keys_raw"] = json!(k);
+        }
+        // wave-18 / task 03 — cross-node acceptance fan-in declarations.
+        // Surface only when the author opted in so the wave-17 byte-shape
+        // stays untouched for nodes that did not declare any fan-in.
+        if !n.acceptance_depends_on.is_empty() {
+            entry["acceptance_depends_on"] = json!(n.acceptance_depends_on);
+        }
+        if let Some(r) = &n.acceptance_requires_raw {
+            entry["acceptance_requires"] = json!(r);
+        }
+        if let Some(s) = &n.acceptance_source_node {
+            entry["acceptance_source_node"] = json!(s);
         }
         if n.workstation_dispatch_opt_in() {
             entry["workstation_dispatch"] = json!(true);
@@ -4706,6 +5392,19 @@ async fn emit_evidence_acceptance(
     if let Some(mode) = evaluation.mode {
         entry = entry.with_extra("acceptance_mode", json!(mode.as_wire()));
     }
+    // wave-18 / task 03 — record the cross-node fan-in outcome so
+    // observers can pin the gate decision (mode + source nodes + result
+    // + reason) without re-walking prior nodes' evidence. Quiet (the
+    // entire `acceptance_fan_in` block is omitted) when the author did
+    // not opt into fan-in so the wave-17 byte-shape is preserved.
+    if let Some(f) = &evaluation.fan_in {
+        entry = entry
+            .with_extra("acceptance_fan_in", f.to_json())
+            .with_extra("acceptance_fan_in_mode", json!(f.mode.as_wire()))
+            .with_extra("acceptance_fan_in_source_nodes", json!(f.source_nodes))
+            .with_extra("acceptance_fan_in_passed", json!(f.passed))
+            .with_extra("acceptance_fan_in_reason", json!(f.reason));
+    }
     if matches!(evaluation.status, AcceptanceStatus::ManualRequired) {
         // Surface the deterministic pause id so downstream resolvers can
         // address the gate without re-deriving the format. Distinct from
@@ -5787,8 +6486,25 @@ async fn execute_with_concurrency(
                 // wave-13 behaviour), Accepted, Rejected, ManualRequired.
                 // The first three terminate the node (succeeded /
                 // failed / paused) without further dispatch.
-                let acceptance =
+                //
+                // wave-18 / task 03 — `apply_acceptance_fan_in` then
+                // overlays cross-node fan-in on top of the per-node
+                // result. The validator already proved every fan-in dep
+                // is a transitive `:depends-on` ancestor, so the prior
+                // node's result is guaranteed to live in `results_by_id`
+                // by the time this branch runs.
+                let acceptance_base =
                     evaluate_node_acceptance(&node, &inner_payload, true);
+                let prior_results_view: HashMap<String, &NodeResult> =
+                    results_by_id
+                        .iter()
+                        .map(|(k, v)| (k.clone(), v))
+                        .collect();
+                let acceptance = apply_acceptance_fan_in(
+                    acceptance_base,
+                    &node,
+                    &prior_results_view,
+                );
                 let acceptance_active = !acceptance.is_inactive();
                 if acceptance_active {
                     emit_evidence_acceptance(
@@ -11097,6 +11813,7 @@ mod tests {
                 commands: vec!["cargo test".into()],
                 evidence_keys: vec![],
                 reason: "ok".into(),
+                fan_in: None,
             }),
         });
         // No hints — quiet.
@@ -11152,6 +11869,7 @@ mod tests {
                 commands: vec![],
                 evidence_keys: vec![],
                 reason: "manual mode".into(),
+                fan_in: None,
             }),
         });
         assert_eq!(o.aggregate_status(), "dag_paused");
@@ -11166,6 +11884,483 @@ mod tests {
             "manual_required pause id `{}` MUST use the acceptance: prefix",
             qid
         );
+    }
+
+    // ── wave-18 / task 03 — cross-node acceptance fan-in ─────────────────
+    //
+    // The fan-in evaluator overlays a deterministic decision on top of
+    // the per-node acceptance evaluation. It NEVER re-runs the source
+    // node — it only inspects the recorded `state` (lifecycle) and
+    // `inner_payload`. Validator + evaluator invariants pinned below.
+
+    fn make_succeeded_result(id: &str, payload: Value) -> NodeResult {
+        NodeResult {
+            id: id.to_string(),
+            target: "mission_task_delegate".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "fresh-code-alignment".into(),
+            inner_payload: payload,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+            rollback: None,
+            acceptance: None,
+        }
+    }
+
+    fn make_failed_result(id: &str) -> NodeResult {
+        NodeResult {
+            id: id.to_string(),
+            target: "mission_task_delegate".into(),
+            state: NodeState::Failed {
+                reason: "test failure".into(),
+            },
+            dispatch_strategy: "fresh-code-alignment".into(),
+            inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+            rollback: None,
+            acceptance: None,
+        }
+    }
+
+    #[test]
+    fn parse_node_form_captures_acceptance_fan_in_hints() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate")
+              (node :id "n2"
+                    :target "mission_task_delegate"
+                    :depends-on ["n1"]
+                    :acceptance-depends-on ["n1"]
+                    :acceptance-requires "all_succeeded"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n2 = parsed.nodes.iter().find(|n| n.id == "n2").unwrap();
+        assert_eq!(n2.acceptance_depends_on, vec!["n1".to_string()]);
+        assert_eq!(n2.acceptance_requires_raw.as_deref(), Some("all_succeeded"));
+        assert_eq!(
+            n2.acceptance_requires_kind(),
+            Some(AcceptanceRequires::AllSucceeded)
+        );
+        assert!(n2.has_acceptance_fan_in());
+        assert!(n2.has_acceptance_hints());
+        // Recognised mode MUST NOT land in unsupported_fields.
+        let unsupported_keys: Vec<String> = n2
+            .unsupported_fields
+            .iter()
+            .map(|(k, _)| k.clone())
+            .collect();
+        for forbidden in [
+            "acceptance-depends-on",
+            "acceptance-requires",
+            "acceptance-source-node",
+        ] {
+            assert!(
+                !unsupported_keys.contains(&forbidden.to_string()),
+                "key `{}` must land on a typed slot, not unsupported_fields",
+                forbidden
+            );
+        }
+    }
+
+    #[test]
+    fn parse_node_form_records_unrecognised_acceptance_requires_in_unsupported_fields() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate")
+              (node :id "n2"
+                    :target "mission_task_delegate"
+                    :depends-on ["n1"]
+                    :acceptance-depends-on ["n1"]
+                    :acceptance-requires "majority_succeeded"))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        let n2 = parsed.nodes.iter().find(|n| n.id == "n2").unwrap();
+        // Raw value lands on the typed slot AND in unsupported_fields.
+        assert_eq!(
+            n2.acceptance_requires_raw.as_deref(),
+            Some("majority_succeeded")
+        );
+        assert!(n2
+            .unsupported_fields
+            .iter()
+            .any(|(k, v)| k == "acceptance-requires" && v == "majority_succeeded"));
+        assert!(n2.acceptance_requires_kind().is_none());
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_acceptance_dep_referencing_missing_node() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate"
+                    :acceptance-depends-on ["does_not_exist"]
+                    :acceptance-requires "all_succeeded"))
+        "#;
+        let err = build_validated_dag(sexp).expect_err("must reject missing fan-in dep");
+        match err {
+            DagBuildError::AcceptanceDependencyMissing { node_id, missing } => {
+                assert_eq!(node_id, "n1");
+                assert_eq!(missing, "does_not_exist");
+            }
+            other => panic!(
+                "expected AcceptanceDependencyMissing, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_acceptance_dep_when_not_a_depends_on_ancestor() {
+        // n2 declares :acceptance-depends-on ["n1"] but does NOT carry
+        // n1 as a (transitive) :depends-on ancestor — the source node's
+        // evidence may not exist when n2's acceptance phase runs, so
+        // the validator MUST refuse instead of silently changing
+        // execution order.
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate")
+              (node :id "n2"
+                    :target "mission_task_delegate"
+                    :acceptance-depends-on ["n1"]
+                    :acceptance-requires "all_succeeded"))
+        "#;
+        let err = build_validated_dag(sexp).expect_err("must reject non-ancestor fan-in dep");
+        match err {
+            DagBuildError::AcceptanceFanInDepNotAncestor { node_id, ancestor } => {
+                assert_eq!(node_id, "n2");
+                assert_eq!(ancestor, "n1");
+            }
+            other => panic!(
+                "expected AcceptanceFanInDepNotAncestor, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_acceptance_depends_on_without_recognised_requires() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate")
+              (node :id "n2"
+                    :target "mission_task_delegate"
+                    :depends-on ["n1"]
+                    :acceptance-depends-on ["n1"]))
+        "#;
+        let err = build_validated_dag(sexp).expect_err("must reject missing requires");
+        match err {
+            DagBuildError::AcceptanceFanInRequiresMissing { node_id, .. } => {
+                assert_eq!(node_id, "n2");
+            }
+            other => panic!(
+                "expected AcceptanceFanInRequiresMissing, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_evidence_keys_mode_without_source_node() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate")
+              (node :id "n2"
+                    :target "mission_task_delegate"
+                    :depends-on ["n1"]
+                    :acceptance-depends-on ["n1"]
+                    :acceptance-requires "evidence_keys"
+                    :acceptance-evidence-keys ["build_ok"]))
+        "#;
+        let err = build_validated_dag(sexp)
+            .expect_err("evidence_keys without :acceptance-source-node must fail");
+        match err {
+            DagBuildError::AcceptanceSourceNodeInvalid { node_id, detail } => {
+                assert_eq!(node_id, "n2");
+                assert!(
+                    detail.contains("acceptance-source-node"),
+                    "detail `{}` must mention the missing field",
+                    detail
+                );
+            }
+            other => panic!(
+                "expected AcceptanceSourceNodeInvalid, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_source_node_outside_depends_on_list() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate")
+              (node :id "n2"
+                    :target "mission_task_delegate"
+                    :depends-on ["n1"]
+                    :acceptance-depends-on ["n1"]
+                    :acceptance-requires "evidence_keys"
+                    :acceptance-evidence-keys ["build_ok"]
+                    :acceptance-source-node "n1_typo"))
+        "#;
+        let err = build_validated_dag(sexp).expect_err("source node mismatch must fail");
+        match err {
+            DagBuildError::AcceptanceSourceNodeInvalid { node_id, detail } => {
+                assert_eq!(node_id, "n2");
+                assert!(detail.contains("n1_typo"));
+            }
+            other => panic!(
+                "expected AcceptanceSourceNodeInvalid, got {:?}",
+                other
+            ),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_accepts_well_formed_fan_in() {
+        let sexp = r#"
+            (plan
+              (node :id "n1"
+                    :target "mission_task_delegate")
+              (node :id "n2"
+                    :target "mission_task_delegate"
+                    :depends-on ["n1"]
+                    :acceptance-depends-on ["n1"]
+                    :acceptance-requires "all_succeeded"))
+        "#;
+        let (_parsed, order) =
+            build_validated_dag(sexp).expect("well-formed fan-in must build");
+        assert_eq!(order, vec!["n1".to_string(), "n2".to_string()]);
+    }
+
+    #[test]
+    fn apply_fan_in_no_op_when_node_has_no_fan_in_hints() {
+        // Absence of :acceptance-depends-on preserves the wave-17
+        // shape exactly — the fan_in field is None on the way in
+        // AND on the way out, regardless of prior_results contents.
+        let node = acceptance_node_with(Some("inner_status"), None, None);
+        let payload = json!({"task_id": "btk-1"});
+        let base = evaluate_node_acceptance(&node, &payload, true);
+        assert!(base.fan_in.is_none(), "baseline must carry no fan_in");
+        let prior = HashMap::new();
+        let after = apply_acceptance_fan_in(base.clone(), &node, &prior);
+        assert_eq!(after.status, base.status);
+        assert!(after.fan_in.is_none());
+    }
+
+    #[test]
+    fn apply_fan_in_all_succeeded_passes_when_every_source_succeeded() {
+        let mut node = acceptance_node_with(None, None, None);
+        node.acceptance_depends_on = vec!["a".into(), "b".into()];
+        node.acceptance_requires_raw = Some("all_succeeded".into());
+        let r_a = make_succeeded_result("a", json!({}));
+        let r_b = make_succeeded_result("b", json!({}));
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a), ("b".to_string(), &r_b)]
+                .into_iter()
+                .collect();
+        let base = evaluate_node_acceptance(&node, &json!({}), true);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        assert_eq!(after.status, AcceptanceStatus::Accepted);
+        let f = after.fan_in.expect("fan_in must be recorded");
+        assert!(f.passed);
+        assert_eq!(f.mode, AcceptanceRequires::AllSucceeded);
+        assert_eq!(f.source_nodes, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn apply_fan_in_all_succeeded_rejects_when_one_source_failed() {
+        let mut node = acceptance_node_with(None, None, None);
+        node.acceptance_depends_on = vec!["a".into(), "b".into()];
+        node.acceptance_requires_raw = Some("all_succeeded".into());
+        let r_a = make_succeeded_result("a", json!({}));
+        let r_b = make_failed_result("b");
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a), ("b".to_string(), &r_b)]
+                .into_iter()
+                .collect();
+        let base = evaluate_node_acceptance(&node, &json!({}), true);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        assert_eq!(after.status, AcceptanceStatus::Rejected);
+        let f = after.fan_in.expect("fan_in must be recorded");
+        assert!(!f.passed);
+        assert!(
+            f.reason.contains("\"b\""),
+            "reason `{}` must surface the failing source node",
+            f.reason
+        );
+        assert!(after.reason.starts_with("acceptance_fan_in:"));
+    }
+
+    #[test]
+    fn apply_fan_in_any_succeeded_passes_when_at_least_one_source_succeeded() {
+        let mut node = acceptance_node_with(None, None, None);
+        node.acceptance_depends_on = vec!["a".into(), "b".into()];
+        node.acceptance_requires_raw = Some("any_succeeded".into());
+        let r_a = make_failed_result("a");
+        let r_b = make_succeeded_result("b", json!({}));
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a), ("b".to_string(), &r_b)]
+                .into_iter()
+                .collect();
+        let base = evaluate_node_acceptance(&node, &json!({}), true);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        assert_eq!(after.status, AcceptanceStatus::Accepted);
+        let f = after.fan_in.expect("fan_in must be recorded");
+        assert!(f.passed);
+        assert_eq!(f.mode, AcceptanceRequires::AnySucceeded);
+    }
+
+    #[test]
+    fn apply_fan_in_any_succeeded_rejects_when_all_sources_failed() {
+        let mut node = acceptance_node_with(None, None, None);
+        node.acceptance_depends_on = vec!["a".into(), "b".into()];
+        node.acceptance_requires_raw = Some("any_succeeded".into());
+        let r_a = make_failed_result("a");
+        let r_b = make_failed_result("b");
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a), ("b".to_string(), &r_b)]
+                .into_iter()
+                .collect();
+        let base = evaluate_node_acceptance(&node, &json!({}), true);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        assert_eq!(after.status, AcceptanceStatus::Rejected);
+        let f = after.fan_in.expect("fan_in must be recorded");
+        assert!(!f.passed);
+    }
+
+    #[test]
+    fn apply_fan_in_evidence_keys_passes_when_source_payload_carries_keys() {
+        let mut node = acceptance_node_with(
+            None,
+            None,
+            Some(r#"["build_ok" "tests_passed"]"#),
+        );
+        node.acceptance_depends_on = vec!["a".into()];
+        node.acceptance_requires_raw = Some("evidence_keys".into());
+        node.acceptance_source_node = Some("a".into());
+        let r_a = make_succeeded_result(
+            "a",
+            json!({"build_ok": true, "tests_passed": 12}),
+        );
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a)].into_iter().collect();
+        let base = evaluate_node_acceptance(&node, &json!({}), true);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        assert_eq!(after.status, AcceptanceStatus::Accepted);
+        let f = after.fan_in.expect("fan_in must be recorded");
+        assert!(f.passed);
+        assert_eq!(f.mode, AcceptanceRequires::EvidenceKeys);
+        assert_eq!(f.source_nodes, vec!["a".to_string()]);
+    }
+
+    #[test]
+    fn apply_fan_in_evidence_keys_rejects_when_source_missing_keys() {
+        let mut node = acceptance_node_with(
+            None,
+            None,
+            Some(r#"["build_ok" "tests_passed"]"#),
+        );
+        node.acceptance_depends_on = vec!["a".into()];
+        node.acceptance_requires_raw = Some("evidence_keys".into());
+        node.acceptance_source_node = Some("a".into());
+        let r_a = make_succeeded_result("a", json!({"build_ok": true}));
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a)].into_iter().collect();
+        let base = evaluate_node_acceptance(&node, &json!({}), true);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        assert_eq!(after.status, AcceptanceStatus::Rejected);
+        let f = after.fan_in.expect("fan_in must be recorded");
+        assert!(!f.passed);
+        assert!(
+            f.reason.contains("tests_passed"),
+            "reason `{}` must surface the missing key",
+            f.reason
+        );
+    }
+
+    #[test]
+    fn apply_fan_in_does_not_promote_a_per_node_rejected_decision() {
+        // Per-node Rejected dominates — fan-in is recorded for audit
+        // but never flips status back to Accepted.
+        let mut node = acceptance_node_with(Some("inner_status"), None, None);
+        node.acceptance_depends_on = vec!["a".into()];
+        node.acceptance_requires_raw = Some("all_succeeded".into());
+        let r_a = make_succeeded_result("a", json!({}));
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a)].into_iter().collect();
+        // Per-node: dispatch_succeeded=false → Rejected.
+        let base = evaluate_node_acceptance(&node, &json!({}), false);
+        assert_eq!(base.status, AcceptanceStatus::Rejected);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        assert_eq!(
+            after.status,
+            AcceptanceStatus::Rejected,
+            "per-node Rejected MUST dominate even when fan-in passes"
+        );
+        // Fan-in still recorded for audit.
+        let f = after.fan_in.expect("fan_in must be recorded for audit");
+        assert!(f.passed, "fan-in itself passed even though parent rejected");
+    }
+
+    #[test]
+    fn apply_fan_in_records_outcome_under_to_json_when_active() {
+        let mut node = acceptance_node_with(None, None, None);
+        node.acceptance_depends_on = vec!["a".into()];
+        node.acceptance_requires_raw = Some("all_succeeded".into());
+        let r_a = make_succeeded_result("a", json!({}));
+        let prior: HashMap<String, &NodeResult> =
+            [("a".to_string(), &r_a)].into_iter().collect();
+        let base = evaluate_node_acceptance(&node, &json!({}), true);
+        let after = apply_acceptance_fan_in(base, &node, &prior);
+        let v = after.to_json();
+        assert_eq!(v["status"], "accepted");
+        assert_eq!(v["fan_in"]["mode"], "all_succeeded");
+        assert_eq!(v["fan_in"]["passed"], true);
+        assert_eq!(v["fan_in"]["source_nodes"][0], "a");
+        assert!(v["fan_in"]["reason"].is_string());
+    }
+
+    #[test]
+    fn build_nodes_summary_surfaces_fan_in_hints_when_present() {
+        let nodes = vec![
+            DagNode {
+                id: "a".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+            DagNode {
+                id: "b".into(),
+                target: "mission_task_delegate".into(),
+                failure_policy: "fail-fast".into(),
+                depends_on: vec!["a".into()],
+                acceptance_depends_on: vec!["a".into()],
+                acceptance_requires_raw: Some("evidence_keys".into()),
+                acceptance_source_node: Some("a".into()),
+                acceptance_evidence_keys_raw: Some(r#"["k"]"#.into()),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["a".to_string(), "b".to_string()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        // a: no fan-in fields surface.
+        assert!(arr[0].get("acceptance_depends_on").is_none());
+        assert!(arr[0].get("acceptance_requires").is_none());
+        assert!(arr[0].get("acceptance_source_node").is_none());
+        // b: every declared field surfaces.
+        assert_eq!(arr[1]["acceptance_depends_on"][0], "a");
+        assert_eq!(arr[1]["acceptance_requires"], "evidence_keys");
+        assert_eq!(arr[1]["acceptance_source_node"], "a");
     }
 
     // ── wave-17 / task 04 — conservative rollback descriptors ────────────
