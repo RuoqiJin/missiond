@@ -29,6 +29,10 @@ use std::str::FromStr;
 use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
+use crate::handlers::knowledge::review_gate::{
+    apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
+    parse_resolution_review_question_id, parse_review_gate_policy, review_gate_policy_was_explicit,
+};
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 use missiond_core::types::DirectiveStatus;
@@ -322,7 +326,29 @@ async fn action_compile_dry_run(
         // opted in via write_file=true; the DB row stays committed even if
         // the file write fails (file-vs-db contract — partial status).
         let file_args = extract_directive_file_args(args);
+        let topic_for_gate = file_args.topic.map(|s| s.to_string());
         maybe_write_directive_artifact(state, &file_args, &mut payload, &preview_sexp).await;
+
+        // wave-14 :: review-gate auto-create. Default policy = Manual keeps
+        // the wave-11 explicit-emit (`emit_review_question=true`) the only
+        // way to fire an event; `emit_question` policy auto-fires after a
+        // successful file write; `off` suppresses both. The hook MUST run
+        // after the file-first splice so it can see `file_written`.
+        let policy = parse_review_gate_policy(args);
+        let policy_explicit = review_gate_policy_was_explicit(args);
+        let legacy = parse_compile_review_gate(args);
+        apply_compile_review_gates(
+            &mut payload,
+            &state.bus,
+            policy,
+            policy_explicit,
+            &legacy,
+            "directive",
+            &id.to_string(),
+            1,
+            topic_for_gate.as_deref(),
+        )
+        .await;
     } else {
         payload["persisted"] = json!(false);
     }
@@ -434,7 +460,27 @@ async fn action_compile_sonnet(
         // dry_run path. The compiled sexp is the durable artifact; we
         // splice the path/sha so callers can verify on-disk parity.
         let file_args = extract_directive_file_args(args);
+        let topic_for_gate = file_args.topic.map(|s| s.to_string());
         maybe_write_directive_artifact(state, &file_args, &mut payload, &compiled_sexp).await;
+
+        // wave-14 :: review-gate auto-create. See dry_run branch above for
+        // policy semantics; same hook applies after the file write splice
+        // so the EmitQuestion path can observe `file_written`.
+        let policy = parse_review_gate_policy(args);
+        let policy_explicit = review_gate_policy_was_explicit(args);
+        let legacy = parse_compile_review_gate(args);
+        apply_compile_review_gates(
+            &mut payload,
+            &state.bus,
+            policy,
+            policy_explicit,
+            &legacy,
+            "directive",
+            &id.to_string(),
+            1,
+            topic_for_gate.as_deref(),
+        )
+        .await;
     } else {
         payload["persisted"] = json!(false);
     }
@@ -749,11 +795,24 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         .directive_approve(id, version)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    Ok(ToolResult::json_pretty(&json!({
+    let mut payload = json!({
         "status": "approved",
         "directive_id": id,
         "version": version,
-    })))
+    });
+    // wave-11/14 resolution path — opt-in via `review_question_id`. The DB
+    // mutation already committed; bus failures only surface a warning so
+    // the approve never fails on a side-channel error.
+    let qid = parse_resolution_review_question_id(args);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        qid.as_deref(),
+        "approved",
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -764,11 +823,21 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
         .directive_update_status(id, version, DirectiveStatus::Archived)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    Ok(ToolResult::json_pretty(&json!({
+    let mut payload = json!({
         "status": "archived",
         "directive_id": id,
         "version": version,
-    })))
+    });
+    let qid = parse_resolution_review_question_id(args);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        qid.as_deref(),
+        "archived",
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 // ───────────────────────────────────────────────────────────────────────

@@ -45,6 +45,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
+use crate::handlers::knowledge::review_gate::{
+    apply_compile_review_gates, parse_compile_review_gate, parse_review_gate_policy,
+    review_gate_policy_was_explicit,
+};
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
     resolve_target_project_root, ResolutionError,
@@ -329,7 +333,30 @@ async fn action_distill_dry_run(
         // entry without an extra arg. The DB row stays committed even if
         // the file write fails (file-vs-db contract).
         let file_args = extract_workflow_file_args(args);
+        let topic_for_gate = file_args
+            .topic
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| name.to_string());
         maybe_write_workflow_artifact(state, &file_args, &mut payload, &preview_sexp, name).await;
+
+        // wave-14 :: review-gate auto-create. Default policy = Manual; the
+        // workflow distill draft is rare enough that explicit-emit usually
+        // wins, but `emit_question` lets a methodology pipeline opt in.
+        let policy = parse_review_gate_policy(args);
+        let policy_explicit = review_gate_policy_was_explicit(args);
+        let legacy = parse_compile_review_gate(args);
+        apply_compile_review_gates(
+            &mut payload,
+            &state.bus,
+            policy,
+            policy_explicit,
+            &legacy,
+            "workflow",
+            &id.to_string(),
+            1,
+            Some(&topic_for_gate),
+        )
+        .await;
     } else {
         payload["persisted"] = json!(false);
     }
@@ -553,7 +580,29 @@ async fn action_distill_sonnet(
         // artifact; we splice the path/sha so future distill runs / forge
         // compilers can verify on-disk parity.
         let file_args = extract_workflow_file_args(args);
+        let topic_for_gate = file_args
+            .topic
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| name.to_string());
         maybe_write_workflow_artifact(state, &file_args, &mut payload, &workflow_sexp, name).await;
+
+        // wave-14 :: review-gate auto-create. Same policy semantics as the
+        // dry_run branch above.
+        let policy = parse_review_gate_policy(args);
+        let policy_explicit = review_gate_policy_was_explicit(args);
+        let legacy = parse_compile_review_gate(args);
+        apply_compile_review_gates(
+            &mut payload,
+            &state.bus,
+            policy,
+            policy_explicit,
+            &legacy,
+            "workflow",
+            &id.to_string(),
+            1,
+            Some(&topic_for_gate),
+        )
+        .await;
     } else {
         payload["persisted"] = json!(false);
     }
@@ -819,7 +868,35 @@ async fn action_compile_deterministic(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| stem.clone());
+    let topic_for_gate = file_args
+        .topic
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| fallback_topic.clone());
     maybe_write_workflow_artifact(state, &file_args, &mut payload, content, &fallback_topic).await;
+
+    // wave-14 :: review-gate auto-create. compile_methodology has no
+    // workflow_id (the methodology source predates any distilled row), so
+    // the artifact_id used in the deterministic question id is the
+    // generated `flow_id`. The hook only fires when both
+    // `review_gate_policy=emit_question` AND the file-first mirror was
+    // requested AND landed (`file_written=true`); a YAML-only persist run
+    // intentionally stays quiet because the workflow scope is not yet
+    // canonicalised in `.missiond/workflows/<topic>.lisp`.
+    let policy = parse_review_gate_policy(args);
+    let policy_explicit = review_gate_policy_was_explicit(args);
+    let legacy = parse_compile_review_gate(args);
+    apply_compile_review_gates(
+        &mut payload,
+        &state.bus,
+        policy,
+        policy_explicit,
+        &legacy,
+        "workflow",
+        &meta.flow_id,
+        1,
+        Some(&topic_for_gate),
+    )
+    .await;
 
     Ok(ToolResult::json_pretty(&payload))
 }

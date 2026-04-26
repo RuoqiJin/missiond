@@ -15,6 +15,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
          (project > absolute cwd > target_project, 禁止 process cwd fallback); \
          DB 行已写但 file 写失败 → status=\"partial\" + file_write_error, 不回滚 row。\
          成功响应附 file_written / file_path / file_sha256 / file_bytes / file_created / file_overwritten。\
+         wave-14 review gate auto-create v1: persist=true 时再传 review_gate_policy=\"emit_question\" \
+         即在 file_written=true 后自动 fire 一条 QuestionEvent::Created (deterministic id = \
+         review:directive:<id>:v<version>:compile:<topic-hash>); review_gate_policy=\"manual\" (默认) \
+         保留 wave-11 显式 emit_review_question=true 路径; review_gate_policy=\"off\" 同时压制两者。\
+         不实现 UI / 不等回答 / 不自动 approve; bus 失败 surface review_question_warning + 确定性 id 供重试。\
+         approve / archive 接收 review_question_id → 触发 QuestionEvent::Resolved (或 DecisionResolved)。\
+         响应总附 review_gate_policy / review_question_emitted (+ review_question_id / review_question_warning when applicable)。\
          list/get/approve/archive/version_chain 为 store-backed full。\
          Lisp 源: intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: \
          s2 intent-alignment-authoring + s3 alignment-review-gate \
@@ -53,7 +60,24 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "review_gate": {
                     "type": "string",
-                    "description": "[compile] free-form note about the review gate (recorded in references_json)"
+                    "description": "[compile] free-form note about the review gate (recorded in references_json). NOT the wave-14 policy — see `review_gate_policy` for the manual|emit_question|off knob."
+                },
+                "review_gate_policy": {
+                    "type": "string",
+                    "enum": ["manual", "emit_question", "off"],
+                    "description": "[compile persist=true] (wave-14 review gate auto-create v1) controls automatic QuestionEvent::Created emission AFTER a successful file-first artifact write. `manual` (default) keeps the legacy explicit-emit path (`emit_review_question=true`) the only way to fire an event; `emit_question` auto-fires when `write_file=true` AND the file landed (`file_written=true`); `off` suppresses BOTH the auto-emit and the legacy bool. Response always echoes the resolved policy under `review_gate_policy`. The auto-emit is fire-and-forget on the bus side: it never blocks the response, never auto-approves, and never waits for a human gate. Bus failures surface `review_question_warning` + the deterministic id so the caller can retry / resolve manually with the same id."
+                },
+                "emit_review_question": {
+                    "type": "boolean",
+                    "description": "[compile persist=true review_gate_policy=manual] (wave-11 explicit-emit path) fire one QuestionEvent::Created after the directive draft is committed. Best-effort; bus failures surface `review_question_warning` instead of failing the compile. Ignored when `review_gate_policy=emit_question` (auto-emit takes over) or `review_gate_policy=off` (suppression)."
+                },
+                "review_question_text": {
+                    "type": "string",
+                    "description": "[compile persist=true emit_review_question=true | review_gate_policy=emit_question] free-form prompt echoed back in the response payload (`review_question_text`); the bus event itself only carries the deterministic id."
+                },
+                "review_question_id": {
+                    "type": "string",
+                    "description": "[compile persist=true | approve | archive] deterministic question-id override. On compile, replaces the auto-derived id (`review:directive:<id>:v<version>:compile[:<topic-hash>]`). On approve/archive, opts the action into emitting a follow-up QuestionEvent::Resolved (or DecisionResolved) with the supplied id — same fire-and-forget, bus-failure-warns semantics. Absent → no resolution emit (legacy quiet)."
                 },
                 "affected_pillars": {
                     "type": ["array", "string"],

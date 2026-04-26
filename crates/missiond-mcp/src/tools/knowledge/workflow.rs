@@ -24,6 +24,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
          project root 解析强制走 resolve_target_project_root (project > absolute cwd > target_project, 禁止 process cwd fallback); \
          DB / YAML 已写但 file 写失败 → status=\"partial\" + file_write_error, 不回滚已落的 row/yaml; \
          成功响应附 file_written / file_path / file_sha256 / file_bytes / file_created / file_overwritten。\
+         wave-14 review gate auto-create v1: distill / compile_methodology persist=true 时再传 \
+         review_gate_policy=\"emit_question\" 即在 file_written=true 后自动 fire 一条 QuestionEvent::Created \
+         (deterministic id = review:workflow:<id|flow_id>:v<version>:compile:<topic-hash>); \
+         review_gate_policy=\"manual\" (默认) 保留 wave-11 显式 emit_review_question=true 路径; \
+         review_gate_policy=\"off\" 同时压制两者; 不实现 UI / 不等回答 / 不自动 approve; \
+         bus 失败 surface review_question_warning + 确定性 id 供重试; \
+         compile_methodology 因为暂无 workflow_id 行,确定性 id 锚定在 flow_id 上。\
+         响应总附 review_gate_policy / review_question_emitted (+ review_question_id / review_question_warning when applicable)。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
          implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
          role workflow-distiller + intent-memory.lisp :: directive-layer :: file-first-artifacts :: workflow-methodology-file。",
@@ -149,6 +157,23 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "topic": {
                     "type": "string",
                     "description": "[distill|compile_methodology persist=true write_file=true] file-first SSOT topic segment used to derive `.missiond/workflows/<topic>.lisp`. Sanitized (alnum / `_` / `-`); blank inputs collapse to `anonymous`."
+                },
+                "review_gate_policy": {
+                    "type": "string",
+                    "enum": ["manual", "emit_question", "off"],
+                    "description": "[distill persist=true | compile_methodology persist=true] (wave-14 review gate auto-create v1) controls automatic QuestionEvent::Created emission AFTER a successful workflow .lisp file-first write. `manual` (default) keeps the legacy explicit-emit path (`emit_review_question=true`) the only way to fire an event; `emit_question` auto-fires when `write_file=true` AND the file landed (`file_written=true`); `off` suppresses BOTH the auto-emit and the legacy bool. Response always echoes the resolved policy. Auto-emit is fire-and-forget on the bus (never blocks, never auto-approves, never waits). compile_methodology has no workflow_id row, so the deterministic id is anchored on `flow_id` instead. Bus failures surface `review_question_warning` + the deterministic id for caller retry / manual resolution."
+                },
+                "emit_review_question": {
+                    "type": "boolean",
+                    "description": "[distill persist=true | compile_methodology persist=true review_gate_policy=manual] (wave-11 explicit-emit path) fire one QuestionEvent::Created after the workflow row / methodology YAML is committed. Best-effort; bus failures surface `review_question_warning` instead of failing the action. Ignored when `review_gate_policy=emit_question` (auto-emit takes over) or `review_gate_policy=off` (suppression)."
+                },
+                "review_question_text": {
+                    "type": "string",
+                    "description": "[distill | compile_methodology emit_review_question=true | review_gate_policy=emit_question] free-form prompt echoed back in the response payload (`review_question_text`); the bus event itself only carries the deterministic id."
+                },
+                "review_question_id": {
+                    "type": "string",
+                    "description": "[distill | compile_methodology persist=true] deterministic question-id override. Replaces the auto-derived id (`review:workflow:<id>:v<version>:compile[:<topic-hash>]`). Same fire-and-forget, bus-failure-warns semantics as the directive/plan surfaces."
                 }
             }
         }),

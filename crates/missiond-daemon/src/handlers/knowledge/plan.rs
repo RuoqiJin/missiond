@@ -48,6 +48,10 @@ use std::str::FromStr;
 use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
+use crate::handlers::knowledge::review_gate::{
+    apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
+    parse_resolution_review_question_id, parse_review_gate_policy, review_gate_policy_was_explicit,
+};
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
     resolve_target_project_root, ResolutionError,
@@ -356,7 +360,31 @@ async fn action_compile_dry_run(state: &AppState, args: &Value) -> Result<ToolRe
         // on-disk PLAN.lisp without an extra arg. The DB row remains
         // committed even if the file write fails (file-vs-db contract).
         let file_args = extract_plan_file_args(args);
+        let topic_for_gate = file_args
+            .topic
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| task_id.to_string());
         maybe_write_plan_artifact(state, &file_args, &mut payload, &dry_run_sexp, task_id).await;
+
+        // wave-14 :: review-gate auto-create. Default policy = Manual
+        // (legacy explicit emit only); `emit_question` policy auto-fires
+        // after a successful PLAN.lisp write. Resolution stays opt-in via
+        // `review_question_id` on approve/mark/supersede.
+        let policy = parse_review_gate_policy(args);
+        let policy_explicit = review_gate_policy_was_explicit(args);
+        let legacy = parse_compile_review_gate(args);
+        apply_compile_review_gates(
+            &mut payload,
+            &state.bus,
+            policy,
+            policy_explicit,
+            &legacy,
+            "plan",
+            &id.to_string(),
+            next_version,
+            Some(&topic_for_gate),
+        )
+        .await;
     } else {
         payload["persisted"] = json!(false);
     }
@@ -564,12 +592,35 @@ async fn action_compile_sonnet(state: &AppState, args: &Value) -> Result<ToolRes
         // splice the path/sha so the plan-runner can verify on-disk parity
         // before scheduling.
         let file_args = extract_plan_file_args(args);
+        let topic_for_gate = file_args
+            .topic
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| board_task_id.clone());
         maybe_write_plan_artifact(
             state,
             &file_args,
             &mut payload,
             &compiled_sexp,
             &board_task_id,
+        )
+        .await;
+
+        // wave-14 :: review-gate auto-create. Same policy semantics as the
+        // dry_run branch above; topic falls back to `board_task_id` to
+        // match the file-first writer's default.
+        let policy = parse_review_gate_policy(args);
+        let policy_explicit = review_gate_policy_was_explicit(args);
+        let legacy = parse_compile_review_gate(args);
+        apply_compile_review_gates(
+            &mut payload,
+            &state.bus,
+            policy,
+            policy_explicit,
+            &legacy,
+            "plan",
+            &id.to_string(),
+            next_version,
+            Some(&topic_for_gate),
         )
         .await;
     } else {
@@ -895,10 +946,21 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         .plan_update_status(id, PlanStatus::Approved)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    Ok(ToolResult::json_pretty(&json!({
+    let mut payload = json!({
         "status": "approved",
         "plan_id": id,
-    })))
+    });
+    // wave-11/14 resolution path — opt-in via `review_question_id`.
+    let qid = parse_resolution_review_question_id(args);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        qid.as_deref(),
+        "approved",
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -916,10 +978,20 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         .plan_update_status(id, target)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    Ok(ToolResult::json_pretty(&json!({
+    let mut payload = json!({
         "plan_id": id,
         "new_status": target.as_str(),
-    })))
+    });
+    let qid = parse_resolution_review_question_id(args);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        qid.as_deref(),
+        target.as_str(),
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -930,11 +1002,21 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
         .plan_supersede(old_id, new_id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    Ok(ToolResult::json_pretty(&json!({
+    let mut payload = json!({
         "status": "superseded",
         "old_plan_id": old_id,
         "new_plan_id": new_id,
-    })))
+    });
+    let qid = parse_resolution_review_question_id(args);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        qid.as_deref(),
+        "superseded",
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 // ───────────────────────────────────────────────────────────────────────
