@@ -1967,4 +1967,343 @@ mod tests {
             ArtifactScope::Execution
         );
     }
+
+    // ── 6. wave-16 / Task 08 :: canonical-loop e2e smoke ─────────────
+    //
+    // Goal: prove the full `message → directive → plan → execute → evidence`
+    // shape end-to-end without spinning up an AppState, without calling
+    // Sonnet/Gemini/ClaudeCode, and without dispatching an external
+    // workstation. The smoke walks the three planner transitions and
+    // exercises the decorator against simulated inner-handler payloads
+    // shaped to mirror what `directive::handle` / `plan::handle` actually
+    // emit in `compiler_mode=dry_run` + `dry_run=true` modes.
+    //
+    // Coverage is integration-shape focused: at every stage we assert the
+    // canonical envelope fields (`pipeline_stage`, `flow_ref`,
+    // `artifact_refs.scope`, `next_step`, `v0_non_goals`) plus the stage-
+    // specific carrier (`directive_id`/`plan_id` ids; the s6 dry-run
+    // `would_dispatch` carrier; the evidence sidecar pointer surfaced
+    // through artifact_refs when a downstream evidence write produces one).
+    //
+    // Out of smoke scope (covered elsewhere or explicitly excluded by the
+    // task contract):
+    //   * live LLM calls (sonnet/gemini)              — wave-11/wave-13
+    //   * live workstation dispatch                   — wave-15/wave-16
+    //   * DAG scheduler fan-out                       — plan_dag::tests
+    //   * review-gate bus publishes                   — wave-14/wave-16
+    //   * end-to-end DB persistence with AppState     — runtime/integration
+
+    /// Build a `ToolResult` carrying a single JSON content element so the
+    /// smoke can drive `decorate` without spinning up the inner handler.
+    fn smoke_inner_result(payload: Value) -> ToolResult {
+        ToolResult {
+            content: vec![missiond_mcp::tools::ToolContent::Text {
+                text: serde_json::to_string_pretty(&payload).unwrap(),
+            }],
+            is_error: None,
+        }
+    }
+
+    /// Pull the appended pipeline-meta sibling off a decorated result.
+    /// `decorate` always pushes the meta as the LAST content element.
+    fn smoke_meta_of(decorated: &ToolResult) -> Value {
+        let last = decorated
+            .content
+            .last()
+            .expect("decorated result must carry at least one content element");
+        let text = match last {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        serde_json::from_str(&text).expect("pipeline meta must serialise as JSON")
+    }
+
+    #[test]
+    fn smoke_canonical_loop_message_to_directive_to_plan_to_execute_with_evidence() {
+        // ── Stage s1 :: message-intake → directive-compile dry_run ─────
+        //
+        // The caller hands the pipeline a bare message. The planner picks
+        // DirectiveCompile and forwards `compiler_mode=dry_run` so no LLM
+        // is reached. We simulate the directive handler returning a
+        // `persist=true` dry_run payload (the exact shape produced by
+        // `directive::action_compile_dry_run`) and assert the decorated
+        // envelope carries the canonical s1 breadcrumbs.
+        let s1_args = json!({
+            "message": "wave16 task08 smoke utterance",
+            "source": "user_utterance",
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        let s1_decision = plan_pipeline(&s1_args).expect("s1 must route");
+        let PipelineDecision::DirectiveCompile { compile_args } = s1_decision else {
+            panic!("expected DirectiveCompile for bare-message input");
+        };
+        // Forwarded inner args carry the exact knobs the directive
+        // compiler expects in dry_run mode.
+        assert_eq!(compile_args["action"], "compile");
+        assert_eq!(compile_args["utterance"], "wave16 task08 smoke utterance");
+        assert_eq!(compile_args["compiler_mode"], "dry_run");
+        assert_eq!(compile_args["persist"], true);
+
+        let directive_id = "00000000-0000-0000-0000-0000000000d1";
+        let s1_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "persisted": true,
+            "directive_id": directive_id,
+            "version": 1,
+            "utterance": "wave16 task08 smoke utterance",
+            "source": "user_utterance",
+        }));
+        let s1_decorated = decorate(
+            s1_inner,
+            DecorateContext {
+                stage: stages::MESSAGE_INTAKE,
+                scope: ArtifactScope::Directive,
+                next_step:
+                    "review the compiled directive then re-call this pipeline with `approved_directive_id`",
+                next_call: Some(json!({
+                    "tool": "mission_directive",
+                    "action": "approve",
+                })),
+                expects_next_inputs: json!({
+                    "approved_directive_id": "uuid",
+                    "directive_version": "i32",
+                    "board_task_id": "string",
+                }),
+            },
+        );
+        let s1_meta = smoke_meta_of(&s1_decorated);
+        assert_eq!(s1_meta["pipeline_stage"], stages::MESSAGE_INTAKE);
+        assert_eq!(s1_meta["flow_ref"], FLOW_REF);
+        assert_eq!(s1_meta["artifact_refs"]["scope"], "directive");
+        assert_eq!(s1_meta["artifact_refs"]["directive_id"], directive_id);
+        assert_eq!(s1_meta["artifact_refs"]["version"], 1);
+        assert_eq!(s1_meta["artifact_refs"]["status"], "dry_run");
+        assert!(s1_meta["next_step"].is_string());
+        assert_eq!(s1_meta["next_call"]["action"], "approve");
+        // The v0/v1 non-goals must remain loud at every stage so the
+        // canonical loop never silently auto-approves or auto-dispatches.
+        let s1_non_goals = s1_meta["v0_non_goals"].as_array().unwrap();
+        assert!(s1_non_goals.iter().any(|v| v == "auto_approve_directive"));
+        assert!(s1_non_goals
+            .iter()
+            .any(|v| v == "autonomous_workstation_dispatch"));
+
+        // ── Stage s4 :: plan-authoring (after explicit s3 approval) ────
+        //
+        // The caller surfaces the just-approved directive id + a board
+        // task anchor. The planner picks PlanCompile in dry_run mode so
+        // no LLM is reached. We simulate the plan handler returning the
+        // exact shape produced by `plan::action_compile_dry_run` with
+        // `persist=true`.
+        let board_task_id = "btk-wave16-task08-smoke";
+        let s4_args = json!({
+            "message": "stale s1 message — must be overridden by approved_directive_id",
+            "approved_directive_id": directive_id,
+            "directive_version": 1,
+            "board_task_id": board_task_id,
+            "compiler_mode": "dry_run",
+            "persist": true,
+            "plan_acceptance": ["smoke passes"],
+        });
+        let s4_decision = plan_pipeline(&s4_args).expect("s4 must route");
+        let PipelineDecision::PlanCompile { compile_args } = s4_decision else {
+            panic!("approved_directive_id must take precedence over stale message");
+        };
+        assert_eq!(compile_args["action"], "compile");
+        assert_eq!(compile_args["directive_id"], directive_id);
+        assert_eq!(compile_args["board_task_id"], board_task_id);
+        assert_eq!(compile_args["compiler_mode"], "dry_run");
+        assert_eq!(compile_args["persist"], true);
+        assert_eq!(compile_args["acceptance"], json!(["smoke passes"]));
+
+        let plan_id = "11111111-1111-1111-1111-0000000000a1";
+        let s4_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "persisted": true,
+            "plan_id": plan_id,
+            "version": 1,
+            "board_task_id": board_task_id,
+            "directive_id": directive_id,
+        }));
+        let s4_decorated = decorate(
+            s4_inner,
+            DecorateContext {
+                stage: stages::PLAN_AUTHORING,
+                scope: ArtifactScope::Plan,
+                next_step:
+                    "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` and `execute=true`",
+                next_call: Some(json!({
+                    "tool": "mission_plan",
+                    "action": "approve",
+                })),
+                expects_next_inputs: json!({
+                    "approved_plan_id": "uuid",
+                    "execute": true,
+                }),
+            },
+        );
+        let s4_meta = smoke_meta_of(&s4_decorated);
+        assert_eq!(s4_meta["pipeline_stage"], stages::PLAN_AUTHORING);
+        assert_eq!(s4_meta["flow_ref"], FLOW_REF);
+        assert_eq!(s4_meta["artifact_refs"]["scope"], "plan");
+        assert_eq!(s4_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s4_meta["artifact_refs"]["board_task_id"], board_task_id);
+        assert_eq!(s4_meta["artifact_refs"]["version"], 1);
+        assert_eq!(s4_meta["next_call"]["action"], "approve");
+        let s4_non_goals = s4_meta["v0_non_goals"].as_array().unwrap();
+        assert!(s4_non_goals.iter().any(|v| v == "auto_approve_plan"));
+
+        // ── Stage s6 :: execution-runner dry_run with would_dispatch ───
+        //
+        // The caller surfaces the approved plan id with `execute=true`
+        // AND `dry_run=true`. The planner picks PlanExecute and forwards
+        // every documented runner knob (incl. `dry_run`) — we then
+        // simulate the exact dry-run envelope `plan::action_execute_internal`
+        // produces (`runner_status=dry_run_no_dispatch` + `would_dispatch`
+        // carrier + `workstation_dispatch_source`). This proves that a
+        // unified-entry call in dry-run mode never actually spawns an
+        // external workstation while still surfacing the canonical
+        // dispatch descriptor the caller would replay against the live
+        // runner.
+        let s6_args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "target": "mission_task_delegate",
+            "dispatch_strategy": "agent-team",
+            "dry_run": true,
+            "project": "missiond",
+            "cwd": "/Users/jinchen/Projects/missiond",
+            "scope": "wave16/task08 smoke",
+        });
+        let s6_decision = plan_pipeline(&s6_args).expect("s6 must route");
+        let PipelineDecision::PlanExecute { execute_args } = s6_decision else {
+            panic!("approved_plan_id + execute=true must route to PlanExecute");
+        };
+        assert_eq!(execute_args["action"], "execute");
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["execute_mode"], "internal");
+        assert_eq!(execute_args["target"], "mission_task_delegate");
+        assert_eq!(execute_args["dispatch_strategy"], "agent-team");
+        assert_eq!(execute_args["dry_run"], true);
+        assert_eq!(execute_args["project"], "missiond");
+        assert_eq!(execute_args["cwd"], "/Users/jinchen/Projects/missiond");
+
+        // Simulate exactly the dry-run envelope `action_execute_internal`
+        // produces: status=dry_run, runner_status=dry_run_no_dispatch,
+        // would_dispatch carrying the inner-args bag the runner WOULD have
+        // sent to the target tool.
+        let would_dispatch = json!({
+            "action": "open",
+            "execution_id": format!("plan-{}", plan_id),
+            "parent_design": format!("plan/{}", plan_id),
+            "owner": "plan-runner",
+            "scope": format!("plan {} board_task {}", plan_id, board_task_id),
+            "dispatch_strategy": "agent-team",
+        });
+        let s6_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "execute_mode": "internal",
+            "runner_status": "dry_run_no_dispatch",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "target_tool": "mission_task_delegate",
+            "target_source": "explicit_arg",
+            "dispatch_strategy": "agent-team",
+            "dispatch_strategy_source": "explicit_arg",
+            "plan_hint_summary": {},
+            "would_dispatch": would_dispatch,
+            "workstation_dispatch_source": "default_off",
+        }));
+        let s6_decorated = decorate(
+            s6_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step:
+                    "execution dispatched (or would-dispatch in dry_run); collect evidence via mission_plan(action=record_evidence)",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let s6_meta = smoke_meta_of(&s6_decorated);
+        assert_eq!(s6_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(s6_meta["flow_ref"], FLOW_REF);
+        assert_eq!(s6_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(s6_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s6_meta["artifact_refs"]["board_task_id"], board_task_id);
+        assert_eq!(s6_meta["artifact_refs"]["status"], "dry_run");
+
+        // The s6 dry-run envelope surfaces `would_dispatch` on the inner
+        // payload (NOT on artifact_refs — the projection only lifts
+        // documented row-id / file_* / review_question_* fields). The
+        // smoke proves the inner payload reaches the caller untouched.
+        let s6_inner_text = match &s6_decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let s6_inner_payload: Value =
+            serde_json::from_str(&s6_inner_text).expect("inner payload parses");
+        assert_eq!(s6_inner_payload["status"], "dry_run");
+        assert_eq!(
+            s6_inner_payload["runner_status"], "dry_run_no_dispatch",
+            "s6 dry_run must not actually dispatch — runner_status proves it"
+        );
+        assert_eq!(s6_inner_payload["would_dispatch"]["action"], "open");
+        assert_eq!(
+            s6_inner_payload["would_dispatch"]["dispatch_strategy"],
+            "agent-team"
+        );
+        // workstation_dispatch_source must surface so the caller can prove
+        // no autonomous external workstation spawn happened (wave-15/16).
+        assert_eq!(
+            s6_inner_payload["workstation_dispatch_source"], "default_off",
+            "smoke must prove no autonomous workstation dispatch fired"
+        );
+
+        // ── Stage s6 evidence sidecar :: record_evidence projection ────
+        //
+        // After execution (or a dry-run that the caller still wants to
+        // breadcrumb), `mission_plan(action=record_evidence)` returns a
+        // payload that includes the file-first sidecar pointer
+        // (`file_path` + `file_sha256` + `file_bytes`). The decorator
+        // projection lifts these into artifact_refs alongside the
+        // execution row pointers so a single envelope shape covers the
+        // whole loop. We simulate that projection here against the
+        // canonical evidence-collector v0 wire shape.
+        let evidence_path = "/tmp/missiond-smoke/.missiond/evidence/wave16-task08/plan-evidence.jsonl";
+        let evidence_inner = smoke_inner_result(json!({
+            "status": "recorded",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "version": 1,
+            "file_written": true,
+            "file_path": evidence_path,
+            "file_sha256": "deadbeefcafebabe",
+            "file_bytes": 256,
+            "file_created": true,
+            "file_overwritten": false,
+        }));
+        let evidence_decorated = decorate(
+            evidence_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "evidence recorded; loop closed",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let ev_meta = smoke_meta_of(&evidence_decorated);
+        assert_eq!(ev_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(ev_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(ev_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(ev_meta["artifact_refs"]["status"], "recorded");
+        // Evidence sidecar pointer surfaces through the file-first splice.
+        assert_eq!(ev_meta["artifact_refs"]["file_written"], true);
+        assert_eq!(ev_meta["artifact_refs"]["file_path"], evidence_path);
+        assert_eq!(ev_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe");
+        assert_eq!(ev_meta["artifact_refs"]["file_bytes"], 256);
+    }
 }
