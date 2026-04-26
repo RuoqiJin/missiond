@@ -1,0 +1,525 @@
+#!/usr/bin/env node
+
+import path from 'node:path';
+import {
+  head,
+  isList,
+  keywordPropBool,
+  keywordPropText,
+  listLispFilesRecursive,
+  nodeText,
+  nodeToStringArray,
+  parseLisp,
+  readKeywordProps,
+  readLispFile,
+} from './lib/missiond_lisp.mjs';
+
+const usage = `Usage:
+  node scripts/check-task-report.mjs [--all] [--json] [--dry-fixture] <report.lisp...>
+
+Checks MissionD report-contract v1 Lisp files:
+  - validates reader syntax through the shared MissionD Lisp parser
+  - validates each (report <id> ...) form with :schema "missiond.report-contract.v1"
+  - rejects: missing :task_id, invalid :status, empty :acceptance_results
+    when :status = done, absolute paths in :files_changed / :scope_deviations,
+    schema mismatch, and malformed acceptance entries
+
+Use --all to scan .missiond/tasks/**/reports/*.report.lisp.
+Use --dry-fixture to run self-contained fixtures.
+`;
+
+const SCHEMA = 'missiond.report-contract.v1';
+const ALLOWED_STATUS = new Set(['draft', 'in-progress', 'done', 'blocked', 'rejected']);
+const REQUIRED_FIELDS = [
+  ':schema',
+  ':task_id',
+  ':status',
+  ':commit_hash',
+  ':files_changed',
+  ':acceptance_results',
+];
+
+function main() {
+  const args = process.argv.slice(2);
+  let all = false;
+  let json = false;
+  let dryFixture = false;
+  const inputs = [];
+
+  for (const arg of args) {
+    if (arg === '-h' || arg === '--help') {
+      console.log(usage);
+      process.exit(0);
+    } else if (arg === '--all') {
+      all = true;
+    } else if (arg === '--json') {
+      json = true;
+    } else if (arg === '--dry-fixture') {
+      dryFixture = true;
+    } else {
+      inputs.push(arg);
+    }
+  }
+
+  if (dryFixture) {
+    runFixtures();
+    return;
+  }
+
+  const cwd = process.cwd();
+  const files = [
+    ...(all ? collectAllReports(cwd) : []),
+    ...inputs.map((input) => path.resolve(cwd, input)),
+  ];
+
+  if (files.length === 0) {
+    console.error(usage);
+    process.exit(2);
+  }
+
+  const diagnostics = [];
+  let reportCount = 0;
+
+  for (const file of [...new Set(files)]) {
+    let forms;
+    try {
+      forms = readLispFile(file);
+    } catch (err) {
+      diagnostics.push({
+        severity: 'error',
+        file,
+        line: err.line ?? 1,
+        column: err.column ?? 1,
+        message: err.message,
+      });
+      continue;
+    }
+    for (const form of forms) {
+      if (!isList(form) || head(form) !== 'report') continue;
+      reportCount += 1;
+      validateReport(file, form, diagnostics);
+    }
+  }
+
+  const ok = !diagnostics.some((d) => d.severity === 'error');
+  if (json) {
+    console.log(
+      JSON.stringify({ ok, files: files.length, reports: reportCount, diagnostics }, null, 2),
+    );
+  } else if (ok) {
+    console.log(`task-report check OK (${reportCount} report${reportCount === 1 ? '' : 's'})`);
+  } else {
+    for (const d of diagnostics) {
+      console.error(`${d.file}:${d.line}:${d.column}: ${d.severity}: ${d.message}`);
+    }
+    console.error(
+      `task-report check FAILED — ${diagnostics.length} diagnostic(s), ${reportCount} report(s)`,
+    );
+  }
+  process.exit(ok ? 0 : 1);
+}
+
+function collectAllReports(cwd) {
+  const root = path.join(cwd, '.missiond', 'tasks');
+  return listLispFilesRecursive(root).filter((p) => p.endsWith('.report.lisp'));
+}
+
+function validateReport(file, report, diagnostics) {
+  const id = nodeText(report.children[1]);
+  if (!id) {
+    addError(diagnostics, file, report.loc, '(report ...) missing id as second form');
+  } else if (!/^[a-z0-9][a-z0-9._-]*$/.test(id)) {
+    addError(
+      diagnostics,
+      file,
+      report.children[1].loc,
+      `report id "${id}" must be lowercase kebab/dot/underscore id`,
+    );
+  }
+
+  const props = readKeywordProps(report, { start: 2 });
+
+  for (const field of REQUIRED_FIELDS) {
+    if (!props[field]) {
+      addError(
+        diagnostics,
+        file,
+        report.loc,
+        `(report ${id ?? '<missing>'} ...) missing required field ${field}`,
+      );
+    }
+  }
+
+  const schema = keywordPropText(props, ':schema');
+  if (schema !== SCHEMA) {
+    addError(
+      diagnostics,
+      file,
+      props[':schema']?.value?.loc ?? report.loc,
+      `:schema must be "${SCHEMA}"`,
+    );
+  }
+
+  const taskId = keywordPropText(props, ':task_id');
+  if (!taskId || taskId.trim() === '') {
+    addError(
+      diagnostics,
+      file,
+      props[':task_id']?.value?.loc ?? report.loc,
+      ':task_id must be a non-empty string',
+    );
+  }
+
+  const status = keywordPropText(props, ':status');
+  if (!status || !ALLOWED_STATUS.has(status)) {
+    addError(
+      diagnostics,
+      file,
+      props[':status']?.value?.loc ?? report.loc,
+      `:status must be one of ${[...ALLOWED_STATUS].join('|')}`,
+    );
+  }
+
+  const commitHash = keywordPropText(props, ':commit_hash');
+  if (status === 'done' && (!commitHash || commitHash.trim() === '')) {
+    addError(
+      diagnostics,
+      file,
+      props[':commit_hash']?.value?.loc ?? report.loc,
+      ':commit_hash must be a non-empty string when :status = done',
+    );
+  }
+
+  const filesChanged = nodeToStringArray(props[':files_changed']?.value);
+  if (!props[':files_changed']?.value || !isList(props[':files_changed'].value)) {
+    addError(
+      diagnostics,
+      file,
+      props[':files_changed']?.value?.loc ?? report.loc,
+      ':files_changed must be a vector/list (may be empty for non-done status)',
+    );
+  }
+  if (status === 'done' && filesChanged.length === 0) {
+    addError(
+      diagnostics,
+      file,
+      props[':files_changed']?.value?.loc ?? report.loc,
+      ':files_changed must be non-empty when :status = done',
+    );
+  }
+  for (const p of filesChanged) {
+    if (path.isAbsolute(p) || p.startsWith('~')) {
+      addError(
+        diagnostics,
+        file,
+        props[':files_changed']?.value?.loc ?? report.loc,
+        `:files_changed paths must be repo-relative, got "${p}"`,
+      );
+    }
+  }
+
+  validateAcceptance(file, report, props[':acceptance_results']?.value, status, diagnostics);
+  validateScopeDeviations(file, report, props[':scope_deviations']?.value, diagnostics);
+}
+
+function validateAcceptance(file, report, node, status, diagnostics) {
+  const loc = node?.loc ?? report.loc;
+  if (node == null) {
+    return; // already reported as missing required field
+  }
+  if (!isList(node)) {
+    addError(diagnostics, file, loc, ':acceptance_results must be a vector/list');
+    return;
+  }
+  const entries = node.children;
+  if (status === 'done' && entries.length === 0) {
+    addError(
+      diagnostics,
+      file,
+      loc,
+      ':acceptance_results must be non-empty when :status = done',
+    );
+    return;
+  }
+  for (const entry of entries) {
+    if (!isList(entry)) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? loc,
+        ':acceptance_results entries must be property lists',
+      );
+      continue;
+    }
+    const ep = readKeywordProps(entry, { start: 0 });
+    const command = keywordPropText(ep, ':command');
+    if (!command || command.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        ep[':command']?.value?.loc ?? entry.loc,
+        'acceptance entry missing :command',
+      );
+    }
+    const exitNode = ep[':exit_code']?.value;
+    const exitText = nodeText(exitNode);
+    if (exitText == null || !/^-?\d+$/.test(exitText)) {
+      addError(
+        diagnostics,
+        file,
+        exitNode?.loc ?? entry.loc,
+        'acceptance entry :exit_code must be an integer',
+      );
+    }
+    const okBool = keywordPropBool(ep, ':ok');
+    if (okBool == null) {
+      addError(
+        diagnostics,
+        file,
+        ep[':ok']?.value?.loc ?? entry.loc,
+        'acceptance entry :ok must be true|false',
+      );
+    }
+  }
+}
+
+function validateScopeDeviations(file, report, node, diagnostics) {
+  if (node == null) return; // optional field
+  if (!isList(node)) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      ':scope_deviations must be a vector/list',
+    );
+    return;
+  }
+  for (const entry of node.children) {
+    if (!isList(entry)) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':scope_deviations entries must be property lists',
+      );
+      continue;
+    }
+    const ep = readKeywordProps(entry, { start: 0 });
+    const pth = keywordPropText(ep, ':path');
+    if (!pth || pth.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        ep[':path']?.value?.loc ?? entry.loc,
+        'scope_deviations entry missing :path',
+      );
+    } else if (path.isAbsolute(pth) || pth.startsWith('~')) {
+      addError(
+        diagnostics,
+        file,
+        ep[':path']?.value?.loc ?? entry.loc,
+        `scope_deviations :path must be repo-relative, got "${pth}"`,
+      );
+    }
+    const reason = keywordPropText(ep, ':reason');
+    if (!reason || reason.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        ep[':reason']?.value?.loc ?? entry.loc,
+        'scope_deviations entry missing :reason',
+      );
+    }
+  }
+}
+
+function addError(diagnostics, file, loc, message) {
+  diagnostics.push({
+    severity: 'error',
+    file,
+    line: loc?.line ?? 1,
+    column: loc?.column ?? 1,
+    message,
+  });
+}
+
+function runFixtures() {
+  const fixtures = [
+    {
+      name: 'valid done report',
+      source: `(report wave19-fix-ok
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-ok"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)]
+        :scope_deviations []
+        :notes "fixture ok")`,
+      ok: true,
+    },
+    {
+      name: 'valid draft report (acceptance may be empty)',
+      source: `(report wave19-fix-draft
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-draft"
+        :status draft
+        :commit_hash ""
+        :files_changed []
+        :acceptance_results [])`,
+      ok: true,
+    },
+    {
+      name: 'missing task_id',
+      source: `(report wave19-fix-missing-task-id
+        :schema "missiond.report-contract.v1"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /missing required field :task_id/,
+    },
+    {
+      name: 'invalid status',
+      source: `(report wave19-fix-bad-status
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-bad-status"
+        :status finished
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:status must be one of/,
+    },
+    {
+      name: 'empty acceptance_results when done',
+      source: `(report wave19-fix-empty-accept
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-empty-accept"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results [])`,
+      ok: false,
+      expects: /:acceptance_results must be non-empty when :status = done/,
+    },
+    {
+      name: 'absolute path in files_changed',
+      source: `(report wave19-fix-abs-path
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-abs-path"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["/etc/passwd"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:files_changed paths must be repo-relative/,
+    },
+    {
+      name: 'malformed acceptance entry (missing :ok)',
+      source: `(report wave19-fix-bad-accept
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-bad-accept"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0)])`,
+      ok: false,
+      expects: /acceptance entry :ok must be true\|false/,
+    },
+    {
+      name: 'schema mismatch',
+      source: `(report wave19-fix-bad-schema
+        :schema "missiond.task-contract.v1"
+        :task_id "wave19-fix-bad-schema"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:schema must be "missiond\.report-contract\.v1"/,
+    },
+    {
+      name: 'done without commit_hash',
+      source: `(report wave19-fix-no-commit
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-no-commit"
+        :status done
+        :commit_hash ""
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:commit_hash must be a non-empty string when :status = done/,
+    },
+    {
+      name: 'scope_deviations with absolute path',
+      source: `(report wave19-fix-bad-deviation
+        :schema "missiond.report-contract.v1"
+        :task_id "wave19-fix-bad-deviation"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :scope_deviations
+          [(:path "/tmp/leak" :reason "debug")])`,
+      ok: false,
+      expects: /scope_deviations :path must be repo-relative/,
+    },
+  ];
+
+  let failed = 0;
+  for (const fixture of fixtures) {
+    const file = `<fixture:${fixture.name}>`;
+    const diagnostics = [];
+    let forms;
+    try {
+      forms = parseLisp(fixture.source, file);
+    } catch (err) {
+      diagnostics.push({
+        severity: 'error',
+        file,
+        line: err.line ?? 1,
+        column: err.column ?? 1,
+        message: err.message,
+      });
+    }
+    if (forms) {
+      for (const form of forms) {
+        if (isList(form) && head(form) === 'report') validateReport(file, form, diagnostics);
+      }
+    }
+    const ok = !diagnostics.some((d) => d.severity === 'error');
+    const messages = diagnostics.map((d) => d.message).join(' | ');
+    const expectMatched = fixture.expects ? fixture.expects.test(messages) : true;
+    if (ok !== fixture.ok || !expectMatched) {
+      failed += 1;
+      console.error(`fixture FAILED: ${fixture.name}`);
+      console.error(`  expected ok=${fixture.ok}, got ok=${ok}`);
+      if (fixture.expects && !expectMatched) {
+        console.error(`  expected diagnostic matching ${fixture.expects}`);
+      }
+      for (const d of diagnostics) {
+        console.error(`    ${d.file}:${d.line}:${d.column}: ${d.message}`);
+      }
+    } else {
+      console.log(`fixture OK: ${fixture.name}`);
+    }
+  }
+
+  if (failed > 0) {
+    console.error(`task-report fixtures FAILED — ${failed}/${fixtures.length} failed`);
+    process.exit(1);
+  }
+  console.log(`task-report fixtures OK (${fixtures.length})`);
+}
+
+main();
