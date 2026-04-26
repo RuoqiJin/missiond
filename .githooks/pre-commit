@@ -7,11 +7,17 @@
 #   Without that variable the hook is a no-op (exit 0) so it stays opt-in
 #   per commit / per agent session.
 #
-# To enable for the local clone:
+# To enable this hook for the local clone (repo-local only — never global):
+#   node scripts/install-missiond-hooks.mjs --install
+# Or, equivalently:
 #   git config core.hooksPath .githooks
 #
+# To inspect the current state without mutating anything:
+#   node scripts/check-missiond-hooks.mjs            # human output
+#   node scripts/check-missiond-hooks.mjs --json     # machine-readable
+#
 # To run the guard for a single commit:
-#   MISSIOND_TASK_CONTRACT=.missiond/tasks/wave20/wave20-01-task-scope-index-guard-v1.lisp \
+#   MISSIOND_TASK_CONTRACT=.missiond/tasks/wave21/wave21-01-hooks-path-installer-v1.lisp \
 #     git commit -m "feat(tasks): ..."
 #
 # The guard itself is read-only: no git add / commit / reset / checkout /

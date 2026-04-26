@@ -4,12 +4,14 @@
 
 (task-contract-schema missiond.task-contract.v1
   :version "v1"
-  :status "code-aligned initial — checker + renderer + verifier + scope-guard scripts implemented"
+  :status "code-aligned initial — checker + renderer + verifier + scope-guard + hooks-installer scripts implemented"
   :checker "scripts/check-task-contract.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :verifier "scripts/verify-task-contract.mjs"
   :scope-guard "scripts/task-scope-guard.mjs"
   :pre-commit-hook ".githooks/pre-commit"
+  :hooks-installer "scripts/install-missiond-hooks.mjs"
+  :hooks-doctor "scripts/check-missiond-hooks.mjs"
 
   (purpose
     "S-expressions carry the machine contract: scope, forbidden files, dependencies, acceptance, commit policy, and report requirements."
@@ -93,6 +95,35 @@
     :pre-commit-hook
       (:path ".githooks/pre-commit"
        :activation "MISSIOND_TASK_CONTRACT env var must point at a task.lisp; otherwise hook exits 0"
-       :enable "git config core.hooksPath .githooks (per-clone opt-in)"
+       :enable "node scripts/install-missiond-hooks.mjs --install (preferred) or git config core.hooksPath .githooks (equivalent, per-clone opt-in)"
        :delegates-to "scripts/task-scope-guard.mjs --mode staged"
-       :read-only true)))
+       :read-only true))
+
+  (hooks-installer-contract
+    :purpose "Replace tribal-knowledge `git config core.hooksPath .githooks` with an explicit, repo-local installer + doctor flow so every clone can opt into the task-scope-guard pre-commit deterministically."
+    :scripts
+      (:installer "scripts/install-missiond-hooks.mjs"
+       :doctor "scripts/check-missiond-hooks.mjs")
+    :flags [--check --install --json --dry-fixture --strict]
+    :modes
+      [(check
+         "read-only doctor: prints whether git core.hooksPath equals .githooks and whether .githooks/pre-commit exists"
+         "exits 0 by default even on drift; pair with --strict to make drift a hard non-zero exit")
+       (install
+         "performs exactly one mutation: `git config --local core.hooksPath .githooks`"
+         "no-op + exit 0 when already aligned; never touches --global or --system git config")
+       (dry-fixture
+         "self-contained fixtures (no git invoked, no disk writes) covering inspect + install state machine + adapter --local enforcement")]
+    :doctor-alias
+      (:script "scripts/check-missiond-hooks.mjs"
+       :delegates-to "scripts/install-missiond-hooks.mjs --check"
+       :rejects-mutating-flags ["--install" "--dry-fixture"]
+       :reason "Keeps the agent-facing doctor predictable: doctor never mutates, ever.")
+    :scope
+      ["repo-local only: never enables hooks globally"
+       "single mutation in --install mode: `git config --local core.hooksPath .githooks`"
+       "no other writes: never touches files outside .git/config; never runs git add/commit/reset/checkout/stash/push/merge/rebase"]
+    :acceptance
+      ["node scripts/install-missiond-hooks.mjs --dry-fixture exits 0 with all 8 fixtures green"
+       "node scripts/install-missiond-hooks.mjs --check --json prints the current core.hooksPath + hook-file presence"
+       "node scripts/check-missiond-hooks.mjs --json equals --check delegation output"]))
