@@ -157,6 +157,17 @@ const FINDING_COMMIT_STATUS_NO_HASH: &str = "commit-status-without-hash";
 const FINDING_COMMIT_BLOCKED_NO_BLOCKER: &str = "commit-status-blocked-without-blocker";
 const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
 
+/// Canonical verifier-status values surfaced by wave19-02 / wave19-08 ::
+/// task-contract completion metadata. The writer agent runs the verifier
+/// out-of-process (typically `node scripts/verify-task-contract.mjs`) and
+/// reports the outcome verbatim. The daemon never runs the verifier
+/// itself — `verifier_status` is purely caller-supplied metadata.
+///
+/// `passed` — verifier exited 0; `failed` — verifier reported errors;
+/// `skipped` — verifier intentionally not run (read-only completion);
+/// `unknown` — caller could not determine the outcome.
+const VALID_VERIFIER_STATUSES: &[&str] = &["passed", "failed", "skipped", "unknown"];
+
 /// Normalize an optional dispatch strategy string against the canonical set.
 /// Unknown / empty values fall back to `DEFAULT_DISPATCH_STRATEGY` (`"unknown"`)
 /// without erroring; we never hard-fail open() on a strategy mismatch because
@@ -186,6 +197,23 @@ fn normalize_commit_status(raw: &str) -> Option<&'static str> {
         return None;
     }
     for &known in VALID_COMMIT_STATUSES {
+        if known == v {
+            return Some(known);
+        }
+    }
+    None
+}
+
+/// Same canonicalize-or-reject contract as `normalize_commit_status`,
+/// but for the wave19-08 verifier-status enum. Unknown labels return
+/// `None` so `action_complete` can hard-fail with `INVALID_PARAM` —
+/// audit / dashboard consumers downstream key off the exact string.
+fn normalize_verifier_status(raw: &str) -> Option<&'static str> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return None;
+    }
+    for &known in VALID_VERIFIER_STATUSES {
         if known == v {
             return Some(known);
         }
@@ -1180,6 +1208,16 @@ struct CompletionRecord {
     commit_hash: Option<String>,
     commit_status: Option<String>,
     commit_blocker: Option<String>,
+    // ── wave-19 / task 08 — task-contract completion metadata ──
+    // Recorded verbatim from the matching `mission_execution(action=complete)`
+    // invocation when the dispatch flowed through a task-contract v1 +
+    // report-contract v1 pair (wave19-02 / wave19-03). Daemon never
+    // parses `task_report_path` itself; `verifier_status` is the
+    // authoritative outcome signal and is reported by the writer.
+    task_contract_path: Option<String>,
+    task_report_path: Option<String>,
+    verifier_status: Option<String>,
+    verifier_notes: Option<String>,
 }
 
 fn parse_completions(file: &LogFile) -> Vec<CompletionRecord> {
@@ -1241,6 +1279,33 @@ fn parse_completions(file: &LogFile) -> Vec<CompletionRecord> {
             .map(|raw| unwrap_str(raw))
             .filter(|s| !s.is_empty());
 
+        // wave-19 / task 08 — task-contract completion metadata. Empty
+        // strings collapse to `None` so audit / status do not surface
+        // whitespace as a meaningful value (mirrors `commit_hash` /
+        // `commit_blocker`). `verifier-status` is normalised against the
+        // canonical enum at write-time, but we still tolerate legacy /
+        // hand-edited values here so a malformed file remains parseable.
+        let task_contract_path = kvs
+            .get("task-contract-path")
+            .or_else(|| kvs.get("task_contract_path"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let task_report_path = kvs
+            .get("task-report-path")
+            .or_else(|| kvs.get("task_report_path"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let verifier_status = kvs
+            .get("verifier-status")
+            .or_else(|| kvs.get("verifier_status"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let verifier_notes = kvs
+            .get("verifier-notes")
+            .or_else(|| kvs.get("verifier_notes"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+
         out.push(CompletionRecord {
             id,
             phase: kvs.get("phase").map(|s| unwrap_str(s)).unwrap_or_default(),
@@ -1251,6 +1316,10 @@ fn parse_completions(file: &LogFile) -> Vec<CompletionRecord> {
             commit_hash,
             commit_status,
             commit_blocker,
+            task_contract_path,
+            task_report_path,
+            verifier_status,
+            verifier_notes,
         });
     }
     out
@@ -2133,6 +2202,56 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // ── wave-19 / task 08 — task-contract completion metadata.
+    //
+    // All four fields are optional and recorded verbatim into the
+    // companion log when supplied. `verifier_status` is normalized
+    // against the canonical enum so audit / dashboard consumers can key
+    // off the exact string; unknown labels reject with `INVALID_PARAM`
+    // BEFORE any file mutation. `task_contract_path` doubles as the
+    // trigger for the contract-level enforcement gate further below
+    // when paired with `enforce_scoped_commit=true`.
+    let task_contract_path = args
+        .get("task_contract_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let task_report_path = args
+        .get("task_report_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let verifier_status_raw = args
+        .get("verifier_status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let verifier_status = match verifier_status_raw {
+        Some(s) => match normalize_verifier_status(s) {
+            Some(canonical) => Some(canonical.to_string()),
+            None => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "verifier_status must be one of {:?}, got `{}`",
+                            VALID_VERIFIER_STATUSES, s
+                        ),
+                    )
+                    .with_suggestion(
+                        "see wave19-08 :: verifier-status enum (passed|failed|skipped|unknown)",
+                    ),
+                ));
+            }
+        },
+        None => None,
+    };
+    let verifier_notes = args
+        .get("verifier_notes")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
     // ── Optional fail-fast enforcement (wave16-06).
     //
     // `enforce_scoped_commit=true` flips the existing audit-only handoff
@@ -2160,6 +2279,28 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
             commit_hash.as_deref(),
             commit_status.as_deref(),
             commit_blocker.as_deref(),
+        ) {
+            Ok(v) => Some(v),
+            Err(err) => return Ok(err),
+        }
+    } else {
+        None
+    };
+
+    // wave-19 / task 08 — contract-level enforcement gate. Runs only
+    // when the caller paired `enforce_scoped_commit=true` with a
+    // `task_contract_path`; otherwise the contract metadata is recorded
+    // verbatim with no additional checks (legacy / opt-out behaviour).
+    // Daemon never shells out — we read the file off disk and use the
+    // workstation_dispatch parser to project the narrow view we need.
+    let task_contract_validation = if enforce_scoped_commit && task_contract_path.is_some() {
+        let path_arg = task_contract_path.as_deref().unwrap();
+        match enforce_task_contract_completion(
+            &file,
+            &root,
+            path_arg,
+            commit_hash.as_deref(),
+            staged_files.as_deref(),
         ) {
             Ok(v) => Some(v),
             Err(err) => return Ok(err),
@@ -2210,6 +2351,33 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         entry.push_str(&format!(
             "\n      :commit-blocker {}",
             lisp_quote_string(blocker)
+        ));
+    }
+    // wave-19 / task 08 — task-contract metadata. Each field skips when
+    // absent so legacy callers that never set them keep the byte-identical
+    // 6-field shape (or 11-field shape with scoped-commit fields).
+    if let Some(ref tcp) = task_contract_path {
+        entry.push_str(&format!(
+            "\n      :task-contract-path {}",
+            lisp_quote_string(tcp)
+        ));
+    }
+    if let Some(ref trp) = task_report_path {
+        entry.push_str(&format!(
+            "\n      :task-report-path {}",
+            lisp_quote_string(trp)
+        ));
+    }
+    if let Some(ref vs) = verifier_status {
+        entry.push_str(&format!(
+            "\n      :verifier-status {}",
+            lisp_quote_string(vs)
+        ));
+    }
+    if let Some(ref vn) = verifier_notes {
+        entry.push_str(&format!(
+            "\n      :verifier-notes {}",
+            lisp_quote_string(vn)
         ));
     }
     entry.push(')');
@@ -2269,6 +2437,25 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     if let Some(v) = scoped_commit_validation {
         response["scoped_commit_validation"] = v;
+    }
+    // wave-19 / task 08 — surface contract metadata + the contract-level
+    // validation summary (when the gate ran). Skip-serialize semantics
+    // mirror the scoped-commit fields above so the response stays
+    // byte-identical for legacy callers that omit every wave19 field.
+    if let Some(tcp) = task_contract_path {
+        response["task_contract_path"] = json!(tcp);
+    }
+    if let Some(trp) = task_report_path {
+        response["task_report_path"] = json!(trp);
+    }
+    if let Some(vs) = verifier_status {
+        response["verifier_status"] = json!(vs);
+    }
+    if let Some(vn) = verifier_notes {
+        response["verifier_notes"] = json!(vn);
+    }
+    if let Some(v) = task_contract_validation {
+        response["task_contract_validation"] = v;
     }
     Ok(ToolResult::json_pretty(&response))
 }
@@ -2401,6 +2588,21 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
             }
             if let Some(blocker) = &c.commit_blocker {
                 row["commit_blocker"] = json!(blocker);
+            }
+            // wave-19 / task 08 — task-contract metadata projection.
+            // Same skip-on-absent semantics as the scoped-commit fields
+            // above so legacy completed_phases entries stay shape-stable.
+            if let Some(tcp) = &c.task_contract_path {
+                row["task_contract_path"] = json!(tcp);
+            }
+            if let Some(trp) = &c.task_report_path {
+                row["task_report_path"] = json!(trp);
+            }
+            if let Some(vs) = &c.verifier_status {
+                row["verifier_status"] = json!(vs);
+            }
+            if let Some(vn) = &c.verifier_notes {
+                row["verifier_notes"] = json!(vn);
             }
             row
         })
@@ -2949,6 +3151,168 @@ fn enforce_scoped_commit_completion(
         "checked": ["commit_hash", "commit_blocker", "scoped_commit_violation"],
         "staged_files_checked": staged_non_empty.len(),
         "claim_scopes": claim_scopes,
+    }))
+}
+
+/// wave-19 / task 08 — contract-level completion gate.
+///
+/// Runs only when `action_complete` saw both `enforce_scoped_commit=true`
+/// AND a non-empty `task_contract_path`. We:
+///
+///   1. Resolve the path against the project root (relative paths anchor
+///      on the registered project, never the daemon's CWD).
+///   2. Read the file off disk (read-only) and parse it through the
+///      shared `workstation_dispatch::parse_task_contract` projector so
+///      the daemon and the workstation pillar agree on the schema.
+///   3. Require a non-empty `commit_hash` — by contract a successful
+///      task-contract completion must point at a durable scoped commit;
+///      anything else means the verifier could not have run.
+///   4. For every entry in the contract's `:write-scope`, assert it is
+///      covered by either an active/released claim scope (re-using the
+///      same `scopes_overlap` rule as `enforce_scoped_commit_completion`)
+///      or by a path the caller staged (so a contract that names a brand
+///      new file is not rejected before its first claim lands).
+///
+/// Returns `Ok(validation_summary)` on success; the summary is echoed
+/// back on the response under `task_contract_validation` so callers can
+/// confirm which rules ran. Failure modes:
+///
+///   - `TASK_CONTRACT_REQUIRED` — file missing / unreadable.
+///   - `TASK_CONTRACT_MALFORMED` — lex / schema-mismatch / shape error.
+///   - `COMMIT_HASH_REQUIRED_FOR_CONTRACT` — `commit_hash` was absent or
+///     blank; the writer must report the durable scoped commit.
+///   - `CLAIM_SCOPE_MISSING` — at least one `:write-scope` entry is not
+///     covered by any active/released claim AND was not staged.
+///
+/// Daemon never runs git or any verifier here — the writer agent runs
+/// `node scripts/verify-task-contract.mjs` out-of-process and reports the
+/// outcome via `verifier_status`. This gate only checks the daemon-owned
+/// state (claim scopes, on-disk contract file) versus the caller's
+/// reported metadata.
+fn enforce_task_contract_completion(
+    file: &LogFile,
+    project_root: &Path,
+    task_contract_path: &str,
+    commit_hash: Option<&str>,
+    staged_files: Option<&[String]>,
+) -> std::result::Result<Value, ToolResult> {
+    // (1) Resolve. Relative paths anchor on the project root; absolute
+    // paths flow through verbatim so an out-of-tree contract (rare) is
+    // still loadable. We deliberately do NOT canonicalize here — the
+    // caller's path string is echoed back into the validation summary
+    // so dashboards correlate the response to the dispatch envelope.
+    let raw = std::path::Path::new(task_contract_path);
+    let resolved: PathBuf = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        project_root.join(raw)
+    };
+
+    // (2) Load + parse. Shared projector; daemon + workstation pillar
+    // agree on schema. Errors map deterministically to the two
+    // `TASK_CONTRACT_*` codes so callers can branch on file-vs-content.
+    let contract = match super::workstation_dispatch::load_task_contract(&resolved) {
+        Ok(c) => c,
+        Err(e) => {
+            use super::workstation_dispatch::TaskContractParseError as Tce;
+            let (code, message) = match &e {
+                Tce::Io(detail) => (
+                    "TASK_CONTRACT_REQUIRED",
+                    format!(
+                        "task_contract_path `{}` is not readable: {}",
+                        resolved.display(),
+                        detail
+                    ),
+                ),
+                _ => (
+                    "TASK_CONTRACT_MALFORMED",
+                    format!(
+                        "task_contract_path `{}` failed schema parse: {}",
+                        resolved.display(),
+                        e.reason()
+                    ),
+                ),
+            };
+            return Err(ToolResult::structured_error(
+                ToolError::new(code, message).with_suggestion(
+                    "ensure the path resolves under the project root and the file is a valid `missiond.task-contract.v1` Lisp form",
+                ),
+            ));
+        }
+    };
+
+    // (3) commit_hash gate. The contract pins a writer's durable
+    // commit; a missing hash means we cannot tie the report back to a
+    // git ref the verifier could have inspected.
+    let commit_present = commit_hash.map(|s| !s.trim().is_empty()).unwrap_or(false);
+    if !commit_present {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "COMMIT_HASH_REQUIRED_FOR_CONTRACT",
+                format!(
+                    "enforce_scoped_commit=true with task_contract_path=`{}` requires a non-empty commit_hash",
+                    task_contract_path
+                ),
+            )
+            .with_suggestion(
+                "report the scoped commit hash so the verifier can correlate the report-contract to the durable commit",
+            ),
+        ));
+    }
+
+    // (4) Claim-scope coverage. Every `:write-scope` entry must overlap
+    // an active/released claim OR a staged_files path. We re-use the
+    // same overlap rule as the audit + scoped-commit gates so the three
+    // checkpoints stay semantically aligned.
+    let claim_scopes: Vec<String> = parse_claims(file)
+        .iter()
+        .map(|c| c.scope.clone())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let staged: &[String] = staged_files.unwrap_or(&[]);
+
+    let mut uncovered: Vec<String> = Vec::new();
+    for ws in &contract.write_scope {
+        if ws.is_empty() {
+            continue;
+        }
+        let in_claim = claim_scopes.iter().any(|cs| scopes_overlap(cs, ws));
+        let in_staged = staged.iter().any(|sp| scopes_overlap(sp, ws));
+        if !in_claim && !in_staged {
+            uncovered.push(ws.clone());
+        }
+    }
+    if !uncovered.is_empty() {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "CLAIM_SCOPE_MISSING",
+                format!(
+                    "task_contract_path `{}` :write-scope has {} entry/entries with no covering claim or staged file: uncovered={:?}, claim_scopes={:?}, staged_files={:?}",
+                    task_contract_path,
+                    uncovered.len(),
+                    uncovered,
+                    claim_scopes,
+                    staged,
+                ),
+            )
+            .with_suggestion(
+                "open a claim covering each missing :write-scope entry, or stage the corresponding files before completing",
+            ),
+        ));
+    }
+
+    Ok(json!({
+        "task_contract_path": task_contract_path,
+        "resolved_path": resolved.display().to_string(),
+        "schema": contract.schema,
+        "checked": [
+            "commit_hash_present",
+            "task_contract_loadable",
+            "write_scope_covered",
+        ],
+        "write_scope_entries": contract.write_scope.len(),
+        "claim_scopes": claim_scopes,
+        "staged_files_checked": staged.len(),
     }))
 }
 
@@ -3647,6 +4011,20 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
     summary["project_root"] = json!(root.to_string_lossy());
     if let Some(cid) = args.get("claim_id").and_then(|v| v.as_str()) {
         summary["claim_id"] = json!(cid);
+    }
+    // wave-19 / task 08 — metadata-only echo of the task-contract path
+    // when the caller threads it through preflight. Daemon does NOT load
+    // or validate the contract here; the contract-level gate runs at
+    // `action=complete` time. Surfacing the path lets the writer agent
+    // correlate the preflight response with the dispatch envelope and
+    // notice mismatches before staging.
+    if let Some(tcp) = args
+        .get("task_contract_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        summary["task_contract_path"] = json!(tcp);
     }
 
     Ok(ToolResult::json_pretty(&summary))
@@ -4430,6 +4808,10 @@ mod tests {
                 commit_hash: Some("abc".into()),
                 commit_status: Some("committed".into()),
                 commit_blocker: None,
+                task_contract_path: None,
+                task_report_path: None,
+                verifier_status: None,
+                verifier_notes: None,
             },
             CompletionRecord {
                 id: "COMP002".into(),
@@ -4441,6 +4823,10 @@ mod tests {
                 commit_hash: None,
                 commit_status: Some("blocked".into()),
                 commit_blocker: Some("conflict".into()),
+                task_contract_path: None,
+                task_report_path: None,
+                verifier_status: None,
+                verifier_notes: None,
             },
         ];
         let v = summarize_durability(&records);
@@ -4951,5 +5337,288 @@ mod tests {
         let err = collect_specific_claim_scope(&file, "C999")
             .expect_err("unknown claim id must reject");
         assert_eq!(extract_error_code(&err).as_deref(), Some("NOT_FOUND"));
+    }
+
+    // ── Wave 19 / Task 08 — task-contract completion metadata ──
+    //
+    // The runtime gate `enforce_task_contract_completion` is what
+    // `action_complete` calls when the caller pairs
+    // `enforce_scoped_commit=true` with a `task_contract_path`. These
+    // tests pin the four structured-error codes plus the happy-path
+    // validation summary using a tempdir-anchored project root so the
+    // contract loader sees a real file. Verifier-status normalization
+    // and persistence are covered separately at the helper level.
+
+    use std::io::Write;
+
+    fn write_task_contract(dir: &Path, rel: &str, body: &str) -> PathBuf {
+        let abs = dir.join(rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        let mut f = std::fs::File::create(&abs).expect("create");
+        f.write_all(body.as_bytes()).expect("write");
+        abs
+    }
+
+    /// Minimal valid task-contract v1 form. Mirrors the shape produced
+    /// by plan.rs::build_task_contract_lisp (wave19-06) but trimmed to
+    /// the fields the daemon enforcement gate inspects.
+    const SAMPLE_CONTRACT_BODY: &str = r#"
+(task wave19-08-test-contract
+  :schema "missiond.task-contract.v1"
+  :goal "exercise task-contract completion gate"
+  :write-scope ["src/a.rs" "src/b.rs"]
+  :must-not-touch []
+  :acceptance []
+  :commit (:required true :message "feat(test): wave19-08" :scope-check write-scope-only))
+"#;
+
+    /// `verifier_status` normalizer must accept every canonical label
+    /// (with whitespace) and reject typos. Mirrors the contract for
+    /// `commit_status` so the test surface stays uniform across
+    /// completion enums.
+    #[test]
+    fn verifier_status_normalizer_accepts_canonical_only() {
+        for &status in VALID_VERIFIER_STATUSES {
+            assert_eq!(normalize_verifier_status(status), Some(status));
+        }
+        assert_eq!(normalize_verifier_status("  passed  "), Some("passed"));
+        assert!(normalize_verifier_status("").is_none());
+        assert!(normalize_verifier_status("done").is_none());
+        assert!(normalize_verifier_status("PASSED").is_none());
+    }
+
+    /// `parse_completions` must round-trip the wave19-08 metadata when
+    /// every new field is present, including verifier_notes prose with
+    /// punctuation, so dashboards / status surfaces see the original
+    /// caller-supplied strings.
+    #[test]
+    fn parse_completions_reads_task_contract_metadata() {
+        let body = "(execution-log\n  (completions\n    (COMP001\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :commit-hash \"abc1234\"\n      :commit-status \"committed\"\n      :task-contract-path \".missiond/tasks/wave19/sample.lisp\"\n      :task-report-path \".missiond/tasks/wave19/reports/sample.report.lisp\"\n      :verifier-status \"passed\"\n      :verifier-notes \"verifier OK against abc1234\")))\n";
+        let file = LogFile::parse(body.to_string()).expect("parse");
+        let comps = parse_completions(&file);
+        assert_eq!(comps.len(), 1);
+        let c = &comps[0];
+        assert_eq!(
+            c.task_contract_path.as_deref(),
+            Some(".missiond/tasks/wave19/sample.lisp"),
+        );
+        assert_eq!(
+            c.task_report_path.as_deref(),
+            Some(".missiond/tasks/wave19/reports/sample.report.lisp"),
+        );
+        assert_eq!(c.verifier_status.as_deref(), Some("passed"));
+        assert_eq!(
+            c.verifier_notes.as_deref(),
+            Some("verifier OK against abc1234"),
+        );
+    }
+
+    /// Legacy completions (no wave19-08 fields) must still parse and
+    /// surface `None` everywhere new — the same backward-compat contract
+    /// the wave12-01 scoped-commit fields uphold.
+    #[test]
+    fn parse_completions_legacy_omits_task_contract_metadata() {
+        let body = "(execution-log\n  (completions\n    (COMP001\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\")))\n";
+        let file = LogFile::parse(body.to_string()).expect("parse");
+        let c = &parse_completions(&file)[0];
+        assert!(c.task_contract_path.is_none());
+        assert!(c.task_report_path.is_none());
+        assert!(c.verifier_status.is_none());
+        assert!(c.verifier_notes.is_none());
+    }
+
+    /// Missing task-contract file → TASK_CONTRACT_REQUIRED. The error
+    /// must surface BEFORE the daemon mutates the companion log so the
+    /// writer can correct the path without a partial commit on record.
+    #[test]
+    fn enforce_contract_rejects_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = fresh_file_with_claim();
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            "tasks/does-not-exist.lisp",
+            Some("abc1234"),
+            Some(&["src/a.rs".to_string()]),
+        );
+        let err = res.expect_err("missing file must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_CONTRACT_REQUIRED"),
+        );
+    }
+
+    /// Malformed contract body (schema mismatch) → TASK_CONTRACT_MALFORMED.
+    /// Distinct from REQUIRED so the writer can tell "wrong path" from
+    /// "wrong content" without re-running the verifier.
+    #[test]
+    fn enforce_contract_rejects_malformed_schema() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad = "(task wave19-08-bad\n  :schema \"missiond.task-contract.v0\"\n  :goal \"bad\")";
+        write_task_contract(dir.path(), "tasks/bad.lisp", bad);
+        let file = fresh_file_with_claim();
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            "tasks/bad.lisp",
+            Some("abc1234"),
+            Some(&["src/a.rs".to_string()]),
+        );
+        let err = res.expect_err("schema mismatch must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_CONTRACT_MALFORMED"),
+        );
+    }
+
+    /// Missing commit_hash → COMMIT_HASH_REQUIRED_FOR_CONTRACT. Distinct
+    /// from the scoped-commit COMMIT_HASH_REQUIRED so dashboards can
+    /// distinguish "no hash on report" from "no hash on commit_status".
+    #[test]
+    fn enforce_contract_rejects_missing_commit_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let file = fresh_file_with_claim();
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            "tasks/ok.lisp",
+            None,
+            Some(&["src/a.rs".to_string()]),
+        );
+        let err = res.expect_err("missing hash must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("COMMIT_HASH_REQUIRED_FOR_CONTRACT"),
+        );
+    }
+
+    /// Empty / whitespace commit_hash also rejects — the helper trims
+    /// before checking so the writer cannot smuggle a blank string past
+    /// the gate.
+    #[test]
+    fn enforce_contract_rejects_blank_commit_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let file = fresh_file_with_claim();
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            "tasks/ok.lisp",
+            Some("   "),
+            Some(&["src/a.rs".to_string()]),
+        );
+        let err = res.expect_err("blank hash must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("COMMIT_HASH_REQUIRED_FOR_CONTRACT"),
+        );
+    }
+
+    /// `:write-scope` entry not covered by any claim AND not staged →
+    /// CLAIM_SCOPE_MISSING. This is the "writer ran the verifier OK but
+    /// the daemon-side state cannot prove the work landed inside scope"
+    /// case the gate exists to catch.
+    #[test]
+    fn enforce_contract_rejects_uncovered_write_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        // fresh_file_with_claim covers "src/" — that overlaps both
+        // contract entries, so we narrow the claim to a sibling path
+        // that proves the contract entries are uncovered. Easiest: use
+        // fresh_file (no claims) and stage NOTHING.
+        let file = fresh_file();
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            "tasks/ok.lisp",
+            Some("abc1234"),
+            None,
+        );
+        let err = res.expect_err("uncovered scope must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("CLAIM_SCOPE_MISSING"),
+        );
+    }
+
+    /// Happy path: contract loadable, hash present, every :write-scope
+    /// entry overlaps an active claim. Validation summary records the
+    /// resolved path + checked rules so the response mirrors the
+    /// scoped-commit gate's shape.
+    #[test]
+    fn enforce_contract_accepts_covered_write_scope() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolved = write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let file = fresh_file_with_claim(); // active claim on "src/"
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            "tasks/ok.lisp",
+            Some("abc1234"),
+            Some(&["src/a.rs".to_string(), "src/b.rs".to_string()]),
+        );
+        let summary = res.expect("covered scope must pass");
+        assert_eq!(
+            summary.get("schema").and_then(|v| v.as_str()),
+            Some("missiond.task-contract.v1"),
+        );
+        assert_eq!(
+            summary.get("write_scope_entries").and_then(|v| v.as_u64()),
+            Some(2),
+        );
+        assert_eq!(
+            summary
+                .get("resolved_path")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            Some(resolved.display().to_string()),
+        );
+    }
+
+    /// Happy path with absolute task_contract_path: must NOT be rejoined
+    /// against the project root, and the resolved_path echoed back must
+    /// be byte-equal to the absolute path the caller supplied.
+    #[test]
+    fn enforce_contract_accepts_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolved = write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let abs_str = resolved.display().to_string();
+        let file = fresh_file_with_claim();
+        let res = enforce_task_contract_completion(
+            &file,
+            // Anchor against an unrelated tempdir to prove the absolute
+            // path takes precedence over project_root.
+            tempfile::tempdir().unwrap().path(),
+            &abs_str,
+            Some("abc1234"),
+            Some(&["src/a.rs".to_string(), "src/b.rs".to_string()]),
+        );
+        let summary = res.expect("absolute path must load");
+        assert_eq!(
+            summary.get("resolved_path").and_then(|v| v.as_str()),
+            Some(abs_str.as_str()),
+        );
+    }
+
+    /// Staged file alone (no claim) is enough to cover a :write-scope
+    /// entry — this is the "brand new file" case where the writer staged
+    /// it but has not yet opened a claim. Mirrors the scoped-commit gate
+    /// which accepts staged paths inside released claims.
+    #[test]
+    fn enforce_contract_accepts_staged_only_coverage() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let file = fresh_file(); // zero claims
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            "tasks/ok.lisp",
+            Some("abc1234"),
+            Some(&["src/a.rs".to_string(), "src/b.rs".to_string()]),
+        );
+        assert!(res.is_ok(), "staged paths alone should cover write-scope");
     }
 }
