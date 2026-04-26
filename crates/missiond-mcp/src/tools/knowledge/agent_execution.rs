@@ -35,7 +35,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             "manager action — see Lisp helper agent-execution-coordination :: mcp-tool-design",
             &[
                 "open", "list", "claim", "heartbeat", "release", "deviate", "decide", "issue",
-                "complete", "status", "audit", "repair",
+                "complete", "status", "audit", "repair", "preflight_commit",
             ],
         ),
     );
@@ -274,6 +274,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
             &["dry_run", "apply"],
         ),
     );
+    properties.insert(
+        "cwd".into(),
+        prop(
+            "string",
+            "[preflight_commit] working directory the writer agent is committing from. Optional override for the project root; must canonicalize to a path inside the registered project root or preflight rejects with INVALID_PARAM. Defaults to the project root when absent.",
+        ),
+    );
+    properties.insert(
+        "expected_files".into(),
+        prop_array_of_strings(
+            "[preflight_commit] optional hint listing the files the dispatch brief expected this writer to touch (e.g. plan node `paths`). Drift in either direction surfaces in the response: paths NOT touched land in `expected_missing`, paths touched but NOT expected land in `expected_unexpected`. Advisory only — does not flip `ok`; the scope check against active+released claims is the authoritative gate.",
+        ),
+    );
 
     let schema = json!({
         "type": "object",
@@ -283,13 +296,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
 
     vec![ToolDefinition::new(
         "mission_execution",
-        "agent-execution-coordination v0.5.x manager — 12 actions over .missiond/v2/<id>.lisp \
+        "agent-execution-coordination v0.5.x manager — 13 actions over .missiond/v2/<id>.lisp \
          companion logs (open / list / claim / heartbeat / release / deviate / decide / issue / \
-         complete / status / audit / repair). ID 分配由 manager 原子化 (id-counters slot), \
+         complete / status / audit / repair / preflight_commit). ID 分配由 manager 原子化 (id-counters slot), \
          claim 带 lease + heartbeat,deviation/decision/issue/completion 自动编号 D/DC/I/COMP\
          ;status 给 dashboard,audit 检 paren / 单调 ID / 重叠 claim / stale claim / scoped commit \
          handoff (commit-status-without-hash, commit-status-blocked-without-blocker, scoped-commit-violation),repair 仅修\
-         结构 (dry_run|apply)。Lisp 源: intent-memory.lisp :: agent-execution-coordination + \
+         结构 (dry_run|apply)。preflight_commit (wave18-08): read-only `git status --porcelain=v1` \
+         under the resolved project root, compares changed/staged paths vs active+released claim scopes, \
+         returns `{ok, changed_files, staged_files, out_of_scope_files, expected_missing?, \
+         expected_unexpected?, claim_scopes, next_step}`. Daemon NEVER runs `git add/commit/reset/checkout` — \
+         only inspects. Pairs with `enforce_scoped_commit=true` on action=complete (wave16-06) which is the \
+         post-commit gate; preflight catches the same SCOPED_COMMIT_VIOLATION one step earlier. \
+         Lisp 源: intent-memory.lisp :: agent-execution-coordination + \
          intent-worker.lisp :: agent-execution-manager-interface + intent-flow.lisp :: \
          F-execution-log-governance + F-scoped-commit-handoff。注意:event-bus ExecutionEvent::* 暂未发射,等域扩展落地。",
         schema,

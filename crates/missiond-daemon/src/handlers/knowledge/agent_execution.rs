@@ -273,13 +273,14 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "status" => action_status(state, &args).await,
         "audit" => action_audit(state, &args).await,
         "repair" => action_repair(state, &args).await,
+        "preflight_commit" => action_preflight_commit(state, &args).await,
         other => Ok(ToolResult::structured_error(
             ToolError::new(
                 error_codes::UNKNOWN_ACTION,
                 format!("unknown mission_execution action `{}`", other),
             )
             .with_suggestion(
-                "valid: open|list|claim|heartbeat|release|deviate|decide|issue|complete|status|audit|repair",
+                "valid: open|list|claim|heartbeat|release|deviate|decide|issue|complete|status|audit|repair|preflight_commit",
             ),
         )),
     }
@@ -3209,6 +3210,449 @@ fn rebuild_derived_indexes(file: &mut LogFile) -> Result<()> {
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// action: preflight_commit — read-only worktree audit before scoped commit
+//
+// Wave 18 / Task 08. The daemon may inspect git status / diff but MUST
+// NEVER stage/commit/reset/checkout. The writer agent is the only actor
+// that mutates the worktree; we just project worktree state vs the
+// active+released claim scopes so the writer can see scope drift before
+// running its scoped commit.
+//
+// Pairs with `enforce_scoped_commit_completion` (wave16-06) which is the
+// post-commit gate; preflight catches the same violations one step
+// earlier so the writer doesn't have to roll back a bad stage.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Single-file entry from `git status --porcelain=v1`. The first byte is
+/// the index (staged) status, the second is the worktree status; we
+/// surface both so the caller can tell "staged but reverted in worktree"
+/// from "edited but not staged".
+///
+/// We deliberately keep the struct minimal and plain — no path
+/// canonicalization here, since rename pairs / quoted paths would require
+/// shelling out to `git diff` per entry. The audit needs file paths
+/// relative to the project root, which porcelain v1 already provides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PorcelainEntry {
+    /// Index/staged status byte (`'M'`, `'A'`, `'D'`, `'R'`, `'?'`, ` `, …).
+    index_status: char,
+    /// Worktree status byte (same alphabet as `index_status`).
+    worktree_status: char,
+    /// Path as reported by porcelain (rename right-hand side when applicable).
+    path: String,
+}
+
+impl PorcelainEntry {
+    /// True when the index slot reflects a tracked staged change
+    /// (anything but ` ` / `?` / `!`). Untracked / ignored files never
+    /// count as staged because porcelain marks them with `?` / `!`.
+    fn is_staged(&self) -> bool {
+        !matches!(self.index_status, ' ' | '?' | '!')
+    }
+
+    /// True when the worktree slot reflects an unstaged change OR the
+    /// file is untracked — both shapes carry "would be touched by an
+    /// over-broad `git add .`". Ignored files (`!`) stay out so the
+    /// preflight doesn't flag `.gitignore`d build artefacts.
+    fn is_changed(&self) -> bool {
+        match (self.index_status, self.worktree_status) {
+            ('!', _) | (_, '!') => false,
+            _ => self.index_status != ' ' || self.worktree_status != ' ',
+        }
+    }
+}
+
+/// Parse the textual output of `git status --porcelain=v1`. Returns an
+/// owned `Vec<PorcelainEntry>` so the caller is free of any borrow on
+/// the source string.
+///
+/// Rules:
+///   - skip blank lines.
+///   - rename entries (`R` / `C` in the index slot) carry the rename
+///     pair on a single line as `RENAMED -> ORIG`; we record the
+///     right-hand side which is the post-rename path, matching what the
+///     scoped-commit audit cares about.
+///   - quoted paths (porcelain c-style escapes when the path contains
+///     special bytes) are forwarded verbatim with the surrounding
+///     quotes — this preserves round-trip fidelity even though
+///     scope-overlap matching against quoted paths will fail-by-design;
+///     the violator surfaces in `out_of_scope_files` so the writer can
+///     widen the claim or rename the file.
+///
+/// We keep this parser deliberately tiny and pure: no panics, no
+/// allocations beyond the obvious `String` per path, no calls into the
+/// process. That means the fail-fast contract from the task brief — the
+/// daemon never spawns a mutating git command — sits one level up
+/// (`run_git_status`).
+fn parse_porcelain_status(text: &str) -> Vec<PorcelainEntry> {
+    let mut out = Vec::new();
+    for raw in text.lines() {
+        if raw.is_empty() {
+            continue;
+        }
+        let bytes = raw.as_bytes();
+        if bytes.len() < 4 {
+            // Defensive: malformed line, skip silently. Porcelain v1
+            // always emits at least `XY <path>` (4+ chars).
+            continue;
+        }
+        let index_status = bytes[0] as char;
+        let worktree_status = bytes[1] as char;
+        let rest = &raw[3..];
+        // Rename / copy pairs separate `OLD -> NEW`; we pin the new
+        // path because that is what lives on disk after `git add`.
+        let path = if (index_status == 'R' || index_status == 'C')
+            && rest.contains(" -> ")
+        {
+            // unwrap is safe because contains() returned true.
+            rest.split(" -> ").nth(1).unwrap().to_string()
+        } else {
+            rest.to_string()
+        };
+        out.push(PorcelainEntry {
+            index_status,
+            worktree_status,
+            path,
+        });
+    }
+    out
+}
+
+/// Collect every claim scope on the companion log, regardless of
+/// status. Mirrors `enforce_scoped_commit_completion` — both
+/// active and released claims count for scope-overlap purposes
+/// because `F-scoped-commit-handoff :: s7` legitimately commits inside
+/// a just-released claim window.
+fn collect_all_claim_scopes(file: &LogFile) -> Vec<String> {
+    parse_claims(file)
+        .iter()
+        .map(|c| c.scope.clone())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Restrict to the scope of a specific claim id when caller supplies
+/// `claim_id`. Returns `Err` with a structured `NOT_FOUND` ToolResult
+/// when the claim id does not match any record so the writer learns
+/// the typo before running git.
+fn collect_specific_claim_scope(
+    file: &LogFile,
+    claim_id: &str,
+) -> std::result::Result<Vec<String>, ToolResult> {
+    let claims = parse_claims(file);
+    let hit = claims.iter().find(|c| c.id == claim_id);
+    match hit {
+        Some(c) if !c.scope.is_empty() => Ok(vec![c.scope.clone()]),
+        Some(_) => Err(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!("claim {} has no scope set", claim_id),
+            )
+            .with_suggestion("rerun with claim_id omitted to use the union of all claim scopes"),
+        )),
+        None => Err(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::NOT_FOUND,
+                format!("claim_id `{}` not found on companion log", claim_id),
+            )
+            .with_suggestion("call action=status to list active claim ids"),
+        )),
+    }
+}
+
+/// Pure preflight comparison: given porcelain entries + claim scopes +
+/// an optional `expected_files` hint from the dispatch brief, return
+/// the structured projection the action surfaces back to the caller.
+///
+/// Output shape (also wired into the response JSON):
+///   - `changed_files`: every porcelain entry whose worktree slot is
+///      non-clean (includes untracked).
+///   - `staged_files`: every porcelain entry whose index slot is
+///      non-clean (excludes untracked).
+///   - `out_of_scope_files`: subset of (changed ∪ staged) that does
+///      NOT overlap any claim scope.
+///   - `expected_missing`: paths in `expected_files` that are NOT in
+///      the changed/staged set. Helps the writer notice when a file the
+///      brief expected to touch was forgotten.
+///   - `expected_unexpected`: paths changed/staged that are NOT in
+///      `expected_files`. Surfaced only when `expected_files` is supplied
+///      so the writer can audit drift from the plan node's `paths`
+///      hint without us hard-failing on it.
+///   - `ok`: true iff `out_of_scope_files` is empty.
+///   - `next_step`: human-readable hint mirroring the wave16-06
+///      enforcement messages so the writer can act without re-reading
+///      the contract.
+fn build_preflight_summary(
+    entries: &[PorcelainEntry],
+    claim_scopes: &[String],
+    expected_files: Option<&[String]>,
+) -> Value {
+    let changed_files: Vec<String> = entries
+        .iter()
+        .filter(|e| e.is_changed())
+        .map(|e| e.path.clone())
+        .collect();
+    let staged_files: Vec<String> = entries
+        .iter()
+        .filter(|e| e.is_staged())
+        .map(|e| e.path.clone())
+        .collect();
+
+    // Union of changed + staged for scope check, dedup-preserving order.
+    let mut union: Vec<String> = Vec::with_capacity(changed_files.len() + staged_files.len());
+    for p in changed_files.iter().chain(staged_files.iter()) {
+        if !union.contains(p) {
+            union.push(p.clone());
+        }
+    }
+
+    let out_of_scope_files: Vec<String> = if claim_scopes.is_empty() {
+        // No claim → every touched file is out-of-scope by definition;
+        // the writer must claim before committing.
+        union.clone()
+    } else {
+        union
+            .iter()
+            .filter(|path| !claim_scopes.iter().any(|cs| scopes_overlap_pure(cs, path)))
+            .cloned()
+            .collect()
+    };
+
+    let mut summary = json!({
+        "ok": out_of_scope_files.is_empty(),
+        "changed_files": changed_files,
+        "staged_files": staged_files,
+        "out_of_scope_files": out_of_scope_files,
+        "claim_scopes": claim_scopes,
+    });
+
+    if let Some(expected) = expected_files {
+        let expected_missing: Vec<String> = expected
+            .iter()
+            .filter(|p| !changed_files.contains(p) && !staged_files.contains(p))
+            .cloned()
+            .collect();
+        let expected_unexpected: Vec<String> = changed_files
+            .iter()
+            .chain(staged_files.iter())
+            .filter(|p| !expected.contains(p))
+            .cloned()
+            .collect();
+        // Dedup expected_unexpected while preserving insertion order so
+        // the response is deterministic across porcelain orderings.
+        let mut seen_un: Vec<String> = Vec::new();
+        for p in expected_unexpected {
+            if !seen_un.contains(&p) {
+                seen_un.push(p);
+            }
+        }
+        summary["expected_files"] = json!(expected);
+        summary["expected_missing"] = json!(expected_missing);
+        summary["expected_unexpected"] = json!(seen_un);
+    }
+
+    let next_step = if !out_of_scope_files.is_empty() {
+        if claim_scopes.is_empty() {
+            "open a claim covering the touched paths via `mission_execution(action=claim, scope=…)` before staging anything".to_string()
+        } else {
+            format!(
+                "narrow staged set to claim scope, or open a new claim covering: {:?}",
+                out_of_scope_files
+            )
+        }
+    } else if staged_files.is_empty() && changed_files.is_empty() {
+        "worktree clean — nothing to commit".to_string()
+    } else if staged_files.is_empty() {
+        "stage the in-scope edits with `git add <paths>` then re-run preflight before committing".to_string()
+    } else {
+        "in-scope changes detected — run scoped `git commit`, then call `action=complete` with `enforce_scoped_commit=true`".to_string()
+    };
+    summary["next_step"] = json!(next_step);
+
+    summary
+}
+
+/// Run `git status --porcelain=v1` under `root` (read-only). Returns the
+/// raw stdout text on success, or a structured `ToolResult` error when
+/// git is unavailable or refuses to operate on the path.
+///
+/// Safety: the only git subcommand spawned by this module is `status`
+/// + `--porcelain=v1`. There is **no** `git add / commit / reset /
+/// checkout` codepath in this file — grep for `Command.*git.*(add|
+/// commit|reset|checkout)` over `agent_execution.rs` returns zero hits
+/// (verified at PR time).
+fn run_git_status(root: &Path) -> std::result::Result<String, ToolResult> {
+    let output = std::process::Command::new("git")
+        .args(["status", "--porcelain=v1"])
+        .current_dir(root)
+        .output()
+        .map_err(|e| {
+            ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::EXTERNAL_ERROR,
+                    format!(
+                        "failed to spawn `git status` under {}: {}",
+                        root.display(),
+                        e
+                    ),
+                )
+                .with_suggestion("ensure git is installed and the project root is a worktree"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::EXTERNAL_ERROR,
+                format!(
+                    "`git status` exited non-zero under {}: {}",
+                    root.display(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+            )
+            .with_suggestion("verify the project root is a git worktree (no `--git-dir` override)"),
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let execution_id = match require_str(args, "execution_id") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+
+    // Resolve project root through the registry — same gate every other
+    // action uses. Refusing unresolved roots is part of the wave18-08
+    // safety contract: we never run git outside an explicitly registered
+    // project (or the active CWD when no project is supplied).
+    let root = match resolve_project_root(state, project_or_target_project(args)).await {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("cannot resolve project root: {}", e),
+                )
+                .with_suggestion(
+                    "register the project via `mission_project(action=add, …)` or call from inside the project worktree",
+                ),
+            ));
+        }
+    };
+
+    // Optional `cwd` override — must stay inside the resolved project
+    // root. We canonicalize both sides so symlinks / `..` traversals
+    // can't escape the project boundary. If canonicalization fails we
+    // refuse rather than silently fall back to root, matching the
+    // fail-fast posture of the wave16-06 enforcement gate.
+    let cwd_arg = args
+        .get("cwd")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let inspect_dir = match cwd_arg {
+        Some(cwd) => {
+            let candidate = std::path::PathBuf::from(cwd);
+            let abs = if candidate.is_absolute() {
+                candidate
+            } else {
+                root.join(candidate)
+            };
+            let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
+            let canon_abs = match abs.canonicalize() {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(ToolResult::structured_error(
+                        ToolError::new(
+                            error_codes::INVALID_PARAM,
+                            format!("cwd `{}` does not exist or is not accessible: {}", cwd, e),
+                        ),
+                    ));
+                }
+            };
+            if !canon_abs.starts_with(&canon_root) {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "cwd `{}` resolves outside the project root `{}`",
+                            cwd,
+                            root.display()
+                        ),
+                    )
+                    .with_suggestion("supply a path inside the project, or omit `cwd`"),
+                ));
+            }
+            canon_abs
+        }
+        None => root.clone(),
+    };
+
+    // Expected_files hint from the workstation brief. Trimmed and
+    // empty-filtered through the same helper as `staged_files` so the
+    // writer doesn't need to pre-clean its list.
+    let expected_files = collect_string_list(args, "expected_files");
+
+    // Companion log read — same path resolution as every other action.
+    // We need the claims block for scope comparison; opening the file
+    // also doubles as a "did the writer pass a real execution_id?"
+    // gate, mirroring the rejection shape of action_status.
+    let path = companion_path(&root, execution_id);
+    let file = match read_log_file(&path) {
+        Ok(f) => f,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!(
+                        "companion log {} not readable: {}",
+                        path.display(),
+                        e
+                    ),
+                )
+                .with_suggestion("confirm execution_id matches a previously opened companion log"),
+            ));
+        }
+    };
+
+    // Resolve which claim scope(s) we audit against. Default = union of
+    // all claim scopes; explicit `claim_id` narrows to a single scope so
+    // the writer can preflight against the exact claim it just acquired.
+    let claim_scopes = if let Some(cid) = args.get("claim_id").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        match collect_specific_claim_scope(&file, cid) {
+            Ok(scopes) => scopes,
+            Err(err) => return Ok(err),
+        }
+    } else {
+        collect_all_claim_scopes(&file)
+    };
+
+    // Read-only git status under the inspect_dir. The only mutating
+    // codepath in this whole crate is `arch_maintenance_worker`, which
+    // lives behind a feature flag the writer agent never reaches; this
+    // action stays strictly to `git status --porcelain=v1`.
+    let raw_status = match run_git_status(&inspect_dir) {
+        Ok(s) => s,
+        Err(err) => return Ok(err),
+    };
+    let entries = parse_porcelain_status(&raw_status);
+
+    let mut summary = build_preflight_summary(&entries, &claim_scopes, expected_files.as_deref());
+
+    // Echo the inputs so the writer agent can correlate the response
+    // with the exact dispatch envelope it sent us. `cwd` is the
+    // canonicalized form so any symlink / `..` resolution is visible.
+    summary["execution_id"] = json!(execution_id);
+    summary["cwd"] = json!(inspect_dir.to_string_lossy());
+    summary["project_root"] = json!(root.to_string_lossy());
+    if let Some(cid) = args.get("claim_id").and_then(|v| v.as_str()) {
+        summary["claim_id"] = json!(cid);
+    }
+
+    Ok(ToolResult::json_pretty(&summary))
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // tests — exercise the parser, ID allocation, and round-trip on a
 // freshly-opened canonical file
 // ───────────────────────────────────────────────────────────────────────
@@ -4219,5 +4663,293 @@ mod tests {
         // contract by exercising it directly. The opt-out (legacy)
         // path is exercised by every existing `action_complete` test
         // above, all of which omit `enforce_scoped_commit`.
+    }
+
+    // ── Wave 18 / Task 08 — preflight_commit (worktree audit) ──
+    //
+    // These tests exercise the pure helpers (`parse_porcelain_status`,
+    // `build_preflight_summary`) plus the claim-resolution helper. The
+    // outer `action_preflight_commit` async path needs an AppState +
+    // a real git worktree, so we only smoke-test the orchestration
+    // through the helpers — the same approach the wave16-06 tests took
+    // for `enforce_scoped_commit_completion`.
+
+    /// Porcelain v1 parser must surface the standard XY-status pairs
+    /// that scoped-commit enforcement keys off (modified, added,
+    /// deleted, renamed, untracked) without dropping any path.
+    #[test]
+    fn porcelain_parser_recognises_each_status_kind() {
+        let raw = " M src/a.rs\nA  src/b.rs\nMM src/c.rs\nD  src/d.rs\n?? new/file.rs\n!! .build/cache\nR  src/e.rs -> src/f.rs\n";
+        let entries = parse_porcelain_status(raw);
+        assert_eq!(entries.len(), 7);
+
+        // Worktree-modified, not staged: changed but NOT staged.
+        assert_eq!(entries[0].path, "src/a.rs");
+        assert!(entries[0].is_changed());
+        assert!(!entries[0].is_staged());
+
+        // Staged-add: staged AND changed (worktree slot is space ⇒
+        // identical to index, but the index slot is non-blank).
+        assert!(entries[1].is_staged());
+        assert!(entries[1].is_changed());
+
+        // Both staged and worktree-edited (`MM`).
+        assert!(entries[2].is_staged());
+        assert!(entries[2].is_changed());
+
+        // Staged delete.
+        assert_eq!(entries[3].path, "src/d.rs");
+        assert!(entries[3].is_staged());
+
+        // Untracked: changed but NOT staged.
+        assert_eq!(entries[4].path, "new/file.rs");
+        assert!(entries[4].is_changed());
+        assert!(!entries[4].is_staged());
+
+        // Ignored: stays out of both buckets so .gitignore'd build
+        // artefacts don't trip preflight.
+        assert!(!entries[5].is_changed());
+        assert!(!entries[5].is_staged());
+
+        // Rename: parser must keep the post-rename path so scope-overlap
+        // matches the on-disk file.
+        assert_eq!(entries[6].path, "src/f.rs");
+        assert!(entries[6].is_staged());
+    }
+
+    /// Empty stdout (clean worktree) must yield an empty entry list —
+    /// downstream `build_preflight_summary` then emits the
+    /// "worktree clean — nothing to commit" hint.
+    #[test]
+    fn porcelain_parser_handles_clean_worktree() {
+        assert!(parse_porcelain_status("").is_empty());
+        assert!(parse_porcelain_status("\n\n").is_empty());
+    }
+
+    /// Scope comparison: union of changed/staged paths inside the claim
+    /// scope keeps `out_of_scope_files` empty and `ok=true`.
+    #[test]
+    fn preflight_summary_in_scope_is_ok() {
+        let entries = vec![
+            PorcelainEntry {
+                index_status: 'M',
+                worktree_status: ' ',
+                path: "src/a.rs".into(),
+            },
+            PorcelainEntry {
+                index_status: ' ',
+                worktree_status: 'M',
+                path: "src/b.rs".into(),
+            },
+        ];
+        let scopes = vec!["src/".to_string()];
+        let summary = build_preflight_summary(&entries, &scopes, None);
+        assert_eq!(summary.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let oos = summary
+            .get("out_of_scope_files")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        assert!(oos.is_empty());
+        assert_eq!(
+            summary
+                .get("staged_files")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(1),
+        );
+        assert_eq!(
+            summary
+                .get("changed_files")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(2),
+        );
+    }
+
+    /// A staged path outside every claim scope must surface in
+    /// `out_of_scope_files` with `ok=false`. Parallel to
+    /// SCOPED_COMMIT_VIOLATION on the post-commit gate so the writer
+    /// agent sees the same drift signal at preflight time.
+    #[test]
+    fn preflight_summary_flags_out_of_scope_path() {
+        let entries = vec![
+            PorcelainEntry {
+                index_status: 'M',
+                worktree_status: ' ',
+                path: "src/a.rs".into(),
+            },
+            PorcelainEntry {
+                index_status: 'A',
+                worktree_status: ' ',
+                path: "vendor/x.rs".into(),
+            },
+        ];
+        let scopes = vec!["src/".to_string()];
+        let summary = build_preflight_summary(&entries, &scopes, None);
+        assert_eq!(summary.get("ok").and_then(|v| v.as_bool()), Some(false));
+        let oos: Vec<String> = summary
+            .get("out_of_scope_files")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(oos, vec!["vendor/x.rs"]);
+        let next = summary
+            .get("next_step")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            next.contains("vendor/x.rs"),
+            "next_step should mention the violator, got: {}",
+            next
+        );
+    }
+
+    /// No claims on the companion log + dirty worktree → every touched
+    /// path is out-of-scope by definition. This is the pre-claim case
+    /// the wave16-06 enforcement gate calls CLAIM_SCOPE_REQUIRED;
+    /// preflight surfaces it as a flat out-of-scope list with a
+    /// "open a claim first" next_step instead of a hard error so the
+    /// writer can iteratively fix it.
+    #[test]
+    fn preflight_summary_no_claims_marks_everything_out_of_scope() {
+        let entries = vec![PorcelainEntry {
+            index_status: 'M',
+            worktree_status: ' ',
+            path: "src/a.rs".into(),
+        }];
+        let scopes: Vec<String> = vec![];
+        let summary = build_preflight_summary(&entries, &scopes, None);
+        assert_eq!(summary.get("ok").and_then(|v| v.as_bool()), Some(false));
+        let oos: Vec<&str> = summary
+            .get("out_of_scope_files")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(oos, vec!["src/a.rs"]);
+        let next = summary
+            .get("next_step")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            next.contains("open a claim"),
+            "next_step should suggest opening a claim, got: {}",
+            next
+        );
+    }
+
+    /// Clean worktree + active claim: ok=true, both file lists empty,
+    /// next_step explicitly says "nothing to commit".
+    #[test]
+    fn preflight_summary_clean_worktree_ok() {
+        let entries: Vec<PorcelainEntry> = vec![];
+        let scopes = vec!["src/".to_string()];
+        let summary = build_preflight_summary(&entries, &scopes, None);
+        assert_eq!(summary.get("ok").and_then(|v| v.as_bool()), Some(true));
+        assert_eq!(
+            summary
+                .get("changed_files")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(0),
+        );
+        assert_eq!(
+            summary
+                .get("staged_files")
+                .and_then(|v| v.as_array())
+                .map(|a| a.len()),
+            Some(0),
+        );
+        let next = summary
+            .get("next_step")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        assert!(
+            next.contains("worktree clean"),
+            "next_step should mention clean worktree, got: {}",
+            next
+        );
+    }
+
+    /// `expected_files` hint surfaces both directions of drift:
+    /// expected-but-not-touched goes to `expected_missing`, touched-but-
+    /// not-expected goes to `expected_unexpected`. Neither flips `ok`
+    /// because the scope check is the source of truth — expected_files
+    /// is advisory metadata from the dispatch brief.
+    #[test]
+    fn preflight_summary_expected_files_drift_surfaces_both_directions() {
+        let entries = vec![
+            PorcelainEntry {
+                index_status: 'M',
+                worktree_status: ' ',
+                path: "src/a.rs".into(),
+            },
+            PorcelainEntry {
+                index_status: 'A',
+                worktree_status: ' ',
+                path: "src/c.rs".into(),
+            },
+        ];
+        let scopes = vec!["src/".to_string()];
+        let expected = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let summary = build_preflight_summary(&entries, &scopes, Some(&expected));
+        // Scope check passes — `c.rs` is inside `src/` even though it
+        // wasn't expected.
+        assert_eq!(summary.get("ok").and_then(|v| v.as_bool()), Some(true));
+        let missing: Vec<&str> = summary
+            .get("expected_missing")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(missing, vec!["src/b.rs"]);
+        let unexpected: Vec<&str> = summary
+            .get("expected_unexpected")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(unexpected, vec!["src/c.rs"]);
+    }
+
+    /// Claim resolution: `claim_id` pointing to a real claim returns
+    /// just that claim's scope (single-element vec).
+    #[test]
+    fn preflight_specific_claim_returns_just_that_scope() {
+        let mut file = fresh_file();
+        let now = now_iso();
+        let entry = format!(
+            "    (C001\n      :claimer \"agent\"\n      :scope \"src/\"\n      :phase \"phase-A\"\n      :acquired-at {ts}\n      :lease-expires-at {ts}\n      :heartbeat-at {ts}\n      :status \"active\")",
+            ts = lisp_quote_string(&now),
+        );
+        append_to_block(&mut file, "claims", &entry).unwrap();
+        let entry2 = format!(
+            "    (C002\n      :claimer \"agent\"\n      :scope \"vendor/\"\n      :phase \"phase-A\"\n      :acquired-at {ts}\n      :lease-expires-at {ts}\n      :heartbeat-at {ts}\n      :status \"active\")",
+            ts = lisp_quote_string(&now),
+        );
+        append_to_block(&mut file, "claims", &entry2).unwrap();
+        let scopes = collect_specific_claim_scope(&file, "C002").unwrap();
+        assert_eq!(scopes, vec!["vendor/".to_string()]);
+        // Union path includes both.
+        let union = collect_all_claim_scopes(&file);
+        assert_eq!(union.len(), 2);
+        assert!(union.contains(&"src/".to_string()));
+        assert!(union.contains(&"vendor/".to_string()));
+    }
+
+    /// Unknown claim_id must reject with NOT_FOUND so the writer
+    /// learns about the typo before running git.
+    #[test]
+    fn preflight_unknown_claim_id_rejects() {
+        let file = fresh_file();
+        let err = collect_specific_claim_scope(&file, "C999")
+            .expect_err("unknown claim id must reject");
+        assert_eq!(extract_error_code(&err).as_deref(), Some("NOT_FOUND"));
     }
 }
