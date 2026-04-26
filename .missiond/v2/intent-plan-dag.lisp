@@ -12,7 +12,7 @@
 (plan-dag-shard
   :version "v1"
   :origin "wave 15 task 02 — physical split from intent-layer + flow parents"
-  :status "code-aligned partial — runtime v2 已落 (wave 13 task 02); 完整 11-stage 仍 architecture-designed pending"
+  :status "code-aligned partial — runtime v2 已落 (wave 13 task 02); wave 15 task 05 (commit 615b249) 加 workstation-dispatch v0 opt-in — plan_dag.rs::dispatch_node 接 :workstation-dispatch true 节点路由到 workstation_dispatch.rs; 经 mission_task_delegate; 完整 11-stage (claim-lease/retry/rollback/acceptance/review-gate paused/mark-plan-final/distill 触发) 仍 architecture-designed pending (anchor: intent-layer.actor.plan-dag-scheduler / intent-layer.unified-entry-pipeline.workstation-dispatch-v0)"
   :stability "section-ids preserved (R008 + R016); content byte-identical to pre-split parents"
 
   ;; ──────────────────────────────────────────────────────────

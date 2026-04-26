@@ -166,7 +166,7 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v0.5 — wave 14 execution status backfill (file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry pipeline v1 / source-index checker R015+R016 implemented) + L2 shard split plan (designed not executed) 2026-04-26"
+    :version "v0.6 — wave 15 execution status backfill (extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 explicit-bridge / workstation dispatch v0 opt-in via mission_task_delegate) layered on v0.5 baseline 2026-04-26"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
     :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
@@ -1493,63 +1493,273 @@
         :wave "14 task 05 (commit 5c60f82)"
         :note "checker phase 3.1 从 architecture-designed 升 code-aligned: scripts/check-architecture-lisp.mjs 加 R015 (4 必填字段 :section-id / :source-file / :local-path / :status) + R016 (section-id 全局唯一); :compression-safe? value enum 接受 true|false|yes|no|safe|unsafe|defer; --dry-fixture 自测 5 fixtures PASS (happy / R015 缺字段 / R016 重名 / compsafe rejected / compsafe alias); --all-v2 跑 14 文件 + 93 entry 全合规; :local-path prefix 软规则 (warn-only) 仍 deferred"))
 
+    ;; ──────────────────────────────────────────────────
+    ;; v0.6 (wave 15 task 06) — wave 15 execution status backfill
+    ;; ──────────────────────────────────────────────────
+    ;; 目的:
+    ;;   - 把 wave 15 task 01/02/03/04/05 的真实代码状态回填到 source-index
+    ;;   - 不重复已有 section-id; 在 v0.5 baseline 上扩 +5 anchor entry, 升 +5 现有 entry status
+    ;;   - 保留 R008 + R016 (section-id 不变, 改名走 :prev-id)
+    ;;
+    ;; wave 15 已完成 commit (anchor):
+    ;;   - 2c0799d chore(wave14): archive task briefs (task 00 — 仅归档, 不进 source-index)
+    ;;   - ea90c5d test(event): stop hardcoding domain count (task 01 — extensible domain assertion)
+    ;;   - 3f37d32 docs(v2): split L2 architecture shards (task 02 — 5 shard 创建 + 6 parent stub + 28 source-index 重定向)
+    ;;   - b861b9a chore(v2): make source checker shard-aware (task 03 — R017+R018 + auto-discovery)
+    ;;   - 615b249 feat(plan): dispatch workstation tasks from plan nodes (task 05 — opt-in workstation_dispatch v0)
+    ;;   - 03513c0 feat(review): resolve review gates explicitly (task 04 — review-resolution bridge v0)
+    ;;
+    ;; 状态升级摘要 (本批次直接修改的现有 entry, 见各 entry note 末尾 "wave 15 升: X → Y"):
+    ;;   - intent-layer.unified-entry-pipeline.review-gate-policy           code-aligned → code-aligned-partial (resolution v0 + workflow-handler 仍未接 = partial)
+    ;;   - intent-layer.unified-entry-pipeline.review-gate-id-derivation    code-aligned → code-aligned-partial (resolution envelope validator 已落)
+    ;;   - intent-layer.actor.plan-dag-scheduler                             code-aligned-partial → code-aligned-partial (workstation_dispatch opt-in 已落, autonomous spawn pending)
+    ;;   - intent-layer.unified-entry-pipeline.workstation-dispatch-policy   operational-practice → code-aligned-partial (opt-in v0 经 mission_task_delegate, 自动 dispatch_strategy 推断仍 pending)
+    ;;   - intent-layer.source-index-checker.r015-r016-implemented           code-aligned → code-aligned (R017+R018 + shard auto-discovery 扩 phase-3.2)
+    ;; ──────────────────────────────────────────────────
+    (wave-15-backfill v0.6
+      :date "2026-04-26"
+      :decided-by "wave 15 / task 06 lisp backfill session"
+      :scope "回填 wave 15 task 01/02/03/04/05 真实代码状态; 新增 5 anchor entry, 升级 5 现有 entry status; 不发明 wave15 没实现的架构"
+      :non-goal "本任务不真正压缩主 Lisp; 不修改 Rust/SQL/JS/Cargo/任务文档; 不动 event-bus.lisp / intent-mcp-defs.lisp"
+      :commits
+        [(commit-1 :hash "ea90c5d" :title "test(event): stop hardcoding domain count"
+                   :primary-targets ["crates/missiond-core/tests/event_dispatcher_integration.rs"]
+                   :tests "domain_all_includes_execution: assert Domain::ALL.contains(Execution) + len() >= 13 floor (extensible, 不锁精确 count)")
+         (commit-2 :hash "3f37d32" :title "docs(v2): split L2 architecture shards"
+                   :primary-targets [".missiond/v2/intent-execution-governance.lisp"
+                                     ".missiond/v2/intent-directive-artifacts.lisp"
+                                     ".missiond/v2/intent-plan-dag.lisp"
+                                     ".missiond/v2/intent-capability-governance.lisp"
+                                     ".missiond/v2/intent-workstation-policy.lisp"
+                                     ".missiond/v2/intent-flow.lisp"
+                                     ".missiond/v2/intent-intent-layer.lisp"
+                                     ".missiond/v2/intent-memory.lisp"
+                                     ".missiond/v2/intent-tools.lisp"
+                                     ".missiond/v2/intent-worker.lisp"
+                                     ".missiond/v2/intent-pillar-source-index.lisp"]
+                   :tests "checker --all-v2 19 files OK; 105 section-id 全保 (R008); 28 source-index :source-file 重定向")
+         (commit-3 :hash "b861b9a" :title "chore(v2): make source checker shard-aware"
+                   :primary-targets ["scripts/check-architecture-lisp.mjs"
+                                     ".missiond/v2/architecture-dsl.lisp (R017/R018 + checker phase 3.2 wording)"]
+                   :tests "--dry-fixture 5 → 10 (happy / R015 缺字段 / R016 重名 / compsafe rejected / compsafe alias / R017 missing source-file / R018 outside v2 / R018 短路 / pillar-section-index header / shard auto-discovery union); --all-v2 19 files (含 5 wave-15 shard auto-discovered) OK")
+         (commit-4 :hash "615b249" :title "feat(plan): dispatch workstation tasks from plan nodes"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs (新建 962 行)"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "agent-team hint exactly once / fresh-code-alignment task brief 含 scoped commit policy / resident-lisp 不退 prompt / project-root unresolved → SafeDescriptor / unsupported hint preserved / dry_run 不写 evidence")
+         (commit-5 :hash "03513c0" :title "feat(review): resolve review gates explicitly"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/directive.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "approve via valid review id / stale version rejection / scope mismatch / artifact mismatch / unsupported scope / unsupported action / rejected decision / needs_changes next_step")]
+
+      ;; ── 区域 17 · extensible domain count test (wave 15 task 01) ──
+      (section-entry
+        :section-id "event-bus.section.execution-event.domain-all-extensible-test"
+        :title "Domain::ALL extensibility test — domain_all_includes_execution"
+        :source-file ".missiond/v2/intent-event-bus.lisp"
+        :local-path "pillar event-bus :: section execution-event :: integration test domain_all_includes_execution"
+        :status code-aligned
+        :compression-safe? false
+        :implements ["crates/missiond-core/tests/event_dispatcher_integration.rs"]
+        :cross-ref ["event-bus.pillar-root"
+                    "event-bus.section.execution-event.plan-node-state-changed"]
+        :wave "15 task 01 (commit ea90c5d)"
+        :note "rename test domain_all_length_is_12 → domain_all_includes_execution; 改 contains(Domain::Execution) + len() >= 13 floor; 不再 hardcode 精确 count, 未来扩 domain 不需改 test; event-bus.lisp 正文 protected 不动, 仅在本 source-index 加 metadata entry; legacy fan-out 测试同步将 'all 12 domains' wording 改 'all current domains'")
+
+      ;; ── 区域 18 · L2 shard split executed (wave 15 task 02) ──
+      (section-entry
+        :section-id "intent-layer.l2-shard-split.executed"
+        :title "L2 shard split executed — 5 shard 创建 + parent stub + source-index 重定向"
+        :source-file ".missiond/v2/architecture-dsl.lisp"
+        :local-path "defdsl architecture-v1 :: l2-shard-split-plan (EXECUTED)"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/v2/intent-execution-governance.lisp"
+           ".missiond/v2/intent-directive-artifacts.lisp"
+           ".missiond/v2/intent-plan-dag.lisp"
+           ".missiond/v2/intent-capability-governance.lisp"
+           ".missiond/v2/intent-workstation-policy.lisp"
+           ".missiond/v2/intent-flow.lisp"
+           ".missiond/v2/intent-intent-layer.lisp"
+           ".missiond/v2/intent-memory.lisp"
+           ".missiond/v2/intent-tools.lisp"
+           ".missiond/v2/intent-worker.lisp"
+           ".missiond/v2/intent-pillar-source-index.lisp"]
+        :cross-ref ["intent-layer.source-index-checker.r017-r018-implemented"]
+        :wave "15 task 02 (commit 3f37d32)"
+        :note "L2 shard split 已从 designed → executed: 5 shard 文件创建 (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); 6 parent 文件 stub 化 (flow / intent-layer / memory / tools / worker / source-index); 28 source-index :source-file 重定向到 5 shard; 105 section-id 全保 (R008 + R016); 内容 byte-identical (cross-cutting-invariants rule-5 no-content-mutation); event-bus.lisp / event-bus-execution.lisp / mcp-defs.lisp 未参与拆分 (frozen rule-6); architecture-dsl.lisp :: l2-shard-split-plan 内 5 shard :status 仍标 'designed (not executed)' — 那是 plan 模板自身, 实际执行状态由本 entry 反映")
+
+      ;; ── 区域 19 · shard-aware checker R017+R018 + auto-discovery (wave 15 task 03) ──
+      (section-entry
+        :section-id "intent-layer.source-index-checker.r017-r018-implemented"
+        :title "source-index checker R017 source-file-must-exist + R018 source-file-must-live-under-v2 + shard auto-discovery"
+        :source-file ".missiond/v2/architecture-dsl.lisp"
+        :local-path "defdsl architecture-v1 :: checker-contract :: phase-3.2-shard-aware (IMPLEMENTED)"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/check-architecture-lisp.mjs"
+           ".missiond/v2/architecture-dsl.lisp (checker phase-3.2-status wording + R017/R018 rules)"]
+        :cross-ref ["intent-layer.source-index-checker.r015-r016-implemented"
+                    "intent-layer.l2-shard-split.executed"]
+        :wave "15 task 03 (commit b861b9a)"
+        :note "checker phase 3.2 从 architecture-designed 升 code-aligned: scripts/check-architecture-lisp.mjs 加 R017 (source-file 必存在 — 防 L2 shard rename / move 留死链) + R018 (source-file 必 .missiond/v2/ 起头 — source-index 不退化为通用清单); 同时引入 collectSourceFileRefs 自动从 source-index :source-file 引用反向拉入 shard 文件 (data-driven, 不 hardcode shard 路径); 报告行显示 initial + auto-discovered shard 数; --dry-fixture 5 → 10 (新加 R017 missing / R018 outside / R018 短路 / pillar-section-index header / shard auto-discovery 5 fixtures); --all-v2 跑 19 文件 (含 5 wave-15 shard auto-discovered) 全 OK; :local-path prefix 软规则仍 warn-only deferred")
+
+      ;; ── 区域 20 · review-gate resolution v0 (wave 15 task 04) ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.review-gate-resolution-v0"
+        :title "review-gate explicit resolution bridge v0 — review_decision input + envelope validator"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: review-gate-resolution-v0"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/directive.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.review-gate-policy"
+                    "intent-layer.unified-entry-pipeline.review-gate-id-derivation"
+                    "intent-layer.unified-entry-pipeline.alignment-review-gate"
+                    "intent-layer.unified-entry-pipeline.plan-review-gate"
+                    "tools.surface.review-gate-args"]
+        :wave "15 task 04 (commit 03513c0)"
+        :note "wave 14 task 03 review-gate 自动 emit QuestionEvent (manual|emit_question|off) → wave 15 task 04 加 explicit resolution bridge v0: 显式输入 review_question_id + review_decision (approved|rejected|needs_changes) + review_actor + review_note; 三 decision 行为: approved → 跑 manager transition (directive_approve / directive_update_status(Archived) / plan_update_status / plan_supersede); rejected → 保持当前 status, 仅记录 review_actor/review_note + 走 status='review_rejected'; needs_changes → 保持 review/draft + surface next_step + 走 status='review_needs_changes'; envelope validator 5 fail-fast 错误 (REVIEW_SCOPE_MISMATCH / REVIEW_SCOPE_UNSUPPORTED / REVIEW_ARTIFACT_MISMATCH / STALE_REVIEW_VERSION / REVIEW_ACTION_UNSUPPORTED) + 2 input 错误 (MISSING_PARAM 缺 review_decision / INVALID_PARAM 未知 decision); 接到现有 directive (approve/archive) + plan (approve/mark/supersede) action, 不新增 MCP tool (tool count 仍 83); workflow handler 暂未接 review-resolution = partial; 不实现 UI / 不等 QuestionEvent::Resolved 答 / 不自动 approve (4 项 v0 non-goal 仍生效); bus 失败转 review_question_warning, DB 已 commit 时不回滚")
+
+      (section-entry
+        :section-id "tools.surface.review-resolution-args"
+        :title "mission_directive/plan review_decision/review_actor/review_note args"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: review-resolution args (wave 15)"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-mcp/src/tools/knowledge/directive.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.review-gate-resolution-v0"
+                    "tools.surface.review-gate-args"]
+        :wave "15 task 04 (commit 03513c0)"
+        :note "wave 15 task 04 在 wave 14 task 03 既有 review_question_id (legacy quiet emit path) 上加 3 args: review_decision (enum approved|rejected|needs_changes; 必填 when review_question_id 出现) / review_actor (free-form identity; echoed) / review_note (free-form note; echoed); response 4 字段: review_decision (echoed) / review_decision_outcome (perform_transition|keep_artifact|request_changes) / review_actor (when supplied) / review_note (when supplied); legacy quiet path (传 review_question_id 不传 review_decision) 字节兼容 — 触发 emit Resolved/legacy 而不走 envelope validator; tool count 仍 83 不变; mission_workflow 当前未在 schema 加 review-resolution args = partial")
+
+      ;; ── 区域 21 · workstation dispatch v0 (wave 15 task 05) ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.workstation-dispatch-v0"
+        :title "workstation-dispatch v0 — opt-in via :workstation-dispatch true / mission_task_delegate transport"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: workstation-dispatch-v0"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["worker.section.claudecode-workstation-orchestration"
+                    "worker.section.claudecode-workstation-orchestration.dispatch-decision-matrix"
+                    "worker.section.claudecode-workstation-orchestration.execution-strategy-record"
+                    "intent-layer.unified-entry-pipeline.workstation-dispatch-policy"
+                    "flow.workstation-dispatch-policy"
+                    "intent-layer.actor.plan-dag-scheduler"]
+        :wave "15 task 05 (commit 615b249)"
+        :note "wave 15 task 05 v0 implementation — 新建 handlers/knowledge/workstation_dispatch.rs (962 行) + 接入 plan.rs (action_execute_internal) + plan_dag.rs (dispatch_node) 两条路径; 严格 opt-in: PLAN.lisp 节点 :workstation-dispatch true (或 plan-level execute args 显式传) 才触发, 默认走原 mission_execution(open) 路径; 走 mission_task_delegate (不 claude -p, 不新增 transport); 任务 brief 含 ## Objective / ## Owned files / ## Forbidden files / ## Acceptance / ## Commit policy + 当 dispatch_strategy=agent-team 加 ## Parallelism hint section + literal '使用 agent-team提高效率' 恰好一次 (idempotent); 失败时返 SafeDescriptor (UnsupportedTarget / ProjectRootUnresolved / MissingObjective) 不静默 fallback prompt mode; 不 join 相对 cwd 到 process cwd; response 字段: workstation_dispatch_status (dispatched | skipped_unsupported_target | skipped_project_root_unresolved | skipped_missing_objective | dry_run | dispatched_inner_error) / dispatch_strategy / task_brief_preview (truncated) / inner_result (when dispatched); evidence sidecar entry 'workstation_dispatch:v0' 接 typed EvidenceEntry; unknown hint 字段保留 in node_hint_summary.unsupported_fields, 不重 interpret arbitrary lisp; 4 v0 non-goal 之 autonomous_workstation_dispatch 仍 surface — 完全自主 spawn workstation (不需显式 opt-in) 仍 pending (anchor: deferred-coverage)")
+
+      (section-entry
+        :section-id "tools.surface.plan-workstation-dispatch-args"
+        :title "mission_plan(action=execute) workstation_dispatch + workstation_dispatch_dry_run + node :workstation-dispatch hint"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: workstation-dispatch args (wave 15)"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-mcp/src/tools/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.workstation-dispatch-v0"
+                    "intent-layer.actor.plan-dag-scheduler"]
+        :wave "15 task 05 (commit 615b249)"
+        :note "新增 mission_plan(action=execute) args: workstation_dispatch (bool, plan-level opt-in) / workstation_dispatch_dry_run (bool, 不写 evidence/不真派) + PLAN.lisp 节点 :workstation-dispatch <bool> hint (节点级 opt-in, default false); :objective / :owned-files / :forbidden-files / :acceptance / :commit-policy 节点字段 plan-runner 解析后传给 task brief (preserved); :dispatch-strategy 复用既有 enum (resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback / unknown); tool count 仍 83 不变 (在既有 mission_plan execute action 上加 args, 不新增 tool)"))
+
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; 仍有以下未细化项, 等后续 wave 再补"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; 仍有以下未细化项, 等后续 wave 再补"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"
-         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组, capability_usage / mission_plan record_evidence / mission_directive write_file/review_gate / mission_plan write_file/review_gate / mission_workflow write_file/review_gate 已有专项)"
+         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组, capability_usage / mission_plan record_evidence / mission_directive write_file/review_gate / mission_plan write_file/review_gate / mission_workflow write_file/review_gate / mission_directive review-resolution / mission_plan review-resolution / mission_plan workstation-dispatch 已有专项)"
          "pillar intent-layer 各 actor 内部 step (directive-compiler / plan-compiler / workflow-distiller 内部)"
-         "pillar event-bus 4 表内部字段索引 (frozen 文件, 不强行细化; PlanNodeStateChanged variant 已 code-aligned, 详见 event-bus.section.execution-event.plan-node-state-changed)"
+         "pillar event-bus 4 表内部字段索引 (frozen 文件, 不强行细化; PlanNodeStateChanged variant 已 code-aligned, 详见 event-bus.section.execution-event.plan-node-state-changed; domain count extensibility test 已 code-aligned, 详见 event-bus.section.execution-event.domain-all-extensible-test)"
          "pillar flow 其他 ~17 个非主线 flow (F9-project-init / F-incident-reaction / F-execution-log-governance 等)"
          "scoped-commit-handoff 的 daemon enforce step-level entry (待 daemon 实现后回填)"
          "PLAN DAG scheduler 完整 11-stage 的 per-stage entry — runtime v2 已覆盖 dispatch/lifecycle/failure-policy/condition-gate, 仍 deferred: claim-lease (s5) / per-node retry-N (s9) / rollback compensate (s9) / acceptance evaluator (s7) / review-gate paused (s9) / mark-plan-final (s10) / trigger-record-execution-distill (s11)"
-         "unified-entry pipeline 升级到 actor 后的 4 自动化 non-goal 实现 (auto_approve_directive / auto_approve_plan / auto_answer_review_question / autonomous_workstation_dispatch) — wave 14 task 04 仍 surface 不实现"
+         "review-gate resolution v0 → workflow handler 接入 (wave 15 task 04 仅 directive + plan handler 接入; mission_workflow 仍未接 review-resolution bridge)"
+         "review-gate live QuestionEvent::Resolved 订阅 — wave 15 task 04 仍是 caller-pushed explicit input 不订阅 bus, autonomous answer-listener pending"
+         "autonomous workstation dispatch — wave 15 task 05 v0 是 PLAN-hint opt-in; 完全自主 (plan-runner 自动从 PLAN.lisp DAG 推断 :workstation-dispatch true) 仍 surface 不实现"
+         "unified-entry pipeline 升级到 actor 后的 4 自动化 non-goal 实现 (auto_approve_directive / auto_approve_plan / auto_answer_review_question / autonomous_workstation_dispatch) — wave 14 task 04 仍 surface, wave 15 task 04/05 部分缓解 (review-resolution 显式 + workstation dispatch opt-in)"
          "ExecutionEvent dispatch_strategy/target_project/requested_cwd 完整字段扩展 — wave 14 task 02 已扩 PlanNodeStateChanged variant 含 dispatch_strategy/target_project, 但 ExecutionEvent::Opened 等其他 variant 仍未扩同字段"
-         "L2 shard 实际执行 — plan 已写 architecture-dsl.lisp :: l2-shard-split-plan, 等 execution-gate 全满足后由后续 wave 拆"]))
+         "review-gate / workstation dispatch UI panel — 当前仅 MCP response + sidecar; 前端 review/dispatch 面板 pending"]))
 
   ;; ──────────────────────────────────────────────────
   ;; Part 3 · 当前判断与下一步路径
   ;; ──────────────────────────────────────────────────
   (judgement-now
     :date "2026-04-26"
-    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 13 task 04 execution-status-backfill + wave 14 task 07 lisp-backfill-and-l2-shard-plan sessions"
-    :wave14-task-07-non-goal
-      ["本任务不真正压缩主 Lisp"
-       "本任务不实际拆 shard (L2 split plan 已写, 实际执行延后到 gate 全满足)"
-       "本任务只在 v0.4 baseline 上回填 wave 14 真实状态 / +13 entry / 升级 7 现有 entry status"
-       "L2 shard plan 已写入 architecture-dsl.lisp :: l2-shard-split-plan, 但本 wave 不移动任何 shard 内容"]
+    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 13 task 04 execution-status-backfill + wave 14 task 07 lisp-backfill-and-l2-shard-plan + wave 15 task 06 lisp-backfill-wave15-status sessions"
+    :wave15-task-06-non-goal
+      ["本任务不改 Rust / SQL / JS / Cargo / 任务文档"
+       "本任务不真正压缩主 Lisp"
+       "本任务不发明 wave 15 没实现的架构 — 只反映 committed implementation truth"
+       "不动 .missiond/v2/intent-event-bus.lisp 正文 (frozen) / .missiond/intent-mcp-defs.lisp"
+       "不删 anchor / 不合并不相关 sections / 不重写 event-bus protected"]
     :why-no-main-compression-yet
       ["主大 lisp 正文仍是 future code wave 的 anchor"
-       "L1 压缩在 wave 13 task 05 已部分完成, L2 物理拆分等四 gate 全满足"
-       "压缩需要的 section-id / status taxonomy / split rule / shard plan 必须先冻结 — 这正是 wave 11 + wave 12 task 06 + wave 13 task 04 + wave 14 task 07 的工作"]
+       "L1 压缩在 wave 13 task 05 已部分完成, L2 物理拆分已在 wave 15 task 02 完成 (5 shard 创建; 主 Lisp 减约 3000 行)"
+       "压缩需要的 section-id / status taxonomy / split rule / shard plan 必须先冻结 — 这正是 wave 11 + wave 12 task 06 + wave 13 task 04 + wave 14 task 07 + wave 15 task 02/03/06 的工作"]
     :pre-compression-checklist
-      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区 +22 entry; wave 13 task 04 扩 +11 entry; wave 14 task 07 扩 +13 entry)"
+      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区 +22 entry; wave 13 task 04 扩 +11 entry; wave 14 task 07 扩 +13 entry; wave 15 task 06 扩 +5 entry)"
        "status-taxonomy 已在 architecture-dsl.lisp 冻结 7 值"
        "split-policy 已写明 wait-for-conditions"
        "compression-policy 已写明 forbidden 红线 (ingress/logic-core/egress 不动)"
        "frozen 文件 (event-bus / event-bus-execution) 在本 index 标 protected, 不参与压缩"
        "checker phase-3-precompression 已写入 architecture-dsl.lisp"
        "checker phase-3.1 R015+R016 已 IMPLEMENTED (wave 14 task 05 commit 5c60f82)"
-       "L2 shard split plan 已写入 architecture-dsl.lisp :: l2-shard-split-plan (wave 14 task 07)"]
+       "checker phase-3.2 R017+R018 + shard auto-discovery 已 IMPLEMENTED (wave 15 task 03 commit b861b9a)"
+       "L2 shard split plan 已写入 architecture-dsl.lisp :: l2-shard-split-plan (wave 14 task 07)"
+       "L2 shard split 已 EXECUTED — 5 shard 创建 + 28 source-index 重定向 (wave 15 task 02 commit 3f37d32; section-id 全保 R008 + R016)"]
     :unblock-conditions-for-real-compression
       ["条件 1 (wave 14 升级) — file-first writer 已 code-aligned (wave 14 task 01 commit 00cbc1d): 三类 artifact (directive alignment / PLAN / workflow methodology) 全走统一 helper file_artifacts::attempt_artifact_write; resolve_target_project_root; partial 语义; 6 file_* 响应字段; 写者主路径 stable"
-       "条件 2 (wave 14 升级) — review gate 能基于 artifact 自动出 QuestionEvent 已 code-aligned (wave 14 task 03 commit 96842cd): review_gate policy enum (manual|emit_question|off); deterministic id; default 不破 byte-identical; file 写失败拒发"
+       "条件 2 (wave 14 升级 + wave 15 task 04 加 explicit resolution bridge) — review gate auto-create v1 + resolution bridge v0: review_gate policy enum (manual|emit_question|off) + 显式 resolution input (review_decision approved|rejected|needs_changes + review_actor + review_note); envelope validator 5 fail-fast 错误码; 接到 directive (approve/archive) + plan (approve/mark/supersede); workflow 接入 = pending"
        "条件 3 (wave 14 部分升级) — PlanNodeStateChanged variant 已扩 + live EventRef 三层策略已落 (wave 14 task 02 commit 2e7789a): ExecutionEvent::PlanNodeStateChanged 4 必 + 5 可选; bus failure 仅 observability; 完整 11-stage scheduler 仍 architecture-designed pending"
-       "条件 4 (wave 14 升级) — unified-entry pipeline v1 已 code-aligned (wave 14 task 04 commit 338a3fb): 不新增 MCP tool (仍 83); v1 file-first + review-gate + scheduler args 转发; pipeline_stage / artifact_refs / next_step; 4 v0 non-goal 仍 surface (人/Codex review 必须)"
-       "条件 5 (wave 14 升级) — evidence collector live event ref 已 code-aligned (wave 14 task 02 commit 2e7789a): 三层策略 live id → deterministic id → unavailable 兜底; bus subscription 仍仅 publish 路径"]
-    :wave-14-status-summary
-      ["条件 1 → code-aligned (file-first writer integration)"
-       "条件 2 → code-aligned (review gate auto-create v1)"
-       "条件 3 → code-aligned partial (PlanNodeStateChanged variant + live ref 已落; 完整 11-stage scheduler pending)"
-       "条件 4 → code-aligned (unified-entry pipeline v1)"
+       "条件 4 (wave 14 升级) — unified-entry pipeline v1 已 code-aligned (wave 14 task 04 commit 338a3fb): 不新增 MCP tool (仍 83); v1 file-first + review-gate + scheduler args 转发; pipeline_stage / artifact_refs / next_step; 4 v0 non-goal 中 review-resolution + workstation-dispatch 已部分缓解 (wave 15 task 04/05)"
+       "条件 5 (wave 14 升级) — evidence collector live event ref 已 code-aligned (wave 14 task 02 commit 2e7789a): 三层策略 live id → deterministic id → unavailable 兜底; bus subscription 仍仅 publish 路径"
+       "条件 6 (wave 15 task 02) — L2 shard split executed: 5 shard 文件 (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); section-id 全保; 内容 byte-identical"
+       "条件 7 (wave 15 task 03) — shard-aware checker: R017 (source-file 必存在) + R018 (source-file 必 .missiond/v2/) + 自动 shard 发现 (data-driven); --dry-fixture 5 → 10; --all-v2 19 文件 OK"
+       "条件 8 (wave 15 task 05) — workstation-dispatch v0 opt-in 已 code-aligned-partial: PLAN node :workstation-dispatch true 触发 mission_task_delegate; agent-team hint literal 恰好一次; SafeDescriptor 不 fallback prompt; autonomous 自主 spawn 仍 pending"]
+    :wave-15-status-summary
+      ["条件 1 → code-aligned (file-first writer integration; wave 14)"
+       "条件 2 → code-aligned-partial (review gate auto-create v1 + resolution bridge v0; workflow 接入仍 pending)"
+       "条件 3 → code-aligned-partial (PlanNodeStateChanged variant + live ref 已落; 完整 11-stage scheduler pending)"
+       "条件 4 → code-aligned (unified-entry pipeline v1; 部分 4 v0 non-goal 缓解)"
        "条件 5 → code-aligned (live event ref 三层策略)"
-       "checker → code-aligned (R015 + R016 IMPLEMENTED)"
-       "L2 shard split plan → designed (not executed)"]
+       "条件 6 → code-aligned (L2 shard split executed)"
+       "条件 7 → code-aligned (R015+R016 + R017+R018 + shard auto-discovery)"
+       "条件 8 → code-aligned-partial (workstation dispatch v0 opt-in via PLAN hint; autonomous 自动 spawn 仍 pending)"
+       "extensible domain count test → code-aligned (wave 15 task 01 — 不 hardcode count, 走 contains+floor)"]
     :next-step
-      ["条件全满足后 (4/5 已满, 完整 11-stage PLAN DAG scheduler 仍待), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
-       "L2 shard 实际拆分前再核对 architecture-dsl.lisp :: l2-shard-split-plan :: execution-gate 全满足"
+      ["条件全满足后 (7/8 已满, 完整 11-stage PLAN DAG scheduler 仍待), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
        "压缩 PR 必须带 git diff --check + checker --all-v2 + 对应 *-execution.lisp D-deviation"
-       "物理 split (拆 shard) 是压缩之后的事, 不和压缩混在一起"
+       "继续把 review-resolution 接到 workflow handler + 实现 autonomous workstation spawn (从 PLAN.lisp DAG 自动推断而非节点 opt-in)"
+       "实现 ExecutionEvent live subscription (review-gate Resolved listener / plan-runner 内部反查)"
+       "把 5 wave-15-shard 内若干 status-only 文本压缩 — 只压 status 句子, schema/contract 段不动"
        "压缩前以 :compression-safe? 字段做白名单过滤 — false 的 section 即使在 compression-policy.allowed 之内也保留正文"]))

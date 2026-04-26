@@ -20,15 +20,15 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — pillar code-truth registry; v0.5 (wave 14 task 07) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13 task 01/02/03 + wave 14 task 01/02/03/04/05 (file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry pipeline v1 / source-index checker R015+R016 implemented) 共 ~104 entry; 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
+      :desc "判真索引 — pillar code-truth registry; v0.6 (wave 15 task 06) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13 task 01/02/03 + wave 14 task 01/02/03/04/05 + wave 15 task 01/02/03/04/05 (extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 opt-in) 共 ~109 entry; 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
     (drift-audit "drift-audit-2026-04-21.md"
       :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")
     (refactor-methodology ".missiond/workflows/pillar-refactor.lisp"
       :desc "memory pillar 实战凝结方法论 — 5 phase × 原则 × anti-patterns × checklist")
     (architecture-dsl "architecture-dsl.lisp"
-      :desc "可复用架构 DSL: pillar/function/flow/tool 的 ingress → logic-core → egress 结构与检查规则; v0.5 (wave 14 task 07) 加 l2-shard-split-plan (5 候选 shard designed not executed + execution-gate + per-shard moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan); v0.4 (wave 12 task 06) 加 R015/R016/section-entry-extended/phase-3.1 precompression checker (R015+R016 已 IMPLEMENTED 于 wave 14 task 05)")
+      :desc "可复用架构 DSL: pillar/function/flow/tool 的 ingress → logic-core → egress 结构与检查规则; v0.6 (wave 15 task 03) 加 R017 source-file-must-exist + R018 source-file-must-live-under-v2 + checker shard auto-discovery via collectSourceFileRefs; v0.5 (wave 14 task 07) 加 l2-shard-split-plan (5 shard designed → wave 15 task 02 EXECUTED) + execution-gate + per-shard moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan; v0.4 (wave 12 task 06) 加 R015/R016/section-entry-extended/phase-3.1 precompression checker (R015+R016 已 IMPLEMENTED 于 wave 14 task 05; R017+R018 + 自动 shard discovery 已 IMPLEMENTED 于 wave 15 task 03)")
     (precompression-note
-      :desc "wave 13 task 05: 已执行 L1 安全压缩; wave 14 task 07: 写 L2 shard split plan (designed, not executed); 物理 split 仍延后, 等 architecture-dsl.lisp :: l2-shard-split-plan :: execution-gate 全满足; 详 architecture-dsl.lisp :: judgement-now / intent-pillar-source-index.lisp :: judgement-now")
+      :desc "wave 13 task 05: 已执行 L1 安全压缩; wave 14 task 07: 写 L2 shard split plan; wave 15 task 02: L2 物理 split 已执行 (5 shard 创建 + 28 source-index 重定向 + section-id 全保 R008); wave 15 task 03: shard-aware checker 已落; 后续压缩仍按 compression-policy 走; 详 architecture-dsl.lisp :: judgement-now / intent-pillar-source-index.lisp :: judgement-now")
     (plan-dag-scheduler-design
       :desc "PLAN DAG scheduler — runtime v2 (wave 13 task 02 commit 8bb6110) + PlanNodeStateChanged variant + live EventRef 三层策略 (wave 14 task 02 commit 2e7789a) 全部 code-aligned (partial); 完整 11-stage (claim-lease / per-node retry / rollback / acceptance / review-gate paused) 仍 architecture-designed pending"
       :flow-anchor ".missiond/v2/intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler"
@@ -63,6 +63,31 @@
       :desc "wave 14 task 05 (commit 5c60f82) — scripts/check-architecture-lisp.mjs 加 R015 mandatory-fields + R016 section-id-uniqueness; :compression-safe? value enum (true|false|yes|no|safe|unsafe|defer); --dry-fixture 5 fixtures PASS; --all-v2 14 文件 OK"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.source-index-checker.r015-r016-implemented"
       :code "scripts/check-architecture-lisp.mjs"
+      :status code-aligned)
+    (source-index-checker-r017-r018
+      :desc "wave 15 task 03 (commit b861b9a) — scripts/check-architecture-lisp.mjs 加 R017 source-file-must-exist + R018 source-file-must-live-under-v2 + 自动 shard 发现 (collectSourceFileRefs data-driven); --dry-fixture 5 → 10; --all-v2 19 文件 OK (含 5 wave-15 shard auto-discovered)"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.source-index-checker.r017-r018-implemented"
+      :code "scripts/check-architecture-lisp.mjs"
+      :status code-aligned)
+    (l2-shard-split-executed
+      :desc "wave 15 task 02 (commit 3f37d32) — L2 shard 物理 split 已执行: 5 shard 文件 (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); 6 parent stub 化; 28 source-index :source-file 重定向; 105 section-id 全保 (R008 + R016); 内容 byte-identical"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.l2-shard-split.executed"
+      :code ".missiond/v2/intent-{execution-governance,directive-artifacts,plan-dag,capability-governance,workstation-policy}.lisp"
+      :status code-aligned)
+    (review-gate-resolution-v0
+      :desc "wave 15 task 04 (commit 03513c0) — review-gate explicit resolution bridge v0; 显式 review_decision (approved|rejected|needs_changes) + review_actor + review_note + envelope validator 5 fail-fast 错误码 (REVIEW_SCOPE_MISMATCH / REVIEW_SCOPE_UNSUPPORTED / REVIEW_ARTIFACT_MISMATCH / STALE_REVIEW_VERSION / REVIEW_ACTION_UNSUPPORTED); 接 directive (approve/archive) + plan (approve/mark/supersede); 不新增 MCP tool (仍 83); workflow handler 接入仍 pending = code-aligned-partial"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.unified-entry-pipeline.review-gate-resolution-v0"
+      :code "crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+      :status code-aligned-partial)
+    (workstation-dispatch-v0
+      :desc "wave 15 task 05 (commit 615b249) — workstation-dispatch v0 opt-in: PLAN node :workstation-dispatch true → mission_task_delegate transport (不 claude -p); task brief 含 objective/owned/forbidden/acceptance/commit-policy + agent-team literal '使用 agent-team提高效率' 恰好一次; SafeDescriptor (UnsupportedTarget / ProjectRootUnresolved / MissingObjective) 不静默 fallback prompt mode; autonomous spawn (plan-runner 从 PLAN.lisp 自动推断) 仍 surface 不实现 = code-aligned-partial"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.unified-entry-pipeline.workstation-dispatch-v0"
+      :code "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+      :status code-aligned-partial)
+    (extensible-domain-count-test
+      :desc "wave 15 task 01 (commit ea90c5d) — domain count 不再 hardcode: rename test domain_all_length_is_12 → domain_all_includes_execution; assert Domain::ALL.contains(Execution) + len() >= 13 floor (extensible, 不锁精确 count); event-bus.lisp 正文 protected 不动, 仅在 source-index 加 metadata entry"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry event-bus.section.execution-event.domain-all-extensible-test"
+      :code "crates/missiond-core/tests/event_dispatcher_integration.rs"
       :status code-aligned))
 
   ;; ── v2 递归同构标准: 原子 / 分子 / pillar ──
@@ -92,7 +117,7 @@
   ;; 详细规格在 intent-memory.lisp (草稿),本处只作导航摘要
   (pillar memory
     :file ".missiond/v2/intent-memory.lisp"
-    :status "v0.5.8 — 9 modules + directive artifacts + agent-execution dual-plane handoff (control + durability) + capability-usage-read-model semantic evidence v1 + directive-layer actor v0 全部 code-aligned partial; plan-node-state-projection 顶层字段 + plan-evidence-sidecar typed 已 code-aligned partial; wave 14 task 01 (commit 00cbc1d): file-first writer integration 三类 artifact (alignment/PLAN/workflow methodology) 主路径 code-aligned (统一 helper file_artifacts::attempt_artifact_write + resolve_target_project_root + partial 语义 + 6 file_* 字段); 完整 11-stage scheduler / scoped commit daemon enforce 仍 pending (详 wave-13 + wave-14 anchors)"
+    :status "v0.5.8 — 9 modules + directive artifacts + agent-execution dual-plane handoff (control + durability) + capability-usage-read-model semantic evidence v1 + directive-layer actor v0 全部 code-aligned partial; plan-node-state-projection 顶层字段 + plan-evidence-sidecar typed 已 code-aligned partial; wave 14 task 01 (commit 00cbc1d): file-first writer integration 三类 artifact (alignment/PLAN/workflow methodology) 主路径 code-aligned (统一 helper file_artifacts::attempt_artifact_write + resolve_target_project_root + partial 语义 + 6 file_* 字段); wave 15 task 02 (commit 3f37d32): file-first-artifacts (5 artifact 详细字段 + plan-evidence-sidecar + plan-node-state-projection) + file-first-writer-integration anchor 已物理 split 到 .missiond/v2/intent-directive-artifacts.lisp shard, module directive-layer 留 stub; capability-usage-read-model 物理 split 到 intent-capability-governance.lisp shard; section-id 全保 (R008); 完整 11-stage scheduler / scoped commit daemon enforce 仍 pending (详 wave-13 + wave-14 + wave-15 anchors)"
     :paradigm "4 mature modules (project-management / board / kb-manager / conversation-logs) 自治 + 系统支持 + 横切"
 
     (purpose "系统长期记忆: 4 个业务模块自治管理自己的表 + 底层系统支持层 + 横切")
@@ -215,7 +240,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar worker
     :canonical-ref ".missiond/v2/intent-worker.lisp"
-    :canonical-status "v0.5 phase-C 2026-04-26 — recursive contract + xjp-router provider + mission_execution manager + project-root spawn cwd + claudecode-workstation-orchestration policy + dual-plane scoped-commit handoff + dispatch_strategy/target_project/requested_cwd companion log + plan-runner v0 + auto-selection v1 + PLAN DAG runtime v2 全部 code-aligned partial; wave 14 task 02 (commit 2e7789a): ExecutionEvent::PlanNodeStateChanged variant 已扩 (4 必 + 5 可选, 含 dispatch_strategy/target_project) + live EventRef 三层策略已落; 完整 11-stage scheduler / scoped commit daemon enforce 仍 pending (详 wave-13 + wave-14 anchors)"
+    :canonical-status "v0.5 phase-C 2026-04-26 — recursive contract + xjp-router provider + mission_execution manager + project-root spawn cwd + claudecode-workstation-orchestration policy + dual-plane scoped-commit handoff + dispatch_strategy/target_project/requested_cwd companion log + plan-runner v0 + auto-selection v1 + PLAN DAG runtime v2 全部 code-aligned partial; wave 14 task 02 (commit 2e7789a): ExecutionEvent::PlanNodeStateChanged variant 已扩 (4 必 + 5 可选, 含 dispatch_strategy/target_project) + live EventRef 三层策略已落; wave 15 task 02/05 (commits 3f37d32/615b249): section claudecode-workstation-orchestration (含 6 policy + dispatch-decision-matrix + execution-strategy-record) 物理 split 到 intent-workstation-policy.lisp shard, 留 stub; workstation-dispatch v0 opt-in (PLAN node :workstation-dispatch true → mission_task_delegate, agent-team literal 恰好一次, SafeDescriptor 不 fallback prompt; handlers/knowledge/workstation_dispatch.rs 962 行) 已 code-aligned-partial; ExecutionEvent::Opened dispatch metadata / 完整 11-stage scheduler / scoped commit daemon enforce / autonomous workstation spawn 仍 pending (详 wave-13 + wave-14 + wave-15 anchors)"
     :v0.1-archive ".missiond/v2/drafts/gptpro/intent-worker.lisp"
     :v0.2-gptpro-archive ".missiond/v2/drafts/gptpro/intent-worker-v0.2.lisp"
     :execution-log ".missiond/v2/worker-pillar-execution.lisp"
@@ -550,7 +575,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar tools
     :canonical-ref ".missiond/v2/intent-tools.lisp"
-    :canonical-status "v0.7 phase-C 2026-04-26 — 83 actual tools; mission_directive/plan/workflow actor v0 + plan-runner v0 + auto-selection v1 + methodology compiler v0 + generated flow loader + mission_execution dispatch_strategy companion log + mission_capability_usage semantic evidence v1 + mission_plan record_evidence typed wrap 全部 code-aligned partial; wave 14 task 01/03 (commit 00cbc1d/96842cd): mission_directive/plan/workflow write_file/topic/overwrite_file + review_gate_policy/emit_review_question/review_question_id args 已 code-aligned (tool count 仍 83); 完整 11-stage PLAN DAG / semantic lifting / forge compiler / planner-class model alias / scoped commit daemon enforce 仍 pending (详 wave-13 + wave-14 anchors)"
+    :canonical-status "v0.7 phase-C 2026-04-26 — 83 actual tools; mission_directive/plan/workflow actor v0 + plan-runner v0 + auto-selection v1 + methodology compiler v0 + generated flow loader + mission_execution dispatch_strategy companion log + mission_capability_usage semantic evidence v1 + mission_plan record_evidence typed wrap 全部 code-aligned partial; wave 14 task 01/03 (commit 00cbc1d/96842cd): mission_directive/plan/workflow write_file/topic/overwrite_file + review_gate_policy/emit_review_question/review_question_id args 已 code-aligned (tool count 仍 83); wave 15 task 02/04/05 (commits 3f37d32/03513c0/615b249): implemented-surface mission_execution / mission_capability_usage / mission_directive write_file+review_gate / mission_plan write_file+review_gate / mission_workflow write_file+review_gate 物理 split 到 intent-execution-governance / intent-capability-governance / intent-directive-artifacts shard, 留 stub; mission_directive (approve/archive) + mission_plan (approve/mark/supersede) 加 review_decision/review_actor/review_note args (review-resolution bridge v0); mission_plan (action=execute) 加 workstation_dispatch/workstation_dispatch_dry_run args + PLAN node :workstation-dispatch hint (workstation-dispatch v0 opt-in); tool count 仍 83 不变; mission_workflow review-resolution / autonomous workstation spawn / 完整 11-stage PLAN DAG / semantic lifting / forge compiler / scoped commit daemon enforce 仍 pending (详 wave-13 + wave-14 + wave-15 anchors)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-tools.lisp"
     (purpose "通过 MCP JSON-RPC 协议暴露给 Claude Code / 其他 Agent 的能力集")
 
@@ -658,7 +683,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar intent-layer
     :canonical-ref ".missiond/v2/intent-intent-layer.lisp"
-    :canonical-status "v0.4 phase-B 2026-04-26 — unified-entry pipeline actor v0 + unified-entry pipeline v0 internal helper + evidence-collector typed EvidenceEntry + plan-dag-scheduler runtime v2 + capability-evolution-governance semantic evidence v1 + workstation-dispatch-policy operational-practice 全部 code-aligned partial; wave 14 task 01/02/03/04 (commit 00cbc1d/2e7789a/96842cd/338a3fb) 升级: file-first writer integration (三类 artifact 主路径) / PlanNodeStateChanged variant + live EventRef 三层策略 / review-gate auto-create policy enum (manual|emit_question|off) / unified-entry pipeline v1 (file-first + review-gate + scheduler args 转发) 全部 code-aligned; 高阶 semantic lifting / forge compiler / planner-class model alias / 完整 11-stage scheduler / 4 项 v0 non-goal 自动化 仍 pending (详 wave-13 + wave-14 anchors)"
+    :canonical-status "v0.4 phase-B 2026-04-26 — unified-entry pipeline actor v0 + unified-entry pipeline v0 internal helper + evidence-collector typed EvidenceEntry + plan-dag-scheduler runtime v2 + capability-evolution-governance semantic evidence v1 + workstation-dispatch-policy operational-practice 全部 code-aligned partial; wave 14 task 01/02/03/04 (commit 00cbc1d/2e7789a/96842cd/338a3fb) 升级: file-first writer integration (三类 artifact 主路径) / PlanNodeStateChanged variant + live EventRef 三层策略 / review-gate auto-create policy enum (manual|emit_question|off) / unified-entry pipeline v1 (file-first + review-gate + scheduler args 转发) 全部 code-aligned; wave 15 task 02/04/05 (commits 3f37d32/03513c0/615b249) 升级: 4 sections (capability-evolution-governance / unified-entry-pipeline workstation-dispatch-policy / action-instruction-actor plan-dag-scheduler / unified-entry-pipeline review-gate-policy + id-derivation) 物理 split 到 4 shard, 留 stub; review-gate explicit resolution bridge v0 (review_decision approved|rejected|needs_changes + envelope validator 5 fail-fast 错误码; 接 directive approve/archive + plan approve/mark/supersede; workflow handler 接入 pending) + workstation-dispatch v0 opt-in (PLAN node :workstation-dispatch true → mission_task_delegate, agent-team literal 恰好一次, SafeDescriptor 不 fallback prompt) 全部 code-aligned-partial; 4 项 v0 non-goal 中 review-resolution + workstation-dispatch 已部分缓解; 高阶 semantic lifting / forge compiler / planner-class model alias / 完整 11-stage scheduler / autonomous workstation spawn / workflow review-resolution 仍 pending (详 wave-13 + wave-14 + wave-15 anchors)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-intent-layer.lisp"
     (purpose "元层: 系统如何描述自己, 如何感知变化, 如何演进, 以及全局用户指令")
 
@@ -908,7 +933,7 @@
   ;; ═══════════════════════════════════════════════════
   (pillar flow
     :canonical-ref ".missiond/v2/intent-flow.lisp"
-    :canonical-status "v0.7 phase-C 2026-04-26 — 83 actual tools indexed + F-intent-alignment-plan-execution-loop 8 stages 统一入口 + 双 review gate + plan-runner v0 + F-execution-log-governance + F-scoped-commit-handoff (control plane + durability plane) + F-methodology / F-capability-usage / F-workstation-dispatch + PLAN DAG runtime v2 + unified-entry pipeline v0 internal helper 全部 code-aligned partial; wave 14 task 01/02/03/04 升级: file-first writer integration / PlanNodeStateChanged variant + live ref / review-gate auto-create v1 / unified-entry pipeline v1 全部 code-aligned; 不新增 tool (仍 83); 完整 11-stage PLAN DAG / semantic lifting / forge compiler / scoped commit daemon enforce / 4 项 v0 non-goal 自动化 仍 pending (详 wave-13 + wave-14 anchors)"
+    :canonical-status "v0.7 phase-C 2026-04-26 — 83 actual tools indexed + F-intent-alignment-plan-execution-loop 8 stages 统一入口 + 双 review gate + plan-runner v0 + F-execution-log-governance + F-scoped-commit-handoff (control plane + durability plane) + F-methodology / F-capability-usage / F-workstation-dispatch + PLAN DAG runtime v2 + unified-entry pipeline v0 internal helper 全部 code-aligned partial; wave 14 task 01/02/03/04 升级: file-first writer integration / PlanNodeStateChanged variant + live ref / review-gate auto-create v1 / unified-entry pipeline v1 全部 code-aligned; wave 15 task 02/04/05 升级: F-execution-log-governance / F-scoped-commit-handoff / F-workstation-dispatch-policy / F-capability-usage-monitoring 物理 split 到独立 shard, 留 stub; review-gate explicit resolution bridge v0 + workstation-dispatch v0 opt-in 已 code-aligned-partial; 不新增 tool (仍 83); 完整 11-stage PLAN DAG / semantic lifting / forge compiler / scoped commit daemon enforce / autonomous workstation spawn / workflow review-resolution / 4 项 v0 non-goal 自动化 仍 pending (详 wave-13 + wave-14 + wave-15 anchors)"
     :gptpro-v0.1-archive ".missiond/v2/drafts/gptpro/intent-flow.lisp"
     (purpose "跨 pillar 的动作前后流程 — 把 memory 静态与 worker 计算串联成 narrative")
     (rationale "v0.4.7 从 board 拆出 autopilot/flow-engine 后, 丢失了 end-to-end narrative; 本 pillar 补上")

@@ -13,7 +13,7 @@
 (workstation-policy-shard
   :version "v1"
   :origin "wave 15 task 02 — physical split from worker/flow/intent-layer parents"
-  :status "operational-practice + code-aligned partial (per source-index entries)"
+  :status "operational-practice + code-aligned partial (per source-index entries); wave 15 task 05 (commit 615b249) 加 workstation-dispatch v0 opt-in — PLAN 节点 :workstation-dispatch true 触发 mission_task_delegate (不 claude -p); task brief 含 objective/owned/forbidden/acceptance/commit-policy + agent-team literal '使用 agent-team提高效率' 恰好一次; 失败返 SafeDescriptor 不静默 fallback prompt; autonomous spawn (plan-runner 从 PLAN.lisp DAG 自动推断而非节点 opt-in) 仍 surface 不实现 = code-aligned-partial (anchor: intent-layer.unified-entry-pipeline.workstation-dispatch-v0)"
   :stability "section-ids preserved (R008 + R016); content byte-identical to pre-split parents"
 
   ;; ──────────────────────────────────────────────────────────

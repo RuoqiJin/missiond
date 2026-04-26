@@ -17,7 +17,7 @@
 (directive-artifacts-shard
   :version "v1"
   :origin "wave 15 task 02 — physical split from memory/intent-layer/tools parents"
-  :status "code-aligned partial (per source-index entries); writer integration 主路径已接入 (wave 14 task 01); review-gate auto-create v1 已落 (wave 14 task 03)"
+  :status "code-aligned partial (per source-index entries); writer integration 主路径已接入 (wave 14 task 01); review-gate auto-create v1 已落 (wave 14 task 03); wave 15 task 04 (commit 03513c0) 加 review-gate explicit resolution bridge v0 — 显式 review_decision (approved|rejected|needs_changes) + review_actor + review_note + envelope validator 5 fail-fast 错误码; 接到 directive (approve/archive) + plan (approve/mark/supersede); workflow handler 接入仍 pending = code-aligned-partial (anchor: intent-layer.unified-entry-pipeline.review-gate-resolution-v0)"
   :stability "section-ids preserved (R008 + R016); content byte-identical to pre-split parents"
 
   ;; ──────────────────────────────────────────────────────────
