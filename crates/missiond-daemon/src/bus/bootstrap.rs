@@ -313,6 +313,25 @@ impl BusServices {
         self.publish(ev, default_opts("execution")).await
     }
 
+    /// Publish an `ExecutionEvent` and return the assigned monotonic `Seq`
+    /// (or the underlying `AppendError`). Convenience wrapper for producers
+    /// that want the live event id so they can stamp it on a downstream
+    /// audit artifact (e.g. evidence-collector `EventRef::new(..., seq)`).
+    ///
+    /// Use this instead of `publish_execution` when the producer plans to
+    /// embed the `Seq` in another structured log entry — the helper hides
+    /// the `AppendAck` discriminant matching at the call site so the
+    /// producer treats `Committed` / `Volatile` / `AlreadyExists` uniformly:
+    /// each variant returns the same `Seq` (`AlreadyExists` reuses the
+    /// dedupe-existing seq, which is the right id to correlate against).
+    pub async fn publish_execution_with_seq(
+        &self,
+        ev: ExecutionEvent,
+    ) -> Result<Seq, AppendError> {
+        let ack = self.publish_execution(ev).await?;
+        Ok(ack.seq())
+    }
+
     /// Core `append` wrapper. Producer sites that need custom `AppendOpts`
     /// (dedupe_key, span context) should call this directly.
     pub async fn publish<E: DomainEvent>(

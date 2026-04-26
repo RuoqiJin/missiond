@@ -125,6 +125,43 @@ pub enum ExecutionEvent {
         claimer: String,
         lease_expires_at: String,
     },
+    /// Per-node lifecycle transition observed by the PLAN DAG runtime v2
+    /// (`plan_dag.rs`). Bus is non-authoritative — durable evidence still
+    /// lives in `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`
+    /// (see `evidence_collector` :: `plan_dag_node_dispatch` entries) — but
+    /// dashboards / replayers can correlate on `plan_id + node_id + attempt`
+    /// without scraping the sidecar file. `from`/`to` mirror the scheduler
+    /// `NodeLifecycle` discriminants
+    /// (`pending` | `ready` | `running` | `succeeded` | `failed` | `skipped`).
+    /// `target` is the inner-dispatch tool (`mission_execution` /
+    /// `mission_task_delegate` / `mission_flow_run`); `dispatch_strategy` /
+    /// `target_project` mirror the same fields surfaced on `Opened` so a
+    /// downstream consumer can join the two streams without re-deriving the
+    /// metadata. `attempt` defaults to 1 (v2 has no per-node retry); a future
+    /// retry-aware scheduler bumps it without requiring a new variant.
+    /// `reason` carries the skip / failure annotation
+    /// (`upstream_failed` / `condition_gated` / `fail_fast_aborted` /
+    /// inner-error message); omitted for plain success transitions.
+    ///
+    /// All non-id fields are optional + skip-serialize so a producer that
+    /// only knows `plan_id`/`node_id`/`from`/`to` stays wire-compatible with
+    /// future shape extensions.
+    PlanNodeStateChanged {
+        plan_id: String,
+        node_id: String,
+        from: String,
+        to: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatch_strategy: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
 }
 
 impl DomainEvent for ExecutionEvent {
@@ -145,6 +182,7 @@ impl DomainEvent for ExecutionEvent {
             Self::Audited { .. } => "audited",
             Self::Repaired { .. } => "repaired",
             Self::StaleClaim { .. } => "stale_claim",
+            Self::PlanNodeStateChanged { .. } => "plan_node_state_changed",
         }
     }
 
@@ -239,6 +277,17 @@ mod tests {
                 claim_id: "C001".into(),
                 claimer: "a".into(),
                 lease_expires_at: "2026-04-25T00:00:00Z".into(),
+            },
+            ExecutionEvent::PlanNodeStateChanged {
+                plan_id: "00000000-0000-0000-0000-000000000abc".into(),
+                node_id: "n1".into(),
+                from: "ready".into(),
+                to: "running".into(),
+                target: Some("mission_execution".into()),
+                dispatch_strategy: Some("agent-team".into()),
+                target_project: Some("missiond".into()),
+                attempt: Some(1),
+                reason: None,
             },
         ];
         for c in &cases {
@@ -408,6 +457,121 @@ mod tests {
             opened.get("requested_cwd").and_then(|v| v.as_str()),
             Some("/Users/x/Projects/missiond/crates")
         );
+    }
+
+    // ── PlanNodeStateChanged ──────────────────────────────────────────
+
+    /// Round-trip the variant with every optional slot populated. Pins the
+    /// wire shape the PLAN DAG runtime v2 emits: 4 required ids plus 5
+    /// optional metadata slots.
+    #[test]
+    fn plan_node_state_changed_round_trip_full() {
+        let ev = ExecutionEvent::PlanNodeStateChanged {
+            plan_id: "00000000-0000-0000-0000-000000000abc".into(),
+            node_id: "n1".into(),
+            from: "running".into(),
+            to: "succeeded".into(),
+            target: Some("mission_execution".into()),
+            dispatch_strategy: Some("agent-team".into()),
+            target_project: Some("missiond".into()),
+            attempt: Some(1),
+            reason: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let payload = parsed
+            .get("PlanNodeStateChanged")
+            .and_then(|v| v.as_object())
+            .expect("PlanNodeStateChanged payload");
+        // 4 required + 4 supplied optional = 8 keys (reason is None → skipped).
+        assert_eq!(payload.len(), 8, "reason omitted when None");
+        assert!(!payload.contains_key("reason"));
+        assert_eq!(payload["plan_id"], "00000000-0000-0000-0000-000000000abc");
+        assert_eq!(payload["from"], "running");
+        assert_eq!(payload["to"], "succeeded");
+        assert_eq!(payload["target"], "mission_execution");
+        assert_eq!(payload["dispatch_strategy"], "agent-team");
+        assert_eq!(payload["target_project"], "missiond");
+        assert_eq!(payload["attempt"], 1);
+    }
+
+    /// Minimal-shape producer (only the four required id fields). Every
+    /// optional must skip-serialize so the wire form is exactly 4 keys.
+    #[test]
+    fn plan_node_state_changed_minimal_serializes_only_required_keys() {
+        let ev = ExecutionEvent::PlanNodeStateChanged {
+            plan_id: "p".into(),
+            node_id: "n".into(),
+            from: "pending".into(),
+            to: "skipped".into(),
+            target: None,
+            dispatch_strategy: None,
+            target_project: None,
+            attempt: None,
+            reason: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let payload = parsed
+            .get("PlanNodeStateChanged")
+            .and_then(|v| v.as_object())
+            .expect("PlanNodeStateChanged payload");
+        assert_eq!(payload.len(), 4, "only the 4 required id fields land");
+        for key in ["plan_id", "node_id", "from", "to"] {
+            assert!(payload.contains_key(key), "missing required key {}", key);
+        }
+        for key in ["target", "dispatch_strategy", "target_project", "attempt", "reason"] {
+            assert!(!payload.contains_key(key), "absent optional {} must skip-serialize", key);
+        }
+    }
+
+    /// Failure / skip transitions surface a `reason` annotation. Bus
+    /// consumers route on this without re-fetching the evidence sidecar.
+    #[test]
+    fn plan_node_state_changed_failure_reason_round_trips() {
+        let ev = ExecutionEvent::PlanNodeStateChanged {
+            plan_id: "p".into(),
+            node_id: "n2".into(),
+            from: "pending".into(),
+            to: "skipped".into(),
+            target: Some("mission_execution".into()),
+            dispatch_strategy: Some("unknown".into()),
+            target_project: None,
+            attempt: Some(1),
+            reason: Some("upstream_failed:n1".into()),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let payload = parsed
+            .get("PlanNodeStateChanged")
+            .and_then(|v| v.as_object())
+            .expect("PlanNodeStateChanged payload");
+        assert_eq!(payload["reason"], "upstream_failed:n1");
+    }
+
+    /// `kind()` returns the canonical wire tag — the evidence collector
+    /// composes `EventRef::new("execution", kind, event_id)` from this exact
+    /// string.
+    #[test]
+    fn plan_node_state_changed_kind_is_canonical() {
+        let ev = ExecutionEvent::PlanNodeStateChanged {
+            plan_id: "p".into(),
+            node_id: "n".into(),
+            from: "pending".into(),
+            to: "running".into(),
+            target: None,
+            dispatch_strategy: None,
+            target_project: None,
+            attempt: None,
+            reason: None,
+        };
+        assert_eq!(ev.kind(), "plan_node_state_changed");
     }
 
     /// Producers may surface only one of the three optional fields. Each

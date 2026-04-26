@@ -150,14 +150,15 @@ pub(crate) struct EventRef {
 }
 
 impl EventRef {
-    /// `#[allow(dead_code)]`: typed constructor for "I have a real event id"
-    /// case. The current call sites (plan.rs / plan_dag.rs) only use
-    /// `EventRef::unavailable(...)` because plan-runner v0 / DAG scheduler
-    /// v1 do not yet subscribe to the live ExecutionEvent bus. Kept on the
-    /// public surface so the upcoming bus subscription wiring (which DOES
-    /// know real event ids) can drop in without re-introducing the
-    /// constructor — exercised by `execution_events_array_in_order` test.
-    #[allow(dead_code)]
+    /// Typed constructor for "I have a real event id" case. Wave-14 / Task
+    /// 02 wired the PLAN DAG runtime v2 (`plan_dag.rs`) to call this with
+    /// either the live `Seq` returned from
+    /// `BusServices::publish_execution_with_seq(...)` or the deterministic
+    /// `plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>` fallback id
+    /// when the bus publish fails. Plan-runner v0 (`plan.rs`) keeps using
+    /// `EventRef::unavailable(...)` because the single-node runner does not
+    /// yet propagate the inner `mission_execution` seq back to the
+    /// evidence-write call site — that wiring is a separate follow-up.
     pub(crate) fn new(source: impl Into<String>, kind: impl Into<String>, event_id: impl Into<String>) -> Self {
         Self {
             event_id: Some(event_id.into()),

@@ -81,17 +81,26 @@
 //!   * Unsupported per-node fields (anything outside the allowlist above) are
 //!     captured into `node_hint_summary.unsupported_fields[node_id]` so the
 //!     audit trail never silently drops author intent.
-//!   * Live `ExecutionEvent` bus subscription. Like v1 we still attach an
-//!     `EventRef::unavailable("…")` placeholder to each per-node entry so
-//!     consumers can distinguish "no events at all" from "we tried to
-//!     correlate but the bus subscription is not yet wired". Wave-13 / 02
-//!     intentionally does NOT extend the `ExecutionEvent` enum: scheduler
-//!     runtime and bus wiring are orthogonal concerns and bundling them
-//!     would force every event-bus consumer (audit dashboards, replayers,
-//!     DLQ) to handle new variants for a feature that does not yet emit them.
-//!     The placeholder reason string already records the gap in-band.
+//!   * Per-node retry / per-attempt bookkeeping. v2 dispatches every node
+//!     exactly once; the `attempt` slot on the `PlanNodeStateChanged` event
+//!     and on the evidence entry is hard-coded to `1` so the wire shape is
+//!     ready for a retry-aware future scheduler without forcing readers to
+//!     handle absence as a special case.
+//!
+//! Live `ExecutionEvent` bus integration (wave-14 / Task 02): every node
+//! transition (`ready -> running`, `running -> succeeded|failed`,
+//! `pending -> skipped`) now publishes a `PlanNodeStateChanged` event on
+//! the execution bus and stamps the resulting live `Seq` (or the
+//! deterministic
+//! `plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>` id when publish
+//! fails) into the evidence entry's `execution_events` array via
+//! `EventRef::new(...)`. Bus publish failure is observability-only — it
+//! never aborts the dispatch, it only records a warning string in
+//! `outcome.bus_publish_warnings` so the response surfaces the degraded
+//! observability path.
 
 use anyhow::Result;
+use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
@@ -802,6 +811,7 @@ pub(super) async fn action_execute_dag_v1(
     let aggregate_status = outcome.aggregate_status();
     let evidence_path = outcome.evidence_path.clone();
     let evidence_error = outcome.evidence_error.clone();
+    let bus_publish_warnings = outcome.bus_publish_warnings.clone();
     let plan_status_update = match outcome.target_plan_status() {
         Some(target) => match state.store.plan_update_status(plan.id, target).await {
             Ok(_) => Ok(target.as_str().to_string()),
@@ -839,6 +849,9 @@ pub(super) async fn action_execute_dag_v1(
     }
     if let Some(err) = evidence_error {
         payload["evidence_error"] = json!(err);
+    }
+    if !bus_publish_warnings.is_empty() {
+        payload["bus_publish_warnings"] = json!(bus_publish_warnings);
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -959,6 +972,13 @@ struct ExecutionOutcome {
     aborted_fail_fast: bool,
     evidence_path: Option<String>,
     evidence_error: Option<String>,
+    /// Per-transition `PlanNodeStateChanged` bus publish warnings collected
+    /// during this run. Bus publish is intentionally non-blocking for the
+    /// main dispatch path (durable evidence already lives in the sidecar);
+    /// the warnings are surfaced on the response so callers can detect a
+    /// degraded observability path without scraping daemon logs. Empty
+    /// when every transition published cleanly.
+    bus_publish_warnings: Vec<String>,
 }
 
 impl ExecutionOutcome {
@@ -1163,13 +1183,157 @@ struct EvidenceCtx<'a> {
     target_project_arg: Option<&'a str>,
 }
 
+/// `EventRef::unavailable` reason kept for the legacy fallback path —
+/// publish *and* deterministic-id construction must both fail before we
+/// surrender to it. Wave-14 :: Task 02 wires `PlanNodeStateChanged` so the
+/// normal path now writes `EventRef::new(...)` either with the live `Seq`
+/// from the bus or with the deterministic
+/// `plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>` id when the bus
+/// publish fails. The `unavailable` placeholder is unreachable today (the
+/// deterministic id is always derivable) but kept on the call surface so
+/// the contract `evidence_collector` documents (`unavailable` → "we tried
+/// to correlate but couldn't") stays implementable if a future caller
+/// genuinely cannot stamp an id.
+#[allow(dead_code)]
 const EVENT_REF_UNAVAILABLE_REASON: &str =
-    "plan_dag scheduler v1 does not yet subscribe to the live \
-     ExecutionEvent bus; caller correlates by plan_id + node_id";
+    "plan_dag scheduler could not derive a live or deterministic \
+     ExecutionEvent reference; this is a fallback path";
+
+/// Domain tag used in `EventRef::source` for plan-node lifecycle entries.
+/// Mirrors `Domain::Execution::as_str()` (kept as a `&'static str` here so
+/// we don't pull the enum reference into every evidence call site).
+const EVENT_REF_SOURCE_EXECUTION: &str = "execution";
+
+/// Kind tag matching `ExecutionEvent::PlanNodeStateChanged.kind()`. Kept
+/// duplicated here so test assertions can pin the wire form without taking
+/// a dep on the event-trait reflection.
+const EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED: &str = "plan_node_state_changed";
+
+/// Build the deterministic event id used as a stable correlation key when
+/// the live bus publish either succeeds (used in the publish dedupe context)
+/// or fails (used as the `EventRef::event_id`). Format
+/// `plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>` matches the wave-14
+/// task brief verbatim so external consumers can grep on it.
+pub(super) fn deterministic_plan_node_event_id(
+    plan_id: uuid::Uuid,
+    node_id: &str,
+    attempt: u32,
+    from: &str,
+    to: &str,
+) -> String {
+    format!(
+        "plan-node:{}:{}:{}:{}-{}",
+        plan_id, node_id, attempt, from, to
+    )
+}
+
+/// Build the `PlanNodeStateChanged` payload for a single transition.
+/// Pure helper so unit tests can pin the wire shape without standing up an
+/// `AppState`.
+pub(super) fn build_plan_node_state_changed_event(
+    plan_id: uuid::Uuid,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    attempt: u32,
+    from: &str,
+    to: &str,
+    reason: Option<String>,
+) -> ExecutionEvent {
+    ExecutionEvent::PlanNodeStateChanged {
+        plan_id: plan_id.to_string(),
+        node_id: node.id.clone(),
+        from: from.to_string(),
+        to: to.to_string(),
+        target: Some(node.target.clone()),
+        dispatch_strategy: Some(dispatch_strategy.to_string()),
+        target_project: node.target_project.clone(),
+        attempt: Some(attempt),
+        reason,
+    }
+}
+
+/// Publish a `PlanNodeStateChanged` event and return the `EventRef` to
+/// embed in the evidence entry. On bus success we surface the live `Seq` as
+/// the event id; on failure we fall back to the deterministic id derived
+/// from `plan_id`/`node_id`/`attempt`/`from`/`to` so the audit trail still
+/// carries a stable correlation key, and we record a warning string the
+/// caller can lift into `outcome.bus_publish_warnings`.
+///
+/// The function NEVER aborts the dispatch on a publish failure — the
+/// scheduler's main loop only consults the returned warning to decide
+/// whether to surface `bus_publish_warnings` on the response. This matches
+/// the wave-14 / task 02 brief: bus publish failure is observability-only.
+async fn publish_plan_node_state_change(
+    state: &AppState,
+    plan_id: uuid::Uuid,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    attempt: u32,
+    from: &str,
+    to: &str,
+    reason: Option<String>,
+) -> (EventRef, Option<String>) {
+    let ev = build_plan_node_state_changed_event(
+        plan_id,
+        node,
+        dispatch_strategy,
+        attempt,
+        from,
+        to,
+        reason,
+    );
+    let deterministic_id =
+        deterministic_plan_node_event_id(plan_id, &node.id, attempt, from, to);
+    match state.bus.publish_execution_with_seq(ev).await {
+        Ok(seq) => (
+            EventRef::new(
+                EVENT_REF_SOURCE_EXECUTION,
+                EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+                seq.0.to_string(),
+            ),
+            None,
+        ),
+        Err(err) => {
+            let warning = format!(
+                "plan_node_state_changed bus publish failed for {} ({} -> {}): {}; \
+                 evidence ref falls back to deterministic id `{}`",
+                node.id, from, to, err, deterministic_id
+            );
+            tracing::warn!(
+                plan_id = %plan_id,
+                node_id = %node.id,
+                from = %from,
+                to = %to,
+                error = %err,
+                "DAG scheduler: PlanNodeStateChanged bus publish failed; deterministic event ref retained"
+            );
+            (
+                EventRef::new(
+                    EVENT_REF_SOURCE_EXECUTION,
+                    EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+                    deterministic_id,
+                ),
+                Some(warning),
+            )
+        }
+    }
+}
+
+/// Per-node attempt counter. v2 has no retry policy so every transition
+/// reports `attempt=1`; encapsulating the constant in a helper keeps the
+/// retry-aware future scheduler a single-call-site change.
+const PLAN_NODE_DEFAULT_ATTEMPT: u32 = 1;
 
 /// Emit `ready -> running` evidence at the moment the scheduler hands a node
 /// to its dispatch task. Kept structurally identical to the success/failure
 /// branches so audit dashboards can pivot on `state_transition` alone.
+///
+/// Wave-14 / Task 02: also publishes a `PlanNodeStateChanged` event on the
+/// execution bus and stamps the resulting live `Seq` (or the deterministic
+/// fallback id when publish fails) onto the evidence entry's
+/// `execution_events` array. Bus publish failures land in
+/// `outcome.bus_publish_warnings` so the response surfaces the degraded
+/// observability path without aborting the dispatch.
 async fn emit_evidence_running(
     state: &AppState,
     ctx: &EvidenceCtx<'_>,
@@ -1177,18 +1341,33 @@ async fn emit_evidence_running(
     dispatch_strategy: &str,
     outcome: &mut ExecutionOutcome,
 ) {
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        PLAN_NODE_DEFAULT_ATTEMPT,
+        "ready",
+        "running",
+        None,
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
     let entry = EvidenceEntry::new(
         evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
         evidence_collector::kind::DISPATCH,
     )
     .with_state_transition("ready -> running")
-    .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+    .add_execution_event(event_ref)
     .with_extra("scheduler_mode", json!("dag_v1"))
     .with_extra("node_id", json!(node.id))
     .with_extra("plan_id", json!(ctx.plan_id))
     .with_extra("target_tool", json!(node.target))
     .with_extra("target", json!(node.target))
-    .with_extra("dispatch_strategy", json!(dispatch_strategy));
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT));
     let append_outcome = evidence_collector::append(
         state,
         ctx.plan_id,
@@ -1217,6 +1396,13 @@ async fn emit_evidence_running(
 /// (failure branch) evidence after the dispatch task returns. The two
 /// branches keep the byte shape of v1's `ready -> {succeeded|failed}` legacy
 /// passthrough fields so existing audit consumers do not need updates.
+///
+/// Wave-14 / Task 02: also publishes a `PlanNodeStateChanged` event on the
+/// execution bus and stamps the resulting live `Seq` (or the deterministic
+/// fallback id when publish fails) onto the evidence entry's
+/// `execution_events` array. The `reason` annotation on the failure branch
+/// surfaces the inner-handler error message so bus consumers can route
+/// without re-fetching the sidecar payload.
 async fn emit_evidence_finished(
     state: &AppState,
     ctx: &EvidenceCtx<'_>,
@@ -1226,17 +1412,47 @@ async fn emit_evidence_finished(
     succeeded: bool,
     outcome: &mut ExecutionOutcome,
 ) {
+    let to_state = if succeeded { "succeeded" } else { "failed" };
+    let reason = if succeeded {
+        None
+    } else {
+        // Best-effort: surface the inner-handler's `error` field so bus
+        // consumers see the same string the response carries. Fallback to
+        // the canonical "inner handler returned error" when no `error`
+        // string is present (mirrors `dispatch_node` classification).
+        let s = inner_payload
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("inner handler returned error")
+            .to_string();
+        Some(s)
+    };
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        PLAN_NODE_DEFAULT_ATTEMPT,
+        "running",
+        to_state,
+        reason,
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
     let mut entry = EvidenceEntry::new(
         evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
         evidence_collector::kind::DISPATCH,
     )
-    .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+    .add_execution_event(event_ref)
     .with_extra("scheduler_mode", json!("dag_v1"))
     .with_extra("node_id", json!(node.id))
     .with_extra("plan_id", json!(ctx.plan_id))
     .with_extra("target_tool", json!(node.target))
     .with_extra("target", json!(node.target))
-    .with_extra("dispatch_strategy", json!(dispatch_strategy));
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT));
     if succeeded {
         // Success branch — populate `inner_dispatch` (canonical typed slot)
         // AND `inner_result` (legacy alias) so wave-12 typed readers and
@@ -1266,7 +1482,7 @@ async fn emit_evidence_finished(
         tracing::warn!(
             plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
             "DAG scheduler: running->{} evidence append failed",
-            if succeeded { "succeeded" } else { "failed" }
+            to_state
         );
     }
     let (path, err) = append_outcome.into_legacy_tuple();
@@ -1282,6 +1498,12 @@ async fn emit_evidence_finished(
 /// dispatches (taint propagation, condition gating, fail-fast abort). The
 /// `skip_reason` and `skip_detail` fields surface why the skip happened so
 /// audit consumers can route on a single transition string.
+///
+/// Wave-14 / Task 02: also publishes a `PlanNodeStateChanged` event with
+/// `from=pending, to=skipped, reason=<skip_reason[:detail]>` so bus consumers
+/// can route the same way without re-fetching the sidecar. Bus publish
+/// failures land in `outcome.bus_publish_warnings` and the evidence ref
+/// degrades to the deterministic id (still live-shape, not unavailable).
 async fn emit_evidence_skipped(
     state: &AppState,
     ctx: &EvidenceCtx<'_>,
@@ -1291,18 +1513,37 @@ async fn emit_evidence_skipped(
     skip_detail: Option<(&'static str, String)>,
     outcome: &mut ExecutionOutcome,
 ) {
+    let event_reason = match &skip_detail {
+        Some((_, detail)) => Some(format!("{}:{}", skip_reason, detail)),
+        None => Some(skip_reason.to_string()),
+    };
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        PLAN_NODE_DEFAULT_ATTEMPT,
+        "pending",
+        "skipped",
+        event_reason,
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
     let mut entry = EvidenceEntry::new(
         evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
         evidence_collector::kind::DISPATCH,
     )
     .with_state_transition("pending -> skipped")
-    .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+    .add_execution_event(event_ref)
     .with_extra("scheduler_mode", json!("dag_v1"))
     .with_extra("node_id", json!(node.id))
     .with_extra("plan_id", json!(ctx.plan_id))
     .with_extra("target_tool", json!(node.target))
     .with_extra("target", json!(node.target))
     .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT))
     .with_extra("skip_reason", json!(skip_reason));
     if let Some((k, v)) = skip_detail {
         entry = entry.with_extra(k, json!(v));
@@ -2372,16 +2613,28 @@ mod tests {
     // We replay the exact entry construction (mirrored from
     // `execute_sequential`) instead of standing up an `AppState` so the
     // assertions stay focused on the wire shape.
+    /// Wave-14 / Task 02: the production path now writes a live
+    /// `EventRef::new(execution, plan_node_state_changed, <seq|deterministic>)`.
+    /// The fixtures pin the **deterministic** branch (no bus available in
+    /// pure tests) so assertions can grep on the deterministic id format.
     fn build_dag_success_entry(node: &DagNode, plan: &Plan, dispatch_strategy: &str, inner_payload: Value) -> Value {
+        let det = deterministic_plan_node_event_id(
+            plan.id,
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "ready",
+            "succeeded",
+        );
         EvidenceEntry::new(
             evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
             evidence_collector::kind::DISPATCH,
         )
         .with_inner_dispatch(inner_payload.clone())
         .with_state_transition("ready -> succeeded")
-        .add_execution_event(EventRef::unavailable(
-            "plan_dag scheduler v1 does not yet subscribe to the live \
-             ExecutionEvent bus; caller correlates by plan_id + node_id",
+        .add_execution_event(EventRef::new(
+            EVENT_REF_SOURCE_EXECUTION,
+            EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+            det,
         ))
         .with_extra("scheduler_mode", json!("dag_v1"))
         .with_extra("node_id", json!(node.id))
@@ -2389,19 +2642,28 @@ mod tests {
         .with_extra("target_tool", json!(node.target))
         .with_extra("target", json!(node.target))
         .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT))
         .with_extra("inner_result", inner_payload)
         .into_json()
     }
 
     fn build_dag_failure_entry(node: &DagNode, plan: &Plan, dispatch_strategy: &str, inner_payload: Value) -> Value {
+        let det = deterministic_plan_node_event_id(
+            plan.id,
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "ready",
+            "failed",
+        );
         EvidenceEntry::new(
             evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
             evidence_collector::kind::DISPATCH,
         )
         .with_state_transition("ready -> failed")
-        .add_execution_event(EventRef::unavailable(
-            "plan_dag scheduler v1 does not yet subscribe to the live \
-             ExecutionEvent bus; caller correlates by plan_id + node_id",
+        .add_execution_event(EventRef::new(
+            EVENT_REF_SOURCE_EXECUTION,
+            EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+            det,
         ))
         .with_extra("scheduler_mode", json!("dag_v1"))
         .with_extra("node_id", json!(node.id))
@@ -2409,6 +2671,7 @@ mod tests {
         .with_extra("target_tool", json!(node.target))
         .with_extra("target", json!(node.target))
         .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT))
         .with_extra("inner_error", inner_payload)
         .into_json()
     }
@@ -2483,24 +2746,36 @@ mod tests {
         );
     }
 
+    /// Wave-14 / Task 02: production now writes a live `EventRef::new(...)`
+    /// — never `EventRef::unavailable(...)` — on the success branch. The
+    /// fixture pins the deterministic-id branch (no bus) so this test
+    /// verifies (a) `unavailable` is absent, (b) the canonical
+    /// `source=execution` / `kind=plan_node_state_changed` mapping survives,
+    /// (c) the deterministic id matches the
+    /// `plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>` format.
     #[test]
-    fn dag_node_dispatch_evidence_records_event_unavailability_reason() {
+    fn dag_node_dispatch_evidence_records_live_event_ref() {
         let node = fixture_dag_node("n2", "mission_execution");
         let plan = fixture_plan("(plan)");
         let entry = build_dag_success_entry(&node, &plan, "agent-team", json!({"ok": true}));
         let events = entry["execution_events"]
             .as_array()
             .expect("execution_events array present");
-        assert_eq!(events.len(), 1, "exactly one placeholder reference per node");
-        assert_eq!(events[0]["unavailable"], true);
-        let reason = events[0]["unavailable_reason"]
-            .as_str()
-            .expect("reason recorded as string");
+        assert_eq!(events.len(), 1, "exactly one event reference per node");
+        let ref0 = &events[0];
         assert!(
-            reason.contains("ExecutionEvent bus"),
-            "reason must mention the bus subscription gap so consumers can route on it: {}",
-            reason
+            ref0.get("unavailable").is_none(),
+            "live path must NOT mark the ref as unavailable: {:?}",
+            ref0
         );
+        assert_eq!(ref0["source"], "execution");
+        assert_eq!(ref0["kind"], "plan_node_state_changed");
+        let event_id = ref0["event_id"].as_str().expect("event_id string");
+        let expected = format!(
+            "plan-node:{}:{}:{}:ready-succeeded",
+            plan.id, node.id, PLAN_NODE_DEFAULT_ATTEMPT
+        );
+        assert_eq!(event_id, expected);
     }
 
     // ── wave-13 / 02 :: v2 scheduler runtime — pure tests ────────────
@@ -2742,19 +3017,37 @@ mod tests {
     // audit dashboards can route on them. Replays the entry construction
     // (mirrored from the helpers above) instead of standing up `AppState`.
 
+    /// Wave-14 / Task 02: fixtures pin the **deterministic** `EventRef::new`
+    /// branch (no live bus available in pure tests). This mirrors what the
+    /// production helpers write when the bus publish either succeeds (with
+    /// the live `Seq` as the id) or fails (with the deterministic id as the
+    /// id + `bus_publish_warnings` populated). Tests assert the wire shape
+    /// of the *entry*, not the bus interaction itself.
     fn build_running_entry(node: &DagNode, plan: &Plan, dispatch_strategy: &str) -> Value {
+        let det = deterministic_plan_node_event_id(
+            plan.id,
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "ready",
+            "running",
+        );
         EvidenceEntry::new(
             evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
             evidence_collector::kind::DISPATCH,
         )
         .with_state_transition("ready -> running")
-        .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+        .add_execution_event(EventRef::new(
+            EVENT_REF_SOURCE_EXECUTION,
+            EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+            det,
+        ))
         .with_extra("scheduler_mode", json!("dag_v1"))
         .with_extra("node_id", json!(node.id))
         .with_extra("plan_id", json!(plan.id))
         .with_extra("target_tool", json!(node.target))
         .with_extra("target", json!(node.target))
         .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT))
         .into_json()
     }
 
@@ -2765,17 +3058,30 @@ mod tests {
         inner_payload: Value,
         succeeded: bool,
     ) -> Value {
+        let to = if succeeded { "succeeded" } else { "failed" };
+        let det = deterministic_plan_node_event_id(
+            plan.id,
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "running",
+            to,
+        );
         let mut entry = EvidenceEntry::new(
             evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
             evidence_collector::kind::DISPATCH,
         )
-        .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+        .add_execution_event(EventRef::new(
+            EVENT_REF_SOURCE_EXECUTION,
+            EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+            det,
+        ))
         .with_extra("scheduler_mode", json!("dag_v1"))
         .with_extra("node_id", json!(node.id))
         .with_extra("plan_id", json!(plan.id))
         .with_extra("target_tool", json!(node.target))
         .with_extra("target", json!(node.target))
-        .with_extra("dispatch_strategy", json!(dispatch_strategy));
+        .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT));
         if succeeded {
             entry = entry
                 .with_inner_dispatch(inner_payload.clone())
@@ -2796,18 +3102,30 @@ mod tests {
         skip_reason: &str,
         skip_detail: Option<(&'static str, String)>,
     ) -> Value {
+        let det = deterministic_plan_node_event_id(
+            plan.id,
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "pending",
+            "skipped",
+        );
         let mut entry = EvidenceEntry::new(
             evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
             evidence_collector::kind::DISPATCH,
         )
         .with_state_transition("pending -> skipped")
-        .add_execution_event(EventRef::unavailable(EVENT_REF_UNAVAILABLE_REASON))
+        .add_execution_event(EventRef::new(
+            EVENT_REF_SOURCE_EXECUTION,
+            EVENT_REF_KIND_PLAN_NODE_STATE_CHANGED,
+            det,
+        ))
         .with_extra("scheduler_mode", json!("dag_v1"))
         .with_extra("node_id", json!(node.id))
         .with_extra("plan_id", json!(plan.id))
         .with_extra("target_tool", json!(node.target))
         .with_extra("target", json!(node.target))
         .with_extra("dispatch_strategy", json!(dispatch_strategy))
+        .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT))
         .with_extra("skip_reason", json!(skip_reason));
         if let Some((k, v)) = skip_detail {
             entry = entry.with_extra(k, json!(v));
@@ -2898,4 +3216,186 @@ mod tests {
         assert_eq!(entry["condition"], "(env :debug)");
     }
 
+    // ── wave-14 / 02 :: PlanNodeStateChanged event + live event refs ──
+
+    /// `deterministic_plan_node_event_id` is the fallback id stamped on
+    /// `EventRef::new(...)` when the bus publish fails. Format must match
+    /// the wave-14 task brief verbatim so downstream consumers can grep.
+    #[test]
+    fn deterministic_event_id_format_matches_brief() {
+        let plan_id = uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000abc").unwrap();
+        let id = deterministic_plan_node_event_id(plan_id, "n1", 1, "ready", "running");
+        assert_eq!(
+            id,
+            "plan-node:00000000-0000-0000-0000-000000000abc:n1:1:ready-running"
+        );
+    }
+
+    /// `build_plan_node_state_changed_event` projects a node + lifecycle
+    /// transition into the `ExecutionEvent` payload. Pins the field
+    /// mapping (target / dispatch_strategy / target_project / attempt /
+    /// reason) and the `kind()` wire tag the evidence collector keys on.
+    #[test]
+    fn plan_node_state_changed_event_projection_matches_node_metadata() {
+        let plan = fixture_plan("(plan)");
+        let mut node = fixture_dag_node("nx", "mission_execution");
+        node.target_project = Some("missiond".into());
+        let ev = build_plan_node_state_changed_event(
+            plan.id,
+            &node,
+            "agent-team",
+            1,
+            "running",
+            "succeeded",
+            None,
+        );
+        assert_eq!(
+            <ExecutionEvent as missiond_core::event::DomainEvent>::kind(&ev),
+            "plan_node_state_changed"
+        );
+        match ev {
+            ExecutionEvent::PlanNodeStateChanged {
+                plan_id,
+                node_id,
+                from,
+                to,
+                target,
+                dispatch_strategy,
+                target_project,
+                attempt,
+                reason,
+            } => {
+                assert_eq!(plan_id, plan.id.to_string());
+                assert_eq!(node_id, "nx");
+                assert_eq!(from, "running");
+                assert_eq!(to, "succeeded");
+                assert_eq!(target.as_deref(), Some("mission_execution"));
+                assert_eq!(dispatch_strategy.as_deref(), Some("agent-team"));
+                assert_eq!(target_project.as_deref(), Some("missiond"));
+                assert_eq!(attempt, Some(1));
+                assert!(reason.is_none(), "success transitions carry no reason");
+            }
+            _ => panic!("expected PlanNodeStateChanged variant"),
+        }
+    }
+
+    /// Failure / skip transitions surface a `reason` annotation through to
+    /// the bus event payload, mirroring what `emit_evidence_*` writes.
+    #[test]
+    fn plan_node_state_changed_event_carries_failure_reason() {
+        let plan = fixture_plan("(plan)");
+        let node = fixture_dag_node("ny", "mission_task_delegate");
+        let ev = build_plan_node_state_changed_event(
+            plan.id,
+            &node,
+            "fresh-code-alignment",
+            1,
+            "pending",
+            "skipped",
+            Some("upstream_failed:n1".into()),
+        );
+        match ev {
+            ExecutionEvent::PlanNodeStateChanged { reason, from, to, .. } => {
+                assert_eq!(reason.as_deref(), Some("upstream_failed:n1"));
+                assert_eq!(from, "pending");
+                assert_eq!(to, "skipped");
+            }
+            _ => panic!("expected PlanNodeStateChanged"),
+        }
+    }
+
+    /// Every fixture-built evidence entry now carries an `attempt` extra
+    /// (defaults to 1 for v2). Ensures audit consumers see a stable column
+    /// they can pivot on once retry-aware schedulers land.
+    #[test]
+    fn dag_evidence_entries_include_attempt_field() {
+        let node = fixture_dag_node("n1", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let succ = build_dag_success_entry(&node, &plan, "agent-team", json!({}));
+        assert_eq!(succ["attempt"], 1);
+        let fail = build_dag_failure_entry(&node, &plan, "agent-team", json!({"error": "x"}));
+        assert_eq!(fail["attempt"], 1);
+        let running = build_running_entry(&node, &plan, "agent-team");
+        assert_eq!(running["attempt"], 1);
+        let finished_ok =
+            build_finished_entry(&node, &plan, "agent-team", json!({"ok": true}), true);
+        assert_eq!(finished_ok["attempt"], 1);
+        let skipped = build_skipped_entry(
+            &node,
+            &plan,
+            "agent-team",
+            "upstream_failed",
+            Some(("failed_dep", "n0".to_string())),
+        );
+        assert_eq!(skipped["attempt"], 1);
+    }
+
+    /// Every fixture-built entry now stamps a live `EventRef::new(...)` —
+    /// the deterministic-id branch in pure tests — with the canonical
+    /// source/kind tags the evidence collector (and downstream consumers)
+    /// route on.
+    #[test]
+    fn dag_evidence_entries_carry_live_event_ref_with_deterministic_id() {
+        let node = fixture_dag_node("n4", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let entries = vec![
+            ("ready -> running", build_running_entry(&node, &plan, "agent-team")),
+            (
+                "running -> succeeded",
+                build_finished_entry(&node, &plan, "agent-team", json!({"ok": true}), true),
+            ),
+            (
+                "running -> failed",
+                build_finished_entry(&node, &plan, "agent-team", json!({"error": "x"}), false),
+            ),
+            (
+                "pending -> skipped",
+                build_skipped_entry(
+                    &node,
+                    &plan,
+                    "agent-team",
+                    "upstream_failed",
+                    Some(("failed_dep", "n0".to_string())),
+                ),
+            ),
+        ];
+        for (transition, entry) in entries {
+            let arr = entry["execution_events"]
+                .as_array()
+                .unwrap_or_else(|| panic!("execution_events array for {}", transition));
+            assert_eq!(arr.len(), 1, "exactly one ref for {}", transition);
+            let r = &arr[0];
+            assert!(
+                r.get("unavailable").is_none(),
+                "live path: ref must NOT be unavailable for {} ({:?})",
+                transition,
+                r
+            );
+            assert_eq!(r["source"], "execution", "for {}", transition);
+            assert_eq!(
+                r["kind"], "plan_node_state_changed",
+                "for {}",
+                transition
+            );
+            let id = r["event_id"].as_str().expect("event_id string");
+            assert!(
+                id.starts_with(&format!("plan-node:{}:{}:1:", plan.id, node.id)),
+                "deterministic id format for {} → {}",
+                transition,
+                id
+            );
+        }
+    }
+
+    /// Bus-failure-path symptom surface: when `bus_publish_warnings` is
+    /// non-empty the `action_execute_dag_v1` response surfaces it as a
+    /// top-level array. Verifies the field plumbing in `ExecutionOutcome`.
+    #[test]
+    fn execution_outcome_collects_bus_publish_warnings() {
+        let mut o = ExecutionOutcome::default();
+        o.bus_publish_warnings.push("simulated bus drop for n1".into());
+        o.bus_publish_warnings.push("simulated bus drop for n2".into());
+        assert_eq!(o.bus_publish_warnings.len(), 2);
+        assert!(o.bus_publish_warnings[0].contains("n1"));
+    }
 }
