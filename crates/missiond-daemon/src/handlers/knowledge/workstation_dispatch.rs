@@ -53,6 +53,22 @@ use super::plan::{tool_result_payload, AGENT_TEAM_OBJECTIVE_HINT};
 /// files and never touches sibling shards.
 pub(crate) const COMMIT_POLICY_SCOPED: &str = "scoped";
 
+/// wave-17 / task 07 — workstation-dispatch scoped-commit handoff defaults.
+///
+/// These constants are surfaced verbatim on every dispatch response under
+/// `scoped_commit_required` / `scoped_commit_policy`. They pin the policy so
+/// downstream callers (Claude / agent-team / observers) can assert the
+/// invariant without re-reading the brief text.
+///
+/// Important: the `enforced-on-complete` value describes the *brief contract*,
+/// NOT the daemon-level `mission_execution(action=complete)` default. The
+/// legacy `enforce_scoped_commit` flag still defaults to `false` so callers
+/// who wire completions outside the workstation-dispatch pipeline keep their
+/// audit-only behaviour. The brief explicitly instructs the worker to opt
+/// into enforcement when calling completion.
+pub(crate) const SCOPED_COMMIT_REQUIRED: bool = true;
+pub(crate) const SCOPED_COMMIT_POLICY: &str = "enforced-on-complete";
+
 /// Hard cap on the per-list size for `owned-files` / `forbidden-files` /
 /// `acceptance-commands` so a runaway PLAN.lisp can't blow the brief past
 /// `mission_task_delegate`'s 16K objective cap. Author intent is preserved
@@ -459,6 +475,52 @@ impl WorkstationDispatchOutcome {
     }
 }
 
+/// Wave-17 / Task 07 — classify the brief as code-generating or read-only
+/// so the completion-handoff section can prescribe a different
+/// `commit_status` default. Conservative rule: a brief with at least one
+/// declared `owned_files` entry is treated as code-generating; an empty
+/// `owned_files` list means the worker has no licence to stage anything,
+/// which is the read-only contract.
+///
+/// This rule deliberately does NOT inspect the objective text — keyword
+/// sniffing would be both ambiguous and easy to game. Authors that want a
+/// read-only task simply omit `owned_files` (the brief already nudges them
+/// with "stage NOTHING by default").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BriefTaskKind {
+    /// Worker is expected to produce a scoped commit naming the owned
+    /// files. Brief instructs the worker to call completion with
+    /// `enforce_scoped_commit=true`, `commit_status=committed`,
+    /// `commit_hash=<hash>`, `staged_files=[<owned files actually staged>]`.
+    Code,
+    /// Worker is read-only (no owned files declared). Brief instructs
+    /// the worker to call completion with `enforce_scoped_commit=true`
+    /// and `commit_status=not-required`, plus a one-line explanation of
+    /// why no commit was produced (so the audit trail captures intent
+    /// rather than silently defaulting to "no commit").
+    ReadOnly,
+}
+
+impl BriefTaskKind {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            BriefTaskKind::Code => "code",
+            BriefTaskKind::ReadOnly => "read-only",
+        }
+    }
+}
+
+/// Wave-17 / Task 07 — derive the brief task kind from the merged hints.
+/// Pure function so tests can pin the rule and downstream callers can
+/// classify a brief without re-walking the hint set.
+pub(crate) fn classify_task_kind(hints: &WorkstationDispatchHints) -> BriefTaskKind {
+    if hints.owned_files.is_empty() {
+        BriefTaskKind::ReadOnly
+    } else {
+        BriefTaskKind::Code
+    }
+}
+
 /// Build the canonical task-brief text. The shape is fixed so downstream
 /// consumers (Claude / agent-team) always see the same headings.
 ///
@@ -470,7 +532,13 @@ impl WorkstationDispatchOutcome {
 ///   5. Acceptance commands (verification commands the task must pass).
 ///   6. Commit policy (default `scoped`) + the literal scoped-commit
 ///      reminder line.
-///   7. Agent-team hint (literal Chinese line, exactly once) when
+///   7. Wave-17 / Task 07 — Completion handoff (scoped commit). Always
+///      present. Prescribes the exact `mission_execution(action=complete)`
+///      arguments the worker must report back: `enforce_scoped_commit=true`
+///      always; `commit_status=committed` + `commit_hash` + `staged_files`
+///      for code briefs; `commit_status=not-required` + a `summary`
+///      explanation for read-only briefs.
+///   8. Agent-team hint (literal Chinese line, exactly once) when
 ///      `dispatch_strategy=agent-team`.
 pub(crate) fn build_task_brief(
     plan: &Plan,
@@ -548,7 +616,55 @@ pub(crate) fn build_task_brief(
     );
     out.push('\n');
 
-    // 7. Agent-team hint (exactly once, literal Chinese).
+    // 7. Completion handoff (scoped commit) — wave-17 / task 07.
+    //
+    // Pin the EXACT `mission_execution(action=complete)` arguments the worker
+    // must report back. The daemon NEVER runs git itself; the worker is
+    // expected to perform the scoped commit (or skip with a typed reason)
+    // and call completion with `enforce_scoped_commit=true` so the daemon's
+    // wave-16/06 fail-fast gates run BEFORE the companion log mutation.
+    //
+    // The legacy `mission_execution(action=complete)` default for
+    // `enforce_scoped_commit` is still `false` — that backward-compatibility
+    // contract MUST NOT be touched (callers outside the workstation-dispatch
+    // pipeline keep audit-only behaviour). The brief is the *opt-in* lever
+    // for this dispatch path: it tells the worker to set the flag explicitly.
+    let task_kind = classify_task_kind(hints);
+    out.push_str("## Completion handoff (scoped commit)\n");
+    out.push_str(&format!("- task kind: {}\n", task_kind.as_str()));
+    out.push_str(
+        "- on completion call `mission_execution(action=complete)` with `enforce_scoped_commit=true`\n",
+    );
+    match task_kind {
+        BriefTaskKind::Code => {
+            out.push_str(
+                "- this brief generates code: stage only the owned files listed above and produce one scoped commit\n",
+            );
+            out.push_str(
+                "- report back `commit_status=\"committed\"`, `commit_hash=\"<git sha>\"`, and `staged_files=[<owned files actually staged>]`\n",
+            );
+            out.push_str(
+                "- if you cannot commit (blocked / refused), report `commit_status=\"blocked\"` with a non-empty `commit_blocker` explaining why so the next agent can resume\n",
+            );
+        }
+        BriefTaskKind::ReadOnly => {
+            out.push_str(
+                "- this brief is read-only: no `owned_files` were declared, so the worker has no licence to stage anything\n",
+            );
+            out.push_str(
+                "- report back `commit_status=\"not-required\"` and use the `summary` field to explain WHY no commit was produced (e.g. \"audit-only — no source files modified\")\n",
+            );
+            out.push_str(
+                "- if the investigation surfaces a code change, STOP and request a follow-up brief with `owned_files` declared instead of staging silently\n",
+            );
+        }
+    }
+    out.push_str(
+        "- the daemon never runs git itself — the worker performs the scoped commit and reports the hash back\n",
+    );
+    out.push('\n');
+
+    // 8. Agent-team hint (exactly once, literal Chinese).
     if dispatch_strategy == "agent-team" {
         out.push_str("## Parallelism hint\n");
         out.push_str(AGENT_TEAM_OBJECTIVE_HINT);
@@ -753,6 +869,20 @@ pub(crate) fn outcome_to_response_fields(
     let mut m = serde_json::Map::new();
     m.insert("workstation_dispatch_status".to_string(), json!(outcome.status()));
     m.insert("dispatch_strategy".to_string(), json!(dispatch_strategy));
+    // Wave-17 / Task 07 — every dispatch (live, dry-run, inner-error,
+    // and safe-descriptor) carries the scoped-commit policy contract so
+    // observers can assert the invariant without parsing the brief text.
+    // The policy is fixed at the workstation-dispatch layer; legacy
+    // callers of `mission_execution(action=complete)` keep their default
+    // `enforce_scoped_commit=false` behaviour untouched.
+    m.insert(
+        "scoped_commit_required".to_string(),
+        json!(SCOPED_COMMIT_REQUIRED),
+    );
+    m.insert(
+        "scoped_commit_policy".to_string(),
+        json!(SCOPED_COMMIT_POLICY),
+    );
     match outcome {
         WorkstationDispatchOutcome::Dispatched {
             task_brief,
@@ -1435,5 +1565,201 @@ mod tests {
         let descriptor = SafeDescriptorReason::MissingObjective;
         assert_eq!(descriptor.status(), "skipped_missing_objective");
         assert!(descriptor.detail().contains("content-free"));
+    }
+
+    // ── wave-17 / task 07 — scoped-commit handoff default tests ─────────
+
+    #[test]
+    fn classify_task_kind_treats_owned_files_as_code_brief() {
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        assert_eq!(classify_task_kind(&hints), BriefTaskKind::Code);
+    }
+
+    #[test]
+    fn classify_task_kind_treats_empty_owned_files_as_read_only_brief() {
+        let hints = WorkstationDispatchHints {
+            objective: Some("audit the wave".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(classify_task_kind(&hints), BriefTaskKind::ReadOnly);
+    }
+
+    #[test]
+    fn build_task_brief_code_requires_enforce_scoped_commit_on_completion() {
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string(), "b.rs".to_string()],
+            ..Default::default()
+        };
+        let brief = build_task_brief(&plan, &hints, "fresh-code-alignment");
+        // The completion handoff section is always present.
+        assert!(
+            brief.contains("## Completion handoff (scoped commit)"),
+            "code brief must carry the completion handoff section"
+        );
+        // The brief tells the worker to set enforce_scoped_commit=true.
+        assert!(
+            brief.contains("`enforce_scoped_commit=true`"),
+            "code brief must instruct the worker to opt into enforcement"
+        );
+        // The brief asks for committed status + commit_hash + staged_files.
+        assert!(
+            brief.contains("`commit_status=\"committed\"`"),
+            "code brief must request commit_status=committed"
+        );
+        assert!(
+            brief.contains("`commit_hash="),
+            "code brief must request commit_hash"
+        );
+        assert!(
+            brief.contains("`staged_files="),
+            "code brief must request staged_files"
+        );
+        // Task kind line.
+        assert!(
+            brief.contains("- task kind: code"),
+            "code brief must declare task kind"
+        );
+        // The blocked branch must also be documented so workers don't
+        // silently drop to "no commit".
+        assert!(
+            brief.contains("`commit_status=\"blocked\"`"),
+            "code brief must document the blocked branch"
+        );
+        // The daemon-never-runs-git invariant must be loud.
+        assert!(
+            brief.contains("daemon never runs git itself"),
+            "brief must restate the daemon-never-runs-git invariant"
+        );
+    }
+
+    #[test]
+    fn build_task_brief_read_only_uses_not_required_with_explanation() {
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("audit the wave-17 surface".to_string()),
+            ..Default::default()
+        };
+        let brief = build_task_brief(&plan, &hints, "fresh-code-alignment");
+        assert!(brief.contains("## Completion handoff (scoped commit)"));
+        // Read-only briefs default to commit_status=not-required.
+        assert!(
+            brief.contains("`commit_status=\"not-required\"`"),
+            "read-only brief must default to commit_status=not-required"
+        );
+        // ...with an explanation requirement.
+        assert!(
+            brief.contains("explain WHY"),
+            "read-only brief must require an explanation in the summary field"
+        );
+        // Task kind line.
+        assert!(
+            brief.contains("- task kind: read-only"),
+            "read-only brief must declare task kind"
+        );
+        // Still asks for enforce_scoped_commit=true so the daemon's
+        // wave-16/06 gates run.
+        assert!(
+            brief.contains("`enforce_scoped_commit=true`"),
+            "read-only brief still opts the completion call into enforcement"
+        );
+        // Read-only brief must NOT instruct the worker to commit anything.
+        assert!(
+            !brief.contains("`commit_status=\"committed\"`"),
+            "read-only brief must NOT prescribe commit_status=committed"
+        );
+    }
+
+    #[test]
+    fn build_task_brief_completion_handoff_does_not_double_inject_agent_team_hint() {
+        // The agent-team hint sits in section 8 (after completion handoff).
+        // Adding the new section must not leak the literal anywhere else.
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let brief = build_task_brief(&plan, &hints, "agent-team");
+        assert_eq!(
+            brief.matches(AGENT_TEAM_OBJECTIVE_HINT).count(),
+            1,
+            "agent-team hint must still appear exactly once after wave-17 / task 07"
+        );
+    }
+
+    #[test]
+    fn build_task_brief_read_only_does_not_inject_agent_team_hint_for_other_strategies() {
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("audit".to_string()),
+            ..Default::default()
+        };
+        let brief = build_task_brief(&plan, &hints, "resident-lisp");
+        assert_eq!(brief.matches(AGENT_TEAM_OBJECTIVE_HINT).count(), 0);
+        // Confirm read-only branch lands.
+        assert!(brief.contains("- task kind: read-only"));
+    }
+
+    #[test]
+    fn outcome_to_response_dispatched_advertises_scoped_commit_policy() {
+        let outcome = WorkstationDispatchOutcome::Dispatched {
+            task_brief: "## Objective\nship\n".to_string(),
+            task_brief_path: None,
+            evidence_path: None,
+            evidence_error: None,
+            inner_payload: json!({"task_id": "btk-9"}),
+        };
+        let v = outcome_to_response_fields(&outcome, "fresh-code-alignment");
+        assert_eq!(v["scoped_commit_required"], json!(true));
+        assert_eq!(v["scoped_commit_policy"], "enforced-on-complete");
+    }
+
+    #[test]
+    fn outcome_to_response_dry_run_advertises_scoped_commit_policy() {
+        let outcome = WorkstationDispatchOutcome::DryRun {
+            task_brief: "## Objective\nship\n".to_string(),
+        };
+        let v = outcome_to_response_fields(&outcome, "fresh-code-alignment");
+        assert_eq!(v["scoped_commit_required"], json!(true));
+        assert_eq!(v["scoped_commit_policy"], "enforced-on-complete");
+    }
+
+    #[test]
+    fn outcome_to_response_inner_error_advertises_scoped_commit_policy() {
+        let outcome = WorkstationDispatchOutcome::InnerError {
+            task_brief: "## Objective\nship\n".to_string(),
+            inner_payload: json!({"error": "nope"}),
+        };
+        let v = outcome_to_response_fields(&outcome, "fresh-code-alignment");
+        assert_eq!(v["scoped_commit_required"], json!(true));
+        assert_eq!(v["scoped_commit_policy"], "enforced-on-complete");
+    }
+
+    #[test]
+    fn outcome_to_response_safe_descriptor_advertises_scoped_commit_policy() {
+        // Even on safe-descriptor refusals the policy contract is part of
+        // the wire shape so observers don't have to special-case the
+        // skipped branch when asserting the invariant.
+        let outcome = WorkstationDispatchOutcome::SafeDescriptor {
+            reason: SafeDescriptorReason::MissingObjective,
+            task_brief: None,
+        };
+        let v = outcome_to_response_fields(&outcome, "fresh-code-alignment");
+        assert_eq!(v["scoped_commit_required"], json!(true));
+        assert_eq!(v["scoped_commit_policy"], "enforced-on-complete");
+    }
+
+    #[test]
+    fn brief_task_kind_string_pin_is_stable_wire_contract() {
+        // These two strings are part of the brief / response wire contract;
+        // changing them silently would break downstream observers.
+        assert_eq!(BriefTaskKind::Code.as_str(), "code");
+        assert_eq!(BriefTaskKind::ReadOnly.as_str(), "read-only");
     }
 }
