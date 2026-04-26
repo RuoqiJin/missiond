@@ -45,7 +45,9 @@
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
 use serde_json::{json, Map, Value};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use crate::state::AppState;
 
@@ -135,6 +137,41 @@ pub(crate) mod kind {
     pub(crate) const NOTE: &str = "note";
 }
 
+/// Provenance tag for an [`EventRef`]. Surfaces on the JSON envelope so
+/// downstream consumers can tell at a glance whether the id came from the
+/// live publish path, was recovered out-of-band from the in-memory cache /
+/// log query (wave-16 / task 07 resolver), or could not be correlated at all.
+///
+/// Wire form is the all-lowercase variant tag (`"live"` / `"log"` /
+/// `"unavailable"`) — kept stable so audit dashboards can pivot on a single
+/// string without parsing structured discriminants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EventRefStatus {
+    /// Producer obtained the id directly from a successful publish (e.g.
+    /// `BusServices::publish_execution_with_seq` returned the `Seq`) or
+    /// from a deterministic correlation key the producer itself owns.
+    Live,
+    /// Recovered from a passive subscriber cache or a log-query lookup
+    /// after the original publish path no longer carried the id. The id is
+    /// still real — the recovery just happened post-hoc.
+    Log,
+    /// Caller wanted to attach an id but neither the publish path nor the
+    /// resolver could surface one. The entry records the attempt + reason
+    /// so consumers can tell "no events" apart from "we tried but failed
+    /// to correlate".
+    Unavailable,
+}
+
+impl EventRefStatus {
+    pub(crate) fn as_wire(self) -> &'static str {
+        match self {
+            EventRefStatus::Live => "live",
+            EventRefStatus::Log => "log",
+            EventRefStatus::Unavailable => "unavailable",
+        }
+    }
+}
+
 /// Reference to an `ExecutionEvent` (or any other domain event) the caller
 /// observed while producing this evidence entry.
 ///
@@ -149,12 +186,20 @@ pub(crate) mod kind {
 /// [`EventRef::unavailable`] — the entry then records `"unavailable": true`
 /// plus a reason string so consumers can tell "no events" apart from "we
 /// tried but failed to correlate".
+///
+/// Wave-16 / task 07 added the [`EventRef::status`] tag. Existing
+/// [`EventRef::new`] callers stay byte-compatible — `new(...)` is now an
+/// alias for [`EventRef::live`] (the publish-path producers always know
+/// they have a live id when they call it). The `status` field surfaces on
+/// the JSON envelope as `"status": "live" | "log" | "unavailable"` so
+/// downstream consumers can pivot without re-deriving provenance.
 #[derive(Debug, Clone)]
 pub(crate) struct EventRef {
     pub event_id: Option<String>,
     pub source: Option<String>,
     pub kind: Option<String>,
     pub unavailable_reason: Option<String>,
+    pub status: EventRefStatus,
 }
 
 impl EventRef {
@@ -167,12 +212,45 @@ impl EventRef {
     /// `EventRef::unavailable(...)` because the single-node runner does not
     /// yet propagate the inner `mission_execution` seq back to the
     /// evidence-write call site — that wiring is a separate follow-up.
+    ///
+    /// Wave-16 / task 07: alias for [`EventRef::live`]. Kept on the public
+    /// surface for byte-compat with the wave-13/14 call sites and tests
+    /// that already pin `EventRef::new(...)`.
     pub(crate) fn new(source: impl Into<String>, kind: impl Into<String>, event_id: impl Into<String>) -> Self {
+        Self::live(source, kind, event_id)
+    }
+
+    /// Record a live event id (publish path returned it directly).
+    pub(crate) fn live(source: impl Into<String>, kind: impl Into<String>, event_id: impl Into<String>) -> Self {
         Self {
             event_id: Some(event_id.into()),
             source: Some(source.into()),
             kind: Some(kind.into()),
             unavailable_reason: None,
+            status: EventRefStatus::Live,
+        }
+    }
+
+    /// Record an event id recovered from a post-hoc lookup (subscriber
+    /// cache or log query). Same wire shape as [`EventRef::live`] except
+    /// the `status` tag flips to `"log"` so consumers can tell the id was
+    /// resolved out-of-band.
+    ///
+    /// `#[allow(dead_code)]`: wave-16 / task 07 introduced the resolver
+    /// surface for downstream call sites that want post-hoc correlation.
+    /// No production caller writes `from_log` directly today — the only
+    /// producer is the resolver itself (see `EventRefResolver::lookup_*`).
+    /// Kept on the public surface so future call sites that want to stamp
+    /// a log-recovered id without going through the resolver have a typed
+    /// entry point. Exercised by `event_ref_log_status_round_trips`.
+    #[allow(dead_code)]
+    pub(crate) fn from_log(source: impl Into<String>, kind: impl Into<String>, event_id: impl Into<String>) -> Self {
+        Self {
+            event_id: Some(event_id.into()),
+            source: Some(source.into()),
+            kind: Some(kind.into()),
+            unavailable_reason: None,
+            status: EventRefStatus::Log,
         }
     }
 
@@ -185,11 +263,16 @@ impl EventRef {
             source: None,
             kind: None,
             unavailable_reason: Some(reason.into()),
+            status: EventRefStatus::Unavailable,
         }
     }
 
     fn into_json(self) -> Value {
         let mut m = Map::new();
+        m.insert(
+            "status".to_string(),
+            Value::String(self.status.as_wire().to_string()),
+        );
         if let Some(id) = self.event_id {
             m.insert("event_id".to_string(), Value::String(id));
         }
@@ -581,6 +664,204 @@ pub(crate) fn wrap_legacy_record_evidence(
     Value::Object(m)
 }
 
+// ═════════════════════════════════════════════════════════════════════════
+// wave-16 / task 07 — EventRefResolver
+//
+// Conservative passive-cache lookup so call sites that no longer carry the
+// live `Seq` from the original publish path can still attach a real event
+// id when a subscriber observed the same event.
+//
+// Strategy chosen (lowest risk):
+//   * In-memory bounded HashMap keyed by deterministic correlation tuple
+//     (currently only `plan-node` lifecycle transitions; future kinds add
+//     their own correlation key constructor).
+//   * Populated by a single passive `ExecutionEvent` subscriber spawned in
+//     `bus::v2_subscribers::spawn_event_ref_cache_sub` — the subscriber
+//     never mutates DB / fires further events; it just acks and inserts.
+//   * Bounded retention: a soft cap evicts the oldest insertion order
+//     entries when the cap is hit. `EVENT_REF_CACHE_CAP` is intentionally
+//     small (1024) — the cache exists for the "evidence write happens
+//     immediately after the publish" case, not for cold history replay.
+//   * Lookup miss → `EventRef::unavailable("not in resolver cache")`.
+//     We deliberately do NOT block / poll the cache — primary dispatch
+//     and evidence write must never wait on a resolver lookup.
+//
+// Log-query path (the `EventRefStatus::Log` constructor) is reserved for
+// a future caller that wants to query `LogReadable::read_from(...)` for
+// recent execution events. Today only the in-memory cache is wired so
+// every cache hit surfaces as `EventRefStatus::Log` (resolved post-hoc,
+// not from the publish call site that ran the dispatch).
+// ═════════════════════════════════════════════════════════════════════════
+
+/// Soft cap on the resolver's in-memory cache. When the cache reaches this
+/// size, the oldest insertion-order entry is evicted on every new insert.
+/// Sized for the "evidence write happens within seconds of the publish"
+/// pattern — not a long-term audit store.
+pub(crate) const EVENT_REF_CACHE_CAP: usize = 1024;
+
+/// Reason string stamped on `EventRef::unavailable` returned from a cache
+/// miss. Kept as a constant so call sites + tests can pin the wire form.
+pub(crate) const EVENT_REF_RESOLVER_MISS_REASON: &str =
+    "event ref not in resolver cache";
+
+/// Cached event entry — what the subscriber stored alongside the
+/// correlation key. Currently just the (source, kind, event_id) triple
+/// surfaced as `EventRef`. Kept as a separate struct so the cache value
+/// can grow (e.g. add `recorded_at`) without churning the `EventRef`
+/// constructor surface.
+#[derive(Debug, Clone)]
+struct CachedEvent {
+    source: String,
+    kind: String,
+    event_id: String,
+}
+
+/// Lightweight in-memory cache + lookup surface for `EventRef` recovery.
+///
+/// Construct one per daemon and share via `Arc`. The subscriber inserts
+/// via [`record_plan_node_state_change`]; consumer call sites query via
+/// [`lookup_plan_node_state_change`].
+///
+/// The resolver NEVER fails the caller: a cache miss returns
+/// `EventRef::unavailable(EVENT_REF_RESOLVER_MISS_REASON)` so the
+/// downstream evidence write proceeds without a hard error. This matches
+/// the wave-16 / task 07 brief: "event lookup failure must not fail
+/// primary dispatch / evidence write".
+#[derive(Debug)]
+pub(crate) struct EventRefResolver {
+    inner: Mutex<EventRefResolverInner>,
+}
+
+#[derive(Debug)]
+struct EventRefResolverInner {
+    /// Insertion-order keys for FIFO eviction when cap is hit. We use a
+    /// `Vec<String>` rather than `VecDeque<String>` because the eviction
+    /// rate is far lower than the lookup rate; the constant-time `pop`
+    /// from the back is preferable but eviction happens at the front so
+    /// we accept the O(n) shift — `EVENT_REF_CACHE_CAP=1024` keeps the
+    /// shift cost negligible against the publish rate.
+    order: Vec<String>,
+    map: HashMap<String, CachedEvent>,
+    cap: usize,
+}
+
+impl EventRefResolver {
+    /// Construct a resolver with the default capacity ([`EVENT_REF_CACHE_CAP`]).
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(EVENT_REF_CACHE_CAP)
+    }
+
+    /// Construct a resolver with a caller-chosen capacity. Exposed so
+    /// tests can pin small caps and exercise the eviction path.
+    pub(crate) fn with_capacity(cap: usize) -> Self {
+        Self {
+            inner: Mutex::new(EventRefResolverInner {
+                order: Vec::with_capacity(cap.min(64)),
+                map: HashMap::with_capacity(cap.min(64)),
+                cap,
+            }),
+        }
+    }
+
+    /// Build the deterministic correlation key for a plan-node lifecycle
+    /// transition. Mirrors the format `plan_dag::deterministic_plan_node_event_id`
+    /// uses for the deterministic-fallback id so cache keys and event ids
+    /// are derivable from the same correlation tuple.
+    pub(crate) fn plan_node_state_change_key(
+        plan_id: &str,
+        node_id: &str,
+        attempt: u32,
+        from: &str,
+        to: &str,
+    ) -> String {
+        format!(
+            "plan-node:{}:{}:{}:{}-{}",
+            plan_id, node_id, attempt, from, to
+        )
+    }
+
+    /// Insert a plan-node lifecycle event into the cache. Idempotent on
+    /// repeat inserts of the same key (later inserts overwrite the prior
+    /// value but do NOT bump the eviction order — the first publish wins
+    /// for FIFO eviction purposes).
+    ///
+    /// `event_id` should be the live `Seq` (or deterministic fallback id)
+    /// the publish path used. `source` / `kind` mirror what the producer
+    /// would have stamped on `EventRef::new`.
+    pub(crate) fn record_plan_node_state_change(
+        &self,
+        plan_id: &str,
+        node_id: &str,
+        attempt: u32,
+        from: &str,
+        to: &str,
+        source: impl Into<String>,
+        kind: impl Into<String>,
+        event_id: impl Into<String>,
+    ) {
+        let key = Self::plan_node_state_change_key(plan_id, node_id, attempt, from, to);
+        let entry = CachedEvent {
+            source: source.into(),
+            kind: kind.into(),
+            event_id: event_id.into(),
+        };
+        let mut g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if !g.map.contains_key(&key) {
+            // FIFO eviction when cap reached.
+            if g.order.len() >= g.cap {
+                if let Some(oldest) = g.order.first().cloned() {
+                    g.order.remove(0);
+                    g.map.remove(&oldest);
+                }
+            }
+            g.order.push(key.clone());
+        }
+        g.map.insert(key, entry);
+    }
+
+    /// Look up a plan-node lifecycle event by deterministic correlation
+    /// key. On hit returns an `EventRef` with `status=Log` (the id was
+    /// recovered post-hoc rather than carried directly from the publish
+    /// path). On miss returns `EventRef::unavailable` with the canonical
+    /// miss reason — never errors / blocks.
+    pub(crate) fn lookup_plan_node_state_change(
+        &self,
+        plan_id: &str,
+        node_id: &str,
+        attempt: u32,
+        from: &str,
+        to: &str,
+    ) -> EventRef {
+        let key = Self::plan_node_state_change_key(plan_id, node_id, attempt, from, to);
+        let g = match self.inner.lock() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        match g.map.get(&key) {
+            Some(c) => EventRef::from_log(c.source.clone(), c.kind.clone(), c.event_id.clone()),
+            None => EventRef::unavailable(EVENT_REF_RESOLVER_MISS_REASON),
+        }
+    }
+
+    /// Current entry count — exposed for tests / metrics.
+    #[allow(dead_code)]
+    pub(crate) fn len(&self) -> usize {
+        match self.inner.lock() {
+            Ok(g) => g.map.len(),
+            Err(poisoned) => poisoned.into_inner().map.len(),
+        }
+    }
+}
+
+impl Default for EventRefResolver {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -673,6 +954,7 @@ mod tests {
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["unavailable"], true);
         assert_eq!(arr[0]["unavailable_reason"], "bus subscription not yet wired");
+        assert_eq!(arr[0]["status"], "unavailable");
         assert!(arr[0].get("event_id").is_none());
     }
 
@@ -683,6 +965,158 @@ mod tests {
             v.as_object().unwrap().get("execution_events").is_none(),
             "no events attached → key absent (don't pretend with empty array)"
         );
+    }
+
+    // ── wave-16 / task 07 :: EventRefStatus surface ────────────────────
+
+    #[test]
+    fn event_ref_live_status_round_trips_via_new_alias() {
+        // `EventRef::new(...)` is the wave-13/14 alias for `live(...)`. It
+        // must continue to mark the resulting envelope with `status=live`
+        // so existing publish-path call sites (plan_dag) get the right
+        // provenance tag for free.
+        let r = EventRef::new("execution", "plan_node_state_changed", "42");
+        assert_eq!(r.status, EventRefStatus::Live);
+        let json = EvidenceEntry::new("test", kind::DISPATCH)
+            .add_execution_event(r)
+            .into_json();
+        let arr = json["execution_events"].as_array().unwrap();
+        assert_eq!(arr[0]["status"], "live");
+        assert_eq!(arr[0]["event_id"], "42");
+    }
+
+    #[test]
+    fn event_ref_log_status_round_trips() {
+        // Resolved post-hoc via the resolver — should surface as `log`.
+        let r = EventRef::from_log("execution", "plan_node_state_changed", "99");
+        assert_eq!(r.status, EventRefStatus::Log);
+        let json = EvidenceEntry::new("test", kind::DISPATCH)
+            .add_execution_event(r)
+            .into_json();
+        let arr = json["execution_events"].as_array().unwrap();
+        assert_eq!(arr[0]["status"], "log");
+        assert_eq!(arr[0]["event_id"], "99");
+    }
+
+    // ── wave-16 / task 07 :: EventRefResolver ──────────────────────────
+
+    #[test]
+    fn resolver_returns_log_ref_on_cache_hit() {
+        let resolver = EventRefResolver::new();
+        let plan_id = "11111111-1111-1111-1111-111111111111";
+        resolver.record_plan_node_state_change(
+            plan_id,
+            "n1",
+            1,
+            "ready",
+            "running",
+            "execution",
+            "plan_node_state_changed",
+            "777",
+        );
+        let r = resolver.lookup_plan_node_state_change(plan_id, "n1", 1, "ready", "running");
+        assert_eq!(r.status, EventRefStatus::Log);
+        assert_eq!(r.event_id.as_deref(), Some("777"));
+        assert_eq!(r.source.as_deref(), Some("execution"));
+        assert_eq!(r.kind.as_deref(), Some("plan_node_state_changed"));
+        assert!(r.unavailable_reason.is_none());
+    }
+
+    #[test]
+    fn resolver_returns_unavailable_on_cache_miss() {
+        let resolver = EventRefResolver::new();
+        let r = resolver.lookup_plan_node_state_change(
+            "00000000-0000-0000-0000-000000000000",
+            "missing-node",
+            1,
+            "ready",
+            "succeeded",
+        );
+        assert_eq!(r.status, EventRefStatus::Unavailable);
+        assert_eq!(
+            r.unavailable_reason.as_deref(),
+            Some(EVENT_REF_RESOLVER_MISS_REASON),
+            "miss reason kept stable so audit consumers can pivot on it"
+        );
+        assert!(r.event_id.is_none());
+    }
+
+    #[test]
+    fn resolver_evicts_oldest_when_capacity_reached() {
+        // Cap=2 — third insert evicts the first.
+        let resolver = EventRefResolver::with_capacity(2);
+        for (node, seq) in [("n1", "1"), ("n2", "2"), ("n3", "3")] {
+            resolver.record_plan_node_state_change(
+                "p", node, 1, "ready", "running", "execution", "plan_node_state_changed", seq,
+            );
+        }
+        // n1 evicted; n2 + n3 retained.
+        let r1 = resolver.lookup_plan_node_state_change("p", "n1", 1, "ready", "running");
+        assert_eq!(r1.status, EventRefStatus::Unavailable, "first key evicted");
+        let r2 = resolver.lookup_plan_node_state_change("p", "n2", 1, "ready", "running");
+        assert_eq!(r2.event_id.as_deref(), Some("2"));
+        let r3 = resolver.lookup_plan_node_state_change("p", "n3", 1, "ready", "running");
+        assert_eq!(r3.event_id.as_deref(), Some("3"));
+        assert_eq!(resolver.len(), 2);
+    }
+
+    #[test]
+    fn resolver_reinsert_overwrites_value_without_double_counting_order() {
+        // Re-recording the same key should overwrite the value but NOT add
+        // a second slot to the eviction order — otherwise a hot key would
+        // squeeze cold ones out of the cap prematurely.
+        let resolver = EventRefResolver::with_capacity(2);
+        for seq in ["1", "2"] {
+            resolver.record_plan_node_state_change(
+                "p", "n1", 1, "ready", "running", "execution", "plan_node_state_changed", seq,
+            );
+        }
+        // n1 still occupies one slot; one more slot is free.
+        resolver.record_plan_node_state_change(
+            "p", "n2", 1, "ready", "running", "execution", "plan_node_state_changed", "X",
+        );
+        // Both entries must survive.
+        let r1 = resolver.lookup_plan_node_state_change("p", "n1", 1, "ready", "running");
+        assert_eq!(r1.event_id.as_deref(), Some("2"), "overwrite kept newest value");
+        let r2 = resolver.lookup_plan_node_state_change("p", "n2", 1, "ready", "running");
+        assert_eq!(r2.event_id.as_deref(), Some("X"));
+        assert_eq!(resolver.len(), 2);
+    }
+
+    #[test]
+    fn resolver_key_format_matches_deterministic_event_id() {
+        // The cache key MUST match the deterministic event id format used
+        // by `plan_dag::deterministic_plan_node_event_id` so cache lookups
+        // can pivot on the same correlation tuple.
+        let key = EventRefResolver::plan_node_state_change_key(
+            "11111111-1111-1111-1111-111111111111",
+            "node-A",
+            3,
+            "running",
+            "succeeded",
+        );
+        assert_eq!(
+            key,
+            "plan-node:11111111-1111-1111-1111-111111111111:node-A:3:running-succeeded"
+        );
+    }
+
+    #[test]
+    fn resolver_lookup_failure_degrades_to_unavailable_with_reason() {
+        // Pinning the no-throw contract from the wave-16/07 brief: a
+        // missing key MUST return `EventRef::unavailable(...)` rather than
+        // panic / Err — the resolver never fails the caller.
+        let resolver = EventRefResolver::new();
+        let r =
+            resolver.lookup_plan_node_state_change("plan", "node", 1, "ready", "succeeded");
+        assert_eq!(r.status, EventRefStatus::Unavailable);
+        let json = EvidenceEntry::new("test", kind::DISPATCH)
+            .add_execution_event(r)
+            .into_json();
+        let arr = json["execution_events"].as_array().unwrap();
+        assert_eq!(arr[0]["status"], "unavailable");
+        assert_eq!(arr[0]["unavailable"], true);
+        assert_eq!(arr[0]["unavailable_reason"], EVENT_REF_RESOLVER_MISS_REASON);
     }
 
     // ── extra / merge passthrough ─────────────────────────────────────

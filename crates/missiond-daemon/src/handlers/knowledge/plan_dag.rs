@@ -3846,6 +3846,119 @@ mod tests {
         assert_eq!(event_id, expected);
     }
 
+    /// Wave-16 / Task 07: every plan-DAG evidence entry must surface the
+    /// `EventRefStatus` provenance tag on the JSON envelope. The publish
+    /// path (success and failure branches) constructs `EventRef::new(...)`
+    /// (alias for `live`) so the resulting wire form carries
+    /// `"status": "live"`. This pins the contract so a future refactor
+    /// that accidentally drops the status field gets caught.
+    #[test]
+    fn dag_node_dispatch_evidence_surfaces_status_live_on_publish_path() {
+        let node = fixture_dag_node("n4", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let success = build_dag_success_entry(&node, &plan, "agent-team", json!({"ok": true}));
+        assert_eq!(
+            success["execution_events"][0]["status"], "live",
+            "publish-path success branch surfaces status=live"
+        );
+        let failure = build_dag_failure_entry(
+            &node,
+            &plan,
+            "agent-team",
+            json!({"error": "downstream rejected"}),
+        );
+        assert_eq!(
+            failure["execution_events"][0]["status"], "live",
+            "publish-path failure branch surfaces status=live (deterministic id is still real)"
+        );
+    }
+
+    /// Wave-16 / Task 07: when a downstream call site cannot stamp a live
+    /// id directly (e.g. the dispatch ran out-of-band of the publish
+    /// task), the resolver lookup degrades to
+    /// `EventRef::unavailable(EVENT_REF_RESOLVER_MISS_REASON)` rather
+    /// than failing. The resulting evidence entry must carry
+    /// `status=unavailable` so audit consumers can distinguish a real
+    /// recovery failure from a live publish.
+    #[test]
+    fn dag_node_dispatch_evidence_resolver_miss_degrades_to_unavailable() {
+        use evidence_collector::{EventRefResolver, EVENT_REF_RESOLVER_MISS_REASON};
+        let node = fixture_dag_node("n5", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        // Empty resolver — every lookup misses by construction.
+        let resolver = EventRefResolver::new();
+        let event_ref = resolver.lookup_plan_node_state_change(
+            &plan.id.to_string(),
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "ready",
+            "succeeded",
+        );
+        let entry = EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_state_transition("ready -> succeeded")
+        .add_execution_event(event_ref)
+        .with_extra("scheduler_mode", json!("dag_v1"))
+        .with_extra("node_id", json!(node.id))
+        .with_extra("plan_id", json!(plan.id))
+        .into_json();
+        let ev = &entry["execution_events"][0];
+        assert_eq!(ev["status"], "unavailable");
+        assert_eq!(ev["unavailable"], true);
+        assert_eq!(ev["unavailable_reason"], EVENT_REF_RESOLVER_MISS_REASON);
+        assert!(
+            ev.get("event_id").is_none(),
+            "unavailable ref carries no event_id"
+        );
+    }
+
+    /// Wave-16 / Task 07: when the resolver IS populated (the passive
+    /// subscriber observed a `PlanNodeStateChanged` for this correlation
+    /// tuple), a downstream call site that queries the resolver gets a
+    /// real id back tagged `status=log` (recovered post-hoc — distinct
+    /// from `live` which only the publish path itself can stamp).
+    #[test]
+    fn dag_node_dispatch_evidence_resolver_hit_surfaces_status_log() {
+        use evidence_collector::EventRefResolver;
+        let node = fixture_dag_node("n6", "mission_execution");
+        let plan = fixture_plan("(plan)");
+        let resolver = EventRefResolver::new();
+        // Simulate the passive subscriber having observed a Seq=42
+        // PlanNodeStateChanged for this transition.
+        resolver.record_plan_node_state_change(
+            &plan.id.to_string(),
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "ready",
+            "succeeded",
+            "execution",
+            "plan_node_state_changed",
+            "42",
+        );
+        let event_ref = resolver.lookup_plan_node_state_change(
+            &plan.id.to_string(),
+            &node.id,
+            PLAN_NODE_DEFAULT_ATTEMPT,
+            "ready",
+            "succeeded",
+        );
+        let entry = EvidenceEntry::new(
+            evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+            evidence_collector::kind::DISPATCH,
+        )
+        .with_state_transition("ready -> succeeded")
+        .add_execution_event(event_ref)
+        .into_json();
+        let ev = &entry["execution_events"][0];
+        assert_eq!(ev["status"], "log", "resolver hit surfaces status=log");
+        assert_eq!(ev["event_id"], "42");
+        assert_eq!(ev["source"], "execution");
+        assert_eq!(ev["kind"], "plan_node_state_changed");
+        assert!(ev.get("unavailable").is_none());
+    }
+
     // ── wave-13 / 02 :: v2 scheduler runtime — pure tests ────────────
     //
     // Full execution requires `AppState` (handlers + project registry +

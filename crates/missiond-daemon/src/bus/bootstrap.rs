@@ -58,6 +58,7 @@ use tracing::{info, warn};
 
 use crate::bus::control_gate_adapter::ControlTreeGate;
 use crate::control_tree::ControlManager;
+use crate::handlers::knowledge::evidence_collector::EventRefResolver;
 
 /// Aggregate of every event-bus subsystem. Cheap to share via `Arc`.
 pub struct BusServices {
@@ -77,6 +78,13 @@ pub struct BusServices {
     /// DB pool — kept around for retention / orphan-cleanup wiring in Phase 8.
     #[allow(dead_code)]
     pg_pool: PgPool,
+    /// wave-16 / task 07 — passive in-memory cache of recently-published
+    /// `ExecutionEvent::PlanNodeStateChanged` ids, keyed by deterministic
+    /// correlation tuple. Populated by `spawn_event_ref_cache_sub` so
+    /// downstream evidence call sites that no longer carry the live `Seq`
+    /// can recover an event id post-hoc. See `EventRefResolver` docstring
+    /// for the lookup contract (cache miss → `EventRef::unavailable(...)`).
+    pub event_ref_resolver: Arc<EventRefResolver>,
 }
 
 /// Handle returned by [`BusServices::start`]. Dropping it signals shutdown.
@@ -165,6 +173,12 @@ impl BusServices {
 
         info!("bus: bootstrap complete");
 
+        // wave-16 / task 07 — resolver is a plain in-memory cache; the
+        // subscriber that populates it is started later by
+        // `bus::v2_subscribers::start_v2_subscribers` (it needs the
+        // shutdown receiver from main.rs).
+        let event_ref_resolver = Arc::new(EventRefResolver::new());
+
         Ok(Arc::new(Self {
             log,
             blob_store,
@@ -175,6 +189,7 @@ impl BusServices {
             dlq,
             tail_source,
             pg_pool: pool,
+            event_ref_resolver,
         }))
     }
 

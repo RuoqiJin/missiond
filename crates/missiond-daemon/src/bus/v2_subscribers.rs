@@ -49,8 +49,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use missiond_core::event::events::{
-    IncidentEvent, MemoryEvent, MessageEvent, QuestionEvent, SessionEndStatus, SessionEvent,
-    SlotEvent, TaskEvent, WorkerEvent,
+    ExecutionEvent, IncidentEvent, MemoryEvent, MessageEvent, QuestionEvent, SessionEndStatus,
+    SessionEvent, SlotEvent, TaskEvent, WorkerEvent,
 };
 use missiond_core::event::subscription::{Subscription, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
@@ -109,7 +109,14 @@ pub(crate) fn start_v2_subscribers(
     // Created-path consumer above.
     spawn_review_resolution_sub(bus.clone(), state.clone(), shutdown_rx.clone());
 
-    info!("v2 event-bus subscribers started (8 router consumers + 1 incident reactor + 1 review-resolution listener)");
+    // wave-16 / task 07 :: passive ExecutionEvent cache populator. Mirrors
+    // every published `PlanNodeStateChanged` into the resolver's in-memory
+    // cache so downstream evidence call sites that no longer carry the
+    // live `Seq` from the publish path can recover the event id post-hoc.
+    // Strictly observation-only — never publishes / mutates DB.
+    spawn_event_ref_cache_sub(bus.clone(), shutdown_rx.clone());
+
+    info!("v2 event-bus subscribers started (8 router consumers + 1 incident reactor + 1 review-resolution listener + 1 event-ref cache populator)");
 }
 
 /// Incident reactor — subscribes to IncidentEvent and triages via
@@ -637,6 +644,79 @@ fn log_workflow_outcome(qid: &str, outcome: &WorkflowSubscriberOutcome) {
             warn!(question_id = %qid, error = %detail, "v2[review_resolution]: workflow DB error");
         }
     }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// wave-16 / task 07 :: ExecutionEvent passive cache populator
+//
+// Subscribes to the execution-domain topic and mirrors every observed
+// `PlanNodeStateChanged` event into the shared `EventRefResolver` cache.
+// Downstream evidence-collector call sites that no longer carry the live
+// `Seq` from the publish path (because they ran out-of-band of the
+// dispatch task) can then call
+// `bus.event_ref_resolver.lookup_plan_node_state_change(...)` to recover
+// the id with `EventRefStatus::Log`.
+//
+// Conservatism contract:
+//   * Observation-only — NEVER publishes a downstream event, NEVER mutates
+//     DB. Subscriber acks every message.
+//   * Cache miss / lookup failure NEVER fails the dispatch — the resolver
+//     returns `EventRef::unavailable(...)` instead of erroring.
+//   * Bounded retention (`EVENT_REF_CACHE_CAP=1024`) so a long-running
+//     daemon doesn't grow the cache unboundedly.
+//   * Other ExecutionEvent variants (Opened / Claimed / Completed / …)
+//     are ignored after ack — wave-16 / task 07 only wires the plan-node
+//     correlation key. Future kinds can extend the subscriber without
+//     changing the dispatch path.
+// ═════════════════════════════════════════════════════════════════════════
+fn spawn_event_ref_cache_sub(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
+    let resolver = bus.event_ref_resolver.clone();
+    tokio::spawn(async move {
+        let Some(mut sub) = subscribe_or_warn::<ExecutionEvent>(
+            &bus,
+            "v2_event_ref_cache",
+            "event_ref_cache",
+        )
+        .await
+        else {
+            return;
+        };
+        info!("v2[event_ref_cache]: subscription live (passive cache populator)");
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    if let ExecutionEvent::PlanNodeStateChanged {
+                        plan_id,
+                        node_id,
+                        from,
+                        to,
+                        attempt,
+                        ..
+                    } = ack.event()
+                    {
+                        // Live `Seq` lives on the AckHandle itself.
+                        let seq = ack.seq().0.to_string();
+                        let attempt_n = attempt.unwrap_or(1);
+                        resolver.record_plan_node_state_change(
+                            plan_id,
+                            node_id,
+                            attempt_n,
+                            from,
+                            to,
+                            "execution",
+                            "plan_node_state_changed",
+                            seq,
+                        );
+                    }
+                    ack.ack().await;
+                }
+            }
+        }
+        info!("v2[event_ref_cache]: shutdown");
+    });
 }
 
 // ───────────────────────────────────────────────────────────────────────
