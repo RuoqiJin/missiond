@@ -597,6 +597,20 @@ fn build_properties() -> Value {
         "[execute scheduler_mode=dag_v1 finalize_plan=true] (wave-18 / task 05) optional human-readable label for the chain (e.g. `wave18-finalize-loop` or `release-rc1-distill`). Echoed back under `finalization.distill_chain.chain_name` and stamped onto the evidence row. When `distill_chain_mode=\"dry_run\"|\"sonnet\"` is also set, the chain runner forwards this value as `mission_workflow(action=distill).name` so a persisted distill row carries the chain label — caller can still pre-populate `name` separately to override. Blank / whitespace collapses to absent.",
     ));
 
+    // ── wave-18 / task 06 — autonomous PLAN field inference v0 ──────────
+    //
+    // Conservative deterministic helper that infers a small set of PLAN
+    // DAG fields when the caller / PLAN.lisp / evidence-sidecar carry
+    // enough signal. NEVER calls an LLM; NEVER mutates over a caller-
+    // supplied value (conflicts surface on `conflicts[]` and stay as
+    // suggestions); ONLY high-confidence inferences are applied under
+    // `apply_safe` (low / medium always degrade to suggestions).
+    p.insert("infer_plan_fields".into(), prop_enum(
+        "string",
+        "[execute] (wave-18 / task 06) opt into autonomous PLAN field inference. Default `off` preserves the legacy byte-shape — no inference, no response augmentation. `preview` runs the deterministic engine over plan.sexp_text + plan.compiled_from + the most-recent 16 evidence-sidecar entries and returns ONLY the inference block (status=`inference_preview`, runner_status=`inference_preview_no_dispatch`); the underlying execute pipeline is NOT invoked, no plan FSM transitions. `apply_safe` runs the same engine, then augments caller args with every field whose confidence is `high` AND whose caller-side slot is empty, then proceeds with execute exactly as if the caller had passed the augmented args. Caller-supplied values ALWAYS win — conflicts (caller value differs from inferred) land on `conflicts[]` and are NEVER mutated. Six fields supported in v0: `target` / `dispatch_strategy` / `target_project` / `owned_files` / `acceptance_mode` / `workstation_dispatch`. Sources scanned: `plan_sexp` (PLAN.lisp `:keyword` hints — high confidence), `compiled_from` (directive provenance string keyword scan — medium confidence), `evidence_sidecar` (historical `plan_runner_dispatch` / `workstation_dispatch` entries — medium / high based on multi-entry agreement). Response surfaces under `plan_field_inference`: `mode` / `inference_status` / `inferred_fields[]` (each {field, value, confidence, source, detail}) / `suggested_fields[]` (sub-threshold) / `conflicts[]` ({field, caller_value, inferred_value, confidence, source}) / `evidence_sources[]` (which knobs the engine scanned). NEVER calls an LLM; deterministic heuristics only. The block is also attached to dispatched responses under `apply_safe` so observers can audit which fields auto-filled.",
+        &["off", "preview", "apply_safe"],
+    ));
+
     Value::Object(p)
 }
 
