@@ -7,7 +7,7 @@
 
 (pillar worker
   :version "v0.5"
-  :status "phase-C recursive architecture contract 2026-04-26 — runtime path → ordered mechanics → explicit egress; project-root spawn cwd contract; claudecode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd / scoped-commit-handoff) operational-practice + architecture-designed; mission_execution dispatch_strategy companion log meta + scoped commit handoff (durability plane) + 完整 PLAN DAG scheduler 设计完成 (详 wave-13 anchors); ExecutionEvent dispatch metadata / PlanNodeStateChanged / scoped commit daemon enforce / plan-runner v1 仍 pending"
+  :status "phase-C recursive architecture contract 2026-04-26 — runtime path → ordered mechanics → explicit egress; project-root spawn cwd contract; claudecode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team-hint / spawn-over-prompt-mode / project-root-cwd / scoped-commit-handoff) operational-practice + architecture-designed; mission_execution dispatch_strategy companion log meta + scoped commit handoff (durability plane) + 完整 PLAN DAG scheduler 设计完成 (详 wave-13 anchors); wave 14 task 02 (commit 2e7789a) 升级: ExecutionEvent::PlanNodeStateChanged variant 已扩 (4 必 + 5 可选含 dispatch_strategy/target_project) + live EventRef 三层策略 已 code-aligned; ExecutionEvent::Opened 等其他 variant 的 dispatch metadata / scoped commit daemon enforce / plan-runner v1 完整 11-stage 仍 pending (详 wave-14 anchors via intent-pillar-source-index.lisp)"
   :predecessor "v0.2 2026-04-21 (integrated by 主 Claude)"
   :target-path ".missiond/v2/intent-worker.lisp"
   :integration-notes

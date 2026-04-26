@@ -6,8 +6,8 @@
 ;; ═════════════════════════════════════════════════════════════
 
 (defdsl architecture-v1
-  :version "v0.4"
-  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule; v0.4 (wave 12 task 06) adds source-index entry mandatory-fields rule + section-id uniqueness rule + :compression-safe? optional field"
+  :version "v0.5"
+  :status "declarative schema 2026-04-26 — reader/checker first; v0.2 adds source-index taxonomy (precompression); v0.3 adds execution handoff dual-plane rule; v0.4 (wave 12 task 06) adds source-index entry mandatory-fields rule + section-id uniqueness rule + :compression-safe? optional field; v0.5 (wave 14 task 07) adds l2-shard-split-plan (5 candidate shards designed, NOT executed; execution-gate + per-shard moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan)"
   :checker "scripts/check-architecture-lisp.mjs"
 
   (purpose
@@ -15,7 +15,8 @@
     "v0.2 扩: 在 主 Lisp 真正压缩/拆分前, 先固定 section-id / status / split / compression 约定,"
     "        让 pillar source index 可机器读, 后续压缩不丢 cross-ref"
     "v0.3 扩: 执行型 flow 可声明 control-plane / durability-plane handoff, 防止 operational report 与代码成果脱节"
-    "v0.4 扩: source-index entry 强制三必填 (file / local-path / status), section-id 全局唯一; 加 :compression-safe? 字段, 让未来批量压缩可白名单驱动")
+    "v0.4 扩: source-index entry 强制三必填 (file / local-path / status), section-id 全局唯一; 加 :compression-safe? 字段, 让未来批量压缩可白名单驱动"
+    "v0.5 扩: 加 l2-shard-split-plan, 设计 5 候选 shard (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); 每 shard 含 moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan; execution-gate 全满足才允许实际拆分; 本 v0.5 不移动任何 shard 内容")
 
   (reader-contract
     :syntax "S-expression + bracket vector"
@@ -273,24 +274,233 @@
                     "emit JSON IR"
                     "generate Mermaid / Markdown / review checklist"])
 
+  ;; ── v0.5 新增 (wave 14 task 07): L2 shard split plan ──
+  ;; 设计 5 候选 shard, 但本 wave 不移动任何 shard 内容; 真正拆分由后续 wave 在 execution-gate 全满足后做
+  (l2-shard-split-plan
+    :version "v0.5"
+    :date "2026-04-26"
+    :decided-by "wave 14 / task 07 lisp backfill + L2 shard split plan session"
+    :goal "为 5 个高变动语义区设计独立 shard 文件, 让主 Lisp (intent-flow.lisp / intent-intent-layer.lisp / intent-memory.lisp / intent-tools.lisp / intent-worker.lisp) 缩瘦, 同时保持 cross-ref 不失锚"
+    :scope-non-goal
+      ["本 v0.5 plan 不移动任何 shard 内容"
+       "本 v0.5 plan 不增减 section-id"
+       "本 v0.5 plan 不修改主 Lisp 大段正文"
+       "L2 实际执行 (拆 shard) 必须等 execution-gate 5 项全满足"]
+    :ordering-rule "L2 实际执行需按 split-policy.order-of-operations: section-id 已稳定 (✓) → file-first writer + review gate + PLAN DAG 稳定 (✓ wave 14 task 01/02/03) → status batch 压缩 (部分 wave 13 task 05 完成) → 物理 split (本 plan 等 gate)"
+
+    ;; ── execution gate (全部满足才允许拆) ──
+    (execution-gate
+      :description "L2 实际拆分前必须四项全满足"
+      :gates
+        ((gate-1 :name "source-index-checker-passing"
+                 :requirement "scripts/check-architecture-lisp.mjs --all-v2 OK + R015 + R016 enforced"
+                 :status "satisfied (wave 14 task 05 commit 5c60f82 — checker IMPLEMENTED, --all-v2 14 files OK, --dry-fixture 5 fixtures PASS)"
+                 :anchor "intent-pillar-source-index.lisp :: intent-layer.source-index-checker.r015-r016-implemented")
+         (gate-2 :name "file-first-writer-stable"
+                 :requirement "directive / plan / workflow 三类 artifact 全走统一 helper, partial 语义清晰, 无 process cwd fallback"
+                 :status "satisfied (wave 14 task 01 commit 00cbc1d — 主路径接入, 6 file_* 响应字段, dead_code 全清)"
+                 :anchor "intent-pillar-source-index.lisp :: memory.directive-layer.file-first-writer-integration")
+         (gate-3 :name "review-gate-stable"
+                 :requirement "review_gate policy enum (manual|emit_question|off) auto-create, deterministic id, default byte-identical"
+                 :status "satisfied (wave 14 task 03 commit 96842cd — policy enum + 自动 emit + deterministic id)"
+                 :anchor "intent-pillar-source-index.lisp :: intent-layer.unified-entry-pipeline.review-gate-policy")
+         (gate-4 :name "no-active-parallel-code-wave"
+                 :requirement "无 wave 14 平行写代码会话仍在改 ownership 文件 (intent-flow.lisp / intent-intent-layer.lisp / intent-memory.lisp / intent-tools.lisp / intent-worker.lisp)"
+                 :status "to-be-verified (本 wave 14 task 07 是最后一个 task; wave 14 task 00-06 全部 commit; wave 15 平行 wave 必须排除 ownership 重叠)"
+                 :anchor "git log + .missiond/claudecode/wave14-* untracked check"))
+      :all-satisfied? "3 of 4 satisfied; gate-4 须 wave 15 starting 时确认"
+      :rollback-rule "若 L2 拆分后任一新 shard 引入 cross-ref 失锚 / checker 报 error / parallel wave 冲突, 按本 plan :rollback-plan 字段回滚")
+
+    ;; ── 5 candidate shards (per-shard spec) ──
+    (candidate-shards
+      :description "5 候选 shard, 每 shard 含 moved-sections / retained-anchor / source-index-update-rule / checker-requirement / rollback-plan"
+
+      (shard intent-execution-governance
+        :proposed-path ".missiond/v2/intent-execution-governance.lisp"
+        :rationale "执行治理 (mission_execution 12-action manager + scoped commit handoff + companion log meta) 现散在 intent-flow.lisp + intent-tools.lisp + intent-intent-layer.lisp 三处; 提到独立 shard 后单一 owner"
+        :moved-sections
+          ["intent-flow.lisp :: F-execution-log-governance"
+           "intent-flow.lisp :: F-scoped-commit-handoff"
+           "intent-tools.lisp :: implemented-surface mission_execution"
+           "intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-runner :: execution-substrate sub-block"]
+        :retained-anchor-in-parent
+          ["intent-flow.lisp 留 stub (flow F-execution-log-governance :file-ref 'intent-execution-governance.lisp')"
+           "intent-flow.lisp 留 stub (flow F-scoped-commit-handoff :file-ref ...)"
+           "intent-tools.lisp 留 stub (implemented-surface mission_execution :file-ref ...)"
+           "intent-intent-layer.lisp plan-runner role 保持完整, execution-substrate 只留 cross-ref 到本 shard"]
+        :source-index-update-rule
+          ["在 intent-pillar-source-index.lisp 加 (pillar-section-index :pillar execution-governance :source-file '.missiond/v2/intent-execution-governance.lisp')"
+           "重定向 flow.execution-log-governance / flow.scoped-commit-handoff / tools.surface.mission_execution 等 entry 的 :source-file"
+           "保持 :section-id 不变 (R008); 移动只换 :source-file 与 :local-path"]
+        :checker-requirement
+          ["scripts/check-architecture-lisp.mjs --all-v2 必须 OK"
+           "section-id 全部出现在 source-index, R015 + R016 满足"
+           "新 shard 必须含 (recursive-architecture-contract ...) 或明确声明 sub-shard"
+           "git diff --check 通过"]
+        :rollback-plan
+          ["若 checker 报 error: git revert 该拆分 commit; source-index :source-file 回退到原文件"
+           "若 cross-ref 失锚: 用 :prev-id 在 source-index 注册旧 path → 新 shard path 映射, 等 cross-ref 消费方更新"
+           "若 parallel code wave 冲突: 暂停拆分, 等 parallel wave 完成 commit 再 rebase"]
+        :estimated-line-impact "约 600-800 行 → 移到 shard; 主文件减 ~700 行"
+        :status "designed (not executed)")
+
+      (shard intent-directive-artifacts
+        :proposed-path ".missiond/v2/intent-directive-artifacts.lisp"
+        :rationale "directive-layer 三类 artifact (file-first-artifacts / file-first-writer-integration / 5 artifact registry) + review_gate policy 集中于 directive/plan/workflow handler; 提到独立 shard 后 schema 与 writer integration 单一 owner"
+        :moved-sections
+          ["intent-memory.lisp :: module directive-layer :: file-first-artifacts (5 artifact 详细字段)"
+           "intent-memory.lisp :: module directive-layer :: file-first-writer-integration"
+           "intent-intent-layer.lisp :: section unified-entry-pipeline :: review-gate-policy + review-gate-id-derivation"
+           "intent-tools.lisp :: tools.surface.directive-write-file-args / plan-write-file-args / workflow-write-file-args / review-gate-args"]
+        :retained-anchor-in-parent
+          ["intent-memory.lisp 留 stub (module directive-layer :file-ref 'intent-directive-artifacts.lisp' + status-summary cross-ref)"
+           "intent-intent-layer.lisp 留 stub (section unified-entry-pipeline :: review-gate :file-ref ...)"
+           "intent-tools.lisp 留 stub (implemented-surface mission_directive/plan/workflow :: write_file/review_gate args :file-ref ...)"]
+        :source-index-update-rule
+          ["在 intent-pillar-source-index.lisp 加 (pillar-section-index :pillar directive-artifacts :source-file '.missiond/v2/intent-directive-artifacts.lisp')"
+           "memory.directive-layer.* 与 intent-layer.unified-entry-pipeline.review-gate-* entry 的 :source-file 重定向"
+           ":section-id 不改, 只换 :source-file"]
+        :checker-requirement
+          ["scripts/check-architecture-lisp.mjs --all-v2 必须 OK"
+           "新 shard parse OK"
+           "review_gate policy enum 三态 完整保留"
+           "git diff --check 通过"]
+        :rollback-plan
+          ["若 review_gate 行为退化: revert 拆分 commit; review_gate.rs 不动, 仅 Lisp 回退"
+           "若 cross-ref 失锚: source-index :prev-id 注册旧 path 映射"]
+        :estimated-line-impact "约 500-700 行 → 移到 shard; 主文件减 ~600 行"
+        :status "designed (not executed)")
+
+      (shard intent-plan-dag
+        :proposed-path ".missiond/v2/intent-plan-dag.lisp"
+        :rationale "PLAN DAG scheduler (actor + runtime v2 + node lifecycle + failure-policy + node schema + FSM + open-questions) 是 intent-intent-layer.lisp 最大 section, ~400+ 行 高变动语义; 提到独立 shard 后 v1 完整 11-stage 实现可独立迭代"
+        :moved-sections
+          ["intent-intent-layer.lisp :: section action-instruction-actor :: actor plan-dag-scheduler (完整 11-stage / claim-lease / retry / rollback / acceptance / review-gate paused / mark-plan-final / trigger-record-execution-distill)"
+           "intent-intent-layer.lisp :: section action-instruction-actor :: actor plan-dag-scheduler :: node schema + node FSM + open-questions"
+           "intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler sub-block (完整 11-stage 协议)"
+           "intent-memory.lisp :: module directive-layer :: artifact plan-node-state-projection (per-node 字段 nodes[] 子树)"]
+        :retained-anchor-in-parent
+          ["intent-intent-layer.lisp 留 stub (section action-instruction-actor :: actor plan-dag-scheduler :file-ref 'intent-plan-dag.lisp' + 当前 runtime v2 status)"
+           "intent-flow.lisp 留 stub (s6 execution-runner :: dag-scheduler :file-ref ... + runtime v2 status)"
+           "intent-memory.lisp 留 stub (artifact plan-node-state-projection :file-ref ... + 顶层字段 status)"]
+        :source-index-update-rule
+          ["在 intent-pillar-source-index.lisp 加 (pillar-section-index :pillar plan-dag :source-file '.missiond/v2/intent-plan-dag.lisp')"
+           "intent-layer.plan-dag-runtime-v2.* / intent-layer.actor.plan-dag-scheduler / flow.execution-runner-dag-scheduler / memory.directive-layer.plan-node-state-projection / event-bus.section.execution-event.plan-node-state-changed entry 的 :source-file 重定向"
+           ":section-id 不改, 只换 :source-file"]
+        :checker-requirement
+          ["scripts/check-architecture-lisp.mjs --all-v2 必须 OK"
+           "新 shard 含 actor / FSM / open-questions 完整结构"
+           "PlanNodeStateChanged variant 仍 protected via event-bus.lisp 不进 shard"
+           "git diff --check 通过"]
+        :rollback-plan
+          ["若 11-stage actor 设计与 runtime v2 实现冲突: revert + 在 shard 内独立标 architecture-designed pending, 不动 plan_dag.rs 代码"
+           "若 cross-ref 失锚: :prev-id 注册"]
+        :estimated-line-impact "约 700-900 行 → 移到 shard; 主文件减 ~800 行"
+        :status "designed (not executed)")
+
+      (shard intent-capability-governance
+        :proposed-path ".missiond/v2/intent-capability-governance.lisp"
+        :rationale "capability-evolution-governance (semantic evidence v1 + DispatcherEvent / WorkerEvent 聚合 + workflow stats + capability_usage tool / read-model) 集中于 capability_usage handler 周边; 提到独立 shard 后语义合并决策可独立迭代"
+        :moved-sections
+          ["intent-intent-layer.lisp :: section capability-evolution-governance (5 sources + lisp hint merge-candidate)"
+           "intent-flow.lisp :: F-capability-usage-monitoring (5 sources monitoring narrative)"
+           "intent-tools.lisp :: implemented-surface mission_capability_usage (action/window/scope/replacement_target/dry_run schema)"
+           "intent-memory.lisp :: module system-support :: derived-read-model capability-usage-read-model"]
+        :retained-anchor-in-parent
+          ["intent-intent-layer.lisp 留 stub (section capability-evolution-governance :file-ref ...)"
+           "intent-flow.lisp 留 stub (F-capability-usage-monitoring :file-ref ...)"
+           "intent-tools.lisp 留 stub (implemented-surface mission_capability_usage :file-ref ...)"
+           "intent-memory.lisp 留 stub (derived-read-model :file-ref ...)"]
+        :source-index-update-rule
+          ["在 intent-pillar-source-index.lisp 加 (pillar-section-index :pillar capability-governance :source-file '.missiond/v2/intent-capability-governance.lisp')"
+           "intent-layer.capability-evolution-governance.* / flow.capability-usage-monitoring / tools.surface.mission-capability-usage / memory.system-support.capability-usage-read-model entry 的 :source-file 重定向"
+           ":section-id 不改, 只换 :source-file"]
+        :checker-requirement
+          ["scripts/check-architecture-lisp.mjs --all-v2 必须 OK"
+           "5 sources 列表完整保留 (契约段不压缩)"
+           "schema 字段 (action/window/scope/replacement_target/dry_run) 完整保留"
+           "git diff --check 通过"]
+        :rollback-plan
+          ["若 capability_usage handler 与 shard 设计冲突: revert + 标 capability_usage 实现仍 code-aligned partial"
+           "若 cross-ref 失锚: :prev-id 注册"]
+        :estimated-line-impact "约 400-500 行 → 移到 shard; 主文件减 ~450 行"
+        :status "designed (not executed)")
+
+      (shard intent-workstation-policy
+        :proposed-path ".missiond/v2/intent-workstation-policy.lisp"
+        :rationale "ClaudeCode workstation orchestration policy (resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback + dispatch-decision-matrix + execution-strategy-record + spawn-over-prompt-mode + project-root-cwd + scoped-commit-handoff) 跨 worker / flow / intent-layer 三 pillar; 提到独立 shard 后单一 owner"
+        :moved-sections
+          ["intent-worker.lisp :: section claudecode-workstation-orchestration (含 dispatch-decision-matrix + execution-strategy-record + 6 个 principle)"
+           "intent-flow.lisp :: F-workstation-dispatch-policy"
+           "intent-intent-layer.lisp :: section unified-entry-pipeline :: workstation-dispatch-policy (含 4 个 principle)"]
+        :retained-anchor-in-parent
+          ["intent-worker.lisp 留 stub (section claudecode-workstation-orchestration :file-ref ...)"
+           "intent-flow.lisp 留 stub (F-workstation-dispatch-policy :file-ref ...)"
+           "intent-intent-layer.lisp 留 stub (workstation-dispatch-policy :file-ref ...)"]
+        :source-index-update-rule
+          ["在 intent-pillar-source-index.lisp 加 (pillar-section-index :pillar workstation-policy :source-file '.missiond/v2/intent-workstation-policy.lisp')"
+           "worker.section.claudecode-workstation-orchestration.* / flow.workstation-dispatch-policy / intent-layer.unified-entry-pipeline.workstation-dispatch-policy entry 的 :source-file 重定向"
+           ":section-id 不改, 只换 :source-file"]
+        :checker-requirement
+          ["scripts/check-architecture-lisp.mjs --all-v2 必须 OK"
+           "dispatch-decision-matrix 决策表完整保留 (契约段不压缩)"
+           "execution-strategy-record 字段 (dispatch_strategy / target_project / requested_cwd) 完整保留"
+           "git diff --check 通过"]
+        :rollback-plan
+          ["若 workstation orchestration 与 plan_dag dispatch 实现冲突: revert + 标 workstation policy 仍 operational-practice"
+           "若 cross-ref 失锚: :prev-id 注册"]
+        :estimated-line-impact "约 300-400 行 → 移到 shard; 主文件减 ~350 行"
+        :status "designed (not executed)"))
+
+    ;; ── 总体 invariants ──
+    (cross-cutting-invariants
+      :description "L2 实际执行任意 shard 时必须遵守的全局约束"
+      :rules
+        [(rule-1 :name "section-id-stability"
+                 :rule "拆分前后 :section-id 不改 (R008); 改名走 :prev-id, 不删旧 entry")
+         (rule-2 :name "no-circular-shard-ref"
+                 :rule "shard 之间不互相 :file-ref; 所有 cross 必须经 source-index (split-policy.rule-4)")
+         (rule-3 :name "checker-must-pass-after-each-shard"
+                 :rule "每拆一个 shard 提交一次 commit, checker --all-v2 必须 OK; 不允许多 shard 一起拆")
+         (rule-4 :name "drift-record"
+                 :rule "拆分动作必须在对应 pillar 的 *-execution.lisp 留 D-deviation 记录 (split-policy.rule-5)")
+         (rule-5 :name "no-content-mutation"
+                 :rule "拆分时严禁压缩或 reword section 正文; shard 内容必须与原主 Lisp byte-identical (压缩另起 commit)")
+         (rule-6 :name "frozen-files-not-shardable"
+                 :rule "intent-event-bus.lisp / intent-event-bus-execution.lisp / intent-mcp-defs.lisp 已锁, 不参与拆分")])
+
+    ;; ── 估算 ──
+    (estimated-impact
+      :total-line-reduction-in-main-files "~3000 行 (5 shard 各 ~600 行)"
+      :main-files-after-split
+        ["intent-flow.lisp 减 ~1500 行 (execution-governance + plan-dag + capability-governance + workstation-policy 各搬出一段)"
+         "intent-intent-layer.lisp 减 ~1300 行 (directive-artifacts review-gate + plan-dag actor + capability-governance + workstation-policy)"
+         "intent-memory.lisp 减 ~700 行 (directive-artifacts + capability-usage-read-model + plan-node-state-projection)"
+         "intent-tools.lisp 减 ~600 行 (mission_execution + mission_directive/plan/workflow write_file/review_gate args + mission_capability_usage)"
+         "intent-worker.lisp 减 ~350 行 (claudecode-workstation-orchestration)"]
+      :new-shard-files-count 5
+      :total-cross-ref-updates "~80 entry :source-file 重定向 (源 index 内, section-id 不变)"))
+
   ;; ── v0.2 新增: 当前主决策记录 ──
   (judgement-now
     :date "2026-04-26"
-    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion sessions"
-    :wave12-task-06-non-goal
+    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 14 task 07 lisp-backfill-and-l2-shard-plan sessions"
+    :wave14-task-07-non-goal
       ["本任务不真正压缩主 Lisp"
-       "本任务不拆任何 shard"
-       "本任务只扩 stable section-id / source-index 覆盖面 + 加 R015/R016 checker future rule"]
+       "本任务不实际拆 shard (L2 split plan 仅设计 5 候选, 实际执行延后到 execution-gate 全满足)"
+       "本任务只在 v0.4 baseline 上回填 wave 14 真实状态 + 加 l2-shard-split-plan"]
     :decisions
       ((d1 :name "no-main-lisp-compression-yet"
-           :reason "在 file-first writer / review gate / PLAN DAG 最小闭环稳定前, 压缩主 Lisp 会让其他并行会话失锚")
+           :reason "L1 安全压缩 wave 13 task 05 已部分完成; L2 物理拆分等四 gate 全满足 (本 v0.5 写 plan, 不执行)")
        (d2 :name "build-index-and-checker-first"
-           :reason "section-id / status taxonomy / split rule 是压缩的先决条件, 必须先冻结")
+           :reason "section-id / status taxonomy / split rule / shard plan 是压缩与拆分的先决条件, 必须先冻结")
        (d3 :name "wait-for-three-checkpoints-before-compression"
            :checkpoints
-             ["file-first writer (alignment.lisp / PLAN.lisp / workflow.lisp) 自动写入 stable"
-              "review gate 能基于 artifact 自动出 QuestionEvent"
-              "PLAN DAG scheduler 跑过最小闭环 + ExecutionEvent dispatch metadata code-aligned"]
-           :then "再回头按 compression-policy 批量压缩状态文本; 最后才物理 split shard")
+             ["file-first writer (alignment.lisp / PLAN.lisp / workflow.lisp) 自动写入 stable — wave 14 task 01 satisfied"
+              "review gate 能基于 artifact 自动出 QuestionEvent — wave 14 task 03 satisfied"
+              "PLAN DAG scheduler 跑过最小闭环 + ExecutionEvent dispatch metadata code-aligned — wave 14 task 02 部分 satisfied (PlanNodeStateChanged variant + live ref); 完整 11-stage scheduler 仍 architecture-designed pending"]
+           :then "再回头按 compression-policy 批量压缩状态文本; 最后按 l2-shard-split-plan 物理 split shard")
        (d4 :name "compression-safe-flag-required-for-batch-compression"
-           :reason "section-entry-extended 引入 :compression-safe? 字段; 未来批量压缩必须以该字段做白名单, 缺省按 false 处理 (wave 12 task 06)"))))
+           :reason "section-entry-extended 引入 :compression-safe? 字段; 未来批量压缩必须以该字段做白名单, 缺省按 false 处理 (wave 12 task 06)")
+       (d5 :name "l2-shard-split-plan-designed-not-executed"
+           :reason "wave 14 task 07 写 5 候选 shard plan + 4-gate execution gate; 本 wave 不移动任何 shard 内容; L2 实际执行需 gate 全满足且无 parallel code wave (wave 14 task 07)"))))
