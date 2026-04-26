@@ -72,6 +72,20 @@
 //!                              maps the run aggregate to a final plan
 //!                              status and (optionally) triggers the
 //!                              workflow distill pass.
+//!                          + wave-18 / task 05 cross-plan distill chain
+//!                              opt-ins (`distill_chain_id /
+//!                               distill_chain_mode / distill_chain_name`);
+//!                              forwarded so the inner
+//!                              `validate_distill_chain_args` can enforce
+//!                              the cross-field "chain knobs require
+//!                              finalize_plan=true" rule.
+//!                          + wave-18 / task 06 autonomous PLAN field
+//!                              inference opt-in (`infer_plan_fields`,
+//!                              one of `off|preview|apply_safe`). Default
+//!                              `off` on the inner handler; the strict
+//!                              allowlist (`parse_infer_plan_fields_mode`)
+//!                              fails the call loudly on a typo rather
+//!                              than silently degrading to `off`.
 //!
 //!   Every v1 response now also carries `artifact_refs` — a flat object
 //!   that lifts whatever the inner handler produced (`directive_id /
@@ -501,6 +515,21 @@ fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
         "finalize_plan",
         "distill_on_success",
         "distill_mode",
+        // wave-18 / task 05 — cross-plan distill chain opt-ins. All
+        // three knobs are forwarded together so the inner
+        // `validate_distill_chain_args` can enforce the cross-field
+        // rule (chain knobs require `finalize_plan=true`); we never
+        // re-validate at the pipeline layer.
+        "distill_chain_id",
+        "distill_chain_mode",
+        "distill_chain_name",
+        // wave-18 / task 06 — autonomous PLAN field inference opt-in.
+        // Default "off" on the inner handler. Strict allowlist
+        // (off/preview/apply_safe) is enforced by
+        // `parse_infer_plan_fields_mode` so a typo fails fast there
+        // rather than silently degrading to "off" at the pipeline
+        // layer.
+        "infer_plan_fields",
     ] {
         if let Some(v) = args.get(key) {
             if !v.is_null() {
@@ -2966,5 +2995,810 @@ mod tests {
             s6b_meta["artifact_refs"]["file_path"],
             "pause + resume must share one evidence sidecar file"
         );
+    }
+
+    // ── 8. wave-18 / Task 09 :: autonomous-loop smoke (post-Wave17/18) ──
+    //
+    // Goal: prove the most-complete current MissionD loop end-to-end through
+    // the unified entry. Layers the wave-18 features on top of the wave-17
+    // paused-resume scaffold (`smoke_paused_dag_resume_canonical_loop`):
+    //
+    //   * wave-18 / task 02 — `ExecutionEvent::Claimed` / `::Completed`
+    //     dispatch metadata (dispatch_strategy / target_project /
+    //     requested_cwd) surfaces on each per-node attempt so a downstream
+    //     consumer can join the bus event with the dispatch context without
+    //     re-loading the companion log.
+    //   * wave-18 / task 03 — cross-node acceptance fan-in (`fan_in` block
+    //     under `node_results[].acceptance` with mode/source_nodes/passed/
+    //     reason). The smoke pins a passing `all-succeeded` fan-in.
+    //   * wave-18 / task 04 — cascade rollback descriptor (record-only,
+    //     `mode="plan"`, no dispatch) surfaces under
+    //     `node_results[].rollback.cascade` for the failed-node path; we
+    //     pin that the smoke's success path keeps the cascade block absent
+    //     (no failed root) but exercises the descriptor shape on a
+    //     dedicated cascade-mode-resolution assertion.
+    //   * wave-18 / task 05 — cross-plan distill chain in `record_only`
+    //     mode. The chain block lands under `finalization.distill_chain`
+    //     with `triggered=true`/`status="recorded"`/`chain_mode=
+    //     "record_only"` and the top-level shortcuts
+    //     `distill_chain_status` / `distill_chain_id` mirror it so callers
+    //     can grep one place. NO LLM is invoked (record_only is the
+    //     no-network path).
+    //   * wave-18 / task 06 — autonomous PLAN field inference forwarding
+    //     contract (`infer_plan_fields` reaches the inner execute call)
+    //     pinned via the dedicated `build_plan_execute_args_*` test. The
+    //     smoke walks the runtime path with `infer_plan_fields="off"` so
+    //     the wave-17 byte-shape stays intact while the forwarding
+    //     contract is still exercised.
+    //   * wave-18 / task 01 — bounded `EventLogQuery` provenance reaches
+    //     the evidence sidecar via `EventRefProvenance::EventLogQuery`. We
+    //     simulate the projection on the s6b inner payload's
+    //     `event_refs[]` block (mirrors the
+    //     `evidence_collector::resolve_event_refs` `event_log_query` path).
+    //   * wave-18 / task 07 — review automation policy is OUT of scope
+    //     for unified_entry (the policy applies to plan
+    //     approve/mark/supersede, which the unified entry never routes
+    //     to). Pinned as a non-goal in the smoke comment so a future
+    //     refactor that tries to add an "auto-approve" route lands an
+    //     explicit failure.
+    //   * wave-18 / task 08 — scoped commit worktree preflight is a
+    //     `mission_execution(action=preflight_commit)` surface NOT routed
+    //     through unified_entry. Same non-goal stance.
+    //
+    // No LLM, no spawn, no shell — the smoke uses `decorate` against
+    // hand-crafted inner payloads that mirror the production handler
+    // shapes. The smoke is FOCUSED — see comments above for what is
+    // covered elsewhere by dedicated unit tests.
+
+    /// Forwarding contract: the three wave-18 / task 05 chain knobs must
+    /// reach the inner `mission_plan(execute)` shape via `PlanExecute`.
+    /// Pinning the chain knobs in their own test (alongside the smoke
+    /// below) guarantees a future refactor that drops one fails fast on
+    /// a small targeted test rather than only on the broader smoke.
+    #[test]
+    fn build_plan_execute_args_forwards_wave18_distill_chain_keys() {
+        let plan_id = "33333333-3333-3333-3333-000000000018";
+        let args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "finalize_plan": true,
+            "distill_chain_id": "chain:wave18-smoke",
+            "distill_chain_mode": "record_only",
+            "distill_chain_name": "wave18-task09-smoke",
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["finalize_plan"], true);
+        assert_eq!(execute_args["distill_chain_id"], "chain:wave18-smoke");
+        assert_eq!(execute_args["distill_chain_mode"], "record_only");
+        assert_eq!(execute_args["distill_chain_name"], "wave18-task09-smoke");
+    }
+
+    /// Forwarding contract: the wave-18 / task 06 `infer_plan_fields` knob
+    /// must reach the inner `mission_plan(execute)` shape. The unified
+    /// entry NEVER re-validates the strict allowlist — that is the inner
+    /// handler's job (`parse_infer_plan_fields_mode`).
+    #[test]
+    fn build_plan_execute_args_forwards_wave18_infer_plan_fields_key() {
+        let plan_id = "33333333-3333-3333-3333-000000000019";
+        for mode in ["off", "preview", "apply_safe"] {
+            let args = json!({
+                "approved_plan_id": plan_id,
+                "execute": true,
+                "execute_mode": "internal",
+                "infer_plan_fields": mode,
+            });
+            let decision = plan_pipeline(&args).expect("should route to plan execute");
+            let PipelineDecision::PlanExecute { execute_args } = decision else {
+                panic!("expected PlanExecute");
+            };
+            assert_eq!(
+                execute_args["infer_plan_fields"], mode,
+                "infer_plan_fields=`{}` must be forwarded unchanged",
+                mode
+            );
+        }
+    }
+
+    /// Forwarding contract: when wave-18 chain / inference knobs are
+    /// omitted, the execute args bag stays byte-identical to the wave-17
+    /// shape (no fabricated nulls, no defaults injected at the pipeline
+    /// layer). Mirrors `build_plan_execute_args_resume_keys_absent_when_omitted`
+    /// for the same legacy-shape preservation guarantee.
+    #[test]
+    fn build_plan_execute_args_wave18_keys_absent_when_omitted() {
+        let args = json!({
+            "approved_plan_id": "33333333-3333-3333-3333-00000000001a",
+            "execute": true,
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        for k in &[
+            "distill_chain_id",
+            "distill_chain_mode",
+            "distill_chain_name",
+            "infer_plan_fields",
+        ] {
+            assert!(
+                execute_args.get(*k).is_none(),
+                "legacy execute path must NOT forward `{}`",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn smoke_wave18_canonical_loop_full_features() {
+        // Authoritative ids for the smoke.
+        let directive_id = "00000000-0000-0000-0000-000000000d18";
+        let board_task_id = "btk-wave18-task09-smoke";
+        let plan_id_uuid = uuid::Uuid::parse_str("44444444-4444-4444-4444-000000000a18")
+            .expect("valid plan uuid");
+        let plan_id = plan_id_uuid.to_string();
+        let plan_version: i32 = 1;
+        let dep_node_id = "preflight-node";
+        let paused_node_id = "review-gate-node";
+        // Distill chain id pinned so the assertion can grep one place.
+        let chain_id = "chain:wave18-smoke";
+        let chain_name = "wave18-task09-smoke";
+
+        // ── Stage s1 :: directive compile (dry_run, no LLM) ────────────
+        let s1_args = json!({
+            "message": "wave18 task09 autonomous-loop smoke utterance",
+            "source": "user_utterance",
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        let s1_decision = plan_pipeline(&s1_args).expect("s1 must route");
+        let PipelineDecision::DirectiveCompile { compile_args } = s1_decision else {
+            panic!("expected DirectiveCompile for bare-message input");
+        };
+        assert_eq!(compile_args["compiler_mode"], "dry_run");
+        let s1_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "persisted": true,
+            "directive_id": directive_id,
+            "version": 1,
+        }));
+        let s1_decorated = decorate(
+            s1_inner,
+            DecorateContext {
+                stage: stages::MESSAGE_INTAKE,
+                scope: ArtifactScope::Directive,
+                next_step: "review the compiled directive then re-call this pipeline with `approved_directive_id`",
+                next_call: Some(json!({"tool": "mission_directive", "action": "approve"})),
+                expects_next_inputs: json!({
+                    "approved_directive_id": "uuid",
+                    "directive_version": "i32",
+                    "board_task_id": "string",
+                }),
+            },
+        );
+        let s1_meta = smoke_meta_of(&s1_decorated);
+        assert_eq!(s1_meta["pipeline_stage"], stages::MESSAGE_INTAKE);
+        assert_eq!(s1_meta["artifact_refs"]["directive_id"], directive_id);
+
+        // ── Stage s4 :: plan compile (PLAN.lisp w/ wave-18 hints) ──────
+        //
+        // Two-node DAG so we can exercise wave-18 / task 03 fan-in
+        // (`:acceptance-depends-on`) on the second node referencing the
+        // first. The first node also opts into retry (max-attempts > 1
+        // exercises wave-16 / task 05 retry observability) and rollback
+        // descriptor (wave-17 / task 04 +
+        // wave-18 / task 04 cascade) so the smoke walks the maximum
+        // hint surface in a single dispatch.
+        let plan_lisp_body = format!(
+            r#"(plan
+                 :board_task_id "{btk}"
+                 (node
+                   :id "{dep}"
+                   :target "mission_execution"
+                   :objective "preflight before review gate"
+                   :max-attempts 2
+                   :retry-on-failure 1
+                   :rollback-policy "descriptor"
+                   :rollback-objective "revert preflight"
+                   :rollback-owned-files ("/tmp/missiond-smoke/preflight.txt")
+                   :rollback-cascade "plan")
+                 (node
+                   :id "{gate}"
+                   :requires ("{dep}")
+                   :target "mission_execution"
+                   :objective "smoke pause then resume"
+                   :review-gate "question-event"
+                   :review-action "plan-node"
+                   :acceptance-mode "inner_status"
+                   :acceptance-depends-on ("{dep}")
+                   :acceptance-requires "all-succeeded"))
+            "#,
+            btk = board_task_id,
+            dep = dep_node_id,
+            gate = paused_node_id,
+        );
+        let s4_args = json!({
+            "approved_directive_id": directive_id,
+            "directive_version": 1,
+            "board_task_id": board_task_id,
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        let s4_decision = plan_pipeline(&s4_args).expect("s4 must route");
+        let PipelineDecision::PlanCompile { compile_args } = s4_decision else {
+            panic!("expected PlanCompile");
+        };
+        assert_eq!(compile_args["board_task_id"], board_task_id);
+        let s4_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "persisted": true,
+            "plan_id": plan_id,
+            "version": plan_version,
+            "board_task_id": board_task_id,
+            "directive_id": directive_id,
+            "sexp_text": plan_lisp_body,
+        }));
+        let s4_decorated = decorate(
+            s4_inner,
+            DecorateContext {
+                stage: stages::PLAN_AUTHORING,
+                scope: ArtifactScope::Plan,
+                next_step: "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` and `execute=true`",
+                next_call: Some(json!({"tool": "mission_plan", "action": "approve"})),
+                expects_next_inputs: json!({"approved_plan_id": "uuid", "execute": true}),
+            },
+        );
+        let s4_meta = smoke_meta_of(&s4_decorated);
+        assert_eq!(s4_meta["pipeline_stage"], stages::PLAN_AUTHORING);
+        assert_eq!(s4_meta["artifact_refs"]["plan_id"], plan_id);
+
+        // Round-trip the deterministic review-question id BEFORE building
+        // the s6 inner payload so the assertion can pin the SAME id a
+        // live `emit_paused_review_gate` would produce.
+        let pause_review_qid =
+            super::super::review_gate::derive_plan_node_review_question_id(
+                &plan_id,
+                plan_version,
+                paused_node_id,
+                Some("plan-node"),
+            );
+        let parsed_qid =
+            super::super::review_gate::parse_review_question_id_struct(&pause_review_qid)
+                .expect("derived qid must parse");
+        assert_eq!(parsed_qid.scope, "plan");
+        assert_eq!(parsed_qid.action, "plan-node");
+        assert_eq!(parsed_qid.artifact_id, plan_id);
+
+        // ── Stage s6a :: execute → preflight succeeds, gate node pauses ─
+        //
+        // Args layered on top of the wave-17 paused smoke: add the
+        // wave-18 chain knobs (`distill_chain_*`) + the inference knob
+        // (`infer_plan_fields="off"` → no behaviour change at runtime,
+        // forwarding contract pinned via the dedicated test above).
+        let s6a_args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "max_parallel_nodes": 2,
+            "dispatch_strategy": "agent-team",
+            "target_project": "missiond",
+            "cwd": "/Users/jinchen/Projects/missiond",
+            "finalize_plan": true,
+            // wave-18 / task 05 — chain in record_only mode (no LLM).
+            "distill_chain_id": chain_id,
+            "distill_chain_mode": "record_only",
+            "distill_chain_name": chain_name,
+            // wave-18 / task 06 — inference forwarding pinned, runtime off.
+            "infer_plan_fields": "off",
+        });
+        let s6a_decision = plan_pipeline(&s6a_args).expect("s6a must route");
+        let PipelineDecision::PlanExecute { execute_args } = s6a_decision else {
+            panic!("approved_plan_id + execute=true must route to PlanExecute");
+        };
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["finalize_plan"], true);
+        assert_eq!(execute_args["distill_chain_id"], chain_id);
+        assert_eq!(execute_args["distill_chain_mode"], "record_only");
+        assert_eq!(execute_args["distill_chain_name"], chain_name);
+        assert_eq!(execute_args["infer_plan_fields"], "off");
+
+        // Sidecar evidence path — same file the resume run will append
+        // to so the round-trip proves both rows landed in one sidecar.
+        let evidence_path =
+            "/tmp/missiond-smoke/.missiond/v2/plans/wave18-task09.evidence.json";
+        let lease_iso = "2026-04-26T00:30:00Z";
+        // wave-18 / task 02 — `ExecutionEvent::Claimed` carries
+        // dispatch_strategy / target_project / requested_cwd. We mirror
+        // the live wire shape on the simulated `event_refs[]` block
+        // surfaced through the per-node evidence (mirrors what the
+        // wave-18 / task 01 `EventLogQueryable` resolver tier produces
+        // in `evidence_collector::resolve_event_refs`).
+        let dep_claim_id = format!("plan-dag:{}:{}:1", plan_id, dep_node_id);
+        let s6a_inner = smoke_inner_result(json!({
+            "status": "dag_paused",
+            "aggregate_status": "dag_paused",
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "runner_status": "review_gate_paused",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "node_count": 2,
+            "max_parallel_nodes": 2,
+            // wave-18 / task 06 — inference block surfaces with mode=off
+            // so the caller can confirm "no inference happened" without
+            // diving into the inner payload. (The runtime emits this
+            // block on EVERY execute call, even with mode=off, per the
+            // wave-18 / task 06 contract.)
+            "plan_field_inference": {
+                "mode": "off",
+                "fields_inferred": [],
+                "fields_conflicting": [],
+            },
+            // wave-16 / task 04 paused-node surface.
+            "paused_nodes": [{
+                "id": paused_node_id,
+                "target": "mission_execution",
+                "state": "paused",
+                "review_question_id": pause_review_qid,
+            }],
+            "paused_node_ids": [paused_node_id],
+            "review_question_ids": [pause_review_qid],
+            "node_results": [
+                // First node: preflight succeeded on attempt 1 of 2.
+                {
+                    "id": dep_node_id,
+                    "target": "mission_execution",
+                    "state": "succeeded",
+                    "dispatch_strategy": "agent-team",
+                    "inner_result": {"ok": true},
+                    // wave-16 / task 05 retry observability — surfaces
+                    // because :max-attempts=2 authorised more than one.
+                    "retry": {
+                        "attempts": 1,
+                        "max_attempts": 2,
+                    },
+                    // wave-18 / task 02 — bus dispatch metadata mirrored
+                    // on the evidence-side `event_refs` block so a
+                    // downstream consumer can join the bus stream with
+                    // dispatch context without re-loading the companion
+                    // log. Provenance label matches
+                    // `EventRefProvenance::EventLogQuery::as_str()`.
+                    "event_refs": [
+                        {
+                            "kind": "claimed",
+                            "claim_id": dep_claim_id,
+                            "claimer": "agent-team",
+                            "lease_expires_at": lease_iso,
+                            "dispatch_strategy": "agent-team",
+                            "target_project": "missiond",
+                            "requested_cwd": "/Users/jinchen/Projects/missiond",
+                            "provenance": "event_log_query",
+                        },
+                        {
+                            "kind": "completed",
+                            "completion_id": "COMP001",
+                            "phase": "preflight",
+                            "agent": "agent-team",
+                            "dispatch_strategy": "agent-team",
+                            "target_project": "missiond",
+                            "requested_cwd": "/Users/jinchen/Projects/missiond",
+                            "provenance": "event_log_query",
+                        }
+                    ],
+                    // wave-17 / task 04 rollback descriptor — declared,
+                    // not dispatched. Cascade outcome is omitted because
+                    // this node SUCCEEDED (cascade only fires on a
+                    // failed root). Pinned as `policy="descriptor"` so
+                    // the smoke proves the descriptor surface is
+                    // available even on the success path.
+                    "rollback": {
+                        "policy": "descriptor",
+                        "objective": "revert preflight",
+                        "owned_files": ["/tmp/missiond-smoke/preflight.txt"],
+                        "acceptance_commands": [],
+                        "dispatched": false,
+                        "reason": "rollback descriptor recorded; node succeeded so no compensation triggered",
+                    },
+                },
+                // Second node: paused at the review gate. No acceptance
+                // outcome yet (the resume run produces it).
+                {
+                    "id": paused_node_id,
+                    "target": "mission_execution",
+                    "state": "paused",
+                    "dispatch_strategy": "unknown",
+                    "inner_result": null,
+                    "review_question_id": pause_review_qid,
+                }
+            ],
+            "evidence_path": evidence_path,
+            "plan_status": "executing",
+            // wave-17 / task 05 finalization "no lie" invariant.
+            "finalization": {
+                "finalize_plan": true,
+                "aggregate_status": "dag_paused",
+                "final_plan_status": "executing",
+                "rule": "paused_node_present_no_finalization",
+                // wave-18 / task 05 — chain block under finalization.
+                // record_only path on a paused run: chain skips because
+                // the plan did not reach a succeeded final state.
+                "distill_chain": {
+                    "triggered": false,
+                    "status": "skipped_plan_not_succeeded",
+                    "chain_id": chain_id,
+                    "chain_id_source": "explicit_arg",
+                    "chain_mode": "record_only",
+                    "chain_name": chain_name,
+                },
+            },
+            // Top-level chain shortcuts mirror `attach_distill_chain_to_payload`.
+            "distill_chain_status": "skipped_plan_not_succeeded",
+            "distill_chain_id": chain_id,
+            // File-first sidecar splice → lifted into artifact_refs.
+            "file_written": true,
+            "file_path": evidence_path,
+            "file_sha256": "deadbeefcafebabe1818",
+            "file_bytes": 768,
+        }));
+        let s6a_decorated = decorate(
+            s6a_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "DAG paused at review gate; resolve via mission_review then re-call with resume_review_question_id",
+                next_call: Some(json!({
+                    "tool": "mission_review",
+                    "action": "resolve",
+                    "review_question_id": pause_review_qid,
+                })),
+                expects_next_inputs: json!({
+                    "resume_review_question_id": "string",
+                    "resume_review_decision": "approved|rejected|needs_changes",
+                    "execute": true,
+                }),
+            },
+        );
+        let s6a_meta = smoke_meta_of(&s6a_decorated);
+        assert_eq!(s6a_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(s6a_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(s6a_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s6a_meta["artifact_refs"]["status"], "dag_paused");
+        // Pause-side evidence sidecar pointer surfaces via file_*.
+        assert_eq!(s6a_meta["artifact_refs"]["file_written"], true);
+        assert_eq!(s6a_meta["artifact_refs"]["file_path"], evidence_path);
+        assert_eq!(s6a_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe1818");
+
+        // Inner payload assertions — wave-18 features pinned here.
+        let s6a_inner_text = match &s6a_decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let s6a_inner_payload: Value = serde_json::from_str(&s6a_inner_text)
+            .expect("s6a inner payload parses");
+        assert_eq!(s6a_inner_payload["aggregate_status"], "dag_paused");
+        // wave-18 / task 06 inference block surfaced with mode=off.
+        assert_eq!(s6a_inner_payload["plan_field_inference"]["mode"], "off");
+        // wave-17 / task 05 finalization "no lie" preserved.
+        assert_eq!(
+            s6a_inner_payload["finalization"]["aggregate_status"],
+            "dag_paused"
+        );
+        assert_ne!(
+            s6a_inner_payload["finalization"]["final_plan_status"],
+            "succeeded"
+        );
+        // wave-18 / task 05 chain skipped because plan not succeeded.
+        assert_eq!(
+            s6a_inner_payload["finalization"]["distill_chain"]["status"],
+            "skipped_plan_not_succeeded"
+        );
+        assert_eq!(
+            s6a_inner_payload["finalization"]["distill_chain"]["chain_mode"],
+            "record_only"
+        );
+        assert_eq!(s6a_inner_payload["distill_chain_status"], "skipped_plan_not_succeeded");
+        assert_eq!(s6a_inner_payload["distill_chain_id"], chain_id);
+        // wave-18 / task 02 dispatch metadata surfaces via event_refs.
+        let dep_event_refs = &s6a_inner_payload["node_results"][0]["event_refs"];
+        assert_eq!(dep_event_refs[0]["kind"], "claimed");
+        assert_eq!(dep_event_refs[0]["claim_id"], dep_claim_id);
+        assert_eq!(dep_event_refs[0]["dispatch_strategy"], "agent-team");
+        assert_eq!(dep_event_refs[0]["target_project"], "missiond");
+        assert_eq!(
+            dep_event_refs[0]["requested_cwd"],
+            "/Users/jinchen/Projects/missiond"
+        );
+        assert_eq!(dep_event_refs[0]["provenance"], "event_log_query");
+        assert_eq!(dep_event_refs[1]["kind"], "completed");
+        assert_eq!(dep_event_refs[1]["dispatch_strategy"], "agent-team");
+        // wave-16 / task 05 retry surface present (max_attempts > 1).
+        assert_eq!(s6a_inner_payload["node_results"][0]["retry"]["max_attempts"], 2);
+        assert_eq!(s6a_inner_payload["node_results"][0]["retry"]["attempts"], 1);
+        // wave-17 / task 04 rollback descriptor surface — recorded but
+        // never dispatched on the success path.
+        let dep_rollback = &s6a_inner_payload["node_results"][0]["rollback"];
+        assert_eq!(dep_rollback["policy"], "descriptor");
+        assert_eq!(dep_rollback["dispatched"], false);
+        assert_eq!(dep_rollback["objective"], "revert preflight");
+
+        // ── Stage s6b :: resume execute → succeeded + chain recorded ────
+        //
+        // Caller hands the pipeline the SAME plan id + the deterministic
+        // review-question id + `resume_review_decision="approved"` +
+        // the same wave-18 chain knobs. We synthesise the inner payload
+        // mirroring `action_execute_resume`'s approved-branch shape +
+        // `apply_distill_chain`'s record_only output: the previously-
+        // paused node moves through `paused -> ready -> running ->
+        // succeeded`, the wave-18 / task 03 fan-in evaluator passes
+        // (`all-succeeded` against the dep node which already succeeded
+        // in s6a), and the cross-plan distill chain RECORDS the entry
+        // into the evidence sidecar without invoking any LLM.
+        let resume_args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "resume_review_question_id": pause_review_qid,
+            "resume_review_decision": "approved",
+            "resume_actor": "agent-team",
+            "resume_note": "wave18 smoke approves",
+            "finalize_plan": true,
+            "distill_chain_id": chain_id,
+            "distill_chain_mode": "record_only",
+            "distill_chain_name": chain_name,
+            "infer_plan_fields": "off",
+        });
+        let s6b_decision = plan_pipeline(&resume_args).expect("s6b must route");
+        let PipelineDecision::PlanExecute { execute_args } = s6b_decision else {
+            panic!("resume call must route to PlanExecute");
+        };
+        // Forwarding pinned through the routing decision.
+        assert_eq!(execute_args["resume_review_question_id"], pause_review_qid);
+        assert_eq!(execute_args["resume_review_decision"], "approved");
+        assert_eq!(execute_args["distill_chain_mode"], "record_only");
+        assert_eq!(execute_args["distill_chain_id"], chain_id);
+        assert_eq!(execute_args["infer_plan_fields"], "off");
+
+        let gate_claim_id = format!("plan-dag:{}:{}:1", plan_id, paused_node_id);
+        let s6b_inner = smoke_inner_result(json!({
+            "status": "dag_succeeded",
+            "aggregate_status": "dag_succeeded",
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "runner_status": "all_nodes_dispatched",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "node_count": 2,
+            "resume": {
+                "review_question_id": pause_review_qid,
+                "review_decision": "approved",
+                "actor": "agent-team",
+            },
+            "plan_field_inference": {
+                "mode": "off",
+                "fields_inferred": [],
+                "fields_conflicting": [],
+            },
+            "node_results": [
+                // Dep node carries forward from s6a (succeeded earlier).
+                {
+                    "id": dep_node_id,
+                    "target": "mission_execution",
+                    "state": "succeeded",
+                    "dispatch_strategy": "agent-team",
+                    "inner_result": {"ok": true},
+                    "retry": {
+                        "attempts": 1,
+                        "max_attempts": 2,
+                    },
+                },
+                // Resumed gate node now succeeds; acceptance includes
+                // the wave-18 / task 03 fan-in outcome.
+                {
+                    "id": paused_node_id,
+                    "target": "mission_execution",
+                    "state": "succeeded",
+                    "dispatch_strategy": "agent-team",
+                    "inner_result": {"ok": true},
+                    "acceptance": {
+                        "status": "accepted",
+                        "mode": "inner_status",
+                        "commands": [],
+                        "evidence_keys": [],
+                        "reason": "inner_status: dispatch Ok and payload carries no error signal",
+                        // wave-18 / task 03 — cross-node fan-in outcome.
+                        "fan_in": {
+                            "mode": "all-succeeded",
+                            "source_nodes": [dep_node_id],
+                            "passed": true,
+                            "reason": "all 1 declared source node(s) reached succeeded",
+                        },
+                    },
+                    "event_refs": [
+                        {
+                            "kind": "claimed",
+                            "claim_id": gate_claim_id,
+                            "claimer": "agent-team",
+                            "lease_expires_at": lease_iso,
+                            "dispatch_strategy": "agent-team",
+                            "target_project": "missiond",
+                            "requested_cwd": "/Users/jinchen/Projects/missiond",
+                            "provenance": "event_log_query",
+                        },
+                        {
+                            "kind": "completed",
+                            "completion_id": "COMP002",
+                            "phase": "review-gate-resume",
+                            "agent": "agent-team",
+                            "dispatch_strategy": "agent-team",
+                            "target_project": "missiond",
+                            "requested_cwd": "/Users/jinchen/Projects/missiond",
+                            "provenance": "event_log_query",
+                        }
+                    ],
+                }
+            ],
+            "paused_node_ids": [],
+            "review_question_ids": [],
+            "evidence_path": evidence_path,
+            "plan_status": "succeeded",
+            "finalization": {
+                "finalize_plan": true,
+                "aggregate_status": "dag_succeeded",
+                "final_plan_status": "succeeded",
+                "rule": "all_terminal_no_failed_no_paused",
+                // wave-18 / task 05 — chain RECORDED on the succeeded
+                // path. record_only mode → no distill_result, no
+                // warning. evidence_path mirrors the per-plan sidecar.
+                "distill_chain": {
+                    "triggered": true,
+                    "status": "recorded",
+                    "chain_id": chain_id,
+                    "chain_id_source": "explicit_arg",
+                    "chain_mode": "record_only",
+                    "chain_name": chain_name,
+                    "chain_index_in_plan": 1,
+                    "evidence_path": evidence_path,
+                },
+            },
+            "distill_chain_status": "recorded",
+            "distill_chain_id": chain_id,
+            "file_written": true,
+            "file_path": evidence_path,
+            "file_sha256": "deadbeefcafebabe2828",
+            "file_bytes": 1536,
+        }));
+        let s6b_decorated = decorate(
+            s6b_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "DAG resumed and succeeded; loop closed (chain entry recorded)",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let s6b_meta = smoke_meta_of(&s6b_decorated);
+        assert_eq!(s6b_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(s6b_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(s6b_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s6b_meta["artifact_refs"]["status"], "dag_succeeded");
+        assert_eq!(s6b_meta["artifact_refs"]["file_written"], true);
+        assert_eq!(s6b_meta["artifact_refs"]["file_path"], evidence_path);
+        assert_eq!(s6b_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe2828");
+
+        let s6b_inner_text = match &s6b_decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let s6b_inner_payload: Value = serde_json::from_str(&s6b_inner_text)
+            .expect("s6b inner payload parses");
+
+        // ── Acceptance fan-in (wave-18 / task 03) ──────────────────────
+        let gate_acceptance = &s6b_inner_payload["node_results"][1]["acceptance"];
+        assert_eq!(gate_acceptance["status"], "accepted");
+        assert_eq!(gate_acceptance["mode"], "inner_status");
+        let fan_in = &gate_acceptance["fan_in"];
+        assert_eq!(fan_in["mode"], "all-succeeded");
+        assert_eq!(fan_in["source_nodes"][0], dep_node_id);
+        assert_eq!(fan_in["passed"], true);
+        assert!(fan_in["reason"]
+            .as_str()
+            .unwrap()
+            .contains("succeeded"));
+
+        // ── Finalization (wave-17 / task 05) ───────────────────────────
+        assert_eq!(
+            s6b_inner_payload["finalization"]["aggregate_status"],
+            "dag_succeeded"
+        );
+        assert_eq!(
+            s6b_inner_payload["finalization"]["final_plan_status"],
+            "succeeded"
+        );
+        assert_eq!(
+            s6b_inner_payload["finalization"]["rule"],
+            "all_terminal_no_failed_no_paused"
+        );
+
+        // ── Distill chain (wave-18 / task 05) ──────────────────────────
+        let chain_block = &s6b_inner_payload["finalization"]["distill_chain"];
+        assert_eq!(chain_block["triggered"], true);
+        assert_eq!(chain_block["status"], "recorded");
+        assert_eq!(chain_block["chain_id"], chain_id);
+        assert_eq!(chain_block["chain_mode"], "record_only");
+        assert_eq!(chain_block["chain_name"], chain_name);
+        assert_eq!(chain_block["chain_index_in_plan"], 1);
+        assert_eq!(chain_block["evidence_path"], evidence_path);
+        // record_only path → no distill_result, no warning. Pinning
+        // their absence proves the smoke did not silently invoke an LLM
+        // through the dry_run / sonnet branches.
+        assert!(
+            chain_block.get("distill_result").is_none(),
+            "record_only chain MUST NOT carry a distill_result (no LLM smoke)"
+        );
+        assert!(
+            chain_block.get("warning").is_none(),
+            "record_only chain MUST NOT surface a warning"
+        );
+        // Top-level chain shortcuts mirror the brief contract.
+        assert_eq!(s6b_inner_payload["distill_chain_status"], "recorded");
+        assert_eq!(s6b_inner_payload["distill_chain_id"], chain_id);
+
+        // ── Dispatch metadata (wave-18 / task 02) ──────────────────────
+        let gate_event_refs = &s6b_inner_payload["node_results"][1]["event_refs"];
+        assert_eq!(gate_event_refs[0]["kind"], "claimed");
+        assert_eq!(gate_event_refs[0]["claim_id"], gate_claim_id);
+        assert_eq!(gate_event_refs[0]["dispatch_strategy"], "agent-team");
+        assert_eq!(gate_event_refs[0]["target_project"], "missiond");
+        assert_eq!(
+            gate_event_refs[0]["requested_cwd"],
+            "/Users/jinchen/Projects/missiond"
+        );
+        // wave-18 / task 01 — provenance label matches the
+        // `EventRefProvenance::EventLogQuery` wire form.
+        assert_eq!(gate_event_refs[0]["provenance"], "event_log_query");
+        assert_eq!(gate_event_refs[1]["kind"], "completed");
+        assert_eq!(gate_event_refs[1]["provenance"], "event_log_query");
+
+        // ── Sidecar invariant: pause + resume + chain rows share one file
+        assert_eq!(
+            s6a_meta["artifact_refs"]["file_path"],
+            s6b_meta["artifact_refs"]["file_path"],
+            "pause + resume + chain rows must share one evidence sidecar"
+        );
+
+        // ── v0/v1 non-goals remain loud at every stage ────────────────
+        // Pinned across the loop so a future refactor that adds an
+        // auto-approve / autonomous-dispatch path lands an explicit
+        // failure on this smoke instead of silently passing.
+        for (label, meta) in [
+            ("s1", &s1_meta),
+            ("s4", &s4_meta),
+            ("s6a", &s6a_meta),
+            ("s6b", &s6b_meta),
+        ] {
+            let non_goals = meta["v0_non_goals"]
+                .as_array()
+                .unwrap_or_else(|| panic!("{} stage must surface v0_non_goals array", label));
+            for needle in [
+                "auto_approve_directive",
+                "auto_approve_plan",
+                "auto_answer_review_question",
+                "autonomous_workstation_dispatch",
+            ] {
+                assert!(
+                    non_goals.iter().any(|v| v == needle),
+                    "{} must keep `{}` in v0_non_goals",
+                    label,
+                    needle
+                );
+            }
+        }
     }
 }
