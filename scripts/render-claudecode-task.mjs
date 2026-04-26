@@ -169,12 +169,20 @@ function renderTask(task, sourcePath) {
   if (task.commit.required) {
     lines.push('After acceptance, commit only files inside the declared write scope.');
     lines.push('');
+    lines.push('Stage just the declared scope, run the pre-commit scoped-index guard, then commit:');
+    lines.push('');
     lines.push('```bash');
     lines.push(renderGitAdd(task.writeScope));
-    lines.push(`git commit -m ${JSON.stringify(task.commit.message ?? '')}`);
+    lines.push(`node scripts/task-scope-guard.mjs --task ${relSource} --mode staged`);
+    lines.push(`MISSIOND_TASK_CONTRACT=${relSource} \\`);
+    lines.push(`  git commit -m ${JSON.stringify(task.commit.message ?? '')}`);
     lines.push('```');
     lines.push('');
     lines.push(`Scope check: \`${task.commit.scopeCheck ?? 'write-scope-only'}\`.`);
+    lines.push('');
+    lines.push(
+      'The `task-scope-guard --mode staged` step blocks the commit before the index is locked in if any staged path falls outside `:write-scope` or matches `:must-not-touch`. The `MISSIOND_TASK_CONTRACT` env var activates the same check from the shared `.githooks/pre-commit` hook (enable per clone with `git config core.hooksPath .githooks`).',
+    );
     lines.push('');
     renderVerifyTaskContract(lines, task, relSource);
   } else {

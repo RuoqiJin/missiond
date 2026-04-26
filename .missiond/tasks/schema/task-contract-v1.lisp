@@ -49,11 +49,14 @@
        ":depends-on as code-fenced ids"
        "shared-memory ledger path .missiond/tasks/<wave>/shared-memory.lisp when the file exists on disk"
        "expected report-contract path .missiond/tasks/<wave>/reports/<task-id>.report.lisp when the wave id is derivable"
+       "pre-commit scoped-index guard line `node scripts/task-scope-guard.mjs --task <task.lisp> --mode staged` immediately after the git-add step when :commit :required is true"
+       "MISSIOND_TASK_CONTRACT=<task.lisp> env-var prefix on the rendered git commit line when :commit :required is true (mirrors the .githooks/pre-commit activation contract)"
        "verify-task-contract command line in the Commit section when :commit :required is true"
        "literal '使用 agent-team提高效率' rendered exactly once in a 'Dispatch Note' section when :dispatch-strategy is agent-team"]
     :backward-compatibility
       ["existing fields (kind/status/owner/dispatch_strategy/depends_on/Goal/Ownership/Must Not Touch/Requirements/Acceptance Commands/Commit/Report) keep their prior wording and ordering"
-       "new sections (Dispatch Note, Shared Memory, Report Contract, verify-task-contract command) are additive and conditional"]
+       "new sections (Dispatch Note, Shared Memory, Report Contract, verify-task-contract command) are additive and conditional"
+       "scoped commit guard v2 (task-scope-guard --mode staged + MISSIOND_TASK_CONTRACT prefix) extends the existing Commit section in place; renders only when :commit :required is true and never replaces the git add or git commit lines"]
     :non-goal "renderer does not invent scope, acceptance, or commit policy; missing fields are checker errors")
 
   (verifier-contract
