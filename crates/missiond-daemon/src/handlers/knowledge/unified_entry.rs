@@ -841,7 +841,18 @@ fn first_content_as_json(result: &ToolResult) -> Value {
 ///   "review_question_emitted": true,
 ///   "review_question_id":      "review:<scope>:<id>:v<v>:compile:<topic-hash>",
 ///   "review_question_text":    "<echoed text>",
-///   "review_question_warning": { "code": …, "reason": …, … }
+///   "review_question_warning": { "code": …, "reason": …, … },
+///   // wave-19/06 + wave-20/04 machine-contract splice (only when the
+///   // inner handler stamped one of these keys — wave-15..19 shape is
+///   // preserved for callers that never opt in):
+///   "task_contract_mode":          "emit" | "emit_dry_run" | "off",
+///   "task_contract_eligible":      true,
+///   "task_contract_path":          "<project_root>/.missiond/tasks/generated/…/root.lisp",
+///   "task_contract_source_path":   "<same path the workstation consumed>",
+///   "dispatch_contract_mode":      "rendered" | "machine",
+///   "render_command":              "node scripts/render-claudecode-task.mjs <path>",
+///   "task_contract_skip_reason":   "<reason node was ineligible>",
+///   "task_contract_error":         "<reason emission failed>"
 /// }
 /// ```
 ///
@@ -903,6 +914,44 @@ fn build_artifact_refs(scope: ArtifactScope, payload: &Value) -> Value {
         "review_question_id",
         "review_question_text",
         "review_question_warning",
+    ] {
+        if let Some(v) = map.get(key) {
+            if !v.is_null() {
+                refs.insert(key.into(), v.clone());
+            }
+        }
+    }
+
+    // wave-19 / task 06 + wave-20 / task 04 — machine-contract splice.
+    // Surfaced only when the inner handler stamped one of these keys (the
+    // wave-15..19 byte-shape stays identical for callers that never opt
+    // into `task_contract_mode` / `dispatch_contract_mode`). Lifting them
+    // here means a single envelope shape covers the machine handoff:
+    //   * `task_contract_mode`         — emit | emit_dry_run | off
+    //   * `task_contract_eligible`     — bus the emitter judged the node on
+    //   * `task_contract_path`         — on-disk Lisp written by the emitter
+    //   * `task_contract_source_path`  — path the workstation consumer read
+    //                                     (proves the Lisp drove the brief)
+    //   * `dispatch_contract_mode`     — rendered (default) | machine
+    //   * `render_command`             — optional compatibility metadata for
+    //                                     out-of-process Markdown rendering
+    //   * `task_contract_skip_reason`  — explains why eligibility failed
+    //   * `task_contract_error`        — explains why emission failed
+    //
+    // wave-20 / task 05 — these fields are the proof that the machine
+    // handoff is the SSOT: a caller observing the unified-entry envelope
+    // can verify `dispatch_contract_mode == "machine"` AND
+    // `task_contract_source_path == task_contract_path` without diving
+    // back into the inner JSON payload.
+    for key in [
+        "task_contract_mode",
+        "task_contract_eligible",
+        "task_contract_path",
+        "task_contract_source_path",
+        "dispatch_contract_mode",
+        "render_command",
+        "task_contract_skip_reason",
+        "task_contract_error",
     ] {
         if let Some(v) = map.get(key) {
             if !v.is_null() {
@@ -3878,5 +3927,774 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ── 9. wave-20 / Task 05 :: machine-driven dispatch loop smoke ──────
+    //
+    // Goal: prove the wave-20 / task 04 machine-driven dispatch loop end-
+    // to-end through the unified entry — the wave-19/06 emitter writes a
+    // task-contract v1 file, the wave-19/07 consumer reads it directly,
+    // the brief carries the `## Source contract` preamble, and the
+    // unified-entry response surfaces every machine-contract field
+    // (`task_contract_path`, `task_contract_source_path`,
+    // `dispatch_contract_mode`) without depending on the markdown brief
+    // being load-bearing.
+    //
+    // The smoke layers two new contracts on top of the wave-16/17/18
+    // canonical-loop scaffold (`smoke_canonical_loop_*`):
+    //
+    //   * **Machine-contract field survival**: the inner plan-execute
+    //     payload carries the wave-19/06 emitter block + the wave-20/04
+    //     workstation extension; the unified-entry decorator's
+    //     `artifact_refs` projection MUST lift every machine-contract
+    //     key so a single envelope shape covers the handoff.
+    //   * **Markdown brief is non-load-bearing**: the brief preview
+    //     surfaces alongside `task_contract_source_path`; we assert that
+    //     the path is the SSOT (the brief is optional compatibility
+    //     metadata when machine mode is active).
+    //
+    // No LLM, no spawn, no shell — the smoke parses fixture task.lisp
+    // text directly via `super::workstation_dispatch::parse_task_contract`,
+    // overlays the contract onto a fresh `WorkstationDispatchHints` to
+    // prove the consumer rule (contract wins on every non-empty field),
+    // and synthesises the inner payload exactly the way
+    // `build_workstation_dispatch_response` produces it for the
+    // `Dispatched { task_contract_source_path: Some(...) }` branch in
+    // machine mode.
+    //
+    // Out of smoke scope (covered elsewhere by dedicated tests):
+    //   * the parser unit tests (parse_task_contract_*) — workstation_dispatch
+    //   * the dispatch-mode parser allowlist tests (parse_dispatch_contract_mode_*)
+    //     — plan
+    //   * the response builder pin tests
+    //     (build_workstation_dispatch_response_machine_mode_*) — plan
+    //   * the wave-20/04 forwarding contract — already pinned earlier in
+    //     this module via
+    //     `build_plan_execute_args_forwards_task_contract_and_dispatch_contract_knobs`.
+
+    /// Reference task-contract v1 body — mirrors the byte-shape produced
+    /// by `plan::build_task_contract_lisp` for a single-node dispatch.
+    /// The smoke parses this text via
+    /// `super::workstation_dispatch::parse_task_contract` to prove the
+    /// consumer rule end-to-end without any IO.
+    const SMOKE_MACHINE_CONTRACT: &str = r#";; Generated by MissionD plan-runner (wave-20 / task 05 smoke fixture).
+;; plan_id = 55555555-5555-5555-5555-000000000020
+;; board_task_id = btk-wave20-task05-smoke
+;; node_id = root
+
+(task plan-55555555-node-root
+  :schema "missiond.task-contract.v1"
+  :title "Plan 55555555-5555-5555-5555-000000000020 node root — workstation task contract"
+  :kind code-alignment
+  :status ready
+  :owner "claudecode"
+  :dispatch-strategy "agent-team"
+  :goal "ship the wave-20 machine loop smoke"
+  :scope "wave 20 task 05 only"
+  :write-scope
+    ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"
+     "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+     "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"]
+  :must-not-touch
+    ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+     "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+  :acceptance
+    ["cargo test -p missiond-daemon handlers::knowledge::unified_entry::tests"
+     "cargo test -p missiond-daemon"
+     "cargo build --workspace"
+     "node scripts/check-architecture-lisp.mjs --all-v2"]
+  :commit
+    (:required true
+     :message "test(intent): cover machine contract dispatch loop"
+     :scope-check write-scope-only
+     :policy "scoped")
+  :target-project "missiond"
+  :requested-cwd "/Users/jinchen/Projects/missiond"
+  :target "mission_task_delegate"
+  :plan-id "55555555-5555-5555-5555-000000000020"
+  :node-id "root"
+)
+"#;
+
+    /// wave-20 / task 05 — `build_artifact_refs` lifts every wave-19/06 +
+    /// wave-20/04 machine-contract field so the unified-entry envelope
+    /// preserves the machine handoff without callers diving back into the
+    /// inner JSON. Pinning the projection separately from the smoke gives
+    /// a future refactor that drops a key a small targeted failure
+    /// instead of only the broader smoke trace.
+    #[test]
+    fn build_artifact_refs_lifts_wave19_20_machine_contract_fields() {
+        // Synthesise the exact key set the wave-20/04 plan-execute branch
+        // stamps on its inner payload when the runner dispatched in
+        // machine mode AND the wave-19/06 emitter wrote the contract.
+        let payload = json!({
+            "status": "executing",
+            "execute_mode": "internal",
+            "plan_id": "55555555-5555-5555-5555-000000000020",
+            "board_task_id": "btk-wave20-task05-smoke",
+            // wave-19 / task 06 — emission record (merge_task_contract_block).
+            "task_contract_mode": "emit",
+            "task_contract_eligible": true,
+            "task_contract_path":
+                "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp",
+            "render_command":
+                "node scripts/render-claudecode-task.mjs /tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp",
+            // wave-20 / task 04 — dispatch-mode + workstation extension.
+            "dispatch_contract_mode": "machine",
+            "task_contract_source_path":
+                "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp",
+            "workstation_dispatch_status": "dispatched",
+            "task_brief_preview":
+                "## Source contract\n- task-contract v1: `…/root.lisp`\n## Objective\n…\n",
+        });
+        let refs = build_artifact_refs(ArtifactScope::Execution, &payload);
+        // Row-id pointers preserved.
+        assert_eq!(refs["scope"], "execution");
+        assert_eq!(refs["plan_id"], "55555555-5555-5555-5555-000000000020");
+        assert_eq!(refs["board_task_id"], "btk-wave20-task05-smoke");
+        assert_eq!(refs["status"], "executing");
+        // wave-19 / task 06 splice surfaced verbatim.
+        assert_eq!(refs["task_contract_mode"], "emit");
+        assert_eq!(refs["task_contract_eligible"], true);
+        assert_eq!(
+            refs["task_contract_path"],
+            "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp"
+        );
+        assert_eq!(
+            refs["render_command"],
+            "node scripts/render-claudecode-task.mjs /tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp"
+        );
+        // wave-20 / task 04 splice surfaced verbatim.
+        assert_eq!(refs["dispatch_contract_mode"], "machine");
+        assert_eq!(
+            refs["task_contract_source_path"],
+            "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp"
+        );
+        // The path the workstation consumed MUST equal the path the
+        // emitter wrote — that equality is the SSOT proof for observers.
+        assert_eq!(
+            refs["task_contract_source_path"], refs["task_contract_path"],
+            "machine-mode handoff invariant: source path consumed equals path emitted"
+        );
+        // The legacy `workstation_dispatch_status` and brief preview
+        // stay on the inner payload (they are not row-id / file-first /
+        // review / contract pointers); the projection deliberately
+        // does NOT lift them so the artifact_refs surface stays terse.
+        let refs_obj = refs.as_object().unwrap();
+        assert!(!refs_obj.contains_key("workstation_dispatch_status"));
+        assert!(!refs_obj.contains_key("task_brief_preview"));
+    }
+
+    /// wave-20 / task 05 — `build_artifact_refs` does not fabricate any
+    /// machine-contract field when the inner handler omitted them. This
+    /// pins the byte-compat invariant for wave-15..19 callers that never
+    /// opt into `task_contract_mode` / `dispatch_contract_mode`.
+    #[test]
+    fn build_artifact_refs_omits_machine_contract_keys_when_inner_silent() {
+        let payload = json!({
+            "status": "executing",
+            "plan_id": "00000000-0000-0000-0000-000000000aaa",
+            "board_task_id": "btk-legacy",
+        });
+        let refs = build_artifact_refs(ArtifactScope::Execution, &payload);
+        let refs_obj = refs.as_object().unwrap();
+        for k in &[
+            "task_contract_mode",
+            "task_contract_eligible",
+            "task_contract_path",
+            "task_contract_source_path",
+            "dispatch_contract_mode",
+            "render_command",
+            "task_contract_skip_reason",
+            "task_contract_error",
+        ] {
+            assert!(
+                !refs_obj.contains_key(*k),
+                "wave-15..19 byte-compat: machine-contract key `{}` must NOT be fabricated",
+                k
+            );
+        }
+    }
+
+    /// wave-20 / task 05 — drive the wave-19/07 narrow parser against the
+    /// fixture task.lisp text and overlay the result onto a fresh hints
+    /// bag. Proves the consumer rule (contract wins on every non-empty
+    /// field) end-to-end on the canonical fixture without IO.
+    ///
+    /// This is the "data side" of the machine handoff: the brief is
+    /// rendered FROM the parsed contract, not from caller args. When the
+    /// dispatch ran in machine mode, the contract is the SSOT — the
+    /// markdown brief is rendered for compatibility but never load-
+    /// bearing.
+    #[test]
+    fn smoke_wave20_machine_loop_fixture_contract_overlays_hints() {
+        use super::super::workstation_dispatch::{
+            self as wd, parse_task_contract, WorkstationDispatchHints,
+        };
+        let parsed = parse_task_contract(SMOKE_MACHINE_CONTRACT)
+            .expect("smoke fixture must parse");
+        // Pin every consumed field so a renderer/parser drift surfaces.
+        assert_eq!(parsed.schema, "missiond.task-contract.v1");
+        assert_eq!(parsed.goal, "ship the wave-20 machine loop smoke");
+        assert_eq!(parsed.scope.as_deref(), Some("wave 20 task 05 only"));
+        assert_eq!(parsed.write_scope.len(), 3);
+        assert!(parsed
+            .write_scope
+            .iter()
+            .any(|p| p == "crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"));
+        assert_eq!(parsed.must_not_touch.len(), 3);
+        assert_eq!(parsed.commit_policy.as_deref(), Some("scoped"));
+        assert_eq!(parsed.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert_eq!(parsed.target_project.as_deref(), Some("missiond"));
+        assert_eq!(parsed.target.as_deref(), Some("mission_task_delegate"));
+
+        // Caller side starts with a deliberately-stale hint set so the
+        // overlay rule (contract wins on every non-empty field) is
+        // exercised end-to-end.
+        let mut hints = WorkstationDispatchHints {
+            objective: Some("STALE objective from caller".to_string()),
+            scope: Some("STALE scope".to_string()),
+            owned_files: vec!["stale-owned.rs".to_string()],
+            forbidden_files: vec![],
+            acceptance_commands: vec!["stale-acceptance".to_string()],
+            commit_policy: None,
+            target_project: None,
+            requested_cwd: None,
+            dispatch_strategy: Some("fresh-code-alignment".to_string()),
+        };
+        hints.overlay_contract(&parsed);
+
+        // Every non-empty contract field MUST have replaced the caller's
+        // stale value — the contract is the SSOT.
+        assert_eq!(
+            hints.objective.as_deref(),
+            Some("ship the wave-20 machine loop smoke"),
+            "contract :goal must beat caller objective"
+        );
+        assert_eq!(
+            hints.scope.as_deref(),
+            Some("wave 20 task 05 only"),
+            "contract :scope must beat caller scope"
+        );
+        assert_eq!(hints.owned_files.len(), 3, "contract :write-scope must beat stale owned_files");
+        assert!(hints
+            .owned_files
+            .iter()
+            .any(|p| p == "crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"));
+        assert_eq!(
+            hints.forbidden_files.len(),
+            3,
+            "contract :must-not-touch surfaces verbatim"
+        );
+        assert_eq!(
+            hints.commit_policy.as_deref(),
+            Some("scoped"),
+            "contract :commit :policy must reach the hints bag"
+        );
+        assert_eq!(
+            hints.dispatch_strategy.as_deref(),
+            Some("agent-team"),
+            "contract :dispatch-strategy must beat caller dispatch_strategy"
+        );
+
+        // Hand the parsed contract to the brief renderer — this is what
+        // the consumer does in machine mode. The brief is built FROM the
+        // parsed contract via `build_task_brief_with_source`. We pin the
+        // `## Source contract` preamble so the renderer-side handoff is
+        // exercised, but the assertion below pins that the brief is NOT
+        // load-bearing in machine mode (the source path is the SSOT).
+        let plan_for_brief = missiond_core::types::Plan {
+            id: uuid::Uuid::parse_str("55555555-5555-5555-5555-000000000020").unwrap(),
+            board_task_id: "btk-wave20-task05-smoke".to_string(),
+            source_directive_id: None,
+            version: 1,
+            sexp_text: "(plan)".to_string(),
+            sexp_hash: "deadbeef".to_string(),
+            status: missiond_core::types::PlanStatus::Approved,
+            compiler_model: None,
+            compiled_from: None,
+            created_at: chrono::Utc::now(),
+            approved_at: None,
+            finished_at: None,
+        };
+        let contract_path =
+            std::path::Path::new("/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp");
+        let brief = wd::build_task_brief_with_source(
+            &plan_for_brief,
+            &hints,
+            "agent-team",
+            Some(contract_path),
+        );
+        assert!(
+            brief.contains("## Source contract"),
+            "machine-mode brief MUST carry the wave-19/07 source-contract preamble"
+        );
+        assert!(
+            brief.contains("/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp"),
+            "brief preamble MUST name the on-disk contract path"
+        );
+        // Contract overlay reached the brief body — the new objective
+        // (NOT the caller's stale one) is what the worker reads.
+        assert!(
+            brief.contains("ship the wave-20 machine loop smoke"),
+            "machine-mode brief MUST render the contract :goal as the objective"
+        );
+        assert!(
+            !brief.contains("STALE objective from caller"),
+            "stale caller objective MUST NOT leak into the contract-driven brief"
+        );
+    }
+
+    /// wave-20 / task 05 — full canonical loop smoke for the machine-
+    /// driven dispatch path. Drives `plan_pipeline` for s4 / s6, then
+    /// synthesises the inner plan-execute payload that the wave-20/04
+    /// `build_workstation_dispatch_response` produces in machine mode
+    /// (Dispatched + `task_contract_source_path: Some(...)` +
+    /// `dispatch_contract_mode="machine"` + the wave-19/06 task-contract
+    /// emission block). Asserts the unified-entry decorator's
+    /// `artifact_refs` projection lifts every machine-contract field so
+    /// the handoff survives one full envelope round trip.
+    #[test]
+    fn smoke_wave20_machine_loop_canonical_contract_handoff() {
+        let directive_id = "00000000-0000-0000-0000-000000000d20";
+        let board_task_id = "btk-wave20-task05-smoke";
+        let plan_id_uuid = uuid::Uuid::parse_str("55555555-5555-5555-5555-000000000020")
+            .expect("valid plan uuid");
+        let plan_id = plan_id_uuid.to_string();
+        let plan_version: i32 = 1;
+        let contract_path =
+            "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp";
+        let render_command = format!("node scripts/render-claudecode-task.mjs {}", contract_path);
+        let evidence_path =
+            "/tmp/missiond-smoke/.missiond/v2/plans/wave20-task05.evidence.json";
+
+        // ── Stage s4 :: plan compile (dry_run, no LLM) ─────────────────
+        let s4_args = json!({
+            "approved_directive_id": directive_id,
+            "directive_version": 1,
+            "board_task_id": board_task_id,
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        let s4_decision = plan_pipeline(&s4_args).expect("s4 must route");
+        let PipelineDecision::PlanCompile { compile_args } = s4_decision else {
+            panic!("expected PlanCompile");
+        };
+        assert_eq!(compile_args["board_task_id"], board_task_id);
+        let s4_inner = smoke_inner_result(json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "persisted": true,
+            "plan_id": plan_id,
+            "version": plan_version,
+            "board_task_id": board_task_id,
+            "directive_id": directive_id,
+        }));
+        let s4_decorated = decorate(
+            s4_inner,
+            DecorateContext {
+                stage: stages::PLAN_AUTHORING,
+                scope: ArtifactScope::Plan,
+                next_step: "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` and `execute=true`",
+                next_call: Some(json!({"tool": "mission_plan", "action": "approve"})),
+                expects_next_inputs: json!({"approved_plan_id": "uuid", "execute": true}),
+            },
+        );
+        let s4_meta = smoke_meta_of(&s4_decorated);
+        assert_eq!(s4_meta["pipeline_stage"], stages::PLAN_AUTHORING);
+        assert_eq!(s4_meta["artifact_refs"]["plan_id"], plan_id);
+        // No machine-contract fields yet — emission has not run.
+        assert!(s4_meta["artifact_refs"]
+            .as_object()
+            .unwrap()
+            .get("task_contract_path")
+            .is_none());
+
+        // ── Stage s6 :: plan execute → machine-driven workstation dispatch
+        //
+        // Caller opts BOTH the wave-19/06 emitter (`task_contract_mode=
+        // "emit"`) AND the wave-20/04 dispatch (`dispatch_contract_mode=
+        // "machine"`) on; the unified entry forwards both knobs verbatim
+        // (already pinned by the dedicated forwarding test earlier in
+        // this module — re-asserted here so the smoke trace is self-
+        // contained).
+        let s6_args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "scheduler_mode": "single_node",
+            "target": "mission_task_delegate",
+            "dispatch_strategy": "agent-team",
+            "target_project": "missiond",
+            "cwd": "/Users/jinchen/Projects/missiond",
+            "task_contract_mode": "emit",
+            "emit_task_contract": true,
+            "dispatch_contract_mode": "machine",
+            "render_markdown": false,
+        });
+        let s6_decision = plan_pipeline(&s6_args).expect("s6 must route");
+        let PipelineDecision::PlanExecute { execute_args } = s6_decision else {
+            panic!("approved_plan_id + execute=true must route to PlanExecute");
+        };
+        // Forwarding pinned through the routing decision.
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["task_contract_mode"], "emit");
+        assert_eq!(execute_args["emit_task_contract"], true);
+        assert_eq!(execute_args["dispatch_contract_mode"], "machine");
+        assert_eq!(execute_args["render_markdown"], false);
+
+        // Synthesise the inner plan-execute payload exactly the way the
+        // wave-20/04 `build_workstation_dispatch_response` produces it
+        // for the `Dispatched + machine-mode` branch. The
+        // `task_contract_source_path` carries the resolved on-disk path
+        // and equals `task_contract_path` (the path the emitter wrote)
+        // — that equality is the SSOT proof for observers.
+        let s6_inner = smoke_inner_result(json!({
+            // Top-level wire shape mirrors `build_workstation_dispatch_response`.
+            "status": "executing",
+            "execute_mode": "internal",
+            "runner_status": "workstation_dispatch_v0",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "target_tool": "mission_task_delegate",
+            "target_source": "explicit_arg",
+            "dispatch_strategy": "agent-team",
+            "dispatch_strategy_source": "explicit_arg",
+            "plan_hint_summary": {},
+            "workstation_dispatch_source": "explicit_arg",
+            // wave-20 / task 04 — dispatch-mode marker.
+            "dispatch_contract_mode": "machine",
+            // Workstation extension fields (outcome_to_response_fields).
+            "workstation_dispatch_status": "dispatched",
+            "scoped_commit_required": true,
+            "scoped_commit_policy": "enforced-on-complete",
+            "task_brief_preview":
+                format!(
+                    "## Source contract\n- task-contract v1: `{}`\n- this brief is rendered from the contract above; treat the contract as the SSOT\n- if the brief and the contract diverge, the contract wins — re-read it before staging\n\n## Objective\nship the wave-20 machine loop smoke\n",
+                    contract_path
+                ),
+            "task_contract_source_path": contract_path,
+            "evidence_path": evidence_path,
+            "inner_result": {
+                "task_id": "btk-wave20-task05-smoke",
+                "status": "dispatched",
+            },
+            // wave-19 / task 06 — emission record (merge_task_contract_block).
+            "task_contract_mode": "emit",
+            "task_contract_eligible": true,
+            "task_contract_path": contract_path,
+            "render_command": render_command,
+        }));
+        let s6_decorated = decorate(
+            s6_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step:
+                    "machine-mode dispatch landed; collect evidence via mission_plan(action=record_evidence)",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let s6_meta = smoke_meta_of(&s6_decorated);
+        assert_eq!(s6_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(s6_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(s6_meta["artifact_refs"]["plan_id"], plan_id);
+        assert_eq!(s6_meta["artifact_refs"]["board_task_id"], board_task_id);
+        assert_eq!(s6_meta["artifact_refs"]["status"], "executing");
+        // ── Machine-contract fields lifted into artifact_refs ──────────
+        assert_eq!(s6_meta["artifact_refs"]["dispatch_contract_mode"], "machine");
+        assert_eq!(s6_meta["artifact_refs"]["task_contract_mode"], "emit");
+        assert_eq!(s6_meta["artifact_refs"]["task_contract_eligible"], true);
+        assert_eq!(s6_meta["artifact_refs"]["task_contract_path"], contract_path);
+        assert_eq!(
+            s6_meta["artifact_refs"]["task_contract_source_path"],
+            contract_path
+        );
+        // SSOT invariant: the path the workstation consumed MUST equal
+        // the path the emitter wrote. Pinning the equality on the
+        // unified-entry envelope shape proves the handoff survived end-
+        // to-end without re-parsing the inner JSON.
+        assert_eq!(
+            s6_meta["artifact_refs"]["task_contract_source_path"],
+            s6_meta["artifact_refs"]["task_contract_path"],
+            "machine-mode loop SSOT invariant: source path consumed equals path emitted"
+        );
+        // render_command surfaces alongside the path so the caller can
+        // run the renderer out of process for human review — but it is
+        // optional compatibility metadata, not load-bearing.
+        assert_eq!(s6_meta["artifact_refs"]["render_command"], render_command);
+
+        // Inner payload preserved byte-for-byte by `decorate` so the
+        // workstation extension stays accessible.
+        let s6_inner_text = match &s6_decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let s6_inner_payload: Value =
+            serde_json::from_str(&s6_inner_text).expect("inner payload parses");
+        assert_eq!(s6_inner_payload["workstation_dispatch_status"], "dispatched");
+        assert_eq!(s6_inner_payload["dispatch_contract_mode"], "machine");
+        assert_eq!(s6_inner_payload["task_contract_source_path"], contract_path);
+
+        // ── v0/v1 non-goals remain loud at every machine-mode stage ────
+        let s6_non_goals = s6_meta["v0_non_goals"].as_array().unwrap();
+        for needle in [
+            "auto_approve_directive",
+            "auto_approve_plan",
+            "auto_answer_review_question",
+            "autonomous_workstation_dispatch",
+        ] {
+            assert!(
+                s6_non_goals.iter().any(|v| v == needle),
+                "machine-mode s6 must keep `{}` in v0_non_goals",
+                needle
+            );
+        }
+    }
+
+    /// wave-20 / task 05 — explicit assertion that the markdown / rendered
+    /// brief is non-load-bearing in machine mode. The unified-entry
+    /// envelope surfaces `task_contract_source_path` as the load-bearing
+    /// pointer; the `task_brief_preview` lives on the inner payload as a
+    /// human-readable mirror but is NOT projected into `artifact_refs`.
+    /// This is the v2 contract: a downstream consumer can drive the
+    /// machine handoff entirely from `artifact_refs.task_contract_*`
+    /// without touching the brief preview.
+    #[test]
+    fn smoke_wave20_machine_mode_markdown_brief_is_non_load_bearing() {
+        let contract_path =
+            "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp";
+        let render_command = format!("node scripts/render-claudecode-task.mjs {}", contract_path);
+
+        // Machine-mode dispatched payload (mirrors
+        // `build_workstation_dispatch_response` in machine mode).
+        let payload = json!({
+            "status": "executing",
+            "plan_id": "55555555-5555-5555-5555-000000000020",
+            "board_task_id": "btk-wave20-task05-smoke",
+            "dispatch_contract_mode": "machine",
+            "task_contract_mode": "emit",
+            "task_contract_eligible": true,
+            "task_contract_path": contract_path,
+            "task_contract_source_path": contract_path,
+            "render_command": render_command,
+            "task_brief_preview":
+                format!("## Source contract\n- task-contract v1: `{}`\n", contract_path),
+            "workstation_dispatch_status": "dispatched",
+        });
+        let inner = ToolResult {
+            content: vec![missiond_mcp::tools::ToolContent::Text {
+                text: serde_json::to_string_pretty(&payload).unwrap(),
+            }],
+            is_error: None,
+        };
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "machine-mode dispatch landed",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let meta = smoke_meta_of(&decorated);
+        let refs = meta["artifact_refs"].as_object().expect("artifact_refs is object");
+
+        // ── Load-bearing: the contract source path must be lifted ─────
+        assert!(
+            refs.contains_key("task_contract_source_path"),
+            "machine-mode envelope MUST surface task_contract_source_path as the SSOT pointer"
+        );
+        assert!(
+            refs.contains_key("task_contract_path"),
+            "machine-mode envelope MUST surface task_contract_path so observers can prove emission==consumption"
+        );
+        assert_eq!(refs["dispatch_contract_mode"], "machine");
+
+        // ── Non-load-bearing: the markdown brief preview must NOT be
+        //    projected into artifact_refs. A consumer can render the
+        //    brief out of process via `render_command` if needed.
+        assert!(
+            !refs.contains_key("task_brief_preview"),
+            "task_brief_preview MUST NOT be projected into artifact_refs in machine mode \
+             (the brief is optional compatibility metadata, not load-bearing)"
+        );
+        // The inner payload still carries the brief preview unchanged
+        // for callers that want the human-readable mirror; we just
+        // refuse to elevate it to the envelope shape.
+        let inner_text = match &decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let inner_payload: Value = serde_json::from_str(&inner_text).unwrap();
+        assert!(
+            inner_payload["task_brief_preview"]
+                .as_str()
+                .unwrap_or("")
+                .contains("## Source contract"),
+            "inner payload preserves the brief preview as a human-readable mirror"
+        );
+
+        // The render_command is surfaced in artifact_refs so the caller
+        // knows HOW to produce the markdown brief if they want it —
+        // but the brief is rendered out of process, never inline.
+        assert_eq!(refs["render_command"], render_command);
+    }
+
+    /// wave-20 / task 05 — malformed task-contract refusal smoke.
+    ///
+    /// Two failure surfaces are exercised in one trace:
+    ///   1. Direct parser failure on intentionally-broken fixture text
+    ///      (proves the consumer detects the failure with a typed
+    ///      `TaskContractParseError`).
+    ///   2. The synthesised inner plan-execute payload that
+    ///      `build_workstation_dispatch_response` produces when the
+    ///      runner refused dispatch via
+    ///      `SafeDescriptorReason::MalformedTaskContract`. The unified-
+    ///      entry decorator MUST keep the refusal visible — no fallback
+    ///      to `claude -p` or the legacy natural-language brief, the
+    ///      `workstation_dispatch_status` MUST stay
+    ///      `skipped_malformed_task_contract`, and the inner payload
+    ///      MUST NOT carry an `inner_result` (no dispatch fired).
+    #[test]
+    fn smoke_wave20_machine_mode_malformed_contract_refuses_no_prompt_fallback() {
+        use super::super::workstation_dispatch::{parse_task_contract, TaskContractParseError};
+
+        // 1. Parser-side: a contract missing the required `:goal` field
+        //    fails fast with `MissingRequired("goal")`. Pinning the
+        //    typed variant proves the parser surfaces the actionable
+        //    reason without inventing a default.
+        let malformed = r#"(task no-goal
+  :schema "missiond.task-contract.v1"
+  :title "missing goal"
+  :write-scope []
+)"#;
+        let err = parse_task_contract(malformed)
+            .expect_err("malformed contract MUST fail parsing rather than silently degrade");
+        assert!(
+            matches!(err, TaskContractParseError::MissingRequired("goal")),
+            "wave-20/05 contract: structured error variant MUST be `MissingRequired(\"goal\")`, got {:?}",
+            err
+        );
+        let reason = err.reason();
+        assert!(
+            reason.contains("missing required") && reason.contains("goal"),
+            "structured error reason must name the missing field, got `{}`",
+            reason
+        );
+
+        // 2. Runner-side: the wave-20/04 response builder produces this
+        //    exact wire shape when `run_workstation_dispatch_with_contract`
+        //    returned `SafeDescriptor { reason: MalformedTaskContract { ... } }`.
+        //    The smoke synthesises that payload and feeds it through the
+        //    unified-entry decorator. The decorator MUST preserve every
+        //    refusal field — there is NO prompt fallback path.
+        let bad_path = "/tmp/missiond-smoke/.missiond/tasks/generated/plan/bad/root.lisp";
+        let payload = json!({
+            "status": "dispatch_skipped",
+            "execute_mode": "internal",
+            "runner_status": "workstation_dispatch_v0",
+            "plan_id": "55555555-5555-5555-5555-000000000020",
+            "board_task_id": "btk-wave20-task05-smoke",
+            "target_tool": "mission_task_delegate",
+            "target_source": "explicit_arg",
+            "dispatch_strategy": "agent-team",
+            "dispatch_strategy_source": "explicit_arg",
+            "plan_hint_summary": {},
+            "workstation_dispatch_source": "explicit_arg",
+            "dispatch_contract_mode": "machine",
+            // Workstation extension — SafeDescriptor branch.
+            "workstation_dispatch_status": "skipped_malformed_task_contract",
+            "workstation_dispatch_reason": format!(
+                "task_contract_path `{}` is malformed: {} — refusing to fall back to the legacy natural-language brief because the contract is the SSOT",
+                bad_path, reason
+            ),
+            "scoped_commit_required": true,
+            "scoped_commit_policy": "enforced-on-complete",
+            // wave-19 / task 06 — emission ran, contract written. The
+            // refusal is downstream of emission; we still surface the
+            // emission record so observers see the file was produced.
+            "task_contract_mode": "emit",
+            "task_contract_eligible": true,
+            "task_contract_path": bad_path,
+            "render_command": format!("node scripts/render-claudecode-task.mjs {}", bad_path),
+        });
+        let inner = ToolResult {
+            content: vec![missiond_mcp::tools::ToolContent::Text {
+                text: serde_json::to_string_pretty(&payload).unwrap(),
+            }],
+            is_error: None,
+        };
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step:
+                    "machine-mode dispatch refused: malformed task contract — fix the on-disk file and retry",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let meta = smoke_meta_of(&decorated);
+        assert_eq!(meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        // ── Refusal envelope: machine-contract fields still surface ────
+        assert_eq!(meta["artifact_refs"]["dispatch_contract_mode"], "machine");
+        assert_eq!(meta["artifact_refs"]["task_contract_mode"], "emit");
+        assert_eq!(meta["artifact_refs"]["task_contract_path"], bad_path);
+        // No dispatch happened, so the SSOT consumed-path is absent —
+        // the projection MUST NOT fabricate one.
+        assert!(
+            meta["artifact_refs"]
+                .as_object()
+                .unwrap()
+                .get("task_contract_source_path")
+                .is_none(),
+            "refusal path MUST NOT carry task_contract_source_path (no consumption happened)"
+        );
+
+        // ── Inner payload: refusal is verbatim, no prompt fallback ─────
+        let inner_text = match &decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let inner_payload: Value = serde_json::from_str(&inner_text).unwrap();
+        assert_eq!(inner_payload["status"], "dispatch_skipped");
+        assert_eq!(
+            inner_payload["workstation_dispatch_status"],
+            "skipped_malformed_task_contract",
+            "refusal MUST stay loud — no silent downgrade to the legacy brief"
+        );
+        let refusal_reason = inner_payload["workstation_dispatch_reason"]
+            .as_str()
+            .unwrap_or("");
+        assert!(
+            refusal_reason.contains(bad_path),
+            "refusal reason must name the offending contract path"
+        );
+        assert!(
+            refusal_reason.contains("missing required") && refusal_reason.contains("goal"),
+            "refusal reason must explain WHY the parse failed (forwarded from the typed error)"
+        );
+        assert!(
+            refusal_reason.contains("refusing to fall back"),
+            "refusal must explicitly mention there is no fallback path \
+             (per wave-19/07 + wave-20/04 SSOT contract)"
+        );
+        // No inner_result MUST have leaked through — the runner refused
+        // before the workstation substrate was invoked.
+        assert!(
+            inner_payload.get("inner_result").is_none(),
+            "machine-mode refusal MUST NOT carry inner_result (no dispatch fired)"
+        );
+        // No `claude -p` shell-out artefact MUST appear anywhere on the
+        // payload — pinning the absence so a future "compatibility
+        // shim" cannot silently re-introduce the prompt fallback.
+        let inner_text_lower = inner_text.to_lowercase();
+        assert!(
+            !inner_text_lower.contains("claude -p"),
+            "machine-mode refusal MUST NOT embed a `claude -p` fallback hint \
+             (would defeat the SSOT contract)"
+        );
     }
 }
