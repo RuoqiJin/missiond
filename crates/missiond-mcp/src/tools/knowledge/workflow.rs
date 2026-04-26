@@ -233,6 +233,18 @@ fn build_properties() -> Value {
         "[distill auto_chain=true] (wave-19 / task 09) optional free-form chain label echoed into the `auto_chain.chain_name` block + chain-record evidence row. Mirrors plan.rs's `distill_chain_name` semantics so a single dashboard query can group both recorders' rows by label without parsing the deterministic id. Blank / missing → omitted from the response.",
     ));
 
+    p.insert("auto_chain_trigger".into(), prop_enum(
+        "string",
+        "[distill] (wave-20 / task 06 cross-plan distill auto-trigger v1) ORTHOGONAL to the wave-19 `auto_chain` opt-in. `never` (default) preserves the wave-19 behaviour byte-for-byte: chain recording requires explicit `auto_chain=true`. `auto_safe` evaluates a deterministic safety-rule set (inner_distill_succeeded / distill_mode_recorded / project_root_resolved / evidence_sidecar_present / evidence_min_entries / chain_id_not_already_recorded) AFTER the caller-chosen distill mode; ALL rules must pass before the daemon falls through to the wave-19 recorder. Rule failure → `auto_trigger.trigger_status=\"skipped_rules_failed\"` with the full rule outcomes; NEVER partially appends. Rule pass → behaves as if `auto_chain=true` (same evidence row, same `auto_chain` block + shortcuts) AND splices an `auto_trigger` block (`{requested,mode,trigger_status,safety_rule_results,chain_id?,sidecar?}` + top-level shortcuts `auto_trigger_status` / `auto_trigger_chain_id`). NEVER calls Sonnet implicitly — the trigger only enables the record-only auto-chain hook; the upstream `distill_mode` arg remains the only way to invoke the distiller actor. Inner distill error → `auto_trigger.trigger_status=\"skipped_inner_error\"` (audit can tell rule failure apart from upstream failure).",
+        &["never", "auto_safe"],
+    ));
+
+    p.insert("auto_trigger_min_evidence".into(), json!({
+        "type": "integer",
+        "minimum": 0,
+        "description": "[distill auto_chain_trigger=auto_safe] (wave-20 / task 06) minimum sidecar entry count required by the `evidence_min_entries` safety rule (default 1). Mirrors the upstream sonnet distill `min_evidence` gate so the trigger's notion of 'real evidence' matches the distiller's; raise to require richer sidecars before auto-recording.",
+    }));
+
     Value::Object(p)
 }
 
@@ -297,6 +309,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
          + top-level shortcuts auto_chain_status / auto_chain_id。default false 保 byte-identical (wave-18 distill 形状不变); \
          永不 implicit sonnet (只 record, 不重派 distiller); sidecar 严格 append-only (无 migration); \
          resolve_failed / record_failed 不破坏 inner distill payload。\
+         wave-20 / task 06 cross-plan distill auto-trigger v1: distill 接 auto_chain_trigger=\"auto_safe\" (默认 \"never\") \
+         在 inner distill 成功后跑 6 条 deterministic 安全规则 (inner_distill_succeeded / distill_mode_recorded / \
+         project_root_resolved / evidence_sidecar_present / evidence_min_entries / chain_id_not_already_recorded), \
+         全部通过才 fall-through 到 wave-19 recorder; 任一失败 surface auto_trigger.trigger_status=\"skipped_rules_failed\" \
+         + 完整 safety_rule_results, 绝不 partially append; 通过则同时 splice auto_chain block (与 wave-19 一致) 和 \
+         auto_trigger block (trigger_status=\"triggered\" / chain_id / sidecar / safety_rule_results) + top-level \
+         shortcuts auto_trigger_status / auto_trigger_chain_id。永不 implicit sonnet (trigger 只放行 record-only \
+         hook, 不触发 distiller actor); auto_chain_trigger 与 wave-19 auto_chain 正交 (两者皆 default off, \
+         任一 opt-in 都走同一条 wave-19 record 路径)。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
          implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
          role workflow-distiller + intent-memory.lisp :: directive-layer :: file-first-artifacts :: workflow-methodology-file。",
