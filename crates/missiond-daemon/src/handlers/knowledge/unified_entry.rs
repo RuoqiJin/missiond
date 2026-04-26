@@ -11,6 +11,8 @@
 //!   - intent-tools.lisp :: implemented-surface mission_directive / mission_plan
 //!     (this helper deliberately does NOT introduce a new MCP surface — it
 //!     sequences the existing manager surfaces)
+//!   - intent-memory.lisp :: directive-layer :: file-first-artifacts
+//!     (wave-14 v1 forwards write_file/topic/overwrite_file + project signals)
 //!
 //! Scope (wave-13 / Task 03 :: unified entry flow v0):
 //!
@@ -29,7 +31,41 @@
 //!        meaningful) `next_call` so the caller never has to guess the
 //!        canonical sequence.
 //!
-//!   Things v0 deliberately does NOT do — these are explicit non-goals:
+//! Scope (wave-14 / Task 04 :: unified entry pipeline v1):
+//!
+//!   v1 layers two pieces of forwarding on top of the v0 composition without
+//!   adding a new MCP tool. The wave-14/01 file-first writer
+//!   (`crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs`)
+//!   and wave-14/03 review-gate auto-create (`review_gate.rs`) ship as
+//!   opt-in args on the existing directive/plan compile surfaces — the
+//!   pipeline simply forwards them so a single unified-entry call can
+//!   reach the file-first SSOT mirror + the deterministic review question
+//!   id without the caller hand-rolling each downstream call.
+//!
+//!   v1 forwarding (per stage):
+//!     * directive compile  → `write_file / topic / overwrite_file /
+//!                              project / cwd / target_project`
+//!                            (file-first writer)
+//!                          + `review_gate_policy / emit_review_question /
+//!                              review_question_text / review_question_id`
+//!                            (review-gate auto-create)
+//!                          + the wave-13 `directive_*` breadcrumbs
+//!     * plan compile       → same file-first + review-gate set; topic
+//!                            still defaults to `board_task_id` inside the
+//!                            handler when omitted
+//!     * plan execute       → same wave-13 execute knobs PLUS `cwd /
+//!                              requested_cwd / project / flow_id / params /
+//!                              priority / timeout_secs / intent /
+//!                              execution_id / parent_design / scope /
+//!                              owner / dry_run / review_question_id`
+//!
+//!   Every v1 response now also carries `artifact_refs` — a flat object
+//!   that lifts whatever the inner handler produced (`directive_id /
+//!   plan_id / version / file_*` / `review_question_*`) so the caller can
+//!   correlate the file-first + review-gate state without parsing the inner
+//!   payload.
+//!
+//!   Things v0/v1 deliberately do NOT do — these are explicit non-goals:
 //!     * auto-approve a directive       (s3 is a human/Codex review gate)
 //!     * auto-approve a plan            (s5 is a human/Codex review gate)
 //!     * auto-answer a review question  (review-gate emission stays opt-in
@@ -128,6 +164,43 @@ const FLOW_REF: &str = "F-intent-alignment-plan-execution-loop";
 ///                            — alias of `execute` (we accept either name
 ///                              for ergonomic reasons; the task spec uses
 ///                              the longer form).
+///
+/// wave-14 / Task 04 :: v1 file-first + review-gate forwarding
+///   * `write_file` (bool)         — opt into the file-first SSOT mirror on
+///                                    directive / plan compile (default false).
+///   * `topic` (string)            — file path topic segment; required by the
+///                                    directive writer when `write_file=true`,
+///                                    optional for the plan writer (defaults
+///                                    to `board_task_id` inside the handler).
+///   * `overwrite_file` (bool)     — allow replacing an existing artifact
+///                                    (default false → atomic refusal).
+///   * `project` / `cwd` /
+///     `target_project`            — project-root resolution signals (the
+///                                    file-first writer rejects process-cwd
+///                                    fallback per intent-worker.lisp ::
+///                                    project-root-spawn-cwd). Forwarded to
+///                                    BOTH the file-first writer (compile)
+///                                    AND the execute branch (where the
+///                                    plan-runner consumes them — `cwd` is
+///                                    also the mission_task_delegate cwd).
+///   * `review_gate_policy`        — wave-14/03 policy enum
+///                                    (`manual` (default) | `emit_question` |
+///                                    `off`). Auto-fires QuestionEvent::
+///                                    Created after a successful artifact
+///                                    write when set to `emit_question`.
+///   * `emit_review_question` /
+///     `review_question_text` /
+///     `review_question_id`        — wave-11 explicit-emit knobs forwarded
+///                                    so callers can also pin the
+///                                    deterministic question id.
+///
+/// Every response now carries `artifact_refs` — a flat object lifting the
+/// inner handler's file_* / review_question_* / id+version pointers so the
+/// caller can correlate without parsing the inner JSON payload. Legacy
+/// callers that omit `write_file` and `review_gate_policy` see the same
+/// inert payload as v0 (artifact_refs is still surfaced, but only carries
+/// the row-id pointers — no file_* / review_question_* fields are
+/// fabricated).
 pub(crate) async fn run_pipeline(state: &AppState, args: Value) -> Result<ToolResult> {
     let plan_pre = match plan_pipeline(&args) {
         Ok(p) => p,
@@ -310,6 +383,13 @@ fn build_directive_compile_args(message: String, args: &Value) -> Value {
     forward_array(args, "directive_affected_pillars", &mut out, "affected_pillars");
     forward_array(args, "directive_non_goals", &mut out, "non_goals");
     forward_array(args, "directive_acceptance", &mut out, "acceptance");
+
+    // wave-14 / Task 04 :: file-first SSOT writer pass-through. The directive
+    // compiler enforces topic-required when write_file=true (no fallback);
+    // we never inject a default here so the failure is loud at the inner
+    // handler instead of being silently masked by the pipeline.
+    forward_file_first_args(args, &mut out);
+    forward_review_gate_args(args, &mut out);
     Value::Object(out)
 }
 
@@ -339,6 +419,12 @@ fn build_plan_compile_args(approved_directive_id: String, board_task_id: String,
     }
     forward_array(args, "plan_acceptance", &mut out, "acceptance");
     forward_array(args, "plan_constraints", &mut out, "constraints");
+
+    // wave-14 / Task 04 :: file-first SSOT writer pass-through. The plan
+    // compiler defaults the topic to `board_task_id` when omitted so the
+    // pipeline does not need to inject one — forwarding is straight-through.
+    forward_file_first_args(args, &mut out);
+    forward_review_gate_args(args, &mut out);
     Value::Object(out)
 }
 
@@ -350,7 +436,14 @@ fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
     // Forward execute-time knobs — the underlying mission_plan execute
     // branch already validates these; we don't re-validate here (single
     // source of truth for the execute schema lives in plan.rs).
+    //
+    // wave-14 / Task 04 :: extended forwarding so the v1 caller can drive
+    // the plan-runner through the unified entry without dropping back to a
+    // direct `mission_plan(action=execute)` call. Every key listed here is
+    // documented on `mission_plan` (see crates/missiond-mcp/src/tools/
+    // knowledge/plan.rs); the pipeline never invents new schema slots.
     for key in [
+        // wave-13 v0 keys (preserved)
         "execute_mode",
         "scheduler_mode",
         "max_parallel_nodes",
@@ -358,6 +451,22 @@ fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
         "dispatch_strategy",
         "target_project",
         "objective",
+        // wave-14 v1 additions — runner / dispatcher knobs
+        "cwd",
+        "requested_cwd",
+        "project",
+        "execution_id",
+        "parent_design",
+        "scope",
+        "owner",
+        "intent",
+        "flow_id",
+        "params",
+        "priority",
+        "timeout_secs",
+        "dry_run",
+        // wave-14 v1 addition — review-gate resolution emit on s6
+        "review_question_id",
     ] {
         if let Some(v) = args.get(key) {
             if !v.is_null() {
@@ -366,6 +475,66 @@ fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
         }
     }
     Value::Object(out)
+}
+
+/// Forward the wave-14 file-first SSOT writer args
+/// (`write_file / topic / overwrite_file / project / cwd / target_project`)
+/// from the unified entry input bag to a downstream compile call. Pure
+/// pass-through: blank strings are dropped (`nonblank`) so the inner
+/// handler sees the same "absent" semantics it would from a direct call;
+/// boolean fields default to absent (let the inner handler pick its own
+/// default of `false`).
+///
+/// We deliberately do NOT inject a `topic` / `project` default here —
+/// the inner handlers carry the canonical defaulting policy
+/// (directive: topic required; plan: topic falls back to `board_task_id`),
+/// and silently filling either at the pipeline layer would mask schema
+/// errors that should fail loudly.
+fn forward_file_first_args(args: &Value, out: &mut serde_json::Map<String, Value>) {
+    if let Some(b) = args.get("write_file").and_then(|v| v.as_bool()) {
+        out.insert("write_file".into(), json!(b));
+    }
+    if let Some(b) = args.get("overwrite_file").and_then(|v| v.as_bool()) {
+        out.insert("overwrite_file".into(), json!(b));
+    }
+    if let Some(t) = nonblank(args.get("topic")) {
+        out.insert("topic".into(), json!(t));
+    }
+    if let Some(p) = nonblank(args.get("project")) {
+        out.insert("project".into(), json!(p));
+    }
+    if let Some(c) = nonblank(args.get("cwd")) {
+        out.insert("cwd".into(), json!(c));
+    }
+    if let Some(tp) = nonblank(args.get("target_project")) {
+        out.insert("target_project".into(), json!(tp));
+    }
+}
+
+/// Forward the wave-14 review-gate args
+/// (`review_gate_policy / emit_review_question / review_question_text /
+///  review_question_id`) from the unified entry input bag to a downstream
+/// compile call.
+///
+/// `review_gate_policy` is forwarded verbatim (including unknown values) so
+/// the inner `parse_review_gate_policy` can stamp the resolved policy on
+/// the response — masking unknown values here would hide caller typos.
+/// `emit_review_question` defaults to absent (let the inner handler pick
+/// `false`); `review_question_text` / `review_question_id` are blank-filtered
+/// so an empty string never overrides a derived id.
+fn forward_review_gate_args(args: &Value, out: &mut serde_json::Map<String, Value>) {
+    if let Some(p) = nonblank(args.get("review_gate_policy")) {
+        out.insert("review_gate_policy".into(), json!(p));
+    }
+    if let Some(b) = args.get("emit_review_question").and_then(|v| v.as_bool()) {
+        out.insert("emit_review_question".into(), json!(b));
+    }
+    if let Some(t) = nonblank(args.get("review_question_text")) {
+        out.insert("review_question_text".into(), json!(t));
+    }
+    if let Some(id) = nonblank(args.get("review_question_id")) {
+        out.insert("review_question_id".into(), json!(id));
+    }
 }
 
 fn forward_array(
@@ -400,18 +569,25 @@ async fn run_directive_compile_stage(state: &AppState, compile_args: Value) -> R
     let inner = super::directive::handle(state, "mission_directive", compile_args).await?;
     Ok(decorate(
         inner,
-        stages::MESSAGE_INTAKE,
-        "review the compiled directive then re-call this pipeline with `approved_directive_id` (and the directive's `version`) once the human gate passes",
-        Some(json!({
-            "tool": "mission_directive",
-            "action": "approve",
-            "note": "approve via mission_directive(action=approve, directive_id=…, version=…). v0 unified entry does NOT auto-approve.",
-        })),
-        json!({
-            "approved_directive_id": "uuid",
-            "directive_version": "i32",
-            "board_task_id": "string",
-        }),
+        DecorateContext {
+            stage: stages::MESSAGE_INTAKE,
+            scope: ArtifactScope::Directive,
+            next_step:
+                "review the compiled directive then re-call this pipeline with `approved_directive_id` \
+                 (and the directive's `version`) once the human gate passes",
+            next_call: Some(json!({
+                "tool": "mission_directive",
+                "action": "approve",
+                "note":
+                    "approve via mission_directive(action=approve, directive_id=…, version=…). \
+                     v0/v1 unified entry does NOT auto-approve.",
+            })),
+            expects_next_inputs: json!({
+                "approved_directive_id": "uuid",
+                "directive_version": "i32",
+                "board_task_id": "string",
+            }),
+        },
     ))
 }
 
@@ -419,17 +595,24 @@ async fn run_plan_compile_stage(state: &AppState, compile_args: Value) -> Result
     let inner = super::plan::handle(state, "mission_plan", compile_args).await?;
     Ok(decorate(
         inner,
-        stages::PLAN_AUTHORING,
-        "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` and `execute=true` once the human gate passes",
-        Some(json!({
-            "tool": "mission_plan",
-            "action": "approve",
-            "note": "approve via mission_plan(action=approve, plan_id=…). v0 unified entry does NOT auto-approve.",
-        })),
-        json!({
-            "approved_plan_id": "uuid",
-            "execute": true,
-        }),
+        DecorateContext {
+            stage: stages::PLAN_AUTHORING,
+            scope: ArtifactScope::Plan,
+            next_step:
+                "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` \
+                 and `execute=true` once the human gate passes",
+            next_call: Some(json!({
+                "tool": "mission_plan",
+                "action": "approve",
+                "note":
+                    "approve via mission_plan(action=approve, plan_id=…). \
+                     v0/v1 unified entry does NOT auto-approve.",
+            })),
+            expects_next_inputs: json!({
+                "approved_plan_id": "uuid",
+                "execute": true,
+            }),
+        },
     ))
 }
 
@@ -437,11 +620,60 @@ async fn run_plan_execute_stage(state: &AppState, execute_args: Value) -> Result
     let inner = super::plan::handle(state, "mission_plan", execute_args).await?;
     Ok(decorate(
         inner,
-        stages::EXECUTION_RUNNER,
-        "execution dispatched; collect evidence via mission_plan(action=record_evidence) and (when running with auto_distill) mission_workflow(action=distill)",
-        None,
-        json!({}),
+        DecorateContext {
+            stage: stages::EXECUTION_RUNNER,
+            scope: ArtifactScope::Execution,
+            next_step:
+                "execution dispatched; collect evidence via mission_plan(action=record_evidence) \
+                 and (when running with auto_distill) mission_workflow(action=distill)",
+            next_call: None,
+            expects_next_inputs: json!({}),
+        },
     ))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// decorate — append unified-entry breadcrumbs (pipeline_stage, flow_ref,
+// artifact_refs, next_step, next_call) to the inner handler's response.
+//
+// wave-14 / Task 04 :: artifact_refs is the new top-level surface — we
+// project the inner handler's payload (file_* / review_question_* / id +
+// version pointers) into a single flat object so callers can correlate
+// without re-parsing the inner JSON. Legacy callers (no write_file, no
+// review_gate_policy) see only the row-id pointers; we never fabricate a
+// `file_written=false` for callers that didn't ask.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Which scope label the decorator should stamp into `artifact_refs.scope`.
+/// Matches the deterministic review-question id `<scope>` slot
+/// (`derive_review_question_id_for_artifact`) so retro queries can join
+/// `pipeline_stage` ↔ `review_question_id` without a translation table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArtifactScope {
+    Directive,
+    Plan,
+    Execution,
+}
+
+impl ArtifactScope {
+    fn as_str(self) -> &'static str {
+        match self {
+            ArtifactScope::Directive => "directive",
+            ArtifactScope::Plan => "plan",
+            ArtifactScope::Execution => "execution",
+        }
+    }
+}
+
+/// All metadata the decorator needs in one bag — keeps the per-stage
+/// runners terse and stops a future `next_step` addition from forcing a
+/// signature churn.
+struct DecorateContext<'a> {
+    stage: &'a str,
+    scope: ArtifactScope,
+    next_step: &'a str,
+    next_call: Option<Value>,
+    expects_next_inputs: Value,
 }
 
 /// Append unified-entry breadcrumbs to whatever the inner handler returned.
@@ -449,26 +681,25 @@ async fn run_plan_execute_stage(state: &AppState, execute_args: Value) -> Result
 /// Important: when the inner handler itself returned a `structured_error`,
 /// we keep `is_error=true` and *still* surface the stage labels so the
 /// caller's pipeline-step UI doesn't lose context. The error payload from
-/// the inner handler is nested under `pipeline_inner_error` so callers
-/// can introspect both layers.
-fn decorate(
-    mut inner: ToolResult,
-    stage: &str,
-    next_step: &str,
-    next_call: Option<Value>,
-    expects_next_inputs: Value,
-) -> ToolResult {
+/// the inner handler is the first content element; the meta payload is
+/// appended as a sibling so introspection remains lossless.
+fn decorate(mut inner: ToolResult, ctx: DecorateContext<'_>) -> ToolResult {
     // We don't reach into the inner ToolResult's structured fields — the
     // public ToolResult contract here is "JSON in the first content
-    // element". We append a sibling content element carrying the
-    // pipeline metadata; this guarantees zero behavioural change for
-    // callers that just want the inner JSON.
+    // element". We *read* that element to project artifact_refs, then
+    // append a sibling content element carrying the pipeline metadata;
+    // this guarantees zero behavioural change for callers that just want
+    // the inner JSON.
+    let inner_payload = first_content_as_json(&inner);
+    let artifact_refs = build_artifact_refs(ctx.scope, &inner_payload);
+
     let mut meta = serde_json::Map::new();
-    meta.insert("pipeline_stage".into(), json!(stage));
+    meta.insert("pipeline_stage".into(), json!(ctx.stage));
     meta.insert("flow_ref".into(), json!(FLOW_REF));
-    meta.insert("next_step".into(), json!(next_step));
-    meta.insert("expects_next_inputs".into(), expects_next_inputs);
-    if let Some(nc) = next_call {
+    meta.insert("artifact_refs".into(), artifact_refs);
+    meta.insert("next_step".into(), json!(ctx.next_step));
+    meta.insert("expects_next_inputs".into(), ctx.expects_next_inputs);
+    if let Some(nc) = ctx.next_call {
         meta.insert("next_call".into(), nc);
     }
     meta.insert(
@@ -481,15 +712,126 @@ fn decorate(
         ]),
     );
 
-    // ToolResult here is `Vec<ToolContent>`; each entry is opaque to the
-    // pipeline planner, so we attach the metadata as a final JSON content
-    // element. Keeping inner content untouched preserves any existing
-    // structured_error payload.
     inner.content.push(missiond_mcp::tools::ToolContent::Text {
         text: serde_json::to_string_pretty(&Value::Object(meta))
             .unwrap_or_else(|_| "{}".to_string()),
     });
     inner
+}
+
+/// Best-effort projection of the inner handler's first JSON content into a
+/// `Value`. When the inner element is not parsable JSON (e.g. structured
+/// error path that already serialises to a JSON string), we still return a
+/// `Value::Null` so the decorator can keep going — `build_artifact_refs`
+/// gracefully degrades when the input is `Null` or an empty object.
+fn first_content_as_json(result: &ToolResult) -> Value {
+    match result.content.first() {
+        Some(missiond_mcp::tools::ToolContent::Text { text }) => {
+            serde_json::from_str::<Value>(text).unwrap_or(Value::Null)
+        }
+        None => Value::Null,
+    }
+}
+
+/// Build the `artifact_refs` object surfaced by every v1 response.
+///
+/// Layout (omitted keys never appear → easy `serde_json::from_value` round
+/// trip + cheap-to-grep responses):
+///
+/// ```text
+/// {
+///   "scope":               "directive" | "plan" | "execution",
+///   // Row-id pointers (always when the inner handler stamped them):
+///   "directive_id":        "uuid",
+///   "plan_id":             "uuid",
+///   "version":             1,
+///   "board_task_id":       "btk-…",
+///   "status":              "compiled" | "partial" | …,
+///   // file-first SSOT splice (only when write_file=true was forwarded):
+///   "file_written":        true,
+///   "file_path":           "<project_root>/.missiond/…/<artifact>.lisp",
+///   "file_sha256":         "<hex>",
+///   "file_bytes":          1234,
+///   "file_created":        true,
+///   "file_overwritten":    false,
+///   "file_write_error":    "<reason>",          // partial path only
+///   // review-gate splice (only when review_gate_policy ≠ Manual or the
+///   // legacy `emit_review_question=true` opt-in fired):
+///   "review_gate_policy":      "manual" | "emit_question" | "off",
+///   "review_question_emitted": true,
+///   "review_question_id":      "review:<scope>:<id>:v<v>:compile:<topic-hash>",
+///   "review_question_text":    "<echoed text>",
+///   "review_question_warning": { "code": …, "reason": …, … }
+/// }
+/// ```
+///
+/// Pure projection — no IO, no derivation. The inner handler is the SSOT
+/// for whether a field exists; we just *lift* it. Legacy callers that omit
+/// every wave-14 opt-in see only `scope` + the row-id pointers.
+fn build_artifact_refs(scope: ArtifactScope, payload: &Value) -> Value {
+    let mut refs = serde_json::Map::new();
+    refs.insert("scope".into(), json!(scope.as_str()));
+    let map = match payload.as_object() {
+        Some(m) => m,
+        None => return Value::Object(refs),
+    };
+
+    // Row-id pointers — wave-13 surfaces these on every persist=true compile
+    // and on every successful execute. We surface whichever subset the inner
+    // payload carries (directive emits `directive_id`; plan emits `plan_id`
+    // + `board_task_id`; execute emits `plan_id` + `board_task_id`).
+    for key in [
+        "directive_id",
+        "plan_id",
+        "version",
+        "board_task_id",
+        "status",
+        "compiler_mode",
+        "compiler_model",
+    ] {
+        if let Some(v) = map.get(key) {
+            if !v.is_null() {
+                refs.insert(key.into(), v.clone());
+            }
+        }
+    }
+
+    // File-first SSOT splice — present only when the inner handler ran the
+    // wave-14 writer. We never fabricate `file_written=false` for callers
+    // that didn't opt in (write_file=false → no file_* fields anywhere).
+    for key in [
+        "file_written",
+        "file_path",
+        "file_sha256",
+        "file_bytes",
+        "file_created",
+        "file_overwritten",
+        "file_write_error",
+    ] {
+        if let Some(v) = map.get(key) {
+            if !v.is_null() {
+                refs.insert(key.into(), v.clone());
+            }
+        }
+    }
+
+    // Review-gate splice — present only when the policy was non-default OR
+    // the legacy `emit_review_question=true` bool fired.
+    for key in [
+        "review_gate_policy",
+        "review_question_emitted",
+        "review_question_id",
+        "review_question_text",
+        "review_question_warning",
+    ] {
+        if let Some(v) = map.get(key) {
+            if !v.is_null() {
+                refs.insert(key.into(), v.clone());
+            }
+        }
+    }
+
+    Value::Object(refs)
 }
 
 fn planner_error_response(err: PlannerError) -> ToolResult {
@@ -500,9 +842,18 @@ fn planner_error_response(err: PlannerError) -> ToolResult {
     let tool_err = ToolError::new(err.code(), err.message().to_string())
         .with_suggestion(err.suggestion());
     let mut res = ToolResult::structured_error(tool_err);
+    // wave-14 / Task 04 :: planner errors carry the same skeleton as a
+    // successful decoration so consumer dashboards can rely on a single
+    // shape. `artifact_refs` is just the scope marker — no rows / files
+    // / review questions exist yet because the planner short-circuited
+    // before any handler ran.
+    let stage = planner_error_stage(&err);
+    let scope = planner_error_scope(&err);
     let meta = json!({
-        "pipeline_stage": planner_error_stage(&err),
+        "pipeline_stage": stage,
         "flow_ref": FLOW_REF,
+        "artifact_refs": { "scope": scope.as_str() },
+        "next_step": err.suggestion(),
         "v0_non_goals": [
             "auto_approve_directive",
             "auto_approve_plan",
@@ -522,6 +873,19 @@ fn planner_error_stage(err: &PlannerError) -> &'static str {
         PlannerError::PlanCompileMissingBoardTask => stages::PLAN_AUTHORING,
         PlannerError::ApprovedPlanWithoutExecuteFlag => stages::PLAN_REVIEW_GATE,
         PlannerError::ExecuteWithoutApprovedPlan => stages::EXECUTION_RUNNER,
+    }
+}
+
+/// Map an early-fail planner error onto the same scope label the decorator
+/// would have stamped if the matching stage had run. Keeps the
+/// `artifact_refs.scope` field consistent across the success / error
+/// branches so consumer dashboards can pivot on a single field.
+fn planner_error_scope(err: &PlannerError) -> ArtifactScope {
+    match err {
+        PlannerError::MissingMessage => ArtifactScope::Directive,
+        PlannerError::PlanCompileMissingBoardTask => ArtifactScope::Plan,
+        PlannerError::ApprovedPlanWithoutExecuteFlag => ArtifactScope::Plan,
+        PlannerError::ExecuteWithoutApprovedPlan => ArtifactScope::Execution,
     }
 }
 
@@ -899,5 +1263,708 @@ mod tests {
     #[test]
     fn flow_ref_constant_matches_lisp() {
         assert_eq!(FLOW_REF, "F-intent-alignment-plan-execution-loop");
+    }
+
+    // ── wave-14 / Task 04 :: file-first + review-gate forwarding ─────
+    //
+    // The next batch of tests pin the v1 forwarding contract: every
+    // wave-14 opt-in arg must reach the inner handler unchanged, default
+    // to inert when omitted, and never produce silent surprises (e.g.
+    // injecting a `topic` default at the pipeline layer would mask the
+    // directive compiler's "topic required" guard).
+    //
+    // We split coverage across three axes:
+    //   1. forward_file_first_args / forward_review_gate_args helpers —
+    //      pure args extraction, easy to reason about.
+    //   2. build_directive_compile_args / build_plan_compile_args —
+    //      end-to-end wiring through plan_pipeline → builder → out.
+    //   3. build_artifact_refs — projection of an inner handler payload
+    //      into the response's artifact_refs slot, including the legacy
+    //      "no file-write, no review gate" path.
+
+    // ── 1. helpers ───────────────────────────────────────────────────
+
+    #[test]
+    fn forward_file_first_args_emits_nothing_when_absent() {
+        let args = json!({});
+        let mut out = serde_json::Map::new();
+        forward_file_first_args(&args, &mut out);
+        assert!(out.is_empty(), "no keys expected, got {:?}", out);
+    }
+
+    #[test]
+    fn forward_file_first_args_propagates_all_keys() {
+        let args = json!({
+            "write_file": true,
+            "overwrite_file": true,
+            "topic": "wave14-task04",
+            "project": "missiond",
+            "cwd": "/abs/path/to/missiond",
+            "target_project": "missiond-fallback",
+        });
+        let mut out = serde_json::Map::new();
+        forward_file_first_args(&args, &mut out);
+        assert_eq!(out["write_file"], true);
+        assert_eq!(out["overwrite_file"], true);
+        assert_eq!(out["topic"], "wave14-task04");
+        assert_eq!(out["project"], "missiond");
+        assert_eq!(out["cwd"], "/abs/path/to/missiond");
+        assert_eq!(out["target_project"], "missiond-fallback");
+    }
+
+    #[test]
+    fn forward_file_first_args_drops_blank_strings() {
+        // Blanks must collapse to "absent" so the inner handler's missing-
+        // topic guard fires loudly instead of being masked by a "topic=''".
+        let args = json!({
+            "write_file": true,
+            "topic": "   ",
+            "project": "",
+            "cwd": "  ",
+        });
+        let mut out = serde_json::Map::new();
+        forward_file_first_args(&args, &mut out);
+        assert_eq!(out["write_file"], true);
+        assert!(out.get("topic").is_none(), "blank topic must collapse to absent");
+        assert!(out.get("project").is_none(), "blank project must collapse to absent");
+        assert!(out.get("cwd").is_none(), "blank cwd must collapse to absent");
+    }
+
+    #[test]
+    fn forward_review_gate_args_emits_nothing_when_absent() {
+        let args = json!({});
+        let mut out = serde_json::Map::new();
+        forward_review_gate_args(&args, &mut out);
+        assert!(out.is_empty(), "no keys expected, got {:?}", out);
+    }
+
+    #[test]
+    fn forward_review_gate_args_propagates_all_keys() {
+        let args = json!({
+            "review_gate_policy": "emit_question",
+            "emit_review_question": true,
+            "review_question_text": "Confirm alignment scope",
+            "review_question_id": "review:directive:abc:v1:compile",
+        });
+        let mut out = serde_json::Map::new();
+        forward_review_gate_args(&args, &mut out);
+        assert_eq!(out["review_gate_policy"], "emit_question");
+        assert_eq!(out["emit_review_question"], true);
+        assert_eq!(out["review_question_text"], "Confirm alignment scope");
+        assert_eq!(
+            out["review_question_id"],
+            "review:directive:abc:v1:compile"
+        );
+    }
+
+    #[test]
+    fn forward_review_gate_args_does_not_mask_unknown_policy_values() {
+        // We deliberately do NOT collapse unknown policy strings here so
+        // the inner `parse_review_gate_policy` can stamp them on the
+        // response (it normalises unknown → manual). Forwarding the raw
+        // value preserves caller-side typo detection.
+        let args = json!({ "review_gate_policy": "no-such-policy" });
+        let mut out = serde_json::Map::new();
+        forward_review_gate_args(&args, &mut out);
+        assert_eq!(out["review_gate_policy"], "no-such-policy");
+    }
+
+    // ── 2. builders ──────────────────────────────────────────────────
+
+    #[test]
+    fn build_directive_compile_args_forwards_wave14_file_first_args() {
+        let args = json!({
+            "message": "ship file-first writer integration",
+            "persist": true,
+            "write_file": true,
+            "overwrite_file": false,
+            "topic": "wave14-04",
+            "project": "missiond",
+            "target_project": "missiond",
+            "cwd": "/Users/jinchen/Projects/missiond",
+        });
+        let decision = plan_pipeline(&args).expect("should route to directive compile");
+        let PipelineDecision::DirectiveCompile { compile_args } = decision else {
+            panic!("expected DirectiveCompile");
+        };
+        // Spec args are intact.
+        assert_eq!(compile_args["utterance"], "ship file-first writer integration");
+        assert_eq!(compile_args["persist"], true);
+        // wave-14 v1 file-first forwarding.
+        assert_eq!(compile_args["write_file"], true);
+        assert_eq!(compile_args["overwrite_file"], false);
+        assert_eq!(compile_args["topic"], "wave14-04");
+        assert_eq!(compile_args["project"], "missiond");
+        assert_eq!(compile_args["target_project"], "missiond");
+        assert_eq!(
+            compile_args["cwd"],
+            "/Users/jinchen/Projects/missiond"
+        );
+    }
+
+    #[test]
+    fn build_directive_compile_args_forwards_wave14_review_gate_args() {
+        let args = json!({
+            "message": "ship file-first writer integration",
+            "persist": true,
+            "write_file": true,
+            "topic": "wave14-04",
+            "project": "missiond",
+            "review_gate_policy": "emit_question",
+            "emit_review_question": false,
+            "review_question_text": "Confirm directive scope",
+            "review_question_id": "review:directive:00000000-0000-0000-0000-000000000abc:v1:compile:deadbeef",
+        });
+        let decision = plan_pipeline(&args).expect("should route to directive compile");
+        let PipelineDecision::DirectiveCompile { compile_args } = decision else {
+            panic!("expected DirectiveCompile");
+        };
+        assert_eq!(compile_args["review_gate_policy"], "emit_question");
+        assert_eq!(compile_args["emit_review_question"], false);
+        assert_eq!(compile_args["review_question_text"], "Confirm directive scope");
+        assert_eq!(
+            compile_args["review_question_id"],
+            "review:directive:00000000-0000-0000-0000-000000000abc:v1:compile:deadbeef"
+        );
+    }
+
+    #[test]
+    fn build_directive_compile_args_legacy_no_file_write_path_unchanged() {
+        // Pre-wave-14 callers that only send {message, persist} must see a
+        // byte-identical inner-args shape — none of the wave-14 keys may
+        // appear in the forwarded bag.
+        let args = json!({
+            "message": "legacy caller",
+            "persist": true,
+        });
+        let decision = plan_pipeline(&args).expect("should route to directive compile");
+        let PipelineDecision::DirectiveCompile { compile_args } = decision else {
+            panic!("expected DirectiveCompile");
+        };
+        for k in &[
+            "write_file",
+            "overwrite_file",
+            "topic",
+            "project",
+            "cwd",
+            "target_project",
+            "review_gate_policy",
+            "emit_review_question",
+            "review_question_text",
+            "review_question_id",
+        ] {
+            assert!(
+                compile_args.get(*k).is_none(),
+                "legacy path must not forward `{}`",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn build_plan_compile_args_forwards_wave14_file_first_and_review_gate() {
+        let args = json!({
+            "approved_directive_id": "00000000-0000-0000-0000-000000000abc",
+            "board_task_id": "btk-wave14-04",
+            "compiler_mode": "sonnet",
+            "persist": true,
+            // file-first writer
+            "write_file": true,
+            "overwrite_file": true,
+            "topic": "wave14-04-plan",
+            "project": "missiond",
+            "cwd": "/Users/jinchen/Projects/missiond",
+            "target_project": "missiond-fallback",
+            // review-gate
+            "review_gate_policy": "emit_question",
+            "emit_review_question": true,
+            "review_question_text": "Approve PLAN.lisp",
+            "review_question_id": "review:plan:11111111-1111-1111-1111-111111111111:v1:compile:deadbeef",
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan compile");
+        let PipelineDecision::PlanCompile { compile_args } = decision else {
+            panic!("expected PlanCompile");
+        };
+        // Spec args.
+        assert_eq!(
+            compile_args["directive_id"],
+            "00000000-0000-0000-0000-000000000abc"
+        );
+        assert_eq!(compile_args["board_task_id"], "btk-wave14-04");
+        // file-first.
+        assert_eq!(compile_args["write_file"], true);
+        assert_eq!(compile_args["overwrite_file"], true);
+        assert_eq!(compile_args["topic"], "wave14-04-plan");
+        assert_eq!(compile_args["project"], "missiond");
+        assert_eq!(
+            compile_args["cwd"],
+            "/Users/jinchen/Projects/missiond"
+        );
+        assert_eq!(compile_args["target_project"], "missiond-fallback");
+        // review-gate.
+        assert_eq!(compile_args["review_gate_policy"], "emit_question");
+        assert_eq!(compile_args["emit_review_question"], true);
+        assert_eq!(compile_args["review_question_text"], "Approve PLAN.lisp");
+        assert_eq!(
+            compile_args["review_question_id"],
+            "review:plan:11111111-1111-1111-1111-111111111111:v1:compile:deadbeef"
+        );
+    }
+
+    #[test]
+    fn build_plan_compile_args_legacy_no_file_write_path_unchanged() {
+        // Symmetric guarantee for the s4 plan-compile path: callers that
+        // omit every wave-14 opt-in must see a forwarded args bag that
+        // contains nothing beyond the wave-13 spec.
+        let args = json!({
+            "approved_directive_id": "00000000-0000-0000-0000-000000000abc",
+            "board_task_id": "btk-legacy",
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan compile");
+        let PipelineDecision::PlanCompile { compile_args } = decision else {
+            panic!("expected PlanCompile");
+        };
+        for k in &[
+            "write_file",
+            "overwrite_file",
+            "topic",
+            "project",
+            "cwd",
+            "target_project",
+            "review_gate_policy",
+            "emit_review_question",
+            "review_question_text",
+            "review_question_id",
+        ] {
+            assert!(
+                compile_args.get(*k).is_none(),
+                "legacy path must not forward `{}`",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn build_plan_execute_args_forwards_wave14_runner_knobs() {
+        // The execute path now owns more pass-through keys so a v1 call
+        // can drive the plan-runner without reaching for a direct
+        // mission_plan(action=execute) call.
+        let args = json!({
+            "approved_plan_id": "11111111-1111-1111-1111-111111111111",
+            "execute": true,
+            // wave-13 v0 keys.
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            "max_parallel_nodes": 4,
+            "target": "mission_task_delegate",
+            "dispatch_strategy": "agent-team",
+            "target_project": "missiond",
+            "objective": "ship task 04",
+            // wave-14 v1 additions.
+            "cwd": "/Users/jinchen/Projects/missiond",
+            "requested_cwd": "/Users/jinchen/Projects/missiond",
+            "project": "missiond",
+            "intent": "code",
+            "execution_id": "exec-wave14-04",
+            "parent_design": "directive/00000000-0000-0000-0000-000000000abc",
+            "scope": "unified entry pipeline v1",
+            "owner": "plan-runner",
+            "flow_id": "F-intent-alignment-plan-execution-loop",
+            "params": { "foo": "bar" },
+            "priority": "high",
+            "timeout_secs": 600,
+            "dry_run": false,
+            "review_question_id": "review:plan:11111111-1111-1111-1111-111111111111:v1:approve",
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        // Sanity checks on v0 keys still being preserved.
+        assert_eq!(execute_args["execute_mode"], "internal");
+        assert_eq!(execute_args["scheduler_mode"], "dag_v1");
+        assert_eq!(execute_args["max_parallel_nodes"], 4);
+        assert_eq!(execute_args["target"], "mission_task_delegate");
+        assert_eq!(execute_args["dispatch_strategy"], "agent-team");
+        assert_eq!(execute_args["target_project"], "missiond");
+        assert_eq!(execute_args["objective"], "ship task 04");
+        // wave-14 additions.
+        for (key, expected) in [
+            ("cwd", json!("/Users/jinchen/Projects/missiond")),
+            ("requested_cwd", json!("/Users/jinchen/Projects/missiond")),
+            ("project", json!("missiond")),
+            ("intent", json!("code")),
+            ("execution_id", json!("exec-wave14-04")),
+            (
+                "parent_design",
+                json!("directive/00000000-0000-0000-0000-000000000abc"),
+            ),
+            ("scope", json!("unified entry pipeline v1")),
+            ("owner", json!("plan-runner")),
+            ("flow_id", json!("F-intent-alignment-plan-execution-loop")),
+            ("params", json!({ "foo": "bar" })),
+            ("priority", json!("high")),
+            ("timeout_secs", json!(600)),
+            ("dry_run", json!(false)),
+            (
+                "review_question_id",
+                json!("review:plan:11111111-1111-1111-1111-111111111111:v1:approve"),
+            ),
+        ] {
+            assert_eq!(
+                execute_args[key], expected,
+                "execute knob `{}` must be forwarded unchanged",
+                key
+            );
+        }
+    }
+
+    // ── 3. artifact_refs projection ─────────────────────────────────
+
+    #[test]
+    fn build_artifact_refs_directive_compile_persisted_with_file_and_review_gate() {
+        // Mirror the exact shape `directive::action_compile_dry_run`
+        // produces when `persist=true` + `write_file=true` +
+        // `review_gate_policy=emit_question` all fired and the file write
+        // succeeded.
+        let payload = json!({
+            "status": "compiled",
+            "compiler_mode": "dry_run",
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+            "file_written": true,
+            "file_path": "/tmp/missiond/.missiond/alignment/wave14-04/intent-alignment.lisp",
+            "file_sha256": "deadbeef",
+            "file_bytes": 128,
+            "file_created": true,
+            "file_overwritten": false,
+            "review_gate_policy": "emit_question",
+            "review_question_emitted": true,
+            "review_question_id": "review:directive:00000000-0000-0000-0000-000000000abc:v1:compile:deadbeef",
+            "review_question_text": "Confirm directive scope",
+        });
+        let refs = build_artifact_refs(ArtifactScope::Directive, &payload);
+        assert_eq!(refs["scope"], "directive");
+        assert_eq!(
+            refs["directive_id"],
+            "00000000-0000-0000-0000-000000000abc"
+        );
+        assert_eq!(refs["version"], 1);
+        assert_eq!(refs["status"], "compiled");
+        assert_eq!(refs["compiler_mode"], "dry_run");
+        // File-first splice surfaced verbatim.
+        assert_eq!(refs["file_written"], true);
+        assert_eq!(
+            refs["file_path"],
+            "/tmp/missiond/.missiond/alignment/wave14-04/intent-alignment.lisp"
+        );
+        assert_eq!(refs["file_sha256"], "deadbeef");
+        assert_eq!(refs["file_bytes"], 128);
+        assert_eq!(refs["file_created"], true);
+        assert_eq!(refs["file_overwritten"], false);
+        // Review-gate splice surfaced verbatim.
+        assert_eq!(refs["review_gate_policy"], "emit_question");
+        assert_eq!(refs["review_question_emitted"], true);
+        assert_eq!(
+            refs["review_question_id"],
+            "review:directive:00000000-0000-0000-0000-000000000abc:v1:compile:deadbeef"
+        );
+        assert_eq!(refs["review_question_text"], "Confirm directive scope");
+    }
+
+    #[test]
+    fn build_artifact_refs_plan_compile_persisted_minimal_payload() {
+        // Plan compile with persist=true but NO write_file / no review-gate
+        // policy — the v1 contract is "lift only what the inner handler
+        // stamped". Legacy callers should see only the row-id pointers.
+        let payload = json!({
+            "status": "compiled",
+            "compiler_mode": "sonnet",
+            "compiler_model": "claude-sonnet",
+            "plan_id": "11111111-1111-1111-1111-111111111111",
+            "version": 2,
+            "board_task_id": "btk-legacy",
+        });
+        let refs = build_artifact_refs(ArtifactScope::Plan, &payload);
+        assert_eq!(refs["scope"], "plan");
+        assert_eq!(
+            refs["plan_id"],
+            "11111111-1111-1111-1111-111111111111"
+        );
+        assert_eq!(refs["version"], 2);
+        assert_eq!(refs["board_task_id"], "btk-legacy");
+        assert_eq!(refs["status"], "compiled");
+        assert_eq!(refs["compiler_mode"], "sonnet");
+        assert_eq!(refs["compiler_model"], "claude-sonnet");
+        // No file_* / review_question_* fields when the inner handler
+        // didn't stamp them — the projection never fabricates.
+        for k in &[
+            "file_written",
+            "file_path",
+            "file_sha256",
+            "file_bytes",
+            "file_created",
+            "file_overwritten",
+            "file_write_error",
+            "review_gate_policy",
+            "review_question_emitted",
+            "review_question_id",
+            "review_question_text",
+            "review_question_warning",
+        ] {
+            let refs_obj = refs.as_object().unwrap();
+            assert!(
+                !refs_obj.contains_key(*k),
+                "legacy projection must not invent `{}`",
+                k
+            );
+        }
+    }
+
+    #[test]
+    fn build_artifact_refs_partial_status_with_file_write_error_surface() {
+        // Verify the partial-status splice (file_first writer's resolver
+        // failure path) surfaces both the downgraded status and the
+        // explanatory `file_write_error` so callers can act without
+        // re-parsing the inner JSON.
+        let payload = json!({
+            "status": "partial",
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+            "file_written": false,
+            "file_write_error": "no project_id, absolute cwd, or fallback target_project supplied",
+        });
+        let refs = build_artifact_refs(ArtifactScope::Directive, &payload);
+        assert_eq!(refs["scope"], "directive");
+        assert_eq!(refs["status"], "partial");
+        assert_eq!(refs["file_written"], false);
+        assert_eq!(
+            refs["file_write_error"],
+            "no project_id, absolute cwd, or fallback target_project supplied"
+        );
+    }
+
+    #[test]
+    fn build_artifact_refs_review_question_warning_surfaced_with_id_for_retry() {
+        // When the review-gate auto-emit publishes against the bus and
+        // fails, the inner handler stamps `review_question_emitted=false`
+        // + `review_question_id` (deterministic, retry-friendly) +
+        // `review_question_warning`. The projection must lift all three so
+        // the caller can replay the publish without recomputing the id.
+        let payload = json!({
+            "status": "compiled",
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+            "file_written": true,
+            "file_path": "/tmp/x/intent-alignment.lisp",
+            "file_sha256": "deadbeef",
+            "review_gate_policy": "emit_question",
+            "review_question_emitted": false,
+            "review_question_id": "review:directive:abc:v1:compile:deadbeef",
+            "review_question_warning": {
+                "code": "BUS_PUBLISH_FAILED",
+                "reason": "transport closed",
+                "scope": "directive",
+            },
+        });
+        let refs = build_artifact_refs(ArtifactScope::Directive, &payload);
+        assert_eq!(refs["review_question_emitted"], false);
+        assert_eq!(
+            refs["review_question_id"],
+            "review:directive:abc:v1:compile:deadbeef"
+        );
+        assert_eq!(
+            refs["review_question_warning"]["code"],
+            "BUS_PUBLISH_FAILED"
+        );
+    }
+
+    #[test]
+    fn build_artifact_refs_returns_scope_only_for_null_payload() {
+        // Defensive: if the inner handler returned a non-JSON ToolContent
+        // (e.g. a plain text error), the decorator falls back to Null and
+        // `build_artifact_refs` must still return a well-formed object
+        // carrying the scope marker so downstream consumers can rely on
+        // the field always being present.
+        let refs = build_artifact_refs(ArtifactScope::Plan, &Value::Null);
+        let obj = refs.as_object().expect("artifact_refs must be an object");
+        assert_eq!(obj.len(), 1, "scope-only fallback");
+        assert_eq!(obj["scope"], "plan");
+    }
+
+    // ── 4. decorate behaviour (legacy compatibility + new shape) ─────
+
+    #[test]
+    fn decorate_appends_artifact_refs_and_pipeline_meta_without_touching_inner() {
+        // Replays the inner -> decorated transformation. We drive
+        // `decorate` with a constructed ToolResult so the test stays pure
+        // (no AppState). The first content element must be untouched
+        // (byte-identical legacy payload) and the appended sibling must
+        // carry pipeline_stage / artifact_refs / next_step.
+        let inner_payload = json!({
+            "status": "compiled",
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+            "file_written": true,
+            "file_path": "/tmp/x/intent-alignment.lisp",
+            "file_sha256": "deadbeef",
+        });
+        let inner_text = serde_json::to_string_pretty(&inner_payload).unwrap();
+        let inner = ToolResult {
+            content: vec![missiond_mcp::tools::ToolContent::Text {
+                text: inner_text.clone(),
+            }],
+            is_error: None,
+        };
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::MESSAGE_INTAKE,
+                scope: ArtifactScope::Directive,
+                next_step: "test next step",
+                next_call: Some(json!({ "tool": "mission_directive", "action": "approve" })),
+                expects_next_inputs: json!({ "approved_directive_id": "uuid" }),
+            },
+        );
+        assert_eq!(
+            decorated.content.len(),
+            2,
+            "decorate must append a sibling, not replace"
+        );
+        // Inner element is byte-identical.
+        let kept = match &decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        assert_eq!(kept, inner_text, "inner payload must NOT be mutated");
+        // Meta sibling carries pipeline_stage + artifact_refs + next_step.
+        let meta_text = match &decorated.content[1] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let meta: Value =
+            serde_json::from_str(&meta_text).expect("meta must serialise as JSON");
+        assert_eq!(meta["pipeline_stage"], stages::MESSAGE_INTAKE);
+        assert_eq!(meta["flow_ref"], FLOW_REF);
+        assert_eq!(meta["next_step"], "test next step");
+        assert_eq!(meta["next_call"]["action"], "approve");
+        // artifact_refs lifts the file-first splice.
+        assert_eq!(meta["artifact_refs"]["scope"], "directive");
+        assert_eq!(
+            meta["artifact_refs"]["directive_id"],
+            "00000000-0000-0000-0000-000000000abc"
+        );
+        assert_eq!(meta["artifact_refs"]["file_written"], true);
+        assert_eq!(
+            meta["artifact_refs"]["file_path"],
+            "/tmp/x/intent-alignment.lisp"
+        );
+        // v0 non-goals are still loud on every response.
+        let non_goals = meta["v0_non_goals"]
+            .as_array()
+            .expect("v0_non_goals must be an array");
+        assert!(non_goals.iter().any(|v| v == "auto_approve_directive"));
+        assert!(non_goals.iter().any(|v| v == "auto_approve_plan"));
+        assert!(non_goals.iter().any(|v| v == "auto_answer_review_question"));
+        assert!(non_goals
+            .iter()
+            .any(|v| v == "autonomous_workstation_dispatch"));
+    }
+
+    #[test]
+    fn decorate_legacy_payload_with_no_file_or_review_gate_keeps_artifact_refs_minimal() {
+        // Pre-wave-14 caller: persist=false → no file_*, no review_*.
+        // The decorator must still surface artifact_refs (with the scope
+        // marker), but the row-id slot is empty when the inner handler
+        // returned a "dry_run" envelope.
+        let inner_payload = json!({
+            "status": "dry_run",
+            "compiler_mode": "dry_run",
+            "utterance": "test",
+        });
+        let inner_text = serde_json::to_string_pretty(&inner_payload).unwrap();
+        let inner = ToolResult {
+            content: vec![missiond_mcp::tools::ToolContent::Text {
+                text: inner_text.clone(),
+            }],
+            is_error: None,
+        };
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::MESSAGE_INTAKE,
+                scope: ArtifactScope::Directive,
+                next_step: "review",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let meta_text = match &decorated.content[1] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let meta: Value = serde_json::from_str(&meta_text).unwrap();
+        // artifact_refs surfaces scope + status + compiler_mode (lifted
+        // from the inner dry_run envelope) but NEVER fabricates file_*
+        // for a caller that didn't opt in.
+        let refs_obj = meta["artifact_refs"]
+            .as_object()
+            .expect("artifact_refs must be an object");
+        assert_eq!(refs_obj["scope"], "directive");
+        assert_eq!(refs_obj["status"], "dry_run");
+        assert_eq!(refs_obj["compiler_mode"], "dry_run");
+        for k in &[
+            "file_written",
+            "file_path",
+            "file_sha256",
+            "review_gate_policy",
+            "review_question_emitted",
+        ] {
+            assert!(
+                !refs_obj.contains_key(*k),
+                "legacy decoration must not invent `{}`",
+                k
+            );
+        }
+    }
+
+    // ── 5. planner_error scope mapping ──────────────────────────────
+
+    #[test]
+    fn planner_error_response_carries_artifact_refs_scope() {
+        // The early-fail error response must carry the same skeleton as a
+        // success — pipeline_stage + flow_ref + artifact_refs + next_step
+        // + v0_non_goals — so consumer dashboards can rely on a single
+        // shape. artifact_refs only carries the scope marker because no
+        // handler ran (no row id / file / review question exists yet).
+        let res = planner_error_response(PlannerError::PlanCompileMissingBoardTask);
+        assert_eq!(res.is_error, Some(true));
+        let meta_text = match &res.content[1] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let meta: Value = serde_json::from_str(&meta_text).unwrap();
+        assert_eq!(meta["pipeline_stage"], stages::PLAN_AUTHORING);
+        assert_eq!(meta["artifact_refs"]["scope"], "plan");
+        assert!(
+            meta["next_step"].is_string(),
+            "planner errors expose the suggestion as next_step"
+        );
+    }
+
+    #[test]
+    fn planner_error_scope_for_each_variant() {
+        assert_eq!(
+            planner_error_scope(&PlannerError::MissingMessage),
+            ArtifactScope::Directive
+        );
+        assert_eq!(
+            planner_error_scope(&PlannerError::PlanCompileMissingBoardTask),
+            ArtifactScope::Plan
+        );
+        assert_eq!(
+            planner_error_scope(&PlannerError::ApprovedPlanWithoutExecuteFlag),
+            ArtifactScope::Plan
+        );
+        assert_eq!(
+            planner_error_scope(&PlannerError::ExecuteWithoutApprovedPlan),
+            ArtifactScope::Execution
+        );
     }
 }
