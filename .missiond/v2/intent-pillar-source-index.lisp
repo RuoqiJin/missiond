@@ -2665,9 +2665,285 @@
         :wave "19 task 11 (NO-OP — 字段已存在自 wave 11 commit fc58018 + wave 18-02 commit 2fbaa88)"
         :note "wave 19 task 11 task contract 要求把 ExecutionEvent::Opened 加 dispatch_strategy/target_project/requested_cwd; 进入 verification 时发现字段已存在 — wave 11 commit fc58018 + wave 14-02 commit 2e7789a + wave 18-02 commit 2fbaa88 三阶段联合早已在 Opened/Claimed/Completed 全部 variant 加 dispatch metadata (3 optional 字段 serde defaults + skip_serializing_if); round-trip tests 已存在 (Opened 含与不含字段两种 JSON 都可解析); wiring (mission_execution(open) 写入 fields) 已建. 任务文档已照 NO-OP 历史归档进 task contract; 无新 commit, 字段无新增. 本 entry 仅作 source-index 元数据声明 (区分于 wave 18-02 entry — 那是 Claimed+Completed; 本 entry 是 Opened 的 NO-OP 注解). event-bus pillar 仍 protected, 不动正文"))
 
+    ;; ──────────────────────────────────────────────────
+    ;; v1.1 (wave 20 task 10) — wave 20 machine-driven dispatch + governance backfill
+    ;; ──────────────────────────────────────────────────
+    ;; 目的:
+    ;;   - 把 wave 20 task 01-09 的真实代码状态回填到 source-index
+    ;;   - wave 20 主线: machine-driven dispatch (Lisp 真成 dispatch SSOT) +
+    ;;     scoped-commit guard (script + pre-commit hook + brief renderer 集成) +
+    ;;     execution preflight contract scope + cross-plan distill auto-trigger +
+    ;;     LLM-augmented PLAN inference (sonnet_suggest opt-in) +
+    ;;     review auto-answer policy + ExecutionEvent legacy metadata sweep
+    ;;   - 不重复已有 section-id; 在 v1.0 baseline 上新增 9 anchor entry,
+    ;;     升级现有 entry: review-automation-policy-v0 (partial → code-aligned with auto-answer),
+    ;;     ExecutionEvent dispatch-metadata-v1 (note 扩 全 11 variants 覆盖完成)
+    ;;   - 保留 R008 + R016 (section-id 不变, 改名走 :prev-id)
+    ;;   - 11-stage scheduler 主线 + machine-contract 全闭环已 close;
+    ;;     仍 partial 是: 完整 LLM auto-approve 全 4 v0 non-goal /
+    ;;     autonomous workstation spawn 完全无 hint /
+    ;;     git pre-commit hook 默认安装 (本 wave 加了 .githooks/pre-commit
+    ;;     但要 git config core.hooksPath .githooks 才生效 — 默认未启用) /
+    ;;     frontend lisp 仍未启动
+    ;;
+    ;; wave 20 已完成 commit (anchor):
+    ;;   - 3f27681 chore(wave19): archive task contracts (task 00 — 13 wave19-*.lisp + 13 wave19-*.md 入库, 仅归档不进 source-index)
+    ;;   - 1fc0fd6 feat(scope): enforce task scope on staged changes (task 01 — scripts/task-scope-guard.mjs staged/commit 双 mode + .githooks/pre-commit 仅 MISSIOND_TASK_CONTRACT env 触发 + 9+3 fixtures + 0 mutating git; commit-mode delegates verify-task-contract)
+    ;;   - b36cf6c feat(renderer): emit task scope guard step (task 02 — render-claudecode-task.mjs Commit 节加 task-scope-guard --mode staged 步骤 + MISSIOND_TASK_CONTRACT env prefix; 实战通过)
+    ;;   - fe835e8 feat(execution): preflight task contract scope (task 03 — mission_execution preflight_commit 加 8 新字段 task_contract_status / staged_out_of_scope / staged_forbidden / unstaged_in_scope / task_contract_scope / next_step / task_contract_error / task_contract_resolved_path; 无新错误码 信息性; grep proof 0 mutating git; legacy byte-compat)
+    ;;   - 681c95d feat(plan): drive workstation dispatch from task contract (task 04 — DispatchContractMode {Rendered, Machine}, dispatch_contract_mode arg / render_markdown shorthand; Machine 模式接通 wave-19 emitter ↔ consumer; 加 task_contract_source_path field; unified_entry forward emitter knobs; Lisp 真成 dispatch SSOT)
+    ;;   - d308fae test(execution): pin unified-entry machine loop (task 05 — 6 smoke tests s4→s6 machine-mode loop / Markdown non-load-bearing / malformed refusal; build_artifact_refs lift 8 个 machine-contract 字段; wave-15..19 byte-compat 钉死)
+    ;;   - 3669ebc feat(plan): trigger cross-plan distill chains automatically (task 06 — auto_chain_trigger default never; 6 deterministic 触发 rule 全过才触发; sonnet 仍仅显式; default off byte-compat)
+    ;;   - 6bb935a feat(plan): suggest plan fields with sonnet (task 07 — infer_plan_fields=sonnet_suggest mode opt-in / suggest only / applied=false 钉死; Sonnet 不可用 llm_unavailable no fallback; DAG mode 拒; default off byte-compat)
+    ;;   - 8adb0a8 feat(review): apply auto-answer review policy (task 08 — auto_answer_policy off|deterministic_safe|dry_run; 5 inherited rules + 2 new destructive_action / caller_decision_present; 3 invariants I1 never reject / I2 destructive never auto-promote / I3 no LLM)
+    ;;   - 6e01e3f feat(execution): complete dispatch metadata event coverage (task 09 — 8 legacy ExecutionEvent variants 全加 dispatch trio Heartbeat/Released/DeviationRecorded/DecisionRecorded/IssueRecorded/Audited/Repaired/StaleClaim; 从 companion log 自动继承; wave14-02 启动的 ExecutionEvent metadata 全部完成)
+    ;;
+    ;; 状态升级摘要 (本批次直接修改的现有 entry, 见各 entry note 末尾):
+    ;;   - intent-layer.unified-entry-pipeline.review-automation-policy-v0      status code-aligned-partial → code-aligned (wave 20-08 加 auto_answer_policy 闭环 5+2 rule + 3 invariants; LLM 自动 approve 仍 v0 non-goal)
+    ;;   - event-bus.section.execution-event.dispatch-metadata-v1               note 扩 (wave 20-09 完成 8 legacy variants 全覆盖; 11 variants 全 dispatch trio)
+    ;;   - intent-layer.machine-contract.task-contract-v1                       note 扩 (wave 20-04 machine 模式接通后 Lisp 真正成为 dispatch SSOT — Markdown 仍存为兼容视图但 non-load-bearing)
+    ;; ──────────────────────────────────────────────────
+    (wave-20-backfill v1.1
+      :date "2026-04-27"
+      :decided-by "wave 20 / task 10 lisp backfill session"
+      :scope "回填 wave 20 task 00-09 真实代码状态; 新增 9 anchor entry + 1 status upgrade (review-automation-policy-v0 由 partial → full); 不发明 wave20 没实现的架构"
+      :non-goal "本任务不改 Rust / SQL / JS / Cargo / 任务文档; 不真正压缩主 Lisp; 不动 event-bus.lisp / intent-mcp-defs.lisp; 不启动 frontend Lisp (continue postpone); pre-commit hook 默认未 git config core.hooksPath 启用 (照实记录, 不假装默认开)"
+      :commits
+        [(commit-1 :hash "1fc0fd6" :title "feat(scope): enforce task scope on staged changes"
+                   :primary-targets ["scripts/task-scope-guard.mjs"
+                                     ".githooks/pre-commit"]
+                   :tests "task-scope-guard 双 mode (staged check 默认 / commit mode 借 verify-task-contract); 9 staged-mode fixtures + 3 commit-mode fixtures 覆盖 in-scope / forbidden touched / out-of-scope staged / unstaged in-scope warning / 空 staged / 无 contract; pre-commit hook 仅在 MISSIOND_TASK_CONTRACT env 设置时触发 (其它 commit 不阻塞); 全程 0 mutating git (grep proof: 不 add/commit/stash/reset/checkout/push/merge/rebase); commit-mode 直接 delegate scripts/verify-task-contract.mjs 逻辑")
+         (commit-2 :hash "b36cf6c" :title "feat(renderer): emit task scope guard step"
+                   :primary-targets ["scripts/render-claudecode-task.mjs"]
+                   :tests "render-claudecode-task.mjs Commit 节追加 'Pre-commit guard (staged scope)' 子步: 'MISSIOND_TASK_CONTRACT=<task-lisp> node scripts/task-scope-guard.mjs --mode staged' (env prefix + 显式 mode, 不污染 user shell env); brief 实战通过 (wave20-02 自身的 brief 渲染了该步, 后续 wave20-03..09 commit 全程跑 staged guard 在 commit 前; 0 false positive); 与 wave19-05 既有 4 节 byte-compat (新加 1 子步, 不破既有 anchor)")
+         (commit-3 :hash "fe835e8" :title "feat(execution): preflight task contract scope"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
+                   :tests "mission_execution(action='preflight_commit') 加 8 新 response 字段 (task_contract_status / staged_out_of_scope / staged_forbidden / unstaged_in_scope / task_contract_scope / next_step / task_contract_error / task_contract_resolved_path); 当 caller 传 task_contract_path 时, daemon 读 contract 解析 write-scope + must-not-touch, 与 git status --porcelain=v1 staged/unstaged 集合做交叉, 标 'in_scope' / 'out_of_scope' / 'forbidden_touched' / 'unstaged_in_scope_warning'; 无新错误码 (信息性 surface, 让 caller 决定是否 commit); grep proof 0 mutating git (仍只 git status --porcelain=v1); legacy byte-compat 当 task_contract_path absent (8 字段全 None / not_applicable)")
+         (commit-4 :hash "681c95d" :title "feat(plan): drive workstation dispatch from task contract"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "DispatchContractMode { Rendered (default), Machine } 由 dispatch_contract_mode 字符串 allowlist 或 render_markdown=false 布尔 shorthand 解析; Machine 模式接通 wave-19/06 emitter ↔ wave-19/07 consumer (run_workstation_dispatch_with_contract): emit 产出 contract path 后, runner 直接交 path 给 consumer 读盘, Markdown brief 变 optional 兼容元数据; 加 task_contract_source_path field (machine + Dispatched only); brief 加 ## Source contract preamble 让 observer 看到是 Lisp 驱动; DAG path TaskContractDispatchCtx 在 scheduler 入口锁定 mode, propagate 给每节点; unified_entry forward 4 emitter/dispatch knobs (task_contract_mode / emit_task_contract / dispatch_contract_mode / render_markdown); 1246 daemon / 17 mcp / 302 core tests + workspace build + check-task-contract --all + check-architecture-lisp --all-v2 + git diff --check + verify-task-contract 全过. **此为 wave 20 主线: Lisp 真正成为 dispatch SSOT, Markdown brief 不再是 load-bearing**")
+         (commit-5 :hash "d308fae" :title "test(execution): pin unified-entry machine loop"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+                   :tests "build_artifact_refs lift 8 个 machine-contract 字段 (task_contract_mode / task_contract_eligible / task_contract_path / task_contract_source_path / dispatch_contract_mode / render_command / task_contract_skip_reason / task_contract_error); 加 6 新 unit/smoke test: (1) artifact_refs lifts every machine-contract field on synthesised wave-20/04 inner payload; (2) artifact_refs omits all machine-contract keys when inner is silent (wave-15..19 byte-compat preserved); (3) fixture-based contract overlay smoke 跑 parse_task_contract + WorkstationDispatchHints::overlay_contract + build_task_brief_with_source 不 IO; (4) 完整 machine-mode canonical loop smoke s4 plan-compile dry_run → s6 plan-execute machine mode 断言 task_contract_source_path == task_contract_path SSOT invariant; (5) Markdown brief non-load-bearing assertion 证 task_brief_preview 仅在 inner payload 不在 artifact_refs; (6) malformed-contract refusal smoke 证 parse_task_contract 返 TaskContractParseError::MissingRequired('goal') 后 SafeDescriptor 落 workstation_dispatch_status=skipped_malformed_task_contract, 无 inner_result, 无 claude -p fallback artefact; 1252 daemon (1246 + 6 new) / 17 mcp / 302 core tests OK")
+         (commit-6 :hash "3669ebc" :title "feat(plan): trigger cross-plan distill chains automatically"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
+                   :tests "mission_workflow(distill) 加 auto_chain_trigger arg (默认 'never' = 字节兼容); 6 deterministic 触发 rule 必须全过才触发 auto chain (parent_plan_succeeded / parent_distill_on_success_true / evidence_sha256_present / project_root_resolvable / workflow_anchor_present / chain_id_not_already_supplied); sonnet 仍仅显式 (auto_chain_trigger 不会自动 sonnet, 仍要求 caller 显式 distill_chain_mode=sonnet); 复用 wave 19-09 deterministic id 'chain:auto:wf-<sha256(...)>'; default 'never' byte-compat (legacy callers 不受影响); auto_chain_trigger='deterministic_only' 才会按 6 rule 评估; 失败任一 rule → trigger_status='skipped_<rule_name>' 结构化 surface 不静默吞")
+         (commit-7 :hash "6bb935a" :title "feat(plan): suggest plan fields with sonnet"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "infer_plan_fields=sonnet_suggest 新 mode 接 wave-18/06 deterministic 之上: 先跑 deterministic, 再 Sonnet 提议; **opt-in / suggest only / applied=false 永远钉死** (Sonnet 提议永不自动落, 仅 surface llm_proposals[] 给 caller 看); Sonnet 不可用 → llm_status='llm_unavailable' (no fallback, 不静默退到 deterministic-only); DAG mode 路径 refuse_llm_inference_in_dag_mode 拒 (sonnet_suggest 仅单节点 execute mode 可用); conflict_status 重新对账 caller args + deterministic high/medium tier; default off (字节兼容); 1230 daemon + 17 mcp + workspace build + architecture-lisp + git diff --check 全过")
+         (commit-8 :hash "8adb0a8" :title "feat(review): apply auto-answer review policy"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+                   :tests "AutoAnswerPolicy { Off (default), DeterministicSafe, DryRun } 由 parse_auto_answer_policy 解析 (case-insensitive + trimmed; hyphenated aliases 接受; unknown collapses to Off); evaluate_auto_answer_policy 复用 wave-18/07 ReviewAutomationContext + safety inspector 加 2 新 guard: (G1) 5 inherited rules from wave-18/07 (caller_opt_in 必填 / no_unresolved_blockers / no_pending_questions_on_target / target_in_review_state / promotion_path_explicit); (G2) destructive-action gate (archive|supersede|remove case-insensitive, centralised in DESTRUCTIVE_REVIEW_ACTIONS) NEVER 自动 promote — pinned 为 dedicated AutoAnswerStatus::SkippedDestructiveAction; (G3) caller-decision guard 让显式 review_decision 永远 win; **3 hard invariants test-pinned**: I1 NEVER auto-reject (selected_decision 在任何 mode 下都不会 'rejected', 上游 Rejected 被 demote 到 NeedsChanges + audit entry 'rule:rejection_demoted'); I2 destructive actions NEVER auto-promote 即使 5 safety rule 全过; I3 完全 pure / sync / 不调 LLM (signature enforcement + 确定性测试); I4 skipped 时 response 带 policy_result / selected_decision / safety_rule_results[] / requires_human=true; dry_run 模式跑同 inspector + guards 但 ALWAYS requires_human=true; unified_entry forward auto_answer_policy 进 plan-execute key list verbatim (pipeline 不 re-validate, inner handler 拥 allowlist) + build_artifact_refs lift 5 outcome keys; default off byte-compat (lift 仅在 inner stamped 时 fire); **NO 新 MCP tool**; **NO 实时 LLM auto-approval**; **NO destructive auto-promotion**; 1288 daemon (1252 + 36) + 17 mcp + workspace build + architecture-lisp + git diff --check 全过")
+         (commit-9 :hash "6e01e3f" :title "feat(execution): complete dispatch metadata event coverage"
+                   :primary-targets ["crates/missiond-core/src/event/events/execution.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"]
+                   :tests "Sweep 8 legacy ExecutionEvent variants (Heartbeat / Released / DeviationRecorded / DecisionRecorded / IssueRecorded / Audited / Repaired / StaleClaim) 全加 optional dispatch_strategy/target_project/requested_cwd serde-default skip-serializing fields, 与 Opened (wave-11) / Claimed+Completed (wave-18/02) / PlanNodeStateChanged (wave-14/02) 已有 projection 协议对齐; wire-shape 影响每 variant: Heartbeat 5→8, Released 5→8 (summary 仍为 mandatory key 在 legacy shape), DeviationRecorded 4→7, DecisionRecorded 4→7, IssueRecorded 4→7, Audited 4→7, Repaired 3→6, StaleClaim 4→7; 继承路径 — 每个 emit site 调 read_dispatch_metadata_from_log(&file) 读 post-write LogFile, forward 三元组; Audit 发 Audited 后 per-stale-claim StaleClaim, 共享 1 meta snapshot via clone; serde back-compat triple-pinned: (1) legacy_json_without_dispatch_metadata 解 None; (2) without_dispatch_metadata_serializes_byte_identical_to_legacy 锁 wire shape; (3) with_dispatch_metadata_round_trips verbatim; partial-metadata sweep 跨 Heartbeat/Audited/Repaired pin per-field skip-serialize; 327 core (302 baseline + 25 new) + 1304 daemon (1288 baseline + 16 new) + 17 mcp + workspace build + architecture-lisp + git diff --check + verify-task-contract 全过. **wave14-02 启动的 ExecutionEvent metadata 协议在 wave 20-09 全 11 variants 闭环**")]
+
+      ;; ── 区域 57 · execution preflight task-contract scope v1 (wave 20 task 03) ──
+      (section-entry
+        :section-id "intent-layer.scoped-commit-worktree-preflight-task-contract-v1"
+        :title "execution preflight task-contract scope v1 — 8 新字段 + 0 mutating git + legacy byte-compat"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: scoped-commit-worktree-preflight-task-contract-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
+        :cross-ref ["intent-layer.scoped-commit-worktree-preflight-v0"
+                    "intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.scoped-commit-enforce-v0"
+                    "intent-layer.machine-contract.task-verifier-v1"]
+        :wave "20 task 03 (commit fe835e8)"
+        :note "wave 18-08 加 mission_execution(preflight_commit) 只跑 git status 不 mutating; 但当时只 surface staged/unstaged/changed_files, caller 仍要自己对 task contract write-scope 做对账. wave20-03 在同一 preflight 加 8 新 response 字段把 contract 对账下沉进 daemon: task_contract_status (resolved | not_supplied | malformed | resolution_failed) + task_contract_scope (echo write-scope + must-not-touch from contract) + staged_out_of_scope (staged 文件 ∉ write-scope) + staged_forbidden (staged 文件 ∈ must-not-touch) + unstaged_in_scope (write-scope 文件未 stage 警告) + next_step 建议 (ready_to_commit / stage_required / unstage_out_of_scope / drop_forbidden / claim_scope_required) + task_contract_error (parse 失败原因) + task_contract_resolved_path (实际读 contract 文件路径). 无新错误码 (信息性 surface, daemon 不替 caller 决定 commit/abort). **grep proof 0 mutating git** — 仍只 git status --porcelain=v1, 不 add/commit/stash/reset/checkout/push/merge/rebase. Legacy byte-compat 当 task_contract_path absent (8 字段全 None 或 not_applicable). brief → preflight (含 contract 对账) → complete enforce + verifier 四段闭环加强 (wave 17-07 + wave 18-08 + wave 19-08 + wave 20-03)")
+
+      ;; ── 区域 58 · machine-driven dispatch v0 (wave 20 task 04) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.dispatch-machine-mode-v0"
+        :title "machine-driven dispatch v0 — DispatchContractMode {Rendered, Machine} + Lisp 真成 dispatch SSOT + Markdown 变 optional 兼容元数据"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: dispatch-machine-mode-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.plan-dag.task-contract-emitter-v0"
+                    "intent-layer.unified-entry-pipeline.workstation-task-contract-consumer-v0"
+                    "intent-layer.unified-entry-pipeline.run-pipeline-helper.v1"]
+        :wave "20 task 04 (commit 681c95d)"
+        :note "wave 19 全闭环 plan emit (19-06) → workstation consume (19-07) → execution verify (19-08), 但 dispatch 路径仍是: plan emit contract → renderer 出 Markdown brief → dispatch 用 brief; 即 Markdown 仍是 dispatch 表层. wave 20-04 把 wave-19/07 dormant consumer (run_workstation_dispatch_with_contract) 接进 active dispatch 路径: (1) DispatchContractMode { Rendered (default 兼容 wave-15..19 wire shape), Machine } 由 dispatch_contract_mode (字符串 allowlist 'rendered' / 'machine') 或 render_markdown=false (布尔 shorthand) 解析; (2) Machine 模式: emit 产出 contract path 后, dispatch 直接 forward path 给 consumer 读盘 (overlay onto brief, contract 是 SSOT); brief 加 ## Source contract preamble 让 observer 看到是 Lisp 驱动; (3) response surface task_contract_source_path field (machine + Dispatched only); (4) Markdown 变 optional 兼容元数据 (render_command 仍 surface 给 out-of-process 渲染); (5) DAG path TaskContractDispatchCtx 在 scheduler 入口锁定 dispatch_contract_mode, propagate 给每个 per-node dispatch (no per-node override); (6) unified_entry forward 4 knobs (wave-20: dispatch_contract_mode / render_markdown + wave-19: task_contract_mode / emit_task_contract — 后者之前未 forward). Malformed contract → SafeDescriptor (status='skipped_malformed_task_contract'); **绝不 fall back claude -p**. **此为 wave 20 主线: Lisp 真正成为 dispatch SSOT, Markdown brief 不再是 load-bearing** (但 ClaudeCode worker 仍在用 Markdown — Markdown 保留 ergonomics, machine 模式 caller 可关闭 render). 默认 Rendered, 不破 wave-15..19 任何 byte-shape")
+
+      ;; ── 区域 59 · unified-entry machine-loop smoke v2 (wave 20 task 05) ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.machine-loop-smoke-v2"
+        :title "unified-entry machine-loop smoke v2 — 6 smoke tests + 8 machine-contract artifact_refs lift + Markdown non-load-bearing 钉死 + malformed refusal"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: machine-loop-smoke-v2"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+        :cross-ref ["intent-layer.machine-contract.dispatch-machine-mode-v0"
+                    "intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.unified-entry-pipeline.workstation-task-contract-consumer-v0"
+                    "intent-layer.unified-entry-pipeline.run-pipeline-helper.v1"
+                    "intent-layer.unified-entry-pipeline.e2e-smoke-v0"
+                    "intent-layer.unified-entry-pipeline.autonomous-loop-smoke-v1"]
+        :wave "20 task 05 (commit d308fae)"
+        :note "wave 16-08 落 deterministic 4 hand-off no-LLM smoke (s1→s4→s6 + sidecar) ; wave 17-08 加 paused-resume e2e smoke; wave 18-09 加 autonomous loop smoke v1; wave 20-05 加 machine-loop smoke v2 — 把 wave 20-04 machine-driven dispatch loop 端到端 smoke 化: (1) build_artifact_refs lift wave-19/06 + wave-20/04 8 个 machine-contract keys (task_contract_mode / task_contract_eligible / task_contract_path / task_contract_source_path / dispatch_contract_mode / render_command / task_contract_skip_reason / task_contract_error) 进 unified envelope 让 downstream 不 re-parse inner JSON; (2) 6 新 test 覆盖: artifact_refs lift 全字段 (合成 wave-20/04 inner payload), artifact_refs omit 当 inner 沉默 (wave-15..19 byte-compat preserved), fixture-based contract overlay smoke (parse + overlay + brief render 不 IO), 完整 machine-mode canonical loop smoke (s4 plan-compile dry_run → s6 plan-execute machine 断言 task_contract_source_path == task_contract_path SSOT invariant), Markdown brief non-load-bearing assertion (task_brief_preview 仅在 inner payload 不在 artifact_refs), malformed-contract refusal smoke (parse_task_contract 返 MissingRequired('goal') 后 SafeDescriptor workstation_dispatch_status='skipped_malformed_task_contract', 无 inner_result, 无 claude -p fallback). **no LLM, no spawn, no shell**; 1252 daemon (1246 + 6) / 17 mcp / 302 core tests OK; wave-15..19 byte-compat 钉死 (artifact_refs 仅在 inner stamped machine keys 时 lift)")
+
+      ;; ── 区域 60 · cross-plan distill auto-trigger v1 (wave 20 task 06) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.cross-plan-distill-auto-trigger-v1"
+        :title "cross-plan distill auto-trigger v1 — auto_chain_trigger default never + 6 deterministic trigger rules + sonnet 仍仅显式"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: cross-plan-distill-auto-trigger-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+           "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
+        :cross-ref ["intent-layer.plan-dag-runtime-v2.cross-plan-distill-chain-v0"
+                    "intent-layer.plan-dag-runtime-v2.cross-plan-distill-auto-chain-v1"
+                    "intent-layer.plan-dag-runtime-v2.finalize-distill-v0"
+                    "memory.directive-layer.plan-evidence-sidecar"]
+        :wave "20 task 06 (commit 3669ebc)"
+        :note "wave 19-09 cross-plan distill auto-chain v1 加 deterministic id 但仍要求 caller 显式传 auto_chain=true 决定串 chain. wave20-06 加 mission_workflow(distill) auto_chain_trigger arg (default 'never' = 字节兼容, 'deterministic_only' = 按 6 rule 评估): 6 deterministic trigger rule 必须全过才触发 auto chain — (R1) parent_plan_succeeded (parent plan FSM = succeeded 或 succeeded-partial), (R2) parent_distill_on_success_true (parent plan / sidecar 标 distill_on_success=true), (R3) evidence_sha256_present (parent evidence sidecar 有可哈希内容), (R4) project_root_resolvable (US 隔离), (R5) workflow_anchor_present (workflow 已注册), (R6) chain_id_not_already_supplied (caller 没传 chain_id 显式覆盖); 任一 rule 失败 → trigger_status='skipped_<rule_name>' 结构化 surface 不静默吞; sonnet 仍仅显式 (auto_chain_trigger 不会自动 sonnet, 仍要求 caller 显式 distill_chain_mode=sonnet); 复用 wave 19-09 deterministic id 'chain:auto:wf-<sha256(...)>'; default 'never' byte-compat (legacy callers 不受影响). 闭环 wave 18-05 deferred 的 'auto-trigger 不需要 caller 显式 opt-in' 但仍 deterministic, sonnet 完全自动 (5+ rule 自动满足) 仍 future")
+
+      ;; ── 区域 61 · LLM-augmented plan inference v0 (wave 20 task 07) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag.llm-augmented-plan-field-inference-v0"
+        :title "LLM-augmented plan inference v0 — infer_plan_fields=sonnet_suggest opt-in + applied=false 钉死 + Sonnet 不可用 llm_unavailable + DAG mode 拒"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: llm-augmented-plan-field-inference-v0"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.plan-dag.autonomous-plan-field-inference-v0"
+                    "intent-layer.actor.plan-dag-scheduler"
+                    "intent-layer.unified-entry-pipeline.workstation-dispatch-v0"]
+        :wave "20 task 07 (commit 6bb935a)"
+        :note "wave 18-06 autonomous PLAN field inference v0 是 deterministic-only (3 confidence + apply_safe 仅 high; 无 LLM). wave20-07 加 infer_plan_fields=sonnet_suggest mode 把 LLM 引入推理但保持严格安全护栏: (1) 先跑 wave-18/06 deterministic 完整流程 (高/中/低 confidence), 再 Sonnet 提议 (额外字段 / 增强 confidence); (2) **opt-in only** — default off (字节兼容); (3) **suggest only / applied=false 永远钉死** — Sonnet 提议永不自动落, 仅 surface llm_proposals[] 给 caller 看 (caller 决定是否 manual apply); (4) Sonnet 不可用 → llm_status='llm_unavailable' (no fallback, 不静默退到 deterministic-only — 显式告诉 caller LLM 那段没跑); (5) DAG mode 路径 refuse_llm_inference_in_dag_mode 拒 (sonnet_suggest 仅单节点 execute mode 可用, 防 DAG 内多节点同时 LLM 推理炸 token); (6) conflict_status 重新对账 caller args + deterministic high/medium tier (LLM 提议与 caller 显式 args 冲突 → conflict_status='caller_wins'); 1230 daemon + 17 mcp + workspace build + architecture-lisp + git diff --check 全过. **status code-aligned-partial** — Sonnet suggest 已落但 applied=false, 完整 LLM-augmented apply (e.g. medium confidence + LLM corroboration → auto apply) 仍 v0 non-goal future")
+
+      ;; ── 区域 62 · review auto-answer policy v0 (wave 20 task 08) ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.review-auto-answer-policy-v0"
+        :title "review auto-answer policy v0 — auto_answer_policy off|deterministic_safe|dry_run + 5+2 rules + 3 hard invariants (I1 never reject / I2 destructive never auto-promote / I3 no LLM)"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: review-auto-answer-policy-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.review-automation-policy-v0"
+                    "intent-layer.unified-entry-pipeline.review-gate-resolution-v0"
+                    "intent-layer.unified-entry-pipeline.review-gate-resolution-listener-v0"
+                    "intent-layer.unified-entry-pipeline.run-pipeline-helper.v1"]
+        :wave "20 task 08 (commit 8adb0a8)"
+        :note "wave 18-07 review_automation_policy 是 caller-driven (manual / suggest / auto_safe) deterministic 但仍要求 caller 显式提供 review_decision; review-gate listener (wave 16-02 + 17-01) 自动接 QuestionEvent::Resolved 但仍要求 question 已被人 (or upstream) answer. wave20-08 加 auto_answer_policy 把 deterministic 自动 answer 引入 listener 路径但 3 invariants 永久护栏: AutoAnswerPolicy { Off (default), DeterministicSafe, DryRun } 由 parse_auto_answer_policy 解析 (case-insensitive + trimmed; hyphenated aliases 接受; unknown collapses to Off). evaluate_auto_answer_policy 复用 wave-18/07 ReviewAutomationContext + safety inspector 加 2 新 guard: G1 destructive-action gate (archive|supersede|remove case-insensitive, centralised in DESTRUCTIVE_REVIEW_ACTIONS) NEVER 自动 promote — pinned 为 dedicated AutoAnswerStatus::SkippedDestructiveAction; G2 caller-decision guard 让显式 review_decision 永远 win. **3 hard invariants test-pinned**: **I1 NEVER auto-reject** (selected_decision 在任何 mode 下都不会 'rejected', 上游 Rejected 被 demote 到 NeedsChanges + audit entry 'rule:rejection_demoted'); **I2 destructive actions NEVER auto-promote** 即使 5 safety rule 全过; **I3 完全 pure / sync / 不调 LLM** (signature enforcement + 确定性测试). I4 skipped 时 response 带 policy_result / selected_decision / safety_rule_results[] / requires_human=true. dry_run 模式跑同 inspector + guards 但 ALWAYS requires_human=true. unified_entry forward auto_answer_policy 进 plan-execute key list verbatim (pipeline 不 re-validate, inner handler 拥 allowlist) + build_artifact_refs lift 5 outcome keys (auto_answer_policy / policy_result / selected_decision / safety_rule_results / requires_human) 进 unified envelope. default off byte-compat (lift 仅在 inner stamped 时 fire). **NO 新 MCP tool**; **NO 实时 LLM auto-approval**; **NO destructive auto-promotion**. unified_entry doc-comment pivot: legacy 'auto-answer a review question' non-goal 收窄到 'auto-answer a review question via LLM' — listener-side deterministic promotion 在 opt-in deterministic_safe 下显式允许, LLM ban 仍持. 闭环 wave 16-02 / 17-01 / 18-07 留下的 'auto-answer 仍 caller-driven' 部分; LLM 自动 approve 仍 v0 non-goal")
+
+      ;; ── 区域 63 · ExecutionEvent legacy metadata sweep v0 (wave 20 task 09) ──
+      (section-entry
+        :section-id "event-bus.section.execution-event.dispatch-metadata-legacy-sweep-v0"
+        :title "ExecutionEvent legacy metadata sweep v0 — 8 legacy variants 全加 dispatch trio + 11 variants 闭环 + companion log 自动继承"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar event-bus :: section execution-event :: dispatch-metadata-legacy-sweep-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-core/src/event/events/execution.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"]
+        :cross-ref ["event-bus.section.execution-event.dispatch-metadata-v1"
+                    "event-bus.section.execution-event.opened-dispatch-metadata-note-wave19-11"
+                    "event-bus.section.execution-event.plan-node-state-changed"
+                    "intent-layer.plan-dag-runtime-v2.execution-event-decision"]
+        :wave "20 task 09 (commit 6e01e3f)"
+        :note "wave 14-02 启动 ExecutionEvent dispatch metadata 协议 (PlanNodeStateChanged); wave 18-02 加 Claimed + Completed; wave 19-11 NO-OP 验证 Opened 已含; wave20-09 sweep 剩余 8 legacy variants 全加 optional dispatch_strategy/target_project/requested_cwd serde-default skip-serializing fields, 11 variants 全 dispatch trio 闭环: Heartbeat 5→8, Released 5→8 (summary 仍为 mandatory key 在 legacy shape), DeviationRecorded 4→7, DecisionRecorded 4→7, IssueRecorded 4→7, Audited 4→7, Repaired 3→6, StaleClaim 4→7. 继承路径 — 每个 emit site 调 read_dispatch_metadata_from_log(&file) 读 post-write LogFile, forward 三元组; Audit 发 Audited 后 per-stale-claim StaleClaim 共享 1 meta snapshot via clone. serde back-compat triple-pinned per variant: (1) legacy_json_without_dispatch_metadata 解 None; (2) without_dispatch_metadata_serializes_byte_identical_to_legacy 锁 wire shape; (3) with_dispatch_metadata_round_trips verbatim. partial-metadata sweep 跨 Heartbeat/Audited/Repaired pin per-field skip-serialize. 327 core (302 baseline + 25 new) + 84 agent_execution (68 baseline + 16 new) + 1304 daemon (1288 baseline + 16) + 17 mcp + workspace build OK. **wave14-02 启动的 ExecutionEvent metadata 协议在 wave 20-09 全 11 variants 闭环, 不再有 dispatch metadata gap**. event-bus pillar 仍 protected (本 entry 仅 source-index 元数据声明)")
+
+      ;; ── 区域 64 · task-scope-index-guard v1 (wave 20 task 01) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.task-scope-index-guard-v1"
+        :title "task-scope-index-guard v1 — staged/commit 双 mode + .githooks/pre-commit 仅 MISSIOND_TASK_CONTRACT env 触发 + 0 mutating git"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: task-scope-index-guard-v1"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["scripts/task-scope-guard.mjs"
+           ".githooks/pre-commit"]
+        :cross-ref ["intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.machine-contract.task-verifier-v1"
+                    "intent-layer.scoped-commit-enforce-v0"
+                    "intent-layer.scoped-commit-handoff-brief-default-v1"]
+        :wave "20 task 01 (commit 1fc0fd6)"
+        :note "wave 19 闭环 task-contract: schema (19-02) + verifier (19-02) + report (19-03) + shared-memory (19-04) + renderer (19-05) + plan emit (19-06) + workstation consume (19-07) + execution complete verify (19-08); 但 commit 前的 staged scope 检查仍要求 caller 手工对账. wave20-01 加 scripts/task-scope-guard.mjs 把对账下沉到 git 端: (1) 双 mode — staged mode 默认 (commit 前检查 git diff --cached --name-only 与 task contract write-scope/must-not-touch); commit mode (post-commit, delegate scripts/verify-task-contract.mjs 逻辑); (2) 9 staged-mode fixtures + 3 commit-mode fixtures 覆盖 in-scope / forbidden touched / out-of-scope staged / unstaged in-scope warning / 空 staged / 无 contract; (3) .githooks/pre-commit hook 仅在 MISSIOND_TASK_CONTRACT env 设置时触发 task-scope-guard --mode staged (其它 commit 不阻塞 — opt-in 不破现有 workflow); (4) 全程 0 mutating git (grep proof: 不 add/commit/stash/reset/checkout/push/merge/rebase). **status code-aligned-partial** — guard script + hook 已落, 但 git config core.hooksPath .githooks 默认未启用 (要 caller 显式 git config 或 task-renderer brief 指引才生效); enforce-by-default 切 git config 默认 + worktree-level scope enforce 仍 future")
+
+      ;; ── 区域 65 · renderer scoped-commit guard v2 (wave 20 task 02) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.renderer-scoped-commit-guard-v2"
+        :title "renderer scoped-commit guard v2 — Commit 节加 task-scope-guard --mode staged 子步 + MISSIOND_TASK_CONTRACT env prefix"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: renderer-scoped-commit-guard-v2"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/render-claudecode-task.mjs"]
+        :cross-ref ["intent-layer.machine-contract.renderer-dispatch-brief-v1"
+                    "intent-layer.machine-contract.task-scope-index-guard-v1"
+                    "intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.scoped-commit-handoff-brief-default-v1"]
+        :wave "20 task 02 (commit b36cf6c)"
+        :note "wave 19-05 renderer 加 4 节 (Machine Contract / Dispatch Note / Shared Memory / Report Contract) + verify command. wave20-02 在 Commit 节追加 'Pre-commit guard (staged scope)' 子步: 'MISSIOND_TASK_CONTRACT=<task-lisp> node scripts/task-scope-guard.mjs --mode staged' (env prefix + 显式 mode, 不污染 user shell env, brief 渲染时直接打印整条命令让 worker copy-paste 可跑). 实战通过 — wave20-02 自身 brief 已含该步, 后续 wave20-03..09 commit 全程跑 staged guard 在 commit 前; 0 false positive (8 个 commit 全过). 与 wave19-05 既有 4 节 byte-compat (新加 1 子步, 不破既有 anchor; agent-team literal 单实例条件不动). **brief → preflight (wave 18-08 + wave 20-03 contract scope 对账) → staged guard (wave 20-02) → commit → verifier (wave 19-02) → execution complete verify (wave 19-08) 五段闭环**: brief 写 task scope; preflight + staged guard 在 commit 前对账; commit 落 hash; verifier + execution complete 在 commit 后再交叉对账")
+
+      ;; ── 区域 66 · machine-contract task-contract-v1 status note extension (wave 20 task 04 note 扩) ──
+      ;; 注: section-id 已存在 (区域 36), 本 entry 不新增 anchor; 仅在 wave-20-backfill 块内
+      ;;     声明 note 扩展 (machine-mode dispatch 接通后 Lisp 真正成为 dispatch SSOT)
+      (status-upgrade
+        :section-id "intent-layer.machine-contract.task-contract-v1"
+        :prev-status code-aligned
+        :new-status code-aligned
+        :note-extension "wave 20-04 (commit 681c95d) 接通 wave-19/07 dormant consumer (run_workstation_dispatch_with_contract) 进 active dispatch 路径: DispatchContractMode { Rendered (default 兼容), Machine } + dispatch_contract_mode arg / render_markdown shorthand; Machine 模式 dispatch 直接 forward contract path 给 consumer 读盘, Markdown brief 变 optional 兼容元数据 (render_command 仍 surface). **此为 wave 20 主线: Lisp 真正成为 dispatch SSOT, Markdown brief 不再 load-bearing** (但 ClaudeCode worker 仍可用 Markdown — Markdown 保留 ergonomics). 默认 Rendered, 不破 wave-15..19 任何 byte-shape. 见 anchor intent-layer.machine-contract.dispatch-machine-mode-v0")
+
+      ;; ── 区域 67 · review-automation-policy-v0 status upgrade (wave 20 task 08 加 auto_answer_policy) ──
+      ;; 注: section-id 已存在 (区域 wave-18-backfill), 本 entry 不新增 anchor; 仅在 wave-20-backfill 块内
+      ;;     声明 status code-aligned-partial → code-aligned 升级 (wave 20-08 加 auto-answer-policy v0)
+      (status-upgrade
+        :section-id "intent-layer.unified-entry-pipeline.review-automation-policy-v0"
+        :prev-status code-aligned-partial
+        :new-status code-aligned
+        :evidence-commits ["8adb0a8 (wave 20-08 review auto-answer policy v0)"]
+        :rationale "wave 18-07 落 review_automation_policy v0 (manual|suggest|auto_safe) + 5 deterministic safety rule 但仍要求 caller 显式提供 review_decision; wave 20-08 加 auto_answer_policy (off|deterministic_safe|dry_run) 把 deterministic 自动 answer 引入 listener 路径并 pin 3 hard invariants (I1 never auto-reject / I2 destructive never auto-promote / I3 no LLM). 5 inherited rules from wave-18/07 + 2 new guards (destructive_action / caller_decision_present). LLM 自动 approve 仍 v0 non-goal future. 见 anchor intent-layer.unified-entry-pipeline.review-auto-answer-policy-v0")
+
+      ;; ── 区域 68 · ExecutionEvent dispatch-metadata-v1 status note extension (wave 20 task 09 完成 11 variants 全覆盖) ──
+      ;; 注: section-id 已存在 (区域 wave-18-backfill), 本 entry 不新增 anchor; 仅在 wave-20-backfill 块内
+      ;;     声明 note 扩展 (8 legacy variants 全加 trio, 11 variants 全闭环)
+      (status-upgrade
+        :section-id "event-bus.section.execution-event.dispatch-metadata-v1"
+        :prev-status code-aligned
+        :new-status code-aligned
+        :note-extension "wave 14-02 启动 dispatch metadata 协议 (PlanNodeStateChanged); wave 18-02 加 Claimed + Completed; wave 19-11 NO-OP 验证 Opened 已含; **wave 20-09 (commit 6e01e3f) sweep 剩余 8 legacy variants** (Heartbeat / Released / DeviationRecorded / DecisionRecorded / IssueRecorded / Audited / Repaired / StaleClaim) 全加 optional dispatch_strategy/target_project/requested_cwd serde-default skip-serializing fields, 从 companion log 自动继承 via read_dispatch_metadata_from_log helper. **11 variants 全 dispatch trio 闭环, 不再有 dispatch metadata gap**. 见 anchor event-bus.section.execution-event.dispatch-metadata-legacy-sweep-v0"))
+
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener (QuestionEvent::Resolved subscriber) / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 (live/log/unavailable) / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 (typed builder + EventRefProvenance 4 值 + 512 cap) / ExecutionEvent dispatch metadata v1 (Claimed/Completed) / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade (machine-contract task-contract-v1 由 partial → 全 close); 仍有以下未细化项, 等后续 wave 再补"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener (QuestionEvent::Resolved subscriber) / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 (live/log/unavailable) / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 (typed builder + EventRefProvenance 4 值 + 512 cap) / ExecutionEvent dispatch metadata v1 (Claimed/Completed) / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade (machine-contract task-contract-v1 由 partial → 全 close); v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade (task-contract-v1 note 扩 machine-mode SSOT / review-automation-policy-v0 由 partial → full / dispatch-metadata-v1 note 扩 11 variants 闭环); 仍有以下未细化项, 等后续 wave 再补"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"
@@ -2692,7 +2968,16 @@
   ;; ──────────────────────────────────────────────────
   (judgement-now
     :date "2026-04-27"
-    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 13 task 04 execution-status-backfill + wave 14 task 07 lisp-backfill-and-l2-shard-plan + wave 15 task 06 lisp-backfill-wave15-status + wave 16 task 09 lisp-backfill-wave16-status + wave 17 task 09 lisp-backfill-wave17-status + wave 18 task 10 lisp-backfill-wave18-status + wave 19 task 12 lisp-backfill-wave19-status sessions"
+    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 13 task 04 execution-status-backfill + wave 14 task 07 lisp-backfill-and-l2-shard-plan + wave 15 task 06 lisp-backfill-wave15-status + wave 16 task 09 lisp-backfill-wave16-status + wave 17 task 09 lisp-backfill-wave17-status + wave 18 task 10 lisp-backfill-wave18-status + wave 19 task 12 lisp-backfill-wave19-status + wave 20 task 10 lisp-backfill-wave20-status sessions"
+    :wave20-task-10-non-goal
+      ["本任务不改 Rust / SQL / JS / Cargo / 任务文档"
+       "本任务不真正压缩主 Lisp"
+       "本任务不发明 wave 20 没实现的架构 — 只反映 committed implementation truth"
+       "不动 .missiond/v2/intent-event-bus.lisp 正文 (frozen) / .missiond/intent-mcp-defs.lisp"
+       "不删 anchor / 不合并不相关 sections / 不重写 event-bus protected"
+       "不启动 frontend Lisp (continue postpone 直到 MissionD loop 稳)"
+       "wave 20-01 task-scope-guard hook 默认未 git config core.hooksPath .githooks 启用 — 照实记录, 不假装默认开"
+       "wave 20-07 sonnet_suggest 是 suggest-only / applied=false 永远钉死 — 照实记录, 不当作完整 LLM-augmented apply"]
     :wave19-task-12-non-goal
       ["本任务不改 Rust / SQL / JS / Cargo / 任务文档"
        "本任务不真正压缩主 Lisp"
@@ -2728,7 +3013,7 @@
        "L1 压缩在 wave 13 task 05 已部分完成, L2 物理拆分已在 wave 15 task 02 完成 (5 shard 创建; 主 Lisp 减约 3000 行)"
        "压缩需要的 section-id / status taxonomy / split rule / shard plan 必须先冻结 — 这正是 wave 11 + wave 12 task 06 + wave 13 task 04 + wave 14 task 07 + wave 15 task 02/03/06 + wave 16 task 09 + wave 17 task 09 + wave 18 task 10 的工作"]
     :pre-compression-checklist
-      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区 +22 entry; wave 13 task 04 扩 +11 entry; wave 14 task 07 扩 +13 entry; wave 15 task 06 扩 +5 entry; wave 16 task 09 扩 +6 entry; wave 17 task 09 扩 +7 entry; wave 18 task 10 扩 +9 entry)"
+      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区 +22 entry; wave 13 task 04 扩 +11 entry; wave 14 task 07 扩 +13 entry; wave 15 task 06 扩 +5 entry; wave 16 task 09 扩 +6 entry; wave 17 task 09 扩 +7 entry; wave 18 task 10 扩 +9 entry; wave 19 task 12 扩 +9 entry; wave 20 task 10 扩 +9 entry)"
        "status-taxonomy 已在 architecture-dsl.lisp 冻结 7 值"
        "split-policy 已写明 wait-for-conditions"
        "compression-policy 已写明 forbidden 红线 (ingress/logic-core/egress 不动)"
@@ -2785,14 +3070,27 @@
        "PLAN DAG forward compensate ref v0 → code-aligned (wave 19 task 10 commit 246a675; :compensate-node / :compensate-ref 双拼写 + 4 拒绝条件 + union forward+reverse)"
        "ExecutionEvent::Opened dispatch metadata wave 19-11 → code-aligned NO-OP (历史已 implemented 自 wave 11 commit fc58018 + wave 18-02 commit 2fbaa88; 字段 + wiring + round-trip tests 全在; 无新 commit)"
        "wave-19-04 commit 归属错 (被 wave 19-02 commit 77f1f2b 一并入 main) — 功能落地正确"]
+    :wave-20-status-summary
+      ["task-scope-index-guard v1 → code-aligned-partial (wave 20 task 01 commit 1fc0fd6; staged/commit 双 mode + .githooks/pre-commit 仅 MISSIOND_TASK_CONTRACT env 触发 + 9+3 fixtures + 0 mutating git; 默认未 git config core.hooksPath .githooks 启用)"
+       "renderer scoped-commit guard v2 → code-aligned (wave 20 task 02 commit b36cf6c; Commit 节加 task-scope-guard --mode staged 子步 + MISSIOND_TASK_CONTRACT env prefix; brief → preflight → staged guard → commit → verifier 五段闭环)"
+       "execution preflight task-contract scope v1 → code-aligned (wave 20 task 03 commit fe835e8; 8 新 preflight 字段 task_contract_status / staged_out_of_scope / staged_forbidden / unstaged_in_scope / task_contract_scope / next_step / task_contract_error / task_contract_resolved_path; 无新错误码 信息性; grep proof 0 mutating git; legacy byte-compat)"
+       "machine-driven dispatch v0 → code-aligned (wave 20 task 04 commit 681c95d; DispatchContractMode {Rendered, Machine} + dispatch_contract_mode arg / render_markdown shorthand; Machine 模式接通 wave-19/07 dormant consumer; **Lisp 真正成 dispatch SSOT**, Markdown brief 不再 load-bearing; 默认 Rendered 不破 wave-15..19 byte-shape; unified_entry forward 4 emitter knobs)"
+       "unified-entry machine-loop smoke v2 → code-aligned (wave 20 task 05 commit d308fae; 6 smoke tests + build_artifact_refs lift 8 个 machine-contract 字段 + wave-15..19 byte-compat 钉死 + Markdown non-load-bearing assertion + malformed refusal smoke)"
+       "cross-plan distill auto-trigger v1 → code-aligned (wave 20 task 06 commit 3669ebc; auto_chain_trigger default 'never' / 'deterministic_only'; 6 deterministic trigger rule 全过才触发; sonnet 仍仅显式; default off byte-compat)"
+       "LLM-augmented plan inference v0 → code-aligned-partial (wave 20 task 07 commit 6bb935a; infer_plan_fields=sonnet_suggest mode opt-in / **suggest only / applied=false 永远钉死**; Sonnet 不可用 llm_unavailable no fallback; DAG mode refuse_llm_inference_in_dag_mode 拒; default off byte-compat)"
+       "review auto-answer policy v0 → code-aligned (wave 20 task 08 commit 8adb0a8; auto_answer_policy off|deterministic_safe|dry_run; 5 inherited rules from wave-18/07 + 2 new guards destructive_action / caller_decision_present; **3 hard invariants test-pinned**: I1 NEVER auto-reject / I2 destructive NEVER auto-promote / I3 NO LLM; unified_entry forward + build_artifact_refs lift 5 outcome keys; default off byte-compat)"
+       "ExecutionEvent legacy metadata sweep v0 → code-aligned (wave 20 task 09 commit 6e01e3f; 8 legacy variants 全加 dispatch trio Heartbeat/Released/DeviationRecorded/DecisionRecorded/IssueRecorded/Audited/Repaired/StaleClaim; 从 companion log read_dispatch_metadata_from_log 自动继承; **wave14-02 启动的 ExecutionEvent metadata 协议在 wave 20-09 全 11 variants 闭环**)"
+       "review-automation-policy-v0 status upgrade → code-aligned (wave 20 task 08 加 auto_answer_policy 闭环 5+2 rule + 3 invariants; LLM 自动 approve 仍 v0 non-goal)"
+       "ExecutionEvent dispatch-metadata-v1 status note 扩 → code-aligned (wave 20 task 09 完成 8 legacy variants 全覆盖; 11 variants 全 dispatch trio 闭环)"
+       "machine-contract task-contract-v1 status note 扩 → code-aligned (wave 20 task 04 machine 模式接通后 Lisp 真正成为 dispatch SSOT, Markdown 仍存为兼容视图但 non-load-bearing)"]
     :next-step
-      ["条件全满足后 (11 条件全 code-aligned; 完整 11-stage PLAN DAG scheduler 已 close 主线; wave 19 加 machine-contract task SSOT 全闭环 plan emit → workstation consume → execution verify — 留 LLM auto-approve 全 4 v0 non-goal / autonomous workstation spawn 完全无 hint / git pre-commit hook / sonnet 自动接 chain (5 rule 全过) / LLM-augmented PLAN inference / frontend Lisp 仍 future), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
-       "wave 19 闭环 task-contract dispatch SSOT — 后续可推: (a) 真正 machine-driven autonomous dispatch (无 ClaudeCode Markdown 渲染, 由 daemon 直接 fork worker); (b) report-contract checker 在 mission_execution(complete) 路径自动 invoke; (c) shared-memory ledger 在并行工位 spawn 时自动 seed claim entry"
+      ["条件全满足后 (11 条件全 code-aligned; 完整 11-stage PLAN DAG scheduler 已 close 主线; wave 19 加 machine-contract task SSOT 全闭环 plan emit → workstation consume → execution verify; wave 20 加 machine-driven dispatch + scoped-commit 全 5 段闭环 brief → preflight → staged guard → commit → verifier + ExecutionEvent metadata 11 variants 闭环 + review auto-answer deterministic_safe — 留 LLM auto-approve 全 4 v0 non-goal / autonomous workstation spawn 完全无 hint / git pre-commit hook 默认安装 (本 wave 加了 .githooks/pre-commit 但要 git config core.hooksPath .githooks 才生效, 默认未启用) / sonnet 自动接 chain (完全自动 5+ rule 满足) / LLM-augmented PLAN inference apply (sonnet_suggest 仅 suggest, 完整 apply 仍 future) / frontend Lisp 仍 future), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
+       "wave 20 闭环 machine-driven dispatch — 后续可推: (a) git config core.hooksPath .githooks 默认启用 + worktree-level pre-commit hook 强制 scope; (b) sonnet_suggest 升级到 LLM-augmented apply (medium confidence + LLM corroboration → auto apply); (c) review auto-answer 完整 LLM auto-approve (闭环 wave 14-04 留下的 4 v0 non-goal 之 auto_answer_review_question + auto_approve_directive + auto_approve_plan); (d) autonomous workstation dispatch 完全无 hint (plan-runner 不需要任何 PLAN hint, 全局 LLM 推断)"
+       "wave 19 闭环 task-contract dispatch SSOT — 后续可推: (a) report-contract checker 在 mission_execution(complete) 路径自动 invoke; (b) shared-memory ledger 在并行工位 spawn 时自动 seed claim entry"
        "压缩 PR 必须带 git diff --check + checker --all-v2 + 对应 *-execution.lisp D-deviation"
-       "继续切 enforce default — claim-lease / scoped-commit 切 enforce-by-default + git pre-commit hook 执行 scope check (worktree-level)"
-       "实现 sonnet 自动接 distill chain (无需 caller 显式 chain_id) + LLM-augmented PLAN field inference (从 directive 历史语义 + codex 上下文推断 PLAN 全字段)"
-       "实现完整 LLM 自动 approve directive / plan + 自动 answer review question (4 v0 non-goal 闭环) + 完全 autonomous workstation spawn (plan-runner 不需要任何 hint, 全局推断)"
-       "实现 ExecutionEvent::Opened 等更早 variant 扩 dispatch metadata 完整覆盖"
+       "继续切 enforce default — claim-lease / scoped-commit 切 enforce-by-default + git pre-commit hook 默认启用 + git hooksPath 默认指向 .githooks (worktree-level scope check)"
+       "实现 sonnet 完全自动接 distill chain (5+ rule 自动满足, 无需 caller 显式 chain_id) + LLM-augmented PLAN field inference apply (从 sonnet_suggest 升级到 medium confidence + LLM corroboration → auto apply)"
+       "实现完整 LLM 自动 approve directive / plan + 自动 answer review question (4 v0 non-goal 闭环, wave 20-08 deterministic_safe 是首步) + 完全 autonomous workstation spawn (plan-runner 不需要任何 hint, 全局推断)"
        "把 5 wave-15-shard 内若干 status-only 文本压缩 — 只压 status 句子, schema/contract 段不动"
        "压缩前以 :compression-safe? 字段做白名单过滤 — false 的 section 即使在 compression-policy.allowed 之内也保留正文"
        "frontend Lisp 仍 postpone 直到 MissionD loop 稳"]))

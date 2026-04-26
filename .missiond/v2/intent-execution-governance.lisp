@@ -13,7 +13,7 @@
 (execution-governance-shard
   :version "v1"
   :origin "wave 15 task 02 — physical split from flow + tools parents"
-  :status "code-aligned partial — 12-action manager + ExecutionEvent emission 已落; ExecutionEvent dispatch metadata + scoped commit daemon enforce 仍 pending"
+  :status "code-aligned — 12-action manager + ExecutionEvent emission + dispatch metadata 全 11 variants (Opened wave-11 + PlanNodeStateChanged wave-14/02 + Claimed/Completed wave-18/02 + 8 legacy variants Heartbeat/Released/DeviationRecorded/DecisionRecorded/IssueRecorded/Audited/Repaired/StaleClaim wave-20/09 commit 6e01e3f) + scoped commit daemon enforce v0 (wave 16-06 commit 591d288) + scoped-commit worktree preflight v0 (wave 18-08 commit f171ae6) + execution task-contract completion verification v0 (wave 19-08 commit 405d13b 加 task_contract_path/task_report_path/verifier_status/verifier_notes) + execution preflight task-contract scope v1 (wave 20-03 commit fe835e8 加 8 contract-scope 字段, 0 mutating git) + task-scope-index-guard v1 (wave 20-01 commit 1fc0fd6 加 scripts/task-scope-guard.mjs + .githooks/pre-commit MISSIOND_TASK_CONTRACT env trigger). brief → preflight (含 contract scope) → staged guard → commit → verifier (post-commit) + execution complete verify 五段闭环. 完整 enforce-by-default + git config core.hooksPath .githooks 默认启用 仍 future"
   :stability "section-ids preserved (R008 + R016); content byte-identical to pre-split parents"
 
   ;; ──────────────────────────────────────────────────────────
