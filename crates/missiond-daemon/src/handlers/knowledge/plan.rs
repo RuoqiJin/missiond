@@ -49,12 +49,15 @@ use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
 use crate::handlers::knowledge::review_gate::{
-    apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
-    parse_plan_node_resume_input, parse_resolution_review_question_id, parse_review_gate_policy,
-    parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
-    review_gate_policy_was_explicit, stamp_needs_changes_next_step, stamp_resolution_payload,
-    validate_review_resolution_envelope, ParsedReviewQuestionId, ResolutionOutcome,
-    ReviewDecision, ReviewResolutionInput,
+    apply_compile_review_gates, evaluate_review_automation, maybe_emit_review_question_resolved,
+    parse_compile_review_gate, parse_plan_node_resume_input, parse_resolution_review_question_id,
+    parse_review_automation_policy, parse_review_gate_policy, parse_review_question_id_struct,
+    parse_review_resolution_input, resolution_wire_string,
+    review_automation_policy_was_explicit, review_gate_policy_was_explicit,
+    stamp_needs_changes_next_step, stamp_resolution_payload, stamp_review_automation_payload,
+    validate_review_resolution_envelope, AutomationStatus, ParsedReviewQuestionId,
+    ResolutionOutcome, ReviewAutomationContext, ReviewAutomationPolicy, ReviewDecision,
+    ReviewResolutionInput,
 };
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
@@ -951,25 +954,85 @@ async fn action_by_task(state: &AppState, args: &Value) -> Result<ToolResult> {
 /// gate.)
 const PLAN_REVIEW_ACTIONS: &[&str] = &["compile", "approve", "mark", "supersede"];
 
+/// wave-18 / task 07 :: build the deterministic safety context for a
+/// plan-side resolution. Mirrors the directive helper:
+///   * `deterministic_mode` = `compiler_model.is_none()` (dry-run leaves
+///     it unset; sonnet records `claude-sonnet`). LLM-driven plans
+///     always block `auto_safe`.
+///   * `protected_source_or_target` is currently `false` — plan rows
+///     have no merge source/target concept; the rule still records a
+///     loud-but-passing reason.
+///   * Caller may opt into hash matching via `expected_file_sha256`
+///     (none today; the wave-14 file-first writer surfaces the actual
+///     hash on compile, and a future caller can pass the captured value
+///     here).
+fn build_plan_automation_ctx(
+    args: &Value,
+    plan_compiler_model: Option<&str>,
+) -> ReviewAutomationContext {
+    ReviewAutomationContext {
+        deterministic_mode: plan_compiler_model.is_none(),
+        file_write_attempted: false,
+        file_write_succeeded: false,
+        actual_file_sha256: None,
+        expected_file_sha256: args
+            .get("expected_file_sha256")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        protected_source_or_target: false,
+        additional_blockers: Vec::new(),
+    }
+}
+
 async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "plan_id")?;
+
+    let automation_policy = parse_review_automation_policy(args);
+    let automation_explicit = review_automation_policy_was_explicit(args);
 
     // wave-15 :: explicit resolution bridge. When the caller supplies
     // `review_question_id` + `review_decision` we validate the envelope
     // BEFORE mutating plan state. `Rejected` / `NeedsChanges` skip the
     // approve transition entirely; `Approved` proceeds with the existing
     // `plan_update_status(Approved)` call.
+    //
+    // wave-18 / task 07 :: when a non-Manual `review_automation_policy`
+    // is supplied without an explicit `review_decision` (which would
+    // otherwise fail-fast with MISSING_PARAM), promote the qid into a
+    // policy-driven evaluation path. Caller-supplied decisions ALWAYS
+    // win over the policy.
     let resolution = match parse_review_resolution_input(args) {
         Ok(r) => r,
         Err(e) => {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(e.code(), e.message()),
-            ))
+            if matches!(automation_policy, ReviewAutomationPolicy::Manual)
+                || !matches!(e, crate::handlers::knowledge::review_gate::ResolutionInputError::MissingDecision)
+            {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(e.code(), e.message()),
+                ));
+            }
+            let qid = parse_resolution_review_question_id(args)
+                .expect("MissingDecision implies qid was present");
+            return plan_action_approve_with_policy_only(
+                state,
+                id,
+                qid,
+                automation_policy,
+            )
+            .await;
         }
     };
 
     if let Some(input) = resolution {
-        return action_approve_with_resolution(state, id, input).await;
+        return action_approve_with_resolution(
+            state,
+            id,
+            input,
+            automation_policy,
+            automation_explicit,
+        )
+        .await;
     }
 
     state
@@ -999,10 +1062,16 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
 /// review envelope (scope / artifact / version / action) against the
 /// current plan row, then performs the manager transition only when the
 /// decision is `approved`.
+///
+/// wave-18 / task 07 :: also evaluates the deterministic
+/// `review_automation_policy` and stamps the suggestion / status onto
+/// the response payload. Caller-supplied `review_decision` ALWAYS wins.
 async fn action_approve_with_resolution(
     state: &AppState,
     id: uuid::Uuid,
     input: ReviewResolutionInput,
+    automation_policy: ReviewAutomationPolicy,
+    automation_explicit: bool,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1065,6 +1134,21 @@ async fn action_approve_with_resolution(
     }
 
     stamp_resolution_payload(&mut payload, &input);
+
+    if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
+        let mut args_v = json!({});
+        if let Some(map) = args_v.as_object_mut() {
+            map.insert("review_automation_policy".into(), json!(automation_policy.as_str()));
+        }
+        let ctx = build_plan_automation_ctx(&args_v, plan.compiler_model.as_deref());
+        let outcome = evaluate_review_automation(
+            automation_policy,
+            &ctx,
+            Some(input.decision),
+        );
+        stamp_review_automation_payload(&mut payload, &outcome);
+    }
+
     let resolution_str = resolution_wire_string(input.decision);
     maybe_emit_review_question_resolved(
         &mut payload,
@@ -1074,6 +1158,107 @@ async fn action_approve_with_resolution(
         None,
     )
     .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
+/// Wave-18 / task 07 :: policy-driven approve path for `mission_plan`.
+/// Fires when caller supplies `review_question_id` +
+/// `review_automation_policy` (non-Manual) WITHOUT an explicit
+/// `review_decision`. Auto-promotes to `Approved` only under `auto_safe`
+/// + every safety rule passing. NEVER auto-rejects.
+async fn plan_action_approve_with_policy_only(
+    state: &AppState,
+    id: uuid::Uuid,
+    qid: String,
+    automation_policy: ReviewAutomationPolicy,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&qid) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let plan = match state
+        .store
+        .plan_get(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    {
+        Some(p) => p,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("plan `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    let current_version = plan.version;
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "plan",
+        &id.to_string(),
+        current_version,
+        PLAN_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "plan_id": id,
+        "version": current_version,
+        "review_question_id": qid,
+    });
+
+    let mut args_v = json!({});
+    if let Some(map) = args_v.as_object_mut() {
+        map.insert(
+            "review_automation_policy".into(),
+            json!(automation_policy.as_str()),
+        );
+    }
+    let ctx = build_plan_automation_ctx(&args_v, plan.compiler_model.as_deref());
+    let outcome = evaluate_review_automation(automation_policy, &ctx, None);
+
+    if outcome.may_auto_resolve {
+        state
+            .store
+            .plan_update_status(id, PlanStatus::Approved)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+        payload["status"] = json!("approved");
+        payload["resolution_source"] = json!("review_automation_policy");
+    } else {
+        payload["status"] = json!("review_pending_decision");
+        if matches!(outcome.status, AutomationStatus::AutoSafeBlocked) {
+            payload["next_step"] = json!(
+                "auto_safe blocked — supply explicit `review_decision` (approved|rejected|needs_changes) to flip the plan"
+            );
+        } else {
+            payload["next_step"] = json!(
+                "suggest mode is informational — supply explicit `review_decision` to flip the plan"
+            );
+        }
+    }
+
+    stamp_review_automation_payload(&mut payload, &outcome);
+
+    if outcome.may_auto_resolve {
+        maybe_emit_review_question_resolved(
+            &mut payload,
+            &state.bus,
+            Some(&qid),
+            "approved",
+            None,
+        )
+        .await;
+    }
+
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1088,18 +1273,47 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         )
     })?;
 
+    let automation_policy = parse_review_automation_policy(args);
+    let automation_explicit = review_automation_policy_was_explicit(args);
+
     // wave-15 :: explicit resolution bridge — same pattern as approve.
+    // wave-18 / task 07 :: same MissingDecision-under-policy promotion.
+    // mark is the most general state transition (caller picks the target
+    // status) — so the policy can only auto-promote when the requested
+    // target is `approved`. Other targets surface the suggestion only.
     let resolution = match parse_review_resolution_input(args) {
         Ok(r) => r,
         Err(e) => {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(e.code(), e.message()),
-            ))
+            if matches!(automation_policy, ReviewAutomationPolicy::Manual)
+                || !matches!(e, crate::handlers::knowledge::review_gate::ResolutionInputError::MissingDecision)
+            {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(e.code(), e.message()),
+                ));
+            }
+            let qid = parse_resolution_review_question_id(args)
+                .expect("MissingDecision implies qid was present");
+            return plan_action_mark_with_policy_only(
+                state,
+                id,
+                target,
+                qid,
+                automation_policy,
+            )
+            .await;
         }
     };
 
     if let Some(input) = resolution {
-        return action_mark_with_resolution(state, id, target, input).await;
+        return action_mark_with_resolution(
+            state,
+            id,
+            target,
+            input,
+            automation_policy,
+            automation_explicit,
+        )
+        .await;
     }
 
     state
@@ -1127,11 +1341,16 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
 /// review envelope; on `approved` decision performs the requested
 /// `plan_update_status` transition; on `rejected`/`needs_changes` keeps
 /// the plan at its current status.
+///
+/// wave-18 / task 07 :: stamps the automation outcome on the response.
+/// Caller-supplied `review_decision` always wins.
 async fn action_mark_with_resolution(
     state: &AppState,
     id: uuid::Uuid,
     target: PlanStatus,
     input: ReviewResolutionInput,
+    automation_policy: ReviewAutomationPolicy,
+    automation_explicit: bool,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1197,6 +1416,21 @@ async fn action_mark_with_resolution(
     }
 
     stamp_resolution_payload(&mut payload, &input);
+
+    if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
+        let mut args_v = json!({});
+        if let Some(map) = args_v.as_object_mut() {
+            map.insert("review_automation_policy".into(), json!(automation_policy.as_str()));
+        }
+        let ctx = build_plan_automation_ctx(&args_v, plan.compiler_model.as_deref());
+        let outcome = evaluate_review_automation(
+            automation_policy,
+            &ctx,
+            Some(input.decision),
+        );
+        stamp_review_automation_payload(&mut payload, &outcome);
+    }
+
     let resolution_str = resolution_wire_string(input.decision);
     maybe_emit_review_question_resolved(
         &mut payload,
@@ -1209,25 +1443,161 @@ async fn action_mark_with_resolution(
     Ok(ToolResult::json_pretty(&payload))
 }
 
+/// Wave-18 / task 07 :: policy-driven mark path. Auto-promotes ONLY
+/// when the requested target status is `Approved` (the only safe
+/// auto-resolution outcome for `mark`); other targets degrade to
+/// suggest-only even when every safety rule passes.
+async fn plan_action_mark_with_policy_only(
+    state: &AppState,
+    id: uuid::Uuid,
+    target: PlanStatus,
+    qid: String,
+    automation_policy: ReviewAutomationPolicy,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&qid) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let plan = match state
+        .store
+        .plan_get(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    {
+        Some(p) => p,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("plan `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    let current_version = plan.version;
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "plan",
+        &id.to_string(),
+        current_version,
+        PLAN_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "plan_id": id,
+        "version": current_version,
+        "review_question_id": qid,
+        "requested_status": target.as_str(),
+    });
+
+    let mut args_v = json!({});
+    if let Some(map) = args_v.as_object_mut() {
+        map.insert(
+            "review_automation_policy".into(),
+            json!(automation_policy.as_str()),
+        );
+    }
+    let mut ctx = build_plan_automation_ctx(&args_v, plan.compiler_model.as_deref());
+    if !matches!(target, PlanStatus::Approved) {
+        // `mark` to a non-Approved target is never auto-promoted by the
+        // policy. We pin a loud blocker so the audit trail explains the
+        // refusal even when every safety rule otherwise passes.
+        ctx.additional_blockers.push(format!(
+            "non_approved_target:mark target `{}` is never auto-promoted by review_automation_policy (only `approved` is)",
+            target.as_str()
+        ));
+    }
+    let outcome = evaluate_review_automation(automation_policy, &ctx, None);
+
+    if outcome.may_auto_resolve && matches!(target, PlanStatus::Approved) {
+        state
+            .store
+            .plan_update_status(id, PlanStatus::Approved)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+        payload["new_status"] = json!(PlanStatus::Approved.as_str());
+        payload["status"] = json!("approved");
+        payload["resolution_source"] = json!("review_automation_policy");
+    } else {
+        payload["new_status"] = json!(plan.status.as_str());
+        payload["status"] = json!("review_pending_decision");
+        payload["next_step"] = json!(
+            "supply explicit `review_decision` (approved|rejected|needs_changes) to finalise the mark"
+        );
+    }
+
+    stamp_review_automation_payload(&mut payload, &outcome);
+
+    if outcome.may_auto_resolve && matches!(target, PlanStatus::Approved) {
+        maybe_emit_review_question_resolved(
+            &mut payload,
+            &state.bus,
+            Some(&qid),
+            "approved",
+            None,
+        )
+        .await;
+    }
+
+    Ok(ToolResult::json_pretty(&payload))
+}
+
 async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> {
     let old_id = parse_id_arg(args, "old_plan_id")?;
     let new_id = parse_id_arg(args, "new_plan_id")?;
+
+    let automation_policy = parse_review_automation_policy(args);
+    let automation_explicit = review_automation_policy_was_explicit(args);
 
     // wave-15 :: explicit resolution bridge. Supersede pivots two plan
     // ids; the review envelope is anchored to `old_plan_id` (the artifact
     // being closed out by the supersede). `Rejected` / `NeedsChanges` skip
     // the supersede entirely.
+    //
+    // wave-18 / task 07 :: supersede is destructive (the old plan goes
+    // to Superseded). We never auto-promote it from a policy — the
+    // policy-only branch surfaces the suggestion and refuses to mutate.
     let resolution = match parse_review_resolution_input(args) {
         Ok(r) => r,
         Err(e) => {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(e.code(), e.message()),
-            ))
+            if matches!(automation_policy, ReviewAutomationPolicy::Manual)
+                || !matches!(e, crate::handlers::knowledge::review_gate::ResolutionInputError::MissingDecision)
+            {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(e.code(), e.message()),
+                ));
+            }
+            let qid = parse_resolution_review_question_id(args)
+                .expect("MissingDecision implies qid was present");
+            return plan_action_supersede_with_policy_only(
+                state,
+                old_id,
+                new_id,
+                qid,
+                automation_policy,
+            )
+            .await;
         }
     };
 
     if let Some(input) = resolution {
-        return action_supersede_with_resolution(state, old_id, new_id, input).await;
+        return action_supersede_with_resolution(
+            state,
+            old_id,
+            new_id,
+            input,
+            automation_policy,
+            automation_explicit,
+        )
+        .await;
     }
 
     state
@@ -1256,11 +1626,16 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
 /// the review envelope against the OLD plan (the artifact being closed),
 /// then performs the supersede transition only when the decision is
 /// `approved`.
+///
+/// wave-18 / task 07 :: stamps the automation outcome on the response.
+/// Caller-supplied `review_decision` always wins.
 async fn action_supersede_with_resolution(
     state: &AppState,
     old_id: uuid::Uuid,
     new_id: uuid::Uuid,
     input: ReviewResolutionInput,
+    automation_policy: ReviewAutomationPolicy,
+    automation_explicit: bool,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1324,6 +1699,21 @@ async fn action_supersede_with_resolution(
     }
 
     stamp_resolution_payload(&mut payload, &input);
+
+    if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
+        let mut args_v = json!({});
+        if let Some(map) = args_v.as_object_mut() {
+            map.insert("review_automation_policy".into(), json!(automation_policy.as_str()));
+        }
+        let ctx = build_plan_automation_ctx(&args_v, plan.compiler_model.as_deref());
+        let outcome = evaluate_review_automation(
+            automation_policy,
+            &ctx,
+            Some(input.decision),
+        );
+        stamp_review_automation_payload(&mut payload, &outcome);
+    }
+
     let resolution_str = resolution_wire_string(input.decision);
     maybe_emit_review_question_resolved(
         &mut payload,
@@ -1333,6 +1723,84 @@ async fn action_supersede_with_resolution(
         None,
     )
     .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
+/// Wave-18 / task 07 :: policy-driven supersede path. Supersede is
+/// destructive (the old plan goes to `Superseded`); we never auto-promote
+/// from a policy. Surfaces the suggestion only and refuses to mutate.
+async fn plan_action_supersede_with_policy_only(
+    state: &AppState,
+    old_id: uuid::Uuid,
+    new_id: uuid::Uuid,
+    qid: String,
+    automation_policy: ReviewAutomationPolicy,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&qid) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let plan = match state
+        .store
+        .plan_get(old_id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    {
+        Some(p) => p,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("old plan `{}` not found for resolution", old_id),
+                ),
+            ))
+        }
+    };
+    let current_version = plan.version;
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "plan",
+        &old_id.to_string(),
+        current_version,
+        PLAN_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "old_plan_id": old_id,
+        "new_plan_id": new_id,
+        "version": current_version,
+        "review_question_id": qid,
+    });
+
+    let mut args_v = json!({});
+    if let Some(map) = args_v.as_object_mut() {
+        map.insert(
+            "review_automation_policy".into(),
+            json!(automation_policy.as_str()),
+        );
+    }
+    let mut ctx = build_plan_automation_ctx(&args_v, plan.compiler_model.as_deref());
+    ctx.additional_blockers.push(
+        "destructive_action:supersede transitions are never auto-promoted by the automation policy"
+            .to_string(),
+    );
+    let outcome = evaluate_review_automation(automation_policy, &ctx, None);
+
+    payload["status"] = json!("review_pending_decision");
+    payload["next_step"] = json!(
+        "supply explicit `review_decision` (approved|rejected|needs_changes) — supersede is destructive and never auto-promoted"
+    );
+
+    stamp_review_automation_payload(&mut payload, &outcome);
+
     Ok(ToolResult::json_pretty(&payload))
 }
 

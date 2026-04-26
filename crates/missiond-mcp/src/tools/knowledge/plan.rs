@@ -317,6 +317,25 @@ fn build_properties() -> Value {
         "[approve | mark | supersede review_decision=*] (wave-15) free-form reason / next-step note. Echoed onto the response payload (`review_note`) and surfaced to downstream consumers as the human-readable resolution context.",
     ));
 
+    // ── wave-18 / task 07 — review automation policy v0 ─────────────────
+    //
+    // Explicit autonomy knob ORTHOGONAL to the wave-14 `review_gate_policy`
+    // (which controls EMISSION). Default `manual` preserves the wave-15
+    // behaviour byte-for-byte. `suggest` returns a deterministic
+    // suggestion without mutation. `auto_safe` may auto-promote to
+    // `approved` only when ALL safety rules pass — never auto-rejects,
+    // never calls an LLM. Caller-supplied `review_decision` ALWAYS wins.
+    p.insert("review_automation_policy".into(), prop_enum(
+        "string",
+        "[approve | mark | supersede] (wave-18 / task 07 review automation policy v0) explicit autonomy knob for the resolution surface. ORTHOGONAL to `review_gate_policy` (which controls EMISSION). `manual` (default) keeps the wave-15 behaviour: caller-supplied `review_decision` is the only authority and the response is byte-identical with pre-wave-18 callers. `suggest` makes the handler compute a deterministic suggestion (`suggested_review_decision`) and surfaces it WITHOUT mutating the plan. `auto_safe` may auto-promote to `approved` ONLY when ALL deterministic safety rules pass: producer ran in deterministic/dry-run mode (plan.compiler_model is None — i.e. dry-run), no file write OR file hash matches the supplied expected_file_sha256, no protected source/target, no unresolved conflicts, and the caller explicitly opted in via this knob. NEVER auto-rejects. NEVER calls an LLM. Caller-supplied `review_decision` ALWAYS wins (the policy never overrides explicit decisions). `mark` only auto-promotes when the requested target status is `approved`; other targets surface the suggestion only. `supersede` is intentionally NEVER auto-promoted (destructive transition). Response always carries `review_automation_policy` / `review_automation_status` / `suggested_review_decision` / `automation_reasons[]` when the knob was supplied.",
+        &["manual", "suggest", "auto_safe"],
+    ));
+
+    p.insert("expected_file_sha256".into(), prop(
+        "string",
+        "[approve | mark | supersede review_automation_policy=auto_safe] (wave-18 / task 07) optional caller-supplied SHA-256 the deterministic safety inspector requires to match the on-disk PLAN.lisp hash. Pure additive guard: when the plan compile landed via the file-first writer the caller can capture `file_sha256` from the compile response and replay it here so an unexpected on-disk modification blocks `auto_safe`. Absent → strict-matching disabled (no file write attempted under approve/mark/supersede in v0; the rule still surfaces a passing audit row when omitted).",
+    ));
+
     // ── wave-17 / task 01 — PLAN-DAG paused-node resume hook ────────────
     //
     // These knobs are opt-in. They route `mission_plan(action=execute,

@@ -30,12 +30,14 @@ use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
 use crate::handlers::knowledge::review_gate::{
-    apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
-    parse_resolution_review_question_id, parse_review_gate_policy,
-    parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
-    review_gate_policy_was_explicit, stamp_needs_changes_next_step, stamp_resolution_payload,
-    validate_review_resolution_envelope, ParsedReviewQuestionId, ResolutionOutcome,
-    ReviewDecision, ReviewResolutionInput,
+    apply_compile_review_gates, evaluate_review_automation, maybe_emit_review_question_resolved,
+    parse_compile_review_gate, parse_resolution_review_question_id, parse_review_automation_policy,
+    parse_review_gate_policy, parse_review_question_id_struct, parse_review_resolution_input,
+    resolution_wire_string, review_automation_policy_was_explicit, review_gate_policy_was_explicit,
+    stamp_needs_changes_next_step, stamp_resolution_payload, stamp_review_automation_payload,
+    validate_review_resolution_envelope, AutomationStatus, ParsedReviewQuestionId,
+    ResolutionOutcome, ReviewAutomationContext, ReviewAutomationPolicy, ReviewDecision,
+    ReviewResolutionInput,
 };
 use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
@@ -798,26 +800,105 @@ async fn action_version_chain(state: &AppState, args: &Value) -> Result<ToolResu
 /// / archive); `version_chain` / `get` / `list` never resolve a gate.
 const DIRECTIVE_REVIEW_ACTIONS: &[&str] = &["compile", "approve", "archive"];
 
+/// Build the wave-18 / task 07 deterministic safety context for the
+/// directive surface. Pure projection of the directive row + caller args.
+///
+/// Rules of thumb:
+///   * `deterministic_mode` = `compiler_model.is_none()` (dry-run leaves
+///     it unset; sonnet records `claude-sonnet`). LLM-driven artifacts
+///     ALWAYS block `auto_safe` — refusing to auto-approve unattended
+///     LLM output is the load-bearing safety contract.
+///   * `protected_source_or_target` is currently `false` for directive —
+///     directive surface has no merge source/target concept (that lives
+///     on capability_usage). Future work: lift `protected_pillars`
+///     from references_json once the capability protected list pivots
+///     into the directive layer; for v0 we keep the rule loud-but-passing.
+///   * File hashing flows through caller-supplied `expected_file_sha256`
+///     (none today — directive compile never round-trips a hash through
+///     approve/archive). The handler still honours it if a future caller
+///     supplies the hint.
+///   * `additional_blockers` carries any caller-side warnings the
+///     handler already detected (currently empty — the wave-15 envelope
+///     validators run BEFORE this, and any failure short-circuits the
+///     whole resolution path before the policy fires).
+fn build_directive_automation_ctx(
+    args: &Value,
+    directive_compiler_model: Option<&str>,
+) -> ReviewAutomationContext {
+    ReviewAutomationContext {
+        deterministic_mode: directive_compiler_model.is_none(),
+        // Directive approve/archive never re-touches the file artifact —
+        // the wave-14 file-first writer ran during compile. So no file
+        // write is "attempted" at the resolution boundary.
+        file_write_attempted: false,
+        file_write_succeeded: false,
+        actual_file_sha256: None,
+        expected_file_sha256: args
+            .get("expected_file_sha256")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        protected_source_or_target: false,
+        additional_blockers: Vec::new(),
+    }
+}
+
 async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "directive_id")?;
     let version = require_i32(args, "version")?;
+
+    let automation_policy = parse_review_automation_policy(args);
+    let automation_explicit = review_automation_policy_was_explicit(args);
 
     // wave-15 :: explicit resolution bridge. When the caller supplies
     // `review_question_id` + `review_decision` we validate the envelope
     // BEFORE mutating state. `Rejected` / `NeedsChanges` skip the DB
     // transition entirely (the artifact stays non-approved); `Approved`
     // proceeds with the existing manager transition.
+    //
+    // wave-18 / task 07 :: when a non-Manual `review_automation_policy`
+    // is supplied without an explicit `review_decision` (which would
+    // otherwise fail-fast with MISSING_PARAM), we promote the qid into
+    // a policy-driven evaluation path. Caller-supplied decisions ALWAYS
+    // win over the policy.
     let resolution = match parse_review_resolution_input(args) {
         Ok(r) => r,
         Err(e) => {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(e.code(), e.message()),
-            ))
+            // wave-18 / task 07: under a non-Manual policy with a qid
+            // but no decision, route through the policy bridge instead
+            // of fail-fast — the policy may auto-resolve or surface a
+            // suggestion. Other parse errors (UnknownDecision) still
+            // fail-fast because they signal caller typos.
+            if matches!(automation_policy, ReviewAutomationPolicy::Manual)
+                || !matches!(e, crate::handlers::knowledge::review_gate::ResolutionInputError::MissingDecision)
+            {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(e.code(), e.message()),
+                ));
+            }
+            let qid = parse_resolution_review_question_id(args)
+                .expect("MissingDecision implies qid was present");
+            return action_approve_with_policy_only(
+                state,
+                id,
+                version,
+                qid,
+                automation_policy,
+            )
+            .await;
         }
     };
 
     if let Some(input) = resolution {
-        return action_approve_with_resolution(state, id, version, input).await;
+        return action_approve_with_resolution(
+            state,
+            id,
+            version,
+            input,
+            automation_policy,
+            automation_explicit,
+        )
+        .await;
     }
 
     state
@@ -849,11 +930,19 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
 /// Wave-15 explicit resolution bridge for `action=approve`. Validates the
 /// review envelope (scope / artifact / version / action), then performs
 /// the manager transition only when the decision is `approved`.
+///
+/// wave-18 / task 07 :: also evaluates the deterministic
+/// `review_automation_policy` and stamps the suggestion / status onto
+/// the response payload. Caller-supplied `review_decision` ALWAYS wins;
+/// the automation outcome is informational under that path
+/// (`status=overridden_by_explicit_decision`).
 async fn action_approve_with_resolution(
     state: &AppState,
     id: uuid::Uuid,
     version: i32,
     input: ReviewResolutionInput,
+    automation_policy: ReviewAutomationPolicy,
+    automation_explicit: bool,
 ) -> Result<ToolResult> {
     // Parse the deterministic id envelope.
     let parsed = match parse_review_question_id_struct(&input.question_id) {
@@ -864,15 +953,15 @@ async fn action_approve_with_resolution(
             ))
         }
     };
-    // Source the current artifact version from the chain head so the
+    // Source the current artifact + version from the chain head so the
     // staleness check is anchored to the latest persisted draft / version.
     let chain = state
         .store
         .directive_get_version_chain(id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    let current_version = match chain.iter().last() {
-        Some(d) => d.version,
+    let head_directive = match chain.iter().last() {
+        Some(d) => d.clone(),
         None => {
             return Ok(ToolResult::structured_error(
                 ToolError::new(
@@ -882,6 +971,7 @@ async fn action_approve_with_resolution(
             ))
         }
     };
+    let current_version = head_directive.version;
     if version != current_version {
         return Ok(ToolResult::structured_error(
             ToolError::new(
@@ -933,6 +1023,28 @@ async fn action_approve_with_resolution(
     }
 
     stamp_resolution_payload(&mut payload, &input);
+
+    // wave-18 / task 07 :: surface the automation outcome AFTER stamping
+    // the explicit decision so observers can see both. Skipped under
+    // Manual + caller-omitted policy to keep pre-wave-18 callers
+    // byte-identical.
+    if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
+        let mut args_v = json!({});
+        if let Some(map) = args_v.as_object_mut() {
+            map.insert("review_automation_policy".into(), json!(automation_policy.as_str()));
+        }
+        let ctx = build_directive_automation_ctx(
+            &args_v,
+            head_directive.compiler_model.as_deref(),
+        );
+        let outcome = evaluate_review_automation(
+            automation_policy,
+            &ctx,
+            Some(input.decision),
+        );
+        stamp_review_automation_payload(&mut payload, &outcome);
+    }
+
     let resolution_str = resolution_wire_string(input.decision);
     maybe_emit_review_question_resolved(
         &mut payload,
@@ -945,22 +1057,185 @@ async fn action_approve_with_resolution(
     Ok(ToolResult::json_pretty(&payload))
 }
 
+/// Wave-18 / task 07 :: policy-driven approve path. Invoked when the
+/// caller supplies `review_question_id` + `review_automation_policy`
+/// (non-Manual) WITHOUT an explicit `review_decision`. Evaluates the
+/// deterministic safety inspector and either auto-promotes to
+/// `Approved` (auto_safe + every rule passes) or surfaces the suggestion
+/// without mutating (suggest, or auto_safe with any blocking rule).
+///
+/// NEVER calls an LLM. NEVER auto-rejects. The wave-15 envelope
+/// validators run BEFORE the policy fires.
+async fn action_approve_with_policy_only(
+    state: &AppState,
+    id: uuid::Uuid,
+    version: i32,
+    qid: String,
+    automation_policy: ReviewAutomationPolicy,
+) -> Result<ToolResult> {
+    // Parse + validate the envelope before invoking the policy. Same
+    // rejection set as the wave-15 explicit path so a malformed id can
+    // never sneak past via the automation knob.
+    let parsed = match parse_review_question_id_struct(&qid) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let chain = state
+        .store
+        .directive_get_version_chain(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let head_directive = match chain.iter().last() {
+        Some(d) => d.clone(),
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("directive `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    let current_version = head_directive.version;
+    if version != current_version {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "STALE_REVIEW_VERSION",
+                format!(
+                    "approve `version=v{}` does not match directive `{}` head `v{}`",
+                    version, id, current_version
+                ),
+            ),
+        ));
+    }
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "directive",
+        &id.to_string(),
+        current_version,
+        DIRECTIVE_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "directive_id": id,
+        "version": version,
+        "review_question_id": qid,
+    });
+
+    let mut args_v = json!({});
+    if let Some(map) = args_v.as_object_mut() {
+        map.insert(
+            "review_automation_policy".into(),
+            json!(automation_policy.as_str()),
+        );
+    }
+    let ctx = build_directive_automation_ctx(
+        &args_v,
+        head_directive.compiler_model.as_deref(),
+    );
+    // No caller decision here — this whole branch fires precisely when
+    // the caller omitted `review_decision`.
+    let outcome = evaluate_review_automation(automation_policy, &ctx, None);
+
+    if outcome.may_auto_resolve {
+        // Safety inspector cleared every rule under `auto_safe`. Run the
+        // existing approve transition.
+        state
+            .store
+            .directive_approve(id, version)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?;
+        payload["status"] = json!("approved");
+        payload["resolution_source"] = json!("review_automation_policy");
+    } else {
+        // Suggest-only OR auto_safe blocked. NO mutation. Surface the
+        // suggestion + reasons; downstream caller decides next step.
+        payload["status"] = json!("review_pending_decision");
+        if matches!(outcome.status, AutomationStatus::AutoSafeBlocked) {
+            payload["next_step"] = json!(
+                "auto_safe blocked — supply explicit `review_decision` (approved|rejected|needs_changes) to flip the directive"
+            );
+        } else {
+            payload["next_step"] = json!(
+                "suggest mode is informational — supply explicit `review_decision` to flip the directive"
+            );
+        }
+    }
+
+    stamp_review_automation_payload(&mut payload, &outcome);
+
+    if outcome.may_auto_resolve {
+        // Best-effort emit a Resolved event so the inbound subscriber
+        // sees the auto-approval — same fire-and-forget bus contract as
+        // the wave-15 explicit path.
+        maybe_emit_review_question_resolved(
+            &mut payload,
+            &state.bus,
+            Some(&qid),
+            "approved",
+            None,
+        )
+        .await;
+    }
+
+    Ok(ToolResult::json_pretty(&payload))
+}
+
 async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "directive_id")?;
     let version = require_i32(args, "version")?;
 
+    let automation_policy = parse_review_automation_policy(args);
+    let automation_explicit = review_automation_policy_was_explicit(args);
+
     // wave-15 :: explicit resolution bridge — see `action_approve` above.
+    // wave-18 / task 07 :: same MissingDecision-under-policy promotion as
+    // approve so the policy can drive resolution under archive too.
     let resolution = match parse_review_resolution_input(args) {
         Ok(r) => r,
         Err(e) => {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(e.code(), e.message()),
-            ))
+            if matches!(automation_policy, ReviewAutomationPolicy::Manual)
+                || !matches!(e, crate::handlers::knowledge::review_gate::ResolutionInputError::MissingDecision)
+            {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(e.code(), e.message()),
+                ));
+            }
+            // archive auto-transition under auto_safe is intentionally
+            // NOT supported — archiving is a destructive transition that
+            // we never want auto-promoted from a policy. The handler
+            // therefore surfaces the suggestion only, never mutates.
+            let qid = parse_resolution_review_question_id(args)
+                .expect("MissingDecision implies qid was present");
+            return action_archive_with_policy_only(
+                state,
+                id,
+                version,
+                qid,
+                automation_policy,
+            )
+            .await;
         }
     };
 
     if let Some(input) = resolution {
-        return action_archive_with_resolution(state, id, version, input).await;
+        return action_archive_with_resolution(
+            state,
+            id,
+            version,
+            input,
+            automation_policy,
+            automation_explicit,
+        )
+        .await;
     }
 
     state
@@ -989,11 +1264,17 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
 /// validation as approve; on `approved` decision we perform the archive
 /// transition; on `rejected`/`needs_changes` the directive stays at its
 /// current status.
+///
+/// wave-18 / task 07 :: also evaluates the deterministic
+/// `review_automation_policy` and stamps the suggestion / status onto
+/// the response payload. Caller-supplied `review_decision` ALWAYS wins.
 async fn action_archive_with_resolution(
     state: &AppState,
     id: uuid::Uuid,
     version: i32,
     input: ReviewResolutionInput,
+    automation_policy: ReviewAutomationPolicy,
+    automation_explicit: bool,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1008,8 +1289,8 @@ async fn action_archive_with_resolution(
         .directive_get_version_chain(id)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
-    let current_version = match chain.iter().last() {
-        Some(d) => d.version,
+    let head_directive = match chain.iter().last() {
+        Some(d) => d.clone(),
         None => {
             return Ok(ToolResult::structured_error(
                 ToolError::new(
@@ -1019,6 +1300,7 @@ async fn action_archive_with_resolution(
             ))
         }
     };
+    let current_version = head_directive.version;
     if version != current_version {
         return Ok(ToolResult::structured_error(
             ToolError::new(
@@ -1066,6 +1348,27 @@ async fn action_archive_with_resolution(
     }
 
     stamp_resolution_payload(&mut payload, &input);
+
+    // wave-18 / task 07 :: surface the automation outcome AFTER stamping
+    // the explicit decision so observers see both. Skipped under Manual +
+    // caller-omitted policy to keep pre-wave-18 callers byte-identical.
+    if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
+        let mut args_v = json!({});
+        if let Some(map) = args_v.as_object_mut() {
+            map.insert("review_automation_policy".into(), json!(automation_policy.as_str()));
+        }
+        let ctx = build_directive_automation_ctx(
+            &args_v,
+            head_directive.compiler_model.as_deref(),
+        );
+        let outcome = evaluate_review_automation(
+            automation_policy,
+            &ctx,
+            Some(input.decision),
+        );
+        stamp_review_automation_payload(&mut payload, &outcome);
+    }
+
     let resolution_str = resolution_wire_string(input.decision);
     maybe_emit_review_question_resolved(
         &mut payload,
@@ -1075,6 +1378,107 @@ async fn action_archive_with_resolution(
         None,
     )
     .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
+/// Wave-18 / task 07 :: policy-driven archive path. Fires when the
+/// caller supplies `review_question_id` + `review_automation_policy`
+/// (non-Manual) WITHOUT an explicit `review_decision`.
+///
+/// IMPORTANT: archive auto-transition is intentionally NEVER promoted
+/// under `auto_safe`. Archiving is destructive (the directive cannot
+/// flow into plan compile from the archived state); we never want a
+/// safety inspector to silently retire a draft. The handler therefore
+/// surfaces the suggestion only and refuses to mutate, regardless of
+/// whether every safety rule passes.
+async fn action_archive_with_policy_only(
+    state: &AppState,
+    id: uuid::Uuid,
+    version: i32,
+    qid: String,
+    automation_policy: ReviewAutomationPolicy,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&qid) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    let chain = state
+        .store
+        .directive_get_version_chain(id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let head_directive = match chain.iter().last() {
+        Some(d) => d.clone(),
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("directive `{}` not found for resolution", id),
+                ),
+            ))
+        }
+    };
+    let current_version = head_directive.version;
+    if version != current_version {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "STALE_REVIEW_VERSION",
+                format!(
+                    "archive `version=v{}` does not match directive `{}` head `v{}`",
+                    version, id, current_version
+                ),
+            ),
+        ));
+    }
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "directive",
+        &id.to_string(),
+        current_version,
+        DIRECTIVE_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let mut payload = json!({
+        "directive_id": id,
+        "version": version,
+        "review_question_id": qid,
+    });
+
+    let mut args_v = json!({});
+    if let Some(map) = args_v.as_object_mut() {
+        map.insert(
+            "review_automation_policy".into(),
+            json!(automation_policy.as_str()),
+        );
+    }
+    let mut ctx = build_directive_automation_ctx(
+        &args_v,
+        head_directive.compiler_model.as_deref(),
+    );
+    // Pin the loud "destructive" blocker so even auto_safe + every rule
+    // passing still surfaces a clear refusal — archive is destructive
+    // and we never want the policy to silently retire a draft.
+    ctx.additional_blockers.push(
+        "destructive_action:archive transitions are never auto-promoted by the automation policy"
+            .to_string(),
+    );
+    let outcome = evaluate_review_automation(automation_policy, &ctx, None);
+
+    payload["status"] = json!("review_pending_decision");
+    payload["next_step"] = json!(
+        "supply explicit `review_decision` (approved|rejected|needs_changes) to archive — archive is destructive and never auto-promoted"
+    );
+
+    stamp_review_automation_payload(&mut payload, &outcome);
+
     Ok(ToolResult::json_pretty(&payload))
 }
 

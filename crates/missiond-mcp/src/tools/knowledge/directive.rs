@@ -99,6 +99,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "type": "string",
                     "description": "[approve | archive review_decision=*] (wave-15) free-form reason / next-step note. Echoed onto the response payload (`review_note`) and surfaced to downstream consumers as the human-readable resolution context."
                 },
+                "review_automation_policy": {
+                    "type": "string",
+                    "enum": ["manual", "suggest", "auto_safe"],
+                    "description": "[approve | archive] (wave-18 / task 07 review automation policy v0) explicit autonomy knob for the resolution surface. ORTHOGONAL to `review_gate_policy` (which controls EMISSION). `manual` (default) keeps the existing wave-15 behaviour: caller-supplied `review_decision` is the only authority and the response is byte-identical with pre-wave-18 callers. `suggest` makes the handler compute a deterministic suggestion (`suggested_review_decision`) and surfaces it WITHOUT mutating the artifact. `auto_safe` may auto-promote to `approved` ONLY when ALL deterministic safety rules pass: producer ran in deterministic/dry-run mode, no file write OR file hash matches the supplied expected_file_sha256, no protected source/target, no unresolved conflicts, and the caller explicitly opted in via this knob. NEVER auto-rejects (refusing a draft is a human-only decision). NEVER calls an LLM. Caller-supplied `review_decision` ALWAYS wins (the policy never overrides explicit decisions). `archive` is intentionally NEVER auto-promoted under `auto_safe` (destructive transition) — the policy surfaces the suggestion and refuses to mutate. Response always carries `review_automation_policy` / `review_automation_status` / `suggested_review_decision` / `automation_reasons[]` when the knob was supplied."
+                },
+                "expected_file_sha256": {
+                    "type": "string",
+                    "description": "[approve | archive review_automation_policy=auto_safe] (wave-18 / task 07) optional caller-supplied SHA-256 the deterministic safety inspector requires to match the on-disk artifact hash. Pure additive guard: when the artifact landed via the file-first writer the caller can capture `file_sha256` from the compile response and replay it here so an unexpected on-disk modification blocks `auto_safe`. Absent → strict-matching disabled (no file write attempted under approve/archive in v0; the rule still surfaces a passing audit row when omitted)."
+                },
                 "affected_pillars": {
                     "type": ["array", "string"],
                     "items": { "type": "string" },

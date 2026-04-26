@@ -46,11 +46,14 @@ use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
 use crate::handlers::knowledge::review_gate::{
-    apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
+    apply_compile_review_gates, evaluate_review_automation, maybe_emit_review_question_resolved,
+    parse_compile_review_gate, parse_resolution_review_question_id, parse_review_automation_policy,
     parse_review_gate_policy, parse_review_question_id_struct, parse_review_resolution_input,
-    resolution_wire_string, review_gate_policy_was_explicit, stamp_needs_changes_next_step,
-    stamp_resolution_payload, validate_review_resolution_envelope, ParsedReviewQuestionId,
-    ResolutionOutcome, ReviewDecision, ReviewResolutionInput,
+    resolution_wire_string, review_automation_policy_was_explicit, review_gate_policy_was_explicit,
+    stamp_needs_changes_next_step, stamp_resolution_payload, stamp_review_automation_payload,
+    validate_review_resolution_envelope, AutomationStatus, ParsedReviewQuestionId,
+    ResolutionOutcome, ReviewAutomationContext, ReviewAutomationPolicy, ReviewDecision,
+    ReviewResolutionInput,
 };
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
@@ -1116,12 +1119,21 @@ const WORKFLOW_REVIEW_ACTIONS: &[&str] = &["compile"];
 const WORKFLOW_REVIEW_VERSION: i32 = 1;
 
 async fn action_resolve_review(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let automation_policy = parse_review_automation_policy(args);
+    let automation_explicit = review_automation_policy_was_explicit(args);
+
     // Caller must supply both id + decision (with optional actor / note).
     // Missing decision when id is present is fail-fast — same contract as
     // directive / plan.
+    //
+    // wave-18 / task 07 :: when a non-Manual `review_automation_policy`
+    // is supplied without an explicit `review_decision`, route through
+    // the policy bridge instead of fail-fast.
     let resolution = match parse_review_resolution_input(args) {
         Ok(Some(r)) => r,
         Ok(None) => {
+            // No qid at all → still fail-fast (the policy needs an id to
+            // anchor the decision against).
             return Ok(ToolResult::structured_error(
                 ToolError::new(
                     error_codes::MISSING_PARAM,
@@ -1130,12 +1142,24 @@ async fn action_resolve_review(state: &AppState, args: &Value) -> Result<ToolRes
                 .with_suggestion(
                     "use the deterministic id wave-14 emitted on the workflow Created event",
                 ),
-            ))
+            ));
         }
         Err(e) => {
-            return Ok(ToolResult::structured_error(
-                ToolError::new(e.code(), e.message()),
-            ))
+            if matches!(automation_policy, ReviewAutomationPolicy::Manual)
+                || !matches!(e, crate::handlers::knowledge::review_gate::ResolutionInputError::MissingDecision)
+            {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(e.code(), e.message()),
+                ));
+            }
+            let qid = parse_resolution_review_question_id(args)
+                .expect("MissingDecision implies qid was present");
+            return action_resolve_review_with_policy_only(
+                state,
+                qid,
+                automation_policy,
+            )
+            .await;
         }
     };
 
@@ -1165,10 +1189,146 @@ async fn action_resolve_review(state: &AppState, args: &Value) -> Result<ToolRes
     // flow ids look like `methodology-<stem>-v0` and never parse as UUID.
     match uuid::Uuid::parse_str(&parsed.artifact_id) {
         Ok(workflow_id) => {
-            action_resolve_review_persisted(state, workflow_id, resolution).await
+            action_resolve_review_persisted(
+                state,
+                workflow_id,
+                resolution,
+                automation_policy,
+                automation_explicit,
+            )
+            .await
         }
-        Err(_) => action_resolve_review_methodology(state, parsed.artifact_id.clone(), resolution).await,
+        Err(_) => {
+            action_resolve_review_methodology(
+                state,
+                parsed.artifact_id.clone(),
+                resolution,
+                automation_policy,
+                automation_explicit,
+            )
+            .await
+        }
     }
+}
+
+/// Wave-18 / task 07 :: build the workflow-side automation context. We
+/// have NO `compiler_model` field on the Workflow row, so the
+/// deterministic-mode rule defaults to `false` for persisted workflows
+/// (distill historically ran the LLM-driven Sonnet path). The methodology
+/// branch (compile_methodology) is fully deterministic — its
+/// `compile_mode="deterministic"` writes a YAML from the source `.lisp`
+/// without an LLM, so we flag those callers via `methodology_branch=true`.
+///
+/// The defaults here intentionally err on the side of CAUTION:
+/// `auto_safe` for workflow approvals will not auto-promote unless the
+/// caller explicitly passes `deterministic_workflow=true` — surfacing
+/// the rule outcomes loudly in the response so an operator can see why.
+fn build_workflow_automation_ctx(
+    args: &Value,
+    methodology_branch: bool,
+) -> ReviewAutomationContext {
+    let caller_deterministic = args
+        .get("deterministic_workflow")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let deterministic_mode = methodology_branch || caller_deterministic;
+    ReviewAutomationContext {
+        deterministic_mode,
+        file_write_attempted: false,
+        file_write_succeeded: false,
+        actual_file_sha256: None,
+        expected_file_sha256: args
+            .get("expected_file_sha256")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+        protected_source_or_target: false,
+        additional_blockers: Vec::new(),
+    }
+}
+
+/// Wave-18 / task 07 :: policy-driven resolve_review path. Workflow rows
+/// have no status column; the persisted branch never runs a DB
+/// transition. The policy can still surface a suggestion under
+/// `auto_safe` / `suggest`. NEVER mutates state.
+async fn action_resolve_review_with_policy_only(
+    state: &AppState,
+    qid: String,
+    automation_policy: ReviewAutomationPolicy,
+) -> Result<ToolResult> {
+    let parsed = match parse_review_question_id_struct(&qid) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "workflow",
+        &parsed.artifact_id,
+        WORKFLOW_REVIEW_VERSION,
+        WORKFLOW_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    let methodology_branch = uuid::Uuid::parse_str(&parsed.artifact_id).is_err();
+    // Surface enough context for the operator to act.
+    let mut payload = json!({
+        "scope": "workflow",
+        "mode": if methodology_branch { "methodology" } else { "persisted" },
+        "artifact_id": parsed.artifact_id,
+        "version": WORKFLOW_REVIEW_VERSION,
+        "review_question_id": qid,
+        "db_transition": false,
+    });
+
+    let mut args_v = json!({});
+    if let Some(map) = args_v.as_object_mut() {
+        map.insert(
+            "review_automation_policy".into(),
+            json!(automation_policy.as_str()),
+        );
+    }
+    let ctx = build_workflow_automation_ctx(&args_v, methodology_branch);
+    let outcome = evaluate_review_automation(automation_policy, &ctx, None);
+
+    if outcome.may_auto_resolve {
+        // Workflow has no DB transition — auto-promotion just stamps the
+        // approval on the response and emits the Resolved bus event.
+        payload["status"] = json!("review_approved");
+        payload["resolution_source"] = json!("review_automation_policy");
+    } else {
+        payload["status"] = json!("review_pending_decision");
+        if matches!(outcome.status, AutomationStatus::AutoSafeBlocked) {
+            payload["next_step"] = json!(
+                "auto_safe blocked — supply explicit `review_decision` (approved|rejected|needs_changes) to flip the workflow"
+            );
+        } else {
+            payload["next_step"] = json!(
+                "suggest mode is informational — supply explicit `review_decision` to flip the workflow"
+            );
+        }
+    }
+
+    stamp_review_automation_payload(&mut payload, &outcome);
+
+    if outcome.may_auto_resolve {
+        maybe_emit_review_question_resolved(
+            &mut payload,
+            &state.bus,
+            Some(&qid),
+            "approved",
+            None,
+        )
+        .await;
+    }
+
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 /// Persisted distill resolution. The workflow row exists; the `Workflow`
@@ -1177,10 +1337,15 @@ async fn action_resolve_review(state: &AppState, args: &Value) -> Result<ToolRes
 /// Resolved bus event. `approved` is loud (`status=review_approved`);
 /// `rejected` / `needs_changes` keep the artifact non-approved with the
 /// reason surfaced.
+///
+/// wave-18 / task 07 :: stamps the automation outcome on the response.
+/// Caller-supplied `review_decision` always wins.
 async fn action_resolve_review_persisted(
     state: &AppState,
     workflow_id: uuid::Uuid,
     input: ReviewResolutionInput,
+    automation_policy: ReviewAutomationPolicy,
+    automation_explicit: bool,
 ) -> Result<ToolResult> {
     let row = state
         .store
@@ -1224,6 +1389,21 @@ async fn action_resolve_review_persisted(
     }
 
     stamp_resolution_payload(&mut payload, &input);
+
+    if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
+        let mut args_v = json!({});
+        if let Some(map) = args_v.as_object_mut() {
+            map.insert("review_automation_policy".into(), json!(automation_policy.as_str()));
+        }
+        let ctx = build_workflow_automation_ctx(&args_v, false);
+        let outcome = evaluate_review_automation(
+            automation_policy,
+            &ctx,
+            Some(input.decision),
+        );
+        stamp_review_automation_payload(&mut payload, &outcome);
+    }
+
     let resolution_str = resolution_wire_string(input.decision);
     maybe_emit_review_question_resolved(
         &mut payload,
@@ -1243,10 +1423,16 @@ async fn action_resolve_review_persisted(
 /// audit pipeline can correlate the decision with the source artifact,
 /// AND emits the Resolved bus event (best-effort). It NEVER fakes DB
 /// state — there is nothing to mutate.
+///
+/// wave-18 / task 07 :: stamps the automation outcome on the response.
+/// methodology branch is fully deterministic (`compile_methodology` runs
+/// no LLM), so the deterministic-mode rule auto-passes for this branch.
 async fn action_resolve_review_methodology(
     state: &AppState,
     flow_id: String,
     input: ReviewResolutionInput,
+    automation_policy: ReviewAutomationPolicy,
+    automation_explicit: bool,
 ) -> Result<ToolResult> {
     let mut payload = json!({
         "scope": "workflow",
@@ -1271,6 +1457,21 @@ async fn action_resolve_review_methodology(
     }
 
     stamp_resolution_payload(&mut payload, &input);
+
+    if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
+        let mut args_v = json!({});
+        if let Some(map) = args_v.as_object_mut() {
+            map.insert("review_automation_policy".into(), json!(automation_policy.as_str()));
+        }
+        let ctx = build_workflow_automation_ctx(&args_v, true);
+        let outcome = evaluate_review_automation(
+            automation_policy,
+            &ctx,
+            Some(input.decision),
+        );
+        stamp_review_automation_payload(&mut payload, &outcome);
+    }
+
     let resolution_str = resolution_wire_string(input.decision);
     maybe_emit_review_question_resolved(
         &mut payload,
