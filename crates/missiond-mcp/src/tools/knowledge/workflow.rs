@@ -223,6 +223,16 @@ fn build_properties() -> Value {
         "[resolve_review review_automation_policy=auto_safe] (wave-18 / task 07) optional caller-supplied SHA-256 the safety inspector requires to match the on-disk workflow .lisp hash. Replay the `file_sha256` captured from the original distill / compile_methodology response so an unexpected on-disk modification blocks `auto_safe`.",
     ));
 
+    p.insert("auto_chain".into(), prop(
+        "boolean",
+        "[distill] (wave-19 / task 09 cross-plan distill auto-chain v1) opt-in cross-plan distill chain recorder anchored on the workflow surface. Default false → response is byte-identical with the wave-18 distill payload (no `auto_chain` block). When true, AFTER the caller-chosen distill mode (`distill_mode=\"dry_run\"|\"sonnet\"`) completes successfully the daemon DERIVES a deterministic chain id from `project_root + plan_id + (workflow_id|name|<unnamed>) + sha256(.evidence.json|<no-evidence>)` (sha256-hashed, prefixed `chain:auto:wf-`), appends ONE chain-record evidence row to `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json` (kind=`distill_chain_record`, source=`workflow_distill_auto_chain`; same kind as wave-18 plan_dag-driven entries so audit queries see both), and splices an `auto_chain` block onto the response (`auto_chain.{requested,status,chain_id,chain_id_source=\"derived_from_workflow_context\",chain_id_inputs,evidence_path|evidence_error}` + top-level shortcuts `auto_chain_status` / `auto_chain_id`). NEVER calls Sonnet implicitly — the auto-chain hook only RECORDS; the upstream distill call already chose its mode. Sidecar append is purely additive (no migration). Failures collapse to status `resolve_failed` (project root unresolvable; no chain id surfaced) or `record_failed` (chain id IS surfaced + `evidence_error`). Inner distill errors are preserved verbatim — auto_chain is skipped on error envelopes (mirrors plan.rs's `apply_distill_chain` policy).",
+    ));
+
+    p.insert("auto_chain_name".into(), prop(
+        "string",
+        "[distill auto_chain=true] (wave-19 / task 09) optional free-form chain label echoed into the `auto_chain.chain_name` block + chain-record evidence row. Mirrors plan.rs's `distill_chain_name` semantics so a single dashboard query can group both recorders' rows by label without parsing the deterministic id. Blank / missing → omitted from the response.",
+    ));
+
     Value::Object(p)
 }
 
@@ -279,6 +289,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
          自动 stamp review_approved (workflow 行无 status 列, approval receipt-only); 永不 auto-reject; \
          永不 call LLM; explicit review_decision 永远 win over policy。响应总附 review_automation_policy / \
          review_automation_status / suggested_review_decision / automation_reasons[]。\
+         wave-19 / task 09 cross-plan distill auto-chain v1: distill 接 auto_chain=true 即在 inner distill 成功后 \
+         derive 确定性 chain id 自 project_root + plan_id + (workflow_id|name|<unnamed>) + sha256(.evidence.json|<no-evidence>) \
+         (sha256 哈希, 前缀 `chain:auto:wf-`), append 一条 distill_chain_record (source=`workflow_distill_auto_chain`) \
+         evidence row 到 `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`, 响应附 auto_chain block \
+         (chain_id / chain_id_source=\"derived_from_workflow_context\" / chain_id_inputs / evidence_path|evidence_error) \
+         + top-level shortcuts auto_chain_status / auto_chain_id。default false 保 byte-identical (wave-18 distill 形状不变); \
+         永不 implicit sonnet (只 record, 不重派 distiller); sidecar 严格 append-only (无 migration); \
+         resolve_failed / record_failed 不破坏 inner distill payload。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
          implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
          role workflow-distiller + intent-memory.lisp :: directive-layer :: file-first-artifacts :: workflow-methodology-file。",
