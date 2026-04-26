@@ -2066,9 +2066,41 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // ── Optional fail-fast enforcement (wave16-06).
+    //
+    // `enforce_scoped_commit=true` flips the existing audit-only handoff
+    // checks into hard rejects at completion-time. Default `false` keeps
+    // legacy callers byte-identical: they still get the audit-only path
+    // wired through `mission_execution(action=audit)` later. We resolve
+    // the flag here so the validation step (run BEFORE id allocation)
+    // sees the caller's intent without paying the read cost twice.
+    let enforce_scoped_commit = args
+        .get("enforce_scoped_commit")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
     let mut file = read_log_file(&path)?;
+
+    // Run the enforcement gate BEFORE `allocate_id` mutates the
+    // id-counters block — a rejected completion must not bump the
+    // counter or otherwise change the durable file.
+    let scoped_commit_validation = if enforce_scoped_commit {
+        match enforce_scoped_commit_completion(
+            &file,
+            staged_files.as_deref(),
+            commit_hash.as_deref(),
+            commit_status.as_deref(),
+            commit_blocker.as_deref(),
+        ) {
+            Ok(v) => Some(v),
+            Err(err) => return Ok(err),
+        }
+    } else {
+        None
+    };
+
     let id = allocate_id(&mut file, Counter::Completion)?;
     let date = now_iso();
 
@@ -2137,6 +2169,12 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         "phase": phase,
         "agent": agent,
         "at": date,
+        // Always surfaced so callers can detect at a glance which mode
+        // the completion went through. `false` here means audit-only
+        // (legacy / opt-out) — `true` means the durability invariants
+        // were validated at write-time and the validation summary is
+        // included below.
+        "scoped_commit_enforced": enforce_scoped_commit,
     });
     if let Some(list) = changed_files {
         response["changed_files"] = json!(list);
@@ -2152,6 +2190,9 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     if let Some(blocker) = commit_blocker {
         response["commit_blocker"] = json!(blocker);
+    }
+    if let Some(v) = scoped_commit_validation {
+        response["scoped_commit_validation"] = v;
     }
     Ok(ToolResult::json_pretty(&response))
 }
@@ -2700,6 +2741,139 @@ fn audit_scoped_commit_handoff(
             }
         }
     }
+}
+
+/// Apply the wave16-06 fail-fast scoped-commit handoff checks against a
+/// pending `action_complete` payload. Mirrors the audit-only failure
+/// modes from `audit_scoped_commit_handoff` — same `scopes_overlap`
+/// helper, same union of active+released claim scopes — but instead of
+/// pushing audit findings the violations short-circuit completion with
+/// a structured `ToolResult` error.
+///
+/// Returns `Ok(validation_summary)` when every gate passes; the summary
+/// is echoed back on the response under `scoped_commit_validation` so
+/// callers can confirm which rules ran.
+///
+/// Failure modes (all wired to the wave16-06 task contract):
+/// 1. `COMMIT_HASH_REQUIRED` — `commit_status="committed"` without a
+///    `commit_hash`. Mirrors the audit `commit-status-without-hash`
+///    finding (intent-memory.lisp :: scoped-commit-contract :inv-7).
+/// 2. `COMMIT_BLOCKER_REQUIRED` — `commit_status="blocked"` without a
+///    `commit_blocker`. Mirrors `commit-status-blocked-without-blocker`.
+/// 3. `CLAIM_SCOPE_REQUIRED` — caller reported `staged_files` but the
+///    file has no claims at all. Distinct error code so callers can
+///    tell "claim missing" from "scope drift" — both surface as
+///    `scoped-commit-violation` in the audit-only path.
+/// 4. `SCOPED_COMMIT_VIOLATION` — at least one staged path escapes the
+///    union of every recorded claim scope. Direct parallel of the
+///    audit `scoped-commit-violation` finding.
+///
+/// We deliberately do not run git inside the daemon. The caller is the
+/// writer agent; the daemon validates the metadata it reports.
+fn enforce_scoped_commit_completion(
+    file: &LogFile,
+    staged_files: Option<&[String]>,
+    commit_hash: Option<&str>,
+    commit_status: Option<&str>,
+    commit_blocker: Option<&str>,
+) -> std::result::Result<Value, ToolResult> {
+    if commit_status == Some("committed")
+        && commit_hash.map(|s| s.is_empty()).unwrap_or(true)
+    {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "COMMIT_HASH_REQUIRED",
+                "enforce_scoped_commit=true requires a non-empty commit_hash when commit_status=\"committed\"",
+            )
+            .with_suggestion(
+                "report the scoped commit hash, or set commit_status to `blocked`/`pending`/`skipped`/`not-required`",
+            ),
+        ));
+    }
+
+    if commit_status == Some("blocked")
+        && commit_blocker.map(|s| s.is_empty()).unwrap_or(true)
+    {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "COMMIT_BLOCKER_REQUIRED",
+                "enforce_scoped_commit=true requires a non-empty commit_blocker when commit_status=\"blocked\"",
+            )
+            .with_suggestion(
+                "describe why the scoped commit could not land so the next agent can resume per scoped-commit-contract :recovery-rule",
+            ),
+        ));
+    }
+
+    let staged_non_empty: &[String] = match staged_files {
+        Some(list) if !list.is_empty() => list,
+        // Empty / absent staged_files: nothing to validate against
+        // claims — the completion may legitimately be read-only.
+        _ => {
+            return Ok(json!({
+                "checked": ["commit_hash", "commit_blocker"],
+                "staged_files_checked": 0,
+                "claim_scopes": Vec::<String>::new(),
+            }));
+        }
+    };
+
+    let claims = parse_claims(file);
+    let claim_scopes: Vec<String> = claims
+        .iter()
+        .map(|c| c.scope.clone())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if claim_scopes.is_empty() {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "CLAIM_SCOPE_REQUIRED",
+                format!(
+                    "enforce_scoped_commit=true requires at least one claim scope on the companion log when staged_files is non-empty (got {} staged path(s))",
+                    staged_non_empty.len()
+                ),
+            )
+            .with_suggestion(
+                "issue a `mission_execution(action=claim, scope=…)` covering the staged paths before completing, or stage no files",
+            ),
+        ));
+    }
+
+    // Reuse `scopes_overlap` so coordinator + auditor + enforcement all
+    // agree on what "inside scope" means (same prefix-match rule).
+    let mut violators: Vec<String> = Vec::new();
+    for path in staged_non_empty {
+        let in_scope = claim_scopes.iter().any(|cs| scopes_overlap(cs, path));
+        if !in_scope {
+            violators.push(path.clone());
+        }
+    }
+    if !violators.is_empty() {
+        // ToolError has no structured details slot today; bake the
+        // offending paths + the claim scopes into the reason string so
+        // the writer agent can correct without a second roundtrip.
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "SCOPED_COMMIT_VIOLATION",
+                format!(
+                    "enforce_scoped_commit=true rejected {} staged path(s) that escape every recorded claim scope: violators={:?}, claim_scopes={:?}",
+                    violators.len(),
+                    violators,
+                    claim_scopes,
+                ),
+            )
+            .with_suggestion(
+                "narrow the staged set to the active claim scope, or open a new claim covering the escaped paths",
+            ),
+        ));
+    }
+
+    Ok(json!({
+        "checked": ["commit_hash", "commit_blocker", "scoped_commit_violation"],
+        "staged_files_checked": staged_non_empty.len(),
+        "claim_scopes": claim_scopes,
+    }))
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -3597,5 +3771,207 @@ mod tests {
         assert_eq!(by.get("committed").and_then(|x| x.as_i64()), Some(1));
         assert_eq!(by.get("blocked").and_then(|x| x.as_i64()), Some(1));
         assert_eq!(by.get("pending").and_then(|x| x.as_i64()), Some(0));
+    }
+
+    // ── Wave 16 / Task 06 — fail-fast scoped-commit enforcement ────
+    //
+    // Tests below pin the contract of `enforce_scoped_commit_completion`,
+    // the runtime gate `action_complete` calls when the caller opts in
+    // via `enforce_scoped_commit=true`. The audit-only path still owns
+    // legacy callers (covered above) — these only exercise the new
+    // structured-error short-circuit.
+
+    fn extract_error_code(result: &ToolResult) -> Option<String> {
+        let v = serde_json::to_value(result).ok()?;
+        // structured_error renders into the content[0].text JSON payload.
+        let content = v.get("content")?.as_array()?;
+        let first = content.first()?;
+        let text = first.get("text")?.as_str()?;
+        let parsed: Value = serde_json::from_str(text).ok()?;
+        parsed
+            .get("error_code")
+            .and_then(|c| c.as_str())
+            .map(|s| s.to_string())
+    }
+
+    /// Released claim alongside the existing "src/" active claim — both
+    /// must count as in-scope when validating staged paths so the
+    /// post-release commit window stays open per
+    /// F-scoped-commit-handoff :: s7 release-claim.
+    fn fresh_file_with_released_claim() -> LogFile {
+        let mut file = fresh_file();
+        let now = now_iso();
+        let entry = format!(
+            "    (C001\n      :claimer \"agent\"\n      :scope \"crates/foo/\"\n      :phase \"phase-A\"\n      :acquired-at {ts}\n      :lease-expires-at {ts}\n      :released-at {ts}\n      :heartbeat-at {ts}\n      :status \"released\")",
+            ts = lisp_quote_string(&now),
+        );
+        append_to_block(&mut file, "claims", &entry).unwrap();
+        file
+    }
+
+    /// committed without commit_hash + enforce_scoped_commit=true must
+    /// short-circuit with COMMIT_HASH_REQUIRED before the file is touched.
+    #[test]
+    fn enforce_rejects_committed_without_hash() {
+        let file = fresh_file_with_claim();
+        let res = enforce_scoped_commit_completion(
+            &file,
+            Some(&["src/a.rs".to_string()]),
+            None,
+            Some("committed"),
+            None,
+        );
+        let err = res.expect_err("should reject committed without hash");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("COMMIT_HASH_REQUIRED"),
+        );
+    }
+
+    /// blocked without commit_blocker + enforce_scoped_commit=true must
+    /// reject with COMMIT_BLOCKER_REQUIRED. Empty-string blocker is
+    /// equivalent to absent (caller-side trim already collapsed it).
+    #[test]
+    fn enforce_rejects_blocked_without_blocker() {
+        let file = fresh_file_with_claim();
+        let res = enforce_scoped_commit_completion(
+            &file,
+            Some(&["src/a.rs".to_string()]),
+            None,
+            Some("blocked"),
+            None,
+        );
+        let err = res.expect_err("should reject blocked without blocker");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("COMMIT_BLOCKER_REQUIRED"),
+        );
+    }
+
+    /// staged_files non-empty + zero claims must reject with the
+    /// CLAIM_SCOPE_REQUIRED variant — distinct from a scope drift
+    /// violation so the writer can tell "missing claim" from "outside
+    /// scope" without parsing the audit findings list.
+    #[test]
+    fn enforce_rejects_staged_files_with_no_claims() {
+        let file = fresh_file();
+        let res = enforce_scoped_commit_completion(
+            &file,
+            Some(&["src/a.rs".to_string()]),
+            Some("abc1234"),
+            Some("committed"),
+            None,
+        );
+        let err = res.expect_err("should reject staged with no claims");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("CLAIM_SCOPE_REQUIRED"),
+        );
+    }
+
+    /// staged path outside every claim scope must reject with
+    /// SCOPED_COMMIT_VIOLATION. Mirrors the audit-only finding so the
+    /// runtime contract matches the audit contract.
+    #[test]
+    fn enforce_rejects_staged_file_outside_claim_scope() {
+        let file = fresh_file_with_claim();
+        let res = enforce_scoped_commit_completion(
+            &file,
+            Some(&["vendor/x.rs".to_string()]),
+            Some("abc1234"),
+            Some("committed"),
+            None,
+        );
+        let err = res.expect_err("should reject scope drift");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("SCOPED_COMMIT_VIOLATION"),
+        );
+    }
+
+    /// staged path inside an already-released claim must pass —
+    /// the writer legitimately commits files inside the just-released
+    /// scope window per F-scoped-commit-handoff :: s7.
+    #[test]
+    fn enforce_accepts_staged_file_inside_released_claim() {
+        let file = fresh_file_with_released_claim();
+        let res = enforce_scoped_commit_completion(
+            &file,
+            Some(&["crates/foo/src/a.rs".to_string()]),
+            Some("abc1234"),
+            Some("committed"),
+            None,
+        );
+        let summary = res.expect("should accept released-claim handoff");
+        assert_eq!(
+            summary.get("staged_files_checked").and_then(|v| v.as_u64()),
+            Some(1),
+        );
+        let scopes = summary
+            .get("claim_scopes")
+            .and_then(|v| v.as_array())
+            .expect("claim_scopes array");
+        assert!(scopes
+            .iter()
+            .any(|v| v.as_str() == Some("crates/foo/")));
+    }
+
+    /// Empty staged_files + enforce_scoped_commit=true must still pass
+    /// (read-only completions are legal per scoped-commit-contract
+    /// :commit-status-values :not-required) and the validation summary
+    /// must record "0 staged paths checked" so callers can confirm the
+    /// branch they hit.
+    #[test]
+    fn enforce_accepts_empty_staged_files() {
+        let file = fresh_file_with_claim();
+        let res = enforce_scoped_commit_completion(
+            &file,
+            Some(&[]),
+            None,
+            Some("not-required"),
+            None,
+        );
+        let summary = res.expect("read-only completion must pass");
+        assert_eq!(
+            summary.get("staged_files_checked").and_then(|v| v.as_u64()),
+            Some(0),
+        );
+    }
+
+    /// Caller did not opt in → `enforce_scoped_commit_completion` is
+    /// never called. We assert the legacy code path explicitly: a
+    /// `commit_status=committed` payload with no hash is accepted by
+    /// the gate when `enforce_scoped_commit=false` because the gate
+    /// simply does not run (audit will still flag it later).
+    ///
+    /// We can't drive `action_complete` directly without AppState, so
+    /// instead we mirror its branch by ensuring the helper is only
+    /// reached when the flag is true — invoking it directly with the
+    /// same payload here illustrates the contract: legacy callers
+    /// would never hit this path.
+    #[test]
+    fn enforce_helper_is_opt_in_only() {
+        // Mirror the dispatch branch from `action_complete`: when the
+        // caller does not set `enforce_scoped_commit`, we never reach
+        // the helper. So a payload that *would* fail validation
+        // (`committed` without hash) is allowed through the legacy
+        // path. We assert the helper rejects it to make the contrast
+        // explicit.
+        let file = fresh_file_with_claim();
+        let res = enforce_scoped_commit_completion(
+            &file,
+            None,
+            None,
+            Some("committed"),
+            None,
+        );
+        assert_eq!(
+            extract_error_code(&res.expect_err("opt-in path rejects")).as_deref(),
+            Some("COMMIT_HASH_REQUIRED"),
+        );
+        // The gate is gated on the caller flag; this test pins that
+        // contract by exercising it directly. The opt-out (legacy)
+        // path is exercised by every existing `action_complete` test
+        // above, all of which omit `enforce_scoped_commit`.
     }
 }

@@ -260,6 +260,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
         ),
     );
     properties.insert(
+        "enforce_scoped_commit".into(),
+        prop(
+            "boolean",
+            "[complete] opt-in fail-fast enforcement of scoped-commit-contract at completion time (wave16-06). Defaults to false: legacy callers keep audit-only behavior. When true, action=complete rejects with structured errors before mutating the companion log: `COMMIT_HASH_REQUIRED` (commit_status=committed without commit_hash), `COMMIT_BLOCKER_REQUIRED` (commit_status=blocked without commit_blocker), `CLAIM_SCOPE_REQUIRED` (staged_files non-empty but no claims on the file), `SCOPED_COMMIT_VIOLATION` (any staged path escapes every recorded claim scope — same scopes_overlap rule as the audit-only path). Daemon never runs git itself; the writer agent runs the scoped commit and reports back. Response surfaces `scoped_commit_enforced` plus `scoped_commit_validation` summary on success.",
+        ),
+    );
+    properties.insert(
         "mode".into(),
         prop_enum(
             "string",
