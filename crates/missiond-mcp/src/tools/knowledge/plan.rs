@@ -717,6 +717,42 @@ fn build_properties() -> Value {
         &["off", "sonnet_suggest"],
     ));
 
+    // ── wave-21 / task 05 — PLAN inference apply gate v1 ────────────────
+    //
+    // Layered on top of `infer_plan_fields` (wave-18 / task 06 +
+    // wave-20 / task 07). Default behaviour is suggest-only — the
+    // wave-18 `apply_safe` mode keeps its byte-shape so back-compat
+    // callers do not have to opt into the new gate. When the caller
+    // explicitly passes `apply_inferred_fields=true` the gate becomes
+    // load-bearing:
+    //   * deterministic high-confidence + no-conflict fields are
+    //     promoted into `apply_gate.applied_fields[]`;
+    //   * caller-vs-inferred conflicts NEVER apply (they surface on
+    //     `apply_gate.conflict_fields[]`);
+    //   * suggestions (medium / low) NEVER apply (skipped with reason
+    //     `below_apply_threshold`);
+    //   * LLM proposals (wave-20 / sonnet_suggest) ONLY apply when the
+    //     caller named the field in `llm_caller_approved` AND the
+    //     proposal passes a per-field safety check (mirrors the
+    //     wave-21 / task 04 workstation whitelists).
+    // The response always carries an `apply_gate` block with
+    // {requested, persist_inference_requested, persist_inference_applied
+    // (always false in v1), applied_fields[], skipped_fields[],
+    // conflict_fields[], resulting_plan_preview}.
+    p.insert("apply_inferred_fields".into(), prop(
+        "boolean",
+        "[execute] (wave-21 / task 05) opt-in apply gate for PLAN field inference. Default `false` (suggest-only) preserves the wave-18 / wave-20 byte-shape — proposals are surfaced under `plan_field_inference` but never mutate caller args. When `true` the gate promotes deterministic high-confidence + no-conflict fields into `apply_gate.applied_fields[]` AND drives the augmented args into the dispatch pipeline (under `infer_plan_fields=apply_safe`). Caller-vs-inferred conflicts are NEVER applied — they surface on `apply_gate.conflict_fields[]` with the inferer's source intact. Sub-threshold suggestions never apply (skipped with reason `below_apply_threshold`). LLM proposals apply ONLY when the caller named the field in `llm_caller_approved` AND the proposal passes safety + confidence + conflict checks. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected with INVALID_PARAM so a typo never silently opens the gate. Response surfaces an `apply_gate` block with {requested, persist_inference_requested, persist_inference_applied (always false in v1), applied_fields[] (each {field, value, source, origin}), skipped_fields[] (each {field, reason, origin, [detail]}), conflict_fields[] (each {field, caller_value, inferred_value, confidence, source}), resulting_plan_preview (caller args ∪ applied)}. Persistence boundary: the gate NEVER mutates persisted plan.sexp_text in v1 — `persist_inference_applied` is hard-pinned to false; a future wave will wire the persisted plan write under the existing `persist=true` action arg or the explicit `persist_inference=true` flag.",
+    ));
+
+    p.insert("llm_caller_approved".into(), prop_no_type(
+        "[execute] (wave-21 / task 05) per-field caller approval list for `infer_plan_fields=sonnet_suggest` LLM proposals. Default absent ⇒ no LLM proposal applies, even when `apply_inferred_fields=true`. Accepts two shapes: object map `{\"target\": true, \"owned_files\": false}` (only fields with `true` count as approved) OR array of field strings `[\"target\", \"workstation_dispatch\"]`. Field strings outside the wave-20 LLM allowlist (`target`, `dispatch_strategy`, `target_project`, `owned_files`, `acceptance_mode`, `workstation_dispatch`) are silently dropped (defensive). Approval is necessary BUT NOT sufficient: the apply gate ALSO requires `apply_inferred_fields=true`, the proposal's `confidence ∈ {high, medium}`, `conflict_status=\"none\"` from wave-20 reconciliation, AND a per-field safety check that mirrors wave-21 / task 04 whitelists (target ∈ {mission_execution, mission_task_delegate, mission_flow_run}; dispatch_strategy ∈ {resident-lisp, fresh-code-alignment, agent-team, mixed} — `prompt-fallback` / `unknown` excluded). Proposals failing any check land on `apply_gate.skipped_fields[]` with structured reasons (`llm_not_caller_approved`, `llm_confidence_too_low`, `llm_conflict_present`, `llm_safety_check_failed`, `caller_value_already_set`, `deterministic_inferred_already_applied`). Strict shape: only object / array forms are accepted; bool / string / number rejected with INVALID_PARAM.",
+    ));
+
+    p.insert("persist_inference".into(), prop(
+        "boolean",
+        "[execute] (wave-21 / task 05) explicit persistence opt-in for the apply gate. Default `false`. The v1 gate NEVER mutates persisted `plan.sexp_text` regardless of this flag — `apply_gate.persist_inference_applied` is hard-pinned to `false` so observers can `assert apply_gate.persist_inference_applied == false` directly. The flag is echoed on the response under `apply_gate.persist_inference_requested` so a future wave (when the persisted plan write lands) can pivot on the same wire string without breaking back-compat callers. Per the goal contract: persisted plan text is mutated only when an existing action already has `persist=true` (compile path) or this explicit `persist_inference=true` flag is supplied (execute path); the v1 gate audit-records the request without acting on it. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected.",
+    ));
+
     Value::Object(p)
 }
 
@@ -921,8 +957,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
          caller / PLAN 已有 signal 时 surface status=\"plan_hints_present\" + signal_summary 列出哪些 slot 命中。\
          scheduler_mode=dag_v1 preflight reject sonnet_suggest (v0 single-node only)。响应附 workstation_proposals 块 + \
          workstation_inference_mode=\"sonnet_suggest\" 模式 echo (off 模式不 surface)。\
+         wave-21 / task 05 PLAN inference apply gate v1: execute (任意 infer_plan_fields 模式) 接受 \
+         apply_inferred_fields=true (bool only; 字符串 \"true\" fail-fast INVALID_PARAM 拒) opt-in 启用 controlled apply gate — \
+         deterministic high-confidence + no-conflict 字段进 `apply_gate.applied_fields[]` 并 augment 进 dispatch pipeline (apply_safe 模式)；\
+         caller-vs-inferred conflicts 永不 apply (落 `apply_gate.conflict_fields[]`)；suggestions (medium/low) 永不 apply (skipped reason `below_apply_threshold`)；\
+         wave-20 LLM proposals 仅当 caller 在 `llm_caller_approved` (object {field: bool} 或 array [field strings]) 显式批准 \
+         AND confidence ∈ {high, medium} AND conflict_status=\"none\" AND 通过 per-field safety check (mirrors wave-21/04 whitelists; \
+         dispatch_strategy `prompt-fallback`/`unknown` deliberately excluded) 才 apply。响应固定附 `apply_gate` 块 \
+         {requested, persist_inference_requested, persist_inference_applied (always false in v1), applied_fields[] (each {field, value, source, origin}), \
+         skipped_fields[] (each {field, reason ∈ {apply_gate_not_requested, caller_value_already_set, caller_value_conflict, below_apply_threshold, \
+         llm_not_caller_approved, llm_confidence_too_low, llm_conflict_present, llm_safety_check_failed, deterministic_inferred_already_applied}, origin, [detail]}), \
+         conflict_fields[], resulting_plan_preview (caller args ∪ applied)}。Persistence boundary: v1 gate 永不 mutate 持久化 plan.sexp_text \
+         (persist_inference_applied 钉死 false); persist_inference=true 仅 echo 进 audit 行,等下一个 wave 接 persisted plan write。\
+         默认 apply_inferred_fields=false ⇒ 与 wave-18..20 byte-shape 完全一致 (suggest-only)。\
          Lisp 源 (forward ref): .missiond/tasks/schema/task-contract-v1.lisp + intent-tools.lisp :: implemented-surface \
-         mission_plan :: :task-contract-emitter (wave-19/12 backfill)。",
+         mission_plan :: :task-contract-emitter (wave-19/12 backfill) + :execute-contract :apply-inferred-fields-gate (wave-21/05 backfill)。",
         schema,
     )]
 }

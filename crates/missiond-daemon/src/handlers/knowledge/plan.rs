@@ -4229,6 +4229,586 @@ pub(super) fn apply_safe_augmentation(args: &Value, inference: &PlanFieldInferen
     augmented
 }
 
+// ── wave-21 / task 05 — PLAN inference apply-gate v1 ───────────────────
+//
+// Layered on top of wave-18 / task 06 (deterministic `infer_plan_fields`
+// modes) and wave-20 / task 07 (LLM-augmented `sonnet_suggest`). The
+// existing wave-18 `apply_safe` mode auto-applies high-confidence fields
+// silently — which the wave-21 review surfaced as too lenient. The new
+// `apply_inferred_fields=true` flag introduces an EXPLICIT operator
+// approval before any inferred / proposed value mutates the call.
+//
+// Default behaviour (`apply_inferred_fields` absent / false) is suggest-
+// only:
+//   * `preview` / `sonnet_suggest` short-circuit unchanged;
+//   * `apply_safe` still auto-fills high-confidence slots (legacy
+//     behaviour preserved for back-compat — callers that relied on
+//     wave-18 byte-shape do NOT have to opt into the new gate).
+//
+// Opt-in behaviour (`apply_inferred_fields=true`) is conservative:
+//   * deterministic high-confidence inferred fields with NO conflict
+//     are applied;
+//   * deterministic suggestions (medium / low) are SKIPPED with reason
+//     `"below_apply_threshold"`;
+//   * caller-vs-inferred conflicts are NEVER applied — they surface on
+//     `conflict_fields[]` with the conflict source intact;
+//   * LLM proposals (wave-20 / sonnet_suggest) are SKIPPED unless the
+//     caller explicitly approved them via `llm_caller_approved`
+//     (per-field bool map or array of field names);
+//   * approved LLM proposals additionally require:
+//       - `confidence ∈ {high, medium}` (low-confidence LLM proposals
+//         are conservative-skip);
+//       - `conflict_status="none"` (no caller / deterministic clash);
+//       - `safety_check` passes the per-field whitelist (mirrors
+//         workstation_dispatch::WorkstationProposalValidator allowlists).
+//
+// The response carries a structured `apply_gate` block with:
+//   * `requested`               — bool echoing the flag.
+//   * `applied_fields[]`        — `{field, value, source, origin}`.
+//   * `skipped_fields[]`        — `{field, reason, origin}`.
+//   * `conflict_fields[]`       — `{field, caller_value, inferred_value,
+//                                    confidence, source}`.
+//   * `resulting_plan_preview`  — augmented args view (caller-supplied
+//                                  ∪ applied_fields), suitable for the
+//                                  caller to dry-run a follow-up call.
+//   * `persist_inference_requested` — bool echoing `persist_inference`.
+//   * `persist_inference_applied`   — always `false` in v1 (the gate
+//                                      RESPECTS the persistence boundary
+//                                      but does NOT mutate plan.sexp_text;
+//                                      a future wave will wire the
+//                                      persisted plan write).
+//
+// Lisp authority forward reference (Wave 21 backfill):
+//   - intent-flow.lisp :: F-intent-alignment-plan-execution-loop ::
+//                         s4 plan-authoring (apply gate v1)
+//   - intent-tools.lisp :: implemented-surface mission_plan ::
+//                         :execute-contract :apply-inferred-fields-gate
+
+/// Provenance tag for an apply-gate decision row. Keeps deterministic
+/// inference distinguishable from LLM-augmented proposals on the wire so
+/// observers can pivot on `origin` without re-reading the bundle status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum ApplyOrigin {
+    /// Field came from `PlanFieldInference::inferred[]`.
+    DeterministicInferred,
+    /// Field came from `PlanFieldInference::suggested[]`.
+    DeterministicSuggested,
+    /// Field came from `PlanFieldInference::conflicts[]`.
+    DeterministicConflict,
+    /// Field came from a `LlmProposal` (wave-20 / sonnet_suggest).
+    LlmProposal,
+}
+
+impl ApplyOrigin {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            ApplyOrigin::DeterministicInferred => "deterministic_inferred",
+            ApplyOrigin::DeterministicSuggested => "deterministic_suggested",
+            ApplyOrigin::DeterministicConflict => "deterministic_conflict",
+            ApplyOrigin::LlmProposal => "llm_proposal",
+        }
+    }
+}
+
+/// Field actually applied by the gate. Carries enough provenance for an
+/// audit reader to reconstruct WHY the field was promoted (deterministic
+/// high-confidence vs caller-approved LLM proposal).
+#[derive(Debug, Clone)]
+pub(super) struct AppliedField {
+    pub(super) field: &'static str,
+    pub(super) value: Value,
+    pub(super) source: &'static str,
+    pub(super) origin: ApplyOrigin,
+}
+
+impl AppliedField {
+    fn to_json(&self) -> Value {
+        json!({
+            "field": self.field,
+            "value": self.value.clone(),
+            "source": self.source,
+            "origin": self.origin.as_wire(),
+        })
+    }
+}
+
+/// Field deliberately NOT applied. The `reason` is a short canonical
+/// string; observers can pivot on it without re-deriving the policy from
+/// the rest of the response.
+#[derive(Debug, Clone)]
+pub(super) struct SkippedField {
+    pub(super) field: &'static str,
+    pub(super) reason: &'static str,
+    pub(super) origin: ApplyOrigin,
+    /// Optional human-readable detail (e.g. `"caller already set target"`).
+    pub(super) detail: Option<String>,
+}
+
+impl SkippedField {
+    fn to_json(&self) -> Value {
+        let mut m = serde_json::Map::new();
+        m.insert("field".to_string(), json!(self.field));
+        m.insert("reason".to_string(), json!(self.reason));
+        m.insert("origin".to_string(), json!(self.origin.as_wire()));
+        if let Some(d) = &self.detail {
+            m.insert("detail".to_string(), json!(d));
+        }
+        Value::Object(m)
+    }
+}
+
+/// Aggregate apply-gate decision attached to the response under
+/// `apply_gate`. Mirrors `PlanFieldInference::to_response_json` in always
+/// emitting every list (empty when nothing fired) so observers pivot on a
+/// stable shape regardless of which inference mode ran.
+#[derive(Debug, Default)]
+pub(super) struct ApplyGateOutcome {
+    pub(super) requested: bool,
+    pub(super) persist_inference_requested: bool,
+    pub(super) applied: Vec<AppliedField>,
+    pub(super) skipped: Vec<SkippedField>,
+    pub(super) conflict: Vec<InferenceConflict>,
+    /// Caller-supplied args augmented with `applied[]` — preview only.
+    /// Always emitted so a follow-up caller can dry-run with the same
+    /// shape without re-deriving it.
+    pub(super) resulting_plan_preview: Value,
+}
+
+impl ApplyGateOutcome {
+    pub(super) fn to_response_json(&self) -> Value {
+        let applied: Vec<Value> = self.applied.iter().map(|f| f.to_json()).collect();
+        let skipped: Vec<Value> = self.skipped.iter().map(|f| f.to_json()).collect();
+        let conflict: Vec<Value> = self.conflict.iter().map(|c| c.to_json()).collect();
+        json!({
+            "requested": self.requested,
+            "persist_inference_requested": self.persist_inference_requested,
+            // v1 invariant: persisted plan text is NEVER mutated by this
+            // gate. A future wave will wire the persisted plan write
+            // gated by an existing `persist=true` action arg or the
+            // explicit `persist_inference=true` flag.
+            "persist_inference_applied": false,
+            "applied_fields": applied,
+            "skipped_fields": skipped,
+            "conflict_fields": conflict,
+            "resulting_plan_preview": self.resulting_plan_preview.clone(),
+        })
+    }
+}
+
+/// Parse the per-field `llm_caller_approved` map. Accepts:
+///   * absent / null            → empty set (no LLM approvals).
+///   * object `{field: bool}`   → set of fields with `true`.
+///   * array of strings         → set of field names verbatim.
+/// Strings outside the LLM allowlist are dropped silently (the gate
+/// surfaces an "unknown_field" skip reason elsewhere if needed).
+pub(super) fn parse_llm_caller_approved(args: &Value) -> std::collections::HashSet<&'static str> {
+    let mut out: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    let raw = match args.get("llm_caller_approved") {
+        Some(v) => v,
+        None => return out,
+    };
+    match raw {
+        Value::Object(map) => {
+            for (k, v) in map.iter() {
+                if !v.as_bool().unwrap_or(false) {
+                    continue;
+                }
+                if let Some(canonical) = LLM_ALLOWED_FIELDS
+                    .iter()
+                    .find(|allowed| allowed.eq_ignore_ascii_case(k))
+                    .copied()
+                {
+                    out.insert(canonical);
+                }
+            }
+        }
+        Value::Array(items) => {
+            for item in items.iter() {
+                let Some(s) = item.as_str() else {
+                    continue;
+                };
+                if let Some(canonical) = LLM_ALLOWED_FIELDS
+                    .iter()
+                    .find(|allowed| allowed.eq_ignore_ascii_case(s.trim()))
+                    .copied()
+                {
+                    out.insert(canonical);
+                }
+            }
+        }
+        // Any other shape is ignored — `llm_caller_approved` is always
+        // an explicit map/array; a stray bool/string/number cannot be
+        // construed as an approval list, so we treat it as empty rather
+        // than erroring. A typo therefore keeps proposals SKIPPED, which
+        // is the conservative default.
+        _ => {}
+    }
+    out
+}
+
+/// True when caller passed `apply_inferred_fields=true` (any other shape
+/// — including the literal string `"true"` — is rejected by the wave-21
+/// validator before we get here, so this only checks the bool form).
+pub(super) fn caller_requested_apply(args: &Value) -> bool {
+    args.get("apply_inferred_fields")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// True when caller passed `persist_inference=true`. Surfaced on the
+/// gate response so observers can audit which persistence boundary the
+/// gate honoured. The actual plan-text write is FUTURE work — see the
+/// `persist_inference_applied=false` invariant in
+/// `ApplyGateOutcome::to_response_json`.
+pub(super) fn caller_requested_persist_inference(args: &Value) -> bool {
+    args.get("persist_inference")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Strict pre-flight validator for `apply_inferred_fields` /
+/// `persist_inference`. We only accept the bool form — a literal
+/// string `"true"` / `"false"` is rejected so a typo cannot silently
+/// masquerade as opt-in. Mirrors the conservative posture of the
+/// `infer_plan_fields` validator.
+pub(super) fn validate_apply_gate_args(args: &Value) -> std::result::Result<(), String> {
+    if let Some(v) = args.get("apply_inferred_fields") {
+        if !v.is_boolean() && !v.is_null() {
+            return Err(format!(
+                "apply_inferred_fields must be a boolean (true|false); got {}",
+                json_kind(v)
+            ));
+        }
+    }
+    if let Some(v) = args.get("persist_inference") {
+        if !v.is_boolean() && !v.is_null() {
+            return Err(format!(
+                "persist_inference must be a boolean (true|false); got {}",
+                json_kind(v)
+            ));
+        }
+    }
+    if let Some(v) = args.get("llm_caller_approved") {
+        if !v.is_object() && !v.is_array() && !v.is_null() {
+            return Err(format!(
+                "llm_caller_approved must be object {{field: bool}} or array of field strings; got {}",
+                json_kind(v)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Per-field safety check for an LLM proposal. Mirrors the conservative
+/// whitelists wave-21 / task 04 pinned for `workstation_inference_mode`
+/// (the LLM proposal pipeline already validated the value shape; this is
+/// a second guard at the apply boundary). Returns `Ok(())` when the
+/// proposal is safe to apply; `Err(detail)` otherwise.
+fn llm_proposal_safety_check(field: &str, value: &Value) -> std::result::Result<(), String> {
+    match field {
+        "target" => {
+            let s = value.as_str().unwrap_or("");
+            if matches!(
+                s,
+                "mission_execution" | "mission_task_delegate" | "mission_flow_run"
+            ) {
+                Ok(())
+            } else {
+                Err(format!("target value `{}` not in apply-gate whitelist", s))
+            }
+        }
+        "dispatch_strategy" => {
+            let s = value.as_str().unwrap_or("");
+            // Conservative: prompt-fallback / unknown deliberately
+            // EXCLUDED from auto-apply. Mirrors wave-21 / task 04.
+            if matches!(
+                s,
+                "resident-lisp" | "fresh-code-alignment" | "agent-team" | "mixed"
+            ) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "dispatch_strategy value `{}` not in apply-gate whitelist",
+                    s
+                ))
+            }
+        }
+        "acceptance_mode" => {
+            let s = value.as_str().unwrap_or("");
+            if canonicalize_acceptance_mode(s).is_some() {
+                Ok(())
+            } else {
+                Err(format!(
+                    "acceptance_mode value `{}` not in apply-gate whitelist",
+                    s
+                ))
+            }
+        }
+        "owned_files" => {
+            let arr = value.as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+            if arr.is_empty() {
+                Err("owned_files value is empty".to_string())
+            } else if arr.iter().all(|x| x.as_str().map(|s| !s.trim().is_empty()).unwrap_or(false)) {
+                Ok(())
+            } else {
+                Err("owned_files entries must be non-empty strings".to_string())
+            }
+        }
+        "target_project" => {
+            let s = value.as_str().unwrap_or("").trim();
+            if s.is_empty() {
+                Err("target_project value is empty".to_string())
+            } else {
+                Ok(())
+            }
+        }
+        "workstation_dispatch" => {
+            if value.as_bool().is_some() {
+                Ok(())
+            } else {
+                Err("workstation_dispatch value must be boolean".to_string())
+            }
+        }
+        other => Err(format!("field `{}` not supported by apply gate", other)),
+    }
+}
+
+/// Compute the apply-gate decision over the inference result + caller
+/// args. PURE function — no IO, no AppState reads — so the unit tests
+/// can pin every edge case without touching the LLM.
+///
+/// The gate is suggest-only by default; only when
+/// `apply_inferred_fields=true` does the function promote any field
+/// into `applied[]`. Conflict / suggestion / non-approved-LLM rows
+/// always land in `skipped[]` with a canonical reason so observers can
+/// pivot on a stable shape.
+pub(super) fn compute_apply_gate(
+    args: &Value,
+    inference: &PlanFieldInference,
+) -> ApplyGateOutcome {
+    let requested = caller_requested_apply(args);
+    let persist_requested = caller_requested_persist_inference(args);
+    let approved_llm_fields = parse_llm_caller_approved(args);
+    let mut outcome = ApplyGateOutcome {
+        requested,
+        persist_inference_requested: persist_requested,
+        ..Default::default()
+    };
+
+    // Conflicts always surface on `conflict_fields[]` regardless of the
+    // gate flag — they are the strongest "do NOT silently mutate" signal
+    // and observers must see them whether or not apply was requested.
+    for c in &inference.conflicts {
+        outcome.conflict.push(c.clone());
+        // Also record a skip row so a single grep over `skipped_fields[]`
+        // tells observers that the conflict-field WOULD have been skipped
+        // had the gate tried to apply it.
+        outcome.skipped.push(SkippedField {
+            field: c.field,
+            reason: "caller_value_conflict",
+            origin: ApplyOrigin::DeterministicConflict,
+            detail: Some(format!(
+                "caller_value differs from inferred_value (source={})",
+                c.source
+            )),
+        });
+    }
+
+    // Track which field slots are already accounted for (caller-supplied
+    // OR already applied) to keep `resulting_plan_preview` deterministic
+    // even when the same field appears in both the deterministic block
+    // and an LLM proposal.
+    let mut preview = args.clone();
+    let mut filled: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
+
+    // Deterministic high-confidence inferred fields. Skipped without
+    // approval; applied when `apply_inferred_fields=true` AND caller did
+    // not already populate the slot.
+    for f in &inference.inferred {
+        if !f.confidence.meets_apply_threshold() {
+            // Defensive — wave-18 invariant places only High in
+            // `inferred[]`; record the row as a suggestion-tier skip if
+            // a future regression sneaks one in.
+            outcome.skipped.push(SkippedField {
+                field: f.field,
+                reason: "below_apply_threshold",
+                origin: ApplyOrigin::DeterministicInferred,
+                detail: Some(format!("confidence={}", f.confidence.as_wire())),
+            });
+            continue;
+        }
+        let caller_already_set = caller_value_for_field(args, f.field).is_some();
+        if caller_already_set {
+            outcome.skipped.push(SkippedField {
+                field: f.field,
+                reason: "caller_value_already_set",
+                origin: ApplyOrigin::DeterministicInferred,
+                detail: None,
+            });
+            continue;
+        }
+        if !requested {
+            outcome.skipped.push(SkippedField {
+                field: f.field,
+                reason: "apply_gate_not_requested",
+                origin: ApplyOrigin::DeterministicInferred,
+                detail: None,
+            });
+            continue;
+        }
+        // Promote.
+        outcome.applied.push(AppliedField {
+            field: f.field,
+            value: f.value.clone(),
+            source: f.source,
+            origin: ApplyOrigin::DeterministicInferred,
+        });
+        filled.insert(f.field);
+        if let Some(map) = preview.as_object_mut() {
+            map.insert(f.field.to_string(), f.value.clone());
+        }
+    }
+
+    // Deterministic suggestions (medium / low). Always skipped — the
+    // gate is conservative; sub-threshold fields require the caller to
+    // promote them via an explicit arg, NOT the apply flag.
+    for f in &inference.suggested {
+        outcome.skipped.push(SkippedField {
+            field: f.field,
+            reason: "below_apply_threshold",
+            origin: ApplyOrigin::DeterministicSuggested,
+            detail: Some(format!("confidence={}", f.confidence.as_wire())),
+        });
+    }
+
+    // LLM proposals — apply only when caller approval set + safety check
+    // passes + no conflict + confidence != low + caller has not already
+    // populated the slot + deterministic inferred[] has not already
+    // claimed the slot.
+    if let Some(bundle) = inference.llm.as_ref() {
+        for p in &bundle.proposals {
+            let approved = approved_llm_fields.contains(p.field);
+            if !approved {
+                outcome.skipped.push(SkippedField {
+                    field: p.field,
+                    reason: "llm_not_caller_approved",
+                    origin: ApplyOrigin::LlmProposal,
+                    detail: None,
+                });
+                continue;
+            }
+            if !requested {
+                // Caller approved the LLM proposal but did not flip the
+                // master apply gate — skip with a distinct reason so
+                // observers see the layered miss.
+                outcome.skipped.push(SkippedField {
+                    field: p.field,
+                    reason: "apply_gate_not_requested",
+                    origin: ApplyOrigin::LlmProposal,
+                    detail: None,
+                });
+                continue;
+            }
+            if matches!(p.confidence, InferenceConfidence::Low) {
+                outcome.skipped.push(SkippedField {
+                    field: p.field,
+                    reason: "llm_confidence_too_low",
+                    origin: ApplyOrigin::LlmProposal,
+                    detail: Some(format!("confidence={}", p.confidence.as_wire())),
+                });
+                continue;
+            }
+            if !matches!(p.conflict_status, LlmConflictStatus::None) {
+                outcome.skipped.push(SkippedField {
+                    field: p.field,
+                    reason: "llm_conflict_present",
+                    origin: ApplyOrigin::LlmProposal,
+                    detail: Some(format!(
+                        "conflict_status={}",
+                        p.conflict_status.as_wire()
+                    )),
+                });
+                continue;
+            }
+            if let Err(detail) = llm_proposal_safety_check(p.field, &p.value) {
+                outcome.skipped.push(SkippedField {
+                    field: p.field,
+                    reason: "llm_safety_check_failed",
+                    origin: ApplyOrigin::LlmProposal,
+                    detail: Some(detail),
+                });
+                continue;
+            }
+            if caller_value_for_field(args, p.field).is_some() {
+                outcome.skipped.push(SkippedField {
+                    field: p.field,
+                    reason: "caller_value_already_set",
+                    origin: ApplyOrigin::LlmProposal,
+                    detail: None,
+                });
+                continue;
+            }
+            if filled.contains(p.field) {
+                // Deterministic inferred[] already promoted this slot;
+                // surface the redundant LLM proposal as a structured
+                // skip rather than silently duplicating it.
+                outcome.skipped.push(SkippedField {
+                    field: p.field,
+                    reason: "deterministic_inferred_already_applied",
+                    origin: ApplyOrigin::LlmProposal,
+                    detail: None,
+                });
+                continue;
+            }
+            outcome.applied.push(AppliedField {
+                field: p.field,
+                value: p.value.clone(),
+                source: "llm_proposal",
+                origin: ApplyOrigin::LlmProposal,
+            });
+            filled.insert(p.field);
+            if let Some(map) = preview.as_object_mut() {
+                map.insert(p.field.to_string(), p.value.clone());
+            }
+        }
+    }
+
+    outcome.resulting_plan_preview = preview;
+    outcome
+}
+
+/// Splice the `apply_gate` block onto a successful response. Mirrors
+/// `attach_inference_block`: structured errors are left untouched, and a
+/// pre-existing block is preserved (NEVER overwritten) so future DAG /
+/// resume paths can attach their own gate row.
+pub(super) fn attach_apply_gate_block(
+    mut result: ToolResult,
+    block: Option<Value>,
+) -> ToolResult {
+    let Some(block) = block else {
+        return result;
+    };
+    if result.is_error.unwrap_or(false) {
+        return result;
+    }
+    let text = match result.content.first() {
+        Some(ToolContent::Text { text }) => text.clone(),
+        _ => return result,
+    };
+    let mut payload: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return result,
+    };
+    if let Some(map) = payload.as_object_mut() {
+        map.entry("apply_gate".to_string()).or_insert(block);
+    }
+    result.content = vec![ToolContent::Text {
+        text: serde_json::to_string_pretty(&payload).unwrap_or(text),
+    }];
+    result
+}
+
 /// Map a free-form target string from a plan hint to the canonical 3-target
 /// surface. `flow_id_present` gates `mission_flow_run` because the inner
 /// dispatcher refuses to run without a flow_id.
@@ -4366,6 +4946,18 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
 
+    // wave-21 / task 05 — pre-flight `apply_inferred_fields` /
+    // `persist_inference` / `llm_caller_approved` shape validation. Runs
+    // BEFORE the plan lookup so a typo (`apply_inferred_fields="ture"`)
+    // fails fast instead of silently being ignored. Conservative: only
+    // bool / object / array shapes are accepted; string `"true"` is
+    // rejected so the gate never opens by accident.
+    if let Err(msg) = validate_apply_gate_args(args) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(error_codes::INVALID_PARAM, msg),
+        ));
+    }
+
     // wave-21 / task 04 — pre-flight `workstation_inference_mode`
     // validation. Strictly orthogonal to `infer_plan_fields`: the wave-21
     // surface targets the four workstation knobs (target /
@@ -4423,88 +5015,138 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
     // (so high-confidence determinism is never overridden by the model);
     // then Sonnet is asked to fill remaining fields. Proposals are
     // SURFACED, never auto-applied.
-    let (effective_args, inference_block): (Value, Option<Value>) = if matches!(
-        infer_mode,
-        InferPlanFieldsMode::Off
-    ) {
-        (args.clone(), None)
-    } else {
-        let project_arg = args.get("project").and_then(|v| v.as_str());
-        let cwd_arg = args.get("cwd").and_then(|v| v.as_str());
-        let target_project_arg = args.get("target_project").and_then(|v| v.as_str());
-        // 16 entries is the soft cap — recent dispatches dominate the
-        // inferer's signal; older entries are rarely useful.
-        let evidence_entries = read_recent_evidence_entries(
-            state,
-            id,
-            project_arg,
-            cwd_arg,
-            target_project_arg,
-            16,
-        )
-        .await;
-        let plan_hints = parse_plan_hints(&plan.sexp_text);
-        let input = PlanInferenceInput {
-            plan_hints,
-            plan_sexp: &plan.sexp_text,
-            compiled_from: plan.compiled_from.as_deref(),
-            evidence_entries: evidence_entries.clone(),
-        };
-        let mut inference = compute_plan_field_inference(args, &input);
-
-        // wave-20 / task 07 — Sonnet pass. Runs only under
-        // `sonnet_suggest`; failure surfaces as an `Unavailable` bundle
-        // (NOT a silent fallback to deterministic-only). Proposals never
-        // mutate caller args.
-        if infer_mode.is_llm_augmented() {
-            let bundle = request_llm_proposals(
+    //
+    // wave-21 / task 05 — apply gate v1. Layered on top of the wave-18 /
+    // wave-20 inference output. The new `apply_inferred_fields=true`
+    // flag opts the caller into a CONTROLLED apply path (suggest-only
+    // by default). The gate is suggest-only when the flag is absent so
+    // the wave-18 byte-shape stays intact for back-compat callers.
+    let (effective_args, inference_block, apply_gate_block): (Value, Option<Value>, Option<Value>) =
+        if matches!(infer_mode, InferPlanFieldsMode::Off) {
+            (args.clone(), None, None)
+        } else {
+            let project_arg = args.get("project").and_then(|v| v.as_str());
+            let cwd_arg = args.get("cwd").and_then(|v| v.as_str());
+            let target_project_arg = args.get("target_project").and_then(|v| v.as_str());
+            // 16 entries is the soft cap — recent dispatches dominate the
+            // inferer's signal; older entries are rarely useful.
+            let evidence_entries = read_recent_evidence_entries(
                 state,
-                &plan.sexp_text,
-                plan.compiled_from.as_deref(),
-                &evidence_entries,
-                &inference,
-                args,
+                id,
+                project_arg,
+                cwd_arg,
+                target_project_arg,
+                16,
             )
             .await;
-            inference.llm = Some(bundle);
-        }
-
-        let block = inference.to_response_json(infer_mode);
-
-        if matches!(
-            infer_mode,
-            InferPlanFieldsMode::Preview | InferPlanFieldsMode::SonnetSuggest
-        ) {
-            // Preview / sonnet_suggest short-circuit: never dispatch,
-            // never mutate plan state. Sonnet proposals stay surfaced
-            // for caller review.
-            let runner_status = if matches!(infer_mode, InferPlanFieldsMode::SonnetSuggest) {
-                "inference_sonnet_suggest_no_dispatch"
-            } else {
-                "inference_preview_no_dispatch"
+            let plan_hints = parse_plan_hints(&plan.sexp_text);
+            let input = PlanInferenceInput {
+                plan_hints,
+                plan_sexp: &plan.sexp_text,
+                compiled_from: plan.compiled_from.as_deref(),
+                evidence_entries: evidence_entries.clone(),
             };
-            let status_label = if matches!(infer_mode, InferPlanFieldsMode::SonnetSuggest) {
-                "inference_sonnet_suggest"
-            } else {
-                "inference_preview"
-            };
-            let payload = json!({
-                "status": status_label,
-                "execute_mode": execute_mode,
-                "runner_status": runner_status,
-                "plan_id": plan.id,
-                "board_task_id": plan.board_task_id,
-                "plan_field_inference": block,
-            });
-            return Ok(ToolResult::json_pretty(&payload));
-        }
+            let mut inference = compute_plan_field_inference(args, &input);
 
-        // ApplySafe — augment args with high-confidence inferred slots
-        // that the caller did not already populate. Conflicts are NEVER
-        // applied (they only ever surface on the inference block).
-        let augmented = apply_safe_augmentation(args, &inference);
-        (augmented, Some(block))
-    };
+            // wave-20 / task 07 — Sonnet pass. Runs only under
+            // `sonnet_suggest`; failure surfaces as an `Unavailable` bundle
+            // (NOT a silent fallback to deterministic-only). Proposals never
+            // mutate caller args.
+            if infer_mode.is_llm_augmented() {
+                let bundle = request_llm_proposals(
+                    state,
+                    &plan.sexp_text,
+                    plan.compiled_from.as_deref(),
+                    &evidence_entries,
+                    &inference,
+                    args,
+                )
+                .await;
+                inference.llm = Some(bundle);
+            }
+
+            let block = inference.to_response_json(infer_mode);
+
+            // wave-21 / task 05 — compute the apply gate over the
+            // inference result + caller args. Suggest-only when
+            // `apply_inferred_fields` is absent (default false). When
+            // opted in, deterministic high-confidence + no-conflict
+            // fields are promoted into `applied_fields[]`; LLM
+            // proposals are promoted only when caller approved them
+            // explicitly via `llm_caller_approved`.
+            let apply_outcome = compute_apply_gate(args, &inference);
+            let gate_block = apply_outcome.to_response_json();
+
+            if matches!(
+                infer_mode,
+                InferPlanFieldsMode::Preview | InferPlanFieldsMode::SonnetSuggest
+            ) {
+                // Preview / sonnet_suggest short-circuit: never dispatch,
+                // never mutate plan state. Sonnet proposals stay surfaced
+                // for caller review. The apply gate ALSO surfaces here so
+                // a preview caller can see what WOULD apply if the gate
+                // were paired with `apply_safe` mode.
+                let runner_status = if matches!(infer_mode, InferPlanFieldsMode::SonnetSuggest) {
+                    "inference_sonnet_suggest_no_dispatch"
+                } else {
+                    "inference_preview_no_dispatch"
+                };
+                let status_label = if matches!(infer_mode, InferPlanFieldsMode::SonnetSuggest) {
+                    "inference_sonnet_suggest"
+                } else {
+                    "inference_preview"
+                };
+                let payload = json!({
+                    "status": status_label,
+                    "execute_mode": execute_mode,
+                    "runner_status": runner_status,
+                    "plan_id": plan.id,
+                    "board_task_id": plan.board_task_id,
+                    "plan_field_inference": block,
+                    "apply_gate": gate_block,
+                });
+                return Ok(ToolResult::json_pretty(&payload));
+            }
+
+            // ApplySafe path. When the wave-21 gate is REQUESTED, drive
+            // the dispatch from the structured `applied_fields[]` (LLM
+            // approvals included); otherwise keep the wave-18 byte-shape
+            // by augmenting from the deterministic high-confidence slots
+            // alone. Either way, the gate block lands on the response so
+            // observers can audit the decision.
+            let augmented = if apply_outcome.requested {
+                let mut out = args.clone();
+                if let Some(map) = out.as_object_mut() {
+                    for af in &apply_outcome.applied {
+                        // Preserve caller-supplied values defensively —
+                        // `compute_apply_gate` already routes those into
+                        // `skipped_fields[]` with reason
+                        // `caller_value_already_set`, so the slot here
+                        // should already be empty. We double-check at
+                        // the mutation site so a future regression is
+                        // loud.
+                        let already = map
+                            .get(af.field)
+                            .map(|v| match v {
+                                Value::Null => false,
+                                Value::String(s) => !s.trim().is_empty(),
+                                Value::Array(a) => !a.is_empty(),
+                                Value::Bool(_) => true,
+                                _ => true,
+                            })
+                            .unwrap_or(false);
+                        if already {
+                            continue;
+                        }
+                        map.insert(af.field.to_string(), af.value.clone());
+                    }
+                }
+                out
+            } else {
+                apply_safe_augmentation(args, &inference)
+            };
+            (augmented, Some(block), Some(gate_block))
+        };
     let args = &effective_args;
 
     // wave-17 / task 01 — explicit PLAN-DAG paused-node resume hook.
@@ -4668,7 +5310,8 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         workstation_proposal_bundle.as_ref(),
     );
 
-    Ok(attach_inference_block(final_result, inference_block))
+    let final_result = attach_inference_block(final_result, inference_block);
+    Ok(attach_apply_gate_block(final_result, apply_gate_block))
 }
 
 /// wave-21 / task 04 — compute the workstation proposal bundle for this
@@ -11593,5 +12236,540 @@ mod tests {
         let payload = parse_payload(&r);
         assert!(payload.get("workstation_proposals").is_none());
         assert!(payload.get("workstation_inference_mode").is_none());
+    }
+
+    // ── wave-21 / task 05 — PLAN inference apply gate v1 ────────────────
+
+    #[test]
+    fn validate_apply_gate_args_accepts_bool_and_absent() {
+        // Default (no flags) is valid.
+        assert!(validate_apply_gate_args(&json!({})).is_ok());
+        // Bool true / false are valid.
+        assert!(validate_apply_gate_args(&json!({"apply_inferred_fields": true})).is_ok());
+        assert!(validate_apply_gate_args(&json!({"apply_inferred_fields": false})).is_ok());
+        assert!(validate_apply_gate_args(&json!({"persist_inference": true})).is_ok());
+        // Object / array forms for llm_caller_approved are valid.
+        assert!(validate_apply_gate_args(
+            &json!({"llm_caller_approved": {"target": true}})
+        )
+        .is_ok());
+        assert!(validate_apply_gate_args(
+            &json!({"llm_caller_approved": ["target"]})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_apply_gate_args_rejects_string_form() {
+        // Conservative: string `"true"` MUST NOT silently open the gate.
+        let err = validate_apply_gate_args(&json!({"apply_inferred_fields": "true"}))
+            .expect_err("string form rejected");
+        assert!(err.contains("apply_inferred_fields must be a boolean"));
+        let err = validate_apply_gate_args(&json!({"persist_inference": "true"}))
+            .expect_err("persist_inference string rejected");
+        assert!(err.contains("persist_inference must be a boolean"));
+        // llm_caller_approved bool / string is also rejected.
+        let err = validate_apply_gate_args(&json!({"llm_caller_approved": true}))
+            .expect_err("bool form rejected");
+        assert!(err.contains("llm_caller_approved must be object"));
+    }
+
+    #[test]
+    fn caller_requested_apply_defaults_false() {
+        assert!(!caller_requested_apply(&json!({})));
+        assert!(!caller_requested_apply(
+            &json!({"apply_inferred_fields": false})
+        ));
+        assert!(caller_requested_apply(
+            &json!({"apply_inferred_fields": true})
+        ));
+        // String form is treated as false (validator rejects it before
+        // we get here, but the helper is defensive).
+        assert!(!caller_requested_apply(
+            &json!({"apply_inferred_fields": "true"})
+        ));
+    }
+
+    #[test]
+    fn parse_llm_caller_approved_accepts_object_and_array() {
+        let from_obj = parse_llm_caller_approved(
+            &json!({"llm_caller_approved": {"target": true, "owned_files": false}}),
+        );
+        assert!(from_obj.contains("target"));
+        assert!(!from_obj.contains("owned_files"));
+        let from_arr = parse_llm_caller_approved(
+            &json!({"llm_caller_approved": ["target", "workstation_dispatch"]}),
+        );
+        assert!(from_arr.contains("target"));
+        assert!(from_arr.contains("workstation_dispatch"));
+        // Unknown fields silently dropped (the gate's "unknown_field"
+        // skip path covers downstream observability).
+        let unknown = parse_llm_caller_approved(
+            &json!({"llm_caller_approved": ["bogus_field"]}),
+        );
+        assert!(unknown.is_empty());
+    }
+
+    #[test]
+    fn apply_gate_default_off_skips_everything() {
+        // Apply flag absent → high-confidence inferred fields land in
+        // `skipped_fields[]` with reason `apply_gate_not_requested`,
+        // never in `applied_fields[]`.
+        let mut inf = PlanFieldInference::default();
+        inf.inferred.push(InferredField {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        let outcome = compute_apply_gate(&json!({}), &inf);
+        assert!(!outcome.requested);
+        assert!(outcome.applied.is_empty(), "no apply without explicit gate");
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].field, "target");
+        assert_eq!(outcome.skipped[0].reason, "apply_gate_not_requested");
+        // resulting_plan_preview is the caller args verbatim.
+        assert_eq!(outcome.resulting_plan_preview, json!({}));
+    }
+
+    #[test]
+    fn apply_gate_opt_in_promotes_high_confidence_inferred() {
+        let mut inf = PlanFieldInference::default();
+        inf.inferred.push(InferredField {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        let args = json!({"apply_inferred_fields": true});
+        let outcome = compute_apply_gate(&args, &inf);
+        assert!(outcome.requested);
+        assert_eq!(outcome.applied.len(), 1);
+        assert_eq!(outcome.applied[0].field, "target");
+        assert_eq!(outcome.applied[0].origin.as_wire(), "deterministic_inferred");
+        assert_eq!(
+            outcome.resulting_plan_preview["target"],
+            json!("mission_task_delegate")
+        );
+    }
+
+    #[test]
+    fn apply_gate_skips_caller_value_already_set() {
+        let mut inf = PlanFieldInference::default();
+        inf.inferred.push(InferredField {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        let args = json!({
+            "apply_inferred_fields": true,
+            "target": "mission_execution",
+        });
+        let outcome = compute_apply_gate(&args, &inf);
+        assert!(outcome.applied.is_empty(), "caller value wins");
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.field == "target")
+            .expect("skip row");
+        assert_eq!(skip.reason, "caller_value_already_set");
+        // Preview leaves caller value intact.
+        assert_eq!(
+            outcome.resulting_plan_preview["target"],
+            json!("mission_execution")
+        );
+    }
+
+    #[test]
+    fn apply_gate_routes_conflicts_to_conflict_fields() {
+        // Caller-vs-inferred conflicts are NEVER applied AND surface
+        // separately on `conflict_fields[]`.
+        let mut inf = PlanFieldInference::default();
+        inf.conflicts.push(InferenceConflict {
+            field: "target",
+            caller_value: json!("mission_execution"),
+            inferred_value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+        });
+        let outcome = compute_apply_gate(
+            &json!({
+                "apply_inferred_fields": true,
+                "target": "mission_execution",
+            }),
+            &inf,
+        );
+        assert!(outcome.applied.is_empty(), "no apply on conflict");
+        assert_eq!(outcome.conflict.len(), 1);
+        assert_eq!(outcome.conflict[0].field, "target");
+        // A skip row mirrors the conflict for grep consistency.
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.reason == "caller_value_conflict")
+            .expect("conflict-source skip row");
+        assert_eq!(skip.field, "target");
+        assert_eq!(skip.origin.as_wire(), "deterministic_conflict");
+    }
+
+    #[test]
+    fn apply_gate_skips_suggestions_below_threshold() {
+        // Medium / low suggestions are conservative-skip even with the
+        // gate flag set — the caller must promote them via explicit args.
+        let mut inf = PlanFieldInference::default();
+        inf.suggested.push(InferredField {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::Medium,
+            source: "compiled_from",
+            detail: None,
+        });
+        let outcome = compute_apply_gate(
+            &json!({"apply_inferred_fields": true}),
+            &inf,
+        );
+        assert!(outcome.applied.is_empty(), "below-threshold never applies");
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.field == "target")
+            .expect("skip row");
+        assert_eq!(skip.reason, "below_apply_threshold");
+        assert_eq!(skip.origin.as_wire(), "deterministic_suggested");
+    }
+
+    #[test]
+    fn apply_gate_llm_skipped_without_caller_approval() {
+        // LLM proposals never apply unless the caller named the field
+        // in `llm_caller_approved`. Default policy is conservative.
+        let mut inf = PlanFieldInference::default();
+        inf.llm = Some(LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "target",
+                value: json!("mission_task_delegate"),
+                confidence: InferenceConfidence::High,
+                evidence: "vibes".to_string(),
+                conflict_status: LlmConflictStatus::None,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: None,
+            request_caller: None,
+        });
+        let outcome = compute_apply_gate(
+            &json!({"apply_inferred_fields": true}),
+            &inf,
+        );
+        assert!(outcome.applied.is_empty(), "no LLM apply without approval");
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.origin == ApplyOrigin::LlmProposal)
+            .expect("LLM skip row");
+        assert_eq!(skip.reason, "llm_not_caller_approved");
+    }
+
+    #[test]
+    fn apply_gate_llm_promoted_when_caller_approved_and_safe() {
+        let mut inf = PlanFieldInference::default();
+        inf.llm = Some(LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "dispatch_strategy",
+                value: json!("agent-team"),
+                confidence: InferenceConfidence::High,
+                evidence: "PLAN explicitly mentions parallelism".to_string(),
+                conflict_status: LlmConflictStatus::None,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: None,
+            request_caller: None,
+        });
+        let outcome = compute_apply_gate(
+            &json!({
+                "apply_inferred_fields": true,
+                "llm_caller_approved": ["dispatch_strategy"],
+            }),
+            &inf,
+        );
+        assert_eq!(outcome.applied.len(), 1);
+        let af = &outcome.applied[0];
+        assert_eq!(af.field, "dispatch_strategy");
+        assert_eq!(af.origin.as_wire(), "llm_proposal");
+        assert_eq!(
+            outcome.resulting_plan_preview["dispatch_strategy"],
+            json!("agent-team")
+        );
+    }
+
+    #[test]
+    fn apply_gate_llm_safety_check_rejects_unsupported_strategy() {
+        // `prompt-fallback` and `unknown` are deliberately excluded from
+        // the apply-gate whitelist (mirrors wave-21 / task 04).
+        let mut inf = PlanFieldInference::default();
+        inf.llm = Some(LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "dispatch_strategy",
+                value: json!("prompt-fallback"),
+                confidence: InferenceConfidence::High,
+                evidence: "model guess".to_string(),
+                conflict_status: LlmConflictStatus::None,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: None,
+            request_caller: None,
+        });
+        let outcome = compute_apply_gate(
+            &json!({
+                "apply_inferred_fields": true,
+                "llm_caller_approved": ["dispatch_strategy"],
+            }),
+            &inf,
+        );
+        assert!(outcome.applied.is_empty(), "unsupported strategy rejected");
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.field == "dispatch_strategy")
+            .expect("skip row");
+        assert_eq!(skip.reason, "llm_safety_check_failed");
+        assert!(skip
+            .detail
+            .as_deref()
+            .unwrap_or("")
+            .contains("prompt-fallback"));
+    }
+
+    #[test]
+    fn apply_gate_llm_skipped_on_conflict_status() {
+        // wave-20 reconciliation already tagged a deterministic conflict;
+        // the apply gate respects it.
+        let mut inf = PlanFieldInference::default();
+        inf.llm = Some(LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "target",
+                value: json!("mission_execution"),
+                confidence: InferenceConfidence::High,
+                evidence: "model says X".to_string(),
+                conflict_status: LlmConflictStatus::ConflictsWithDeterministic,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: None,
+            request_caller: None,
+        });
+        let outcome = compute_apply_gate(
+            &json!({
+                "apply_inferred_fields": true,
+                "llm_caller_approved": ["target"],
+            }),
+            &inf,
+        );
+        assert!(outcome.applied.is_empty());
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.field == "target")
+            .expect("skip row");
+        assert_eq!(skip.reason, "llm_conflict_present");
+    }
+
+    #[test]
+    fn apply_gate_llm_skipped_when_low_confidence() {
+        let mut inf = PlanFieldInference::default();
+        inf.llm = Some(LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "target",
+                value: json!("mission_task_delegate"),
+                confidence: InferenceConfidence::Low,
+                evidence: "weak signal".to_string(),
+                conflict_status: LlmConflictStatus::None,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: None,
+            request_caller: None,
+        });
+        let outcome = compute_apply_gate(
+            &json!({
+                "apply_inferred_fields": true,
+                "llm_caller_approved": ["target"],
+            }),
+            &inf,
+        );
+        assert!(outcome.applied.is_empty());
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.field == "target")
+            .expect("skip row");
+        assert_eq!(skip.reason, "llm_confidence_too_low");
+    }
+
+    #[test]
+    fn apply_gate_llm_skipped_when_deterministic_already_filled_slot() {
+        // Deterministic high-confidence already promoted `target`;
+        // the LLM proposal for the same slot should NOT silently apply
+        // a second time.
+        let mut inf = PlanFieldInference::default();
+        inf.inferred.push(InferredField {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        inf.llm = Some(LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "target",
+                value: json!("mission_execution"),
+                confidence: InferenceConfidence::High,
+                evidence: "different guess".to_string(),
+                conflict_status: LlmConflictStatus::None,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: None,
+            request_caller: None,
+        });
+        let outcome = compute_apply_gate(
+            &json!({
+                "apply_inferred_fields": true,
+                "llm_caller_approved": ["target"],
+            }),
+            &inf,
+        );
+        // Deterministic wins; LLM is skipped explicitly.
+        assert_eq!(outcome.applied.len(), 1);
+        assert_eq!(outcome.applied[0].origin.as_wire(), "deterministic_inferred");
+        let skip = outcome
+            .skipped
+            .iter()
+            .find(|s| s.origin == ApplyOrigin::LlmProposal)
+            .expect("LLM skip row");
+        assert_eq!(skip.reason, "deterministic_inferred_already_applied");
+    }
+
+    #[test]
+    fn apply_gate_response_block_has_stable_shape() {
+        let outcome = ApplyGateOutcome {
+            requested: false,
+            persist_inference_requested: false,
+            applied: Vec::new(),
+            skipped: Vec::new(),
+            conflict: Vec::new(),
+            resulting_plan_preview: json!({}),
+        };
+        let block = outcome.to_response_json();
+        assert_eq!(block["requested"], false);
+        assert_eq!(block["persist_inference_requested"], false);
+        // v1 invariant: persisted plan text is NEVER mutated by this gate.
+        assert_eq!(block["persist_inference_applied"], false);
+        assert!(block["applied_fields"].is_array());
+        assert!(block["skipped_fields"].is_array());
+        assert!(block["conflict_fields"].is_array());
+        assert!(block["resulting_plan_preview"].is_object());
+    }
+
+    #[test]
+    fn apply_gate_persist_inference_flag_echoed_but_never_applied() {
+        // Even when caller passes persist_inference=true the v1 gate
+        // must NOT mutate persisted plan text — the response surface
+        // pins the invariant via `persist_inference_applied=false`.
+        let outcome = compute_apply_gate(
+            &json!({
+                "apply_inferred_fields": true,
+                "persist_inference": true,
+            }),
+            &PlanFieldInference::default(),
+        );
+        assert!(outcome.persist_inference_requested);
+        let block = outcome.to_response_json();
+        assert_eq!(block["persist_inference_requested"], true);
+        assert_eq!(block["persist_inference_applied"], false);
+    }
+
+    #[test]
+    fn attach_apply_gate_block_skips_when_block_absent() {
+        let original = ToolResult::json_pretty(&json!({"status": "executing"}));
+        let original_text = match original.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("text"),
+        };
+        let r = attach_apply_gate_block(original, None);
+        let after_text = match r.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("text"),
+        };
+        assert_eq!(original_text, after_text);
+    }
+
+    #[test]
+    fn attach_apply_gate_block_splices_block_into_payload() {
+        let original = ToolResult::json_pretty(&json!({"status": "executing"}));
+        let block = json!({"requested": true, "applied_fields": []});
+        let r = attach_apply_gate_block(original, Some(block.clone()));
+        let v = parse_payload(&r);
+        assert_eq!(v["status"], "executing");
+        assert_eq!(v["apply_gate"], block);
+    }
+
+    #[test]
+    fn attach_apply_gate_block_preserves_pre_existing_block() {
+        let original = ToolResult::json_pretty(&json!({
+            "status": "executing",
+            "apply_gate": {"requested": false},
+        }));
+        let block = json!({"requested": true});
+        let r = attach_apply_gate_block(original, Some(block));
+        let v = parse_payload(&r);
+        // Pre-existing block wins.
+        assert_eq!(v["apply_gate"]["requested"], false);
+    }
+
+    #[test]
+    fn attach_apply_gate_block_skips_error_results() {
+        let original = ToolResult::structured_error(ToolError::new(
+            error_codes::INVALID_PARAM,
+            "boom",
+        ));
+        let block = json!({"requested": true});
+        let r = attach_apply_gate_block(original, Some(block));
+        let payload = parse_payload(&r);
+        assert!(payload.get("apply_gate").is_none());
+    }
+
+    #[test]
+    fn apply_gate_resulting_plan_preview_includes_caller_and_applied_fields() {
+        // Caller passes one field, gate applies one inferred field; the
+        // preview shows the union (without mutating caller args).
+        let mut inf = PlanFieldInference::default();
+        inf.inferred.push(InferredField {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        let args = json!({
+            "apply_inferred_fields": true,
+            "objective": "ship feature",
+        });
+        let outcome = compute_apply_gate(&args, &inf);
+        let preview = &outcome.resulting_plan_preview;
+        assert_eq!(preview["objective"], "ship feature");
+        assert_eq!(preview["target"], "mission_task_delegate");
+        assert_eq!(preview["apply_inferred_fields"], true);
     }
 }
