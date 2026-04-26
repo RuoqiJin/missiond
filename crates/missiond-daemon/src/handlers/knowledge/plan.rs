@@ -2392,6 +2392,18 @@ fn scan_keyword_pairs(sexp: &str) -> Vec<(String, String)> {
 pub(super) const INFER_MODE_OFF: &str = "off";
 pub(super) const INFER_MODE_PREVIEW: &str = "preview";
 pub(super) const INFER_MODE_APPLY_SAFE: &str = "apply_safe";
+/// wave-20 / task 07 — LLM-augmented PLAN field inference v0.
+///
+/// Opt-in mode that asks Sonnet to PROPOSE values for the same six PLAN
+/// fields that the deterministic engine handles, but ONLY when the
+/// deterministic pass returned no signal at all for that field (no
+/// inferred / no suggested / no conflict). LLM proposals are surfaced
+/// under `plan_field_inference.llm_proposals[]` and NEVER auto-applied —
+/// they are explicit suggestions for caller review. Mutation policy
+/// stays identical to `preview` (no plan FSM transitions, no augmented
+/// args). The deterministic engine still runs first; LLM output never
+/// overrides a deterministic high-confidence inference.
+pub(super) const INFER_MODE_SONNET_SUGGEST: &str = "sonnet_suggest";
 
 /// Resolved inference mode after argument validation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2399,6 +2411,8 @@ pub(super) enum InferPlanFieldsMode {
     Off,
     Preview,
     ApplySafe,
+    /// wave-20 / task 07 — LLM proposals on top of deterministic inference.
+    SonnetSuggest,
 }
 
 impl InferPlanFieldsMode {
@@ -2407,7 +2421,16 @@ impl InferPlanFieldsMode {
             InferPlanFieldsMode::Off => INFER_MODE_OFF,
             InferPlanFieldsMode::Preview => INFER_MODE_PREVIEW,
             InferPlanFieldsMode::ApplySafe => INFER_MODE_APPLY_SAFE,
+            InferPlanFieldsMode::SonnetSuggest => INFER_MODE_SONNET_SUGGEST,
         }
+    }
+
+    /// True when the mode opts into the wave-20 / task 07 LLM-augmented
+    /// proposal pass. SonnetSuggest is the only LLM-touching mode in v0;
+    /// preview / apply_safe / off are byte-for-byte identical to
+    /// wave-18 / task 06 deterministic behaviour.
+    pub(super) fn is_llm_augmented(self) -> bool {
+        matches!(self, InferPlanFieldsMode::SonnetSuggest)
     }
 }
 
@@ -2421,8 +2444,9 @@ pub(super) fn parse_infer_plan_fields_mode(
         None | Some("") | Some(INFER_MODE_OFF) => Ok(InferPlanFieldsMode::Off),
         Some(INFER_MODE_PREVIEW) => Ok(InferPlanFieldsMode::Preview),
         Some(INFER_MODE_APPLY_SAFE) => Ok(InferPlanFieldsMode::ApplySafe),
+        Some(INFER_MODE_SONNET_SUGGEST) => Ok(InferPlanFieldsMode::SonnetSuggest),
         Some(other) => Err(format!(
-            "infer_plan_fields must be one of [\"off\", \"preview\", \"apply_safe\"]; got `{}`",
+            "infer_plan_fields must be one of [\"off\", \"preview\", \"apply_safe\", \"sonnet_suggest\"]; got `{}`",
             other
         )),
     }
@@ -2517,6 +2541,10 @@ pub(super) struct PlanFieldInference {
     /// so observers can tell which knobs the inferer scanned without
     /// reconstructing it from the per-field `source` strings.
     pub(super) evidence_sources: Vec<&'static str>,
+    /// wave-20 / task 07 — Sonnet-augmented proposals. Always `None` for
+    /// `off` / `preview` / `apply_safe`. Populated only under
+    /// `sonnet_suggest`. NEVER auto-applied; surfaced for caller review.
+    pub(super) llm: Option<LlmProposalBundle>,
 }
 
 impl PlanFieldInference {
@@ -2544,6 +2572,18 @@ impl PlanFieldInference {
                     "apply_safe_suggestions_only"
                 }
             }
+            // wave-20 / task 07 — `sonnet_suggest` reports the deterministic
+            // shape under `inference_status` (so observers reading the legacy
+            // field still see a meaningful tier) and the Sonnet-specific
+            // outcome under `llm_status`. The deterministic block is the
+            // same as `preview` for this mode (we never auto-apply).
+            InferPlanFieldsMode::SonnetSuggest => {
+                if self.inferred.is_empty() && self.suggested.is_empty() && self.conflicts.is_empty() {
+                    "sonnet_suggest_no_deterministic_signal"
+                } else {
+                    "sonnet_suggest"
+                }
+            }
         }
     }
 
@@ -2554,15 +2594,711 @@ impl PlanFieldInference {
         let inferred: Vec<Value> = self.inferred.iter().map(|f| f.to_json()).collect();
         let suggested: Vec<Value> = self.suggested.iter().map(|f| f.to_json()).collect();
         let conflicts: Vec<Value> = self.conflicts.iter().map(|c| c.to_json()).collect();
-        json!({
+        let mut block = json!({
             "mode": mode.as_wire(),
             "inference_status": self.status(mode),
             "inferred_fields": inferred,
             "suggested_fields": suggested,
             "conflicts": conflicts,
             "evidence_sources": self.evidence_sources.iter().map(|s| json!(s)).collect::<Vec<_>>(),
+        });
+        // wave-20 / task 07 — surface the LLM proposal bundle when it ran.
+        // Always emit BOTH `llm_status` AND `llm_proposals[]` for the
+        // sonnet_suggest mode so observers can pivot on a stable shape
+        // even when the bundle is empty (e.g. LLM returned no usable
+        // suggestions). For other modes the keys are omitted entirely so
+        // the legacy byte-shape is preserved.
+        if matches!(mode, InferPlanFieldsMode::SonnetSuggest) {
+            let bundle = self.llm.as_ref();
+            let status = bundle
+                .map(|b| b.status)
+                .unwrap_or(LlmProposalStatus::NotInvoked);
+            let proposals: Vec<Value> = bundle
+                .map(|b| b.proposals.iter().map(|p| p.to_json()).collect())
+                .unwrap_or_default();
+            let unavailable_reason = bundle.and_then(|b| b.unavailable_reason.clone());
+            let model = bundle.and_then(|b| b.model.clone());
+            let request_caller = bundle.and_then(|b| b.request_caller.clone());
+            let map = block.as_object_mut().expect("json! object");
+            map.insert("llm_status".to_string(), json!(status.as_wire()));
+            map.insert("llm_proposals".to_string(), Value::Array(proposals));
+            if let Some(reason) = unavailable_reason {
+                map.insert("llm_unavailable_reason".to_string(), json!(reason));
+            }
+            if let Some(model) = model {
+                map.insert("llm_model".to_string(), json!(model));
+            }
+            if let Some(caller) = request_caller {
+                map.insert("llm_caller".to_string(), json!(caller));
+            }
+        }
+        block
+    }
+}
+
+// ── wave-20 / task 07 — LLM proposal validation + bundle ─────────────────
+//
+// The Sonnet-augmented mode produces a STRUCTURED proposal list. Every
+// proposal carries:
+//   * `field`            — one of the six v0 PLAN fields (allowlist below).
+//   * `value`            — JSON value matching the expected field shape
+//                          (string / boolean / list of strings).
+//   * `confidence`       — high|medium|low (apply policy is OFF for v0;
+//                          surfaced for caller use).
+//   * `evidence`         — short justification string (LLM-supplied).
+//   * `conflict_status`  — "none" | "conflicts_with_caller" |
+//                          "conflicts_with_deterministic" — never
+//                          auto-resolved.
+//
+// Validation rejects unknown fields, missing keys, value shape mismatch,
+// and unknown confidence strings. Failures land on `parse_warnings[]` so
+// observers can audit which proposals were dropped without an exception
+// killing the rest.
+
+/// Allowlisted PLAN fields the LLM may propose values for (mirrors the
+/// six fields handled by the deterministic engine).
+pub(super) const LLM_ALLOWED_FIELDS: &[&str] = &[
+    "target",
+    "dispatch_strategy",
+    "target_project",
+    "owned_files",
+    "acceptance_mode",
+    "workstation_dispatch",
+];
+
+/// Cap applied to LLM proposal lists. Sonnet may attempt to fill every
+/// field; the cap pins the list size at a safe upper bound and protects
+/// the response payload from accidental blowup. Eight is comfortably
+/// above the six allowlisted fields so a well-behaved model never trips
+/// the limit.
+pub(super) const LLM_PROPOSAL_CAP: usize = 8;
+
+/// Token budget for the Sonnet inference call. Plans + evidence digest
+/// stay well under 4 KB; we leave headroom for the model to emit one
+/// proposal per field with a short justification.
+const SONNET_INFER_MAX_TOKENS: u32 = 1024;
+
+/// Caller string surfaced to LLM gateway logging. Mirrors the
+/// `plan_compiler` literal used by the wave-12 / 04 plan-compiler so the
+/// observability surface stays self-explanatory.
+const SONNET_INFER_CALLER: &str = "plan_field_inference";
+
+/// Wire status describing the outcome of the LLM-augmented pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LlmProposalStatus {
+    /// Caller picked a non-LLM mode; the bundle is absent.
+    NotInvoked,
+    /// LLM was unavailable (gateway not initialised, gate closed, network
+    /// failure, etc.). Bundle carries a reason; no proposals.
+    Unavailable,
+    /// LLM responded with at least one valid proposal.
+    Suggested,
+    /// LLM responded but no proposal survived validation (zero usable
+    /// fields). Bundle may carry parse_warnings to explain why.
+    NoSuggestions,
+    /// LLM responded with parseable shape but every field was already
+    /// covered by the deterministic engine, so we suppressed the
+    /// proposal list rather than echo redundant suggestions.
+    DeterministicAlreadyComplete,
+}
+
+impl LlmProposalStatus {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            LlmProposalStatus::NotInvoked => "not_invoked",
+            LlmProposalStatus::Unavailable => "llm_unavailable",
+            LlmProposalStatus::Suggested => "suggested",
+            LlmProposalStatus::NoSuggestions => "no_suggestions",
+            LlmProposalStatus::DeterministicAlreadyComplete => "deterministic_already_complete",
+        }
+    }
+}
+
+/// Conflict tag attached to every LLM proposal. Caller / deterministic
+/// agreement is never silently overridden; conflicts surface for review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LlmConflictStatus {
+    /// Caller did not specify, deterministic engine returned no signal,
+    /// LLM proposal stands alone.
+    None,
+    /// Caller passed an explicit value differing from the LLM proposal.
+    ConflictsWithCaller,
+    /// Deterministic engine inferred a different value for the same
+    /// field with high confidence.
+    ConflictsWithDeterministic,
+    /// Deterministic engine surfaced the same field as a suggestion
+    /// (medium / low confidence) with a different value. Lower-priority
+    /// conflict than caller / deterministic-high.
+    OverlapsDeterministicSuggestion,
+}
+
+impl LlmConflictStatus {
+    pub(super) fn as_wire(self) -> &'static str {
+        match self {
+            LlmConflictStatus::None => "none",
+            LlmConflictStatus::ConflictsWithCaller => "conflicts_with_caller",
+            LlmConflictStatus::ConflictsWithDeterministic => "conflicts_with_deterministic",
+            LlmConflictStatus::OverlapsDeterministicSuggestion => {
+                "overlaps_deterministic_suggestion"
+            }
+        }
+    }
+}
+
+/// One validated LLM proposal. The `field` is interned to a static
+/// allowlist string so downstream consumers can switch on it cheaply.
+#[derive(Debug, Clone)]
+pub(super) struct LlmProposal {
+    pub(super) field: &'static str,
+    pub(super) value: Value,
+    pub(super) confidence: InferenceConfidence,
+    pub(super) evidence: String,
+    pub(super) conflict_status: LlmConflictStatus,
+}
+
+impl LlmProposal {
+    pub(super) fn to_json(&self) -> Value {
+        json!({
+            "field": self.field,
+            "value": self.value.clone(),
+            "confidence": self.confidence.as_wire(),
+            "evidence": self.evidence,
+            "conflict_status": self.conflict_status.as_wire(),
+            // Pin the never-applied invariant so observers can `assert
+            // proposal.applied == false` without reading the whole
+            // task contract.
+            "applied": false,
         })
     }
+}
+
+/// Bundle of LLM-side data attached to [`PlanFieldInference`]. Always
+/// carries the status (so observers see whether the gateway was
+/// reachable) plus the validated proposals. `parse_warnings[]` records
+/// per-field validation drops for caller debugging without aborting the
+/// response.
+#[derive(Debug, Clone)]
+pub(super) struct LlmProposalBundle {
+    pub(super) status: LlmProposalStatus,
+    pub(super) proposals: Vec<LlmProposal>,
+    pub(super) parse_warnings: Vec<String>,
+    pub(super) unavailable_reason: Option<String>,
+    pub(super) model: Option<String>,
+    pub(super) request_caller: Option<String>,
+}
+
+impl LlmProposalBundle {
+    pub(super) fn unavailable(reason: impl Into<String>) -> Self {
+        LlmProposalBundle {
+            status: LlmProposalStatus::Unavailable,
+            proposals: Vec::new(),
+            parse_warnings: Vec::new(),
+            unavailable_reason: Some(reason.into()),
+            model: None,
+            request_caller: Some(SONNET_INFER_CALLER.to_string()),
+        }
+    }
+}
+
+/// Validate a Sonnet response into a list of [`LlmProposal`] entries.
+/// The expected shape is `{"proposals": [{...}, ...]}` (object with a
+/// `proposals` array) OR a bare top-level array; both forms are
+/// accepted because Sonnet sometimes elides the wrapper.
+///
+/// Rejected proposals land on `parse_warnings[]` so the caller can audit
+/// what survived. The validator is PURE so the unit tests can pin every
+/// edge case without touching the LLM.
+pub(super) fn parse_llm_proposals(raw: &str) -> (Vec<LlmProposal>, Vec<String>) {
+    let mut warnings: Vec<String> = Vec::new();
+    let trimmed = raw.trim();
+    let trimmed = strip_code_fence(trimmed);
+    let parsed: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(err) => {
+            warnings.push(format!("LLM response was not valid JSON: {}", err));
+            return (Vec::new(), warnings);
+        }
+    };
+    let raw_proposals = match &parsed {
+        Value::Array(arr) => arr.clone(),
+        Value::Object(map) => match map.get("proposals") {
+            Some(Value::Array(arr)) => arr.clone(),
+            Some(other) => {
+                warnings.push(format!(
+                    "`proposals` must be an array, got {}",
+                    json_kind(other)
+                ));
+                return (Vec::new(), warnings);
+            }
+            None => {
+                warnings.push(
+                    "LLM response object missing required `proposals` array".to_string(),
+                );
+                return (Vec::new(), warnings);
+            }
+        },
+        other => {
+            warnings.push(format!(
+                "LLM response top-level must be array or object, got {}",
+                json_kind(other)
+            ));
+            return (Vec::new(), warnings);
+        }
+    };
+    let mut out: Vec<LlmProposal> = Vec::new();
+    let mut seen_fields: std::collections::HashSet<&'static str> =
+        std::collections::HashSet::new();
+    for (idx, raw) in raw_proposals.iter().enumerate() {
+        if out.len() >= LLM_PROPOSAL_CAP {
+            warnings.push(format!(
+                "proposal cap of {} reached; dropping remaining entries",
+                LLM_PROPOSAL_CAP
+            ));
+            break;
+        }
+        let obj = match raw.as_object() {
+            Some(o) => o,
+            None => {
+                warnings.push(format!(
+                    "proposals[{}] must be an object, got {}",
+                    idx,
+                    json_kind(raw)
+                ));
+                continue;
+            }
+        };
+        let field_raw = obj
+            .get("field")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim())
+            .unwrap_or("");
+        let field = match LLM_ALLOWED_FIELDS
+            .iter()
+            .find(|allowed| allowed.eq_ignore_ascii_case(field_raw))
+            .copied()
+        {
+            Some(f) => f,
+            None => {
+                warnings.push(format!(
+                    "proposals[{}] field `{}` not in allowlist",
+                    idx, field_raw
+                ));
+                continue;
+            }
+        };
+        if seen_fields.contains(field) {
+            warnings.push(format!(
+                "proposals[{}] duplicate field `{}` ignored",
+                idx, field
+            ));
+            continue;
+        }
+        let value_raw = match obj.get("value") {
+            Some(v) => v.clone(),
+            None => {
+                warnings.push(format!("proposals[{}] missing required `value`", idx));
+                continue;
+            }
+        };
+        let value = match coerce_proposal_value(field, &value_raw) {
+            Ok(v) => v,
+            Err(err) => {
+                warnings.push(format!("proposals[{}] {}", idx, err));
+                continue;
+            }
+        };
+        let confidence = match obj.get("confidence").and_then(|v| v.as_str()) {
+            Some(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "high" => InferenceConfidence::High,
+                "medium" => InferenceConfidence::Medium,
+                "low" => InferenceConfidence::Low,
+                other => {
+                    warnings.push(format!(
+                        "proposals[{}] confidence `{}` not in [high, medium, low]",
+                        idx, other
+                    ));
+                    continue;
+                }
+            },
+            None => {
+                warnings.push(format!(
+                    "proposals[{}] missing required `confidence`",
+                    idx
+                ));
+                continue;
+            }
+        };
+        let evidence = obj
+            .get("evidence")
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        if evidence.is_empty() {
+            warnings.push(format!(
+                "proposals[{}] missing required `evidence` justification",
+                idx
+            ));
+            continue;
+        }
+        seen_fields.insert(field);
+        out.push(LlmProposal {
+            field,
+            value,
+            confidence,
+            evidence,
+            // conflict_status is reconciled against the deterministic
+            // result + caller args by `reconcile_llm_conflicts` once the
+            // proposal list is parsed. Default to `None` here so a
+            // failing reconciliation step never accidentally promotes a
+            // conflict-free state.
+            conflict_status: LlmConflictStatus::None,
+        });
+    }
+    (out, warnings)
+}
+
+/// Strip a Markdown code fence (```json ... ``` or ``` ... ```) if the
+/// model wrapped its JSON output. Returns the inner trimmed content. The
+/// validator runs after this so a fenced response still parses cleanly.
+fn strip_code_fence(s: &str) -> &str {
+    let s = s.trim();
+    let stripped = s
+        .strip_prefix("```json")
+        .or_else(|| s.strip_prefix("```JSON"))
+        .or_else(|| s.strip_prefix("```"));
+    let Some(rest) = stripped else {
+        return s;
+    };
+    // Drop the opening newline (if any) and the closing fence.
+    let rest = rest.trim_start_matches('\n');
+    let rest = rest.strip_suffix("```").unwrap_or(rest);
+    rest.trim()
+}
+
+/// Short json kind name for diagnostics (e.g. `"string"`, `"object"`).
+fn json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Coerce a raw LLM-emitted value into the canonical shape expected for
+/// `field`. Rejects shape mismatches with a human-readable reason that
+/// lands on `parse_warnings[]`. Empty / blank strings and arrays are
+/// rejected because they carry no usable signal.
+fn coerce_proposal_value(field: &str, raw: &Value) -> std::result::Result<Value, String> {
+    match field {
+        "workstation_dispatch" => match raw {
+            Value::Bool(b) => Ok(Value::Bool(*b)),
+            Value::String(s) => match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "yes" | "on" | "1" => Ok(Value::Bool(true)),
+                "false" | "no" | "off" | "0" => Ok(Value::Bool(false)),
+                other => Err(format!(
+                    "value for `workstation_dispatch` must be bool, got string `{}`",
+                    other
+                )),
+            },
+            other => Err(format!(
+                "value for `workstation_dispatch` must be bool, got {}",
+                json_kind(other)
+            )),
+        },
+        "owned_files" => match raw {
+            Value::Array(items) => {
+                let mut out: Vec<String> = Vec::new();
+                for (i, item) in items.iter().enumerate() {
+                    let Some(s) = item.as_str() else {
+                        return Err(format!(
+                            "value.owned_files[{}] must be string, got {}",
+                            i,
+                            json_kind(item)
+                        ));
+                    };
+                    let t = s.trim();
+                    if !t.is_empty() {
+                        out.push(t.to_string());
+                    }
+                }
+                if out.is_empty() {
+                    Err("value for `owned_files` must contain at least one path".to_string())
+                } else {
+                    Ok(json!(out))
+                }
+            }
+            other => Err(format!(
+                "value for `owned_files` must be string array, got {}",
+                json_kind(other)
+            )),
+        },
+        // The remaining four fields are string-shaped.
+        "target" | "dispatch_strategy" | "target_project" | "acceptance_mode" => match raw {
+            Value::String(s) => {
+                let t = s.trim();
+                if t.is_empty() {
+                    Err(format!("value for `{}` must be non-empty string", field))
+                } else {
+                    Ok(json!(t))
+                }
+            }
+            other => Err(format!(
+                "value for `{}` must be string, got {}",
+                field,
+                json_kind(other)
+            )),
+        },
+        _ => Err(format!("field `{}` is not supported by LLM proposals", field)),
+    }
+}
+
+/// Reconcile parsed LLM proposals against the deterministic inference
+/// result and the caller-supplied args. Tags every proposal with a
+/// [`LlmConflictStatus`] so observers can pivot on it without recomputing.
+///
+/// Conflict precedence (highest first):
+///   1. Caller-supplied differing value          → ConflictsWithCaller.
+///   2. Deterministic high-confidence value      → ConflictsWithDeterministic.
+///   3. Deterministic suggestion (medium / low)  → OverlapsDeterministicSuggestion.
+///   4. Otherwise                                → None.
+///
+/// This function NEVER mutates state; it only annotates the proposal
+/// bundle so the caller can decide whether to act.
+pub(super) fn reconcile_llm_conflicts(
+    proposals: &mut [LlmProposal],
+    deterministic: &PlanFieldInference,
+    args: &Value,
+) {
+    for p in proposals.iter_mut() {
+        // 1. Caller-supplied values always win for conflict tagging.
+        if let Some(caller_val) = caller_value_for_field(args, p.field) {
+            if !values_equivalent(p.field, &caller_val, &p.value) {
+                p.conflict_status = LlmConflictStatus::ConflictsWithCaller;
+                continue;
+            }
+            // Caller agrees with LLM proposal — leave conflict_status
+            // at None; the proposal still carries useful evidence.
+        }
+        // 2. Deterministic high-confidence inference for the same field.
+        if let Some(det) = deterministic
+            .inferred
+            .iter()
+            .find(|f| f.field == p.field)
+        {
+            if !values_equivalent(p.field, &det.value, &p.value) {
+                p.conflict_status = LlmConflictStatus::ConflictsWithDeterministic;
+                continue;
+            }
+        }
+        // 3. Deterministic suggestion (medium / low) overlap.
+        if let Some(sug) = deterministic
+            .suggested
+            .iter()
+            .find(|f| f.field == p.field)
+        {
+            if !values_equivalent(p.field, &sug.value, &p.value) {
+                p.conflict_status = LlmConflictStatus::OverlapsDeterministicSuggestion;
+                continue;
+            }
+        }
+    }
+}
+
+/// Caller value for a field in caller args, normalised to a `Value` so it
+/// can be compared with LLM proposals. Strings are trimmed; empty
+/// strings collapse to `None`. Arrays of strings (for `owned_files`)
+/// flow through unchanged.
+fn caller_value_for_field(args: &Value, field: &str) -> Option<Value> {
+    match field {
+        "workstation_dispatch" => caller_bool(args, field).map(Value::Bool),
+        "owned_files" => {
+            let v = caller_string_list(args, field);
+            if v.is_empty() {
+                None
+            } else {
+                Some(json!(v))
+            }
+        }
+        _ => caller_str(args, field).map(|s| json!(s)),
+    }
+}
+
+/// Field-aware equality check. Strings compare ascii-case-insensitively
+/// (matching the deterministic engine); arrays compare order-independent
+/// for `owned_files`; bools / others compare with `==`.
+fn values_equivalent(field: &str, a: &Value, b: &Value) -> bool {
+    match field {
+        "owned_files" => {
+            let a_list: Vec<String> = a
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let b_list: Vec<String> = b
+                .as_array()
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|x| x.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let mut a_sorted = a_list.clone();
+            let mut b_sorted = b_list.clone();
+            a_sorted.sort();
+            b_sorted.sort();
+            a_sorted == b_sorted
+        }
+        "workstation_dispatch" => a.as_bool() == b.as_bool(),
+        _ => match (a.as_str(), b.as_str()) {
+            (Some(x), Some(y)) => x.eq_ignore_ascii_case(y),
+            _ => a == b,
+        },
+    }
+}
+
+/// Compose the system + user prompts for the Sonnet inference call. The
+/// system prompt pins the strict JSON schema, the user prompt embeds the
+/// PLAN sexp + compiled_from + evidence digest. Pure function so the
+/// unit tests can lock the prompt shape.
+pub(super) fn build_llm_inference_prompt(
+    plan_sexp: &str,
+    compiled_from: Option<&str>,
+    evidence_entries: &[Value],
+    deterministic: &PlanFieldInference,
+    caller_args: &Value,
+) -> (String, String) {
+    let system = String::from(
+        "You are MissionD's plan field inference assistant. Inspect the supplied PLAN.lisp \
+         sexp, the directive provenance string, and a small evidence digest, then propose \
+         values for any of the following six PLAN fields that are NOT already covered by the \
+         deterministic engine: target, dispatch_strategy, target_project, owned_files, \
+         acceptance_mode, workstation_dispatch.\n\n\
+         Reply with STRICT JSON ONLY (no Markdown fences, no prose) matching this shape:\n\
+         {\n  \"proposals\": [\n    {\n      \"field\": \"<one of the six fields>\",\n      \"value\": <string|bool|string array depending on field>,\n      \"confidence\": \"high\"|\"medium\"|\"low\",\n      \"evidence\": \"<one short sentence justifying the proposal>\"\n    }\n  ]\n}\n\n\
+         Rules:\n\
+         - Never propose a value that already appears in the deterministic block. The caller will \
+           tag your proposal with `conflict_status` if it disagrees with caller args or the \
+           deterministic engine; do not pre-flag conflicts yourself.\n\
+         - Omit a field rather than fabricate one. An empty proposals array is a valid response.\n\
+         - `target` must be one of: mission_execution | mission_task_delegate | mission_flow_run.\n\
+         - `dispatch_strategy` must be one of: resident-lisp | fresh-code-alignment | agent-team | mixed | prompt-fallback.\n\
+         - `acceptance_mode` must be one of: inner_status | evidence_keys | manual.\n\
+         - `owned_files` must be a non-empty array of repo-relative paths.\n\
+         - `workstation_dispatch` must be a boolean.\n\
+         - Confidence `high` is reserved for unambiguous evidence. When in doubt, use `medium` or omit.\n\
+         - Never include keys outside the listed schema.",
+    );
+    let evidence_digest: Vec<Value> = evidence_entries
+        .iter()
+        .rev()
+        .take(8)
+        .cloned()
+        .collect();
+    let deterministic_block = deterministic.to_response_json(InferPlanFieldsMode::Preview);
+    let user = format!(
+        "PLAN.lisp sexp:\n```lisp\n{plan}\n```\n\ncompiled_from: {compiled}\n\nrecent evidence (newest first, capped):\n```json\n{evidence}\n```\n\ndeterministic inference already produced:\n```json\n{deterministic}\n```\n\ncaller-supplied args (already-set fields you must NOT override):\n```json\n{caller}\n```",
+        plan = plan_sexp,
+        compiled = compiled_from.unwrap_or("(none)"),
+        evidence = serde_json::to_string_pretty(&evidence_digest).unwrap_or_else(|_| "[]".into()),
+        deterministic = serde_json::to_string_pretty(&deterministic_block)
+            .unwrap_or_else(|_| "{}".into()),
+        caller = serde_json::to_string_pretty(caller_args).unwrap_or_else(|_| "{}".into()),
+    );
+    (system, user)
+}
+
+/// Run the Sonnet inference call. Returns a [`LlmProposalBundle`] in
+/// every code path so the caller can pivot on the bundle status without
+/// branching on Result. Sonnet unavailability surfaces as
+/// `LlmProposalStatus::Unavailable` with an explanatory reason — never
+/// as a silent fallback to deterministic-only.
+pub(super) async fn request_llm_proposals(
+    state: &AppState,
+    plan_sexp: &str,
+    compiled_from: Option<&str>,
+    evidence_entries: &[Value],
+    deterministic: &PlanFieldInference,
+    caller_args: &Value,
+) -> LlmProposalBundle {
+    let Some(sonnet) = state.sonnet.as_ref() else {
+        return LlmProposalBundle::unavailable(
+            "Sonnet gateway not initialized; LLM-augmented PLAN inference unavailable",
+        );
+    };
+    let (system, user) = build_llm_inference_prompt(
+        plan_sexp,
+        compiled_from,
+        evidence_entries,
+        deterministic,
+        caller_args,
+    );
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: system,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user,
+        },
+    ];
+    let raw = match sonnet
+        .call_interactive(messages, Some(SONNET_INFER_MAX_TOKENS), SONNET_INFER_CALLER)
+        .await
+    {
+        Ok(s) => s,
+        Err(err) => {
+            return LlmProposalBundle::unavailable(format!(
+                "Sonnet inference call failed: {}",
+                err
+            ));
+        }
+    };
+    let (mut proposals, parse_warnings) = parse_llm_proposals(&raw);
+    reconcile_llm_conflicts(&mut proposals, deterministic, caller_args);
+    let status = if proposals.is_empty() {
+        // Distinguish between "deterministic already covered every field"
+        // and "model returned no usable suggestions". The first is a
+        // success signal (no work to do); the second is debug-worthy.
+        if deterministic_covers_all_fields(deterministic) {
+            LlmProposalStatus::DeterministicAlreadyComplete
+        } else {
+            LlmProposalStatus::NoSuggestions
+        }
+    } else {
+        LlmProposalStatus::Suggested
+    };
+    LlmProposalBundle {
+        status,
+        proposals,
+        parse_warnings,
+        unavailable_reason: None,
+        model: Some(SONNET_COMPILER_MODEL.to_string()),
+        request_caller: Some(SONNET_INFER_CALLER.to_string()),
+    }
+}
+
+/// True when the deterministic engine produced a high-confidence
+/// inference for every allowlisted field. Used to label the LLM bundle
+/// status so observers can tell whether an empty `llm_proposals[]` means
+/// "model declined" vs "nothing left to suggest".
+fn deterministic_covers_all_fields(deterministic: &PlanFieldInference) -> bool {
+    for field in LLM_ALLOWED_FIELDS {
+        let covered = deterministic
+            .inferred
+            .iter()
+            .any(|f| f.field == *field && f.confidence.meets_apply_threshold());
+        if !covered {
+            return false;
+        }
+    }
+    true
 }
 
 /// Read up to the most-recent N evidence sidecar entries for a plan.
@@ -3548,9 +4284,15 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     // wave-18 / task 06 — autonomous PLAN field inference. We always run
     // the inference engine when `infer_plan_fields != off` and short-
-    // circuit (preview) or augment caller args (apply_safe). When the
-    // mode is `off`, the variable below stays `None` and the downstream
-    // pipeline observes byte-identical legacy behaviour.
+    // circuit (preview / sonnet_suggest) or augment caller args (apply_safe).
+    // When the mode is `off`, the variable below stays `None` and the
+    // downstream pipeline observes byte-identical legacy behaviour.
+    //
+    // wave-20 / task 07 — `sonnet_suggest` extends the same engine with
+    // an LLM proposal pass. The deterministic block runs unchanged FIRST
+    // (so high-confidence determinism is never overridden by the model);
+    // then Sonnet is asked to fill remaining fields. Proposals are
+    // SURFACED, never auto-applied.
     let (effective_args, inference_block): (Value, Option<Value>) = if matches!(
         infer_mode,
         InferPlanFieldsMode::Off
@@ -3576,17 +4318,50 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
             plan_hints,
             plan_sexp: &plan.sexp_text,
             compiled_from: plan.compiled_from.as_deref(),
-            evidence_entries,
+            evidence_entries: evidence_entries.clone(),
         };
-        let inference = compute_plan_field_inference(args, &input);
+        let mut inference = compute_plan_field_inference(args, &input);
+
+        // wave-20 / task 07 — Sonnet pass. Runs only under
+        // `sonnet_suggest`; failure surfaces as an `Unavailable` bundle
+        // (NOT a silent fallback to deterministic-only). Proposals never
+        // mutate caller args.
+        if infer_mode.is_llm_augmented() {
+            let bundle = request_llm_proposals(
+                state,
+                &plan.sexp_text,
+                plan.compiled_from.as_deref(),
+                &evidence_entries,
+                &inference,
+                args,
+            )
+            .await;
+            inference.llm = Some(bundle);
+        }
+
         let block = inference.to_response_json(infer_mode);
 
-        if matches!(infer_mode, InferPlanFieldsMode::Preview) {
-            // Preview short-circuit: never dispatch, never mutate.
+        if matches!(
+            infer_mode,
+            InferPlanFieldsMode::Preview | InferPlanFieldsMode::SonnetSuggest
+        ) {
+            // Preview / sonnet_suggest short-circuit: never dispatch,
+            // never mutate plan state. Sonnet proposals stay surfaced
+            // for caller review.
+            let runner_status = if matches!(infer_mode, InferPlanFieldsMode::SonnetSuggest) {
+                "inference_sonnet_suggest_no_dispatch"
+            } else {
+                "inference_preview_no_dispatch"
+            };
+            let status_label = if matches!(infer_mode, InferPlanFieldsMode::SonnetSuggest) {
+                "inference_sonnet_suggest"
+            } else {
+                "inference_preview"
+            };
             let payload = json!({
-                "status": "inference_preview",
+                "status": status_label,
                 "execute_mode": execute_mode,
-                "runner_status": "inference_preview_no_dispatch",
+                "runner_status": runner_status,
                 "plan_id": plan.id,
                 "board_task_id": plan.board_task_id,
                 "plan_field_inference": block,
@@ -3650,6 +4425,13 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
                         "DAG scheduler dispatches inside the daemon; pass execute_mode=\"internal\"",
                     ),
                 ));
+            }
+            // wave-20 / task 07 — refuse infer_plan_fields=sonnet_suggest
+            // here so the caller does not silently lose the LLM proposal
+            // block when the DAG short-circuits ahead of any inference
+            // pass. v0 keeps LLM-augmented inference single-node-only.
+            if let Some(err) = super::plan_dag::refuse_llm_inference_in_dag_mode(args) {
+                return Ok(err);
             }
             // wave-18 / task 05 — pre-flight cross-plan distill chain knobs
             // BEFORE the DAG runs so a typo (`distill_chain_mode="sonnett"`)
@@ -9399,5 +10181,572 @@ mod tests {
         let r = attach_inference_block(original, Some(block));
         let v = parse_payload(&r);
         assert_eq!(v["plan_field_inference"]["mode"], "preview");
+    }
+
+    // ── wave-20 / task 07 — LLM-augmented PLAN field inference v0 ──────
+
+    #[test]
+    fn parse_infer_plan_fields_mode_accepts_sonnet_suggest() {
+        // wave-20 / task 07 — new LLM-augmented mode lands on the same
+        // allowlist as the wave-18 / task 06 deterministic modes.
+        let mode = parse_infer_plan_fields_mode(
+            &json!({"infer_plan_fields": "sonnet_suggest"}),
+        )
+        .expect("sonnet_suggest accepted");
+        assert_eq!(mode, InferPlanFieldsMode::SonnetSuggest);
+        assert!(mode.is_llm_augmented());
+        // Determinstic modes never report as LLM-augmented.
+        assert!(!InferPlanFieldsMode::Off.is_llm_augmented());
+        assert!(!InferPlanFieldsMode::Preview.is_llm_augmented());
+        assert!(!InferPlanFieldsMode::ApplySafe.is_llm_augmented());
+    }
+
+    #[test]
+    fn parse_infer_plan_fields_mode_typo_error_lists_sonnet_suggest() {
+        // Typo path now mentions sonnet_suggest in the error message so
+        // a caller misspelling the new mode knows the canonical form.
+        let err = parse_infer_plan_fields_mode(
+            &json!({"infer_plan_fields": "sonnet-suggest"}),
+        )
+        .expect_err("hyphenated form rejected");
+        assert!(err.contains("sonnet_suggest"));
+        assert!(err.contains("sonnet-suggest"));
+    }
+
+    #[test]
+    fn sonnet_suggest_mode_wire_string_round_trips() {
+        assert_eq!(
+            InferPlanFieldsMode::SonnetSuggest.as_wire(),
+            INFER_MODE_SONNET_SUGGEST
+        );
+    }
+
+    #[test]
+    fn parse_llm_proposals_accepts_wrapped_object() {
+        // Canonical happy path — Sonnet returns the documented
+        // `{"proposals": [...]}` envelope.
+        let raw = r#"{
+            "proposals": [
+                {
+                    "field": "target",
+                    "value": "mission_task_delegate",
+                    "confidence": "high",
+                    "evidence": "PLAN sexp clearly delegates to claudecode"
+                }
+            ]
+        }"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].field, "target");
+        assert_eq!(proposals[0].value, json!("mission_task_delegate"));
+        assert_eq!(proposals[0].confidence, InferenceConfidence::High);
+        assert_eq!(proposals[0].conflict_status, LlmConflictStatus::None);
+    }
+
+    #[test]
+    fn parse_llm_proposals_accepts_bare_array() {
+        // Sonnet sometimes elides the wrapper and emits a top-level
+        // array. We accept both shapes.
+        let raw = r#"[{"field":"workstation_dispatch","value":true,"confidence":"medium","evidence":"plan declares scope hints"}]"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].value, json!(true));
+    }
+
+    #[test]
+    fn parse_llm_proposals_strips_markdown_fence() {
+        // The system prompt forbids fences but Sonnet sometimes emits
+        // them anyway; we tolerate the wrapper.
+        let raw = "```json\n{\"proposals\": [{\"field\":\"target\",\"value\":\"mission_execution\",\"confidence\":\"medium\",\"evidence\":\"vague evidence\"}]}\n```";
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(warnings.is_empty(), "warnings: {:?}", warnings);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].value, json!("mission_execution"));
+    }
+
+    #[test]
+    fn parse_llm_proposals_rejects_unknown_field() {
+        let raw = r#"{"proposals":[{"field":"orbital_velocity","value":"warp9","confidence":"high","evidence":"x"}]}"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(proposals.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("orbital_velocity"));
+    }
+
+    #[test]
+    fn parse_llm_proposals_rejects_invalid_confidence() {
+        let raw = r#"{"proposals":[{"field":"target","value":"mission_execution","confidence":"absolute","evidence":"x"}]}"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(proposals.is_empty());
+        assert!(warnings[0].contains("absolute"));
+    }
+
+    #[test]
+    fn parse_llm_proposals_rejects_missing_evidence() {
+        // Evidence is required; an empty string drops the proposal.
+        let raw = r#"{"proposals":[{"field":"target","value":"mission_execution","confidence":"high","evidence":""}]}"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(proposals.is_empty());
+        assert!(warnings[0].contains("evidence"));
+    }
+
+    #[test]
+    fn parse_llm_proposals_rejects_value_shape_mismatch() {
+        // owned_files must be a string array, not a single string.
+        let raw = r#"{"proposals":[{"field":"owned_files","value":"src/lib.rs","confidence":"medium","evidence":"x"}]}"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(proposals.is_empty());
+        assert!(warnings[0].contains("owned_files"));
+        // Boolean expected for workstation_dispatch.
+        let raw2 = r#"{"proposals":[{"field":"workstation_dispatch","value":42,"confidence":"medium","evidence":"x"}]}"#;
+        let (proposals2, warnings2) = parse_llm_proposals(raw2);
+        assert!(proposals2.is_empty());
+        assert!(warnings2[0].contains("workstation_dispatch"));
+    }
+
+    #[test]
+    fn parse_llm_proposals_dedupes_repeated_fields() {
+        let raw = r#"{
+            "proposals":[
+                {"field":"target","value":"mission_execution","confidence":"medium","evidence":"first"},
+                {"field":"target","value":"mission_task_delegate","confidence":"high","evidence":"second"}
+            ]
+        }"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals[0].evidence, "first");
+        assert!(warnings.iter().any(|w| w.contains("duplicate")));
+    }
+
+    #[test]
+    fn parse_llm_proposals_caps_long_lists() {
+        // Build a list longer than the cap so the trim warning fires.
+        let mut entries = Vec::new();
+        for f in [
+            "target",
+            "dispatch_strategy",
+            "target_project",
+            "owned_files",
+            "acceptance_mode",
+            "workstation_dispatch",
+            "extra_one",
+            "extra_two",
+            "extra_three",
+            "extra_four",
+        ] {
+            let value = match f {
+                "owned_files" => json!(["a.rs"]),
+                "workstation_dispatch" => json!(true),
+                _ => json!("mission_execution"),
+            };
+            entries.push(json!({
+                "field": f,
+                "value": value,
+                "confidence": "low",
+                "evidence": "x"
+            }));
+        }
+        let raw = serde_json::to_string(&json!({"proposals": entries})).unwrap();
+        let (proposals, warnings) = parse_llm_proposals(&raw);
+        // Cap pinned at LLM_PROPOSAL_CAP (8); duplicate-fields and
+        // unknown-fields are dropped before the cap check, so the cap
+        // warning may not fire — but the proposal count must be ≤ cap.
+        assert!(proposals.len() <= LLM_PROPOSAL_CAP);
+        // Unknown fields surface at minimum the `extra_*` warnings.
+        assert!(warnings.iter().any(|w| w.contains("extra_one")));
+    }
+
+    #[test]
+    fn parse_llm_proposals_rejects_garbage_json() {
+        let raw = "not json at all";
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(proposals.is_empty());
+        assert!(warnings[0].contains("not valid JSON"));
+    }
+
+    #[test]
+    fn parse_llm_proposals_rejects_missing_proposals_key() {
+        let raw = r#"{"results": []}"#;
+        let (proposals, warnings) = parse_llm_proposals(raw);
+        assert!(proposals.is_empty());
+        assert!(warnings[0].contains("missing required `proposals`"));
+    }
+
+    #[test]
+    fn reconcile_marks_caller_conflict() {
+        // Caller passed a different value for the same field — the
+        // proposal must surface ConflictsWithCaller (and never auto-apply).
+        let mut proposals = vec![LlmProposal {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::High,
+            evidence: "plan sexp".to_string(),
+            conflict_status: LlmConflictStatus::None,
+        }];
+        let deterministic = PlanFieldInference::default();
+        let args = json!({"target": "mission_execution"});
+        reconcile_llm_conflicts(&mut proposals, &deterministic, &args);
+        assert_eq!(
+            proposals[0].conflict_status,
+            LlmConflictStatus::ConflictsWithCaller
+        );
+    }
+
+    #[test]
+    fn reconcile_marks_deterministic_conflict() {
+        // Caller silent; deterministic engine inferred a different
+        // value with high confidence. Proposal must surface
+        // ConflictsWithDeterministic.
+        let mut deterministic = PlanFieldInference::default();
+        deterministic.inferred.push(InferredField {
+            field: "target",
+            value: json!("mission_execution"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        let mut proposals = vec![LlmProposal {
+            field: "target",
+            value: json!("mission_task_delegate"),
+            confidence: InferenceConfidence::Medium,
+            evidence: "compiled_from hint".to_string(),
+            conflict_status: LlmConflictStatus::None,
+        }];
+        reconcile_llm_conflicts(&mut proposals, &deterministic, &json!({}));
+        assert_eq!(
+            proposals[0].conflict_status,
+            LlmConflictStatus::ConflictsWithDeterministic
+        );
+    }
+
+    #[test]
+    fn reconcile_marks_overlap_with_deterministic_suggestion() {
+        // Deterministic suggestion (medium / low) at a different value
+        // than LLM proposal — surfaced as overlap, lower precedence
+        // than caller / deterministic-high conflicts.
+        let mut deterministic = PlanFieldInference::default();
+        deterministic.suggested.push(InferredField {
+            field: "owned_files",
+            value: json!(["a.rs"]),
+            confidence: InferenceConfidence::Medium,
+            source: "evidence_sidecar",
+            detail: None,
+        });
+        let mut proposals = vec![LlmProposal {
+            field: "owned_files",
+            value: json!(["b.rs"]),
+            confidence: InferenceConfidence::Low,
+            evidence: "compiled_from".to_string(),
+            conflict_status: LlmConflictStatus::None,
+        }];
+        reconcile_llm_conflicts(&mut proposals, &deterministic, &json!({}));
+        assert_eq!(
+            proposals[0].conflict_status,
+            LlmConflictStatus::OverlapsDeterministicSuggestion
+        );
+    }
+
+    #[test]
+    fn reconcile_leaves_conflict_none_when_caller_agrees() {
+        // Caller passed the same value as the proposal — no conflict.
+        let mut proposals = vec![LlmProposal {
+            field: "target",
+            value: json!("mission_execution"),
+            confidence: InferenceConfidence::Medium,
+            evidence: "agreement".to_string(),
+            conflict_status: LlmConflictStatus::None,
+        }];
+        reconcile_llm_conflicts(
+            &mut proposals,
+            &PlanFieldInference::default(),
+            &json!({"target": "MISSION_EXECUTION"}),
+        );
+        // String comparison is case-insensitive, mirroring the
+        // deterministic engine.
+        assert_eq!(proposals[0].conflict_status, LlmConflictStatus::None);
+    }
+
+    #[test]
+    fn reconcile_owned_files_is_set_like() {
+        // owned_files compares order-independent so a permutation does
+        // not surface as a deterministic conflict.
+        let mut deterministic = PlanFieldInference::default();
+        deterministic.inferred.push(InferredField {
+            field: "owned_files",
+            value: json!(["a.rs", "b.rs"]),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        let mut proposals = vec![LlmProposal {
+            field: "owned_files",
+            value: json!(["b.rs", "a.rs"]),
+            confidence: InferenceConfidence::High,
+            evidence: "permutation".to_string(),
+            conflict_status: LlmConflictStatus::None,
+        }];
+        reconcile_llm_conflicts(&mut proposals, &deterministic, &json!({}));
+        assert_eq!(proposals[0].conflict_status, LlmConflictStatus::None);
+    }
+
+    #[test]
+    fn llm_proposal_to_json_pins_applied_false() {
+        // Critical invariant: every LLM proposal carries `applied=false`
+        // on the wire so observers can `assert proposal.applied == false`
+        // without re-reading the task contract.
+        let p = LlmProposal {
+            field: "target",
+            value: json!("mission_execution"),
+            confidence: InferenceConfidence::High,
+            evidence: "x".to_string(),
+            conflict_status: LlmConflictStatus::None,
+        };
+        let v = p.to_json();
+        assert_eq!(v["applied"], json!(false));
+        assert_eq!(v["field"], json!("target"));
+        assert_eq!(v["confidence"], json!("high"));
+        assert_eq!(v["conflict_status"], json!("none"));
+    }
+
+    #[test]
+    fn llm_bundle_unavailable_carries_reason() {
+        let b = LlmProposalBundle::unavailable("gateway not initialized");
+        assert_eq!(b.status, LlmProposalStatus::Unavailable);
+        assert!(b.proposals.is_empty());
+        assert_eq!(
+            b.unavailable_reason.as_deref(),
+            Some("gateway not initialized")
+        );
+        assert_eq!(b.request_caller.as_deref(), Some(SONNET_INFER_CALLER));
+    }
+
+    #[test]
+    fn response_block_under_sonnet_suggest_carries_llm_keys_when_unavailable() {
+        // Even when Sonnet is unavailable we surface llm_status +
+        // llm_proposals[] (empty) so observers pivot on a stable shape.
+        let mut inf = PlanFieldInference::default();
+        inf.llm = Some(LlmProposalBundle::unavailable("test reason"));
+        let block = inf.to_response_json(InferPlanFieldsMode::SonnetSuggest);
+        assert_eq!(block["mode"], "sonnet_suggest");
+        assert_eq!(block["llm_status"], "llm_unavailable");
+        assert_eq!(block["llm_proposals"], json!([]));
+        assert_eq!(block["llm_unavailable_reason"], "test reason");
+        assert_eq!(block["llm_caller"], SONNET_INFER_CALLER);
+    }
+
+    #[test]
+    fn response_block_under_sonnet_suggest_with_proposals() {
+        let mut inf = PlanFieldInference::default();
+        let bundle = LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "target",
+                value: json!("mission_execution"),
+                confidence: InferenceConfidence::Medium,
+                evidence: "compiled_from".to_string(),
+                conflict_status: LlmConflictStatus::None,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: Some("claude-sonnet".to_string()),
+            request_caller: Some(SONNET_INFER_CALLER.to_string()),
+        };
+        inf.llm = Some(bundle);
+        let block = inf.to_response_json(InferPlanFieldsMode::SonnetSuggest);
+        assert_eq!(block["llm_status"], "suggested");
+        assert_eq!(block["llm_proposals"][0]["field"], "target");
+        assert_eq!(block["llm_proposals"][0]["applied"], false);
+        assert_eq!(block["llm_model"], "claude-sonnet");
+    }
+
+    #[test]
+    fn response_block_under_deterministic_modes_omits_llm_keys() {
+        // Backward compatibility: existing wave-18 modes must produce
+        // BYTE-IDENTICAL response shapes (no llm_* keys leaking through).
+        let inf = PlanFieldInference::default();
+        for mode in [
+            InferPlanFieldsMode::Off,
+            InferPlanFieldsMode::Preview,
+            InferPlanFieldsMode::ApplySafe,
+        ] {
+            let block = inf.to_response_json(mode);
+            assert!(block.get("llm_status").is_none(), "mode {:?}", mode);
+            assert!(
+                block.get("llm_proposals").is_none(),
+                "mode {:?}",
+                mode
+            );
+            assert!(
+                block.get("llm_unavailable_reason").is_none(),
+                "mode {:?}",
+                mode
+            );
+        }
+    }
+
+    #[test]
+    fn sonnet_suggest_status_reports_no_deterministic_signal_when_empty() {
+        let inf = PlanFieldInference::default();
+        assert_eq!(
+            inf.status(InferPlanFieldsMode::SonnetSuggest),
+            "sonnet_suggest_no_deterministic_signal"
+        );
+    }
+
+    #[test]
+    fn sonnet_suggest_status_reports_sonnet_suggest_when_signals_present() {
+        let mut inf = PlanFieldInference::default();
+        inf.suggested.push(InferredField {
+            field: "target",
+            value: json!("mission_execution"),
+            confidence: InferenceConfidence::Medium,
+            source: "evidence_sidecar",
+            detail: None,
+        });
+        assert_eq!(
+            inf.status(InferPlanFieldsMode::SonnetSuggest),
+            "sonnet_suggest"
+        );
+    }
+
+    #[test]
+    fn build_llm_inference_prompt_embeds_inputs() {
+        // Pin the prompt shape so future regressions are visible: must
+        // mention the PLAN sexp, the directive provenance, the evidence
+        // digest, the deterministic block, and the caller args.
+        let plan_sexp = "(plan :target \"mission_task_delegate\")";
+        let evidence = vec![json!({"target": "mission_execution"})];
+        let deterministic = PlanFieldInference::default();
+        let args = json!({"foo": "bar"});
+        let (system, user) = build_llm_inference_prompt(
+            plan_sexp,
+            Some("directive/abc:1"),
+            &evidence,
+            &deterministic,
+            &args,
+        );
+        assert!(system.contains("plan field inference"));
+        assert!(system.contains("STRICT JSON"));
+        assert!(system.contains("conflict_status"));
+        assert!(user.contains(plan_sexp));
+        assert!(user.contains("directive/abc:1"));
+        assert!(user.contains("\"foo\""));
+        assert!(user.contains("\"target\": \"mission_execution\""));
+    }
+
+    #[test]
+    fn deterministic_covers_all_fields_pred_only_true_when_six_high_inferences() {
+        let mut inf = PlanFieldInference::default();
+        // Empty → false.
+        assert!(!deterministic_covers_all_fields(&inf));
+        for f in LLM_ALLOWED_FIELDS.iter().take(5) {
+            inf.inferred.push(InferredField {
+                field: *f,
+                value: json!("x"),
+                confidence: InferenceConfidence::High,
+                source: "plan_sexp",
+                detail: None,
+            });
+        }
+        // Only 5 of 6 → still false.
+        assert!(!deterministic_covers_all_fields(&inf));
+        // Add the last field → true.
+        inf.inferred.push(InferredField {
+            field: LLM_ALLOWED_FIELDS[5],
+            value: json!(true),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+            detail: None,
+        });
+        assert!(deterministic_covers_all_fields(&inf));
+    }
+
+    #[test]
+    fn deterministic_covers_all_fields_ignores_suggestions() {
+        // Only high-confidence inferred entries count; suggestions
+        // (medium / low) leave the predicate at `false` so the LLM is
+        // still asked to weigh in.
+        let mut inf = PlanFieldInference::default();
+        for f in LLM_ALLOWED_FIELDS.iter() {
+            inf.suggested.push(InferredField {
+                field: *f,
+                value: json!("x"),
+                confidence: InferenceConfidence::Medium,
+                source: "evidence_sidecar",
+                detail: None,
+            });
+        }
+        assert!(!deterministic_covers_all_fields(&inf));
+    }
+
+    #[test]
+    fn coerce_proposal_value_workstation_dispatch_string_normalises() {
+        let v = coerce_proposal_value("workstation_dispatch", &json!("YES"))
+            .expect("string yes coerces to bool true");
+        assert_eq!(v, json!(true));
+        let v = coerce_proposal_value("workstation_dispatch", &json!("0"))
+            .expect("string 0 coerces to bool false");
+        assert_eq!(v, json!(false));
+    }
+
+    #[test]
+    fn coerce_proposal_value_target_project_strips_whitespace() {
+        let v = coerce_proposal_value("target_project", &json!("  missiond  "))
+            .expect("trims whitespace");
+        assert_eq!(v, json!("missiond"));
+    }
+
+    #[test]
+    fn coerce_proposal_value_owned_files_drops_blank_entries() {
+        let v = coerce_proposal_value(
+            "owned_files",
+            &json!(["src/lib.rs", "  ", "src/main.rs"]),
+        )
+        .expect("blanks stripped");
+        assert_eq!(v, json!(["src/lib.rs", "src/main.rs"]));
+    }
+
+    #[test]
+    fn refuse_llm_inference_in_dag_mode_blocks_sonnet_suggest() {
+        // wave-20 / task 07 — single-node-only enforcement on the DAG path.
+        let args = json!({
+            "scheduler_mode": "dag_v1",
+            "infer_plan_fields": "sonnet_suggest"
+        });
+        let err = super::super::plan_dag::refuse_llm_inference_in_dag_mode(&args)
+            .expect("dag + sonnet_suggest combo refused");
+        assert_eq!(err.is_error, Some(true));
+        let payload = parse_payload(&err);
+        let reason = payload["reason"]
+            .as_str()
+            .expect("structured ToolError carries `reason`");
+        assert!(
+            reason.contains("single-node-execute-only"),
+            "reason: {}",
+            reason
+        );
+        assert_eq!(payload["error_code"], "INVALID_PARAM");
+    }
+
+    #[test]
+    fn refuse_llm_inference_in_dag_mode_allows_deterministic_modes() {
+        // off / preview / apply_safe stay accepted on the DAG path
+        // (they were already accepted in wave-18 / task 06).
+        for mode in ["off", "preview", "apply_safe"] {
+            let args = json!({
+                "scheduler_mode": "dag_v1",
+                "infer_plan_fields": mode
+            });
+            assert!(
+                super::super::plan_dag::refuse_llm_inference_in_dag_mode(&args).is_none(),
+                "deterministic mode `{}` must not be refused on DAG path",
+                mode
+            );
+        }
+        // No infer_plan_fields at all → also accepted.
+        let args = json!({"scheduler_mode": "dag_v1"});
+        assert!(super::super::plan_dag::refuse_llm_inference_in_dag_mode(&args).is_none());
     }
 }

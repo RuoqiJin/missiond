@@ -113,7 +113,8 @@ use super::evidence_collector::{
     self, AppendOutcome, EventRef, EvidenceEntry,
 };
 use super::plan::{
-    build_internal_dispatch_args, tool_result_payload, ParsedPlanHints,
+    build_internal_dispatch_args, parse_infer_plan_fields_mode, tool_result_payload,
+    InferPlanFieldsMode, ParsedPlanHints,
 };
 
 const VALID_TARGETS: &[&str] = &[
@@ -8298,6 +8299,52 @@ pub(super) fn detect_scheduler_mode(args: &Value) -> std::result::Result<bool, T
     }
 }
 
+/// wave-20 / task 07 — DAG path guard for LLM-augmented inference modes.
+///
+/// `infer_plan_fields=sonnet_suggest` is a single-node-execute-only
+/// feature in v0: the deterministic engine + Sonnet pass operate on the
+/// PLAN-level sexp, not on per-node fan-out. Combining the LLM mode with
+/// `scheduler_mode=dag_v1` would silently skip the LLM pass (the DAG
+/// scheduler runs before any inference can happen) — that violates the
+/// fail-fast contract. We refuse the combo eagerly so callers receive a
+/// structured error pointing at the right surface, instead of an
+/// unexpected response missing the LLM proposal block.
+///
+/// Returns `None` when the args are clean (or carry a deterministic
+/// `infer_plan_fields` mode); `Some(error)` when the combo is rejected.
+/// Pure: no AppState reads, no IO.
+pub(super) fn refuse_llm_inference_in_dag_mode(args: &Value) -> Option<ToolResult> {
+    let mode = match parse_infer_plan_fields_mode(args) {
+        Ok(m) => m,
+        // The single-node execute path validates parse errors before the
+        // DAG branch is reached; if we somehow get here with a typo we
+        // re-surface the parse error as a structured tool error so the
+        // caller still sees a helpful message.
+        Err(msg) => {
+            return Some(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, msg),
+            ));
+        }
+    };
+    if !mode.is_llm_augmented() {
+        return None;
+    }
+    Some(ToolResult::structured_error(
+        ToolError::new(
+            error_codes::INVALID_PARAM,
+            format!(
+                "infer_plan_fields=`{}` is single-node-execute-only in v0; \
+                 it is not supported with scheduler_mode=dag_v1",
+                mode.as_wire(),
+            ),
+        )
+        .with_suggestion(
+            "drop scheduler_mode=dag_v1 to use the single-node execute path with \
+             sonnet_suggest, or rerun the DAG with infer_plan_fields ∈ {off, preview, apply_safe}",
+        ),
+    ))
+}
+
 // ═════════════════════════════════════════════════════════════════════════
 // wave-17 / task 01 — paused-node resume hook
 //
@@ -9334,6 +9381,55 @@ mod tests {
     #[test]
     fn detect_scheduler_mode_rejects_unknown_value() {
         let err = detect_scheduler_mode(&json!({"scheduler_mode": "warp_drive"})).unwrap_err();
+        assert_eq!(err.is_error, Some(true));
+    }
+
+    // ── wave-20 / task 07 — DAG-side guard for LLM-augmented modes ──────
+
+    #[test]
+    fn refuse_llm_inference_in_dag_mode_blocks_sonnet_suggest() {
+        // sonnet_suggest is single-node-execute-only in v0; the DAG path
+        // must reject the combo eagerly so the LLM proposal block is
+        // never silently dropped.
+        let args = json!({
+            "scheduler_mode": "dag_v1",
+            "infer_plan_fields": "sonnet_suggest"
+        });
+        let err = refuse_llm_inference_in_dag_mode(&args)
+            .expect("dag + sonnet_suggest combo refused");
+        assert_eq!(err.is_error, Some(true));
+    }
+
+    #[test]
+    fn refuse_llm_inference_in_dag_mode_allows_deterministic_modes() {
+        // Off / preview / apply_safe stay accepted — these are the
+        // wave-18 / task 06 modes the DAG path already tolerates.
+        for mode in ["off", "preview", "apply_safe"] {
+            let args = json!({
+                "scheduler_mode": "dag_v1",
+                "infer_plan_fields": mode
+            });
+            assert!(
+                refuse_llm_inference_in_dag_mode(&args).is_none(),
+                "mode `{}` must not be refused",
+                mode
+            );
+        }
+        // Absent infer_plan_fields → no refusal.
+        assert!(refuse_llm_inference_in_dag_mode(&json!({})).is_none());
+    }
+
+    #[test]
+    fn refuse_llm_inference_in_dag_mode_propagates_typo_error() {
+        // A typo on the infer mode surfaces as INVALID_PARAM via the
+        // shared parser, so the DAG path returns the same structured
+        // error as the single-node path (no silent acceptance).
+        let args = json!({
+            "scheduler_mode": "dag_v1",
+            "infer_plan_fields": "sonet_suggest"
+        });
+        let err = refuse_llm_inference_in_dag_mode(&args)
+            .expect("typo surfaced as structured error");
         assert_eq!(err.is_error, Some(true));
     }
 
