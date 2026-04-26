@@ -73,6 +73,50 @@ fn build_opened_event(
     }
 }
 
+/// Single tuple of the workstation-dispatch trio surfaced on every
+/// `ExecutionEvent` variant that carries dispatch context. Sourced from the
+/// companion-log meta block so consumers don't have to re-load the file to
+/// correlate the event against its dispatch strategy / target project /
+/// requested cwd. All three fields are `None` when the meta block omits the
+/// corresponding `:key`, which lets the legacy companion logs (pre-wave12-01)
+/// emit cleanly with the default skip-serialize wire form.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct DispatchMeta {
+    dispatch_strategy: Option<String>,
+    target_project: Option<String>,
+    requested_cwd: Option<String>,
+}
+
+/// Read the workstation-dispatch trio (`:dispatch-strategy` /
+/// `:target-project` / `:requested-cwd`) from the companion-log meta block.
+///
+/// Mirrors the parsing path used by `action_list` so the live event stream
+/// and the dashboard list view see identical strings. Quoted-string atoms
+/// have their outer quotes stripped via `trim_matches('"')` to match the
+/// downstream contract; whitespace-only values collapse to `None` so a
+/// caller that wrote `:target-project ""` doesn't surface a confusing empty
+/// label on the bus.
+///
+/// Returns `DispatchMeta::default()` when the file has no meta block — the
+/// caller emits the event without metadata in that case, matching what
+/// legacy producers serialized before the trio was added.
+fn read_dispatch_metadata_from_log(file: &LogFile) -> DispatchMeta {
+    let Some(block) = file.find_block("meta") else {
+        return DispatchMeta::default();
+    };
+    let meta = parse_kv_pairs(&file.src, block.children());
+    let read = |key: &str| -> Option<String> {
+        meta.get(key)
+            .map(|s| s.trim().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty())
+    };
+    DispatchMeta {
+        dispatch_strategy: read("dispatch-strategy"),
+        target_project: read("target-project"),
+        requested_cwd: read("requested-cwd"),
+    }
+}
+
 const COMPANION_DIR: &str = ".missiond/v2";
 const DEFAULT_LEASE_SECS: i64 = 1800;
 const MAX_LEASE_SECS: i64 = 24 * 3600;
@@ -1588,6 +1632,13 @@ async fn action_claim(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    // Surface the workstation-dispatch trio on the live event so consumers
+    // can correlate this claim against the dispatch context without
+    // re-loading the companion log. We read the trio from the same
+    // post-write `file` handle so the meta block we observe is the one
+    // just persisted (the claim append doesn't touch meta beyond
+    // `:last-updated-at`, which we ignore here).
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::Claimed {
@@ -1597,6 +1648,9 @@ async fn action_claim(state: &AppState, args: &Value) -> Result<ToolResult> {
             scope: scope.to_string(),
             phase: phase.to_string(),
             lease_expires_at: expires.clone(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -2163,6 +2217,12 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    // Same dispatch-metadata projection rationale as `action_claim` —
+    // surface the trio from the companion-log meta block so completion
+    // consumers can route on workstation-dispatch context without reading
+    // the on-disk file. Absent / legacy meta cleanly skip-serializes
+    // (see ExecutionEvent::Completed doc comment).
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::Completed {
@@ -2171,6 +2231,9 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
             phase: phase.to_string(),
             agent: agent.to_string(),
             at: date.clone(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -3418,6 +3481,177 @@ mod tests {
         assert!(opened.contains_key("dispatch_strategy"));
         assert!(!opened.contains_key("target_project"));
         assert!(!opened.contains_key("requested_cwd"));
+    }
+
+    // ── Wave 18 / Task 02 — dispatch metadata projection on Claimed /
+    // Completed events. The daemon-side helper `read_dispatch_metadata_from_log`
+    // is the single mapping point between the persisted companion-log meta
+    // block and the live `Claimed` / `Completed` events. These tests exercise
+    // it against the canonical writer (`render_canonical_template`) so the
+    // wire form stays in lock-step with what the runtime emits.
+
+    /// When the companion log was opened with the full dispatch trio,
+    /// `read_dispatch_metadata_from_log` returns every field verbatim
+    /// (with outer string-quotes stripped to match the existing `action_list`
+    /// contract).
+    #[test]
+    fn read_dispatch_metadata_returns_full_trio_when_present() {
+        let body = render_canonical_template(
+            "exec-disp",
+            ".missiond/v2/disp.lisp",
+            "scope/x",
+            "owner-x",
+            "fresh-code-alignment",
+            Some("missiond"),
+            Some("/Users/x/Projects/missiond/crates/foo"),
+        );
+        let file = LogFile::parse(body).expect("parse");
+        let meta = read_dispatch_metadata_from_log(&file);
+        assert_eq!(meta.dispatch_strategy.as_deref(), Some("fresh-code-alignment"));
+        assert_eq!(meta.target_project.as_deref(), Some("missiond"));
+        assert_eq!(
+            meta.requested_cwd.as_deref(),
+            Some("/Users/x/Projects/missiond/crates/foo")
+        );
+    }
+
+    /// When the open args omitted `target_project` / `requested_cwd`,
+    /// the helper still returns the canonical `dispatch_strategy` slot
+    /// and leaves the optional pair as `None` so the event skip-serializes.
+    #[test]
+    fn read_dispatch_metadata_returns_dispatch_only_when_optionals_absent() {
+        let body = render_canonical_template(
+            "exec-min",
+            ".missiond/v2/min.lisp",
+            "scope/y",
+            "owner-y",
+            "agent-team",
+            None,
+            None,
+        );
+        let file = LogFile::parse(body).expect("parse");
+        let meta = read_dispatch_metadata_from_log(&file);
+        assert_eq!(meta.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert!(meta.target_project.is_none());
+        assert!(meta.requested_cwd.is_none());
+    }
+
+    /// Legacy companion logs (pre-wave12-01) had no dispatch keys at all.
+    /// The helper must return `DispatchMeta::default()` so the event
+    /// serializes byte-identical to the pre-trio wire form.
+    #[test]
+    fn read_dispatch_metadata_returns_default_for_legacy_log() {
+        let body = "(execution-log\n  \
+                    (meta\n    \
+                    :execution-id \"legacy-x\"\n    \
+                    :parent-design \"old.lisp\"\n    \
+                    :status \"open\"\n    \
+                    :owner \"old-owner\"\n    \
+                    :scope \"legacy/scope\"\n    \
+                    :companion-of \"old.lisp\")\n  \
+                    (claims))\n";
+        let file = LogFile::parse(body.to_string()).expect("legacy parses");
+        let meta = read_dispatch_metadata_from_log(&file);
+        assert_eq!(meta, DispatchMeta::default());
+    }
+
+    /// Whitespace-only / empty-string values in the meta block must
+    /// collapse to `None` so the bus event doesn't surface an empty
+    /// label that downstream consumers would have to special-case.
+    #[test]
+    fn read_dispatch_metadata_collapses_empty_values_to_none() {
+        let body = "(execution-log\n  \
+                    (meta\n    \
+                    :execution-id \"e\"\n    \
+                    :parent-design \"p\"\n    \
+                    :status \"open\"\n    \
+                    :owner \"o\"\n    \
+                    :scope \"s\"\n    \
+                    :companion-of \"p\"\n    \
+                    :dispatch-strategy \"agent-team\"\n    \
+                    :target-project \"\"\n    \
+                    :requested-cwd \"   \")\n  \
+                    (claims))\n";
+        let file = LogFile::parse(body.to_string()).expect("parse");
+        let meta = read_dispatch_metadata_from_log(&file);
+        assert_eq!(meta.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert!(meta.target_project.is_none(), "empty target_project must collapse to None");
+        assert!(meta.requested_cwd.is_none(), "whitespace requested_cwd must collapse to None");
+    }
+
+    /// The canonical companion log written by `render_canonical_template`
+    /// projects cleanly into a `Claimed` event with the full trio. This
+    /// ties the writer + reader contracts together and pins the wire form
+    /// the runtime `action_claim` emit path will produce.
+    #[test]
+    fn claimed_event_inherits_dispatch_trio_from_companion_log() {
+        let body = render_canonical_template(
+            "exec-disp",
+            ".missiond/v2/disp.lisp",
+            "scope/x",
+            "owner-x",
+            "fresh-code-alignment",
+            Some("missiond"),
+            Some("/Users/x/Projects/missiond/crates/foo"),
+        );
+        let file = LogFile::parse(body).expect("parse");
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Claimed {
+            execution_id: "exec-disp".into(),
+            claim_id: "C001".into(),
+            claimer: "claude".into(),
+            scope: "scope/x".into(),
+            phase: "".into(),
+            lease_expires_at: "2026-04-25T01:00:00Z".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let claimed = parsed.get("Claimed").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(claimed.len(), 9);
+        assert_eq!(claimed["dispatch_strategy"], "fresh-code-alignment");
+        assert_eq!(claimed["target_project"], "missiond");
+        assert_eq!(
+            claimed["requested_cwd"],
+            "/Users/x/Projects/missiond/crates/foo"
+        );
+    }
+
+    /// Legacy companion logs project into a `Completed` event whose wire
+    /// form omits the dispatch trio entirely (byte-identical to the
+    /// pre-wave18 5-field shape).
+    #[test]
+    fn completed_event_omits_dispatch_trio_for_legacy_log() {
+        let body = "(execution-log\n  \
+                    (meta\n    \
+                    :execution-id \"legacy-x\"\n    \
+                    :parent-design \"old.lisp\"\n    \
+                    :status \"open\"\n    \
+                    :owner \"old-owner\"\n    \
+                    :scope \"legacy/scope\"\n    \
+                    :companion-of \"old.lisp\")\n  \
+                    (claims))\n";
+        let file = LogFile::parse(body.to_string()).expect("legacy parses");
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Completed {
+            execution_id: "legacy-x".into(),
+            completion_id: "COMP001".into(),
+            phase: "phase-A".into(),
+            agent: "old-agent".into(),
+            at: "2026-04-25T03:00:00Z".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let completed = parsed.get("Completed").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(completed.len(), 5);
+        assert!(!completed.contains_key("dispatch_strategy"));
+        assert!(!completed.contains_key("target_project"));
+        assert!(!completed.contains_key("requested_cwd"));
     }
 
     // ── Wave 12 / Task 01 — scoped-commit handoff durability plane ──

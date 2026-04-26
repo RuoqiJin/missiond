@@ -49,6 +49,15 @@ pub enum ExecutionEvent {
         requested_cwd: Option<String>,
     },
     /// A new claim was acquired over a scope.
+    ///
+    /// `dispatch_strategy` / `target_project` / `requested_cwd` mirror the
+    /// workstation-dispatch metadata persisted in the companion log meta
+    /// block (intent-worker.lisp :: claudecode-workstation-orchestration ::
+    /// execution-strategy-record). They are read from the on-disk meta on
+    /// each emit so the consumer does not have to re-load the companion
+    /// log to correlate this claim against its dispatch context. Optional
+    /// + skipped on serialize when absent so legacy producers / consumers
+    /// stay byte-identical with the original 6-field wire form.
     Claimed {
         execution_id: String,
         claim_id: String,
@@ -56,6 +65,12 @@ pub enum ExecutionEvent {
         scope: String,
         phase: String,
         lease_expires_at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatch_strategy: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_cwd: Option<String>,
     },
     /// Heartbeat extended an active claim's lease.
     Heartbeat {
@@ -95,12 +110,27 @@ pub enum ExecutionEvent {
         owner: String,
     },
     /// A phase or subtask was marked complete.
+    ///
+    /// `dispatch_strategy` / `target_project` / `requested_cwd` mirror the
+    /// workstation-dispatch metadata persisted in the companion log meta
+    /// block (intent-worker.lisp :: claudecode-workstation-orchestration ::
+    /// execution-strategy-record). They are read from the on-disk meta on
+    /// each emit so the consumer does not have to re-load the companion
+    /// log to correlate this completion against its dispatch context.
+    /// Optional + skipped on serialize when absent so legacy producers /
+    /// consumers stay byte-identical with the original 5-field wire form.
     Completed {
         execution_id: String,
         completion_id: String,
         phase: String,
         agent: String,
         at: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        dispatch_strategy: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_project: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        requested_cwd: Option<String>,
     },
     /// An audit run finished — `findings_count` is the total findings of any
     /// severity, `error_count` the subset that block (parse / overlap / dup).
@@ -221,6 +251,9 @@ mod tests {
                 scope: "s".into(),
                 phase: "".into(),
                 lease_expires_at: "2026-04-25T00:00:00Z".into(),
+                dispatch_strategy: None,
+                target_project: None,
+                requested_cwd: None,
             },
             ExecutionEvent::Heartbeat {
                 execution_id: "e".into(),
@@ -260,6 +293,9 @@ mod tests {
                 phase: "p".into(),
                 agent: "a".into(),
                 at: "2026-04-25T00:00:00Z".into(),
+                dispatch_strategy: None,
+                target_project: None,
+                requested_cwd: None,
             },
             ExecutionEvent::Audited {
                 execution_id: "e".into(),
@@ -325,6 +361,9 @@ mod tests {
                 scope: "src/event/events/".into(),
                 phase: "phase-A".into(),
                 lease_expires_at: "2026-04-25T01:00:00Z".into(),
+                dispatch_strategy: None,
+                target_project: None,
+                requested_cwd: None,
             },
             ExecutionEvent::Released {
                 execution_id: "exec-1".into(),
@@ -572,6 +611,271 @@ mod tests {
             reason: None,
         };
         assert_eq!(ev.kind(), "plan_node_state_changed");
+    }
+
+    // ── Claimed / Completed dispatch metadata ────────────────────────
+    //
+    // Wave 18 / Task 02 extended `Claimed` and `Completed` with the same
+    // optional dispatch metadata trio carried by `Opened` so consumers
+    // observing claim / completion events can correlate against the
+    // workstation-dispatch context without re-loading the companion log.
+    // Backward compatibility is mandatory: legacy 6-field `Claimed` /
+    // 5-field `Completed` JSON must still deserialize, and producers that
+    // omit the trio must serialize byte-identically to the legacy wire
+    // form.
+
+    /// Legacy producers wrote `Claimed` with only the original 6 fields.
+    /// `#[serde(default)]` on the new optionals must let the old shape
+    /// deserialize into `None` everywhere without erroring.
+    #[test]
+    fn claimed_deserializes_legacy_json_without_dispatch_metadata() {
+        let legacy = r#"{
+            "Claimed": {
+                "execution_id": "exec-legacy",
+                "claim_id": "C001",
+                "claimer": "old-claimer",
+                "scope": "old/scope",
+                "phase": "phase-A",
+                "lease_expires_at": "2026-04-25T01:00:00Z"
+            }
+        }"#;
+        let ev: ExecutionEvent = serde_json::from_str(legacy).expect("legacy JSON parses");
+        match ev {
+            ExecutionEvent::Claimed {
+                ref execution_id,
+                ref dispatch_strategy,
+                ref target_project,
+                ref requested_cwd,
+                ..
+            } => {
+                assert_eq!(execution_id, "exec-legacy");
+                assert!(dispatch_strategy.is_none());
+                assert!(target_project.is_none());
+                assert!(requested_cwd.is_none());
+            }
+            _ => panic!("expected Claimed"),
+        }
+    }
+
+    /// When all dispatch metadata is absent, `Claimed` must serialize
+    /// byte-identical to the old 6-field wire form (no extra keys for
+    /// the dispatch trio).
+    #[test]
+    fn claimed_without_dispatch_metadata_serializes_byte_identical_to_legacy() {
+        let ev = ExecutionEvent::Claimed {
+            execution_id: "exec-1".into(),
+            claim_id: "C001".into(),
+            claimer: "claude".into(),
+            scope: "src/event/events/".into(),
+            phase: "phase-A".into(),
+            lease_expires_at: "2026-04-25T01:00:00Z".into(),
+            dispatch_strategy: None,
+            target_project: None,
+            requested_cwd: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let claimed = parsed
+            .get("Claimed")
+            .and_then(|v| v.as_object())
+            .expect("Claimed payload");
+        assert!(!claimed.contains_key("dispatch_strategy"));
+        assert!(!claimed.contains_key("target_project"));
+        assert!(!claimed.contains_key("requested_cwd"));
+        for key in [
+            "execution_id",
+            "claim_id",
+            "claimer",
+            "scope",
+            "phase",
+            "lease_expires_at",
+        ] {
+            assert!(claimed.contains_key(key), "missing legacy key {}", key);
+        }
+        assert_eq!(claimed.len(), 6);
+    }
+
+    /// New producers may surface dispatch metadata on `Claimed`; the
+    /// round-trip must preserve every provided value verbatim.
+    #[test]
+    fn claimed_with_dispatch_metadata_round_trips() {
+        let ev = ExecutionEvent::Claimed {
+            execution_id: "exec-disp".into(),
+            claim_id: "C002".into(),
+            claimer: "claude".into(),
+            scope: "src/event/events/".into(),
+            phase: "phase-B".into(),
+            lease_expires_at: "2026-04-25T02:00:00Z".into(),
+            dispatch_strategy: Some("agent-team".into()),
+            target_project: Some("missiond".into()),
+            requested_cwd: Some("/Users/x/Projects/missiond/crates".into()),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let claimed = parsed
+            .get("Claimed")
+            .and_then(|v| v.as_object())
+            .expect("Claimed payload");
+        assert_eq!(claimed.len(), 9);
+        assert_eq!(
+            claimed.get("dispatch_strategy").and_then(|v| v.as_str()),
+            Some("agent-team")
+        );
+        assert_eq!(
+            claimed.get("target_project").and_then(|v| v.as_str()),
+            Some("missiond")
+        );
+        assert_eq!(
+            claimed.get("requested_cwd").and_then(|v| v.as_str()),
+            Some("/Users/x/Projects/missiond/crates")
+        );
+    }
+
+    /// Legacy producers wrote `Completed` with only the original 5
+    /// fields. `#[serde(default)]` on the new optionals must let the old
+    /// shape deserialize into `None` everywhere.
+    #[test]
+    fn completed_deserializes_legacy_json_without_dispatch_metadata() {
+        let legacy = r#"{
+            "Completed": {
+                "execution_id": "exec-legacy",
+                "completion_id": "COMP001",
+                "phase": "phase-A",
+                "agent": "old-agent",
+                "at": "2026-04-25T03:00:00Z"
+            }
+        }"#;
+        let ev: ExecutionEvent = serde_json::from_str(legacy).expect("legacy JSON parses");
+        match ev {
+            ExecutionEvent::Completed {
+                ref completion_id,
+                ref dispatch_strategy,
+                ref target_project,
+                ref requested_cwd,
+                ..
+            } => {
+                assert_eq!(completion_id, "COMP001");
+                assert!(dispatch_strategy.is_none());
+                assert!(target_project.is_none());
+                assert!(requested_cwd.is_none());
+            }
+            _ => panic!("expected Completed"),
+        }
+    }
+
+    /// `Completed` without dispatch metadata must serialize byte-identical
+    /// to the old 5-field wire form.
+    #[test]
+    fn completed_without_dispatch_metadata_serializes_byte_identical_to_legacy() {
+        let ev = ExecutionEvent::Completed {
+            execution_id: "e".into(),
+            completion_id: "COMP001".into(),
+            phase: "p".into(),
+            agent: "a".into(),
+            at: "2026-04-25T00:00:00Z".into(),
+            dispatch_strategy: None,
+            target_project: None,
+            requested_cwd: None,
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let completed = parsed
+            .get("Completed")
+            .and_then(|v| v.as_object())
+            .expect("Completed payload");
+        assert!(!completed.contains_key("dispatch_strategy"));
+        assert!(!completed.contains_key("target_project"));
+        assert!(!completed.contains_key("requested_cwd"));
+        for key in ["execution_id", "completion_id", "phase", "agent", "at"] {
+            assert!(completed.contains_key(key), "missing legacy key {}", key);
+        }
+        assert_eq!(completed.len(), 5);
+    }
+
+    /// `Completed` with dispatch metadata round-trips and re-serializes
+    /// exactly the keys present.
+    #[test]
+    fn completed_with_dispatch_metadata_round_trips() {
+        let ev = ExecutionEvent::Completed {
+            execution_id: "exec-disp".into(),
+            completion_id: "COMP002".into(),
+            phase: "phase-B".into(),
+            agent: "claude".into(),
+            at: "2026-04-25T04:00:00Z".into(),
+            dispatch_strategy: Some("fresh-code-alignment".into()),
+            target_project: Some("missiond".into()),
+            requested_cwd: Some("/Users/x/Projects/missiond".into()),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let completed = parsed
+            .get("Completed")
+            .and_then(|v| v.as_object())
+            .expect("Completed payload");
+        assert_eq!(completed.len(), 8);
+        assert_eq!(
+            completed.get("dispatch_strategy").and_then(|v| v.as_str()),
+            Some("fresh-code-alignment")
+        );
+        assert_eq!(
+            completed.get("target_project").and_then(|v| v.as_str()),
+            Some("missiond")
+        );
+        assert_eq!(
+            completed.get("requested_cwd").and_then(|v| v.as_str()),
+            Some("/Users/x/Projects/missiond")
+        );
+    }
+
+    /// Partial-metadata producers — only `dispatch_strategy` known —
+    /// must round-trip on both `Claimed` and `Completed` and skip the
+    /// absent siblings.
+    #[test]
+    fn claimed_and_completed_partial_metadata_skips_absent_siblings() {
+        let claimed = ExecutionEvent::Claimed {
+            execution_id: "exec-part".into(),
+            claim_id: "C003".into(),
+            claimer: "claude".into(),
+            scope: "src/".into(),
+            phase: "".into(),
+            lease_expires_at: "2026-04-25T05:00:00Z".into(),
+            dispatch_strategy: Some("resident-lisp".into()),
+            target_project: None,
+            requested_cwd: None,
+        };
+        let json = serde_json::to_string(&claimed).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(claimed, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let payload = parsed.get("Claimed").and_then(|v| v.as_object()).unwrap();
+        assert!(payload.contains_key("dispatch_strategy"));
+        assert!(!payload.contains_key("target_project"));
+        assert!(!payload.contains_key("requested_cwd"));
+        assert_eq!(payload.len(), 7);
+
+        let completed = ExecutionEvent::Completed {
+            execution_id: "exec-part".into(),
+            completion_id: "COMP003".into(),
+            phase: "phase-X".into(),
+            agent: "claude".into(),
+            at: "2026-04-25T06:00:00Z".into(),
+            dispatch_strategy: Some("resident-lisp".into()),
+            target_project: None,
+            requested_cwd: None,
+        };
+        let json = serde_json::to_string(&completed).unwrap();
+        let back: ExecutionEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(completed, back);
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let payload = parsed.get("Completed").and_then(|v| v.as_object()).unwrap();
+        assert!(payload.contains_key("dispatch_strategy"));
+        assert!(!payload.contains_key("target_project"));
+        assert!(!payload.contains_key("requested_cwd"));
+        assert_eq!(payload.len(), 6);
     }
 
     /// Producers may surface only one of the three optional fields. Each
