@@ -49,13 +49,19 @@ use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
 use crate::handlers::knowledge::review_gate::{
-    apply_compile_review_gates, evaluate_review_automation, maybe_emit_review_question_resolved,
-    parse_compile_review_gate, parse_plan_node_resume_input, parse_resolution_review_question_id,
+    apply_compile_review_gates, build_llm_auto_approve_proposal_system_prompt,
+    build_llm_auto_approve_proposal_user_prompt, enforce_proposal_invariants,
+    evaluate_review_automation, llm_auto_approve_proposal_mode_was_explicit,
+    maybe_emit_review_question_resolved, parse_compile_review_gate,
+    parse_llm_auto_approve_proposal, parse_llm_auto_approve_proposal_mode,
+    parse_plan_node_resume_input, parse_resolution_review_question_id,
     parse_review_automation_policy, parse_review_gate_policy, parse_review_question_id_struct,
     parse_review_resolution_input, resolution_wire_string,
     review_automation_policy_was_explicit, review_gate_policy_was_explicit,
-    stamp_needs_changes_next_step, stamp_resolution_payload, stamp_review_automation_payload,
-    validate_review_resolution_envelope, AutomationStatus, ParsedReviewQuestionId,
+    stamp_llm_auto_approve_proposal_payload, stamp_needs_changes_next_step,
+    stamp_resolution_payload, stamp_review_automation_payload,
+    validate_review_resolution_envelope, AutomationStatus, LlmAutoApproveProposalBundle,
+    LlmAutoApproveProposalMode, LlmAutoApproveProposalStatus, ParsedReviewQuestionId,
     ResolutionOutcome, ReviewAutomationContext, ReviewAutomationPolicy, ReviewDecision,
     ReviewResolutionInput,
 };
@@ -985,11 +991,176 @@ fn build_plan_automation_ctx(
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// wave-21 / task 06 — LLM auto-approve proposal v0 (plan surface)
+//
+// Mirrors the directive surface — see directive.rs comment for the full
+// invariant table. Wired into approve / mark / supersede; supersede is
+// destructive and ALWAYS short-circuits to `destructive_blocked`. The
+// proposal NEVER drives a DB transition or bus emission in v0
+// (`applied=false` pinned; `requires_human=true` forced).
+// ───────────────────────────────────────────────────────────────────────
+
+const PLAN_REVIEW_PROPOSER_CALLER: &str = "plan_review_proposer";
+const SONNET_PLAN_PROPOSER_MAX_TOKENS: u32 = 1024;
+
+async fn request_plan_auto_approve_proposal(
+    state: &AppState,
+    mode: LlmAutoApproveProposalMode,
+    action: &str,
+    artifact_id: &uuid::Uuid,
+    version: i32,
+    deterministic_summary: &Value,
+    artifact_digest: Option<&str>,
+) -> LlmAutoApproveProposalBundle {
+    if crate::handlers::knowledge::review_gate::is_destructive_review_action(action) {
+        return LlmAutoApproveProposalBundle::destructive_blocked(
+            mode,
+            action,
+            PLAN_REVIEW_PROPOSER_CALLER,
+            None,
+            format!(
+                "rule:destructive_action:`{}` is destructive; auto-approve proposal NEVER promotes (invariant I2)",
+                action.to_ascii_lowercase()
+            ),
+        );
+    }
+
+    let Some(sonnet) = state.sonnet.as_ref() else {
+        return LlmAutoApproveProposalBundle::unavailable(
+            mode,
+            action,
+            PLAN_REVIEW_PROPOSER_CALLER,
+            "Sonnet gateway not initialized; LLM auto-approve proposal unavailable",
+        );
+    };
+
+    let system = build_llm_auto_approve_proposal_system_prompt();
+    let user = build_llm_auto_approve_proposal_user_prompt(
+        "plan",
+        action,
+        &artifact_id.to_string(),
+        version,
+        deterministic_summary,
+        artifact_digest,
+    );
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: system,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user,
+        },
+    ];
+
+    let raw = match sonnet
+        .call_interactive(
+            messages,
+            Some(SONNET_PLAN_PROPOSER_MAX_TOKENS),
+            PLAN_REVIEW_PROPOSER_CALLER,
+        )
+        .await
+    {
+        Ok(s) => s,
+        Err(err) => {
+            return LlmAutoApproveProposalBundle::unavailable(
+                mode,
+                action,
+                PLAN_REVIEW_PROPOSER_CALLER,
+                format!("Sonnet auto-approve proposal call failed: {}", err),
+            );
+        }
+    };
+
+    let (proposal, parse_warnings) = parse_llm_auto_approve_proposal(&raw);
+    match proposal {
+        Some(mut p) => {
+            enforce_proposal_invariants(&mut p, action);
+            LlmAutoApproveProposalBundle {
+                mode,
+                status: LlmAutoApproveProposalStatus::Suggested,
+                proposal: Some(p),
+                proposal_warnings: parse_warnings,
+                unavailable_reason: None,
+                action: action.to_string(),
+                request_caller: Some(PLAN_REVIEW_PROPOSER_CALLER.to_string()),
+                model: Some(SONNET_COMPILER_MODEL.to_string()),
+            }
+        }
+        None => LlmAutoApproveProposalBundle {
+            mode,
+            status: LlmAutoApproveProposalStatus::NoSuggestion,
+            proposal: None,
+            proposal_warnings: parse_warnings,
+            unavailable_reason: None,
+            action: action.to_string(),
+            request_caller: Some(PLAN_REVIEW_PROPOSER_CALLER.to_string()),
+            model: Some(SONNET_COMPILER_MODEL.to_string()),
+        },
+    }
+}
+
+fn attach_plan_proposal_block(payload: &mut Value, bundle: &LlmAutoApproveProposalBundle) {
+    if matches!(bundle.status, LlmAutoApproveProposalStatus::NotInvoked) {
+        return;
+    }
+    stamp_llm_auto_approve_proposal_payload(payload, bundle);
+}
+
+fn parse_plan_proposer_mode_or_error(
+    args: &Value,
+) -> std::result::Result<Option<LlmAutoApproveProposalMode>, ToolError> {
+    let mode = parse_llm_auto_approve_proposal_mode(args)
+        .map_err(|msg| ToolError::new(error_codes::INVALID_PARAM, msg))?;
+    if mode.is_sonnet_suggest() {
+        Ok(Some(mode))
+    } else if llm_auto_approve_proposal_mode_was_explicit(args) {
+        Ok(Some(mode))
+    } else {
+        Ok(None)
+    }
+}
+
+fn plan_proposer_summary(
+    automation_outcome_status: &str,
+    automation_policy: &str,
+    decision_present: bool,
+    extra: Option<(&str, Value)>,
+) -> Value {
+    let mut map = serde_json::Map::new();
+    map.insert(
+        "review_automation_policy".to_string(),
+        json!(automation_policy),
+    );
+    map.insert(
+        "review_automation_status".to_string(),
+        json!(automation_outcome_status),
+    );
+    map.insert(
+        "explicit_decision_supplied".to_string(),
+        json!(decision_present),
+    );
+    if let Some((k, v)) = extra {
+        map.insert(k.to_string(), v);
+    }
+    Value::Object(map)
+}
+
 async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "plan_id")?;
 
     let automation_policy = parse_review_automation_policy(args);
     let automation_explicit = review_automation_policy_was_explicit(args);
+
+    // wave-21 / task 06 :: parse the propose-only `auto_approve_mode`
+    // knob up-front so caller typos surface as INVALID_PARAM BEFORE any
+    // DB read.
+    let proposer_mode = match parse_plan_proposer_mode_or_error(args) {
+        Ok(m) => m,
+        Err(e) => return Ok(ToolResult::structured_error(e)),
+    };
 
     // wave-15 :: explicit resolution bridge. When the caller supplies
     // `review_question_id` + `review_decision` we validate the envelope
@@ -1019,6 +1190,7 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
                 id,
                 qid,
                 automation_policy,
+                proposer_mode,
             )
             .await;
         }
@@ -1031,6 +1203,7 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
             input,
             automation_policy,
             automation_explicit,
+            proposer_mode,
         )
         .await;
     }
@@ -1055,6 +1228,21 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         None,
     )
     .await;
+    // wave-21 / task 06 :: propose-only Sonnet pass on the legacy path.
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary("legacy_quiet", "manual", false, None);
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "approve",
+            &id,
+            0,
+            &summary,
+            None,
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1072,6 +1260,7 @@ async fn action_approve_with_resolution(
     input: ReviewResolutionInput,
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1135,6 +1324,7 @@ async fn action_approve_with_resolution(
 
     stamp_resolution_payload(&mut payload, &input);
 
+    let mut automation_status_label = "not_evaluated".to_string();
     if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
         let mut args_v = json!({});
         if let Some(map) = args_v.as_object_mut() {
@@ -1146,6 +1336,7 @@ async fn action_approve_with_resolution(
             &ctx,
             Some(input.decision),
         );
+        automation_status_label = outcome.status.as_str().to_string();
         stamp_review_automation_payload(&mut payload, &outcome);
     }
 
@@ -1158,6 +1349,28 @@ async fn action_approve_with_resolution(
         None,
     )
     .await;
+    // wave-21 / task 06 :: propose-only Sonnet pass for the explicit-
+    // resolution path. Caller decision ALWAYS wins; proposal is
+    // informational only.
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary(
+            &automation_status_label,
+            automation_policy.as_str(),
+            true,
+            None,
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "approve",
+            &id,
+            current_version,
+            &summary,
+            Some(&plan.sexp_text),
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1171,6 +1384,7 @@ async fn plan_action_approve_with_policy_only(
     id: uuid::Uuid,
     qid: String,
     automation_policy: ReviewAutomationPolicy,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -1259,6 +1473,28 @@ async fn plan_action_approve_with_policy_only(
         .await;
     }
 
+    // wave-21 / task 06 :: propose-only Sonnet pass on the policy-only
+    // approve path.
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary(
+            outcome.status.as_str(),
+            automation_policy.as_str(),
+            false,
+            None,
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "approve",
+            &id,
+            current_version,
+            &summary,
+            Some(&plan.sexp_text),
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
+
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1275,6 +1511,13 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let automation_policy = parse_review_automation_policy(args);
     let automation_explicit = review_automation_policy_was_explicit(args);
+
+    // wave-21 / task 06 :: parse the propose-only `auto_approve_mode`
+    // knob up-front.
+    let proposer_mode = match parse_plan_proposer_mode_or_error(args) {
+        Ok(m) => m,
+        Err(e) => return Ok(ToolResult::structured_error(e)),
+    };
 
     // wave-15 :: explicit resolution bridge — same pattern as approve.
     // wave-18 / task 07 :: same MissingDecision-under-policy promotion.
@@ -1299,6 +1542,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
                 target,
                 qid,
                 automation_policy,
+                proposer_mode,
             )
             .await;
         }
@@ -1312,6 +1556,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
             input,
             automation_policy,
             automation_explicit,
+            proposer_mode,
         )
         .await;
     }
@@ -1334,6 +1579,27 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         None,
     )
     .await;
+    // wave-21 / task 06 :: propose-only Sonnet pass for the legacy mark
+    // path. The requested target is surfaced to the prompt for context.
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary(
+            "legacy_quiet",
+            "manual",
+            false,
+            Some(("requested_status", json!(target.as_str()))),
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "mark",
+            &id,
+            0,
+            &summary,
+            None,
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1351,6 +1617,7 @@ async fn action_mark_with_resolution(
     input: ReviewResolutionInput,
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1417,6 +1684,7 @@ async fn action_mark_with_resolution(
 
     stamp_resolution_payload(&mut payload, &input);
 
+    let mut automation_status_label = "not_evaluated".to_string();
     if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
         let mut args_v = json!({});
         if let Some(map) = args_v.as_object_mut() {
@@ -1428,6 +1696,7 @@ async fn action_mark_with_resolution(
             &ctx,
             Some(input.decision),
         );
+        automation_status_label = outcome.status.as_str().to_string();
         stamp_review_automation_payload(&mut payload, &outcome);
     }
 
@@ -1440,6 +1709,25 @@ async fn action_mark_with_resolution(
         None,
     )
     .await;
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary(
+            &automation_status_label,
+            automation_policy.as_str(),
+            true,
+            Some(("requested_status", json!(target.as_str()))),
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "mark",
+            &id,
+            current_version,
+            &summary,
+            Some(&plan.sexp_text),
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1453,6 +1741,7 @@ async fn plan_action_mark_with_policy_only(
     target: PlanStatus,
     qid: String,
     automation_policy: ReviewAutomationPolicy,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -1547,6 +1836,26 @@ async fn plan_action_mark_with_policy_only(
         .await;
     }
 
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary(
+            outcome.status.as_str(),
+            automation_policy.as_str(),
+            false,
+            Some(("requested_status", json!(target.as_str()))),
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "mark",
+            &id,
+            current_version,
+            &summary,
+            Some(&plan.sexp_text),
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
+
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1556,6 +1865,14 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
 
     let automation_policy = parse_review_automation_policy(args);
     let automation_explicit = review_automation_policy_was_explicit(args);
+
+    // wave-21 / task 06 :: parse the propose-only `auto_approve_mode`
+    // knob up-front. Supersede is destructive — the proposer ALWAYS
+    // surfaces `destructive_blocked`.
+    let proposer_mode = match parse_plan_proposer_mode_or_error(args) {
+        Ok(m) => m,
+        Err(e) => return Ok(ToolResult::structured_error(e)),
+    };
 
     // wave-15 :: explicit resolution bridge. Supersede pivots two plan
     // ids; the review envelope is anchored to `old_plan_id` (the artifact
@@ -1583,6 +1900,7 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
                 new_id,
                 qid,
                 automation_policy,
+                proposer_mode,
             )
             .await;
         }
@@ -1596,6 +1914,7 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
             input,
             automation_policy,
             automation_explicit,
+            proposer_mode,
         )
         .await;
     }
@@ -1619,6 +1938,25 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
         None,
     )
     .await;
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary(
+            "legacy_quiet",
+            "manual",
+            false,
+            Some(("new_plan_id", json!(new_id))),
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "supersede",
+            &old_id,
+            0,
+            &summary,
+            None,
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1636,6 +1974,7 @@ async fn action_supersede_with_resolution(
     input: ReviewResolutionInput,
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1700,6 +2039,7 @@ async fn action_supersede_with_resolution(
 
     stamp_resolution_payload(&mut payload, &input);
 
+    let mut automation_status_label = "not_evaluated".to_string();
     if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
         let mut args_v = json!({});
         if let Some(map) = args_v.as_object_mut() {
@@ -1711,6 +2051,7 @@ async fn action_supersede_with_resolution(
             &ctx,
             Some(input.decision),
         );
+        automation_status_label = outcome.status.as_str().to_string();
         stamp_review_automation_payload(&mut payload, &outcome);
     }
 
@@ -1723,6 +2064,27 @@ async fn action_supersede_with_resolution(
         None,
     )
     .await;
+    if let Some(mode) = proposer_mode {
+        // supersede is destructive — proposer ALWAYS surfaces
+        // `destructive_blocked` (invariant I2).
+        let summary = plan_proposer_summary(
+            &automation_status_label,
+            automation_policy.as_str(),
+            true,
+            Some(("new_plan_id", json!(new_id))),
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "supersede",
+            &old_id,
+            current_version,
+            &summary,
+            Some(&plan.sexp_text),
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1735,6 +2097,7 @@ async fn plan_action_supersede_with_policy_only(
     new_id: uuid::Uuid,
     qid: String,
     automation_policy: ReviewAutomationPolicy,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -1800,6 +2163,26 @@ async fn plan_action_supersede_with_policy_only(
     );
 
     stamp_review_automation_payload(&mut payload, &outcome);
+
+    if let Some(mode) = proposer_mode {
+        let summary = plan_proposer_summary(
+            outcome.status.as_str(),
+            automation_policy.as_str(),
+            false,
+            Some(("new_plan_id", json!(new_id))),
+        );
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            mode,
+            "supersede",
+            &old_id,
+            current_version,
+            &summary,
+            Some(&plan.sexp_text),
+        )
+        .await;
+        attach_plan_proposal_block(&mut payload, &bundle);
+    }
 
     Ok(ToolResult::json_pretty(&payload))
 }

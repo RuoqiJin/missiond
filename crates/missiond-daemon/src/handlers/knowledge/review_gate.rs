@@ -2380,6 +2380,704 @@ pub(crate) fn stamp_auto_answer_payload(
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// wave-21 / task 06 — LLM auto-approve proposal v0
+//
+// Adds an EXPLICIT Sonnet-assisted proposal mode for the wave-15 / wave-16
+// review-resolution surfaces (directive approve/archive, plan
+// approve/mark/supersede). It is layered ON TOP of (and conservatively
+// disjoint from) the wave-18 / 07 [`ReviewAutomationPolicy`] (deterministic
+// safety inspector → may auto-resolve) and the wave-20 / 08
+// [`AutoAnswerPolicy`] (listener-side deterministic auto-answer). Where
+// the prior knobs reach into the deterministic inspector, this knob asks a
+// Sonnet model to PROPOSE a review decision — but **never** lets the
+// proposal land as authority in v0. The proposal is informational:
+// dashboards and UI surfaces can grep for it and a human still has to
+// supply an explicit `review_decision` to flip the artifact.
+//
+// Two states (default = `Off`, byte-identical with pre-wave-21 callers
+// that never sent the field):
+//
+//   off                → existing behaviour. Handler does NOT call Sonnet
+//                        for review-action suggestions; response stays
+//                        pre-wave-21 byte-identical.
+//   sonnet_suggest     → handler asks Sonnet to PROPOSE a structured
+//                        review decision (decision + confidence +
+//                        evidence + non_goal_check + destructive_check +
+//                        requires_human) and surfaces the proposal under
+//                        `llm_auto_approve_proposal` on the response.
+//                        NEVER mutates state in v0; the field
+//                        `applied=false` is pinned across every
+//                        proposal so observers never have to inspect the
+//                        status to know nothing landed.
+//
+// Hard invariants — every implementation MUST satisfy these without
+// exception (pinned by tests):
+//
+//   I1. NEVER auto-reject. Proposals MAY return `decision=needs_changes`
+//       or `decision=approved`; `decision=rejected` is collapsed to
+//       `needs_changes` (with a `proposal_warnings[]` entry) so the
+//       proposal NEVER carries `rejected` as the suggested authority —
+//       refusing a draft is a human-only decision.
+//   I2. Destructive actions (`archive`, `supersede`, `remove` —
+//       case-insensitive) ALWAYS land `requires_human=true` and the
+//       proposal status is pinned to `destructive_blocked` regardless of
+//       the model's suggestion. The proposal value is preserved for
+//       audit (so dashboards see what Sonnet would have said) but the
+//       caller MUST defer to a human reviewer.
+//   I3. **No actual auto-approve in v0**: the proposal NEVER drives a DB
+//       transition or bus emission. `applied=false` is pinned on every
+//       proposal regardless of confidence. Any future wave that wants to
+//       promote a proposal to authority MUST add a separate explicit
+//       caller-side opt-in flag — this knob only ever proposes.
+//   I4. Sonnet unavailable surfaces `LlmAutoApproveProposalStatus::
+//       Unavailable` with an explanatory `unavailable_reason` and zero
+//       proposals. NO fallback to a deterministic suggestion; NO silent
+//       success. This mirrors the `feedback_fail_fast_no_fallback` rule.
+//   I5. The destructive_check field on the proposal MUST equal the
+//       deterministic [`is_destructive_review_action`] outcome,
+//       regardless of what Sonnet replied. Caller-supplied input never
+//       overrides the deterministic destructive guard.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Wave-21 / task 06 — opt-in mode controlling whether the resolution
+/// surface asks Sonnet to propose a review decision. Default `Off`
+/// preserves pre-wave-21 byte-shape; `SonnetSuggest` surfaces a propose-
+/// only block under `llm_auto_approve_proposal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LlmAutoApproveProposalMode {
+    /// Default: handler does NOT ask Sonnet for review-action proposals.
+    Off,
+    /// Handler asks Sonnet to PROPOSE a structured review decision and
+    /// surfaces it on the response. NEVER mutates state in v0.
+    SonnetSuggest,
+}
+
+impl LlmAutoApproveProposalMode {
+    /// Lower-snake-case wire label for response payload.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LlmAutoApproveProposalMode::Off => "off",
+            LlmAutoApproveProposalMode::SonnetSuggest => "sonnet_suggest",
+        }
+    }
+
+    /// True iff the mode opts the caller into the propose-only Sonnet
+    /// path. False for `Off` (legacy byte-shape).
+    pub(crate) fn is_sonnet_suggest(self) -> bool {
+        matches!(self, LlmAutoApproveProposalMode::SonnetSuggest)
+    }
+}
+
+/// Parse the wave-21 / task 06 `auto_approve_mode` arg. Unknown / absent
+/// / blank values collapse to `Off` so legacy callers (which never sent
+/// the field) keep their byte-identical response shape. Strict-enum: any
+/// non-empty unknown value fails fast with [`Err`] so caller typos never
+/// silently degrade to Off.
+///
+/// Recognised values (case-insensitive, trimmed):
+///   * `"off"`            → [`LlmAutoApproveProposalMode::Off`] (default)
+///   * `"sonnet_suggest"` → [`LlmAutoApproveProposalMode::SonnetSuggest`]
+///                          (hyphenated `"sonnet-suggest"` accepted)
+pub(crate) fn parse_llm_auto_approve_proposal_mode(
+    args: &Value,
+) -> Result<LlmAutoApproveProposalMode, String> {
+    let Some(raw_v) = args.get("auto_approve_mode") else {
+        return Ok(LlmAutoApproveProposalMode::Off);
+    };
+    let Some(s) = raw_v.as_str() else {
+        return Err(format!(
+            "auto_approve_mode must be a string (one of [\"off\", \"sonnet_suggest\"]); got `{}`",
+            raw_v
+        ));
+    };
+    let normalised = s.trim().to_ascii_lowercase();
+    match normalised.as_str() {
+        "" | "off" => Ok(LlmAutoApproveProposalMode::Off),
+        "sonnet_suggest" | "sonnet-suggest" => Ok(LlmAutoApproveProposalMode::SonnetSuggest),
+        other => Err(format!(
+            "auto_approve_mode must be one of [\"off\", \"sonnet_suggest\"]; got `{}`",
+            other
+        )),
+    }
+}
+
+/// True iff the caller actually included an `auto_approve_mode` key in
+/// the request JSON (regardless of value). Used to keep pre-wave-21/06
+/// callers byte-identical when they never opted in.
+pub(crate) fn llm_auto_approve_proposal_mode_was_explicit(args: &Value) -> bool {
+    args.get("auto_approve_mode").is_some()
+}
+
+/// Confidence label attached to an LLM auto-approve proposal. Mirrors the
+/// wave-20 plan inference confidence vocabulary so dashboards can pivot
+/// on the same set across knobs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LlmAutoApproveProposalConfidence {
+    Low,
+    Medium,
+    High,
+}
+
+impl LlmAutoApproveProposalConfidence {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LlmAutoApproveProposalConfidence::Low => "low",
+            LlmAutoApproveProposalConfidence::Medium => "medium",
+            LlmAutoApproveProposalConfidence::High => "high",
+        }
+    }
+
+    /// Parse the wire string. Case-insensitive + trimmed. Unknown /
+    /// blank → `None` so the caller can record a parse warning.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "low" => Some(LlmAutoApproveProposalConfidence::Low),
+            "medium" | "med" => Some(LlmAutoApproveProposalConfidence::Medium),
+            "high" => Some(LlmAutoApproveProposalConfidence::High),
+            _ => None,
+        }
+    }
+}
+
+/// Wire status describing the outcome of the wave-21 / task 06
+/// propose-only LLM pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LlmAutoApproveProposalStatus {
+    /// Caller picked `auto_approve_mode="off"` (or omitted the knob).
+    /// Bundle is absent from the response (byte-identical with pre-wave-21
+    /// callers).
+    NotInvoked,
+    /// Sonnet was unavailable (gateway not initialised, network failure,
+    /// etc.). Bundle carries `unavailable_reason`; no proposal. NO
+    /// fallback to a deterministic suggestion (invariant I4).
+    Unavailable,
+    /// Sonnet returned a parseable proposal that survived validation.
+    Suggested,
+    /// Action is destructive (archive | supersede | remove). The proposal
+    /// is preserved for audit but `requires_human=true` is pinned and
+    /// `applied=false` is enforced (invariant I2).
+    DestructiveBlocked,
+    /// Sonnet returned an unparseable / empty / invalid response (e.g.
+    /// no JSON, missing required fields). Bundle carries
+    /// `proposal_warnings[]` for caller debugging; no proposal lands.
+    NoSuggestion,
+}
+
+impl LlmAutoApproveProposalStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            LlmAutoApproveProposalStatus::NotInvoked => "not_invoked",
+            LlmAutoApproveProposalStatus::Unavailable => "llm_unavailable",
+            LlmAutoApproveProposalStatus::Suggested => "suggested",
+            LlmAutoApproveProposalStatus::DestructiveBlocked => "destructive_blocked",
+            LlmAutoApproveProposalStatus::NoSuggestion => "no_suggestion",
+        }
+    }
+}
+
+/// One validated wave-21 / task 06 LLM auto-approve proposal. Pure data;
+/// every field reflects either Sonnet output (decision / confidence /
+/// evidence / non_goal_check) or a deterministic invariant
+/// (destructive_check / requires_human / applied).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LlmAutoApproveProposal {
+    /// Suggested decision. NEVER `Rejected` — invariant I1 collapses any
+    /// model-side `rejected` to `NeedsChanges` so the proposal never
+    /// carries an auto-reject suggestion.
+    pub decision: ReviewDecision,
+    /// Sonnet-assigned confidence. Defaults to `Low` when the model omits
+    /// or returns an unrecognised value.
+    pub confidence: LlmAutoApproveProposalConfidence,
+    /// Free-form Sonnet-side justification text. Trimmed; never empty
+    /// (validator drops proposals without evidence to avoid silent
+    /// suggestions).
+    pub evidence: String,
+    /// Sonnet-side claim that the proposal does not violate the
+    /// artifact's stated non-goals. Echoed verbatim for audit; the
+    /// handler does NOT cross-check this string against PLAN.lisp /
+    /// directive sexp non-goals in v0.
+    pub non_goal_check: String,
+    /// Deterministic destructive-action check. ALWAYS sourced from
+    /// [`is_destructive_review_action`] — never from Sonnet (invariant
+    /// I5). Stable string to make dashboards trivially `grep`-able.
+    pub destructive_check: String,
+    /// Whether the listener / caller MUST defer to a human reviewer.
+    /// ALWAYS `true` for destructive actions (invariant I2); ALWAYS
+    /// `true` in v0 even for non-destructive actions (invariant I3 —
+    /// proposals NEVER apply automatically).
+    pub requires_human: bool,
+}
+
+impl LlmAutoApproveProposal {
+    /// Wire shape consumed by callers. The `applied=false` field is
+    /// pinned here (rather than computed from `requires_human`) so
+    /// observers can `assert proposal.applied == false` without reading
+    /// the whole task contract.
+    pub(crate) fn to_json(&self) -> Value {
+        json!({
+            "decision": self.decision.as_str(),
+            "confidence": self.confidence.as_str(),
+            "evidence": self.evidence,
+            "non_goal_check": self.non_goal_check,
+            "destructive_check": self.destructive_check,
+            "requires_human": self.requires_human,
+            "applied": false,
+        })
+    }
+}
+
+/// Bundle of wave-21 / task 06 LLM-side data attached to the response.
+/// Always carries the status (so observers see whether the gateway was
+/// reachable) plus the proposal payload (when one survived). The bundle
+/// is propose-only — `applied=false` is pinned on every contained
+/// proposal regardless of status (invariant I3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct LlmAutoApproveProposalBundle {
+    pub mode: LlmAutoApproveProposalMode,
+    pub status: LlmAutoApproveProposalStatus,
+    /// At most ONE proposal in v0 (the proposal is per-action, per-call).
+    /// Future waves may extend this to multiple proposals (per-field) but
+    /// the v0 contract caps it at one to keep the audit trail terse.
+    pub proposal: Option<LlmAutoApproveProposal>,
+    /// Free-form parse warnings the validator surfaced (e.g. "decision
+    /// missing", "rejected demoted to needs_changes"). Never empty after
+    /// `Unavailable` / `NoSuggestion`.
+    pub proposal_warnings: Vec<String>,
+    /// Reason the gateway was unavailable. Populated only under
+    /// `LlmAutoApproveProposalStatus::Unavailable`.
+    pub unavailable_reason: Option<String>,
+    /// Action label this proposal was made against (e.g. `"approve"`,
+    /// `"archive"`, `"supersede"`, `"mark"`). Echoed verbatim from the
+    /// caller so observers can correlate the proposal with the surface.
+    pub action: String,
+    /// Caller string surfaced to LLM gateway logging. None when the
+    /// gateway was never asked (e.g. status=DestructiveBlocked short-
+    /// circuited the call).
+    pub request_caller: Option<String>,
+    /// Model identifier. Populated when the LLM was actually invoked.
+    pub model: Option<String>,
+}
+
+impl LlmAutoApproveProposalBundle {
+    /// Build a bundle in the `Off` (not-invoked) state. The `action` is
+    /// recorded so dashboards can still grep for the surface label even
+    /// when the bundle reports `not_invoked`.
+    pub(crate) fn not_invoked(action: impl Into<String>) -> Self {
+        LlmAutoApproveProposalBundle {
+            mode: LlmAutoApproveProposalMode::Off,
+            status: LlmAutoApproveProposalStatus::NotInvoked,
+            proposal: None,
+            proposal_warnings: Vec::new(),
+            unavailable_reason: None,
+            action: action.into(),
+            request_caller: None,
+            model: None,
+        }
+    }
+
+    /// Build a bundle in the `Unavailable` state. NO fallback proposal —
+    /// invariant I4 forbids silent degradation to deterministic.
+    pub(crate) fn unavailable(
+        mode: LlmAutoApproveProposalMode,
+        action: impl Into<String>,
+        request_caller: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> Self {
+        LlmAutoApproveProposalBundle {
+            mode,
+            status: LlmAutoApproveProposalStatus::Unavailable,
+            proposal: None,
+            proposal_warnings: Vec::new(),
+            unavailable_reason: Some(reason.into()),
+            action: action.into(),
+            request_caller: Some(request_caller.into()),
+            model: None,
+        }
+    }
+
+    /// Build a bundle in the `DestructiveBlocked` state. Invariant I2:
+    /// the proposal value is preserved for audit but `requires_human` is
+    /// pinned to `true` and `applied` will serialise as `false` via
+    /// [`LlmAutoApproveProposal::to_json`]. The Sonnet call MAY have run
+    /// (proposal preserves the suggestion) OR MAY have been short-circuited
+    /// before the call (proposal is None). Both shapes are valid.
+    pub(crate) fn destructive_blocked(
+        mode: LlmAutoApproveProposalMode,
+        action: impl Into<String>,
+        request_caller: impl Into<String>,
+        proposal: Option<LlmAutoApproveProposal>,
+        warning: impl Into<String>,
+    ) -> Self {
+        let mut warnings: Vec<String> = Vec::new();
+        warnings.push(warning.into());
+        LlmAutoApproveProposalBundle {
+            mode,
+            status: LlmAutoApproveProposalStatus::DestructiveBlocked,
+            proposal: proposal.map(|mut p| {
+                // Invariant I2 + I3: pin requires_human=true even if the
+                // model claimed otherwise.
+                p.requires_human = true;
+                p
+            }),
+            proposal_warnings: warnings,
+            unavailable_reason: None,
+            action: action.into(),
+            request_caller: Some(request_caller.into()),
+            model: None,
+        }
+    }
+}
+
+/// Parse a Sonnet response string into a [`LlmAutoApproveProposal`].
+/// Pure / side-effect free. The expected shape is a JSON object with the
+/// six fields {decision, confidence, evidence, non_goal_check,
+/// destructive_check, requires_human}. Wrapping `{"proposal": {...}}`
+/// also accepted because Sonnet sometimes nests the body.
+///
+/// Validator behaviour:
+///   * `decision="rejected"` is collapsed to `NeedsChanges` with a
+///     `proposal_warnings[]` entry (invariant I1).
+///   * Missing / empty `evidence` drops the proposal (we never surface
+///     a silent suggestion).
+///   * Missing `decision` drops the proposal.
+///   * `confidence` defaults to `Low` when omitted / unrecognised
+///     (records a warning).
+///   * `non_goal_check` defaults to a deterministic placeholder when
+///     omitted (records a warning).
+///   * The caller is responsible for OVERWRITING `destructive_check` +
+///     `requires_human` based on the deterministic [`
+///     is_destructive_review_action`] outcome — invariant I5 forbids
+///     trusting the model's value.
+///
+/// Returns `(Some(proposal), warnings)` on success;
+/// `(None, warnings)` on failure (warnings always populated when
+/// `proposal=None`).
+pub(crate) fn parse_llm_auto_approve_proposal(
+    raw: &str,
+) -> (Option<LlmAutoApproveProposal>, Vec<String>) {
+    let mut warnings: Vec<String> = Vec::new();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        warnings.push("LLM response was empty".to_string());
+        return (None, warnings);
+    }
+    let trimmed = strip_proposal_code_fence(trimmed);
+    let parsed: Value = match serde_json::from_str(trimmed) {
+        Ok(v) => v,
+        Err(err) => {
+            warnings.push(format!("LLM response was not valid JSON: {}", err));
+            return (None, warnings);
+        }
+    };
+    let body = match &parsed {
+        Value::Object(map) => match map.get("proposal") {
+            Some(Value::Object(_)) => map.get("proposal").unwrap().clone(),
+            Some(other) => {
+                warnings.push(format!(
+                    "`proposal` must be an object, got {}",
+                    proposal_json_kind(other)
+                ));
+                return (None, warnings);
+            }
+            None => Value::Object(map.clone()),
+        },
+        other => {
+            warnings.push(format!(
+                "LLM response top-level must be an object, got {}",
+                proposal_json_kind(other)
+            ));
+            return (None, warnings);
+        }
+    };
+    let obj = match body.as_object() {
+        Some(o) => o,
+        None => {
+            warnings.push("LLM response body must be an object".to_string());
+            return (None, warnings);
+        }
+    };
+
+    // decision (required, never `rejected`).
+    let decision_raw = obj
+        .get("decision")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase())
+        .unwrap_or_default();
+    if decision_raw.is_empty() {
+        warnings.push("decision missing or not a string".to_string());
+        return (None, warnings);
+    }
+    let decision = match decision_raw.as_str() {
+        "approved" | "approve" => ReviewDecision::Approved,
+        "needs_changes" | "needs-changes" | "changes" | "revise" | "fix" => {
+            ReviewDecision::NeedsChanges
+        }
+        "rejected" | "reject" | "no" => {
+            // Invariant I1 — never auto-reject. Demote to NeedsChanges.
+            warnings.push(
+                "rule:rejection_demoted:LLM proposed `rejected`; auto-approve proposal NEVER carries `rejected`, demoting to `needs_changes`"
+                    .to_string(),
+            );
+            ReviewDecision::NeedsChanges
+        }
+        other => {
+            warnings.push(format!(
+                "decision `{}` is not in {{approved, needs_changes}}",
+                other
+            ));
+            return (None, warnings);
+        }
+    };
+
+    // evidence (required, non-empty).
+    let evidence = obj
+        .get("evidence")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let evidence = match evidence {
+        Some(e) => e,
+        None => {
+            warnings.push(
+                "evidence missing or empty; proposal dropped (no silent suggestions)".to_string(),
+            );
+            return (None, warnings);
+        }
+    };
+
+    // confidence (optional, defaults to Low).
+    let confidence = obj
+        .get("confidence")
+        .and_then(|v| v.as_str())
+        .and_then(LlmAutoApproveProposalConfidence::parse)
+        .unwrap_or_else(|| {
+            warnings
+                .push("confidence missing or unrecognised; defaulting to `low`".to_string());
+            LlmAutoApproveProposalConfidence::Low
+        });
+
+    // non_goal_check (optional, defaults to placeholder).
+    let non_goal_check = obj
+        .get("non_goal_check")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            warnings.push(
+                "non_goal_check missing or empty; defaulting to placeholder string".to_string(),
+            );
+            "non_goal_check_unavailable".to_string()
+        });
+
+    // destructive_check + requires_human are seeded from the model but
+    // ALWAYS overwritten by the caller via [`enforce_proposal_invariants`]
+    // before the bundle is published. We seed them to the model values
+    // here so the validator stays pure (no action-label dependency).
+    let destructive_check = obj
+        .get("destructive_check")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "destructive_check_pending".to_string());
+    let requires_human = obj
+        .get("requires_human")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
+    let proposal = LlmAutoApproveProposal {
+        decision,
+        confidence,
+        evidence,
+        non_goal_check,
+        destructive_check,
+        requires_human,
+    };
+    (Some(proposal), warnings)
+}
+
+/// Strip a leading ```/```json fence from the LLM response if present.
+/// Mirrors [`strip_code_fence`] in plan.rs but kept local so the helper
+/// stays self-contained.
+fn strip_proposal_code_fence(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    let Some(after_open) = trimmed.strip_prefix("```") else {
+        return trimmed;
+    };
+    let body = after_open
+        .strip_prefix("json")
+        .or_else(|| after_open.strip_prefix("JSON"))
+        .unwrap_or(after_open);
+    let body = body.trim_start_matches('\n').trim_start();
+    body.strip_suffix("```")
+        .map(|s| s.trim_end())
+        .unwrap_or(body)
+}
+
+/// Lower-case JSON kind label for parser warnings. Mirrors
+/// [`json_kind`] in plan.rs.
+fn proposal_json_kind(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "bool",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Apply the wave-21 / task 06 invariants to a freshly-parsed proposal:
+///   * Pin `destructive_check` to the deterministic
+///     [`is_destructive_review_action`] outcome (invariant I5).
+///   * Force `requires_human=true` for destructive actions (invariant
+///     I2) AND for ALL actions in v0 (invariant I3 — propose-only).
+///   * Returns `true` iff the action was destructive (caller flips
+///     bundle status to `DestructiveBlocked`).
+///
+/// Pure / side-effect free.
+pub(crate) fn enforce_proposal_invariants(
+    proposal: &mut LlmAutoApproveProposal,
+    action: &str,
+) -> bool {
+    let destructive = is_destructive_review_action(action);
+    let action_lc = action.trim().to_ascii_lowercase();
+    proposal.destructive_check = if destructive {
+        format!(
+            "destructive:`{}` is on the destructive list (archive|supersede|remove); auto-approve proposal pinned `requires_human=true` regardless of model output",
+            action_lc
+        )
+    } else {
+        format!(
+            "non_destructive:`{}` is not on the destructive list",
+            action_lc
+        )
+    };
+    // Invariant I3: propose-only in v0. Even non-destructive actions
+    // pin requires_human=true so the listener / caller MUST defer.
+    proposal.requires_human = true;
+    destructive
+}
+
+/// Build the system prompt instructing Sonnet to produce a structured
+/// auto-approve proposal. Pure / no I/O.
+pub(crate) fn build_llm_auto_approve_proposal_system_prompt() -> String {
+    String::from(
+        "You are the Wave 21 / Task 06 review-action proposer. The user will share a \
+         pending review surface (directive / plan + action) and any deterministic \
+         safety inspector outcome. Your job is to PROPOSE a review decision in a \
+         strict JSON shape. Constraints:\n\
+         \n\
+         1. You MUST reply with a single JSON object (no prose, no code fence). The \
+            object MUST contain exactly these keys: decision, confidence, evidence, \
+            non_goal_check, destructive_check, requires_human.\n\
+         2. `decision` MUST be one of {\"approved\", \"needs_changes\"}. NEVER reply \
+            `rejected` — refusing a draft is a human-only decision; if the artifact \
+            looks unsafe, reply `needs_changes` with an evidence string explaining \
+            why.\n\
+         3. `confidence` MUST be one of {\"low\", \"medium\", \"high\"}.\n\
+         4. `evidence` MUST be a non-empty string with concrete justification (cite \
+            the artifact / safety inspector output).\n\
+         5. `non_goal_check` MUST be a string explicitly stating whether the proposal \
+            respects the artifact's declared non-goals.\n\
+         6. `destructive_check` MUST be a string describing whether the action is \
+            destructive (archive / supersede / remove). The handler will OVERWRITE \
+            this field with the deterministic verdict — your value is informational.\n\
+         7. `requires_human` MUST be boolean. The handler will FORCE this to true in \
+            v0 (proposals never apply automatically) — your value is informational.\n\
+         8. Respond with ONLY the JSON object — no commentary, no markdown.\n",
+    )
+}
+
+/// Build the user prompt body (pure / no I/O). The caller passes the
+/// surface label, action, deterministic safety summary, and an optional
+/// caller-supplied artifact-side digest (e.g. PLAN.lisp sexp head, recent
+/// evidence keys). Keep the prompt small — Sonnet only needs the shape.
+pub(crate) fn build_llm_auto_approve_proposal_user_prompt(
+    scope: &str,
+    action: &str,
+    artifact_id: &str,
+    version: i32,
+    deterministic_summary: &Value,
+    artifact_digest: Option<&str>,
+) -> String {
+    format!(
+        "Review surface: {scope} action={action}\n\
+         Artifact: id={artifact_id} version=v{version}\n\
+         Deterministic safety inspector summary:\n```json\n{summary}\n```\n\
+         Artifact digest (when supplied):\n```\n{digest}\n```\n\n\
+         Reply with the JSON proposal per the system instructions.\n",
+        scope = scope,
+        action = action,
+        artifact_id = artifact_id,
+        version = version,
+        summary = serde_json::to_string_pretty(deterministic_summary)
+            .unwrap_or_else(|_| "{}".into()),
+        digest = artifact_digest.unwrap_or("(none)"),
+    )
+}
+
+/// Stamp the wave-21 / task 06 bundle onto a response payload under the
+/// stable `llm_auto_approve_proposal` key. Pure / no bus calls.
+///
+/// Mutates `payload` with:
+///   * `llm_auto_approve_proposal_mode`   — resolved mode label
+///   * `llm_auto_approve_proposal_status` — bundle status label
+///   * `llm_auto_approve_proposal`        — proposal JSON (when present)
+///   * `llm_auto_approve_proposal_warnings` — array of warning strings
+///   * `llm_auto_approve_proposal_unavailable_reason` — string (when set)
+///   * `llm_auto_approve_proposal_action` — action label echoed verbatim
+///   * `llm_auto_approve_proposal_caller` — request caller (when set)
+///   * `llm_auto_approve_proposal_model`  — model id (when set)
+pub(crate) fn stamp_llm_auto_approve_proposal_payload(
+    payload: &mut Value,
+    bundle: &LlmAutoApproveProposalBundle,
+) {
+    let Some(map) = payload.as_object_mut() else {
+        return;
+    };
+    map.insert(
+        "llm_auto_approve_proposal_mode".to_string(),
+        json!(bundle.mode.as_str()),
+    );
+    map.insert(
+        "llm_auto_approve_proposal_status".to_string(),
+        json!(bundle.status.as_str()),
+    );
+    if let Some(p) = bundle.proposal.as_ref() {
+        map.insert(
+            "llm_auto_approve_proposal".to_string(),
+            p.to_json(),
+        );
+    }
+    map.insert(
+        "llm_auto_approve_proposal_warnings".to_string(),
+        json!(bundle.proposal_warnings),
+    );
+    if let Some(reason) = bundle.unavailable_reason.as_ref() {
+        map.insert(
+            "llm_auto_approve_proposal_unavailable_reason".to_string(),
+            json!(reason),
+        );
+    }
+    map.insert(
+        "llm_auto_approve_proposal_action".to_string(),
+        json!(bundle.action),
+    );
+    if let Some(caller) = bundle.request_caller.as_ref() {
+        map.insert(
+            "llm_auto_approve_proposal_caller".to_string(),
+            json!(caller),
+        );
+    }
+    if let Some(model) = bundle.model.as_ref() {
+        map.insert(
+            "llm_auto_approve_proposal_model".to_string(),
+            json!(model),
+        );
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // tests — pure helpers only (no bus, no DB).
 // ───────────────────────────────────────────────────────────────────────
 
@@ -4651,5 +5349,484 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ───────────────────────────────────────────────────────────────────
+    // wave-21 / task 06 — LLM auto-approve proposal v0
+    //
+    // Pure helper tests. NO bus, NO DB, NO LLM. The Sonnet call itself
+    // is wired in the per-handler integration code; here we pin the
+    // parser / invariant / stamper contract.
+    // ───────────────────────────────────────────────────────────────────
+
+    fn well_formed_proposal_response() -> &'static str {
+        r#"{
+            "decision": "approved",
+            "confidence": "medium",
+            "evidence": "directive aligns with declared goals; safety inspector clear.",
+            "non_goal_check": "no listed non-goals affected",
+            "destructive_check": "non-destructive",
+            "requires_human": false
+        }"#
+    }
+
+    #[test]
+    fn auto_approve_mode_default_off_when_field_absent() {
+        let mode = parse_llm_auto_approve_proposal_mode(&json!({})).expect("default off");
+        assert_eq!(mode, LlmAutoApproveProposalMode::Off);
+        assert!(!llm_auto_approve_proposal_mode_was_explicit(&json!({})));
+    }
+
+    #[test]
+    fn auto_approve_mode_recognises_off_blank_and_hyphen() {
+        for raw in [
+            json!({"auto_approve_mode": "off"}),
+            json!({"auto_approve_mode": "  Off  "}),
+            json!({"auto_approve_mode": ""}),
+        ] {
+            let mode = parse_llm_auto_approve_proposal_mode(&raw).expect("off variant");
+            assert_eq!(mode, LlmAutoApproveProposalMode::Off);
+            assert!(llm_auto_approve_proposal_mode_was_explicit(&raw));
+        }
+        let sonnet =
+            parse_llm_auto_approve_proposal_mode(&json!({"auto_approve_mode": "sonnet_suggest"}))
+                .expect("sonnet_suggest");
+        assert_eq!(sonnet, LlmAutoApproveProposalMode::SonnetSuggest);
+        let hyphen = parse_llm_auto_approve_proposal_mode(
+            &json!({"auto_approve_mode": "  Sonnet-Suggest  "}),
+        )
+        .expect("hyphenated sonnet");
+        assert_eq!(hyphen, LlmAutoApproveProposalMode::SonnetSuggest);
+    }
+
+    #[test]
+    fn auto_approve_mode_rejects_unknown_value() {
+        let err = parse_llm_auto_approve_proposal_mode(&json!({"auto_approve_mode": "auto"}))
+            .expect_err("typo must fail-fast");
+        assert!(err.contains("auto_approve_mode"));
+    }
+
+    #[test]
+    fn auto_approve_mode_rejects_non_string_type() {
+        let err = parse_llm_auto_approve_proposal_mode(&json!({"auto_approve_mode": true}))
+            .expect_err("non-string must fail-fast");
+        assert!(err.contains("must be a string"));
+    }
+
+    #[test]
+    fn proposal_mode_label_round_trip() {
+        assert_eq!(LlmAutoApproveProposalMode::Off.as_str(), "off");
+        assert_eq!(
+            LlmAutoApproveProposalMode::SonnetSuggest.as_str(),
+            "sonnet_suggest"
+        );
+        assert!(!LlmAutoApproveProposalMode::Off.is_sonnet_suggest());
+        assert!(LlmAutoApproveProposalMode::SonnetSuggest.is_sonnet_suggest());
+    }
+
+    #[test]
+    fn proposal_status_label_round_trip() {
+        assert_eq!(LlmAutoApproveProposalStatus::NotInvoked.as_str(), "not_invoked");
+        assert_eq!(LlmAutoApproveProposalStatus::Unavailable.as_str(), "llm_unavailable");
+        assert_eq!(LlmAutoApproveProposalStatus::Suggested.as_str(), "suggested");
+        assert_eq!(
+            LlmAutoApproveProposalStatus::DestructiveBlocked.as_str(),
+            "destructive_blocked"
+        );
+        assert_eq!(LlmAutoApproveProposalStatus::NoSuggestion.as_str(), "no_suggestion");
+    }
+
+    #[test]
+    fn proposal_confidence_label_round_trip_and_parse() {
+        assert_eq!(LlmAutoApproveProposalConfidence::Low.as_str(), "low");
+        assert_eq!(LlmAutoApproveProposalConfidence::Medium.as_str(), "medium");
+        assert_eq!(LlmAutoApproveProposalConfidence::High.as_str(), "high");
+        assert_eq!(
+            LlmAutoApproveProposalConfidence::parse("HIGH"),
+            Some(LlmAutoApproveProposalConfidence::High)
+        );
+        assert_eq!(
+            LlmAutoApproveProposalConfidence::parse("med"),
+            Some(LlmAutoApproveProposalConfidence::Medium)
+        );
+        assert_eq!(LlmAutoApproveProposalConfidence::parse("foo"), None);
+    }
+
+    #[test]
+    fn parse_well_formed_proposal_returns_proposal_no_warnings() {
+        let (p, warnings) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+        let p = p.expect("well-formed proposal must parse");
+        assert_eq!(p.decision, ReviewDecision::Approved);
+        assert_eq!(p.confidence, LlmAutoApproveProposalConfidence::Medium);
+        assert!(p.evidence.contains("safety inspector clear"));
+        assert_eq!(p.non_goal_check, "no listed non-goals affected");
+        assert!(warnings.is_empty(), "well-formed proposal must not warn: {:?}", warnings);
+    }
+
+    #[test]
+    fn parse_proposal_inside_wrapper_object_accepted() {
+        let raw = format!(r#"{{"proposal": {}}}"#, well_formed_proposal_response());
+        let (p, warnings) = parse_llm_auto_approve_proposal(&raw);
+        assert!(p.is_some(), "wrapper-object proposal must parse");
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_proposal_strips_code_fence() {
+        let fenced = format!("```json\n{}\n```", well_formed_proposal_response());
+        let (p, _) = parse_llm_auto_approve_proposal(&fenced);
+        assert!(p.is_some());
+        let unfenced = format!("```\n{}\n```", well_formed_proposal_response());
+        let (p, _) = parse_llm_auto_approve_proposal(&unfenced);
+        assert!(p.is_some());
+    }
+
+    #[test]
+    fn parse_proposal_demotes_rejected_to_needs_changes() {
+        let raw = r#"{
+            "decision": "rejected",
+            "confidence": "high",
+            "evidence": "model thinks artifact is unsafe",
+            "non_goal_check": "n/a",
+            "destructive_check": "n/a",
+            "requires_human": true
+        }"#;
+        let (p, warnings) = parse_llm_auto_approve_proposal(raw);
+        let p = p.expect("rejected proposal must demote, not drop");
+        assert_eq!(p.decision, ReviewDecision::NeedsChanges, "invariant I1");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("rule:rejection_demoted")),
+            "demotion must be logged: {:?}",
+            warnings
+        );
+    }
+
+    #[test]
+    fn parse_proposal_drops_when_evidence_empty() {
+        let raw = r#"{
+            "decision": "approved",
+            "confidence": "high",
+            "evidence": "   ",
+            "non_goal_check": "n/a",
+            "destructive_check": "n/a",
+            "requires_human": false
+        }"#;
+        let (p, warnings) = parse_llm_auto_approve_proposal(raw);
+        assert!(p.is_none(), "empty evidence must drop the proposal");
+        assert!(warnings.iter().any(|w| w.contains("evidence")));
+    }
+
+    #[test]
+    fn parse_proposal_drops_when_decision_missing() {
+        let raw = r#"{
+            "confidence": "high",
+            "evidence": "no decision",
+            "non_goal_check": "n/a",
+            "destructive_check": "n/a",
+            "requires_human": true
+        }"#;
+        let (p, warnings) = parse_llm_auto_approve_proposal(raw);
+        assert!(p.is_none());
+        assert!(warnings.iter().any(|w| w.contains("decision")));
+    }
+
+    #[test]
+    fn parse_proposal_drops_unknown_decision() {
+        let raw = r#"{
+            "decision": "unsure",
+            "confidence": "high",
+            "evidence": "model hedged",
+            "non_goal_check": "n/a",
+            "destructive_check": "n/a",
+            "requires_human": true
+        }"#;
+        let (p, warnings) = parse_llm_auto_approve_proposal(raw);
+        assert!(p.is_none());
+        assert!(warnings.iter().any(|w| w.contains("not in")));
+    }
+
+    #[test]
+    fn parse_proposal_defaults_low_confidence_when_missing() {
+        let raw = r#"{
+            "decision": "needs_changes",
+            "evidence": "some text",
+            "non_goal_check": "ok",
+            "destructive_check": "ok",
+            "requires_human": true
+        }"#;
+        let (p, warnings) = parse_llm_auto_approve_proposal(raw);
+        let p = p.expect("missing confidence is non-fatal");
+        assert_eq!(p.confidence, LlmAutoApproveProposalConfidence::Low);
+        assert!(warnings.iter().any(|w| w.contains("confidence")));
+    }
+
+    #[test]
+    fn parse_proposal_handles_non_object_top_level() {
+        let (p, warnings) = parse_llm_auto_approve_proposal("[1, 2]");
+        assert!(p.is_none());
+        assert!(warnings
+            .iter()
+            .any(|w| w.contains("top-level must be an object")));
+    }
+
+    #[test]
+    fn parse_proposal_handles_invalid_json() {
+        let (p, warnings) = parse_llm_auto_approve_proposal("not json at all");
+        assert!(p.is_none());
+        assert!(warnings.iter().any(|w| w.contains("not valid JSON")));
+    }
+
+    #[test]
+    fn enforce_invariants_pins_destructive_check_on_archive() {
+        let (mut p, _) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+        let mut p = p.take().expect("seed proposal");
+        // Sonnet claimed `requires_human=false` and `destructive_check=
+        // non-destructive` — the enforcer MUST overwrite.
+        let was_destructive = enforce_proposal_invariants(&mut p, "archive");
+        assert!(was_destructive, "archive is destructive (invariant I5)");
+        assert!(
+            p.destructive_check.starts_with("destructive:"),
+            "destructive_check must reflect deterministic verdict: {}",
+            p.destructive_check
+        );
+        assert!(
+            p.requires_human,
+            "invariant I2: destructive actions ALWAYS require human"
+        );
+    }
+
+    #[test]
+    fn enforce_invariants_pins_requires_human_even_on_non_destructive() {
+        let (mut p, _) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+        let mut p = p.take().expect("seed proposal");
+        // Approve is non-destructive; the model said requires_human=false.
+        // Invariant I3 (propose-only) STILL forces requires_human=true.
+        let was_destructive = enforce_proposal_invariants(&mut p, "approve");
+        assert!(!was_destructive);
+        assert!(
+            p.destructive_check.starts_with("non_destructive:"),
+            "non-destructive verdict must surface: {}",
+            p.destructive_check
+        );
+        assert!(
+            p.requires_human,
+            "invariant I3: v0 NEVER auto-applies; requires_human always true"
+        );
+    }
+
+    #[test]
+    fn enforce_invariants_recognises_all_destructive_actions() {
+        for action in ["archive", "supersede", "remove", "ARCHIVE", "  Supersede  "] {
+            let (mut p, _) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+            let mut p = p.take().unwrap();
+            assert!(
+                enforce_proposal_invariants(&mut p, action),
+                "`{}` must be destructive",
+                action
+            );
+        }
+        for action in ["approve", "compile", "mark", "Approve"] {
+            let (mut p, _) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+            let mut p = p.take().unwrap();
+            assert!(
+                !enforce_proposal_invariants(&mut p, action),
+                "`{}` must NOT be destructive",
+                action
+            );
+        }
+    }
+
+    #[test]
+    fn proposal_to_json_pins_applied_false() {
+        let (p, _) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+        let p = p.unwrap();
+        let v = p.to_json();
+        assert_eq!(
+            v.get("applied").and_then(|x| x.as_bool()),
+            Some(false),
+            "invariant I3: every proposal serialises applied=false"
+        );
+    }
+
+    #[test]
+    fn bundle_not_invoked_records_action_label() {
+        let b = LlmAutoApproveProposalBundle::not_invoked("approve");
+        assert_eq!(b.mode, LlmAutoApproveProposalMode::Off);
+        assert_eq!(b.status, LlmAutoApproveProposalStatus::NotInvoked);
+        assert_eq!(b.action, "approve");
+        assert!(b.proposal.is_none());
+    }
+
+    #[test]
+    fn bundle_unavailable_pins_reason_and_caller() {
+        let b = LlmAutoApproveProposalBundle::unavailable(
+            LlmAutoApproveProposalMode::SonnetSuggest,
+            "approve",
+            "directive_review_proposer",
+            "Sonnet gateway not initialized",
+        );
+        assert_eq!(b.status, LlmAutoApproveProposalStatus::Unavailable);
+        assert!(b
+            .unavailable_reason
+            .as_deref()
+            .unwrap()
+            .contains("Sonnet"));
+        assert_eq!(b.request_caller.as_deref(), Some("directive_review_proposer"));
+        assert!(b.proposal.is_none(), "invariant I4: no fallback proposal");
+        assert!(b.proposal_warnings.is_empty());
+    }
+
+    #[test]
+    fn bundle_destructive_blocked_overwrites_requires_human() {
+        let (mut p, _) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+        // Force model-side claim that no human is needed.
+        let proposal = p.take().map(|mut x| {
+            x.requires_human = false;
+            x
+        });
+        let b = LlmAutoApproveProposalBundle::destructive_blocked(
+            LlmAutoApproveProposalMode::SonnetSuggest,
+            "supersede",
+            "plan_review_proposer",
+            proposal,
+            "rule:destructive_action:supersede; auto-approve proposal NEVER promotes destructive actions",
+        );
+        assert_eq!(b.status, LlmAutoApproveProposalStatus::DestructiveBlocked);
+        let p = b.proposal.expect("destructive_blocked preserves proposal");
+        assert!(
+            p.requires_human,
+            "invariant I2: destructive_blocked MUST pin requires_human=true"
+        );
+        assert!(b
+            .proposal_warnings
+            .iter()
+            .any(|w| w.contains("destructive_action")));
+    }
+
+    #[test]
+    fn stamp_proposal_payload_round_trip() {
+        let (proposal, _) = parse_llm_auto_approve_proposal(well_formed_proposal_response());
+        let mut proposal = proposal.unwrap();
+        enforce_proposal_invariants(&mut proposal, "approve");
+        let bundle = LlmAutoApproveProposalBundle {
+            mode: LlmAutoApproveProposalMode::SonnetSuggest,
+            status: LlmAutoApproveProposalStatus::Suggested,
+            proposal: Some(proposal),
+            proposal_warnings: vec!["w1".to_string()],
+            unavailable_reason: None,
+            action: "approve".to_string(),
+            request_caller: Some("directive_review_proposer".to_string()),
+            model: Some("claude-sonnet".to_string()),
+        };
+        let mut payload = json!({});
+        stamp_llm_auto_approve_proposal_payload(&mut payload, &bundle);
+        assert_eq!(payload["llm_auto_approve_proposal_mode"], "sonnet_suggest");
+        assert_eq!(payload["llm_auto_approve_proposal_status"], "suggested");
+        assert_eq!(payload["llm_auto_approve_proposal_action"], "approve");
+        assert_eq!(
+            payload["llm_auto_approve_proposal_caller"],
+            "directive_review_proposer"
+        );
+        assert_eq!(payload["llm_auto_approve_proposal_model"], "claude-sonnet");
+        assert_eq!(
+            payload["llm_auto_approve_proposal_warnings"],
+            json!(["w1"])
+        );
+        assert_eq!(
+            payload["llm_auto_approve_proposal"]["applied"],
+            false,
+            "invariant I3: applied always false"
+        );
+        assert_eq!(
+            payload["llm_auto_approve_proposal"]["requires_human"],
+            true,
+            "invariant I3: requires_human always true in v0"
+        );
+        assert_eq!(
+            payload["llm_auto_approve_proposal"]["decision"],
+            "approved",
+            "decision echoed verbatim"
+        );
+        assert!(payload
+            .get("llm_auto_approve_proposal_unavailable_reason")
+            .is_none());
+    }
+
+    #[test]
+    fn stamp_proposal_payload_unavailable_includes_reason() {
+        let bundle = LlmAutoApproveProposalBundle::unavailable(
+            LlmAutoApproveProposalMode::SonnetSuggest,
+            "approve",
+            "directive_review_proposer",
+            "no gateway",
+        );
+        let mut payload = json!({});
+        stamp_llm_auto_approve_proposal_payload(&mut payload, &bundle);
+        assert_eq!(
+            payload["llm_auto_approve_proposal_status"],
+            "llm_unavailable"
+        );
+        assert_eq!(
+            payload["llm_auto_approve_proposal_unavailable_reason"],
+            "no gateway"
+        );
+        assert!(
+            payload.get("llm_auto_approve_proposal").is_none(),
+            "invariant I4: no fallback proposal payload"
+        );
+    }
+
+    #[test]
+    fn proposal_invariants_round_trip_never_surface_rejected() {
+        // Defensive invariant I1 — even if a future parser change accepted
+        // `rejected`, the stamped payload MUST NOT carry decision=rejected.
+        for decision_str in ["approved", "needs_changes", "rejected"] {
+            let raw = format!(
+                r#"{{
+                    "decision": "{}",
+                    "confidence": "high",
+                    "evidence": "test",
+                    "non_goal_check": "n/a",
+                    "destructive_check": "n/a",
+                    "requires_human": true
+                }}"#,
+                decision_str
+            );
+            let (p, _) = parse_llm_auto_approve_proposal(&raw);
+            if let Some(mut p) = p {
+                enforce_proposal_invariants(&mut p, "approve");
+                let v = p.to_json();
+                assert_ne!(
+                    v["decision"], "rejected",
+                    "invariant I1 round-trip: payload MUST NOT carry rejected"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn build_proposal_prompts_pure_no_io() {
+        let system = build_llm_auto_approve_proposal_system_prompt();
+        assert!(system.contains("decision"));
+        assert!(system.contains("approved"));
+        assert!(system.contains("needs_changes"));
+        assert!(system.contains("rejected"));
+        assert!(system.contains("requires_human"));
+        let user = build_llm_auto_approve_proposal_user_prompt(
+            "directive",
+            "approve",
+            "abc-123",
+            1,
+            &json!({"deterministic_status": "auto_approved"}),
+            Some("(directive :goal :ship)"),
+        );
+        assert!(user.contains("directive"));
+        assert!(user.contains("approve"));
+        assert!(user.contains("abc-123"));
+        assert!(user.contains("v1"));
+        assert!(user.contains("auto_approved"));
+        assert!(user.contains("(directive :goal :ship)"));
     }
 }

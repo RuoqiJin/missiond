@@ -30,6 +30,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
          不实现 UI / 不等 QuestionEvent::Resolved 回答 / 不自动 approve; bus 失败转 review_question_warning, DB 已 commit 时不回滚。\
          可选 review_actor + review_note 仅作 audit 字符串透传到 response。\
          list/get/approve/archive/version_chain 为 store-backed full。\
+         wave-21 / task 06 LLM auto-approve proposal v0: approve / archive 可传 auto_approve_mode=\"sonnet_suggest\" \
+         (默认 \"off\" 保持 byte-shape) 让 Sonnet PROPOSE 结构化 review 决定 (decision + confidence + evidence + non_goal_check + destructive_check + requires_human); \
+         结果挂在 llm_auto_approve_proposal*; v0 propose-only — 永不 auto-apply, applied=false / requires_human=true 强制 pin; \
+         destructive (archive | supersede | remove) 永远短路到 destructive_blocked 不调 LLM; rejected 从模型来时 demote 成 needs_changes (invariant I1); \
+         Sonnet 不可用 → llm_unavailable 无 deterministic fallback (invariant I4); destructive_check 始终源自 is_destructive_review_action 不是模型 (invariant I5); \
+         caller `review_decision` 永远胜过 proposal — 这层只是 informational hint 给 dashboard / UI; \
+         与 wave-18 / 07 review_automation_policy + wave-20 / 08 auto_answer_policy ORTHOGONAL, 三者可同时存在。\
          Lisp 源: intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: \
          s2 intent-alignment-authoring + s3 alignment-review-gate \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role alignment-author \
@@ -103,6 +110,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "type": "string",
                     "enum": ["manual", "suggest", "auto_safe"],
                     "description": "[approve | archive] (wave-18 / task 07 review automation policy v0) explicit autonomy knob for the resolution surface. ORTHOGONAL to `review_gate_policy` (which controls EMISSION). `manual` (default) keeps the existing wave-15 behaviour: caller-supplied `review_decision` is the only authority and the response is byte-identical with pre-wave-18 callers. `suggest` makes the handler compute a deterministic suggestion (`suggested_review_decision`) and surfaces it WITHOUT mutating the artifact. `auto_safe` may auto-promote to `approved` ONLY when ALL deterministic safety rules pass: producer ran in deterministic/dry-run mode, no file write OR file hash matches the supplied expected_file_sha256, no protected source/target, no unresolved conflicts, and the caller explicitly opted in via this knob. NEVER auto-rejects (refusing a draft is a human-only decision). NEVER calls an LLM. Caller-supplied `review_decision` ALWAYS wins (the policy never overrides explicit decisions). `archive` is intentionally NEVER auto-promoted under `auto_safe` (destructive transition) — the policy surfaces the suggestion and refuses to mutate. Response always carries `review_automation_policy` / `review_automation_status` / `suggested_review_decision` / `automation_reasons[]` when the knob was supplied."
+                },
+                "auto_approve_mode": {
+                    "type": "string",
+                    "enum": ["off", "sonnet_suggest"],
+                    "description": "[approve | archive] (wave-21 / task 06 LLM auto-approve proposal v0) opt-in propose-only Sonnet-assisted review-action recommendation. ORTHOGONAL to the wave-18 / 07 `review_automation_policy` (deterministic safety inspector) AND the wave-20 / 08 `auto_answer_policy` (listener-side auto-answer). `off` (default) preserves pre-wave-21 byte-shape — no LLM call, no proposal block. `sonnet_suggest` asks Sonnet to PROPOSE a structured review decision (decision + confidence + evidence + non_goal_check + destructive_check + requires_human) and surfaces it under `llm_auto_approve_proposal*` on the response. Hard invariants in v0: (I1) proposal NEVER carries `decision=rejected` — `rejected` from the model is demoted to `needs_changes` with a warning; auto-rejection is a human-only decision. (I2) destructive actions (archive | supersede | remove) ALWAYS short-circuit to `destructive_blocked` regardless of model output — proposal value preserved for audit but `requires_human=true` and `applied=false` are pinned. (I3) `applied=false` is pinned on EVERY proposal regardless of confidence — v0 NEVER auto-applies; any future wave promoting proposals to authority MUST add a separate explicit caller-side opt-in flag. (I4) Sonnet unavailable surfaces `llm_unavailable` status with no fallback proposal — invariant against silent degradation to deterministic. (I5) `destructive_check` is ALWAYS sourced from the deterministic `is_destructive_review_action` outcome — never from the model. The proposal NEVER drives a DB transition or bus emission; caller still has to supply explicit `review_decision` to flip the artifact. The deterministic `review_automation_policy` (when also supplied) and the LLM proposal co-exist on the response — they are independent suggestions."
                 },
                 "expected_file_sha256": {
                     "type": "string",

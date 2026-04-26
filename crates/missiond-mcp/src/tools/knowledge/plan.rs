@@ -336,6 +336,32 @@ fn build_properties() -> Value {
         "[approve | mark | supersede review_automation_policy=auto_safe] (wave-18 / task 07) optional caller-supplied SHA-256 the deterministic safety inspector requires to match the on-disk PLAN.lisp hash. Pure additive guard: when the plan compile landed via the file-first writer the caller can capture `file_sha256` from the compile response and replay it here so an unexpected on-disk modification blocks `auto_safe`. Absent → strict-matching disabled (no file write attempted under approve/mark/supersede in v0; the rule still surfaces a passing audit row when omitted).",
     ));
 
+    // ── wave-21 / task 06 — LLM auto-approve proposal v0 ────────────────
+    //
+    // Opt-in propose-only Sonnet-assisted review-action recommendation.
+    // ORTHOGONAL to the wave-18 / 07 deterministic safety inspector AND
+    // the wave-20 / 08 listener auto-answer. Default `off` preserves the
+    // wave-18..20 byte-shape exactly; `sonnet_suggest` adds an
+    // `llm_auto_approve_proposal*` block to the response.
+    //
+    // Hard invariants:
+    //   I1  proposal NEVER carries decision=rejected (rejected → demoted
+    //       to needs_changes with a warning).
+    //   I2  destructive actions (supersede | archive | remove) ALWAYS
+    //       short-circuit to `destructive_blocked` regardless of model
+    //       output; proposal value preserved for audit but
+    //       requires_human=true / applied=false pinned.
+    //   I3  applied=false pinned on EVERY proposal regardless of
+    //       confidence — v0 NEVER auto-applies.
+    //   I4  Sonnet unavailable → `llm_unavailable` with no fallback.
+    //   I5  destructive_check ALWAYS sourced from deterministic helper,
+    //       never from the model.
+    p.insert("auto_approve_mode".into(), prop_enum(
+        "string",
+        "[approve | mark | supersede] (wave-21 / task 06 LLM auto-approve proposal v0) opt-in propose-only Sonnet-assisted review-action recommendation. ORTHOGONAL to the wave-18 / 07 `review_automation_policy` (deterministic safety inspector) AND the wave-20 / 08 `auto_answer_policy` (listener-side auto-answer); the three knobs co-exist on the response when supplied. `off` (default) preserves pre-wave-21 byte-shape — no LLM call, no proposal block. `sonnet_suggest` asks Sonnet to PROPOSE a structured review decision (decision + confidence + evidence + non_goal_check + destructive_check + requires_human) and surfaces it under `llm_auto_approve_proposal*` on the response. Hard invariants in v0: (I1) proposal NEVER carries `decision=rejected` — `rejected` from the model is demoted to `needs_changes` with a warning. (I2) destructive actions (supersede | archive | remove) ALWAYS short-circuit to `destructive_blocked` regardless of model output — proposal value preserved for audit but `requires_human=true` and `applied=false` are pinned. (I3) `applied=false` pinned on EVERY proposal regardless of confidence — v0 NEVER auto-applies. (I4) Sonnet unavailable → `llm_unavailable` status with no fallback proposal — invariant against silent degradation to deterministic. (I5) `destructive_check` ALWAYS sourced from the deterministic `is_destructive_review_action` outcome, never from the model. The proposal NEVER drives a DB transition or bus emission; caller still has to supply explicit `review_decision` to flip the plan. For `mark`, the requested target status is folded into the prompt context but the proposal stays informational regardless of target. For `supersede`, the proposer ALWAYS surfaces `destructive_blocked` (per I2).",
+        &["off", "sonnet_suggest"],
+    ));
+
     // ── wave-17 / task 01 — PLAN-DAG paused-node resume hook ────────────
     //
     // These knobs are opt-in. They route `mission_plan(action=execute,
@@ -970,6 +996,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
          conflict_fields[], resulting_plan_preview (caller args ∪ applied)}。Persistence boundary: v1 gate 永不 mutate 持久化 plan.sexp_text \
          (persist_inference_applied 钉死 false); persist_inference=true 仅 echo 进 audit 行,等下一个 wave 接 persisted plan write。\
          默认 apply_inferred_fields=false ⇒ 与 wave-18..20 byte-shape 完全一致 (suggest-only)。\
+         wave-21 / task 06 LLM auto-approve proposal v0: approve / mark / supersede 接受 auto_approve_mode=\"sonnet_suggest\" \
+         (默认 \"off\" 保持 byte-shape) 让 Sonnet PROPOSE 结构化 review 决定 (decision + confidence + evidence + non_goal_check + destructive_check + requires_human); \
+         结果挂在 llm_auto_approve_proposal*; v0 propose-only — 永不 auto-apply, applied=false / requires_human=true 强制 pin (invariant I3); \
+         destructive (supersede | archive | remove) 永远短路到 destructive_blocked 不调 LLM (invariant I2); \
+         rejected 从模型来时 demote 成 needs_changes (invariant I1, 自动 reject 是 human-only); \
+         Sonnet 不可用 → llm_unavailable 无 deterministic fallback (invariant I4); \
+         destructive_check 始终源自 is_destructive_review_action 不是模型 (invariant I5); \
+         caller `review_decision` 永远胜过 proposal — 这层只是 informational hint 给 dashboard / UI; \
+         与 wave-18 / 07 review_automation_policy + wave-20 / 08 auto_answer_policy ORTHOGONAL, 三者可同时存在共栖响应。\
          Lisp 源 (forward ref): .missiond/tasks/schema/task-contract-v1.lisp + intent-tools.lisp :: implemented-surface \
          mission_plan :: :task-contract-emitter (wave-19/12 backfill) + :execute-contract :apply-inferred-fields-gate (wave-21/05 backfill)。",
         schema,

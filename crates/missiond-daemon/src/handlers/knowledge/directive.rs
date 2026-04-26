@@ -30,12 +30,18 @@ use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
 use crate::handlers::knowledge::review_gate::{
-    apply_compile_review_gates, evaluate_review_automation, maybe_emit_review_question_resolved,
-    parse_compile_review_gate, parse_resolution_review_question_id, parse_review_automation_policy,
-    parse_review_gate_policy, parse_review_question_id_struct, parse_review_resolution_input,
-    resolution_wire_string, review_automation_policy_was_explicit, review_gate_policy_was_explicit,
-    stamp_needs_changes_next_step, stamp_resolution_payload, stamp_review_automation_payload,
-    validate_review_resolution_envelope, AutomationStatus, ParsedReviewQuestionId,
+    apply_compile_review_gates, build_llm_auto_approve_proposal_system_prompt,
+    build_llm_auto_approve_proposal_user_prompt, enforce_proposal_invariants,
+    evaluate_review_automation, llm_auto_approve_proposal_mode_was_explicit,
+    maybe_emit_review_question_resolved, parse_compile_review_gate,
+    parse_llm_auto_approve_proposal, parse_llm_auto_approve_proposal_mode,
+    parse_resolution_review_question_id, parse_review_automation_policy, parse_review_gate_policy,
+    parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
+    review_automation_policy_was_explicit, review_gate_policy_was_explicit,
+    stamp_llm_auto_approve_proposal_payload, stamp_needs_changes_next_step,
+    stamp_resolution_payload, stamp_review_automation_payload,
+    validate_review_resolution_envelope, AutomationStatus, LlmAutoApproveProposalBundle,
+    LlmAutoApproveProposalMode, LlmAutoApproveProposalStatus, ParsedReviewQuestionId,
     ResolutionOutcome, ReviewAutomationContext, ReviewAutomationPolicy, ReviewDecision,
     ReviewResolutionInput,
 };
@@ -843,12 +849,210 @@ fn build_directive_automation_ctx(
     }
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// wave-21 / task 06 — LLM auto-approve proposal v0 (directive surface)
+//
+// Conservative wiring on top of the existing wave-15 / 18 / 20 stack.
+// The new `auto_approve_mode` knob is OPT-IN (default `off`); when
+// `sonnet_suggest` is supplied we invoke Sonnet for a propose-only
+// review-action recommendation and surface it under
+// `llm_auto_approve_proposal*` fields on the response payload. The
+// proposal NEVER drives a DB transition or bus emission in v0 —
+// `applied=false` is pinned on every payload (invariant I3) and
+// `requires_human=true` is forced regardless of model output.
+//
+// Destructive actions (`archive`) ALWAYS short-circuit to
+// `destructive_blocked`: the proposal value is preserved for audit but
+// the response carries `requires_human=true` AND a loud warning. This
+// matches the wave-18 / 07 archive-never-auto-promoted contract for the
+// deterministic policy path.
+//
+// Sonnet unavailable surfaces `LLM_UNAVAILABLE` status with no fallback
+// proposal — invariant I4 forbids silent degradation to deterministic.
+// ───────────────────────────────────────────────────────────────────────
+
+const DIRECTIVE_REVIEW_PROPOSER_CALLER: &str = "directive_review_proposer";
+const SONNET_PROPOSER_MAX_TOKENS: u32 = 1024;
+
+/// Run the wave-21 / task 06 propose-only Sonnet pass for the directive
+/// surface. Returns a fully-built [`LlmAutoApproveProposalBundle`] in
+/// every code path so the caller can pivot on the bundle status without
+/// branching on Result. NEVER mutates state.
+async fn request_directive_auto_approve_proposal(
+    state: &AppState,
+    mode: LlmAutoApproveProposalMode,
+    action: &str,
+    artifact_id: &uuid::Uuid,
+    version: i32,
+    deterministic_summary: &Value,
+    artifact_digest: Option<&str>,
+) -> LlmAutoApproveProposalBundle {
+    // Invariant I2 short-circuit — destructive actions never drive a
+    // Sonnet call in v0. We surface `destructive_blocked` directly so
+    // dashboards can grep for the refusal without reading per-handler
+    // state.
+    if crate::handlers::knowledge::review_gate::is_destructive_review_action(action) {
+        return LlmAutoApproveProposalBundle::destructive_blocked(
+            mode,
+            action,
+            DIRECTIVE_REVIEW_PROPOSER_CALLER,
+            None,
+            format!(
+                "rule:destructive_action:`{}` is destructive; auto-approve proposal NEVER promotes (invariant I2)",
+                action.to_ascii_lowercase()
+            ),
+        );
+    }
+
+    // Invariant I4 — Sonnet unavailable surfaces `Unavailable` with no
+    // fallback proposal. We mirror the directive_compile dry-run rule
+    // here for consistency with the rest of the file.
+    let Some(sonnet) = state.sonnet.as_ref() else {
+        return LlmAutoApproveProposalBundle::unavailable(
+            mode,
+            action,
+            DIRECTIVE_REVIEW_PROPOSER_CALLER,
+            "Sonnet gateway not initialized; LLM auto-approve proposal unavailable",
+        );
+    };
+
+    let system = build_llm_auto_approve_proposal_system_prompt();
+    let user = build_llm_auto_approve_proposal_user_prompt(
+        "directive",
+        action,
+        &artifact_id.to_string(),
+        version,
+        deterministic_summary,
+        artifact_digest,
+    );
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: system,
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: user,
+        },
+    ];
+
+    let raw = match sonnet
+        .call_interactive(
+            messages,
+            Some(SONNET_PROPOSER_MAX_TOKENS),
+            DIRECTIVE_REVIEW_PROPOSER_CALLER,
+        )
+        .await
+    {
+        Ok(s) => s,
+        Err(err) => {
+            return LlmAutoApproveProposalBundle::unavailable(
+                mode,
+                action,
+                DIRECTIVE_REVIEW_PROPOSER_CALLER,
+                format!("Sonnet auto-approve proposal call failed: {}", err),
+            );
+        }
+    };
+
+    let (proposal, parse_warnings) = parse_llm_auto_approve_proposal(&raw);
+    match proposal {
+        Some(mut p) => {
+            // Pin the deterministic invariants (destructive_check +
+            // requires_human always true in v0).
+            enforce_proposal_invariants(&mut p, action);
+            LlmAutoApproveProposalBundle {
+                mode,
+                status: LlmAutoApproveProposalStatus::Suggested,
+                proposal: Some(p),
+                proposal_warnings: parse_warnings,
+                unavailable_reason: None,
+                action: action.to_string(),
+                request_caller: Some(DIRECTIVE_REVIEW_PROPOSER_CALLER.to_string()),
+                model: Some(SONNET_COMPILER_MODEL.to_string()),
+            }
+        }
+        None => LlmAutoApproveProposalBundle {
+            mode,
+            status: LlmAutoApproveProposalStatus::NoSuggestion,
+            proposal: None,
+            proposal_warnings: parse_warnings,
+            unavailable_reason: None,
+            action: action.to_string(),
+            request_caller: Some(DIRECTIVE_REVIEW_PROPOSER_CALLER.to_string()),
+            model: Some(SONNET_COMPILER_MODEL.to_string()),
+        },
+    }
+}
+
+/// Splice the wave-21 / task 06 bundle onto a response payload. Skips
+/// the splice when the bundle is `not_invoked` (`mode=off`) so legacy
+/// callers stay byte-identical with pre-wave-21.
+fn attach_directive_proposal_block(
+    payload: &mut Value,
+    bundle: &LlmAutoApproveProposalBundle,
+) {
+    if matches!(bundle.status, LlmAutoApproveProposalStatus::NotInvoked) {
+        return;
+    }
+    stamp_llm_auto_approve_proposal_payload(payload, bundle);
+}
+
+/// Read + validate the wave-21 / task 06 mode arg. Returns
+/// `Ok(None)` when the caller did not opt in (mode=off OR field absent),
+/// `Ok(Some(mode))` when sonnet_suggest is requested. Strict-enum: typo
+/// values fail-fast with a structured error so callers never silently
+/// degrade to off.
+fn parse_proposer_mode_or_error(
+    args: &Value,
+) -> std::result::Result<Option<LlmAutoApproveProposalMode>, ToolError> {
+    let mode = parse_llm_auto_approve_proposal_mode(args)
+        .map_err(|msg| ToolError::new(error_codes::INVALID_PARAM, msg))?;
+    if mode.is_sonnet_suggest() {
+        Ok(Some(mode))
+    } else {
+        // Echo `Off` only when the caller explicitly supplied it (not
+        // when the field was absent) so dashboards can tell the
+        // difference between "caller opted out" and "caller never saw
+        // the knob". For absent / off, we omit the bundle entirely to
+        // preserve byte-shape.
+        if llm_auto_approve_proposal_mode_was_explicit(args) {
+            Ok(Some(mode))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// Build the deterministic summary block that feeds into the Sonnet
+/// prompt. Tiny / pure / no I/O. Only the fields the model actually
+/// needs surface here so the prompt stays terse.
+fn directive_proposer_summary(
+    automation_outcome_status: &str,
+    automation_policy: &str,
+    decision_present: bool,
+) -> Value {
+    json!({
+        "review_automation_policy": automation_policy,
+        "review_automation_status": automation_outcome_status,
+        "explicit_decision_supplied": decision_present,
+    })
+}
+
 async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
     let id = parse_id_arg(args, "directive_id")?;
     let version = require_i32(args, "version")?;
 
     let automation_policy = parse_review_automation_policy(args);
     let automation_explicit = review_automation_policy_was_explicit(args);
+
+    // wave-21 / task 06 :: parse the propose-only `auto_approve_mode`
+    // knob up-front. Strict-enum failure surfaces as INVALID_PARAM
+    // BEFORE any DB read so caller typos never silently degrade to off.
+    let proposer_mode = match parse_proposer_mode_or_error(args) {
+        Ok(m) => m,
+        Err(e) => return Ok(ToolResult::structured_error(e)),
+    };
 
     // wave-15 :: explicit resolution bridge. When the caller supplies
     // `review_question_id` + `review_decision` we validate the envelope
@@ -884,6 +1088,7 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
                 version,
                 qid,
                 automation_policy,
+                proposer_mode,
             )
             .await;
         }
@@ -897,6 +1102,7 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
             input,
             automation_policy,
             automation_explicit,
+            proposer_mode,
         )
         .await;
     }
@@ -924,6 +1130,22 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         None,
     )
     .await;
+    // wave-21 / task 06 :: propose-only Sonnet pass on the legacy path.
+    // The DB transition already committed; the proposal is informational.
+    if let Some(mode) = proposer_mode {
+        let summary = directive_proposer_summary("legacy_quiet", "manual", false);
+        let bundle = request_directive_auto_approve_proposal(
+            state,
+            mode,
+            "approve",
+            &id,
+            version,
+            &summary,
+            None,
+        )
+        .await;
+        attach_directive_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -943,6 +1165,7 @@ async fn action_approve_with_resolution(
     input: ReviewResolutionInput,
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     // Parse the deterministic id envelope.
     let parsed = match parse_review_question_id_struct(&input.question_id) {
@@ -1028,6 +1251,7 @@ async fn action_approve_with_resolution(
     // the explicit decision so observers can see both. Skipped under
     // Manual + caller-omitted policy to keep pre-wave-18 callers
     // byte-identical.
+    let mut automation_status_label = "not_evaluated".to_string();
     if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
         let mut args_v = json!({});
         if let Some(map) = args_v.as_object_mut() {
@@ -1042,6 +1266,7 @@ async fn action_approve_with_resolution(
             &ctx,
             Some(input.decision),
         );
+        automation_status_label = outcome.status.as_str().to_string();
         stamp_review_automation_payload(&mut payload, &outcome);
     }
 
@@ -1054,6 +1279,29 @@ async fn action_approve_with_resolution(
         None,
     )
     .await;
+
+    // wave-21 / task 06 :: propose-only Sonnet pass for the explicit-
+    // resolution path. Caller-supplied `review_decision` ALWAYS wins
+    // (the policy NEVER overrides explicit decisions) — this proposal
+    // is informational only. Skipped under `mode=off` (default).
+    if let Some(mode) = proposer_mode {
+        let summary = directive_proposer_summary(
+            &automation_status_label,
+            automation_policy.as_str(),
+            true,
+        );
+        let bundle = request_directive_auto_approve_proposal(
+            state,
+            mode,
+            "approve",
+            &id,
+            version,
+            &summary,
+            Some(&head_directive.sexp_text),
+        )
+        .await;
+        attach_directive_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1072,6 +1320,7 @@ async fn action_approve_with_policy_only(
     version: i32,
     qid: String,
     automation_policy: ReviewAutomationPolicy,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     // Parse + validate the envelope before invoking the policy. Same
     // rejection set as the wave-15 explicit path so a malformed id can
@@ -1186,6 +1435,29 @@ async fn action_approve_with_policy_only(
         .await;
     }
 
+    // wave-21 / task 06 :: propose-only Sonnet pass on the policy-only
+    // path. The deterministic policy outcome (auto_safe / suggest /
+    // blocked) is informational input to the prompt; the proposal NEVER
+    // overrides the deterministic decision — both surfaces co-exist.
+    if let Some(mode) = proposer_mode {
+        let summary = directive_proposer_summary(
+            outcome.status.as_str(),
+            automation_policy.as_str(),
+            false,
+        );
+        let bundle = request_directive_auto_approve_proposal(
+            state,
+            mode,
+            "approve",
+            &id,
+            version,
+            &summary,
+            Some(&head_directive.sexp_text),
+        )
+        .await;
+        attach_directive_proposal_block(&mut payload, &bundle);
+    }
+
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1195,6 +1467,13 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let automation_policy = parse_review_automation_policy(args);
     let automation_explicit = review_automation_policy_was_explicit(args);
+
+    // wave-21 / task 06 :: parse the propose-only `auto_approve_mode`
+    // knob up-front. Strict-enum failure surfaces as INVALID_PARAM.
+    let proposer_mode = match parse_proposer_mode_or_error(args) {
+        Ok(m) => m,
+        Err(e) => return Ok(ToolResult::structured_error(e)),
+    };
 
     // wave-15 :: explicit resolution bridge — see `action_approve` above.
     // wave-18 / task 07 :: same MissingDecision-under-policy promotion as
@@ -1221,6 +1500,7 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
                 version,
                 qid,
                 automation_policy,
+                proposer_mode,
             )
             .await;
         }
@@ -1234,6 +1514,7 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
             input,
             automation_policy,
             automation_explicit,
+            proposer_mode,
         )
         .await;
     }
@@ -1257,6 +1538,22 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
         None,
     )
     .await;
+    // wave-21 / task 06 :: archive is destructive — the proposer
+    // ALWAYS short-circuits to `destructive_blocked` (invariant I2).
+    if let Some(mode) = proposer_mode {
+        let summary = directive_proposer_summary("legacy_quiet", "manual", false);
+        let bundle = request_directive_auto_approve_proposal(
+            state,
+            mode,
+            "archive",
+            &id,
+            version,
+            &summary,
+            None,
+        )
+        .await;
+        attach_directive_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1275,6 +1572,7 @@ async fn action_archive_with_resolution(
     input: ReviewResolutionInput,
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1352,6 +1650,7 @@ async fn action_archive_with_resolution(
     // wave-18 / task 07 :: surface the automation outcome AFTER stamping
     // the explicit decision so observers see both. Skipped under Manual +
     // caller-omitted policy to keep pre-wave-18 callers byte-identical.
+    let mut automation_status_label = "not_evaluated".to_string();
     if automation_explicit || !matches!(automation_policy, ReviewAutomationPolicy::Manual) {
         let mut args_v = json!({});
         if let Some(map) = args_v.as_object_mut() {
@@ -1366,6 +1665,7 @@ async fn action_archive_with_resolution(
             &ctx,
             Some(input.decision),
         );
+        automation_status_label = outcome.status.as_str().to_string();
         stamp_review_automation_payload(&mut payload, &outcome);
     }
 
@@ -1378,6 +1678,26 @@ async fn action_archive_with_resolution(
         None,
     )
     .await;
+    // wave-21 / task 06 :: archive is destructive — proposer ALWAYS
+    // surfaces `destructive_blocked` regardless of caller decision.
+    if let Some(mode) = proposer_mode {
+        let summary = directive_proposer_summary(
+            &automation_status_label,
+            automation_policy.as_str(),
+            true,
+        );
+        let bundle = request_directive_auto_approve_proposal(
+            state,
+            mode,
+            "archive",
+            &id,
+            version,
+            &summary,
+            Some(&head_directive.sexp_text),
+        )
+        .await;
+        attach_directive_proposal_block(&mut payload, &bundle);
+    }
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -1397,6 +1717,7 @@ async fn action_archive_with_policy_only(
     version: i32,
     qid: String,
     automation_policy: ReviewAutomationPolicy,
+    proposer_mode: Option<LlmAutoApproveProposalMode>,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -1478,6 +1799,28 @@ async fn action_archive_with_policy_only(
     );
 
     stamp_review_automation_payload(&mut payload, &outcome);
+
+    // wave-21 / task 06 :: archive is destructive — proposer ALWAYS
+    // surfaces `destructive_blocked`. The deterministic policy already
+    // refused to mutate above; the LLM proposer mirrors that refusal.
+    if let Some(mode) = proposer_mode {
+        let summary = directive_proposer_summary(
+            outcome.status.as_str(),
+            automation_policy.as_str(),
+            false,
+        );
+        let bundle = request_directive_auto_approve_proposal(
+            state,
+            mode,
+            "archive",
+            &id,
+            version,
+            &summary,
+            Some(&head_directive.sexp_text),
+        )
+        .await;
+        attach_directive_proposal_block(&mut payload, &bundle);
+    }
 
     Ok(ToolResult::json_pretty(&payload))
 }
