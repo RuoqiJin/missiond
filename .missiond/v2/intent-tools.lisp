@@ -2769,38 +2769,16 @@
     :unified-entry-tool-policy "F-intent-alignment-plan-execution-loop 不引入新 tool; mission_directive(action=compile) 是 message intake 入口; wave 13 task 03 unified-entry pipeline v0 internal helper 不新增 MCP tool, 复用 mission_directive(compile) + mission_plan(compile|approve|execute) + mission_workflow(distill|record_execution) 管理面; tool count 仍是 83 (详 flow pillar :: future-flows :: unified-entry-future-candidates / anchor: intent-layer.unified-entry-pipeline.run-pipeline-helper)"
     :workstation-dispatch-tool-policy "F-workstation-dispatch-policy 不引入新 tool; resident-lisp 复用 mission_pty_send/mission_task_delegate; fresh-code-alignment 走 mission_pty_spawn/mission_compute_slot; execution coordination 仍是 mission_execution; scoped commit handoff 也复用 mission_execution completion fields, 不新增 git tool; agent-team 是任务 .md 文字提示, 不需要 daemon side tool"
 
+    ;; ── mission_execution moved to L2 shard ──
+    ;; Full content moved to .missiond/v2/intent-execution-governance.lisp
     (implemented-surface mission_execution
-      :status "code-aligned — 12-action manager + ExecutionEvent emission + dispatch_strategy companion log meta (open 接收并归一化 dispatch_strategy ∈ {resident-lisp/fresh-code-alignment/agent-team/mixed/prompt-fallback/unknown}; 写 :dispatch-strategy / 可选 :target-project / :requested-cwd 入 meta; list/status graceful read for legacy logs); ExecutionEvent::Opened 仍只带 {execution_id, parent_design, scope, owner, path}, dispatch metadata 入 ExecutionEvent 仍 pending"
-      :actions ["open" "list" "claim" "heartbeat" "release" "deviate" "decide" "issue" "complete" "status" "audit" "repair"]
-      :owner-boundary "tools owns schema; worker owns manager mechanics; memory owns execution protocol/file shape"
-      :unified-pipeline-role "MissionD 统一入口 execution substrate — F-intent-alignment-plan-execution-loop :: s6 execution-runner 的底层协调面 (plan-runner v0 internal mode 已自动 forward dispatch_strategy)"
-      :workstation-dispatch-record "execution coordination 已记录 PLAN 节点工位策略: dispatch_strategy 由 plan-runner(execute internal) 在调 open 时写入 companion log meta; evidence-collector / capability-usage-monitor 可事后回放; ExecutionEvent metadata 扩展仍 pending"
-      :workstation-cross-ref "worker pillar :: section claudecode-workstation-orchestration :: execution-strategy-record + flow pillar :: F-workstation-dispatch-policy :: s4 record-strategy"
-      :dispatch-strategy-field-status "code-aligned partial — companion log meta 持久化已落 (open schema 接受 + list/status 读取); ExecutionEvent::Opened 扩展 dispatch metadata 仍 pending (companion log durable only)"
-      :scoped-commit-handoff "architecture-designed — mission_execution(action=complete) 未来接收 changed_files/staged_files/commit_hash/commit_status, 把 scoped git commit 作为 durability plane 回填 execution log; 当前可由任务书人工执行, schema/code enforce pending"
+      :status "moved-to-shard (code-aligned)"
+      :file-ref ".missiond/v2/intent-execution-governance.lisp"
+      :shard-section "implemented-surface mission_execution"
+      :section-id "tools.surface.mission_execution"
       :code ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"]
-      :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (schema: open 接受 dispatch_strategy/target_project/requested_cwd)"
-                               "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (open meta render + list/status meta read + legacy log graceful)"
-                               "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — 当前未携带 dispatch metadata; 扩展 pending)"]
-      (ingress
-        :schema "action required; execution_id required except open/list; scope/phase/claimer fields per action; open 接受 dispatch_strategy/target_project/requested_cwd 写入 companion log meta; complete future fields changed_files/staged_files/commit_hash/commit_status"
-        :callers ["multi-agent code/lisp alignment sessions" "intent-layer manager UI" "external MCP client" "unified entry pipeline plan-runner v0 internal mode"])
-      (logic-core
-        (step s1 "validate action + required fields; normalize execution_id/parent_design/scope; normalize dispatch_strategy (未知值 → unknown)")
-        (step s2 "dispatch to worker :: agent-execution-manager-interface")
-        (step s3 "manager reads/writes memory :: agent-execution-coordination slots; open 写 meta 含 dispatch_strategy 等")
-        (step s4 "status/audit/repair return structured reports; list 读出 dispatch_strategy (legacy logs without meta 返空字符串/unknown)")
-        (step s5 "future: complete validates scoped commit metadata (changed_files/staged_files subset of claim scope; commit_hash backfill)"))
-      (egress
-        :writes ["*-execution.lisp via manager (含 :dispatch-strategy / :target-project / :requested-cwd meta; future completion commit_hash fields)" "tool_calls audit"]
-        :reads ["execution companion logs" "parent design Lisp"]
-        :flow-ref "F-execution-log-governance / F-scoped-commit-handoff / F-intent-alignment-plan-execution-loop :: s6 execution-runner substrate / F-workstation-dispatch-policy :: s4 record-strategy"
-        :event-bus "ExecutionEvent::* emitted for mutating/audit/repair actions; dispatch metadata 入 ExecutionEvent 仍 pending"
-        :returns "mission_execution action JSON; list 行含 dispatch_strategy 字段")
-      :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd 字段"
-                "complete schema 扩展 changed_files/staged_files/commit_hash/commit_status + scoped commit audit"
-                "timeline 等其他查询面暴露 dispatch_strategy"])
+      :note "12 actions + workstation dispatch record + ingress/logic-core/egress + dispatch-strategy field status live in shard; section-id stable per L2 plan rule-1")
 
     (implemented-surface mission_directive
       :status "code-aligned partial — manager surface + directive-compiler v0 (compiler_mode=sonnet via SonnetGateway interactive lane + sexp validation); compiler_mode=dry_run 默认 preview; auto multi-round refine / file-first .missiond/alignment/<topic>/intent-alignment.lisp 自动写入 仍 pending"
@@ -2927,37 +2905,18 @@
         :flow-ref "trivial-single-step read/edit/manual-reload"
         :returns "content / dry-run preview / write receipt / manual reload receipt"))
 
+    ;; ── mission_capability_usage moved to L2 shard ──
+    ;; Full content moved to .missiond/v2/intent-capability-governance.lisp
+    ;; Trailing `))` reproduces the original block's depth-balance footprint
+    ;; (the original ended with one extra `)` closing the parent section form).
     (implemented-surface mission_capability_usage
-      :status "code-aligned partial — semantic evidence v1: 5 sources (conversation_tool_calls / board_tasks_flow_template / event_log_flow_events probe / lisp_semantic_hints / review_sidecar) + merge-candidate 由 lisp hints (replacement/moved-to/preferred/supersedes/consolidated) 保守生成 + replacement_target 字段 + non-destructive mark/ack/merge; semantic merge 自动决策 / DispatcherEvent/WorkerEvent/ExecutionEvent 聚合 / workflow stats 仍 pending (anchor: intent-layer.capability-evolution-governance.semantic-evidence-v1)"
-      :actions ["snapshot" "report" "candidates" "mark" "ack"]
-      :owner-boundary "tools owns MCP schema; memory owns read-model; flow owns monitoring choreography; intent-layer owns lifecycle decision"
+      :status "moved-to-shard (code-aligned partial)"
+      :file-ref ".missiond/v2/intent-capability-governance.lisp"
+      :shard-section "implemented-surface mission_capability_usage"
+      :section-id "tools.surface.mission-capability-usage"
       :code ["crates/missiond-mcp/src/tools/comm/capability_usage.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"]
-      :implementation-targets ["crates/missiond-mcp/src/tools/comm/capability_usage.rs (schema + replacement_target field for merge)"
-                               "crates/missiond-daemon/src/handlers/comm/capability_usage.rs (HintIndex 解析 .missiond/v2/intent-{tools,flow,intent-layer}.lisp + probe_event_log_flows + ReviewState sidecar + protected source/target rejection)"]
-      :semantic-evidence-v1
-        ["sources[5]: conversation_tool_calls / board_tasks_flow_template / event_log_flow_events (board::task_created since 90d) / lisp_semantic_hints (扫 3 文件) / review_sidecar"
-         "merge-candidate: 仅在 hint token ∈ {deprecated, moved-to, replacement, supersedes} 且 target 解析为已注册 tool/flow 且 target ≠ source 且 target 非 protected 时给出"
-         "consolidated-keep token 显式压制 merge-candidate"
-         "mark/ack/merge non-destructive — 仅写 .missiond/v2/capability-usage-review.json sidecar, 不动 registry"]
-      (ingress
-        :schema "action required; window? default 30d; scope=tool|flow|both; project?; candidate_id? for mark/ack; replacement_target? optional for merge decisions; dry_run optional for mark"
-        :callers ["architecture cleanup review" "intent-layer governance" "external MCP client"])
-      (logic-core
-        (step s1 "validate action/window/scope and refuse destructive action; mark/ack only records review status")
-        (step s2 "snapshot/report/candidates call F-capability-usage-monitoring; 5 sources 联合查询")
-        (step s3 "candidates returns evidence-ranked active/quiet/stale/never-used/shadowed/protected/merge-candidate buckets")
-        (step s4 "mark records human decision intent to sidecar; merge 必须 replacement_target 显式或 hint target 解析得到, 否则拒绝")
-        (step s5 "ack closes a report item only after follow_up_ref points to PLAN.lisp / mission_execution / board task"))
-      (egress
-        :writes [".missiond/v2/capability-usage-review.json sidecar (mark/ack/merge with replacement_target)" "no daemon_state JSON cache because daemon_state is i64-only"]
-        :reads ["conversation_tool_calls" "board_tasks.flow_template" "event_log (board::task_created)" "MCP registry" "YAML flow registry" "intent-tools/intent-flow/intent-intent-layer lisp hints" "review sidecar"]
-        :flow-ref "F-capability-usage-monitoring (code-aligned partial — semantic evidence v1)"
-        :event-bus "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate emitted after snapshot/candidates computation"
-        :returns "usage snapshot (含 source_coverage.sources[5]) / candidate report / review receipt")
-      :pending ["semantic merge 自动决策 (即使 hint 完整, 也只产候选, 不动 registry)"
-                "DispatcherEvent / WorkerEvent / ExecutionEvent 等 event source 聚合"
-                "workflow stats / success rate 进 read-model"]))
+      :note "actions/schema/semantic-evidence-v1/ingress/logic-core/egress live in shard; section-id stable per L2 plan rule-1"))
 
   ;; ══════════════════════════════════════════════════════════
   ;; 3.7 Tool Governance — schema / audit / reload

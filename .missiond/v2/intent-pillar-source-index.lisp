@@ -367,10 +367,10 @@
       (section-entry
         :section-id "worker.section.claudecode-workstation-orchestration"
         :title "section claudecode-workstation-orchestration"
-        :source-file ".missiond/v2/intent-worker.lisp"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
         :local-path "pillar worker :: section claudecode-workstation-orchestration"
         :status operational-practice
-        :note "policy / dispatch_strategy companion log already aligned; full ExecutionEvent metadata pending")
+        :note "wave 15 task 02 — moved to intent-workstation-policy.lisp shard; intent-worker.lisp keeps anchor stub; policy / dispatch_strategy companion log already aligned; full ExecutionEvent metadata pending")
 
       (section-entry
         :section-id "worker.section.worker-side-computation"
@@ -561,7 +561,7 @@
       (section-entry
         :section-id "intent-layer.section.capability-evolution-governance"
         :title "section capability-evolution-governance"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-capability-governance.lisp"
         :local-path "pillar intent-layer :: section capability-evolution-governance"
         :status code-aligned-partial
         :note "semantic evidence v1: 5 sources + lisp hint merge-candidate")
@@ -691,7 +691,7 @@
       (section-entry
         :section-id "flow.capability-usage-monitoring"
         :title "F-capability-usage-monitoring"
-        :source-file ".missiond/v2/intent-flow.lisp"
+        :source-file ".missiond/v2/intent-capability-governance.lisp"
         :local-path "pillar flow :: F-capability-usage-monitoring"
         :status code-aligned-partial
         :note "5 sources + lisp hint merge candidate")
@@ -699,15 +699,15 @@
       (section-entry
         :section-id "flow.workstation-dispatch-policy"
         :title "F-workstation-dispatch-policy"
-        :source-file ".missiond/v2/intent-flow.lisp"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
         :local-path "pillar flow :: F-workstation-dispatch-policy"
         :status operational-practice
-        :note "companion log dispatch_strategy 已落")
+        :note "wave 15 task 02 — moved to intent-workstation-policy.lisp shard; intent-flow.lisp keeps anchor stub; companion log dispatch_strategy 已落")
 
       (section-entry
         :section-id "flow.execution-log-governance"
         :title "F-execution-log-governance"
-        :source-file ".missiond/v2/intent-flow.lisp"
+        :source-file ".missiond/v2/intent-execution-governance.lisp"
         :local-path "pillar flow :: F-execution-log-governance"
         :status code-aligned-partial
         :note "mission_execution 12-action manager + execution companion log; scoped commit handoff 接入")
@@ -715,7 +715,7 @@
       (section-entry
         :section-id "flow.scoped-commit-handoff"
         :title "F-scoped-commit-handoff"
-        :source-file ".missiond/v2/intent-flow.lisp"
+        :source-file ".missiond/v2/intent-execution-governance.lisp"
         :local-path "pillar flow :: F-scoped-commit-handoff"
         :status architecture-designed
         :note "execution Lisp control plane + scoped git commit durability plane"))
@@ -784,7 +784,7 @@
       (section-entry
         :section-id "memory.directive-layer.file-first-artifacts"
         :title "file-first-artifacts (artifact registry)"
-        :source-file ".missiond/v2/intent-memory.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar memory :: module directive-layer :: file-first-artifacts"
         :status code-aligned
         :compression-safe? false
@@ -872,7 +872,7 @@
       (section-entry
         :section-id "intent-layer.actor.plan-dag-scheduler"
         :title "actor plan-dag-scheduler (full DAG architecture)"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
         :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler"
         :status code-aligned-partial
         :compression-safe? false
@@ -889,7 +889,7 @@
       (section-entry
         :section-id "flow.execution-runner-dag-scheduler"
         :title "F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler"
-        :source-file ".missiond/v2/intent-flow.lisp"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
         :local-path "pillar flow :: F-intent-alignment-plan-execution-loop :: s6 execution-runner :: dag-scheduler"
         :status code-aligned-partial
         :compression-safe? false
@@ -899,7 +899,7 @@
       (section-entry
         :section-id "memory.directive-layer.plan-node-state-projection"
         :title "artifact plan-node-state-projection (DAG evidence sidecar)"
-        :source-file ".missiond/v2/intent-memory.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar memory :: module directive-layer :: file-first-artifacts :: artifact plan-node-state-projection"
         :status code-aligned-partial
         :compression-safe? false
@@ -946,7 +946,7 @@
       (section-entry
         :section-id "intent-layer.capability-evolution-governance.semantic-evidence-v1"
         :title "capability-evolution-governance semantic evidence v1"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-capability-governance.lisp"
         :local-path "pillar intent-layer :: section capability-evolution-governance"
         :status code-aligned-partial
         :compression-safe? true
@@ -962,7 +962,7 @@
       (section-entry
         :section-id "memory.system-support.capability-usage-read-model"
         :title "derived-read-model capability-usage-read-model"
-        :source-file ".missiond/v2/intent-memory.lisp"
+        :source-file ".missiond/v2/intent-capability-governance.lisp"
         :local-path "pillar memory :: module system-support :: derived-read-model capability-usage-read-model"
         :status code-aligned-partial
         :compression-safe? false
@@ -973,7 +973,7 @@
       (section-entry
         :section-id "tools.surface.mission-capability-usage"
         :title "implemented-surface mission_capability_usage"
-        :source-file ".missiond/v2/intent-tools.lisp"
+        :source-file ".missiond/v2/intent-capability-governance.lisp"
         :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_capability_usage"
         :status code-aligned-partial
         :compression-safe? false
@@ -986,31 +986,31 @@
       (section-entry
         :section-id "worker.section.claudecode-workstation-orchestration.dispatch-decision-matrix"
         :title "dispatch-decision-matrix (策略决策表)"
-        :source-file ".missiond/v2/intent-worker.lisp"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
         :local-path "pillar worker :: section claudecode-workstation-orchestration :: dispatch-decision-matrix"
         :status code-aligned-partial
         :compression-safe? false
         :implements
           ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
            "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
-        :note "策略 ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback}; 表格本身是契约不压缩")
+        :note "wave 15 task 02 — moved to intent-workstation-policy.lisp shard; 策略 ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback}; 表格本身是契约不压缩")
 
       (section-entry
         :section-id "worker.section.claudecode-workstation-orchestration.execution-strategy-record"
         :title "execution-strategy-record (companion log meta)"
-        :source-file ".missiond/v2/intent-worker.lisp"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
         :local-path "pillar worker :: section claudecode-workstation-orchestration :: execution-strategy-record"
         :status code-aligned-partial
         :compression-safe? false
         :implements
           ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
            "crates/missiond-core/src/event/events/execution.rs"]
-        :note "dispatch_strategy / target_project / requested_cwd 已写入 companion log meta; ExecutionEvent::Opened 扩展同字段 (wave12 task 03 进行中)")
+        :note "wave 15 task 02 — moved to intent-workstation-policy.lisp shard; dispatch_strategy / target_project / requested_cwd 已写入 companion log meta; ExecutionEvent::Opened 扩展同字段 (wave12 task 03 进行中)")
 
       (section-entry
         :section-id "intent-layer.unified-entry-pipeline.workstation-dispatch-policy"
         :title "workstation-dispatch-policy (intent-layer cross-ref)"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
         :local-path "pillar intent-layer :: section unified-entry-pipeline :: workstation-dispatch-policy"
         :status operational-practice
         :compression-safe? true
@@ -1112,7 +1112,7 @@
       (section-entry
         :section-id "intent-layer.plan-dag-runtime-v2"
         :title "PLAN DAG runtime v2 — bounded concurrency + node lifecycle"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
         :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2"
         :status code-aligned-partial
         :compression-safe? false
@@ -1131,7 +1131,7 @@
       (section-entry
         :section-id "intent-layer.plan-dag-runtime-v2.node-lifecycle"
         :title "PLAN DAG node lifecycle 6 状态 + 3 skip variants"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
         :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: node-lifecycle"
         :status code-aligned-partial
         :compression-safe? false
@@ -1144,7 +1144,7 @@
       (section-entry
         :section-id "intent-layer.plan-dag-runtime-v2.failure-policy"
         :title "PLAN DAG failure-policy: fail-fast vs continue"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
         :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: failure-policy"
         :status code-aligned-partial
         :compression-safe? false
@@ -1157,7 +1157,7 @@
       (section-entry
         :section-id "intent-layer.plan-dag-runtime-v2.execution-event-decision"
         :title "ExecutionEvent::PlanNodeStateChanged variant extended (wave 14 升级)"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
         :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: ExecutionEvent decision"
         :status code-aligned
         :compression-safe? true
@@ -1302,7 +1302,7 @@
       (section-entry
         :section-id "memory.directive-layer.file-first-writer-integration"
         :title "file-first writer integration — 三类 artifact (alignment / PLAN / workflow methodology) 主路径"
-        :source-file ".missiond/v2/intent-memory.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar memory :: module directive-layer :: file-first-artifacts :: writer integration"
         :status code-aligned
         :compression-safe? false
@@ -1324,7 +1324,7 @@
       (section-entry
         :section-id "tools.surface.directive-write-file-args"
         :title "mission_directive(action=compile) write_file/topic/overwrite_file/project/cwd/target_project args"
-        :source-file ".missiond/v2/intent-tools.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_directive :: write_file args"
         :status code-aligned
         :compression-safe? false
@@ -1341,7 +1341,7 @@
       (section-entry
         :section-id "tools.surface.plan-write-file-args"
         :title "mission_plan(action=compile) write_file/topic/overwrite_file/project/cwd/target_project args"
-        :source-file ".missiond/v2/intent-tools.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_plan :: write_file args"
         :status code-aligned
         :compression-safe? false
@@ -1358,7 +1358,7 @@
       (section-entry
         :section-id "tools.surface.workflow-write-file-args"
         :title "mission_workflow(action=distill|compile_methodology) write_file/topic|name/overwrite_file/project args"
-        :source-file ".missiond/v2/intent-tools.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_workflow :: write_file args"
         :status code-aligned
         :compression-safe? false
@@ -1394,7 +1394,7 @@
       (section-entry
         :section-id "intent-layer.plan-dag-runtime-v2.live-event-ref-strategy"
         :title "PLAN DAG live EventRef 三层策略 (wave 14 task 02)"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
         :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: live-event-ref-strategy"
         :status code-aligned
         :compression-safe? false
@@ -1411,7 +1411,7 @@
       (section-entry
         :section-id "intent-layer.unified-entry-pipeline.review-gate-policy"
         :title "review_gate policy enum (manual|emit_question|off) — auto-create v1"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar intent-layer :: section unified-entry-pipeline :: review-gate-policy"
         :status code-aligned
         :compression-safe? false
@@ -1433,7 +1433,7 @@
       (section-entry
         :section-id "intent-layer.unified-entry-pipeline.review-gate-id-derivation"
         :title "review-gate deterministic question id derivation"
-        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar intent-layer :: section unified-entry-pipeline :: review-gate-id-derivation"
         :status code-aligned
         :compression-safe? false
@@ -1447,7 +1447,7 @@
       (section-entry
         :section-id "tools.surface.review-gate-args"
         :title "mission_directive/plan/workflow review_gate_policy + review_question_* args"
-        :source-file ".missiond/v2/intent-tools.lisp"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar tools :: section mcp-surface-lifecycle :: review_gate args"
         :status code-aligned
         :compression-safe? false

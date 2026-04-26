@@ -1761,86 +1761,21 @@
         :solution "workflow 表: name UNIQUE + sexp_text + match_rules JSONB + learned_from FK → plan + executions/success_count/avg_cost_usd/last_used_at"
         :benefit  "plan → workflow 蒸馏闭环; LRU + 成功率指标支持 workflow 推荐"))
 
+    ;; ── file-first-artifacts moved to L2 shard ──
+    ;; Full content moved to .missiond/v2/intent-directive-artifacts.lisp
+    ;; (wave 15 task 02 L2 shard split per architecture-dsl.lisp ::
+    ;;  l2-shard-split-plan :: shard intent-directive-artifacts).
     (file-first-artifacts
-      :status "code-aligned partial — sexp/DB row 写入由 actor v0 (directive-compiler / plan-compiler / workflow-distiller / methodology compiler / plan-runner); file-first .lisp 自动同步仍 pending — 当前由 ClaudeCode/外部 LLM 手工产出文件"
-      :rationale "代码同构阶段需要人类/Codex 可审阅的文件产物先行; DB 三表作为可查询镜像,不强迫第一版就全自动写库"
-      :unified-pipeline-anchor "flow pillar :: F-intent-alignment-plan-execution-loop (canonical message → alignment → plan → execution → workflow) + intent-layer pillar :: section unified-entry-pipeline"
-      :ssot-policy "file-first SSOT — alignment/plan/workflow .lisp 是真正 review 边界; directive/plan/workflow 表是可查询镜像 + 状态管理面 (mission_directive/mission_plan/mission_workflow)"
-
-      (artifact intent-alignment-lisp
-        :path ".missiond/alignment/<topic>/intent-alignment.lisp"
-        :maps-to "directive table (DB 镜像; 通过 mission_directive(action=compile, compiler_mode=sonnet, persist=true) 落 draft / 通过 approve/archive 流转)"
-        :purpose "本轮架构变更或 message 的目标/边界/非目标/验收条件/涉及 pillar"
-        :status-lifecycle "draft → reviewing → approved | rejected | superseded"
-        :review-gate "alignment-review-gate (intent-layer section unified-entry-pipeline)"
-        :review-gate-owner "human/Codex"
-        :gate-rule "未通过 approval 不允许进入 plan-authoring 阶段"
-        :writer "directive-compiler actor v0 (compiler_mode=sonnet) — 写 directive sexp + DB draft; file 路径自动写入仍 pending"
-        :code-aligned-writes ["directive sexp + references_json + directive table draft (mission_directive compiler_mode=sonnet, persist=true)"]
-        :pending-writes [".missiond/alignment/<topic>/intent-alignment.lisp 自动写入/与 directive 表双向同步"]
-        :manager-surface "mission_directive (compile / approve / archive / version_chain / list / get)")
-
-      (artifact plan-lisp
-        :path ".missiond/plans/<topic>/PLAN.lisp"
-        :maps-to "plan table (DB 镜像; 通过 mission_plan(action=compile, compiler_mode=sonnet, persist=true) 落 draft/awaiting_approval / 通过 approve/mark/supersede 流转)"
-        :purpose "LLM 规划 + human/Codex review 后的可执行计划,含 files/phases/tasks/tests/risks/rollback"
-        :status-lifecycle "draft → reviewing → approved → executing → succeeded | failed | superseded"
-        :review-gate "plan-review-gate (intent-layer section unified-entry-pipeline)"
-        :review-gate-owner "human/Codex"
-        :gate-rule "未通过 approval 不允许进入 execution-runner 阶段"
-        :writer "plan-compiler actor v0 (compiler_mode=sonnet) — 写 plan sexp + DB awaiting_approval; file 路径自动写入仍 pending"
-        :code-aligned-writes ["plan sexp + plan table draft/awaiting_approval (mission_plan compiler_mode=sonnet, persist=true)"]
-        :pending-writes [".missiond/plans/<topic>/PLAN.lisp 自动写入/与 plan 表双向同步"]
-        :manager-surface "mission_plan (compile / approve / mark / supersede / execute / record_evidence / list / get / by_task)")
-
-      (artifact workflow-lisp
-        :path ".missiond/workflows/<topic>.lisp"
-        :maps-to "workflow table (DB 镜像; 通过 mission_workflow(action=distill, distill_mode=sonnet, persist=true) 落 draft/template / 通过 record_execution 累计统计)"
-        :purpose "多次成功执行后的可复用方法论; 可继续走 F-methodology-to-executable-compile 编译为 YAML 由 flow-engine-v2 runner 执行"
-        :status-lifecycle "draft → published → deprecated"
-        :created-when "成功 plan 多次重复 或 human 显式标 reusable"
-        :writer "workflow-distiller actor v0 (distill_mode=sonnet) — 写 workflow sexp + match_rules + DB draft/template; file 路径自动写入仍 pending"
-        :code-aligned-writes ["workflow sexp + match_rules JSON + workflow table draft/template (mission_workflow distill_mode=sonnet, persist=true)" "<project_root>/.missiond/generated/flows/<flow_id>.yaml (compile_mode=deterministic, persist=true)"]
-        :pending-writes [".missiond/workflows/<topic>.lisp 自动写入/与 workflow 表双向同步"]
-        :manager-surface "mission_workflow (distill / record_execution / compile_methodology / run_methodology / match / apply / list / get)")
-
-      (artifact plan-evidence-sidecar
-        :path ".missiond/v2/plans/<plan_id>.evidence.json"
-        :maps-to "未来可升级为 plan_evidence DB JSONB 列或独立表; 当前为 file-only sidecar"
-        :purpose "plan 执行证据落盘 — git diff / tests / tool_calls refs / event_log refs / execution companion log refs / deviations / decisions / completions / plan_runner_dispatch entries / plan_dag_node_dispatch entries"
-        :writer "evidence-collector role — mission_plan(record_evidence) 显式 + plan-runner v0 internal mode 自动追加 plan_runner_dispatch entry + plan_dag runtime v2 每节点 dispatch/state transition 写 plan_dag_node_dispatch entry (含 6 lifecycle + 3 skip 子分类 + skip_reason/skip_detail)"
-        :writer-typed "typed EvidenceEntry helper (handlers/knowledge/evidence_collector.rs) — canonical source/kind/schema_version + with_extra flat-top byte-for-byte 兼容 legacy passthrough; plan.rs + plan_dag.rs 已接入 (anchor: intent-layer.evidence-collector-typed-helper)"
-        :status "code-aligned partial — sidecar 写入 + typed helper 接入 + legacy passthrough 兼容; 全自动 evidence-collector actor (跨执行路径) + live ExecutionEvent ref (EventRef::unavailable 占位中) + plan_evidence DB JSONB 仍 pending"
-        :consumer "workflow-distiller (s8) + retrospective + capability-usage-monitor (间接)"
-        :ssot-note "当前文件即真相; 升级为 DB 时保留文件作为长期归档"
-        :dag-scheduler-future "actor plan-dag-scheduler 完整 11-stage 升级时, sidecar 增 nodes[<node_id>] block (per-node attempts / claim_id / start-end / inner_result / acceptance_pass / rollback_path); v0 plan_runner_dispatch + runtime v2 plan_dag_node_dispatch entry shape 必须向后兼容")
-
-      (artifact plan-node-state-projection
-        :path ".missiond/v2/plans/<plan_id>.evidence.json :: nodes[<node_id>] (sidecar 子树, 与 plan-evidence-sidecar 同文件)"
-        :status code-aligned-partial
-        :wave-13-task-02-progress "plan_dag runtime v2 (commit 8bb6110): 已写顶层 plan_dag_node_dispatch entry, 6 lifecycle (pending/ready/running/succeeded/failed/skipped) + 3 skip 子分类 (skipped_upstream_failed + failed_dep / skipped_condition / skipped_fail_fast_abort + aborter); 每节点 dispatch + state transition 串行化避免文件 race; nodes[<node_id>] 子树形态仍 pending — 待完整 11-stage scheduler claim-lease/retry/rollback/acceptance 落地 (anchor: intent-layer.plan-dag-runtime-v2.node-lifecycle)"
-        :purpose "完整 PLAN DAG scheduler 的 per-node 状态 + evidence 聚合视图 — 当前 v0 单节点 dispatch 不需要; runtime v2 已写顶层 entry; 完整 11-stage 启用后增 nodes[<node_id>] 子树"
-        :scheduler-cross-ref "intent-layer pillar :: section action-instruction-actor :: actor plan-dag-scheduler"
-        :flow-cross-ref "flow pillar :: F-intent-alignment-plan-execution-loop :: s6 :: dag-scheduler"
-        :node-fsm-enum [pending ready claimed running succeeded failed skipped retrying rolling-back paused]
-        :per-node-block-shape
-          ((node_id        :type "string" :desc "PLAN.lisp 节点 :id (kebab-case)")
-           (state          :type "enum"   :desc "node-fsm-enum 当前态")
-           (claim_id       :type "string" :desc "由 mission_execution(action=claim) 原子分配, 不允许 scheduler 自建")
-           (lease_expires_at :type "iso8601" :desc "claim lease 截止")
-           (target         :type "enum"   :desc "本次 dispatch substrate")
-           (dispatch_strategy :type "enum" :desc "本次解析后的策略")
-           (target_project :type "string" :desc "解析后的 target_project_root")
-           (requested_cwd  :type "path"   :desc "解析后的 cwd, 必须在 target_project 内")
-           (attempts       :type "list"   :desc "[{attempt_no, started_at, ended_at, inner_result, acceptance_pass, error?}] — 每次 retry 一个条目")
-           (acceptance_pass :type "bool"  :desc "节点 :acceptance 验证结果; 缺省以 inner_result success 为准")
-           (rollback_path  :type "list"   :desc "若触发 rollback, 记录补偿节点 chain")
-           (artifacts_refs :type "list"   :desc "execution companion log claim/completion ref / git diff path / test output ref"))
-        :writer-future "actor plan-dag-scheduler s7 collect-node-evidence + s8 update-node-state 落; v0 不写本块, 仅写顶层 plan_runner_dispatch entry"
-        :consumer-future "workflow-distiller s8 (per-node 模式提取) + capability-usage-monitor (per-node retry / dispatch_strategy 命中率) + retrospective"
-        :ssot-rule "本块仍是 file-first sidecar; 升级到 DB plan_evidence JSONB 时保留 sidecar 长期归档 — 与 plan-evidence-sidecar 共享 ssot-note"
-        :pending-writes ["actor plan-dag-scheduler 实现 (crates/missiond-daemon/src/intent_layer/plan_runner.rs + plan_dag.rs)"
-                         "ExecutionEvent::PlanNodeStateChanged 事件扩展 (per-node FSM 转移广播)"]))
+      :status "moved-to-shard (code-aligned partial)"
+      :file-ref ".missiond/v2/intent-directive-artifacts.lisp"
+      :shard-section "file-first-artifacts"
+      :section-id "memory.directive-layer.file-first-artifacts"
+      :artifact-section-ids
+        ["memory.directive-layer.file-first-artifacts"
+         "memory.directive-layer.plan-evidence-sidecar"
+         "memory.directive-layer.plan-node-state-projection"]
+      :writer-integration-cross-ref "memory.directive-layer.file-first-writer-integration (also in shard)"
+      :note "5 artifact (intent-alignment-lisp / plan-lisp / workflow-lisp / plan-evidence-sidecar / plan-node-state-projection) live in shard; section-ids stable per L2 plan rule-1")
 
     (module-ingress
       (desc "写入 3 张表的路径 — MCP 管理面已启用, LLM writer actors 待 pillar 五 实现")
@@ -2371,57 +2306,15 @@
         :solution "派生 read-model 统一读取 tool_calls / event_log / flow_context / workflow stats,生成 capability usage snapshot 与治理候选"
         :benefit "持续优化工具面和 flow catalog,让删改合并有证据而不是凭感觉"))
 
+    ;; ── derived-read-model capability-usage-read-model moved to L2 shard ──
+    ;; Full content moved to .missiond/v2/intent-capability-governance.lisp
     (derived-read-model capability-usage-read-model
-      :status "code-aligned v0.5.6 — semantic evidence v1 已落 (commit 3ed14fc): 5 sources + lisp hint merge-candidate + replacement_target 字段; semantic merge 自动决策 / event_log 之外 source 聚合 / workflow stats 仍 pending"
+      :status "moved-to-shard (code-aligned v0.5.6 — semantic evidence v1)"
+      :file-ref ".missiond/v2/intent-capability-governance.lisp"
+      :shard-section "derived-read-model capability-usage-read-model"
+      :section-id "memory.system-support.capability-usage-read-model"
       :owner-module "system-support"
-      :storage-policy "当前实现按需聚合,不缓存 snapshot: daemon_state trait 只支持 i64,不能存 JSON; mark/ack/merge 治理决定写 <project_root>/.missiond/v2/capability-usage-review.json sidecar (含 replacement_target/ack_at/ack_by/follow_up_ref)"
-      :implementation-targets ["crates/missiond-mcp/src/tools/comm/capability_usage.rs (schema + replacement_target)"
-                               "crates/missiond-daemon/src/handlers/comm/capability_usage.rs (HintIndex 解析 .missiond/v2/intent-{tools,flow,intent-layer}.lisp + probe_event_log_flows + ReviewState sidecar + protected source/target rejection)"]
-      :truth-sources
-        ((tool-calls
-           :status "implemented"
-           :reads ["conversation_tool_calls via ConversationStore::get_tool_call_global_stats(since_iso)"]
-           :grain "tool_name + action + project_id? + caller + outcome + started_at/completed_at"
-           :purpose "统计每个 MCP tool/action 的调用次数、最近调用、成功率、调用来源")
-         (flow-runs
-           :status "implemented"
-           :reads ["board_tasks.flow_template" "engine::flow::loader::list_flows() YAML registry (合并 generated + core)"]
-           :grain "flow_id/flow_template + node/action + project_id? + terminal status"
-           :purpose "统计 named flow 与 executable workflow 的启动、完成、失败、最近使用"
-           :pending ["workflow execution stats / success rate" "flow_context deep evidence"])
-         (event-log-flow-events
-           :status "implemented (read-only probe)"
-           :reads ["event_log via query_timeline_filtered(\"board::task_created\", since=90d, limit=500); 抽 payload.flow_template / .template / .task.flow_template"]
-           :grain "flow_template + event count + first/last seen"
-           :purpose "补充 board_tasks 之外的 flow 事件证据 (read-only, 不写)"
-           :pending ["DispatcherEvent / WorkerEvent / ExecutionEvent 等其他 event source 聚合"])
-         (lisp-semantic-hints
-           :status "implemented"
-           :reads [".missiond/v2/intent-tools.lisp" ".missiond/v2/intent-flow.lisp" ".missiond/v2/intent-intent-layer.lisp"]
-           :purpose "扫描 :replacement \"mission_…\" / :moved-to \"F-…\" / :supersedes \"…\" / :status \"deprecated-…\" / consolidated-keep 标记, 形成 HintIndex"
-           :merge-candidate-rule "仅在 hint token ∈ {deprecated, moved-to, replacement, supersedes} 且 target 解析为已注册 tool/flow 且 target ≠ source 且 target 非 protected 时给出; consolidated-keep 显式压制")
-         (review-sidecar
-           :status "implemented"
-           :reads [".missiond/v2/capability-usage-review.json"]
-           :purpose "读出 mark/ack/merge 历史决策 + replacement_target 关联"))
-      (ingress
-        :source "mission_capability_usage(action=snapshot|report|candidates|mark|ack); future periodic monitor tick"
-        :entry-components ["tools audit log" "event-bus event_log (board::task_created)" "board/workflow state" ".missiond/v2/*.lisp hints" "intent-layer governance rules"])
-      (logic-core
-        (step s1 "collect tool usage by window: 7d / 30d / 90d / all-time from conversation_tool_calls")
-        (step s2 "collect flow usage from board_tasks.flow_template + event_log probe + YAML flow registry (generated + core)")
-        (step s3 "build HintIndex 扫 3 lisp 文件; normalize against MCP registry; protected source/target 在治理规则里")
-        (step s4 "apply protected capability patterns from intent-layer governance")
-        (step s5 "emit categories: active / quiet / stale / never-used / shadowed-by-better-capability / merge-candidate / protected (merge-candidate 仅 hint-driven)")
-        (step s6 "return source_coverage.sources[5] with read-only persistence note; never mutate registry or Lisp directly")
-        (step s7 "mark/ack/merge write review sidecar only; merge 必须 replacement_target 显式或 hint 解析得到, target protected 拒绝"))
-      (egress
-        :writes ["<project_root>/.missiond/v2/capability-usage-review.json for mark/ack/merge only" "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate"]
-        :reads ["conversation_tool_calls" "board_tasks.flow_template" "event_log (board::task_created)" "MCP registry" "YAML flow registry (generated + core)" ".missiond/v2/intent-{tools,flow,intent-layer}.lisp hints" "review sidecar"]
-        :returns "capability usage snapshot (含 source_coverage.sources[5]) + stale/merge/deprecate candidates with evidence")
-      :pending ["semantic merge 自动决策 (即使 hint 完整, 也只产候选, 不动 registry)"
-                "DispatcherEvent / WorkerEvent / ExecutionEvent 等其他 event source 聚合"
-                "workflow execution stats / success rate"])
+      :note "truth-sources / ingress / logic-core / egress / pending live in shard; section-id stable per L2 plan rule-1")
 
     (module-ingress
       (desc "观测 + infra + legacy 3 类写入")

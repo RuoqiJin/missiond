@@ -860,37 +860,17 @@
          returns "incident reaction receipt / list / remediation status")
       :tools-backref ["mission_incident" "mission_infra_ops" "mission_board_query" "mission_task_delegate"])
 
+    ;; ── F-capability-usage-monitoring moved to L2 shard ──
+    ;; Full content moved to .missiond/v2/intent-capability-governance.lisp
+    ;; Trailing `))` reproduces the original block's depth-balance footprint
+    ;; (the original ended with one extra `)` closing the parent category form).
     (flow F-capability-usage-monitoring
-      :desc "tool / flow 调用热度监控 → 落灰/替代/合并候选 → 人工治理决策"
-      :status "code-aligned partial — semantic evidence v1: 5 sources (conversation_tool_calls / board_tasks_flow_template / event_log_flow_events probe / lisp_semantic_hints / review_sidecar) + merge-candidate 由 lisp hints 保守生成 + ObservabilityEvent emit; semantic merge 自动决策 / event_log 全量聚合 / workflow stats 仍 pending (anchor: intent-layer.capability-evolution-governance.semantic-evidence-v1)"
-      :triggers
-        ["periodic daily/weekly monitor tick"
-         "mission_capability_usage(action=snapshot|report|candidates|mark|ack)"
-         "manual architecture cleanup review before removing/merging tools or flows"]
-      :ingress
-        (entry "monitor request with window={7d|30d|90d|all}, scope={tool|flow|both}, project_id?, include_protected?")
-      :implementation-targets
-        ["crates/missiond-mcp/src/tools/comm/capability_usage.rs (schema + replacement_target field)"
-         "crates/missiond-daemon/src/handlers/comm/capability_usage.rs (5-source coverage + HintIndex 解析 .missiond/v2/intent-{tools,flow,intent-layer}.lisp + probe_event_log_flows + ReviewState sidecar)"]
-      (logic-core
-        (step s1 "collect-tool-usage: read memory :: system-support :: capability-usage-read-model over conversation_tool_calls")
-        (step s2 "collect-flow-usage: board_tasks.flow_template + YAML flow registry + event_log_flow_events read-only probe (board::task_created since 90d, payload.flow_template 抽取); workflow stats 仍 deferred")
-        (step s3 "normalize-capabilities: map MCP registry ids, deprecated names, consolidated dispatchers, and tool-backed flow refs into canonical capability ids")
-        (step s4 "join-architecture-index: HintIndex 扫 intent-tools.lisp + intent-flow.lisp + intent-intent-layer.lisp, 解析 :replacement / :moved-to / :supersedes / :status \"deprecated-*\" / consolidated-keep")
-        (step s5 "classify-usage: active / quiet / stale / never-used / protected / shadowed-by-better-capability / merge-candidate (merge-candidate 仅在 hint token ∈ {deprecated, moved-to, replacement, supersedes} 且 target 解析为已注册 tool/flow 时给出; consolidated-keep token 显式压制 merge)")
-        (step s6 "score-candidates: combine count, recency, success rate, criticality, age since introduction, and explicit replacement link")
-        (step s7 "emit-review-report: produce evidence-first report; do not delete, hide, or mutate tools/flows")
-        (step s8 "governance-decision: intent-layer may mark keep / consolidate / deprecate / remove-after-compat-window")
-        (step s9 "follow-up-implementation: approved changes become Lisp edits first, then Forge/ClaudeCode code-alignment tasks"))
-      :egress
-        (writes [".missiond/v2/capability-usage-review.json sidecar (mark/ack/merge with replacement_target)" "ObservabilityEvent::CapabilityUsageSnapshot / CapabilityStaleCandidate" "future review note / board task"])
-        (reads ["conversation_tool_calls" "board_tasks.flow_template" "event_log (board::task_created)" "MCP tool registry" "YAML flow registry" "intent-tools/intent-flow/intent-intent-layer lisp hints"])
-        (returns "capability usage snapshot + candidate governance actions with evidence (sources[5])")
-        (downstream ["intent-layer :: capability-evolution-governance" "tools :: mission_capability_usage" "memory :: capability-usage-read-model"]))
-      :pending ["semantic merge 自动决策 (即使 hint 完整, 也只产候选, 不动 registry)"
-                "workflow stats / success rate 进 read-model"
-                "event_log 之外的事件 source (DispatcherEvent / WorkerEvent / ExecutionEvent) 聚合"]
-      :tools-backref ["mission_audit" "mission_timeline" "mission_codex_ops" "mission_capability_usage"])
+      :status "moved-to-shard (code-aligned partial)"
+      :file-ref ".missiond/v2/intent-capability-governance.lisp"
+      :shard-section "F-capability-usage-monitoring"
+      :section-id "flow.capability-usage-monitoring"
+      :role "narrative — see shard for 9-step + ingress/egress/triggers; section-id stable per L2 plan rule-1"
+      :tools-backref ["mission_audit" "mission_timeline" "mission_codex_ops" "mission_capability_usage"]))
 
     (flow F9-project-init
       :desc "一步注册新项目 — path → 完整元数据 → DB + 历史回填 + 注册表热重载"
@@ -1186,189 +1166,16 @@
                       "auto QuestionEvent gates (alignment / plan)"
                       "ExecutionEvent 扩展 dispatch metadata + PlanNodeStateChanged (anchor: intent-layer.plan-dag-runtime-v2.execution-event-decision)"
                       "file-first PLAN.lisp writer/sync"]
+            ;; ── dag-scheduler sub-section moved to L2 shard ──
+            ;; Full content moved to .missiond/v2/intent-plan-dag.lisp
             (dag-scheduler
               :status code-aligned-partial
-              :runtime-v2-status "wave 13 task 02 (commit 8bb6110) — plan_dag.rs runtime v2: max_parallel_nodes / tokio::JoinSet / 6 lifecycle + 3 skip 子分类 (upstream_failed/fail_fast_aborted/condition_gated) / failure-policy fail-fast vs continue / per-node typed EvidenceEntry 串行化; 完整 11-stage (claim-lease / per-node retry / rollback / acceptance / review-gate paused / mark-plan-final) 仍 pending"
-              :coverage "完整 PLAN DAG scheduler — 多节点 dependency / 并发 dispatch / per-node retry-failure-policy / condition-gate / rollback-compensation / per-node evidence aggregation"
-              :scope "本 sub-section 不实现, 只声明 ingress → 11-stage logic-core → egress 契约, 给后续 plan-runner v1+ 代码同构作 anchor"
-              :v0-relation "复用 v0 + auto-selection v1 的 sexp hint parser / dispatch_strategy 注入 / evidence sidecar / companion log meta; 升级是 'mission_plan(action=execute) 单节点一次性 dispatch' → 'plan-runner 持有调度循环 + claim/lease + ready-set + 节点 FSM'"
-              :anti-pattern "不允许 client 自行解析 PLAN.lisp DAG 后逐节点重新调用 mission_plan(execute) — 那等于把 scheduler 下沉给某个 client 私有循环, 违反 unified-pipeline 原则"
-              :execution-protocol-cross-ref "memory pillar :: module board :: helper agent-execution-coordination — id-counters / claims-with-lease / audit-repair / derived-indexes 必须复用, 不再发明新 atomic 协议"
-              :ingress
-                ((trigger "mission_plan(action=execute, execute_mode=internal) 接收 approved plan_id (PLAN.lisp DAG 含 ≥2 节点)")
-                 (state  "plan row status=approved (review gate 已收敛)")
-                 (state  "PLAN.lisp 文件 / plan.sexp_text 含 (nodes …) DAG 与 (edges …) / 节点 :depends-on 字段")
-                 (hints  "target_project / requested_cwd / dispatch_strategy / parallelism / failure_policy / rollback_policy 默认值 (节点级可覆盖)")
-                 (existing-evidence ".missiond/v2/plans/<plan_id>.evidence.json (v0 plan_runner_dispatch entry — DAG run 必须续写, 不覆盖)"))
-              :node-schema-minimal
-                ((field :id              :type "string (kebab-case)" :required t  :role "节点稳定标识 — DAG 内唯一, 重 run 不变")
-                 (field :title           :type "string"              :required nil :role "人读标题 (review gate 用)")
-                 (field :objective       :type "string"              :required t  :role "节点意图 (传给 dispatch substrate / task .md)")
-                 (field :target          :type "enum"                :required t  :role "执行 substrate ∈ {mission_execution / mission_task_delegate / mission_flow_run}")
-                 (field :flow-id         :type "string"              :required nil :role "若 target=mission_flow_run 必填")
-                 (field :dispatch-strategy :type "enum"              :required nil :role "∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback / unknown}; 缺省继承 plan-level 默认")
-                 (field :parallelism     :type "int"                 :required nil :role "节点内并发 sub-task 数 hint; 与 DAG 间并发独立")
-                 (field :target-project  :type "string"              :required nil :role "节点级目标项目 — 缺省继承 plan-level; project-root cwd 契约消费")
-                 (field :requested-cwd   :type "path"                :required nil :role "覆盖 spawn cwd; 必须在 target_project_root 之内")
-                 (field :depends-on      :type "list[node-id]"       :required nil :role "DAG 边 — ready-set 计算输入; 空 = 根节点")
-                 (field :condition       :type "sexp predicate"      :required nil :role "gate 表达式 — 引用上游节点 evidence; 不满足则 skipped (不算 failed)")
-                 (field :failure-policy  :type "enum + meta"         :required nil :role "∈ {fail-fast / retry-N / continue-on-failure / route-to-rollback}; retry 必须含 :max-attempts + :backoff-ms")
-                 (field :rollback-policy :type "enum + ref"          :required nil :role "∈ {none / compensate-node / cascade-up}; compensate-node 引用同 plan 内 :id 的补偿节点")
-                 (field :timeout-ms      :type "int"                 :required nil :role "节点 wall-clock 上限; 触发即 timeout 状态, 走 failure-policy")
-                 (field :evidence-tags   :type "list[string]"        :required nil :role "节点级 evidence 分类 hint, evidence-collector 落 sidecar 时按 tag 聚合")
-                 (field :acceptance      :type "sexp"                :required nil :role "节点完成判据 (cmd / kb_query / file_exists 等); 缺省 = inner result success/failure")
-                 (field :review-gate     :type "enum"                :required nil :role "∈ {none / question-event / human-checkpoint}; 触发时 plan 推 paused, 等 QuestionEvent 解锁"))
-              :node-state-fsm
-                ((state pending      :enter "DAG 加载, depends-on 未全部 succeeded/skipped")
-                 (state ready        :enter "depends-on 满足 + condition 通过 (或缺省)")
-                 (state claimed      :enter "scheduler 取走 ready 节点, 已分配 claim_id + lease_expires_at (复用 agent-execution-coordination claims slot)")
-                 (state running      :enter "已 dispatch 到 substrate, 等 inner result")
-                 (state succeeded    :enter "inner result OK + acceptance 通过")
-                 (state failed       :enter "inner result error 或 acceptance 拒绝, 失败已不可重试 (failure-policy 耗尽)")
-                 (state skipped      :enter "condition 不通过, 不算失败")
-                 (state retrying     :enter "失败后处于 backoff 等待重新进 ready (retry counter < max-attempts)")
-                 (state rolling-back :enter "下游失败触发 rollback, 当前节点正在执行 compensate")
-                 (state paused       :enter "review-gate=question-event 触发, 等 QuestionEvent::Resolved"))
-              :logic-core
-                ((stage s1 load-plan-graph
-                    :at "intent-layer pillar :: plan-runner v1 (architecture-designed)"
-                    :reads ["plan row (status=approved)" "plan.sexp_text" ".missiond/plans/<topic>/PLAN.lisp 当前是 DB 镜像源"]
-                    :action "解析 (nodes …) (edges …) 与节点字段; 构建有向图, 检测 cycle (cycle = 拒绝执行, plan FSM → failed + 写 issue)"
-                    :writes ["scheduler 内存图 (plan_id → DAG)" "evidence sidecar entry plan_runner_graph_loaded"]
-                    :failure-mode "cycle / 未知节点 id / depends-on 引用孤儿 → 立刻 reject, 不进入下一阶段; plan 不允许部分 load")
-                 (stage s2 validate-node-schema
-                    :at "intent-layer pillar :: plan-runner v1"
-                    :reads ["per-node 字段"]
-                    :action "校验必填字段 (id / objective / target); 校验 enum 值; 校验 :depends-on 全部存在; failure-policy/rollback-policy 形状校验"
-                    :writes ["evidence sidecar entry plan_runner_schema_validated (per node ok / err)"]
-                    :failure-mode "任一节点校验失败 → reject 整张 DAG, 不退化到 'partial run'; 错误明确指向节点 id")
-                 (stage s3 resolve-target-project-root
-                    :at "intent-layer pillar :: plan-runner v1 → memory pillar :: project-management :: project-registry"
-                    :reads ["plan-level :target_project / 节点级 :target-project / :requested-cwd / ProjectRegistry"]
-                    :action "为每节点解析 target_project_root: 节点级 > plan 级 > directive 级; 校验 :requested-cwd 必须在 root 之内; 复用 worker pillar :: section pty :: invariant project-root-spawn-cwd"
-                    :writes ["per-node resolved_project_root + resolved_cwd"]
-                    :failure-mode "解析失败或 cwd 越界 → 节点 schema check fail, 整图 reject; 不允许 fallback 到 missiond 仓根")
-                 (stage s4 build-ready-set
-                    :at "intent-layer pillar :: plan-runner v1"
-                    :reads ["DAG + 当前节点 FSM 状态 + parallelism 限制 (plan-level / dispatch_strategy 派生)"]
-                    :action "计算 ready-set = {n | n.state=pending ∧ ∀d∈n.depends-on (d.state ∈ {succeeded, skipped}) ∧ n.condition 通过 ∧ 当前并发 < limit}; condition 不通过的节点直接 → skipped (递归向下推)"
-                    :writes ["scheduler 内存 ready-set (cache, 不写文件)"]
-                    :idempotency "ready-set 必须从 durable 节点 FSM 重建; scheduler crash 后下次 tick 仍能恢复同一 ready-set")
-                 (stage s5 acquire-execution-claim
-                    :at "intent-layer pillar :: plan-runner v1 → memory pillar :: helper agent-execution-coordination"
-                    :reads ["mission_execution 协议 claims slot / id-counters"]
-                    :action "为 ready 节点调 mission_execution(action=claim, scope=plan/<plan_id>/node/<node_id>, lease_secs=<from policy>); claim_id manager 原子分配; lease 过期未 heartbeat → reap, 节点回 ready"
-                    :writes ["execution companion log claims slot + active_claims index"]
-                    :guarantee "scope overlap 必拒绝 — 同一节点不允许两 scheduler 实例同时 claim; 复用 D010 教训的 manager 原子分配 (intent-event-bus / intent-memory execution lisp 已证实)"
-                    :failure-mode "claim 失败 (overlap / lease store 不可用) → 节点保持 ready, 下 tick 重试; scheduler 不允许 'best-effort dispatch 不 claim'")
-                 (stage s6 dispatch-ready-nodes
-                    :at "intent-layer pillar :: plan-runner v1 → tools pillar :: mission_execution / mission_task_delegate / mission_flow_run"
-                    :action "已 claim 节点按 :target 路由: mission_execution(open) → spawn/复用 ClaudeCode slot (companion log meta dispatch_strategy/target_project/requested_cwd 写入, 复用 v0 路径); mission_task_delegate → 已存在 slot 挂任务; mission_flow_run → flow-engine-v2 runner; agent-team hint 注入复用 v0 idempotent 逻辑"
-                    :writes ["mission_execution / mission_task_delegate / mission_flow_run 入参 + companion log meta"
-                             "evidence sidecar entry plan_runner_dispatch (per node, 含 claim_id / dispatch_strategy / target_project / requested_cwd / inner_result_handle)"
-                             "节点 FSM: claimed → running"]
-                    :concurrency "ready-set 内多节点可并发 dispatch (受 plan/dispatch-strategy 派生 parallelism 限制); 节点之间共享 substrate (resident-lisp slot) 必须串行化, scheduler 持锁"
-                    :anti-pattern "不允许直接调 mission_pty_spawn 绕过 mission_execution — execution log 是协调真相")
-                 (stage s7 collect-node-evidence
-                    :at "intent-layer pillar :: evidence-collector role + memory pillar :: agent-execution-coordination"
-                    :reads ["dispatch substrate 回包 (mission_execution status / inner result)" "ExecutionEvent stream (dispatch metadata 扩展后, 当前仅 companion log)" "tool_calls 从 conversation_messages 派生 (per node 范围)" "git diff (cwd-scoped)" "test outputs (节点 acceptance 调用)"]
-                    :action "按节点 :evidence-tags 聚合 inner result + companion log slice + acceptance 验证结果, 落 evidence sidecar 子条目 plan_runner_node_evidence (per node)"
-                    :writes [".missiond/v2/plans/<plan_id>.evidence.json :: nodes[<node_id>] block (含 attempts[] / claim_id / start/end / inner_result / acceptance_pass / artifacts_refs)"
-                             "execution companion log :: completions slot (mission_execution(action=complete, phase=node-<node_id>))"]
-                    :ssot-rule "evidence sidecar 是 file-first 真相; 升级到 plan_evidence DB JSONB 时保留 sidecar 作为长期归档 (与 v0 一致)")
-                 (stage s8 update-node-state
-                    :at "intent-layer pillar :: plan-runner v1"
-                    :reads ["acceptance 验证结果 + inner result + timeout 检测 + heartbeat 生命周期"]
-                    :action "节点 FSM 推进: running → succeeded | failed | timeout; succeeded 触发 release claim + 重算 ready-set (s4); failed 转 stage s9 走 failure-policy"
-                    :writes ["scheduler 内存节点 FSM" "execution companion log claims slot release (mission_execution(action=release))"
-                             "evidence sidecar entry plan_runner_node_state_change"]
-                    :idempotency "节点 FSM 必须从 evidence + companion log 可重建 — scheduler crash 不丢状态")
-                 (stage s9 handle-retry-failure-rollback
-                    :at "intent-layer pillar :: plan-runner v1"
-                    :reads ["节点 :failure-policy / :rollback-policy / 当前 attempt count / 上下游节点 FSM"]
-                    :action
-                      ((branch retry-N
-                          :rule "attempt < max-attempts → 节点回 retrying, backoff-ms 后重新进 ready (s4); 写 evidence sidecar attempt 子条目 + 增加 id-counter")
-                       (branch fail-fast
-                          :rule "节点 → failed; scheduler 立即 mark plan failed (s10); 取消所有 ready/claimed/running 节点 (release claim + cancel inner)")
-                       (branch continue-on-failure
-                          :rule "节点 → failed; 不影响下游 ready-set 计算 (下游可视为 :depends-on satisfied=skipped); 仅记入 issue slot (mission_execution(action=issue))")
-                       (branch route-to-rollback
-                          :rule "节点 → failed; rollback-policy=compensate-node 触发对应补偿节点入 ready-set; rollback-policy=cascade-up 触发上游已 succeeded 节点反向 dispatch 补偿"))
-                    :writes ["节点 FSM 转移" "execution companion log issues / deviations / decisions slot (按分支语义)"]
-                    :anti-pattern "不允许 silent retry — 每次 retry 必须写 evidence + 增 attempt counter; 不允许默默吞错 (fail-fast 原则)")
-                 (stage s10 mark-plan-final
-                    :at "intent-layer pillar :: plan-runner v1 → memory pillar :: directive-layer plan FSM"
-                    :reads ["全节点 FSM"]
-                    :action
-                      ((rule plan-succeeded
-                          :condition "所有节点 ∈ {succeeded, skipped}"
-                          :writes "plan FSM: executing → succeeded; mission_plan(action=mark, status=succeeded); 触发 record_evidence 闭环 (s11)")
-                       (rule plan-failed
-                          :condition "存在节点 failed 且 failure-policy=fail-fast 或 rollback 终态 failed"
-                          :writes "plan FSM: executing → failed; companion log meta failure_summary; 标记 unresolved_issues")
-                       (rule plan-partial
-                          :condition "存在 failed 节点但 failure-policy=continue-on-failure, 其余 succeeded"
-                          :writes "plan FSM: executing → succeeded (with partial flag in evidence sidecar); review_required=true; mission_plan(action=mark, status=succeeded, evidence_partial=true)"))
-                    :failure-mode "plan FSM 写入失败 (DB 不可用) → 暴露 partial, 不假装成功; sidecar 保留所有节点真相方便 audit/repair")
-                 (stage s11 trigger-record-execution-distill-candidate
-                    :at "intent-layer pillar :: plan-runner v1 → tools pillar :: mission_workflow"
-                    :reads ["plan FSM 终态 + evidence sidecar 全文"]
-                    :action
-                      ((path success
-                          :writes "mission_workflow(action=record_execution) 累计 success_count + avg_cost_usd; 满足触发条件 (success_count ≥ 阈值 或 human pin) 时 enqueue distill candidate 事件 (供 s8 workflow-distillation 消费)")
-                       (path failure
-                          :writes "mission_workflow(action=record_execution, success=false); failure pattern 入 capability_usage hints 用于后续 negative-rule 学习"))
-                    :downstream-flow "F-intent-alignment-plan-execution-loop :: s7 evidence-collection 收口 + s8 workflow-distillation 触发"))
-              :egress
-                ((writes
-                    ["plan FSM final state (executing → succeeded | failed | succeeded-partial) via mission_plan(action=mark) — DirectiveLayerStore::plan_update_status"
-                     "evidence sidecar nodes[<node_id>] block (per-node aggregate; attempts[] 历史; rollback path)"
-                     "mission_execution companion log claims/completions/deviations/issues slots (per-node)"
-                     "scheduler ticks 计数 (capability_usage observability hint)"])
-                 (emits
-                    ["future ExecutionEvent::PlanNodeStateChanged (含 plan_id / node_id / from / to / dispatch_strategy / target_project) — 当前 ExecutionEvent dispatch metadata 仍 pending"
-                     "future PlanCompleted / PlanFailed / PlanPartial DomainEvent — 通过 mission_plan(action=mark) 触发 plan FSM event"])
-                 (returns
-                    "plan_id + final_status + per-node summary (id/state/attempts/dispatch_strategy/elapsed_ms) + distill_candidate_enqueued flag")
-                 (downstream
-                    ["F-intent-alignment-plan-execution-loop :: s7 evidence-collection (sidecar 升级)"
-                     "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation (distill candidate 消费)"
-                     "F-execution-log-governance (per-node companion log audit/repair)"
-                     "F-capability-usage-monitoring (dispatch_strategy 命中率 / 节点 retry 模式)"
-                     "F-workstation-dispatch-policy (策略命中后回写 ExecutionEvent)"]))
-              :file-vs-db-contract
-                ("plan.sexp_text + .missiond/plans/<topic>/PLAN.lisp 是 DAG 真相 (file-first SSOT) — file-first writer 落地后, 文件即真相; 当前 plan.sexp_text 是 DB 镜像源"
-                 "evidence sidecar (.missiond/v2/plans/<plan_id>.evidence.json) 是节点级证据真相 — 升级到 plan_evidence DB JSONB 时保留 sidecar"
-                 "execution companion log 是 claim/lease/id-counter 真相 — 不允许 scheduler 自建 ID 池 (违反 agent-execution-coordination D010 教训)"
-                 "scheduler 内存 DAG / ready-set / 节点 FSM 是 cache, 必须可从 sidecar + companion log 重建")
-              :anti-patterns
-                ["不允许 scheduler 自建 claim/lease 协议绕过 mission_execution — agent-execution-coordination 是单一真相"
-                 "不允许 silent retry — 每次重试写 evidence + 增 attempt counter, 失败信息暴露不掩盖"
-                 "不允许节点失败时静默吞错 — failure-policy 必须显式声明; 缺省 fail-fast"
-                 "不允许 client 自行解析 PLAN.lisp DAG 后逐节点重新调用 mission_plan(execute) — scheduler 必须在 daemon 内"
-                 "不允许把 'continue-on-failure' 当默认 — 那等于鼓励兜底; 必须 PLAN.lisp 节点显式声明"
-                 "不允许把 prompt-fallback 当 dispatch_strategy 默认 — 默认 fail-fast 走 spawn 路径"]
-              :open-design-questions
-                ["dispatch substrate 间的 cross-node lock — 多节点共享 resident-lisp slot 时, 是 scheduler 持锁还是 mission_execution claim 子 scope?"
-                 "rollback semantic 是否可全自动 — 当前默认 :rollback-policy=none, 需要节点显式声明 compensate-node; 是否引入 'auto-compensate by reverse-dispatch' 仍待审"
-                 "DAG-level vs node-level :failure-policy 优先级 — 节点级覆盖 plan 级是合理默认, 但需文档化"
-                 "scheduler tick 周期 — 事件驱动 (ExecutionEvent::PlanNodeStateChanged) 还是固定 tick? 当前推荐事件驱动 + autopilot fallback tick"
-                 "节点级 review-gate=question-event 触发后, plan FSM 是 paused 还是 awaiting_approval? 复用既有 plan FSM 还是新增 paused 态?"]
-              :implementation-targets-current
-                ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs (runtime v2; 详 :runtime-v2-status)"
-                 "crates/missiond-daemon/src/handlers/knowledge/plan.rs (action=execute internal v0 — 单节点 dispatch + auto-selection v1; 多节点 → plan_dag runtime v2)"
-                 "crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs (typed EvidenceEntry helper; EventRef::unavailable 占位)"
-                 "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (claim/heartbeat/release 接入)"
-                 "crates/missiond-core/src/db/pg/directive.rs (plan_update_status)"]
-              :implementation-targets-future
-                ["crates/missiond-daemon/src/intent_layer/plan_runner.rs (新文件 — 提取完整 11-stage scheduler, claim-lease/retry/rollback; runtime v2 仅覆盖 dispatch + lifecycle + failure-policy fail-fast/continue 子集)"
-                 "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent::PlanNodeStateChanged 扩展; dispatch metadata pending — 见 anchor intent-layer.plan-dag-runtime-v2.execution-event-decision)"
-                 "crates/missiond-core/src/db/pg/directive.rs (新增 plan_evidence JSONB 列待审)"]
-              :checker-contract
-                ("scheduler 实现完成必须保持 evidence sidecar shape 向后兼容 — v0 plan_runner_dispatch entry 仍可读"
-                 "scheduler 实现完成必须保持 mission_execution claims/completions slot shape — agent-execution-coordination 协议不动"
-                 "scheduler 实现完成必须保持 mission_plan(execute) 单节点 fast-path — 无 DAG 时退化为 v0 行为"))
+              :file-ref ".missiond/v2/intent-plan-dag.lisp"
+              :shard-section "dag-scheduler (flow s6 execution-runner sub-block)"
+              :section-id "flow.execution-runner-dag-scheduler"
+              :scope "完整 PLAN DAG scheduler 11-stage 协议正文 — 见 shard"
+              :runtime-v2-ref "intent-layer.plan-dag-runtime-v2 (also in shard)"
+              :note "section-id stable per L2 plan rule-1; ingress / 11-stage logic-core / egress / dispatch-strategy / file-vs-db-contract / pending / implementation-targets / checker-contract live in shard")
             :substrate "execution substrate = mission_execution 12-action manager (open/list/claim/heartbeat/release/deviate/decide/issue/complete/status/audit/repair, F-execution-log-governance)"
             :options-before-runner ["bridge mode 仍可用 (caller 自行执行 next_call)" "internal mode 由 plan-runner 直接 dispatch + 写 evidence + 推 plan FSM"]
             :dispatch-strategy
@@ -1444,69 +1251,13 @@
                       "mission_execution (execution substrate, 12-action coordination, dispatch_strategy/target_project/requested_cwd 持久化到 companion log meta)"])
 
     (flow F-workstation-dispatch-policy
-      :desc "MissionD 调度 ClaudeCode 工位的策略选择 — unified-entry pipeline s6 execution-runner 的子策略 narrative; 不重复 slot lifecycle 全文, 仅描述策略选择 → 派工口径"
-      :status "operational-practice + code-aligned partial — dispatch_strategy 贯穿 mission_plan(execute internal) → mission_execution(open) → companion log meta → evidence sidecar; PLAN DAG runtime v2 wave-based 并发下用 typed EvidenceEntry 串行化; auto-推断 strategy/target/target_project + ExecutionEvent dispatch metadata 仍 pending (anchor: flow.workstation-dispatch-policy / intent-layer.plan-dag-runtime-v2.execution-event-decision)"
-      :role "把 worker pillar :: section claudecode-workstation-orchestration 的 5 条 policy 与 unified-entry pipeline 的 stage s2/s4/s6 连成一条 narrative; 是 cross-ref 中枢, 不是新执行路径"
-      :triggers
-        ["F-intent-alignment-plan-execution-loop :: s2 alignment-authoring (Lisp 改动)"
-         "F-intent-alignment-plan-execution-loop :: s4 plan-authoring (PLAN 起草)"
-         "F-intent-alignment-plan-execution-loop :: s6 execution-runner (PLAN 执行)"
-         "human request to dispatch a ClaudeCode workstation explicitly"]
-      :ingress
-        (entry "PLAN.lisp 节点 :dispatch-strategy + :target_project + :parallelism + 任务 .md 路径 (.missiond/claudecode/<topic>.md)")
-      :stages
-        ((s1 classify-task
-            :at "intent-layer pillar :: plan-runner (architecture-designed)"
-            :reads ["PLAN.lisp 节点 :dispatch-strategy" "节点改动文件清单 (Lisp / Rust / SQL / JS / 混合)" "节点 :parallelism 与 :target_project"]
-            :decision-table-ref "worker pillar :: section claudecode-workstation-orchestration :: dispatch-decision-matrix"
-            :outputs "strategy ∈ {resident-lisp / fresh-code-alignment / agent-team / mixed / prompt-fallback}")
-         (s2 select-substrate
-            :at "worker pillar :: section claudecode-workstation-orchestration"
-            :branches
-              ((resident-lisp        :substrate "复用现有 ClaudeCode lisp-architect slot via mission_pty_send / mission_task_delegate")
-               (fresh-code-alignment :substrate "mission_pty_spawn 新 slot 或 mission_compute_slot create dynamic slot, project-root cwd")
-               (agent-team           :substrate "fresh slot + 在任务 .md 中加入'使用 agent-team 提高效率'文字; ClaudeCode 主会话内并发 sub-agent")
-               (mixed                :substrate "拆 plan 分阶段: Lisp 阶段 → resident-lisp; 代码阶段 → fresh-code-alignment; 用 mission_execution 串接")
-               (prompt-fallback      :substrate "claude -p 一次性 prompt; 仅 daemon 不可用或 throwaway 查询时使用")))
-         (s3 enforce-cwd-and-context
-            :at "worker pillar :: section pty :: invariant project-root-spawn-cwd"
-            :enforcement "spawner::spawn_tracked_slot 强制 cwd = target_project_root; existing slot 复用前校验 slot.project_root == target_project_root"
-            :code-alignment "code-aligned for spawn cwd; 自动 mismatch detection 已存在")
-         (s4 record-strategy
-            :at "tools pillar :: mission_execution(action=open) — dispatch_strategy/target_project/requested_cwd 已写入 companion log meta"
-            :writes ["companion log meta :dispatch-strategy / :target-project / :requested-cwd" "evidence sidecar plan_runner_dispatch entry"]
-            :consumer "evidence-collector 落 evidence sidecar; capability-usage-monitor 后续统计策略命中率"
-            :status "code-aligned partial — companion log meta 持久化已实现, plan-runner internal mode 自动转发也已实现; ExecutionEvent 扩展 dispatch metadata 仍 code-alignment pending (companion-log durable only / event metadata future)"
-            :implementation-targets ["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs (open schema: dispatch_strategy/target_project/requested_cwd)"
-                                     "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs (action_open meta render + list/status meta read + legacy log graceful read)"
-                                     "crates/missiond-core/src/event/events/execution.rs (ExecutionEvent — dispatch metadata 仍未扩展)"]
-            :pending ["ExecutionEvent::Opened 扩展 dispatch_strategy/target_project/requested_cwd 字段"
-                      "list/status 读路径之外的查询面 (例如 timeline 查询) 暴露 dispatch_strategy"])
-         (s5 dispatch-and-monitor
-            :at "tools/worker pillars"
-            :substrate ["mission_pty_spawn / mission_pty_send / mission_pty_read"
-                        "mission_task_delegate (resident slot 上挂新任务)"
-                        "mission_compute_slot (动态 slot)"
-                        "mission_execution claim/heartbeat/release"]
-            :monitor "mission_pty_screenshot / mission_pty_status; PTY extractor anomaly; ControlTree pause cascade"))
-      :egress
-        (writes ["execution row (with dispatch_strategy field — future)"
-                 "PTY session log (via spawn substrate)"
-                 "tool_calls (via gen_gateway audit)"
-                 "evidence sidecar (via mission_plan record_evidence)"]
-         reads ["PLAN.lisp 节点 :dispatch-strategy" "worker pillar dispatch-decision-matrix" "ProjectRegistry"]
-         downstream ["F-intent-alignment-plan-execution-loop :: s7 evidence-collection"
-                     "F-execution-log-governance"
-                     "F-scoped-commit-handoff"
-                     "F-capability-usage-monitoring (后续统计)"]
-         returns "strategy choice + spawned/reused slot id + execution_id (when manager opened)")
-      :anti-patterns
-        ["不要为单次 Lisp 改动新开 fresh ClaudeCode slot — 浪费上下文"
-         "不要为代码同构复用常驻 Lisp slot — cwd 不对, 上下文污染"
-         "不要让多个并行 sub-agent 同时写同一 Lisp 块 — 结构漂移"
-         "不要默认走 claude -p — 无 evidence 闭环, 不可观测"
-         "不要让并行写入任务只留下 completion report 而没有 scoped commit hash"]
-      :no-new-tool "本 flow 不引入新 tool; 全程复用 mission_pty_* / mission_compute_slot / mission_task_delegate / mission_execution / mission_plan"
+      :status "moved-to-shard (operational-practice + code-aligned partial)"
+      :file-ref ".missiond/v2/intent-workstation-policy.lisp"
+      :shard-section "F-workstation-dispatch-policy"
+      :section-id "flow.workstation-dispatch-policy"
+      :role "narrative — see shard for full 5-stage spec; section-id stable per L2 plan rule-1"
+      :worker-cross-ref "worker pillar :: section claudecode-workstation-orchestration (also moved to shard)"
+      :intent-layer-cross-ref "intent-layer pillar :: section unified-entry-pipeline :: workstation-dispatch-policy (also moved to shard)"
       :tools-backref ["mission_pty_spawn" "mission_pty_send" "mission_pty_read"
                       "mission_compute_slot" "mission_task_delegate"
                       "mission_execution" "mission_plan"])
@@ -1790,113 +1541,25 @@
         (memory "legacy tasks queue state")
         (flow "把 query/cancel 合并为 legacy queue control shared-flow"))
 
+    ;; ── F-execution-log-governance moved to L2 shard ──
+    ;; Full content moved to .missiond/v2/intent-execution-governance.lisp
     (flow F-execution-log-governance
-      :desc "mission_execution manager → execution companion log → claim/decision/deviation/completion governance"
-      :triggers ["mission_execution(action=...)" "multi-agent pillar/code-alignment work session"]
-      :status "code-aligned partial; 12-action manager + Domain::Execution / ExecutionEvent emission implemented; scoped commit durability handoff architecture-designed"
-      :protocol "memory pillar :: board helper agent-execution-coordination v0.5.2"
-      :stages
-        ((s1 open-or-load-execution
-            :at "tools pillar mission_execution + worker pillar :: agent-execution-manager-interface"
-            :action "open creates meta/id-counters/phase-tracker; list/status/audit loads existing companion logs")
-         (s2 claim-scope
-            :at "worker manager + memory protocol"
-            :action "claim validates overlapping scope, allocates claim_id, sets lease_expires_at")
-         (s3 keepalive-or-release
-            :at "worker manager"
-            :action "heartbeat extends lease; release closes claim with optional summary")
-         (s4 record-operational-facts
-            :at "worker manager"
-            :action "deviate/decide/issue/complete allocate D/DC/I/COMP ids and append typed records")
-         (s5 update-derived-indexes
-            :at "execution companion log"
-            :writes "active_claims / open_issues / unresolved_deviations / latest_decisions / completed_phases")
-         (s6 audit-or-repair
-            :at "worker manager + architecture-lisp checker"
-            :checks ["paren balance" "ID monotonic/no duplicates" "claim overlap" "stale claims" "completed phase coverage" "open issue owners"]
-            :repair "dry-run first; apply may only mark stale claims / rebuild derived indexes / suggest renumber")
-         (s7 scoped-commit-handoff
-            :at "worker pillar :: claudecode-workstation-orchestration + git"
-            :action "after verification, stage only claimed files, commit scoped patch, then backfill commit_hash into completion/git-handoff"
-            :flow-ref "F-scoped-commit-handoff")
-         (s8 expose-status
-            :at "tools pillar response + optional board progress"
-            :returns "action receipt / status report / audit report"))
-      :egress
-        (:writes ["*-execution.lisp operational slots" "derived indexes" "git commit hash in completion/git-handoff"]
-         :reads ["parent design Lisp" "execution companion log"]
-         :emits ["ExecutionEvent::*" "optional BoardTaskStatusChanged when linked"]
-         :returns "mission_execution JSON result")
+      :status "moved-to-shard (code-aligned partial)"
+      :file-ref ".missiond/v2/intent-execution-governance.lisp"
+      :shard-section "F-execution-log-governance"
+      :section-id "flow.execution-log-governance"
       :tools-backref ["mission_execution"]
-      :cross-pillar
-        (memory "owns execution protocol + durable file shape")
-        (worker "owns manager mechanics, leases, audit/repair runtime")
-        (tools "owns future MCP schema")
-        (intent-layer "keeps methodology separate from operational execution state"))
+      :note "8 stages + 12-action manager + cross-pillar + scoped commit handoff cross-ref live in shard; section-id stable per L2 plan rule-1")
 
+    ;; ── F-scoped-commit-handoff moved to L2 shard ──
+    ;; Full content moved to .missiond/v2/intent-execution-governance.lisp
     (flow F-scoped-commit-handoff
-      :desc "执行共享内存层 → scoped git commit → commit_hash 回填, 解决并行工位报告完成但 live tree 成果被回退的问题"
-      :status "architecture-designed + task-file operational-practice; daemon automated stage/commit/preflight pending"
-      :why "execution companion Lisp 是 control plane, 记录 claim/lease/verification; git commit 是 durability plane, 固化实际文件修改. 两者必须互相引用."
-      :triggers ["writing agent finished verification" "mission_execution(action=complete) with changed_files" "plan-runner node success"]
-      :ingress
-        (entry "execution_id + claim_id + claimed_scope + changed_files + verification result + commit policy")
-      :stages
-        ((s1 read-claim-scope
-            :at "mission_execution(status)"
-            :reads "claims.active_claims / completion candidate"
-            :guard "claim must be active or just released by same claimer; stale/foreign claim requires issue/deviate")
-         (s2 compute-changed-files
-            :at "git worktree"
-            :action "read git diff --name-only / git status --short; classify staged/unstaged/untracked"
-            :guard "changed_files must be subset of claimed_scope or explicitly approved deviation")
-         (s3 verify-before-stage
-            :at "task acceptance"
-            :requires ["task-specific tests" "git diff --check" "architecture-lisp checker if Lisp changed"]
-            :failure "write mission_execution(issue) or completion commit_status=blocked; do not commit")
-         (s4 stage-owned-files-only
-            :at "git index"
-            :action "git add exact file list from claimed_scope; never git add ."
-            :preflight "git diff --cached --name-only must equal/subset claimed files")
-         (s5 scoped-commit
-            :at "git"
-            :action "git commit with message carrying execution_id/phase/task"
-            :result "commit_hash")
-         (s6 backfill-completion
-            :at "mission_execution(action=complete)"
-            :writes "completion.changed_files / staged_files / verification / commit_hash / commit_status=committed")
-         (s7 release-claim
-            :at "mission_execution(action=release)"
-            :action "release claim after commit hash is recorded; if commit blocked, release only with explicit summary"))
-      :commit-policy
-        ((code-alignment-new-session :commit "required")
-         (parallel-code-agent        :commit "required")
-         (resident-lisp-architect    :commit "wave-boundary-or-required")
-         (exploration-only           :commit "not-required")
-         (emergency-fix              :commit "required-after-verify"))
-      :failure-modes
-        ((scope-violation
-           :symptom "staged file outside claimed_scope"
-           :response "unstage offending file, write issue/deviation, request new claim")
-         (verification-failed
-           :symptom "tests/checker fail"
-           :response "no commit; write issue or completion commit_status=blocked with blocker")
-         (git-conflict-or-index-lock
-           :symptom "parallel worker holding index / conflict markers"
-           :response "stop and report; do not stash/reset/checkout other scopes")
-         (commit-succeeded-backfill-failed
-           :symptom "commit exists but execution log update failed"
-           :response "emit issue + retry complete with commit_hash; commit remains durability truth"))
-      :egress
-        (writes ["git commit object" "execution companion log completion/git-handoff fields"]
-         reads ["execution companion claims" "git diff/status" "task verification outputs"]
-         returns "commit receipt or blocked handoff report")
+      :status "moved-to-shard (architecture-designed + task-file operational-practice)"
+      :file-ref ".missiond/v2/intent-execution-governance.lisp"
+      :shard-section "F-scoped-commit-handoff"
+      :section-id "flow.scoped-commit-handoff"
       :tools-backref ["mission_execution"]
-      :cross-pillar
-        (memory "owns completion/git-handoff slot shape")
-        (worker "owns workstation policy + git preflight mechanics")
-        (flow "owns ordered handoff narrative")
-        (intent-layer "plan-runner will call this after each code-writing node"))
+      :note "7 stages + commit-policy + failure-modes + cross-pillar live in shard; section-id stable per L2 plan rule-1")
 
     (flow F-skill-knowledge-lifecycle
       :desc "Skill registry/query/context/mutation → skill tables/files + embeddings + context bundle"
