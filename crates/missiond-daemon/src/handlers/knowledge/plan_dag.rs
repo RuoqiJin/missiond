@@ -124,6 +124,23 @@ const VALID_TARGETS: &[&str] = &[
 const FAILURE_POLICY_FAIL_FAST: &str = "fail-fast";
 const FAILURE_POLICY_CONTINUE: &str = "continue";
 
+/// wave-16 / task 05 — retry policy ceiling.
+///
+/// `:retry-count` (alias `:max-attempts`) is interpreted as **additional**
+/// attempts beyond the first. The scheduler always runs attempt 1; every
+/// retry hint adds N more attempts on top, capped here so a runaway plan
+/// (`:retry-count 9999`) cannot melt the dispatch loop. The cap matches
+/// the safe-default the wave brief calls out (max attempts = 3 → at most
+/// two retries after the first attempt).
+const MAX_NODE_ATTEMPTS_CAP: u32 = 3;
+
+/// wave-16 / task 05 — upper bound on the optional `:retry-delay-ms`
+/// pause between attempts. We cap at 60 seconds to keep an authoring
+/// mistake (`:retry-delay-ms 999999999`) from stalling the entire wave
+/// scheduler. Authors that legitimately need longer back-offs should
+/// model that as a separate plan node, not a per-node sleep.
+const MAX_RETRY_DELAY_MS: u64 = 60_000;
+
 /// One node in the executable DAG. Only fields on the v1 allowlist are kept
 /// here; unsupported fields land in `unsupported_fields` and are surfaced via
 /// `node_hint_summary` so author intent never disappears silently.
@@ -162,6 +179,27 @@ pub(super) struct DagNode {
     pub review_gate: Option<String>,
     pub review_action: Option<String>,
     pub review_text: Option<String>,
+    /// wave-16 / task 05 — bounded per-node retry policy.
+    /// `:retry-count` / `:max-attempts` declares **additional** attempts
+    /// beyond the first; absent / 0 keeps the v2-baseline single-attempt
+    /// dispatch (`max_attempts = 1`). Negative / non-numeric values land
+    /// in `DagBuildError::InvalidRetryHint` at validation time so a typo
+    /// fails fast instead of silently disabling retry. Parsed values are
+    /// capped to `MAX_NODE_ATTEMPTS_CAP` (so `max_attempts ∈ [1, 3]`
+    /// after `effective_max_attempts` resolves them).
+    pub retry_count: Option<u32>,
+    /// wave-16 / task 05 — optional sleep between attempts. Capped to
+    /// `MAX_RETRY_DELAY_MS` (60s) so an authoring typo cannot stall the
+    /// wave scheduler. Absent → no sleep between attempts.
+    pub retry_delay_ms: Option<u64>,
+    /// wave-16 / task 05 — parser-stage retry hint failure carried
+    /// forward so `build_validated_dag` can raise a structured
+    /// `DagBuildError::InvalidRetryHint`. Stored as
+    /// `(key, raw_value, detail)` so the validator can emit a precise
+    /// error message without re-parsing the form. Set when either
+    /// `:retry-count`/`:max-attempts` or `:retry-delay-ms` failed to
+    /// parse as a non-negative integer.
+    pub retry_parse_error: Option<(String, String, String)>,
     /// Per-node unsupported `:keyword value` pairs, kept in source order.
     pub unsupported_fields: Vec<(String, String)>,
 }
@@ -205,6 +243,38 @@ impl DagNode {
             Some(_) => ReviewGateKind::None,
         }
     }
+
+    /// wave-16 / task 05 — total attempts the scheduler will make for
+    /// this node before declaring it `failed`. Always ≥ 1: the first
+    /// dispatch is attempt 1, and `:retry-count`/`:max-attempts` adds
+    /// **additional** retries on top, capped to
+    /// `MAX_NODE_ATTEMPTS_CAP`. Absent / 0 keeps the v2-baseline
+    /// single-attempt contract intact. Capping is also applied here so
+    /// callers (response serialisers, dry-run) can use this as the
+    /// single source of truth for "what the scheduler will actually do".
+    pub(super) fn effective_max_attempts(&self) -> u32 {
+        let extra = self.retry_count.unwrap_or(0);
+        let total = extra.saturating_add(1);
+        total.clamp(1, MAX_NODE_ATTEMPTS_CAP)
+    }
+
+    /// True iff the node opted into ≥ 1 retry attempt. Used by the
+    /// dry-run / dispatch surface to decide whether to emit a
+    /// `retry_plan` entry for this node (we omit nodes with the default
+    /// single-attempt contract so the v2 byte-shape stays untouched
+    /// for callers that do not opt in).
+    pub(super) fn retry_enabled(&self) -> bool {
+        self.effective_max_attempts() > 1
+    }
+
+    /// wave-16 / task 05 — clamp the optional `:retry-delay-ms` to the
+    /// safe ceiling. Absent / 0 → `None` so the scheduler skips the
+    /// `tokio::time::sleep` entirely (no idle wake-up cost).
+    pub(super) fn effective_retry_delay_ms(&self) -> Option<u64> {
+        self.retry_delay_ms
+            .filter(|&n| n > 0)
+            .map(|n| n.min(MAX_RETRY_DELAY_MS))
+    }
 }
 
 /// wave-16 / task 04 — typed projection of `:review-gate` for the
@@ -244,6 +314,19 @@ pub(super) enum DagBuildError {
     },
     SelfDependency(String),
     Cycle(Vec<String>),
+    /// wave-16 / task 05 — author supplied a retry hint with a value
+    /// that fails parsing (negative number, non-numeric, overflow). We
+    /// fail fast here instead of silently dropping the value into
+    /// `unsupported_fields` because retry counts directly drive the
+    /// scheduler's attempt budget — a typo'd `:retry-count "thrice"`
+    /// must NOT be interpreted as "no retry", or the author would
+    /// silently lose the policy they declared.
+    InvalidRetryHint {
+        node_id: String,
+        key: String,
+        raw: String,
+        detail: String,
+    },
 }
 
 impl DagBuildError {
@@ -291,6 +374,21 @@ impl DagBuildError {
                     format!("DAG node `{}` declares itself in :depends-on", id),
                 ),
             ),
+            DagBuildError::InvalidRetryHint { node_id, key, raw, detail } => {
+                ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "DAG node `{}` has invalid `:{}` value `{}`: {}",
+                            node_id, key, raw, detail
+                        ),
+                    )
+                    .with_suggestion(
+                        "supply a non-negative integer ≤ 3 for `:retry-count` / `:max-attempts` \
+                         (the cap), or remove the hint to keep the default single-attempt contract",
+                    ),
+                )
+            }
             DagBuildError::Cycle(cycle) => ToolResult::structured_error(
                 ToolError::new(
                     error_codes::INVALID_PARAM,
@@ -319,6 +417,21 @@ pub(super) fn build_validated_dag(
     for n in &parsed.nodes {
         if !seen.insert(n.id.as_str()) {
             return Err(DagBuildError::DuplicateId(n.id.clone()));
+        }
+    }
+
+    // wave-16 / task 05 — fail fast on any retry hint that did not
+    // parse cleanly. Raised BEFORE target / dependency checks so the
+    // author sees the most actionable error first; a typo'd
+    // `:retry-count "thrice"` is a contract bug, not a topology bug.
+    for n in &parsed.nodes {
+        if let Some((key, raw, detail)) = &n.retry_parse_error {
+            return Err(DagBuildError::InvalidRetryHint {
+                node_id: n.id.clone(),
+                key: key.clone(),
+                raw: raw.clone(),
+                detail: detail.clone(),
+            });
         }
     }
 
@@ -492,6 +605,16 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
     let mut review_gate: Option<String> = None;
     let mut review_action: Option<String> = None;
     let mut review_text: Option<String> = None;
+    // wave-16 / task 05 — bounded per-node retry hints. Both the count
+    // and the delay are parsed strictly inside this loop; the first
+    // hint failure is captured into `retry_parse_error` so the
+    // validator can fail-fast at `build_validated_dag` time without
+    // re-tokenising the form. We keep only the FIRST error (later
+    // hints still flow through their normal handler / unsupported
+    // path so the audit trail captures every signal).
+    let mut retry_count: Option<u32> = None;
+    let mut retry_delay_ms: Option<u64> = None;
+    let mut retry_parse_error: Option<(String, String, String)> = None;
     let mut unsupported_fields: Vec<(String, String)> = Vec::new();
 
     for (raw_key, value) in pairs {
@@ -558,6 +681,108 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
             }
             "review-action" | "review_action" => set_first(&mut review_action, &value),
             "review-text" | "review_text" => set_first(&mut review_text, &value),
+            // wave-16 / task 05 — bounded per-node retry policy. Two
+            // spellings, distinct semantics:
+            //   `:retry-count N`   = N **additional** attempts beyond
+            //                        the first (so total = N+1).
+            //   `:max-attempts N`  = N **total** attempts including
+            //                        the first (so retry_count = N-1).
+            // Both lower into `retry_count` (additional retries) so the
+            // runtime has a single source of truth; the parser
+            // converts on the way in. First hint wins; later ones are
+            // ignored so a duplicate doesn't silently shadow the author's
+            // earlier declaration.
+            //
+            // Strict parsing: any non-numeric / negative value lands
+            // in `retry_parse_error` and the validator raises a
+            // structured `DagBuildError::InvalidRetryHint` BEFORE the
+            // scheduler ever sees the node — silent fall-through to
+            // "no retry" would lose the author's policy.
+            "retry-count" | "retry_count" => {
+                if retry_count.is_none() {
+                    let trimmed = value.trim();
+                    match trimmed.parse::<i64>() {
+                        Ok(n) if n >= 0 => {
+                            // Preserve the raw upper bound so callers
+                            // can see what they declared; the cap is
+                            // applied by `effective_max_attempts`.
+                            retry_count = Some(n.min(u32::MAX as i64) as u32);
+                        }
+                        Ok(_neg) if retry_parse_error.is_none() => {
+                            retry_parse_error = Some((
+                                raw_key.clone(),
+                                value.clone(),
+                                "value must be a non-negative integer".to_string(),
+                            ));
+                        }
+                        Err(e) if retry_parse_error.is_none() => {
+                            retry_parse_error = Some((
+                                raw_key.clone(),
+                                value.clone(),
+                                format!("not a valid integer: {}", e),
+                            ));
+                        }
+                        _ => { /* second error: keep the first */ }
+                    }
+                }
+            }
+            "max-attempts" | "max_attempts" => {
+                if retry_count.is_none() {
+                    let trimmed = value.trim();
+                    match trimmed.parse::<i64>() {
+                        // `:max-attempts 0` is meaningless (zero
+                        // attempts = never run) — we reject it as a
+                        // structured parse error so the author sees
+                        // the typo instead of a silently-skipped node.
+                        Ok(n) if n >= 1 => {
+                            // Convert total attempts → additional
+                            // retries. Subtract one then clamp to u32.
+                            let extra = (n - 1).min(u32::MAX as i64) as u32;
+                            retry_count = Some(extra);
+                        }
+                        Ok(_zero_or_neg) if retry_parse_error.is_none() => {
+                            retry_parse_error = Some((
+                                raw_key.clone(),
+                                value.clone(),
+                                "value must be a positive integer (>= 1)".to_string(),
+                            ));
+                        }
+                        Err(e) if retry_parse_error.is_none() => {
+                            retry_parse_error = Some((
+                                raw_key.clone(),
+                                value.clone(),
+                                format!("not a valid integer: {}", e),
+                            ));
+                        }
+                        _ => { /* second error: keep the first */ }
+                    }
+                }
+            }
+            "retry-delay-ms" | "retry_delay_ms" => {
+                if retry_delay_ms.is_none() {
+                    let trimmed = value.trim();
+                    match trimmed.parse::<i64>() {
+                        Ok(n) if n >= 0 => {
+                            retry_delay_ms = Some(n as u64);
+                        }
+                        Ok(_neg) if retry_parse_error.is_none() => {
+                            retry_parse_error = Some((
+                                raw_key.clone(),
+                                value.clone(),
+                                "value must be a non-negative integer (ms)".to_string(),
+                            ));
+                        }
+                        Err(e) if retry_parse_error.is_none() => {
+                            retry_parse_error = Some((
+                                raw_key.clone(),
+                                value.clone(),
+                                format!("not a valid integer: {}", e),
+                            ));
+                        }
+                        _ => { /* second error: keep the first */ }
+                    }
+                }
+            }
             _ => {
                 unsupported_fields.push((raw_key, value));
             }
@@ -597,6 +822,9 @@ fn parse_node_form(form: &str) -> Option<DagNode> {
         review_gate,
         review_action,
         review_text,
+        retry_count,
+        retry_delay_ms,
+        retry_parse_error,
         unsupported_fields,
     })
 }
@@ -917,6 +1145,7 @@ pub(super) async fn action_execute_dag_v1(
     let nodes_summary = build_nodes_summary(&parsed.nodes, &order);
     let node_hint_summary = build_node_hint_summary(&parsed);
     let concurrency_plan = compute_concurrency_plan(&parsed.nodes, &order, max_parallel_nodes);
+    let retry_plan = build_retry_plan(&parsed.nodes, &order);
 
     if dry_run {
         return Ok(ToolResult::json_pretty(&json!({
@@ -932,6 +1161,12 @@ pub(super) async fn action_execute_dag_v1(
             "topological_order": order,
             "concurrency_plan": concurrency_plan,
             "node_hint_summary": node_hint_summary,
+            // wave-16 / task 05 — projected retry budget per node so
+            // dry-run callers can preview the attempt ceiling without
+            // dispatching. Empty array when no node opted into a retry
+            // policy (preserves the v2 baseline byte-shape for callers
+            // that did not declare retry).
+            "retry_plan": retry_plan,
         })));
     }
 
@@ -985,6 +1220,10 @@ pub(super) async fn action_execute_dag_v1(
         "topological_order": order,
         "concurrency_plan": concurrency_plan,
         "node_hint_summary": node_hint_summary,
+        // wave-16 / task 05 — declared retry budget per node, included
+        // on every (non-dry-run) response too so the row that records
+        // the policy survives alongside the actual attempt counts.
+        "retry_plan": retry_plan,
         "evidence_path": evidence_path,
     });
     match plan_status_update {
@@ -1064,6 +1303,51 @@ fn build_nodes_summary(nodes: &[DagNode], order: &[String]) -> Value {
         }
         if let Some(t) = &n.review_text {
             entry["review_text"] = json!(t);
+        }
+        // wave-16 / task 05 — retry policy surface. Emit only when the
+        // node opted into ≥ 1 retry so the v2 baseline byte-shape is
+        // preserved for callers that did not declare a retry policy.
+        if n.retry_enabled() {
+            let mut retry = json!({
+                "max_attempts": n.effective_max_attempts(),
+            });
+            if let Some(raw) = n.retry_count {
+                retry["retry_count_raw"] = json!(raw);
+            }
+            if let Some(delay) = n.effective_retry_delay_ms() {
+                retry["retry_delay_ms"] = json!(delay);
+            }
+            entry["retry"] = retry;
+        }
+        out.push(entry);
+    }
+    Value::Array(out)
+}
+
+/// wave-16 / task 05 — projection of the per-node retry policy authors
+/// declared. Returned on both the dry-run and live response so the
+/// "what the scheduler will / did do" can be diffed against the
+/// observed `retry` block on each `node_results` entry. Order matches
+/// the topological-sort order; nodes with the v2-baseline single-attempt
+/// contract are omitted so the array stays empty for plans that did
+/// not declare retry (preserves the wave-15 byte-shape).
+fn build_retry_plan(nodes: &[DagNode], order: &[String]) -> Value {
+    let by_id: HashMap<&str, &DagNode> = nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut out: Vec<Value> = Vec::new();
+    for id in order {
+        let Some(n) = by_id.get(id.as_str()) else { continue };
+        if !n.retry_enabled() {
+            continue;
+        }
+        let mut entry = json!({
+            "id": n.id,
+            "max_attempts": n.effective_max_attempts(),
+        });
+        if let Some(raw) = n.retry_count {
+            entry["retry_count_raw"] = json!(raw);
+        }
+        if let Some(delay) = n.effective_retry_delay_ms() {
+            entry["retry_delay_ms"] = json!(delay);
         }
         out.push(entry);
     }
@@ -1154,6 +1438,13 @@ enum NodeLifecycle {
     Paused,
 }
 
+/// wave-16 / task 05 — `Default` is implemented to make wave-13/14/15
+/// test fixtures resilient against the retry-bookkeeping fields added
+/// in this wave. Production construction sites (`execute_with_concurrency`
+/// + the `NodeResult::skipped` helper) always populate every field
+/// explicitly; the default impl only catches test fixtures using
+/// `..Default::default()` so adding a new bookkeeping field doesn't
+/// require touching every old test.
 #[derive(Debug, Clone)]
 struct NodeResult {
     id: String,
@@ -1161,6 +1452,63 @@ struct NodeResult {
     state: NodeState,
     dispatch_strategy: String,
     inner_payload: Value,
+    /// wave-16 / task 05 — number of dispatch attempts the scheduler
+    /// actually consumed for this node. Always ≥ 1 for executed nodes
+    /// (we count the first dispatch as attempt 1); equals
+    /// `effective_max_attempts` only when every attempt failed. Skipped
+    /// / paused nodes report `0` because the scheduler never invoked
+    /// the inner handler. Surfaces on `node_results[].retry.attempts`.
+    attempts_made: u32,
+    /// wave-16 / task 05 — total attempts the scheduler was authorised
+    /// to make for this node (= `effective_max_attempts` at dispatch
+    /// time). Echoed alongside `attempts_made` so consumers can spot
+    /// "exhausted retries" without re-deriving the policy.
+    max_attempts: u32,
+    /// wave-16 / task 05 — true iff the node failed without retrying
+    /// because the failure was classified non-retryable (currently:
+    /// safe-descriptor refusals from the workstation-dispatch
+    /// substrate). Surfaces on the per-node response so consumers can
+    /// distinguish "we exhausted attempts" from "we refused to retry".
+    retry_skipped_non_retryable: bool,
+}
+
+impl NodeResult {
+    /// wave-16 / task 05 — minimal builder used by skip / pause sites
+    /// that never invoked the inner handler. Keeps construction local
+    /// to the scheduler so the per-call-site retry bookkeeping
+    /// (`attempts_made = 0`, `max_attempts = 1`) stays consistent.
+    fn skipped(
+        id: String,
+        target: String,
+        state: NodeState,
+        dispatch_strategy: String,
+    ) -> Self {
+        Self {
+            id,
+            target,
+            state,
+            dispatch_strategy,
+            inner_payload: Value::Null,
+            attempts_made: 0,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+        }
+    }
+}
+
+impl Default for NodeResult {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            target: String::new(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: String::new(),
+            inner_payload: Value::Null,
+            attempts_made: 0,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -1220,6 +1568,26 @@ impl ExecutionOutcome {
             } = &r.state
             {
                 e["review_question_warning"] = json!(w);
+            }
+            // wave-16 / task 05 — retry observability surface. We
+            // emit the `retry` block whenever the node is one whose
+            // policy authorised more than one attempt OR the dispatch
+            // actually consumed more than one attempt OR the failure
+            // was classified non-retryable. Nodes with the v2-baseline
+            // single-attempt contract that succeeded on attempt 1 stay
+            // quiet so the wave-15 byte-shape is preserved.
+            if r.max_attempts > 1
+                || r.attempts_made > 1
+                || r.retry_skipped_non_retryable
+            {
+                let mut retry = json!({
+                    "attempts": r.attempts_made,
+                    "max_attempts": r.max_attempts,
+                });
+                if r.retry_skipped_non_retryable {
+                    retry["non_retryable"] = json!(true);
+                }
+                e["retry"] = retry;
             }
             out.push(e);
         }
@@ -1397,6 +1765,14 @@ struct DispatchOutcome {
     /// per-node response under `reason` and in the `running -> failed`
     /// evidence entry's failure annotation.
     classification: std::result::Result<(), String>,
+    /// wave-16 / task 05 — true when the failure originated from a
+    /// workstation-dispatch safe-descriptor refusal (unsupported
+    /// target / project root unresolved / missing objective). These
+    /// failures are deterministic policy checks — re-running them
+    /// without changing the inputs would refuse identically. The
+    /// scheduler honours this flag by skipping the retry loop and
+    /// surfacing `retry_skipped_non_retryable=true` on the response.
+    non_retryable: bool,
 }
 
 /// Project a parsed DAG node into the workstation-dispatch hint contract.
@@ -1421,19 +1797,29 @@ fn node_to_workstation_hints(
 }
 
 /// Convert a workstation-dispatch outcome into the
-/// `(inner_payload, classification)` pair `dispatch_node` uses to populate
-/// `DispatchOutcome`. Keeps the per-node DAG contract intact: the response
-/// JSON carries the workstation-dispatch envelope under `inner_result`,
-/// and the outcome's status drives the success/failure classification.
+/// `(inner_payload, classification, non_retryable)` triple `dispatch_node`
+/// uses to populate `DispatchOutcome`. Keeps the per-node DAG contract
+/// intact: the response JSON carries the workstation-dispatch envelope
+/// under `inner_result`, and the outcome's status drives the
+/// success/failure classification.
+///
+/// wave-16 / task 05 — `non_retryable` is true ONLY for
+/// `SafeDescriptor` outcomes, because those refusals are deterministic
+/// policy checks (unsupported target / project root unresolved /
+/// missing objective). Re-running the same inputs would refuse
+/// identically; the scheduler respects this and bypasses the retry
+/// loop. `InnerError` (the substrate handler returned an error
+/// payload) IS retryable — that path may have transient causes.
 fn workstation_outcome_to_dispatch_pair(
     node: &DagNode,
     dispatch_strategy: &str,
     outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
     decision: &super::workstation_dispatch::DispatchDecision,
-) -> (Value, std::result::Result<(), String>) {
+) -> (Value, std::result::Result<(), String>, bool) {
     let status = outcome.status();
     let envelope =
         super::workstation_dispatch::outcome_to_response_fields(&outcome, dispatch_strategy);
+    let mut non_retryable = false;
     let classification: std::result::Result<(), String> = match &outcome {
         super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. } => Ok(()),
         super::workstation_dispatch::WorkstationDispatchOutcome::DryRun { .. } => Ok(()),
@@ -1448,11 +1834,17 @@ fn workstation_outcome_to_dispatch_pair(
         super::workstation_dispatch::WorkstationDispatchOutcome::SafeDescriptor {
             reason,
             ..
-        } => Err(format!(
-            "workstation_dispatch refused to dispatch node `{}`: {}",
-            node.id,
-            reason.detail()
-        )),
+        } => {
+            // Safe-descriptor refusals are deterministic policy checks
+            // — flag the failure as non-retryable so the wave loop
+            // skips the retry pass entirely.
+            non_retryable = true;
+            Err(format!(
+                "workstation_dispatch refused to dispatch node `{}`: {}",
+                node.id,
+                reason.detail()
+            ))
+        }
     };
     let mut payload = json!({
         "workstation_dispatch_status": status,
@@ -1477,7 +1869,7 @@ fn workstation_outcome_to_dispatch_pair(
             }
         }
     }
-    (payload, classification)
+    (payload, classification, non_retryable)
 }
 
 async fn dispatch_node(
@@ -1537,18 +1929,20 @@ async fn dispatch_node(
             false,
         )
         .await;
-        let (inner_payload, classification) = workstation_outcome_to_dispatch_pair(
-            &node,
-            &dispatch_strategy,
-            outcome,
-            &dispatch_decision,
-        );
+        let (inner_payload, classification, non_retryable) =
+            workstation_outcome_to_dispatch_pair(
+                &node,
+                &dispatch_strategy,
+                outcome,
+                &dispatch_decision,
+            );
         return Ok(DispatchOutcome {
             node_id: node.id.clone(),
             target: node.target.clone(),
             dispatch_strategy,
             inner_payload,
             classification,
+            non_retryable,
         });
     }
 
@@ -1561,12 +1955,17 @@ async fn dispatch_node(
                 .and_then(|v| v.as_str())
                 .unwrap_or("inner args build failed")
                 .to_string();
+            // wave-16 / task 05 — inner-args build failures are deterministic
+            // (e.g. missing required `flow_id` for `mission_flow_run`).
+            // Re-running with identical inputs would fail identically;
+            // mark non-retryable so the wave loop skips the retry pass.
             return Ok(DispatchOutcome {
                 node_id: node.id.clone(),
                 target: node.target.clone(),
                 dispatch_strategy,
                 inner_payload: err_payload,
                 classification: Err(reason),
+                non_retryable: true,
             });
         }
     };
@@ -1607,6 +2006,10 @@ async fn dispatch_node(
         dispatch_strategy,
         inner_payload,
         classification,
+        // Standard inner-handler failures may have transient causes —
+        // leave them retryable. The wave loop honours the per-node
+        // retry policy and stops once attempts are exhausted.
+        non_retryable: false,
     })
 }
 
@@ -1761,6 +2164,25 @@ async fn publish_plan_node_state_change(
 /// retry-aware future scheduler a single-call-site change.
 const PLAN_NODE_DEFAULT_ATTEMPT: u32 = 1;
 
+/// wave-16 / task 05 — pure retry decision. Extracted out of the wave
+/// loop so the predicate can be unit-tested without standing up an
+/// `AppState`. `should_retry` is true iff the failed attempt is not
+/// classified non-retryable AND attempts remain AND the wave is not
+/// already in fail-fast abort. The wave loop honours this decision
+/// deterministically so the tests below pin the contract.
+pub(super) fn plan_node_should_retry(
+    current_attempt: u32,
+    max_attempts: u32,
+    non_retryable: bool,
+    abort_new_dispatch: bool,
+) -> bool {
+    if non_retryable || abort_new_dispatch {
+        return false;
+    }
+    let attempts_remaining = max_attempts.saturating_sub(current_attempt);
+    attempts_remaining > 0
+}
+
 /// Emit `ready -> running` evidence at the moment the scheduler hands a node
 /// to its dispatch task. Kept structurally identical to the success/failure
 /// branches so audit dashboards can pivot on `state_transition` alone.
@@ -1776,6 +2198,7 @@ async fn emit_evidence_running(
     ctx: &EvidenceCtx<'_>,
     node: &DagNode,
     dispatch_strategy: &str,
+    attempt: u32,
     outcome: &mut ExecutionOutcome,
 ) {
     let (event_ref, warning) = publish_plan_node_state_change(
@@ -1783,7 +2206,7 @@ async fn emit_evidence_running(
         ctx.plan_id,
         node,
         dispatch_strategy,
-        PLAN_NODE_DEFAULT_ATTEMPT,
+        attempt,
         "ready",
         "running",
         None,
@@ -1804,7 +2227,7 @@ async fn emit_evidence_running(
     .with_extra("target_tool", json!(node.target))
     .with_extra("target", json!(node.target))
     .with_extra("dispatch_strategy", json!(dispatch_strategy))
-    .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT));
+    .with_extra("attempt", json!(attempt));
     let append_outcome = evidence_collector::append(
         state,
         ctx.plan_id,
@@ -1847,6 +2270,7 @@ async fn emit_evidence_finished(
     dispatch_strategy: &str,
     inner_payload: &Value,
     succeeded: bool,
+    attempt: u32,
     outcome: &mut ExecutionOutcome,
 ) {
     let to_state = if succeeded { "succeeded" } else { "failed" };
@@ -1869,7 +2293,7 @@ async fn emit_evidence_finished(
         ctx.plan_id,
         node,
         dispatch_strategy,
-        PLAN_NODE_DEFAULT_ATTEMPT,
+        attempt,
         "running",
         to_state,
         reason,
@@ -1889,7 +2313,7 @@ async fn emit_evidence_finished(
     .with_extra("target_tool", json!(node.target))
     .with_extra("target", json!(node.target))
     .with_extra("dispatch_strategy", json!(dispatch_strategy))
-    .with_extra("attempt", json!(PLAN_NODE_DEFAULT_ATTEMPT));
+    .with_extra("attempt", json!(attempt));
     if succeeded {
         // Success branch — populate `inner_dispatch` (canonical typed slot)
         // AND `inner_result` (legacy alias) so wave-12 typed readers and
@@ -2164,6 +2588,12 @@ async fn execute_with_concurrency(
         .collect();
     let mut tainted_by: HashMap<String, String> = HashMap::new();
     let mut results_by_id: HashMap<String, NodeResult> = HashMap::new();
+    // wave-16 / task 05 — per-node attempt counter. Bumped each time
+    // the scheduler hands the node to a dispatch task (whether the
+    // first attempt or a retry). Used to stamp the evidence + bus
+    // payload `attempt` field, and to decide when retries are
+    // exhausted (`attempts_made == effective_max_attempts`).
+    let mut attempts_made: HashMap<String, u32> = HashMap::new();
     let mut outcome = ExecutionOutcome::default();
     let mut abort_new_dispatch = false;
     let mut abort_aborter: Option<String> = None;
@@ -2219,15 +2649,10 @@ async fn execute_with_concurrency(
                 &mut outcome,
             )
             .await;
+            let target_clone = node.target.clone();
             results_by_id.insert(
                 id.clone(),
-                NodeResult {
-                    id,
-                    target: node.target.clone(),
-                    state: state_skip,
-                    dispatch_strategy,
-                    inner_payload: Value::Null,
-                },
+                NodeResult::skipped(id, target_clone, state_skip, dispatch_strategy),
             );
         }
 
@@ -2286,17 +2711,17 @@ async fn execute_with_concurrency(
                     &mut outcome,
                 )
                 .await;
+                let target_clone = node.target.clone();
                 results_by_id.insert(
                     id.clone(),
-                    NodeResult {
+                    NodeResult::skipped(
                         id,
-                        target: node.target.clone(),
-                        state: NodeState::SkippedFailFastAbort {
+                        target_clone,
+                        NodeState::SkippedFailFastAbort {
                             aborter: aborter.clone(),
                         },
                         dispatch_strategy,
-                        inner_payload: Value::Null,
-                    },
+                    ),
                 );
             }
             break;
@@ -2347,13 +2772,12 @@ async fn execute_with_concurrency(
                 .await;
                 results_by_id.insert(
                     id.clone(),
-                    NodeResult {
-                        id: id.clone(),
-                        target: node.target.clone(),
-                        state: NodeState::SkippedCondition,
+                    NodeResult::skipped(
+                        id.clone(),
+                        node.target.clone(),
+                        NodeState::SkippedCondition,
                         dispatch_strategy,
-                        inner_payload: Value::Null,
-                    },
+                    ),
                 );
                 propagate_taint(node, &succs, &mut tainted_by);
                 continue;
@@ -2381,16 +2805,15 @@ async fn execute_with_concurrency(
                 .await;
                 results_by_id.insert(
                     id.clone(),
-                    NodeResult {
-                        id: id.clone(),
-                        target: node.target.clone(),
-                        state: NodeState::Paused {
+                    NodeResult::skipped(
+                        id.clone(),
+                        node.target.clone(),
+                        NodeState::Paused {
                             question_id,
                             bus_publish_warning,
                         },
                         dispatch_strategy,
-                        inner_payload: Value::Null,
-                    },
+                    ),
                 );
                 continue;
             }
@@ -2412,6 +2835,11 @@ async fn execute_with_concurrency(
         }
 
         // 6. Mark dispatched nodes Running, write start evidence, spawn.
+        // wave-16 / task 05 — every spawn (first attempt or retry) bumps
+        // the per-node `attempts_made` counter and stamps the resulting
+        // attempt number onto the evidence + bus payload so audit
+        // dashboards can route on `attempt > 1` without reconstructing
+        // the retry policy from scratch.
         let mut join_set: tokio::task::JoinSet<Result<DispatchOutcome>> =
             tokio::task::JoinSet::new();
         for node in to_dispatch {
@@ -2420,7 +2848,20 @@ async fn execute_with_concurrency(
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
             lifecycle.insert(node.id.clone(), NodeLifecycle::Running);
-            emit_evidence_running(state, &ctx, &node, &dispatch_strategy, &mut outcome).await;
+            let attempt = {
+                let entry = attempts_made.entry(node.id.clone()).or_insert(0);
+                *entry += 1;
+                *entry
+            };
+            emit_evidence_running(
+                state,
+                &ctx,
+                &node,
+                &dispatch_strategy,
+                attempt,
+                &mut outcome,
+            )
+            .await;
             let state_clone = state.clone();
             let plan_clone = plan.clone();
             join_set.spawn(async move { dispatch_node(state_clone, plan_clone, node).await });
@@ -2428,6 +2869,15 @@ async fn execute_with_concurrency(
 
         // 7. Drain wave; for each result decide success/failure, update
         //    lifecycle + taint, write finish evidence.
+        //
+        // wave-16 / task 05 — on failure, consult the per-node retry
+        // policy. If the node opted in (`effective_max_attempts > 1`)
+        // AND the failure is retryable (not a deterministic
+        // safe-descriptor refusal) AND attempts remain, re-spawn the
+        // node into the SAME wave's JoinSet with the next attempt
+        // number. The node stays `Running`; only when retries are
+        // exhausted (or the failure is non-retryable) do we mark it
+        // `Failed` + propagate taint + maybe trip fail-fast.
         while let Some(joined) = join_set.join_next().await {
             let dispatch_outcome = match joined {
                 Ok(Ok(o)) => o,
@@ -2453,12 +2903,17 @@ async fn execute_with_concurrency(
                 dispatch_strategy,
                 inner_payload,
                 classification,
+                non_retryable,
             } = dispatch_outcome;
             let node = match by_id.get(&node_id) {
                 Some(n) => n.clone(),
                 None => continue,
             };
             let succeeded = classification.is_ok();
+            // The attempt # we are currently finishing. Authoritative
+            // because it was bumped at spawn time.
+            let current_attempt = attempts_made.get(&node_id).copied().unwrap_or(1);
+            let max_attempts = node.effective_max_attempts();
             emit_evidence_finished(
                 state,
                 &ctx,
@@ -2466,6 +2921,7 @@ async fn execute_with_concurrency(
                 &dispatch_strategy,
                 &inner_payload,
                 succeeded,
+                current_attempt,
                 &mut outcome,
             )
             .await;
@@ -2479,31 +2935,82 @@ async fn execute_with_concurrency(
                         state: NodeState::Succeeded,
                         dispatch_strategy,
                         inner_payload,
+                        attempts_made: current_attempt,
+                        max_attempts,
+                        retry_skipped_non_retryable: false,
                     },
                 );
-            } else {
-                lifecycle.insert(node_id.clone(), NodeLifecycle::Failed);
-                let reason = classification
-                    .err()
-                    .unwrap_or_else(|| "inner handler returned error".to_string());
-                results_by_id.insert(
-                    node_id.clone(),
-                    NodeResult {
-                        id: node_id.clone(),
-                        target,
-                        state: NodeState::Failed { reason },
-                        dispatch_strategy,
-                        inner_payload,
-                    },
-                );
-                // Taint propagates regardless of policy — it just changes
-                // whether *unrelated* nodes also get aborted (fail-fast) or
-                // can keep running (continue).
-                propagate_taint(&node, &succs, &mut tainted_by);
-                if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
-                    abort_new_dispatch = true;
-                    abort_aborter = Some(node_id.clone());
+                continue;
+            }
+
+            // Failure path — decide retry vs final failure. The
+            // predicate is `plan_node_should_retry` so unit tests can
+            // pin the decision without standing up the wave loop.
+            let should_retry = plan_node_should_retry(
+                current_attempt,
+                max_attempts,
+                non_retryable,
+                abort_new_dispatch,
+            );
+            if should_retry {
+                // Optional sleep between attempts. Skipped when absent
+                // / 0 so the common no-back-off case stays cheap.
+                if let Some(delay_ms) = node.effective_retry_delay_ms() {
+                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                 }
+                // Bump the attempt counter, re-emit `ready -> running`
+                // for the retry attempt, and re-spawn into the SAME
+                // JoinSet so the wave loop drains it without
+                // reshuffling the ready set. Lifecycle stays Running.
+                let next_attempt = {
+                    let entry = attempts_made.entry(node_id.clone()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                emit_evidence_running(
+                    state,
+                    &ctx,
+                    &node,
+                    &dispatch_strategy,
+                    next_attempt,
+                    &mut outcome,
+                )
+                .await;
+                let state_clone = state.clone();
+                let plan_clone = plan.clone();
+                let node_clone = node.clone();
+                join_set.spawn(async move {
+                    dispatch_node(state_clone, plan_clone, node_clone).await
+                });
+                continue;
+            }
+
+            // Final failure — exhausted retries OR non-retryable OR
+            // fail-fast already aborted this wave.
+            lifecycle.insert(node_id.clone(), NodeLifecycle::Failed);
+            let reason = classification
+                .err()
+                .unwrap_or_else(|| "inner handler returned error".to_string());
+            results_by_id.insert(
+                node_id.clone(),
+                NodeResult {
+                    id: node_id.clone(),
+                    target,
+                    state: NodeState::Failed { reason },
+                    dispatch_strategy,
+                    inner_payload,
+                    attempts_made: current_attempt,
+                    max_attempts,
+                    retry_skipped_non_retryable: non_retryable,
+                },
+            );
+            // Taint propagates regardless of policy — it just changes
+            // whether *unrelated* nodes also get aborted (fail-fast) or
+            // can keep running (continue).
+            propagate_taint(&node, &succs, &mut tainted_by);
+            if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
+                abort_new_dispatch = true;
+                abort_aborter = Some(node_id.clone());
             }
         }
     }
@@ -2991,6 +3498,9 @@ mod tests {
             state: NodeState::Succeeded,
             dispatch_strategy: "unknown".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.aggregate_status(), "dag_succeeded");
         assert_eq!(o.runner_status(), "all_nodes_dispatched");
@@ -3007,6 +3517,9 @@ mod tests {
             state: NodeState::Failed { reason: "boom".into() },
             dispatch_strategy: "unknown".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.aggregate_status(), "dag_failed");
         assert_eq!(o.runner_status(), "fail_fast_aborted");
@@ -3023,6 +3536,9 @@ mod tests {
             state: NodeState::Failed { reason: "x".into() },
             dispatch_strategy: "unknown".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "n2".into(),
@@ -3032,6 +3548,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "n3".into(),
@@ -3039,6 +3558,9 @@ mod tests {
             state: NodeState::Succeeded,
             dispatch_strategy: "unknown".into(),
             inner_payload: json!({"ok": true}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
         assert_eq!(o.target_plan_status(), Some(PlanStatus::Failed));
@@ -3461,6 +3983,9 @@ mod tests {
             state: NodeState::Succeeded,
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "b".into(),
@@ -3468,6 +3993,9 @@ mod tests {
             state: NodeState::SkippedUpstreamFailed { failed_dep: "a".into() },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "c".into(),
@@ -3475,6 +4003,9 @@ mod tests {
             state: NodeState::SkippedCondition,
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "d".into(),
@@ -3482,6 +4013,9 @@ mod tests {
             state: NodeState::Failed { reason: "boom".into() },
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({"error": "boom"}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "e".into(),
@@ -3489,6 +4023,9 @@ mod tests {
             state: NodeState::SkippedFailFastAbort { aborter: "d".into() },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         let v = o.skipped_nodes_json();
         let arr = v.as_array().expect("array");
@@ -3513,6 +4050,9 @@ mod tests {
             state: NodeState::Failed { reason: "boom".into() },
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({"error": "boom"}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "b".into(),
@@ -3520,6 +4060,9 @@ mod tests {
             state: NodeState::SkippedFailFastAbort { aborter: "a".into() },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         let v = o.node_results_json();
         let arr = v.as_array().expect("array");
@@ -3543,6 +4086,9 @@ mod tests {
             state: NodeState::Succeeded,
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "b".into(),
@@ -3550,6 +4096,9 @@ mod tests {
             state: NodeState::SkippedCondition,
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
         assert_eq!(o.runner_status(), "partial_dispatched");
@@ -4100,13 +4649,17 @@ mod tests {
             ),
             task_brief: None,
         };
-        let (payload, classification) = workstation_outcome_to_dispatch_pair(
+        let (payload, classification, non_retryable) = workstation_outcome_to_dispatch_pair(
             &node,
             "fresh-code-alignment",
             outcome,
             &fixture_decision_explicit(),
         );
         assert!(classification.is_err(), "safe descriptors must fail dispatch");
+        assert!(
+            non_retryable,
+            "safe-descriptor refusals are deterministic and must classify non-retryable"
+        );
         assert_eq!(payload["workstation_dispatch_status"], "skipped_project_root_unresolved");
         assert_eq!(payload["node_id"], "n1");
         assert_eq!(payload["workstation_dispatch_source"], "plan_hint");
@@ -4130,13 +4683,17 @@ mod tests {
             evidence_error: None,
             inner_payload: json!({"task_id": "btk-7"}),
         };
-        let (payload, classification) = workstation_outcome_to_dispatch_pair(
+        let (payload, classification, non_retryable) = workstation_outcome_to_dispatch_pair(
             &node,
             "agent-team",
             outcome,
             &fixture_decision_inferred(),
         );
         assert!(classification.is_ok(), "dispatched must succeed");
+        assert!(
+            !non_retryable,
+            "successful dispatch must NOT be flagged non-retryable"
+        );
         assert_eq!(payload["workstation_dispatch_status"], "dispatched");
         assert_eq!(payload["dispatch_strategy"], "agent-team");
         assert_eq!(payload["inner_result"]["task_id"], "btk-7");
@@ -4479,6 +5036,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         let v = o.node_results_json();
         let arr = v.as_array().unwrap();
@@ -4503,6 +5063,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         let v = o.node_results_json();
         let arr = v.as_array().unwrap();
@@ -4519,6 +5082,9 @@ mod tests {
             state: NodeState::Succeeded,
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "g".into(),
@@ -4529,6 +5095,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "g2".into(),
@@ -4539,6 +5108,9 @@ mod tests {
             },
             dispatch_strategy: "agent-team".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         let v = o.paused_nodes_json();
         let arr = v.as_array().unwrap();
@@ -4563,6 +5135,9 @@ mod tests {
             state: NodeState::Succeeded,
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "g1".into(),
@@ -4573,6 +5148,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "g2".into(),
@@ -4583,6 +5161,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.paused_node_ids(), vec!["g1".to_string(), "g2".to_string()]);
         assert_eq!(
@@ -4606,6 +5187,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.aggregate_status(), "dag_paused");
         assert_eq!(o.runner_status(), "review_gate_paused");
@@ -4627,6 +5211,9 @@ mod tests {
             state: NodeState::Succeeded,
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "g".into(),
@@ -4637,6 +5224,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.aggregate_status(), "dag_paused");
         assert_eq!(o.target_plan_status(), None);
@@ -4654,6 +5244,9 @@ mod tests {
             state: NodeState::Failed { reason: "boom".into() },
             dispatch_strategy: "agent-team".into(),
             inner_payload: json!({"error": "boom"}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         o.results.push(NodeResult {
             id: "g".into(),
@@ -4664,6 +5257,9 @@ mod tests {
             },
             dispatch_strategy: "unknown".into(),
             inner_payload: Value::Null,
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
         });
         assert_eq!(o.aggregate_status(), "dag_partial");
         assert_eq!(o.target_plan_status(), Some(PlanStatus::Failed));
@@ -4782,6 +5378,416 @@ mod tests {
         // is still real, the warning is observability-only.
         assert_eq!(entry["state_transition"], "pending -> paused");
         assert_eq!(entry["review_question_warning"], "simulated bus drop");
+    }
+
+    // ── wave-16 / task 05 — bounded per-node retry policy ──────────────
+    //
+    // Pure tests for the parser additions (`:retry-count` /
+    // `:max-attempts` / `:retry-delay-ms`), the typed projections
+    // (`effective_max_attempts` + `effective_retry_delay_ms`), the
+    // structured parse-error path (`DagBuildError::InvalidRetryHint`),
+    // the dry-run `retry_plan` projection, the per-node response
+    // surface, and the safe-descriptor non-retryable classification.
+    //
+    // End-to-end retry behaviour (one failure then success → succeeded;
+    // exhausted attempts → failed) is covered by the integration tests
+    // under `tests/plan_dag_retry.rs` because it requires an `AppState`
+    // / handler stub — these pure tests pin the contract surface
+    // without standing up the daemon.
+
+    #[test]
+    fn parse_node_form_captures_retry_count_keyword() {
+        // `:retry-count N` declares N **additional** attempts beyond
+        // the first; both kebab- and snake_case spellings populate
+        // `retry_count` directly.
+        for keyword in ["retry-count", "retry_count"] {
+            let sexp = format!(
+                r#"(plan (node :id "n1" :target "mission_execution" :{} 2))"#,
+                keyword
+            );
+            let parsed = parse_plan_dag(&sexp);
+            assert_eq!(
+                parsed.nodes[0].retry_count,
+                Some(2),
+                "keyword `:{}` must populate retry_count directly",
+                keyword
+            );
+            assert_eq!(parsed.nodes[0].effective_max_attempts(), 3); // 1 + 2 retries
+            assert!(parsed.nodes[0].retry_enabled());
+        }
+    }
+
+    #[test]
+    fn parse_node_form_captures_max_attempts_keyword_as_total_attempts() {
+        // `:max-attempts N` declares N **total** attempts (including
+        // the first); the parser converts to additional retries so
+        // the runtime always sees the same shape.
+        for keyword in ["max-attempts", "max_attempts"] {
+            let sexp = format!(
+                r#"(plan (node :id "n1" :target "mission_execution" :{} 3))"#,
+                keyword
+            );
+            let parsed = parse_plan_dag(&sexp);
+            assert_eq!(
+                parsed.nodes[0].retry_count,
+                Some(2),
+                "keyword `:{}` value 3 must lower into 2 additional retries",
+                keyword
+            );
+            assert_eq!(parsed.nodes[0].effective_max_attempts(), 3);
+        }
+    }
+
+    #[test]
+    fn parse_node_form_max_attempts_one_keeps_baseline_single_attempt() {
+        // `:max-attempts 1` means "exactly one attempt" — the baseline
+        // single-attempt contract; retry_enabled must read false.
+        let sexp = r#"(plan (node :id "n" :target "mission_execution" :max-attempts 1))"#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].retry_count, Some(0));
+        assert_eq!(parsed.nodes[0].effective_max_attempts(), 1);
+        assert!(!parsed.nodes[0].retry_enabled());
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_max_attempts_zero() {
+        // `:max-attempts 0` is meaningless — zero attempts = never
+        // run. We surface a structured parse error so the typo is
+        // visible to the author instead of silently disabling the node.
+        let sexp =
+            r#"(plan (node :id "n" :target "mission_execution" :max-attempts 0))"#;
+        let err = build_validated_dag(sexp).unwrap_err();
+        match err {
+            DagBuildError::InvalidRetryHint { node_id, key, raw, detail } => {
+                assert_eq!(node_id, "n");
+                assert_eq!(key, "max-attempts");
+                assert_eq!(raw, "0");
+                assert!(detail.contains("positive"));
+            }
+            other => panic!("expected InvalidRetryHint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_node_form_captures_retry_delay_ms() {
+        let sexp = r#"
+            (plan
+              (node :id "n1" :target "mission_execution"
+                    :retry-count 1
+                    :retry-delay-ms 250))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].retry_count, Some(1));
+        assert_eq!(parsed.nodes[0].retry_delay_ms, Some(250));
+        assert_eq!(parsed.nodes[0].effective_retry_delay_ms(), Some(250));
+        assert_eq!(parsed.nodes[0].effective_max_attempts(), 2);
+    }
+
+    #[test]
+    fn parse_node_form_retry_count_caps_to_safe_max() {
+        // Authoring `:retry-count 9999` cannot melt the dispatch loop
+        // — `effective_max_attempts` clamps to MAX_NODE_ATTEMPTS_CAP.
+        let sexp =
+            r#"(plan (node :id "n" :target "mission_execution" :retry-count 9999))"#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].retry_count, Some(9999));
+        assert_eq!(
+            parsed.nodes[0].effective_max_attempts(),
+            MAX_NODE_ATTEMPTS_CAP
+        );
+    }
+
+    #[test]
+    fn parse_node_form_retry_delay_ms_caps_to_safe_max() {
+        let sexp = r#"
+            (plan
+              (node :id "n" :target "mission_execution"
+                    :retry-count 1
+                    :retry-delay-ms 9999999))
+        "#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].retry_delay_ms, Some(9999999));
+        assert_eq!(
+            parsed.nodes[0].effective_retry_delay_ms(),
+            Some(MAX_RETRY_DELAY_MS)
+        );
+    }
+
+    #[test]
+    fn parse_node_form_retry_count_zero_keeps_baseline_single_attempt() {
+        let sexp = r#"(plan (node :id "n" :target "mission_execution" :retry-count 0))"#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].retry_count, Some(0));
+        assert_eq!(parsed.nodes[0].effective_max_attempts(), 1);
+        assert!(!parsed.nodes[0].retry_enabled());
+    }
+
+    #[test]
+    fn parse_node_form_retry_count_absent_keeps_baseline_single_attempt() {
+        let sexp = r#"(plan (node :id "n" :target "mission_execution"))"#;
+        let parsed = parse_plan_dag(sexp);
+        assert_eq!(parsed.nodes[0].retry_count, None);
+        assert_eq!(parsed.nodes[0].effective_max_attempts(), 1);
+        assert!(!parsed.nodes[0].retry_enabled());
+        assert_eq!(parsed.nodes[0].effective_retry_delay_ms(), None);
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_negative_retry_count() {
+        // Negative retry counts are a structured parse error — silently
+        // dropping the hint into `unsupported_fields` would lose the
+        // policy the author declared.
+        let sexp =
+            r#"(plan (node :id "n" :target "mission_execution" :retry-count -1))"#;
+        let err = build_validated_dag(sexp).unwrap_err();
+        match err {
+            DagBuildError::InvalidRetryHint { node_id, key, raw, detail } => {
+                assert_eq!(node_id, "n");
+                assert_eq!(key, "retry-count");
+                assert_eq!(raw, "-1");
+                assert!(detail.contains("non-negative"));
+            }
+            other => panic!("expected InvalidRetryHint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_non_numeric_retry_count() {
+        let sexp = r#"
+            (plan (node :id "n" :target "mission_execution" :max-attempts "thrice"))
+        "#;
+        let err = build_validated_dag(sexp).unwrap_err();
+        match err {
+            DagBuildError::InvalidRetryHint { node_id, key, raw, .. } => {
+                assert_eq!(node_id, "n");
+                assert_eq!(key, "max-attempts");
+                assert_eq!(raw, "thrice");
+            }
+            other => panic!("expected InvalidRetryHint, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_validated_dag_rejects_negative_retry_delay_ms() {
+        let sexp = r#"
+            (plan
+              (node :id "n" :target "mission_execution"
+                    :retry-count 1
+                    :retry-delay-ms -50))
+        "#;
+        let err = build_validated_dag(sexp).unwrap_err();
+        assert!(matches!(err, DagBuildError::InvalidRetryHint { .. }));
+    }
+
+    #[test]
+    fn invalid_retry_hint_into_tool_result_carries_invalid_param_code() {
+        // Author-facing surface of the structured parse error: the
+        // ToolResult must carry the canonical INVALID_PARAM error code
+        // and a suggestion that points at the corrective action so a
+        // failed dispatch tells the author exactly what to fix.
+        let err = DagBuildError::InvalidRetryHint {
+            node_id: "n".into(),
+            key: "retry-count".into(),
+            raw: "-1".into(),
+            detail: "value must be a non-negative integer".into(),
+        };
+        let tr = err.into_tool_result();
+        assert_eq!(tr.is_error, Some(true));
+        let payload = tool_result_payload(&tr);
+        assert_eq!(payload["error_code"], error_codes::INVALID_PARAM);
+        let reason = payload["reason"].as_str().expect("reason string");
+        assert!(reason.contains("retry-count"), "reason: {}", reason);
+        assert!(reason.contains("-1"), "reason: {}", reason);
+        assert!(payload["suggestion"].is_string(), "must carry a suggestion");
+    }
+
+    #[test]
+    fn build_retry_plan_lists_only_nodes_that_opted_in() {
+        // Plain nodes (no retry hint) and `:max-attempts 1` (explicit
+        // single-attempt) MUST stay out of `retry_plan` so the v2
+        // baseline byte-shape is preserved for callers that never
+        // declared a retry policy.
+        let sexp = r#"
+            (plan
+              (node :id "a" :target "mission_execution")
+              (node :id "b" :target "mission_execution" :retry-count 2 :retry-delay-ms 100)
+              (node :id "c" :target "mission_execution" :max-attempts 1)
+              (node :id "d" :target "mission_execution" :max-attempts 2))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let plan = build_retry_plan(&parsed.nodes, &order);
+        let arr = plan.as_array().unwrap();
+        assert_eq!(arr.len(), 2, "only nodes with > 1 attempts surface");
+        // Node `b` opted in via `:retry-count 2` (3 total).
+        assert_eq!(arr[0]["id"], "b");
+        assert_eq!(arr[0]["max_attempts"], 3);
+        assert_eq!(arr[0]["retry_count_raw"], 2);
+        assert_eq!(arr[0]["retry_delay_ms"], 100);
+        // Node `d` opted in via `:max-attempts 2` (lowered to 1 retry).
+        assert_eq!(arr[1]["id"], "d");
+        assert_eq!(arr[1]["max_attempts"], 2);
+        assert_eq!(arr[1]["retry_count_raw"], 1);
+    }
+
+    #[test]
+    fn build_nodes_summary_surfaces_retry_block_when_present() {
+        let nodes = vec![
+            DagNode {
+                id: "rb".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                retry_count: Some(2),
+                retry_delay_ms: Some(50),
+                ..Default::default()
+            },
+            DagNode {
+                id: "plain".into(),
+                target: "mission_execution".into(),
+                failure_policy: "fail-fast".into(),
+                ..Default::default()
+            },
+        ];
+        let order = vec!["rb".to_string(), "plain".to_string()];
+        let summary = build_nodes_summary(&nodes, &order);
+        let arr = summary.as_array().unwrap();
+        let rb = &arr[0];
+        assert_eq!(rb["retry"]["max_attempts"], 3);
+        assert_eq!(rb["retry"]["retry_count_raw"], 2);
+        assert_eq!(rb["retry"]["retry_delay_ms"], 50);
+        let plain = &arr[1];
+        // Plain node never opted in — must NOT carry a `retry` block
+        // (preserves the wave-15 baseline byte-shape).
+        assert!(plain.get("retry").is_none());
+    }
+
+    #[test]
+    fn node_results_json_emits_retry_block_when_attempts_made_more_than_one() {
+        let mut o = ExecutionOutcome::default();
+        // A node that succeeded on attempt 2 (one retry consumed) must
+        // emit the `retry` observability block.
+        o.results.push(NodeResult {
+            id: "r".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({"ok": true}),
+            attempts_made: 2,
+            max_attempts: 3,
+            retry_skipped_non_retryable: false,
+        });
+        // A baseline-quiet node (single attempt, no retry policy) must
+        // NOT emit the block — preserves wave-15 byte-shape.
+        o.results.push(NodeResult {
+            id: "q".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Succeeded,
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0]["retry"]["attempts"], 2);
+        assert_eq!(arr[0]["retry"]["max_attempts"], 3);
+        assert!(arr[0]["retry"].get("non_retryable").is_none());
+        assert!(arr[1].get("retry").is_none());
+    }
+
+    #[test]
+    fn node_results_json_emits_retry_block_when_failure_was_non_retryable() {
+        // Safe-descriptor refusal — only one attempt, but the
+        // `non_retryable` flag must surface so consumers can
+        // distinguish "we exhausted attempts" from "we refused to
+        // retry on policy grounds".
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "sd".into(),
+            target: "mission_task_delegate".into(),
+            state: NodeState::Failed {
+                reason: "workstation_dispatch refused: no project root".into(),
+            },
+            dispatch_strategy: "fresh-code-alignment".into(),
+            inner_payload: json!({"workstation_dispatch_status": "skipped_project_root_unresolved"}),
+            attempts_made: 1,
+            max_attempts: 3,
+            retry_skipped_non_retryable: true,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().unwrap();
+        assert_eq!(arr[0]["retry"]["attempts"], 1);
+        assert_eq!(arr[0]["retry"]["max_attempts"], 3);
+        assert_eq!(arr[0]["retry"]["non_retryable"], true);
+    }
+
+    // ── wave-16 / task 05 — retry decision predicate ──────────────────
+    //
+    // `plan_node_should_retry` is the single point of truth for the
+    // wave loop's "retry vs final failure" branch. Pure tests below
+    // pin the matrix authors care about: one failure then a remaining
+    // attempt → retry; exhausted → no retry; safe-descriptor refusal
+    // → no retry; fail-fast abort → no retry.
+
+    #[test]
+    fn plan_node_should_retry_first_failure_with_attempts_left() {
+        // attempt 1 of 3 (1 + 2 retries) failed, retryable, no abort
+        // → must retry on attempt 2.
+        assert!(plan_node_should_retry(1, 3, false, false));
+        // attempt 2 of 3 still has one more retry left.
+        assert!(plan_node_should_retry(2, 3, false, false));
+    }
+
+    #[test]
+    fn plan_node_should_retry_exhausted_attempts_returns_false() {
+        // Final attempt failed → must NOT retry.
+        assert!(!plan_node_should_retry(3, 3, false, false));
+        // Defensive: current_attempt > max_attempts (saturating sub).
+        assert!(!plan_node_should_retry(4, 3, false, false));
+    }
+
+    #[test]
+    fn plan_node_should_retry_baseline_single_attempt_returns_false() {
+        // Default policy = 1 attempt total → never retries.
+        assert!(!plan_node_should_retry(1, 1, false, false));
+    }
+
+    #[test]
+    fn plan_node_should_retry_safe_descriptor_refusal_short_circuits() {
+        // Safe-descriptor refusal — non-retryable trumps remaining
+        // attempts so the wave loop never re-spawns a deterministic
+        // policy refusal.
+        assert!(!plan_node_should_retry(1, 3, true, false));
+    }
+
+    #[test]
+    fn plan_node_should_retry_fail_fast_abort_short_circuits() {
+        // Even with attempts left + retryable failure, an already-
+        // tripped fail-fast abort must stop further retries so the
+        // failing-fast contract (no new dispatches once aborted) is
+        // honoured for retries too.
+        assert!(!plan_node_should_retry(1, 3, false, true));
+    }
+
+    #[test]
+    fn node_results_json_quiet_for_baseline_single_attempt_failure() {
+        // A node that failed on its single allowed attempt (no retry
+        // policy) must stay quiet on the `retry` surface so the
+        // wave-15 byte-shape is preserved.
+        let mut o = ExecutionOutcome::default();
+        o.results.push(NodeResult {
+            id: "f".into(),
+            target: "mission_execution".into(),
+            state: NodeState::Failed { reason: "boom".into() },
+            dispatch_strategy: "agent-team".into(),
+            inner_payload: json!({"error": "boom"}),
+            attempts_made: 1,
+            max_attempts: 1,
+            retry_skipped_non_retryable: false,
+        });
+        let v = o.node_results_json();
+        let arr = v.as_array().unwrap();
+        assert!(arr[0].get("retry").is_none());
     }
 
     /// Forward-compat smoke test: the deterministic id we stamp on the
