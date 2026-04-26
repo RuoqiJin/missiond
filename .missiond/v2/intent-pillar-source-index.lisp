@@ -884,7 +884,7 @@
                     "memory.directive-layer.file-first-artifacts"
                     "flow.execution-runner-dag-scheduler"
                     "intent-layer.plan-dag-runtime-v2"]
-        :note "wave 13 task 02 (commit 8bb6110): plan_dag.rs runtime v2 已 code-aligned partial — max_parallel_nodes 参数 (default=1=v1 行为) + tokio::JoinSet 并发 dispatch; node lifecycle 6 状态 (pending/ready/running/succeeded/failed/skipped) + 3 skip 子分类 (upstream_failed / fail_fast_aborted / condition_gated); failure-policy fail-fast vs continue 已实现; per-node evidence transition 写 evidence collector. 单节点 fast-path 保留. wave 16 task 04 (commit a51bc52): paused 7th lifecycle 落地 — 节点 :review-gate 'question-event' (+ 可选 :review-action / :review-text) 触发 paused; deterministic review id 'review:plan:<plan_id>:v<v>:plan-node:<sha256(node_id)[..16]>'; aggregate_status='dag_paused' / runner_status='review_gate_paused'; bus failure → 仍 pause + warning; 不实现 auto-resume. wave 16 task 05 (commit d8f8a6e): per-node retry policy v0 — :retry-count (additional) / :max-attempts (total) / :retry-delay-ms cap 60s + cap 3 attempts; SafeDescriptor refusals 不 retry (UnsupportedTarget/ProjectRootUnresolved/MissingObjective); 每 attempt 写自己 evidence (attempt number); failure-policy 与 retry 正交 (retry exhaust 后 propagate_taint). 完整 11-stage 协议 (claim-lease 接入 agent-execution-coordination / rollback compensate / acceptance evaluator / mark-plan-final / trigger-record-execution-distill) 仍 architecture-designed pending; paused-resume 后续 plan node 重激活 listener 仍 pending — 协议正文不压缩")
+        :note "wave 13 task 02 (commit 8bb6110): plan_dag.rs runtime v2 已 code-aligned partial — max_parallel_nodes 参数 (default=1=v1 行为) + tokio::JoinSet 并发 dispatch; node lifecycle 6 状态 (pending/ready/running/succeeded/failed/skipped) + 3 skip 子分类 (upstream_failed / fail_fast_aborted / condition_gated); failure-policy fail-fast vs continue 已实现; per-node evidence transition 写 evidence collector. 单节点 fast-path 保留. wave 16 task 04 (commit a51bc52): paused 7th lifecycle 落地 — 节点 :review-gate 'question-event' (+ 可选 :review-action / :review-text) 触发 paused; deterministic review id 'review:plan:<plan_id>:v<v>:plan-node:<sha256(node_id)[..16]>'; aggregate_status='dag_paused' / runner_status='review_gate_paused'; bus failure → 仍 pause + warning; 不实现 auto-resume. wave 16 task 05 (commit d8f8a6e): per-node retry policy v0 — :retry-count (additional) / :max-attempts (total) / :retry-delay-ms cap 60s + cap 3 attempts; SafeDescriptor refusals 不 retry (UnsupportedTarget/ProjectRootUnresolved/MissingObjective); 每 attempt 写自己 evidence (attempt number); failure-policy 与 retry 正交 (retry exhaust 后 propagate_taint). wave 17 task 01 (commit a42f5fd): paused-resume hook v0 — mission_plan(action=execute) 4 字段 (resume_review_question_id / resume_review_decision / resume_actor / resume_note); 3 decision (approved 重 dispatch fresh attempt 1 / rejected 不 dispatch / needs_changes paused); spawn_review_resolution_sub 扩 plan-node action 自动 route 到 resume helper; evidence paused→resume_*. wave 17 task 02 (commit 8661fcb): claim/lease v0 — claim_lease_secs / claimer_name / enforce_claims 3 args; Claimed 第 8 lifecycle (Pending → Claimed → Running); claim scope :owned-files → :scope → plan/<plan_id>/node/<node_id> fallback; scopes_overlap_pure 共享给 claim/audit/scoped-commit 三处; enforce_claims default false byte-compat. wave 17 task 03 (commit f572729): acceptance evaluator v0 — 3 modes (inner_status / evidence_keys / manual); 绝不 shell (grep proof 0 命中); id space acceptance:plan:<plan_id>:v<v>:<node_id> 与 review-gate review:* 隔离 (各自 routing); manual_required 复用 Paused 不新加态; evidence succeeded→acceptance_*. wave 17 task 04 (commit d4466c6): rollback policy v0 — 3 modes (none/descriptor/workstation); 5 safety gates (missing objective / empty owned-files / no project signal / unsafe strategy / SafeDescriptor refusal); workstation 复用 build_task_brief / run_workstation_dispatch; rollback 在 final fail 后 / downstream taint 前; evidence failed→rollback_*. wave 17 task 05 (commit 402fb82): finalize + distill trigger v0 — finalize_plan / distill_on_success / distill_mode (default false / false / dry_run); 4 finalization rule (succeeded → succeeded; failed → failed; partial → failed; paused → unchanged 不撒谎); distill 经现有 super::workflow::handle() 不动 workflow.rs; distill 失败 warning 仍保 plan final state. 仍 pending: cross-plan distill chain / acceptance fan-in / live LLM auto-approve / git hook / autonomous spawn — 协议正文不压缩")
 
       (section-entry
         :section-id "flow.execution-runner-dag-scheduler"
@@ -894,7 +894,7 @@
         :status code-aligned-partial
         :compression-safe? false
         :cross-ref ["intent-layer.plan-dag-runtime-v2" "intent-layer.actor.plan-dag-scheduler"]
-        :note "wave 13 task 02 (commit 8bb6110): runtime v2 (max_parallel_nodes / lifecycle / failure-policy / per-node evidence) code-aligned partial; wave 16 task 04 (commit a51bc52) paused 7th lifecycle + review-gate question-event trigger; wave 16 task 05 (commit d8f8a6e) per-node retry-N (cap 3 attempts; cap delay 60s; SafeDescriptor refusals 不 retry); 完整 11-stage logic-core + node schema + node FSM + claim-lease + rollback + acceptance + mark-plan-final + anti-patterns + open-questions 协议契约段不压缩")
+        :note "wave 13 task 02 (commit 8bb6110): runtime v2 (max_parallel_nodes / lifecycle / failure-policy / per-node evidence) code-aligned partial; wave 16 task 04 (commit a51bc52) paused 7th lifecycle + review-gate question-event trigger; wave 16 task 05 (commit d8f8a6e) per-node retry-N (cap 3 attempts; cap delay 60s; SafeDescriptor refusals 不 retry); wave 17 task 01 (commit a42f5fd) paused-resume hook (s8 paused 节点接 resume_review_decision approved 后 fresh attempt 1 重 dispatch); wave 17 task 02 (commit 8661fcb) claim-lease v0 (s5 claim 在 pending→running 之间插 claimed 第 8 态; opt-in enforce_claims default false byte-compat); wave 17 task 03 (commit f572729) acceptance evaluator v0 (s7 三模式 inner_status / evidence_keys / manual; 绝不 shell; manual_required 复用 paused; id space acceptance:* 与 review:* 隔离); wave 17 task 04 (commit d4466c6) rollback policy v0 (s9 三模式 none/descriptor/workstation + 5 safety gates; rollback 在 final fail 后 / downstream taint 前); wave 17 task 05 (commit 402fb82) finalize + distill v0 (s10/s11 4 finalization rule paused → unchanged 不撒谎; distill 经 super::workflow::handle); 完整 11-stage logic-core + node schema + node FSM + claim-lease + rollback + acceptance + mark-plan-final + anti-patterns + open-questions 协议契约段不压缩")
 
       (section-entry
         :section-id "memory.directive-layer.plan-node-state-projection"
@@ -904,7 +904,7 @@
         :status code-aligned-partial
         :compression-safe? false
         :cross-ref ["intent-layer.plan-dag-runtime-v2" "intent-layer.evidence-collector-typed-helper"]
-        :note "wave 13 task 02 (commit 8bb6110): per-node state projection 由 plan_dag runtime v2 写入 — pending/ready/running/succeeded/failed + 3 skip 子分类 (upstream_failed / fail_fast_aborted / condition_gated) 已落 evidence sidecar; v0 plan_runner_dispatch entry shape 向后兼容; wave 16 task 04 (commit a51bc52) 加 paused 7th lifecycle + review-gate question-event entry; wave 16 task 05 (commit d8f8a6e) 加 per-attempt evidence entry (每次 retry 一个独立 attempt entry, 含 attempt number); claim_id (复用 mission_execution claim-lease) / acceptance_pass / rollback_path 仍 architecture-designed pending — 配合完整 11-stage scheduler 落地")
+        :note "wave 13 task 02 (commit 8bb6110): per-node state projection 由 plan_dag runtime v2 写入 — pending/ready/running/succeeded/failed + 3 skip 子分类 (upstream_failed / fail_fast_aborted / condition_gated) 已落 evidence sidecar; v0 plan_runner_dispatch entry shape 向后兼容; wave 16 task 04 (commit a51bc52) 加 paused 7th lifecycle + review-gate question-event entry; wave 16 task 05 (commit d8f8a6e) 加 per-attempt evidence entry (每次 retry 一个独立 attempt entry, 含 attempt number); wave 17 task 01 (commit a42f5fd) 加 paused→resume_{approved|rejected|needs_changes} evidence (approved 后接 ready→running + running→{succeeded|failed} 三条); wave 17 task 02 (commit 8661fcb) 加 claim_id + Claimed 第 8 态 + pending→claimed→running→{succeeded|failed}→released 五段 evidence (released 含 claim_terminal_state); wave 17 task 03 (commit f572729) 加 acceptance evaluator succeeded→acceptance_{accepted|rejected|manual_required} evidence (rejected 后翻回 failed; manual_required 复用 paused 不新加态); wave 17 task 04 (commit d4466c6) 加 rollback failed→rollback_{not_requested|descriptor_ready|dispatched|refused|failed} evidence + node_results[].rollback 块 (acceptance_commands_executed=false pinned); wave 17 task 05 (commit 402fb82) 加 plan-level dag_finalized evidence + finalization 块映射 aggregate→plan_status; rollback_path / acceptance_pass 字段已落, 只剩 cross-plan distill chain / 跨节点 acceptance fan-in 仍 future")
 
       ;; ── 区域 5 · methodology compiler / semantic lifting ──
       (section-entry
@@ -1091,8 +1091,8 @@
                     "event-bus.section.egress"
                     "event-bus.section.execution-event.plan-node-state-changed"
                     "intent-layer.plan-dag-runtime-v2.live-event-ref-strategy"]
-        :wave "13 task 01 (commit 88568a9) + 14 task 02 (commit 2e7789a) + 16 task 07 (commit 0e6ee63)"
-        :note "wave 13: EventRef::unavailable(reason) 占位 — plan-runner v0 / plan_dag runtime v2 当时无法同步取得 live ExecutionEvent id; wave 14 task 02 (commit 2e7789a) 升级到三层策略: (1) bus publish 成功 → live id EventRef::new(execution, plan_node_state_changed, <Seq>); (2) bus publish 失败 → deterministic id 'plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>' + warning; (3) 必要时仍可 EventRef::unavailable(reason); 占位本身仍是契约 (unavailable=true + reason 必填), 不压缩; 升: code-aligned-partial → code-aligned. wave 16 task 07 (commit 0e6ee63) passive subscriber cache (cap 1024 FIFO, key 'plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>' 严格匹配 deterministic event id) 加 三档 status: live (live id + Seq) / log (deterministic id 命中 cache) / unavailable (兜底, reason 必填); EventRef::new 别名 EventRef::live 保 wave-13/14 byte-compat; subscriber 严格 observation-only (不 mutate 任何主路径)")
+        :wave "13 task 01 (commit 88568a9) + 14 task 02 (commit 2e7789a) + 16 task 07 (commit 0e6ee63) + 17 task 06 (commit 4074a14)"
+        :note "wave 13: EventRef::unavailable(reason) 占位 — plan-runner v0 / plan_dag runtime v2 当时无法同步取得 live ExecutionEvent id; wave 14 task 02 (commit 2e7789a) 升级到三层策略: (1) bus publish 成功 → live id EventRef::new(execution, plan_node_state_changed, <Seq>); (2) bus publish 失败 → deterministic id 'plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>' + warning; (3) 必要时仍可 EventRef::unavailable(reason); 占位本身仍是契约 (unavailable=true + reason 必填), 不压缩; 升: code-aligned-partial → code-aligned. wave 16 task 07 (commit 0e6ee63) passive subscriber cache (cap 1024 FIFO, key 'plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>' 严格匹配 deterministic event id) 加 三档 status: live (live id + Seq) / log (deterministic id 命中 cache) / unavailable (兜底, reason 必填); EventRef::new 别名 EventRef::live 保 wave-13/14 byte-compat; subscriber 严格 observation-only (不 mutate 任何主路径). wave 17 task 06 (commit 4074a14) resolver 三档 (live cache → log query 复用 LogReadable::read_from(Domain::Execution, Seq(0), 512) 不加 store method → unavailable); primary event_ref_status / event_ref_source / event_ref_warning 加在 EvidenceEntry surface; query 失败 unavailable + reason, 绝不挂 primary dispatch; 持久化 event log 查询面 ad-hoc 已通 (按 deterministic key reverse-lookup), 按 plan_id / node_id / time-range 系统化 query API 仍 future")
 
       (section-entry
         :section-id "tools.surface.mission-plan.record-evidence-typed"
@@ -1406,8 +1406,8 @@
         :cross-ref ["intent-layer.plan-dag-runtime-v2"
                     "intent-layer.evidence-collector-event-ref"
                     "event-bus.section.execution-event.plan-node-state-changed"]
-        :wave "14 task 02 (commit 2e7789a)"
-        :note "evidence collector EventRef 三层策略: (1) 优先 live id — bus publish 成功 → EventRef::new(execution, plan_node_state_changed, <Seq>); (2) 失败兜底 — bus publish 失败 → EventRef::new(execution, plan_node_state_changed, <deterministic id 'plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>'>) + warning; (3) legacy 占位 — 必要时仍可 EventRef::unavailable(reason); bus failure 仅 observability (warning 字段记录), 不挂主 dispatch; 升 code-aligned")
+        :wave "14 task 02 (commit 2e7789a) + 17 task 06 (commit 4074a14)"
+        :note "evidence collector EventRef 三层策略: (1) 优先 live id — bus publish 成功 → EventRef::new(execution, plan_node_state_changed, <Seq>); (2) 失败兜底 — bus publish 失败 → EventRef::new(execution, plan_node_state_changed, <deterministic id 'plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>'>) + warning; (3) legacy 占位 — 必要时仍可 EventRef::unavailable(reason); bus failure 仅 observability (warning 字段记录), 不挂主 dispatch; 升 code-aligned. wave 17 task 06 (commit 4074a14) 把 wave-13/14 的 live event ref 三层策略升级到 'live cache → log query → unavailable' 三档 resolver — log query 复用 LogReadable::read_from(Domain::Execution, Seq(0), 512) reverse-lookup deterministic key, cache evict 也能 recover; primary event_ref_status / event_ref_source / event_ref_warning 加在 EvidenceEntry surface; query 失败 → unavailable + reason, 绝不挂 primary dispatch; anchor: intent-layer.evidence-collector-event-log-query-v0")
 
       ;; ── 区域 14 · review-gate auto-create v1 (wave 14 task 03) ──
       (section-entry
@@ -1789,13 +1789,13 @@
         :wave "16 task 01 (commit 01708be)"
         :note "mission_workflow(action='resolve_review') 接 5 字段 (review_artifact_id / review_question_id / review_decision / review_actor / review_note); methodology YAML 不 fake DB row (receipt only — methodology 由 distill UUID 与 generated flow_id 区分: artifact_id 是 UUID → workflow row, 否则 → methodology flow_id receipt); workflow row 无 status/version 列 → 'review_approved/rejected/needs_changes' 仅 stamp 不 DB transition; envelope validator 5 fail-fast 错误码与 directive/plan 同 (REVIEW_SCOPE_MISMATCH / REVIEW_SCOPE_UNSUPPORTED / REVIEW_ARTIFACT_MISMATCH / STALE_REVIEW_VERSION / REVIEW_ACTION_UNSUPPORTED); scope 实际是 'workflow' (vs directive/plan)")
 
-      ;; ── 区域 23 · review-gate question listener v0 (wave 16 task 02) ──
+      ;; ── 区域 23 · review-gate question listener v0 (wave 16 task 02 + wave 17 task 01 plan-node route) ──
       (section-entry
         :section-id "intent-layer.unified-entry-pipeline.review-gate-resolution-listener-v0"
-        :title "review-gate QuestionEvent::Resolved subscriber listener v0"
+        :title "review-gate QuestionEvent::Resolved subscriber listener v0 (plan-node auto-route)"
         :source-file ".missiond/v2/intent-directive-artifacts.lisp"
         :local-path "pillar intent-layer :: section unified-entry-pipeline :: review-gate-resolution-listener-v0"
-        :status code-aligned-partial
+        :status code-aligned
         :compression-safe? false
         :implements
           ["crates/missiond-daemon/src/bus/v2_subscribers.rs"
@@ -1807,8 +1807,8 @@
         :cross-ref ["intent-layer.unified-entry-pipeline.review-gate-resolution-v0"
                     "intent-layer.unified-entry-pipeline.review-gate-policy"
                     "event-bus.section.knowledge-event.question-resolved"]
-        :wave "16 task 02 (commit 331d1c1)"
-        :note "spawn_review_resolution_sub 与既有 spawn_decision_sub 并行启动 (bus subscriber 双 listener); subscribe QuestionEvent::Resolved → 解析 review id (deterministic shape 'review:<scope>:<id>:v<v>:<action>[:<topic-hash>]') → ack 后 ignore 非 review id (不抢非 review 域 question); 抽 pure planner ReviewResolvedDispatch + parse_subscriber_resolution_string 进 review_gate.rs 便于测试; conservative vocabulary mapping (approved/approve/yes/accepted → approved; rejected/reject/no/declined → rejected; needs_changes/needs-changes/changes_requested → needs_changes); 改 mod knowledge → pub(crate) mod knowledge 让 bus subscriber 能 import bridges; 仍 partial — directive/plan auto-resume hook (auto-trigger transition) 仍依赖 caller-side resolve_review explicit call, plan-paused-resume 由 wave-16-04 paused 节点的后续 resume listener 接 (anchor: deferred-coverage 'paused-resume listener 的 plan node 重激活'); 4 v0 non-goal 中 auto_answer_review_question 仍 surface (subscriber 只 consume answer, 不替人答)")
+        :wave "16 task 02 (commit 331d1c1) + 17 task 01 (commit a42f5fd)"
+        :note "wave 16 task 02: spawn_review_resolution_sub 与既有 spawn_decision_sub 并行启动 (bus subscriber 双 listener); subscribe QuestionEvent::Resolved → 解析 review id (deterministic shape 'review:<scope>:<id>:v<v>:<action>[:<topic-hash>]') → ack 后 ignore 非 review id (不抢非 review 域 question); 抽 pure planner ReviewResolvedDispatch + parse_subscriber_resolution_string 进 review_gate.rs 便于测试; conservative vocabulary mapping (approved/approve/yes/accepted → approved; rejected/reject/no/declined → rejected; needs_changes/needs-changes/changes_requested → needs_changes); 改 mod knowledge → pub(crate) mod knowledge 让 bus subscriber 能 import bridges. wave 17 task 01 (commit a42f5fd) 升: spawn_review_resolution_sub 加 plan-node action 自动 route — id scope=plan + action=plan-node 时 listener 自动调用 wave-17 paused-node resume helper (approved → 重 dispatch 节点; rejected/needs_changes → 写 evidence keep paused); 非 plan-node id 保留旧行为 (走 wave-15 review-resolution bridge); 未识别 resolution string 永远 ignore + warn, 绝不 dispatch; 4 v0 non-goal 中 auto_answer_review_question 仍 surface (listener 只 consume answer, 不替人答); 升: code-aligned-partial → code-aligned (auto-resume round-trip 已闭环, plan-node action 与 directive/plan 各自 routing)")
 
       ;; ── 区域 24 · plan DAG paused lifecycle + review-gate trigger (wave 16 task 04) ──
       (section-entry
@@ -1828,8 +1828,8 @@
                     "intent-layer.unified-entry-pipeline.review-gate-policy"
                     "intent-layer.unified-entry-pipeline.review-gate-id-derivation"
                     "memory.directive-layer.plan-node-state-projection"]
-        :wave "16 task 04 (commit a51bc52)"
-        :note "paused 是 6 主 + 3 skip 子分类之外的第 7 主态 (与 actor plan-dag-scheduler 节点 FSM enum 的 paused 对齐) — 节点 :review-gate 'question-event' (+ 可选 :review-action 'approve|archive|mark|supersede' / :review-text) 触发; deterministic review id 'review:plan:<plan_id>:v<v>:plan-node:<sha256(node_id)[..16]>' (paused 节点的 review id 命名固定, 与 directive/plan compile 阶段的 review id 形状区分); response 字段: aggregate_status='dag_paused' / runner_status='review_gate_paused'; bus QuestionEvent::Created 失败时仍 pause 节点 + 报 warning (不阻塞); 不实现 auto-resume — paused 节点的重激活 (plan-runner 收到 QuestionEvent::Resolved 后 re-dispatch) 仍 architecture-designed pending (后续 wave 由 paused-resume listener 接, anchor: deferred-coverage); evidence sidecar entry 含 paused/review_gate_id (deterministic)")
+        :wave "16 task 04 (commit a51bc52) + 17 task 01 (commit a42f5fd)"
+        :note "wave 16 task 04: paused 是 6 主 + 3 skip 子分类之外的第 7 主态 (与 actor plan-dag-scheduler 节点 FSM enum 的 paused 对齐) — 节点 :review-gate 'question-event' (+ 可选 :review-action 'approve|archive|mark|supersede' / :review-text) 触发; deterministic review id 'review:plan:<plan_id>:v<v>:plan-node:<sha256(node_id)[..16]>' (paused 节点的 review id 命名固定, 与 directive/plan compile 阶段的 review id 形状区分); response 字段: aggregate_status='dag_paused' / runner_status='review_gate_paused'; bus QuestionEvent::Created 失败时仍 pause 节点 + 报 warning (不阻塞); 不实现 auto-resume — wave 16 task 04 阶段 paused 节点的重激活仍 pending. wave 17 task 01 (commit a42f5fd) auto-resume 已落: mission_plan(action=execute) 加 4 字段 (resume_review_question_id / resume_review_decision / resume_actor / resume_note); 同一 review id format reverse-parse 到 plan/version/node-hash 后唯一 map 到节点; 3 decision (approved → fresh attempt 1 重 dispatch + paused→resume_approved + ready→running + running→{succeeded|failed} 三条 evidence; rejected → 节点保持 paused + paused→resume_rejected; needs_changes → paused + paused→resume_needs_changes + next_step); spawn_review_resolution_sub (wave 16 task 02) 扩 — 收到 QuestionEvent::Resolved scope=plan + action=plan-node 时 listener 自动调同一 resume helper; 升: code-aligned-partial → code-aligned (paused-resume 协议 round-trip 已通)")
 
       ;; ── 区域 25 · plan DAG per-node retry policy v0 (wave 16 task 05) ──
       (section-entry
@@ -1862,8 +1862,8 @@
            "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
         :cross-ref ["worker.section.claudecode-workstation-orchestration"
                     "memory.helper.agent-execution-coordination"]
-        :wave "16 task 06 (commit 591d288)"
-        :note "mission_execution 接 enforce_scoped_commit (bool, opt-in default false — 字节兼容); enforce=true 时 4 fail-fast 错误码: COMMIT_HASH_REQUIRED (completion 缺 commit_hash) / COMMIT_BLOCKER_REQUIRED (completion 标 blocked 缺 blocker reason) / CLAIM_SCOPE_REQUIRED (claim 时缺 scope) / SCOPED_COMMIT_VIOLATION (changed_files 越出 claim scope); gate 在 allocate_id 之前 (rejected 不 bump state, 错误 caller 重提不会用掉新 id); scope-overlap 检查与 audit/claim 共享同一 scopes_overlap helper (统一定义 scope 字符串前缀语义); daemon 不跑 git (不 spawn git 命令; commit_hash 由 caller 提供); response 字段: scoped_commit_enforced (echoed bool) / scoped_commit_validation (object with passed/violations); 不 enforce 模式下原行为不变 (字节 compat)")
+        :wave "16 task 06 (commit 591d288) + 17 task 07 (commit a21b8ae)"
+        :note "wave 16 task 06: mission_execution 接 enforce_scoped_commit (bool, opt-in default false — 字节兼容); enforce=true 时 4 fail-fast 错误码: COMMIT_HASH_REQUIRED (completion 缺 commit_hash) / COMMIT_BLOCKER_REQUIRED (completion 标 blocked 缺 blocker reason) / CLAIM_SCOPE_REQUIRED (claim 时缺 scope) / SCOPED_COMMIT_VIOLATION (changed_files 越出 claim scope); gate 在 allocate_id 之前 (rejected 不 bump state, 错误 caller 重提不会用掉新 id); scope-overlap 检查与 audit/claim 共享同一 scopes_overlap helper (统一定义 scope 字符串前缀语义); daemon 不跑 git (不 spawn git 命令; commit_hash 由 caller 提供); response 字段: scoped_commit_enforced (echoed bool) / scoped_commit_validation (object with passed/violations); 不 enforce 模式下原行为不变 (字节 compat). wave 17 task 07 (commit a21b8ae) brief-layer enforce 默认开 — workstation_dispatch.rs 任务 brief 加 section 7 'Completion handoff (scoped commit)'; code task (owned_files 非空) → 要求 enforce_scoped_commit=true / commit_status=committed / commit_hash / staged_files; read-only task (owned_files 空) → commit_status=not-required + 解释; response 加 scoped_commit_required: true / scoped_commit_policy: 'enforced-on-complete'; daemon agent_execution.rs 完全未动 (legacy mission_execution 全局 enforce 仍 opt-in default false 字节兼容); brief 与 daemon 双层契约清晰: brief 强制 worker 显式 commit, daemon legacy enforce 仍可被旧 caller bypass (但不影响新 brief)")
 
       ;; ── 区域 27 · unified-entry e2e smoke coverage v0 (wave 16 task 08) ──
       (section-entry
@@ -1879,25 +1879,251 @@
         :wave "16 task 08 (commit a632a91)"
         :note "deterministic 4 hand-off smoke (no LLM, no spawn, all dry_run): s1 directive dry_run → s4 plan dry_run → s6 execute dry_run → s6 evidence sidecar; 全程断言 v0_non_goals 在每 response surface (auto_approve_directive / auto_approve_plan / auto_answer_review_question / autonomous_workstation_dispatch 4 项); 不打 LLM, 不 spawn 工位, 用作 unified_entry pipeline contract 的回归基线 (smoke regression); 是 wave 13 task 03 v0 + wave 14 task 04 v1 的 e2e 测试覆盖, 不引入新行为"))
 
+    ;; ──────────────────────────────────────────────────
+    ;; v0.8 (wave 17 task 09) — wave 17 execution status backfill
+    ;; ──────────────────────────────────────────────────
+    ;; 目的:
+    ;;   - 把 wave 17 task 01-08 的真实代码状态回填到 source-index
+    ;;   - 不重复已有 section-id; 在 v0.7 baseline 上新增 7 anchor entry, 升级 6 现有 entry status/note
+    ;;   - 保留 R008 + R016 (section-id 不变, 改名走 :prev-id)
+    ;;   - 11-stage scheduler 大量 close (s5 claim-lease ✓ / s7 acceptance ✓ / s8 paused-resume ✓ /
+    ;;     s9 rollback ✓ / s10 mark-final ✓ / s11 distill 触发 ✓); 仍 partial 是因为 cross-plan
+    ;;     distill chain / 跨节点 acceptance fan-in / live LLM auto-approve 等仍未实现
+    ;;
+    ;; wave 17 已完成 commit (anchor):
+    ;;   - 181172e chore(wave16): archive task briefs (task 00 — 仅归档, 不进 source-index)
+    ;;   - a42f5fd feat(plan): resume paused DAG nodes after review (task 01 — paused-resume hook v0)
+    ;;   - 8661fcb feat(plan): add claim lease state to DAG nodes (task 02 — claim/lease v0 + Claimed 第 8 态)
+    ;;   - f572729 feat(plan): evaluate DAG node acceptance safely (task 03 — acceptance evaluator v0 三模式)
+    ;;   - d4466c6 feat(plan): record rollback policy for DAG failures (task 04 — rollback policy v0 三模式 + 5 safety gates)
+    ;;   - 402fb82 feat(plan): finalize DAG execution and trigger distill (task 05 — finalize + distill trigger v0)
+    ;;   - 4074a14 feat(evidence): resolve event refs from event log (task 06 — event-log query path v0 三档 resolver)
+    ;;   - a21b8ae feat(workstation): require scoped commit handoff in task briefs (task 07 — brief-layer scoped-commit default v1)
+    ;;   - c7fbac0 test(intent): cover paused DAG resume smoke (task 08 — unified-entry paused-resume e2e smoke + build_plan_execute_args 7 keys forward)
+    ;;
+    ;; 状态升级摘要 (本批次直接修改的现有 entry, 见各 entry note 末尾):
+    ;;   - intent-layer.actor.plan-dag-scheduler                              note 扩 (claim-lease/acceptance/rollback/finalize/paused-resume 已落, 仍 code-aligned-partial 因 cross-plan 仍 pending)
+    ;;   - flow.execution-runner-dag-scheduler                                 note 扩 (同上, 仍 code-aligned-partial)
+    ;;   - memory.directive-layer.plan-node-state-projection                   note 扩 (claim_id/acceptance_pass/rollback_path 全落, 仅 cross-plan 仍 future)
+    ;;   - intent-layer.evidence-collector-event-ref                           note 扩 + wave 17 task 06 三档 resolver (live cache → log query → unavailable)
+    ;;   - intent-layer.scoped-commit-enforce-v0                               note 扩 (wave 17 task 07 brief-layer enforce 默认开; daemon legacy 仍 opt-in)
+    ;;   - intent-layer.plan-dag-runtime-v2.paused-lifecycle                  code-aligned-partial → code-aligned (paused-resume 已闭环 by wave 17 task 01)
+    ;;   - intent-layer.unified-entry-pipeline.review-gate-resolution-listener-v0 code-aligned-partial → code-aligned (wave 17 task 01 plan-node action auto-route)
+    ;; ──────────────────────────────────────────────────
+    (wave-17-backfill v0.8
+      :date "2026-04-26"
+      :decided-by "wave 17 / task 09 lisp backfill session"
+      :scope "回填 wave 17 task 01-08 真实代码状态; 新增 7 anchor entry, 升级 6 现有 entry status/note; 不发明 wave17 没实现的架构"
+      :non-goal "本任务不真正压缩主 Lisp; 不修改 Rust/SQL/JS/Cargo/任务文档; 不动 event-bus.lisp / intent-mcp-defs.lisp; 不启动 frontend Lisp (continue postpone)"
+      :commits
+        [(commit-1 :hash "a42f5fd" :title "feat(plan): resume paused DAG nodes after review"
+                   :primary-targets ["crates/missiond-daemon/src/bus/v2_subscribers.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "mission_plan(action=execute) 4 字段 (resume_review_question_id / resume_review_decision / resume_actor / resume_note); plan-node id 'review:plan:<plan_id>:v<v>:plan-node:<sha256(node_id)[..16]>'; 3 decision (approved 重新 dispatch fresh attempt 1 / rejected 不 dispatch / needs_changes 仍 paused); spawn_review_resolution_sub 扩 plan-node action 自动 route 到 resume helper; evidence paused→resume_*")
+         (commit-2 :hash "8661fcb" :title "feat(plan): add claim lease state to DAG nodes"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "claim_lease_secs / claimer_name / enforce_claims 3 args; Claimed 第 8 lifecycle (Pending → Claimed → Running); claim scope 优先级 :owned-files → :scope → plan/<plan_id>/node/<node_id> fallback; scopes_overlap_pure 暴露给 3 处共享 (claim/audit/scoped-commit); enforce_claims default false byte-compat")
+         (commit-3 :hash "f572729" :title "feat(plan): evaluate DAG node acceptance safely"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "3 modes (inner_status / evidence_keys / manual); 绝不 shell (grep proof 0 命中); id space 'acceptance:plan:<plan_id>:v<v>:<node_id>' 与 review-gate 'review:*' 隔离 (各自 routing); manual_required 复用 Paused 不新加态; evidence succeeded→acceptance_*")
+         (commit-4 :hash "d4466c6" :title "feat(plan): record rollback policy for DAG failures"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "3 modes (none/descriptor/workstation); 5 safety gates (missing objective / empty owned-files / no project signal / unsafe strategy / SafeDescriptor refusal); workstation 复用 build_task_brief / run_workstation_dispatch; rollback 在 final fail 后 / downstream taint 前; evidence failed→rollback_*")
+         (commit-5 :hash "402fb82" :title "feat(plan): finalize DAG execution and trigger distill"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "finalize_plan / distill_on_success / distill_mode (default false / false / dry_run); 4 finalization rule (succeeded → succeeded; failed → failed; partial → failed; paused → unchanged 不撒谎); distill 经现有 super::workflow::handle() 不动 workflow.rs; distill 失败 warning 仍保 plan final state")
+         (commit-6 :hash "4074a14" :title "feat(evidence): resolve event refs from event log"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+                                     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+                   :tests "resolver 三档 (live cache → log query 复用 LogReadable::read_from(Domain::Execution, Seq(0), 512) 不加 store method → unavailable); primary event_ref_status / event_ref_source / event_ref_warning 加在 EvidenceEntry surface; query 失败 unavailable + reason, 绝不挂 primary dispatch")
+         (commit-7 :hash "a21b8ae" :title "feat(workstation): require scoped commit handoff in task briefs"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
+                                     "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+                   :tests "task brief section 7 'Completion handoff (scoped commit)'; code task → enforce_scoped_commit=true / commit_status=committed / commit_hash / staged_files; read-only task → commit_status=not-required + 解释; response scoped_commit_required: true / scoped_commit_policy: 'enforced-on-complete'; daemon agent_execution.rs 完全未动 (legacy compat)")
+         (commit-8 :hash "c7fbac0" :title "test(intent): cover paused DAG resume smoke"
+                   :primary-targets ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+                   :tests "build_plan_execute_args forward 7 个 wave-17 keys (4 resume + 3 finalize); smoke 6 步 (s1 → s4 → s6 paused → resume validate round-trip → s6 resumed succeeded → sidecar 同 plan); no LLM no spawn no shell")]
+
+      ;; ── 区域 28 · PLAN DAG paused-resume hook v0 (wave 17 task 01) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.paused-resume-hook-v0"
+        :title "PLAN DAG paused-node resume hook v0 — mission_plan(execute) 4 resume args + listener auto-route"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: paused-resume-hook-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+           "crates/missiond-daemon/src/bus/v2_subscribers.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.plan-dag-runtime-v2.paused-lifecycle"
+                    "intent-layer.unified-entry-pipeline.review-gate-resolution-listener-v0"
+                    "intent-layer.actor.plan-dag-scheduler"
+                    "memory.directive-layer.plan-node-state-projection"]
+        :wave "17 task 01 (commit a42f5fd)"
+        :note "mission_plan(action=execute) 加 4 字段 (都 optional 字节兼容): resume_review_question_id (= 上一次 wave-16 paused dispatch 返回的 'review:plan:<plan_id>:v<v>:plan-node:<sha256(node_id)[..16]>') / resume_review_decision (enum approved|rejected|needs_changes; 必填 when resume_review_question_id 出现, 缺失 → MISSING_PARAM) / resume_actor (free-form identity, echoed) / resume_note (free-form note, echoed); 4 字段同时出现 routing 到 dedicated paused-node resume helper, 与 wave-15 review_question_id+review_decision (manager-side compile/approve/mark/supersede) 严格分离; helper 校验 envelope: plan id 一致 / plan version 一致 / action=plan-node / node-hash 唯一 map 到一个仍带 :review-gate 'question-event' 的节点; 3 decision 分支: approved → 节点以 fresh attempt 1 重 dispatch (paused 不算失败 attempt) + 写 paused→resume_approved + ready→running + running→{succeeded|failed} 三条 evidence; rejected → 节点保持 paused + 写 paused→resume_rejected; needs_changes → 节点保持 paused + 写 paused→resume_needs_changes + surface next_step; 只 resume 这一个节点, downstream pending 节点不动 (后续 execute 推进); spawn_review_resolution_sub (wave 16 task 02) 扩 — 收到 QuestionEvent::Resolved id scope=plan + action=plan-node 时 listener 自动调同一 helper, 非 plan-node id 保留旧行为; 未识别 resolution 字符串永远 ignore + warn, 绝不 dispatch; 4 v0 non-goal 中 auto_answer_review_question 仍 surface (listener 只 consume answer, 不替人答, 仅做 plan-node action 自动 re-dispatch)")
+
+      ;; ── 区域 29 · PLAN DAG claim/lease v0 + Claimed 第 8 lifecycle (wave 17 task 02) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.claim-lease-v0"
+        :title "PLAN DAG claim/lease v0 — Claimed 第 8 lifecycle + scopes_overlap_pure 共享"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: claim-lease-v0"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.plan-dag-runtime-v2.node-lifecycle"
+                    "intent-layer.actor.plan-dag-scheduler"
+                    "memory.helper.agent-execution-coordination"
+                    "intent-layer.scoped-commit-enforce-v0"
+                    "memory.directive-layer.plan-node-state-projection"]
+        :wave "17 task 02 (commit 8661fcb)"
+        :note "mission_plan(action=execute, scheduler_mode=dag_v1) 加 3 args (都 optional): claim_lease_secs (default 1800, clamp [60, 14400]) / claimer_name (default 'plan-dag-scheduler', whitespace 归一) / enforce_claims (default false, byte-compat). Node FSM enum 加 Claimed 作第 8 主态 (与既有 paused 第 7 态对齐, FSM enum 整套现 8 主态: pending/ready/claimed/running/succeeded/failed/skipped/paused, 加 retrying/rolling-back 共 10 + 3 skip 子分类); per-node lifecycle becomes pending → claimed → running → {succeeded|failed} → released, 每次转移一条 evidence (claim_id 写在 pending→claimed, claim_released_at 与 claim_terminal_state 写在 claimed→released). claim scope 优先级: 节点 :owned-files (非空) → 节点 :scope → 合成 fallback 'plan/<plan_id>/node/<node_id>' (永不为空). enforce_claims=true 时遇 unresolvable scope overlap 立即 fail-fast 节点 (state=failed, reason=CLAIM_CONFLICT..., inner handler 永不调用, payload 含 claim_status=conflict + 冲突 snapshot); enforce_claims=false 时仅记录 evidence + response 但 NEVER block dispatch (向后兼容). scopes_overlap_pure 抽出 (公开纯函数 prefix-segment overlap), 共享给 3 处: plan_dag claim / agent_execution audit / scoped-commit enforce — 三处不会再 drift. dry_run 在响应里附 planned_claims[] 含每个节点的 claim_id/scopes/scope_source/lease_secs/enforce_claims 不 mutate. 复用 wave12-01 mission_execution lease defaults / claimer 词汇, 两 surface 时间戳与 audit 词汇一致. status code-aligned-partial 因为: enforce_claims default false 是 opt-in 兼容期; 后续切默认 enforce / scope-overlap 跨多 plan 全局视图 仍 pending")
+
+      ;; ── 区域 30 · PLAN DAG acceptance evaluator v0 (wave 17 task 03) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.acceptance-evaluator-v0"
+        :title "PLAN DAG acceptance evaluator v0 — 三模式 inner_status / evidence_keys / manual + 隔离 id space"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: acceptance-evaluator-v0"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.plan-dag-runtime-v2.failure-policy"
+                    "intent-layer.plan-dag-runtime-v2.paused-lifecycle"
+                    "intent-layer.actor.plan-dag-scheduler"
+                    "memory.directive-layer.plan-node-state-projection"]
+        :wave "17 task 03 (commit f572729)"
+        :note "PLAN.lisp 节点新增三 hint 字段 (都 optional): :acceptance-mode (enum inner_status | evidence_keys | manual; 与 mission_plan(action=execute) acceptance_mode arg 对齐) / :acceptance-evidence-keys (list[string], 仅 evidence_keys 模式) / :acceptance-commands (list[string], 声明意图但 scheduler 永不执行). 触发时机: 在节点 inner dispatch 成功 (running → succeeded) 之后, 在 propagate_taint 之前. evaluator 是 PURE (no shell, no subprocess; grep proof 0 shell command spawn 命中); 三 mode 行为: inner_status → 接受当且仅当 inner Ok 且 payload 无显式 error signal; evidence_keys → 扫描 inner payload (top-level 然后 well-known nested holders evidence/typed_evidence/inner_result/inner_dispatch/result), 全部 declared key 命中才 accept (空 list 或 raw not array → manual_required 兜底); manual → 总是 pause. 兜底规则: 节点声明 :acceptance-commands 但缺 typed :acceptance-mode → manual_required (显式拒绝执行 PLAN.lisp 内 shell). 三结果: accepted → 节点保持 succeeded; rejected → 节点翻 failed (taint 沿原 :failure-policy 传播, fail-fast 仅在 retry exhaust 后才 trip); manual_required → 节点 pause + deterministic id 'acceptance:plan:<plan_id>:v<v>:<node_id>' (与 wave-16 review-gate id 'review:*' 完全 ID space 隔离, wave-17 paused-node resume helper 故意 NOT consume acceptance:* id, 后续 wave 单独 actor). evidence 写一条 succeeded → acceptance_{accepted|rejected|manual_required}; node_results[].acceptance 块含 mode/status/keys/commands/commands_executed=false (pinned). 节点未声明任何 acceptance hint → 保持 wave-13 succeed-on-dispatch 契约 (acceptance 块 omitted from response). status code-aligned-partial 因为: 跨节点 acceptance fan-in (例如下游节点 acceptance 引用上游 evidence/output 的 cross-node ref) 仍未实现; live LLM auto-approve manual_required 仍 future")
+
+      ;; ── 区域 31 · PLAN DAG rollback policy v0 (wave 17 task 04) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.rollback-policy-v0"
+        :title "PLAN DAG rollback policy v0 — 三模式 none/descriptor/workstation + 5 safety gates"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: rollback-policy-v0"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.plan-dag-runtime-v2.failure-policy"
+                    "intent-layer.plan-dag-runtime-v2.retry-policy-v0"
+                    "intent-layer.unified-entry-pipeline.workstation-dispatch-v0"
+                    "intent-layer.actor.plan-dag-scheduler"
+                    "memory.directive-layer.plan-node-state-projection"]
+        :wave "17 task 04 (commit d4466c6)"
+        :note "PLAN.lisp 节点新增四 hint 字段 (都 optional): :rollback-policy (enum none|descriptor|workstation; default 缺省=none, 保 wave 13/16 字节兼容) / :rollback-objective (free-form, workstation 模式必填非空) / :rollback-owned-files (list[string], workstation 模式必填 >=1 entry) / :rollback-acceptance-commands (list[string], 仅声明永不执行). 三 mode 行为: none → 节点 failed 不做 rollback (preserves wave-13/16 contract); descriptor → 仅在 response + 一条 audit evidence 记录 rollback 意图 (objective + owned files + acceptance commands + brief preview), NEVER dispatch; workstation → 仅当 5 safety gates 全过才 dispatch rollback 通过 wave-15 workstation-dispatch substrate (复用 build_task_brief / run_workstation_dispatch). 5 safety gates: (1) target-project 或 requested-cwd 已解析 (no-project-signal 失败), (2) :rollback-objective 非空 (missing-objective 失败), (3) :rollback-owned-files >=1 entry (empty-owned-files 失败), (4) :dispatch-strategy 在安全白名单 {fresh-code-alignment, resident-lisp, agent-team, mixed} (unsafe-strategy 失败), (5) substrate 未返 SafeDescriptor refusal (substrate-side refusal 同样 collapse 到 refused). 任一失败 → rollback_status='refused' + 失败条件原因, 永不 retry. 触发时机: 在节点最终失败 attempt **之后** (retry exhaust + failure-policy 已生效), 在 downstream taint propagation **之前**; 下游行为仍由 existing :failure-policy 决定, rollback 永不 alter taint / fail-fast. evidence 写一条 failed → rollback_{not_requested|descriptor_ready|dispatched|refused|failed}; node_results[].rollback 块含 policy/status/reason/objective/owned_files/acceptance_commands/acceptance_commands_executed=false (pinned, 证明永不执行). status code-aligned-partial 因为: 自动 compensate-node (节点级 :rollback-policy=compensate-node :ref node-id 引用同 plan 内补偿节点) / cascade-up (上游已 succeeded 节点反向 dispatch 补偿) 仍未实现 — 当前只是 'on-failure dispatch a remediation workstation task' 子集")
+
+      ;; ── 区域 32 · PLAN DAG finalize + distill trigger v0 (wave 17 task 05) ──
+      (section-entry
+        :section-id "intent-layer.plan-dag-runtime-v2.finalize-distill-v0"
+        :title "PLAN DAG finalize + distill trigger v0 — finalize_plan / distill_on_success / distill_mode opt-in"
+        :source-file ".missiond/v2/intent-plan-dag.lisp"
+        :local-path "pillar intent-layer :: section action-instruction-actor :: actor plan-dag-scheduler :: runtime v2 :: finalize-distill-v0"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.actor.plan-dag-scheduler"
+                    "intent-layer.plan-dag-runtime-v2"
+                    "memory.directive-layer.plan-node-state-projection"
+                    "memory.directive-layer.plan-evidence-sidecar"]
+        :wave "17 task 05 (commit 402fb82)"
+        :note "mission_plan(action=execute, scheduler_mode=dag_v1) 加 3 args (都 optional, 都 opt-in 字节兼容): finalize_plan (default false; 关时只跑 plan_update_status 现有 side-effect, response byte-shape 与 wave-17 task 04 baseline 一致) / distill_on_success (default false; gate 在 finalize_plan=true 之后, distill_on_success=true 但 finalize_plan=false → INVALID_PARAM fail-fast 不静默掩盖 caller intent) / distill_mode (default 'dry_run'; 接 mission_workflow(action=distill) parse_distill_mode 同 allowlist, sonet 等 typo 即使在 dry_run 也 fail-fast). 4 finalization rule (映射 aggregate→plan_status): dag_succeeded → succeeded; dag_failed → failed; dag_partial → failed; dag_paused → unchanged 不撒谎 (runner 拒绝在 paused 节点等 review 时 claim 'success'). distill 触发: finalize_plan=true ∧ aggregate=dag_succeeded ∧ plan FSM update 落 'succeeded' → 自动调用既有 super::workflow::handle(action=distill, plan_id=<plan>) (不动 workflow.rs 内部); 项目 / cwd / target_project 信号 verbatim forward, 让 distill handler 解析与 DAG run evidence 同一 project root; finalize 写一条 plan-level dag_finalized audit evidence (含 aggregate→plan_status projection); response 加 finalization 块 (含 distill 子块 triggered/reason/distill_mode/result/warning); distill 失败 surface 一条 non-fatal warning, 绝不 downgrade plan final state (符合 task brief: distill failure does NOT corrupt plan final state). status code-aligned-partial 因为: cross-plan distill chain (上游 plan distill 输出自动 enqueue 给下游 plan workflow) / 自动跨 plan 触发 chain 仍 future; finalize_plan 与 distill_on_success 仍 opt-in (default false), 后续切默认 仍 pending")
+
+      ;; ── 区域 33 · evidence event-log query path v0 (wave 17 task 06) ──
+      (section-entry
+        :section-id "intent-layer.evidence-collector-event-log-query-v0"
+        :title "evidence-collector event-log query path v0 — 三档 resolver (live cache → log query → unavailable)"
+        :source-file ".missiond/v2/intent-intent-layer.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: role evidence-collector :: event-log query path v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+        :cross-ref ["intent-layer.evidence-collector-event-ref"
+                    "intent-layer.evidence-collector-typed-helper"
+                    "event-bus.section.execution-event.plan-node-state-changed"
+                    "intent-layer.plan-dag-runtime-v2.live-event-ref-strategy"]
+        :wave "17 task 06 (commit 4074a14)"
+        :note "wave 16 task 07 已落 passive subscriber cache (cap 1024 FIFO, key 'plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>' 严格匹配 deterministic event id) — 但 cache 容量满 + 持久 query 仍走 unavailable. wave 17 task 06 加 resolver 三档 fallback chain: (1) live cache (subscriber 命中 deterministic key → live id + Seq, status='live'); (2) log query — 复用 LogReadable::read_from(Domain::Execution, Seq(0), 512) 不加 store method (按 deterministic id reverse-lookup persistent event log, 写过的事件即使 cache evict 也能 recover, status='log' + warning='recovered from event log'); (3) unavailable — query 失败兜底 unavailable + reason 必填. 三档结果统一通过新加在 EvidenceEntry surface 的 primary 字段 surface: event_ref_status (enum 'live'|'log'|'unavailable'), event_ref_source (含 domain), event_ref_warning (optional, log mode 默认 'recovered from event log'). subscriber 仍严格 observation-only (不 mutate 任何主路径); query 失败 → unavailable + reason, 绝不挂 primary dispatch (paused/succeeded/failed 等 dispatch path 与 ref resolver 完全解耦). 持久化 event log 查询面 ad-hoc reverse-lookup 已落; 按 plan_id / node_id / time-range 系统化 query API 仍 future")
+
+      ;; ── 区域 34 · workstation scoped-commit handoff brief default v1 (wave 17 task 07) ──
+      (section-entry
+        :section-id "intent-layer.scoped-commit-handoff-brief-default-v1"
+        :title "workstation scoped-commit handoff brief default v1 — task brief section 7 + scoped_commit_required pinned"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
+        :local-path "pillar intent-layer :: section scoped-commit-handoff :: brief-default v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+           "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.scoped-commit-enforce-v0"
+                    "intent-layer.unified-entry-pipeline.workstation-dispatch-v0"
+                    "worker.section.claudecode-workstation-orchestration"
+                    "memory.helper.agent-execution-coordination"]
+        :wave "17 task 07 (commit a21b8ae)"
+        :note "wave 17 task 07 brief-layer enforce 默认开 — workstation_dispatch.rs::build_task_brief 任务 brief 加 section 7 'Completion handoff (scoped commit)' (现 brief 7 sections: 1 Objective / 2 Owned files / 3 Forbidden files / 4 Acceptance / 5 Commit policy / 6 Parallelism hint when agent-team / 7 Completion handoff (scoped commit)). 区分 code task vs read-only task: code task (owned_files 非空) → brief 显式要求 worker 在 mission_execution(action=complete) 调用时附 enforce_scoped_commit=true / commit_status='committed' / commit_hash / staged_files; read-only task (owned_files 空) → brief 接受 commit_status='not-required' + summary 内书面解释 (不强制 commit). response 总是附 scoped_commit_required: true / scoped_commit_policy: 'enforced-on-complete' (4 个 outcome dispatched/dry_run/inner_error/safe_descriptor 全 4 测 OK). daemon agent_execution.rs 完全未动 (legacy mission_execution(action=complete) callers 仍 enforce_scoped_commit default false 字节兼容; 旧 caller 不传 enforce_scoped_commit 走原行为). brief 与 daemon 双层契约清晰: brief 强制 worker 显式 commit (新派工 contract), daemon legacy enforce 仍可被旧 caller bypass (字节兼容). 后续可由 plan-runner 自动注入 enforce_scoped_commit=true 给所有 worker action_complete 调用 (兜底 brief escape) 仍 future. agent-team literal '使用 agent-team提高效率' 在 dispatch_strategy=agent-team 时仍恰一次 (新加 section 不影响 idempotent invariant)")
+
+      ;; ── 区域 35 · unified-entry paused-resume e2e smoke v0 (wave 17 task 08) ──
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.paused-resume-smoke-v0"
+        :title "unified-entry paused-resume e2e smoke v0 — 6 step deterministic round-trip + build_plan_execute_args 7 keys forward"
+        :source-file ".missiond/v2/intent-directive-artifacts.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: paused-resume-smoke-v0"
+        :status code-aligned
+        :compression-safe? true
+        :implements ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+        :cross-ref ["intent-layer.unified-entry-pipeline.run-pipeline-helper"
+                    "intent-layer.unified-entry-pipeline.e2e-smoke-v0"
+                    "intent-layer.unified-entry-pipeline.v0-non-goals"
+                    "intent-layer.plan-dag-runtime-v2.paused-resume-hook-v0"
+                    "intent-layer.plan-dag-runtime-v2.finalize-distill-v0"]
+        :wave "17 task 08 (commit c7fbac0)"
+        :note "wave 16 task 08 落 deterministic 4 hand-off no-LLM smoke (s1→s4→s6 + sidecar). wave 17 task 08 加: build_plan_execute_args 扩 forward 7 个 wave-17 keys (4 resume: resume_review_question_id / resume_review_decision / resume_actor / resume_note + 3 finalize: finalize_plan / distill_on_success / distill_mode); 加 build_plan_execute_args_forwards_wave17_resume_keys + build_plan_execute_args_resume_keys_absent_when_omitted 两个 unit test 锁 forward 行为. 加 6 步 e2e smoke (no LLM no spawn no shell): s1 directive create → s4 plan compile → s6 first execute (节点 :review-gate 'question-event' → paused, sidecar 写 review_question_id) → resume validate 同 round-trip review id 形状 + 4 resume args → s6 second execute (resume_review_decision='approved' 路由 paused-node helper, fresh attempt 1 succeeded) → sidecar 同 plan 写两份 evidence (paused→resume_approved + ready→running + running→succeeded). 不引入新 MCP tool, 不动 workflow.rs / plan.rs 主路径; 用作 wave-17-01 (paused-resume hook) + wave-17-05 (finalize_plan) 联合 contract 的回归基线. wave-17 / Task 02 claim/lease lifecycle / Task 04 rollback / Task 06 event-log resolver / Task 07 workstation brief 由各自 unit test cover (本 smoke 不重复 cover); 在测试模板里显式 list 哪些 wave-17 task 由本 smoke 覆盖 vs 由其他 unit test 覆盖, 避免误以为 e2e cross-cuts 全部"))
+
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener (QuestionEvent::Resolved subscriber) / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 (live/log/unavailable) / unified-entry e2e smoke 共 +6 entry; 仍有以下未细化项, 等后续 wave 再补"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener (QuestionEvent::Resolved subscriber) / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 (live/log/unavailable) / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; 仍有以下未细化项, 等后续 wave 再补"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"
-         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组, capability_usage / mission_plan record_evidence / mission_directive write_file/review_gate / mission_plan write_file/review_gate / mission_workflow write_file/review_gate / mission_directive review-resolution / mission_plan review-resolution / mission_workflow review-resolution / mission_plan workstation-dispatch / mission_execution enforce_scoped_commit 已有专项)"
+         "pillar tools 83 tool 的 per-tool section-id (现仅按 section 分组, capability_usage / mission_plan record_evidence / mission_directive write_file/review_gate / mission_plan write_file/review_gate / mission_workflow write_file/review_gate / mission_directive review-resolution / mission_plan review-resolution / mission_workflow review-resolution / mission_plan workstation-dispatch / mission_execution enforce_scoped_commit / mission_plan resume_review_* / mission_plan claim_lease_* / mission_plan acceptance_* / mission_plan rollback_* / mission_plan finalize_plan / distill_on_success / distill_mode 已有专项)"
          "pillar intent-layer 各 actor 内部 step (directive-compiler / plan-compiler / workflow-distiller 内部)"
-         "pillar event-bus 4 表内部字段索引 (frozen 文件, 不强行细化; PlanNodeStateChanged variant 已 code-aligned, 详见 event-bus.section.execution-event.plan-node-state-changed; domain count extensibility test 已 code-aligned; QuestionEvent::Resolved subscriber 接入由 wave 16 task 02 落, 详见 intent-layer.unified-entry-pipeline.review-gate-resolution-listener-v0)"
+         "pillar event-bus 4 表内部字段索引 (frozen 文件, 不强行细化; PlanNodeStateChanged variant 已 code-aligned, 详见 event-bus.section.execution-event.plan-node-state-changed; domain count extensibility test 已 code-aligned; QuestionEvent::Resolved subscriber 接入由 wave 16 task 02 落 + wave 17 task 01 plan-node action 自动 route, 详见 intent-layer.unified-entry-pipeline.review-gate-resolution-listener-v0)"
          "pillar flow 其他 ~17 个非主线 flow (F9-project-init / F-incident-reaction / F-execution-log-governance 等)"
-         "scoped-commit-handoff daemon enforce — wave 16 task 06 已落 v0 (enforce_scoped_commit opt-in default false; 4 错误码; gate 在 allocate_id 之前; 不跑 git); 后续 enforce-by-default + git 仓库挂钩 / scope-overlap 跨多 plan 全局视图 仍 pending"
-         "PLAN DAG scheduler 完整 11-stage 的 per-stage entry — runtime v2 已覆盖 dispatch/lifecycle/failure-policy/condition-gate, wave 16 task 04 加 paused 7th lifecycle + review-gate question-event trigger, wave 16 task 05 加 per-node retry policy v0 (cap 3 attempts; cap delay 60s; SafeDescriptor 不 retry); 仍 deferred: claim-lease (s5) / rollback compensate (s9 完整) / acceptance evaluator (s7) / mark-plan-final (s10) / trigger-record-execution-distill (s11)"
-         "paused-resume listener 的 plan node 重激活 — wave 16 task 04 paused 已落 (节点状态写 evidence + 标 dag_paused), 但 paused 节点收到 QuestionEvent::Resolved 后的自动 re-dispatch (auto-resume) 仍 architecture-designed pending — 需 plan-runner 增 paused-resume listener (复用 wave 16 task 02 subscriber 协议但 trigger plan_dag re-execution)"
-         "autonomous workstation dispatch — wave 15 task 05 v0 是 PLAN-hint opt-in, wave 16 task 03 加 5 inference rules (target=mission_task_delegate scoped node); 完全 autonomous (plan-runner 不需要任何 hint, 全局推断 + 扩展到 mission_execution path) 仍 surface 不实现"
-         "autonomous PLAN.lisp 推理 — wave 16 task 03 仅 workstation dispatch 推断, 完整 PLAN.lisp 节点字段 (dispatch-strategy / target / target-project / parallelism) 全自动推断 (从 directive + 历史 evidence) 仍 pending"
-         "unified-entry pipeline 升级到 actor 后的 4 自动化 non-goal 实现 (auto_approve_directive / auto_approve_plan / auto_answer_review_question / autonomous_workstation_dispatch) — wave 14 task 04 仍 surface, wave 15-16 task 部分缓解 (review-resolution 显式 / workstation dispatch opt-in + auto-inference / review listener 被动 consume answer 但不替人答)"
+         "scoped-commit-handoff daemon enforce — wave 16 task 06 已落 v0 (enforce_scoped_commit opt-in default false; 4 错误码; gate 在 allocate_id 之前; 不跑 git); wave 17 task 07 加 brief-layer enforce 默认开 (workstation_dispatch.rs 任务 brief section 7); daemon legacy mission_execution(action=complete) callers 仍 enforce_scoped_commit default false 字节兼容; 后续 enforce-by-default 切默认 + git 仓库挂钩 (pre-commit hook scope 校验) / scope-overlap 跨多 plan 全局视图 仍 pending"
+         "PLAN DAG scheduler 完整 11-stage 的 per-stage entry — runtime v2 已覆盖 dispatch/lifecycle/failure-policy/condition-gate, wave 16 task 04 加 paused 7th lifecycle + review-gate question-event trigger, wave 16 task 05 加 per-node retry policy v0; wave 17 大量 close: s5 claim-lease v0 (task 02, opt-in enforce_claims default false) ✓ / s7 acceptance evaluator v0 (task 03, 三模式 inner_status/evidence_keys/manual, 绝不 shell) ✓ / s8 paused-resume hook (task 01, 4 resume args + listener auto-route) ✓ / s9 rollback policy v0 (task 04, 三模式 + 5 safety gates) ✓ / s10 mark-plan-final (task 05, 4 finalization rule, paused → unchanged 不撒谎) ✓ / s11 trigger-record-execution-distill (task 05, 经现有 super::workflow::handle) ✓; 仍 partial 的 11-stage 子项: 完全自动 enforce (claim-lease default true / 切 default enforce) 仍 pending; cross-plan distill chain (上游 plan distill 自动 enqueue 给下游 plan workflow) 仍 future; 跨节点 acceptance fan-in (节点 acceptance 引用 cross-node evidence/output) 仍 future"
+         "autonomous workstation dispatch — wave 15 task 05 v0 是 PLAN-hint opt-in, wave 16 task 03 加 5 inference rules (target=mission_task_delegate scoped node); wave 17 task 07 加 brief-layer scoped-commit enforce 默认; 完全 autonomous (plan-runner 不需要任何 hint, 全局推断 + 扩展到 mission_execution path) 仍 surface 不实现"
+         "autonomous PLAN.lisp 推理 — wave 16 task 03 仅 workstation dispatch 推断, 完整 PLAN.lisp 节点字段 (dispatch-strategy / target / target-project / parallelism / acceptance-mode / rollback-policy 等) 全自动推断 (从 directive + 历史 evidence) 仍 pending"
+         "unified-entry pipeline 升级到 actor 后的 4 自动化 non-goal 实现 (auto_approve_directive / auto_approve_plan / auto_answer_review_question / autonomous_workstation_dispatch) — wave 14 task 04 仍 surface; wave 15-17 task 部分缓解 (review-resolution 显式 by wave 15-04 / workstation dispatch opt-in + auto-inference by wave 15-05 + 16-03 / review listener plan-node action 自动 re-dispatch by wave 17-01 但仍是 caller 显式 resolution drives, 不替人答 / acceptance manual_required / rollback workstation 都仍 caller 显式 opt-in); 完整 LLM 自动 approve / 自动 answer review question 仍 surface"
          "ExecutionEvent dispatch_strategy/target_project/requested_cwd 完整字段扩展 — wave 14 task 02 已扩 PlanNodeStateChanged variant 含 dispatch_strategy/target_project, 但 ExecutionEvent::Opened 等其他 variant 仍未扩同字段"
-         "event-log query path — wave 16 task 07 加 passive subscriber cache (cap 1024 FIFO) 提供 deterministic id → live id reverse-lookup; 持久化 event log 查询面 (按 plan_id / node_id / time-range 检索) 仍 pending"
-         "review-gate / workstation dispatch UI panel — 当前仅 MCP response + sidecar; 前端 review/dispatch 面板 pending (frontend Lisp 仍 postpone 直到 MissionD loop 稳)"
+         "event-log query path — wave 16 task 07 加 passive subscriber cache (cap 1024 FIFO) 提供 deterministic id → live id reverse-lookup; wave 17 task 06 加 三档 resolver (live cache → log query 复用 LogReadable::read_from / Domain::Execution / Seq(0) / 512 不加 store method → unavailable) + primary event_ref_status / event_ref_source / event_ref_warning 在 EvidenceEntry surface; ad-hoc reverse-lookup 已通; 系统化按 plan_id / node_id / time-range query API + dedicated store method 仍 future"
+         "PLAN DAG node FSM 完整 enum 10 主态 (pending/ready/claimed/running/succeeded/failed/skipped/retrying/rolling-back/paused) — wave 13 已 6 主 + 3 skip 子分类 落 evidence; wave 16 task 04 加 paused 第 7 主态; wave 17 task 02 加 Claimed 第 8 主态; retrying / rolling-back 仍未独立 lifecycle 状态 (retry 通过每 attempt 写独立 evidence 表达; rollback 通过 failed→rollback_* evidence + node_results[].rollback 块表达, 不进 FSM)"
+         "git pre-commit hook + worktree-level scope enforcement — wave 17 task 07 brief 强制 worker 显式 commit 但 daemon 不跑 git; 真正 git hook 执行 scope check (pre-commit / pre-push) 仍 future"
+         "review-gate / workstation dispatch / acceptance / rollback UI panel — 当前仅 MCP response + sidecar; 前端 review/dispatch/acceptance/rollback 面板 pending (frontend Lisp 仍 postpone 直到 MissionD loop 稳)"
          "frontend Lisp 系列 — 全部 postpone 至 MissionD loop 稳定后启动 (本 wave 不开 frontend)"]))
 
   ;; ──────────────────────────────────────────────────
@@ -1905,7 +2131,14 @@
   ;; ──────────────────────────────────────────────────
   (judgement-now
     :date "2026-04-26"
-    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 13 task 04 execution-status-backfill + wave 14 task 07 lisp-backfill-and-l2-shard-plan + wave 15 task 06 lisp-backfill-wave15-status + wave 16 task 09 lisp-backfill-wave16-status sessions"
+    :decided-by "wave 11 lisp-source-index-precompression + wave 12 task 06 source-index-expansion + wave 13 task 04 execution-status-backfill + wave 14 task 07 lisp-backfill-and-l2-shard-plan + wave 15 task 06 lisp-backfill-wave15-status + wave 16 task 09 lisp-backfill-wave16-status + wave 17 task 09 lisp-backfill-wave17-status sessions"
+    :wave17-task-09-non-goal
+      ["本任务不改 Rust / SQL / JS / Cargo / 任务文档"
+       "本任务不真正压缩主 Lisp"
+       "本任务不发明 wave 17 没实现的架构 — 只反映 committed implementation truth"
+       "不动 .missiond/v2/intent-event-bus.lisp 正文 (frozen) / .missiond/intent-mcp-defs.lisp"
+       "不删 anchor / 不合并不相关 sections / 不重写 event-bus protected"
+       "不启动 frontend Lisp (continue postpone 直到 MissionD loop 稳)"]
     :wave16-task-09-non-goal
       ["本任务不改 Rust / SQL / JS / Cargo / 任务文档"
        "本任务不真正压缩主 Lisp"
@@ -1918,7 +2151,7 @@
        "L1 压缩在 wave 13 task 05 已部分完成, L2 物理拆分已在 wave 15 task 02 完成 (5 shard 创建; 主 Lisp 减约 3000 行)"
        "压缩需要的 section-id / status taxonomy / split rule / shard plan 必须先冻结 — 这正是 wave 11 + wave 12 task 06 + wave 13 task 04 + wave 14 task 07 + wave 15 task 02/03/06 + wave 16 task 09 的工作"]
     :pre-compression-checklist
-      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区 +22 entry; wave 13 task 04 扩 +11 entry; wave 14 task 07 扩 +13 entry; wave 15 task 06 扩 +5 entry; wave 16 task 09 扩 +6 entry)"
+      ["section-id 在 source index 已落 (wave 11 完成 7 pillar baseline; wave 12 task 06 扩 7 高变动语义区 +22 entry; wave 13 task 04 扩 +11 entry; wave 14 task 07 扩 +13 entry; wave 15 task 06 扩 +5 entry; wave 16 task 09 扩 +6 entry; wave 17 task 09 扩 +7 entry)"
        "status-taxonomy 已在 architecture-dsl.lisp 冻结 7 值"
        "split-policy 已写明 wait-for-conditions"
        "compression-policy 已写明 forbidden 红线 (ingress/logic-core/egress 不动)"
@@ -1931,32 +2164,40 @@
     :unblock-conditions-for-real-compression
       ["条件 1 (wave 14 升级) — file-first writer 已 code-aligned (wave 14 task 01 commit 00cbc1d): 三类 artifact (directive alignment / PLAN / workflow methodology) 全走统一 helper file_artifacts::attempt_artifact_write; resolve_target_project_root; partial 语义; 6 file_* 响应字段; 写者主路径 stable"
        "条件 2 (wave 14 + wave 15 task 04 + wave 16 task 01) — review gate auto-create v1 + resolution bridge v0 + workflow handler 接入: review_gate policy enum (manual|emit_question|off) + 显式 resolution input (review_decision + review_actor + review_note); envelope validator 5 fail-fast 错误码; 接到 directive (approve/archive) + plan (approve/mark/supersede) + workflow (resolve_review with stamp-only on workflow row, methodology receipt-only); 3 surface 全接 → code-aligned"
-       "条件 3 (wave 14 + wave 16 task 04/05) — PlanNodeStateChanged variant 已扩 + live EventRef 三层策略 + plan paused 7th lifecycle + per-node retry policy v0: PlanNodeStateChanged 4 必 + 5 可选; paused 触发 review-gate question-event; retry cap 3 attempts + cap delay 60s + SafeDescriptor 不 retry; 完整 11-stage scheduler (claim-lease / rollback / acceptance / mark-plan-final) 仍 architecture-designed pending"
-       "条件 4 (wave 14 升级) — unified-entry pipeline v1 已 code-aligned (wave 14 task 04 commit 338a3fb) + wave 16 task 08 e2e smoke 加 deterministic 4 hand-off 回归基线: 不新增 MCP tool (仍 83); 4 v0 non-goal 中 review-resolution / workstation-dispatch 已缓解 (wave 15-16); auto_approve_directive / auto_approve_plan / autonomous_workstation_dispatch 完整版仍 surface"
-       "条件 5 (wave 14 + wave 16 task 07) — evidence collector live event ref 三层策略已 code-aligned + passive subscriber cache (cap 1024 FIFO; 三档 status live/log/unavailable; deterministic id reverse lookup): 现可同时持 live id (publish-time) + log id (subscriber 命中 deterministic key); event-log 持久化查询面仍 pending"
+       "条件 3 (wave 14 + wave 16 task 04/05 + wave 17 task 01/02/03/04/05) — PlanNodeStateChanged variant 已扩 + live EventRef 三层策略 + plan paused 7th lifecycle + per-node retry policy v0 + paused-resume hook v0 + claim-lease v0 (Claimed 第 8 态) + acceptance evaluator v0 三模式 + rollback policy v0 三模式 + 5 safety gates + finalize/distill trigger v0: 11-stage scheduler 大量 close (s5 claim ✓ / s7 acceptance ✓ / s8 paused-resume ✓ / s9 rollback ✓ / s10 mark-final ✓ / s11 distill 触发 ✓); 仍 partial 是因为: enforce_claims default false (opt-in 兼容期) / cross-plan distill chain / 跨节点 acceptance fan-in / 自动 compensate-node + cascade-up rollback 仍 future"
+       "条件 4 (wave 14 升级 + wave 17 task 08) — unified-entry pipeline v1 已 code-aligned (wave 14 task 04 commit 338a3fb) + wave 16 task 08 e2e smoke 加 deterministic 4 hand-off 回归基线 + wave 17 task 08 加 build_plan_execute_args 7 个 wave-17 keys forward + 6 步 paused-resume e2e smoke (no LLM no spawn no shell): 不新增 MCP tool (仍 83); 4 v0 non-goal 中 review-resolution / workstation-dispatch / paused-resume listener 已缓解 (wave 15-17); auto_approve_directive / auto_approve_plan / autonomous_workstation_dispatch 完整版 + 自动 answer review question 仍 surface"
+       "条件 5 (wave 14 + wave 16 task 07 + wave 17 task 06) — evidence collector live event ref 三层策略 + passive subscriber cache (cap 1024 FIFO) + event-log query path v0 三档 resolver: 现可 (1) live cache 命中 → live id; (2) log query 复用 LogReadable::read_from(Domain::Execution, Seq(0), 512) reverse-lookup deterministic key; (3) unavailable + reason 兜底; primary event_ref_status / event_ref_source / event_ref_warning 加在 EvidenceEntry surface; query 失败 unavailable + reason 绝不挂 primary dispatch; 系统化 query API + dedicated store method 仍 future"
        "条件 6 (wave 15 task 02) — L2 shard split executed: 5 shard 文件 (intent-execution-governance / intent-directive-artifacts / intent-plan-dag / intent-capability-governance / intent-workstation-policy); section-id 全保; 内容 byte-identical"
        "条件 7 (wave 15 task 03) — shard-aware checker: R017 (source-file 必存在) + R018 (source-file 必 .missiond/v2/) + 自动 shard 发现 (data-driven); --dry-fixture 5 → 10; --all-v2 19 文件 OK"
        "条件 8 (wave 15 task 05 + wave 16 task 03) — workstation-dispatch v0 opt-in + auto-inference v1 已 code-aligned: PLAN node :workstation-dispatch true 触发 mission_task_delegate; 5 inference rules 对 mission_task_delegate scoped node 自动推断; workstation_dispatch_source 5 值 surface; 完全 autonomous spawn (无任何 hint) 仍 pending"
-       "条件 9 (wave 16 task 02) — review-gate QuestionEvent::Resolved 订阅 listener v0: spawn_review_resolution_sub 与 spawn_decision_sub 并行; conservative vocabulary mapping; ack 后 ignore 非 review id; 仍是 observation-only consume answer (不替人答, auto_answer_review_question 仍 surface); paused-resume 用同协议触发 plan node 重激活仍 pending"
-       "条件 10 (wave 16 task 06) — scoped commit handoff daemon enforce v0: enforce_scoped_commit opt-in default false (字节兼容); 4 错误码 (COMMIT_HASH_REQUIRED / COMMIT_BLOCKER_REQUIRED / CLAIM_SCOPE_REQUIRED / SCOPED_COMMIT_VIOLATION); gate 在 allocate_id 之前 (rejected 不 bump state); daemon 不跑 git; 后续 enforce-by-default 仍 pending"]
-    :wave-16-status-summary
+       "条件 9 (wave 16 task 02 + wave 17 task 01) — review-gate QuestionEvent::Resolved 订阅 listener v0 + plan-node action 自动 route: spawn_review_resolution_sub 与 spawn_decision_sub 并行; conservative vocabulary mapping; ack 后 ignore 非 review id; wave 17 task 01 加 plan-node action 自动调 paused-node resume helper (approved → 重 dispatch / rejected/needs_changes → 写 evidence keep paused); 仍是 caller-driven resolution drives, 不替人答 (auto_answer_review_question 仍 surface)"
+       "条件 10 (wave 16 task 06 + wave 17 task 07) — scoped commit handoff daemon enforce v0 (opt-in default false 字节兼容; 4 错误码; gate 在 allocate_id 之前; 不跑 git) + brief-layer enforce 默认开 (workstation_dispatch.rs 任务 brief section 7 'Completion handoff (scoped commit)'; code task → enforce_scoped_commit=true / commit_status=committed / commit_hash / staged_files; read-only task → commit_status=not-required + 解释; response scoped_commit_required: true / scoped_commit_policy: 'enforced-on-complete'); daemon agent_execution.rs 完全未动 (legacy compat); 后续 enforce-by-default 切默认 + git pre-commit hook 执行 scope check 仍 pending"]
+    :wave-17-status-summary
       ["条件 1 → code-aligned (file-first writer integration; wave 14)"
        "条件 2 → code-aligned (review gate auto-create v1 + resolution bridge v0 + workflow handler 接入; 3 surface 全接 by wave 16 task 01)"
-       "条件 3 → code-aligned-partial (PlanNodeStateChanged variant + live ref + paused 7th + retry v0 已落; 完整 11-stage scheduler 的 claim-lease / rollback / acceptance / mark-plan-final 仍 pending)"
-       "条件 4 → code-aligned (unified-entry pipeline v1 + wave 16 task 08 e2e smoke; auto_approve_directive/plan + autonomous_workstation_dispatch 完整版仍 surface)"
-       "条件 5 → code-aligned (live event ref 三层策略 + subscriber 三档 live/log/unavailable + cap 1024 FIFO cache by wave 16 task 07)"
+       "条件 3 → code-aligned-partial (PlanNodeStateChanged variant + live ref + paused 7th + retry v0 + paused-resume + claim-lease + acceptance + rollback + finalize/distill 已落; cross-plan distill chain / 跨节点 acceptance fan-in / 自动 compensate-node + cascade-up / 切 enforce default 仍 pending)"
+       "条件 4 → code-aligned (unified-entry pipeline v1 + wave 16 task 08 e2e smoke + wave 17 task 08 paused-resume e2e smoke; 4 v0 non-goal 中 auto_approve_directive/plan + autonomous_workstation_dispatch 完整版 + 自动 answer review question 仍 surface)"
+       "条件 5 → code-aligned (live event ref 三层策略 + subscriber 三档 + cap 1024 FIFO cache by wave 16 task 07 + log query 三档 resolver by wave 17 task 06)"
        "条件 6 → code-aligned (L2 shard split executed)"
        "条件 7 → code-aligned (R015+R016 + R017+R018 + shard auto-discovery)"
        "条件 8 → code-aligned (workstation dispatch v0 opt-in + auto-inference v1 for mission_task_delegate scoped node by wave 16 task 03; full autonomous spawn 仍 pending)"
-       "条件 9 → code-aligned-partial (review-gate listener subscriber v0 by wave 16 task 02; paused-resume re-activation 仍 pending)"
-       "条件 10 → code-aligned (scoped commit enforce v0 opt-in by wave 16 task 06)"
+       "条件 9 → code-aligned (review-gate listener subscriber v0 by wave 16 task 02 + plan-node action 自动 route by wave 17 task 01; paused-resume round-trip 已闭环, auto_answer_review_question 仍 surface)"
+       "条件 10 → code-aligned (scoped commit daemon enforce v0 opt-in by wave 16 task 06 + brief-layer enforce 默认开 by wave 17 task 07; daemon legacy compat; git pre-commit hook 仍 pending)"
        "extensible domain count test → code-aligned (wave 15 task 01 — 不 hardcode count, 走 contains+floor)"
-       "unified-entry e2e smoke → code-aligned (wave 16 task 08 deterministic 4 hand-off no-LLM)"]
+       "unified-entry e2e smoke → code-aligned (wave 16 task 08 deterministic 4 hand-off no-LLM + wave 17 task 08 paused-resume 6 步 round-trip)"
+       "PLAN DAG paused-resume hook v0 → code-aligned (wave 17 task 01: 4 resume args + listener auto-route)"
+       "PLAN DAG claim-lease v0 → code-aligned-partial (wave 17 task 02: opt-in enforce_claims default false 兼容期)"
+       "PLAN DAG acceptance evaluator v0 → code-aligned-partial (wave 17 task 03: 三模式已落, 跨节点 acceptance fan-in 仍 future)"
+       "PLAN DAG rollback policy v0 → code-aligned-partial (wave 17 task 04: 三模式已落, 自动 compensate-node + cascade-up 仍 future)"
+       "PLAN DAG finalize + distill trigger v0 → code-aligned-partial (wave 17 task 05: distill dry_run + sonnet 已通, 自动 cross-plan chain 仍 future)"
+       "evidence event-log query path v0 → code-aligned (wave 17 task 06: 三档 resolver live cache → log query → unavailable)"
+       "workstation scoped-commit brief default v1 → code-aligned (wave 17 task 07: brief 强制 worker 显式 commit, daemon 不变)"]
     :next-step
-      ["条件全满足后 (10 条件中 8 全 code-aligned, 2 partial — 完整 11-stage PLAN DAG scheduler 与 paused-resume listener 仍待), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
+      ["条件全满足后 (10 条件中 8 全 code-aligned, 2 partial — 完整 11-stage PLAN DAG scheduler 接近 close 但 cross-plan distill chain / 跨节点 acceptance fan-in / 切 enforce default 仍待), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
        "压缩 PR 必须带 git diff --check + checker --all-v2 + 对应 *-execution.lisp D-deviation"
-       "继续把 paused-resume 接到 plan-runner (paused 节点收到 QuestionEvent::Resolved 后自动 re-dispatch) + 实现 autonomous PLAN.lisp 推理 (从 directive + 历史 evidence 推 PLAN 节点字段)"
-       "实现完整 11-stage scheduler (claim-lease / rollback / acceptance / mark-plan-final / trigger-record-execution-distill)"
+       "继续切 enforce default — claim-lease / scoped-commit 切 enforce-by-default + git pre-commit hook 执行 scope check"
+       "实现 cross-plan distill chain (上游 plan distill 自动 enqueue 给下游 plan workflow) + 跨节点 acceptance fan-in (节点 acceptance 引用 cross-node evidence/output)"
+       "实现 autonomous PLAN.lisp 推理 (从 directive + 历史 evidence 推 PLAN 全节点字段) + 全 autonomous workstation spawn (plan-runner 不需要任何 hint, 全局推断)"
        "把 5 wave-15-shard 内若干 status-only 文本压缩 — 只压 status 句子, schema/contract 段不动"
        "压缩前以 :compression-safe? 字段做白名单过滤 — false 的 section 即使在 compression-policy.allowed 之内也保留正文"
        "frontend Lisp 仍 postpone 直到 MissionD loop 稳"]))
