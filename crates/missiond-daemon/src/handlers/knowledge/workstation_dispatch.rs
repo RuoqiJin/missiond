@@ -35,7 +35,7 @@
 //! Wave 15 / Task 05 explicitly does NOT touch the Lisp authority files —
 //! that backfill is Wave 15 / Task 06.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use missiond_core::types::Plan;
 use serde_json::{json, Value};
@@ -152,6 +152,553 @@ impl WorkstationDispatchHints {
             }
         }
         dropped
+    }
+
+    /// wave-19 / task 07 — overlay a parsed task contract on top of the
+    /// existing hints. The contract is the SSOT, so non-empty contract
+    /// fields ALWAYS win over caller args (which were merged earlier).
+    /// Empty contract list-fields do NOT clobber non-empty arg lists —
+    /// that protects against a contract that omits a field (the renderer
+    /// only emits non-empty `:acceptance` etc.) from accidentally
+    /// erasing a caller-supplied list. The `task_contract_path` field is
+    /// preserved so observers can trace provenance.
+    pub(crate) fn overlay_contract(&mut self, contract: &ParsedTaskContract) {
+        // :goal → objective (always wins when non-empty).
+        if !contract.goal.trim().is_empty() {
+            self.objective = Some(contract.goal.trim().to_string());
+        }
+        // :scope (optional, wins when present).
+        if let Some(scope) = contract
+            .scope
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            self.scope = Some(scope.to_string());
+        }
+        // :write-scope → owned_files (only overwrite when non-empty).
+        if !contract.write_scope.is_empty() {
+            self.owned_files = contract.write_scope.clone();
+        }
+        // :must-not-touch → forbidden_files (only overwrite when non-empty).
+        if !contract.must_not_touch.is_empty() {
+            self.forbidden_files = contract.must_not_touch.clone();
+        }
+        // :acceptance (only overwrite when non-empty).
+        if !contract.acceptance.is_empty() {
+            self.acceptance_commands = contract.acceptance.clone();
+        }
+        // :commit (:policy "...") (optional).
+        if let Some(policy) = contract
+            .commit_policy
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            self.commit_policy = Some(policy.to_string());
+        }
+        // :dispatch-strategy (optional, wins when present).
+        if let Some(ds) = contract
+            .dispatch_strategy
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            self.dispatch_strategy = Some(ds.to_string());
+        }
+        // :target-project (optional).
+        if let Some(tp) = contract
+            .target_project
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            self.target_project = Some(tp.to_string());
+        }
+        // :requested-cwd (optional).
+        if let Some(cwd) = contract
+            .requested_cwd
+            .as_deref()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+        {
+            self.requested_cwd = Some(cwd.to_string());
+        }
+    }
+}
+
+// ── wave-19 / task 07 — narrow task-contract v1 parser ─────────────────
+//
+// Scope rule: this parser ONLY extracts the fields workstation_dispatch
+// actually consumes (objective / scope / owned-files / forbidden-files /
+// acceptance / commit policy / dispatch strategy / target / target-project
+// / requested-cwd). It is NOT a general-purpose Lisp reader — the
+// authoritative checker lives at scripts/check-task-contract.mjs and is
+// the gate for any new field. Adding a field here without first teaching
+// the checker would break the SSOT invariant.
+//
+// Why a hand-rolled tokeniser instead of pulling in a Lisp crate:
+//   * The daemon already deliberately avoids a Lisp dependency (see
+//     handlers/comm/capability_usage.rs which uses regexes for the same
+//     reason — keeps the fail-mode surface narrow and the dependency tree
+//     clean for the embedded-runtime build).
+//   * The contract emitter (plan.rs::build_task_contract_lisp) only ever
+//     produces strings, bracketed string lists, bare symbols (kind/status
+//     values), and one nested property list (`:commit (...)`). The
+//     tokeniser below covers exactly that surface.
+//   * Comment lines start with `;;` and end at end-of-line.
+//   * Strings are double-quoted with `\"` and `\\` escapes.
+//
+// Failure mode: any structural error (unbalanced parens, EOF inside a
+// string, missing `:schema`, schema mismatch, unexpected token shape) is
+// surfaced as `TaskContractParseError` and caught by the dispatch layer
+// which converts it into `SafeDescriptorReason::MalformedTaskContract`.
+// The parser NEVER guesses or recovers — fail-fast over silent salvage.
+
+/// Narrow projection of task-contract v1 holding only the fields
+/// `workstation_dispatch` consumes. New fields land here only after the
+/// authoritative checker (scripts/check-task-contract.mjs) is taught
+/// about them. The unused fields (kind, status, owner, etc.) are not
+/// stripped — see `read_optional_string`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct ParsedTaskContract {
+    pub schema: String,
+    pub goal: String,
+    pub scope: Option<String>,
+    pub write_scope: Vec<String>,
+    pub must_not_touch: Vec<String>,
+    pub acceptance: Vec<String>,
+    pub commit_policy: Option<String>,
+    pub dispatch_strategy: Option<String>,
+    pub target_project: Option<String>,
+    pub requested_cwd: Option<String>,
+    pub target: Option<String>,
+}
+
+/// Typed parser/loader failure. Each variant maps deterministically to a
+/// `SafeDescriptorReason::MalformedTaskContract` reason string.
+#[derive(Debug, Clone)]
+pub(crate) enum TaskContractParseError {
+    /// IO failure reading the file (missing / permission / etc.).
+    Io(String),
+    /// The file content failed structural parsing (lex / paren balance /
+    /// EOF inside string).
+    Lex(String),
+    /// The top-level form is not `(task <id> ...)`.
+    NotATaskForm(String),
+    /// `:schema` is missing or not equal to `missiond.task-contract.v1`.
+    SchemaMismatch(String),
+    /// A required field (`:goal`) is missing or blank.
+    MissingRequired(&'static str),
+    /// A field has the wrong type (e.g. `:goal "..."` is not a string).
+    FieldShape { field: &'static str, detail: String },
+}
+
+impl TaskContractParseError {
+    pub(crate) fn reason(&self) -> String {
+        match self {
+            TaskContractParseError::Io(e) => format!("io: {}", e),
+            TaskContractParseError::Lex(e) => format!("lex: {}", e),
+            TaskContractParseError::NotATaskForm(s) => {
+                format!("not a `(task ...)` form: {}", s)
+            }
+            TaskContractParseError::SchemaMismatch(found) => format!(
+                "schema mismatch — expected `missiond.task-contract.v1`, got `{}`",
+                found
+            ),
+            TaskContractParseError::MissingRequired(field) => {
+                format!("missing required field `{}`", field)
+            }
+            TaskContractParseError::FieldShape { field, detail } => {
+                format!("field `{}` has wrong shape: {}", field, detail)
+            }
+        }
+    }
+}
+
+/// One element of the small parse tree. Bracketed `[..]` and parens `(..)`
+/// are not distinguished here — the contract emitter uses `[...]` for
+/// vectors and `(...)` for the top form + `:commit` plist; both shapes
+/// flatten into a `List` and the field reader differentiates by context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SExp {
+    /// Bare symbol (e.g. `task`, `code-alignment`, `write-scope-only`,
+    /// `true`). Includes leading `:` keywords as their own variant below.
+    Symbol(String),
+    /// Property keyword (`:schema`, `:goal`, ...). Stored without the
+    /// leading colon for ergonomic matching.
+    Keyword(String),
+    /// String literal (post-unescape).
+    String(String),
+    /// Compound — both `(...)` and `[...]` flatten here.
+    List(Vec<SExp>),
+}
+
+/// Tokenise + parse a single top-level form. The contract emitter only
+/// ever writes one form per file, so we accept exactly one and reject
+/// trailing junk.
+fn parse_one_top_form(src: &str) -> Result<SExp, TaskContractParseError> {
+    let tokens = lex_tokens(src)?;
+    let mut iter = tokens.into_iter().peekable();
+    let form = parse_form(&mut iter)?;
+    // Skip whitespace tokens — the lexer already drops them; remaining
+    // iter must be empty.
+    if iter.peek().is_some() {
+        return Err(TaskContractParseError::Lex(
+            "trailing tokens after top-level form".to_string(),
+        ));
+    }
+    Ok(form)
+}
+
+/// Internal lexer token. We collapse `(`/`[` into `Open` and `)`/`]`
+/// into `Close` because the contract grammar does not need the
+/// distinction (see `SExp::List`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Tok {
+    Open,
+    Close,
+    Symbol(String),
+    Keyword(String),
+    String(String),
+}
+
+fn lex_tokens(src: &str) -> Result<Vec<Tok>, TaskContractParseError> {
+    let mut out: Vec<Tok> = Vec::new();
+    let bytes = src.as_bytes();
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let b = bytes[i];
+        // Skip whitespace.
+        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
+            i += 1;
+            continue;
+        }
+        // Comment: `;;` (single `;` is also tolerated) → skip to EOL.
+        if b == b';' {
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
+            continue;
+        }
+        // Bracket / paren.
+        if b == b'(' || b == b'[' {
+            out.push(Tok::Open);
+            i += 1;
+            continue;
+        }
+        if b == b')' || b == b']' {
+            out.push(Tok::Close);
+            i += 1;
+            continue;
+        }
+        // String literal.
+        if b == b'"' {
+            i += 1;
+            let mut buf = String::new();
+            let mut closed = false;
+            while i < bytes.len() {
+                let c = bytes[i];
+                if c == b'\\' {
+                    if i + 1 >= bytes.len() {
+                        break;
+                    }
+                    let next = bytes[i + 1];
+                    match next {
+                        b'\\' => buf.push('\\'),
+                        b'"' => buf.push('"'),
+                        b'n' => buf.push('\n'),
+                        b't' => buf.push('\t'),
+                        b'r' => buf.push('\r'),
+                        // Unknown escape → keep the next byte verbatim so
+                        // `\?` round-trips. Conservative; matches the
+                        // emitter's tolerance.
+                        other => buf.push(other as char),
+                    }
+                    i += 2;
+                    continue;
+                }
+                if c == b'"' {
+                    closed = true;
+                    i += 1;
+                    break;
+                }
+                // UTF-8 safe: re-walk via str slicing instead of byte cast.
+                // We grow `buf` one char at a time using char_indices below.
+                // To avoid double-walking, fall back to a per-char loop here.
+                // For ASCII (which `lisp_escape_string` guarantees for the
+                // structural bytes), the cast is safe; non-ASCII bytes flow
+                // through the str-slice branch.
+                if c.is_ascii() {
+                    buf.push(c as char);
+                    i += 1;
+                } else {
+                    // Find the next char boundary in the original `&str`.
+                    let rest = &src[i..];
+                    if let Some(ch) = rest.chars().next() {
+                        buf.push(ch);
+                        i += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if !closed {
+                return Err(TaskContractParseError::Lex(
+                    "unterminated string literal".to_string(),
+                ));
+            }
+            out.push(Tok::String(buf));
+            continue;
+        }
+        // Atom (symbol or keyword). Read until whitespace / paren.
+        let start = i;
+        while i < bytes.len() {
+            let c = bytes[i];
+            if matches!(
+                c,
+                b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b'[' | b']' | b'"' | b';'
+            ) {
+                break;
+            }
+            i += 1;
+        }
+        let raw = &src[start..i];
+        if raw.is_empty() {
+            return Err(TaskContractParseError::Lex(format!(
+                "unexpected byte 0x{:02x} at offset {}",
+                b, start
+            )));
+        }
+        if let Some(stripped) = raw.strip_prefix(':') {
+            if stripped.is_empty() {
+                return Err(TaskContractParseError::Lex(
+                    "bare `:` is not a valid keyword".to_string(),
+                ));
+            }
+            out.push(Tok::Keyword(stripped.to_string()));
+        } else {
+            out.push(Tok::Symbol(raw.to_string()));
+        }
+    }
+    Ok(out)
+}
+
+fn parse_form(
+    iter: &mut std::iter::Peekable<std::vec::IntoIter<Tok>>,
+) -> Result<SExp, TaskContractParseError> {
+    let tok = iter
+        .next()
+        .ok_or_else(|| TaskContractParseError::Lex("unexpected EOF".to_string()))?;
+    match tok {
+        Tok::Open => {
+            let mut items: Vec<SExp> = Vec::new();
+            loop {
+                match iter.peek() {
+                    None => {
+                        return Err(TaskContractParseError::Lex(
+                            "unbalanced parens — EOF inside list".to_string(),
+                        ))
+                    }
+                    Some(Tok::Close) => {
+                        iter.next();
+                        return Ok(SExp::List(items));
+                    }
+                    _ => {
+                        items.push(parse_form(iter)?);
+                    }
+                }
+            }
+        }
+        Tok::Close => Err(TaskContractParseError::Lex(
+            "unexpected closing bracket".to_string(),
+        )),
+        Tok::Symbol(s) => Ok(SExp::Symbol(s)),
+        Tok::Keyword(k) => Ok(SExp::Keyword(k)),
+        Tok::String(s) => Ok(SExp::String(s)),
+    }
+}
+
+/// Walk the top-level `(task <id> :schema ... :goal ... ...)` form and
+/// project the narrow contract.
+fn project_contract(form: &SExp) -> Result<ParsedTaskContract, TaskContractParseError> {
+    let SExp::List(items) = form else {
+        return Err(TaskContractParseError::NotATaskForm(format!(
+            "top form is not a list: {:?}",
+            form
+        )));
+    };
+    // Expect: (task <id-symbol> :keyword <value> :keyword <value> ...)
+    let mut iter = items.iter();
+    let head = iter
+        .next()
+        .ok_or_else(|| TaskContractParseError::NotATaskForm("empty form".to_string()))?;
+    match head {
+        SExp::Symbol(s) if s == "task" => {}
+        other => {
+            return Err(TaskContractParseError::NotATaskForm(format!(
+                "expected leading `task` symbol, got {:?}",
+                other
+            )))
+        }
+    }
+    // Skip the task id (must be a bare symbol per the schema, but we
+    // accept anything non-keyword conservatively — the authoritative
+    // checker enforces shape).
+    let _id = iter
+        .next()
+        .ok_or_else(|| TaskContractParseError::NotATaskForm("missing task id".to_string()))?;
+
+    let mut out = ParsedTaskContract::default();
+    while let Some(tok) = iter.next() {
+        let SExp::Keyword(k) = tok else {
+            return Err(TaskContractParseError::Lex(format!(
+                "expected `:keyword` token in task body, got {:?}",
+                tok
+            )));
+        };
+        let val = iter.next().ok_or_else(|| TaskContractParseError::Lex(
+            format!("keyword `:{}` missing value", k),
+        ))?;
+        match k.as_str() {
+            "schema" => out.schema = require_string(val, "schema")?,
+            "goal" => out.goal = require_string(val, "goal")?,
+            "scope" => out.scope = Some(require_string(val, "scope")?),
+            "write-scope" => out.write_scope = require_string_list(val, "write-scope")?,
+            "must-not-touch" => {
+                out.must_not_touch = require_string_list(val, "must-not-touch")?
+            }
+            "acceptance" => out.acceptance = require_string_list(val, "acceptance")?,
+            "commit" => {
+                out.commit_policy = extract_commit_policy(val)?;
+            }
+            "dispatch-strategy" => {
+                out.dispatch_strategy = Some(require_string(val, "dispatch-strategy")?)
+            }
+            "target-project" => {
+                out.target_project = Some(require_string(val, "target-project")?)
+            }
+            "requested-cwd" => out.requested_cwd = Some(require_string(val, "requested-cwd")?),
+            "target" => out.target = Some(require_string(val, "target")?),
+            // Other v1 fields (kind / status / owner / depends-on / title /
+            // plan-id / node-id / report / requirements) are not consumed
+            // by workstation_dispatch — accept-and-ignore so the parser
+            // does not break when the emitter adds non-load-bearing
+            // metadata. Adding a field here MUST be paired with a checker
+            // update.
+            _ => {}
+        }
+    }
+
+    if out.schema.is_empty() {
+        return Err(TaskContractParseError::SchemaMismatch("(absent)".to_string()));
+    }
+    if out.schema != "missiond.task-contract.v1" {
+        return Err(TaskContractParseError::SchemaMismatch(out.schema.clone()));
+    }
+    if out.goal.trim().is_empty() {
+        return Err(TaskContractParseError::MissingRequired("goal"));
+    }
+    Ok(out)
+}
+
+fn require_string(val: &SExp, field: &'static str) -> Result<String, TaskContractParseError> {
+    match val {
+        SExp::String(s) => Ok(s.clone()),
+        other => Err(TaskContractParseError::FieldShape {
+            field,
+            detail: format!("expected string literal, got {:?}", other),
+        }),
+    }
+}
+
+fn require_string_list(
+    val: &SExp,
+    field: &'static str,
+) -> Result<Vec<String>, TaskContractParseError> {
+    match val {
+        SExp::List(items) => {
+            let mut out: Vec<String> = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    SExp::String(s) => out.push(s.clone()),
+                    other => {
+                        return Err(TaskContractParseError::FieldShape {
+                            field,
+                            detail: format!("non-string item in list: {:?}", other),
+                        })
+                    }
+                }
+            }
+            Ok(out)
+        }
+        other => Err(TaskContractParseError::FieldShape {
+            field,
+            detail: format!("expected list of strings, got {:?}", other),
+        }),
+    }
+}
+
+/// `(:required true :message "..." :scope-check write-scope-only :policy "scoped")`
+///
+/// We only need `:policy` for the workstation brief's commit policy
+/// surface. The other fields are validated by the authoritative checker;
+/// we tolerate missing `:policy` (returns `None`) so the brief defaults
+/// to `COMMIT_POLICY_SCOPED`.
+fn extract_commit_policy(val: &SExp) -> Result<Option<String>, TaskContractParseError> {
+    let SExp::List(items) = val else {
+        return Err(TaskContractParseError::FieldShape {
+            field: "commit",
+            detail: format!("expected property list, got {:?}", val),
+        });
+    };
+    let mut iter = items.iter().peekable();
+    while let Some(tok) = iter.next() {
+        let SExp::Keyword(k) = tok else { continue };
+        if k != "policy" {
+            // Skip the value of any non-`:policy` keyword — the structure
+            // is keyword-then-value, so consume one item.
+            let _ = iter.next();
+            continue;
+        }
+        let val = iter.next().ok_or_else(|| TaskContractParseError::FieldShape {
+            field: "commit",
+            detail: "`:policy` keyword missing value".to_string(),
+        })?;
+        return Ok(Some(require_string(val, "commit.policy")?));
+    }
+    Ok(None)
+}
+
+/// Pure parser entrypoint — exercised directly by the unit tests. The
+/// loader (`load_task_contract`) wraps this with file IO.
+pub(crate) fn parse_task_contract(
+    src: &str,
+) -> Result<ParsedTaskContract, TaskContractParseError> {
+    let form = parse_one_top_form(src)?;
+    project_contract(&form)
+}
+
+/// Loader — read the file then run `parse_task_contract`. Path is
+/// expected to be absolute (the dispatch caller already resolves
+/// `task_contract_path` against the project root before calling).
+pub(crate) fn load_task_contract(
+    path: &Path,
+) -> Result<ParsedTaskContract, TaskContractParseError> {
+    let bytes = std::fs::read_to_string(path)
+        .map_err(|e| TaskContractParseError::Io(format!("{}: {}", path.display(), e)))?;
+    parse_task_contract(&bytes)
+}
+
+/// Resolve a (possibly relative) `task_contract_path` against an
+/// already-resolved project root. The dispatch helper applies this AFTER
+/// `resolve_target_project_root` succeeds so a relative path always has
+/// a deterministic anchor — never the daemon's process cwd.
+fn resolve_contract_path(raw: &Path, project_root: &Path) -> PathBuf {
+    if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        project_root.join(raw)
     }
 }
 
@@ -439,6 +986,12 @@ pub(crate) enum SafeDescriptorReason {
     /// Caller did not provide an objective and the plan hints were empty,
     /// so the brief would have been content-free.
     MissingObjective,
+    /// wave-19 / task 07 — `task_contract_path` was supplied but the file
+    /// is missing, unreadable, or fails the narrow task-contract v1
+    /// parse. We refuse to fall back to the legacy natural-language path
+    /// because the contract is the SSOT — silently downgrading would
+    /// hide an authoring bug. Carries the absolute path + a typed reason.
+    MalformedTaskContract { path: String, reason: String },
 }
 
 impl SafeDescriptorReason {
@@ -447,6 +1000,7 @@ impl SafeDescriptorReason {
             SafeDescriptorReason::UnsupportedTarget(_) => "skipped_unsupported_target",
             SafeDescriptorReason::ProjectRootUnresolved(_) => "skipped_project_root_unresolved",
             SafeDescriptorReason::MissingObjective => "skipped_missing_objective",
+            SafeDescriptorReason::MalformedTaskContract { .. } => "skipped_malformed_task_contract",
         }
     }
 
@@ -459,6 +1013,13 @@ impl SafeDescriptorReason {
             SafeDescriptorReason::MissingObjective => {
                 "workstation-dispatch v0 requires either an explicit objective or a plan hint; \
                  refusing to dispatch a content-free task brief".to_string()
+            }
+            SafeDescriptorReason::MalformedTaskContract { path, reason } => {
+                format!(
+                    "task_contract_path `{}` is malformed: {} — refusing to fall back to the \
+                     legacy natural-language brief because the contract is the SSOT",
+                    path, reason
+                )
             }
         }
     }
@@ -545,12 +1106,44 @@ pub(crate) fn build_task_brief(
     hints: &WorkstationDispatchHints,
     dispatch_strategy: &str,
 ) -> String {
+    build_task_brief_with_source(plan, hints, dispatch_strategy, None)
+}
+
+/// wave-19 / task 07 — `build_task_brief` augmented with an optional
+/// "Source contract" preamble. When `contract_source` is `Some(path)` the
+/// brief opens with a `## Source contract` block that names the on-disk
+/// task-contract v1 file the worker should treat as authoritative — this
+/// gives the worker a stable reference if it needs to re-read the
+/// machine contract while iterating. When `None`, the brief is
+/// byte-identical to the wave-15/16/17 baseline.
+pub(crate) fn build_task_brief_with_source(
+    plan: &Plan,
+    hints: &WorkstationDispatchHints,
+    dispatch_strategy: &str,
+    contract_source: Option<&Path>,
+) -> String {
     let mut out = String::new();
 
     // Header pins plan + board_task so the delegated agent always knows
     // which row it is acting on.
     out.push_str(&format!("# Plan {} — workstation task brief\n", plan.id));
     out.push_str(&format!("Board task: {}\n\n", plan.board_task_id));
+
+    // 0. Source contract (wave-19 / task 07). Preamble — only present
+    //    when the dispatch flowed through a task-contract v1 file.
+    //    Legacy / non-contract briefs omit this block entirely so the
+    //    rest of the brief stays byte-identical.
+    if let Some(path) = contract_source {
+        out.push_str("## Source contract\n");
+        out.push_str(&format!("- task-contract v1: `{}`\n", path.display()));
+        out.push_str(
+            "- this brief is rendered from the contract above; treat the contract as the SSOT\n",
+        );
+        out.push_str(
+            "- if the brief and the contract diverge, the contract wins — re-read it before staging\n",
+        );
+        out.push('\n');
+    }
 
     // 1. Objective.
     let objective = hints
@@ -684,6 +1277,13 @@ pub(crate) fn build_task_brief(
 /// `dispatch_strategy` is the already-normalised strategy from the outer
 /// handler (one of `VALID_DISPATCH_STRATEGIES` in plan.rs, including
 /// `unknown`). It controls only the agent-team hint injection.
+///
+/// Wave-19 / task 07 — preserved as-is for the no-contract dispatch path.
+/// Delegates to [`run_workstation_dispatch_with_contract`] with
+/// `task_contract_path = None`, so the legacy objective / owned-files
+/// brief is built byte-identically. Future call sites that have a
+/// task-contract v1 file on disk should call
+/// `run_workstation_dispatch_with_contract` directly.
 pub(crate) async fn run_workstation_dispatch(
     state: &AppState,
     plan: &Plan,
@@ -691,6 +1291,51 @@ pub(crate) async fn run_workstation_dispatch(
     dispatch_strategy: &str,
     hints: WorkstationDispatchHints,
     dry_run: bool,
+) -> WorkstationDispatchOutcome {
+    run_workstation_dispatch_with_contract(
+        state,
+        plan,
+        target,
+        dispatch_strategy,
+        hints,
+        dry_run,
+        None,
+    )
+    .await
+}
+
+/// Wave-19 / task 07 — contract-aware variant of
+/// [`run_workstation_dispatch`].
+///
+/// Behaviour matrix:
+///   * `task_contract_path = None`  → identical to wave-15/16/17. The
+///     hints feed `build_task_brief` directly; no contract IO happens.
+///   * `task_contract_path = Some`  → load + parse the file, overlay
+///     contract fields onto the hints (contract is the SSOT — non-empty
+///     contract fields beat caller args/hints), and prefix the brief
+///     with a `## Source contract` block naming the on-disk file. The
+///     scoped-commit handoff section (wave-17 / task 07) is preserved
+///     verbatim because it lives in `build_task_brief_with_source` after
+///     the optional preamble.
+///
+/// Failure semantics (contract path supplied):
+///   * IO error / lex error / schema mismatch / missing required field
+///     → `SafeDescriptor { reason: MalformedTaskContract { ... } }`.
+///     We refuse to fall back to the legacy natural-language brief —
+///     downgrading silently would defeat the whole point of having a
+///     machine SSOT.
+///
+/// Path resolution: a relative `task_contract_path` is joined against
+/// the resolved project root (NOT the daemon's process cwd). An
+/// absolute path is taken verbatim.
+pub(crate) async fn run_workstation_dispatch_with_contract(
+    state: &AppState,
+    plan: &Plan,
+    target: &str,
+    dispatch_strategy: &str,
+    hints: WorkstationDispatchHints,
+    dry_run: bool,
+    task_contract_path: Option<&Path>,
 ) -> WorkstationDispatchOutcome {
     // 1. Refuse non-task_delegate targets up front (architecture rule).
     if target != "mission_task_delegate" {
@@ -702,16 +1347,25 @@ pub(crate) async fn run_workstation_dispatch(
 
     // 2. Hint-only safety: a content-free brief is useless. Refuse rather
     //    than dispatch a placeholder objective.
-    let has_meaningful_objective = hints
-        .objective
-        .as_deref()
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
-    if !has_meaningful_objective {
-        return WorkstationDispatchOutcome::SafeDescriptor {
-            reason: SafeDescriptorReason::MissingObjective,
-            task_brief: None,
-        };
+    //
+    //    wave-19 / task 07 — when a contract file is pinned, defer this
+    //    check: the contract's `:goal` field will populate
+    //    `hints.objective` during overlay (step 3.5). The post-overlay
+    //    re-check enforces the same invariant for contract-driven
+    //    dispatches and keeps the failure mode identical
+    //    (`SafeDescriptorReason::MissingObjective`).
+    if task_contract_path.is_none() {
+        let has_meaningful_objective = hints
+            .objective
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !has_meaningful_objective {
+            return WorkstationDispatchOutcome::SafeDescriptor {
+                reason: SafeDescriptorReason::MissingObjective,
+                task_brief: None,
+            };
+        }
     }
 
     // 3. Project-root resolution. `cwd` MUST be absolute when supplied —
@@ -750,11 +1404,70 @@ pub(crate) async fn run_workstation_dispatch(
         }
     };
 
-    // 4. Build the brief. Hints have already been arg-merged; cap lists
-    //    here so the brief stays under the 16K objective limit.
+    // 3.5 wave-19 / task 07 — when a task-contract v1 file is pinned,
+    //     load + parse it and overlay onto the hints. The contract is
+    //     the SSOT, so non-empty contract fields beat caller args. A
+    //     parse failure refuses the dispatch with a typed safe descriptor
+    //     rather than silently downgrading to the legacy brief — keeping
+    //     a malformed contract from masquerading as a working brief is
+    //     the whole point of this layer.
     let mut hints = hints;
+    let mut contract_source_path: Option<PathBuf> = None;
+    let mut contract_dispatch_strategy: Option<String> = None;
+    if let Some(raw_path) = task_contract_path {
+        let resolved_path = resolve_contract_path(raw_path, &resolution.project_root);
+        match load_task_contract(&resolved_path) {
+            Ok(contract) => {
+                hints.overlay_contract(&contract);
+                contract_dispatch_strategy = contract.dispatch_strategy.clone();
+                contract_source_path = Some(resolved_path);
+            }
+            Err(err) => {
+                return WorkstationDispatchOutcome::SafeDescriptor {
+                    reason: SafeDescriptorReason::MalformedTaskContract {
+                        path: resolved_path.display().to_string(),
+                        reason: err.reason(),
+                    },
+                    task_brief: None,
+                };
+            }
+        }
+        // Defence in depth: re-check the post-overlay objective. The
+        // pure parser already rejects empty `:goal`, so this cannot
+        // fire today — but if a future overlay rule loosens, the
+        // dispatch refuses rather than silently shipping a content-free
+        // brief.
+        let still_has_objective = hints
+            .objective
+            .as_deref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        if !still_has_objective {
+            return WorkstationDispatchOutcome::SafeDescriptor {
+                reason: SafeDescriptorReason::MissingObjective,
+                task_brief: None,
+            };
+        }
+    }
+
+    // 4. Build the brief. Hints have already been arg-merged + (when a
+    //    contract was supplied) overlaid with the contract; cap lists
+    //    here so the brief stays under the 16K objective limit.
     let _capped = hints.cap_lists();
-    let brief = build_task_brief(plan, &hints, dispatch_strategy);
+    // Strategy precedence: when the contract pins `:dispatch-strategy`,
+    // it overrides the caller-passed `dispatch_strategy` for brief
+    // rendering ONLY (the response-facing `dispatch_strategy` keeps the
+    // resolver's value so observers can see what was requested vs what
+    // the contract enforced).
+    let brief_dispatch_strategy: &str = contract_dispatch_strategy
+        .as_deref()
+        .unwrap_or(dispatch_strategy);
+    let brief = build_task_brief_with_source(
+        plan,
+        &hints,
+        brief_dispatch_strategy,
+        contract_source_path.as_deref(),
+    );
 
     // 5. dry_run: stop here, no dispatch, no evidence.
     if dry_run {
@@ -809,7 +1522,7 @@ pub(crate) async fn run_workstation_dispatch(
     }
 
     // 7. Evidence sidecar — typed entry, source=`workstation_dispatch`.
-    let entry = EvidenceEntry::new(
+    let mut entry = EvidenceEntry::new(
         evidence_collector::source::WORKSTATION_DISPATCH,
         evidence_collector::kind::DISPATCH,
     )
@@ -829,6 +1542,20 @@ pub(crate) async fn run_workstation_dispatch(
     .with_extra("forbidden_files", json!(hints.forbidden_files.clone()))
     .with_extra("acceptance_commands", json!(hints.acceptance_commands.clone()))
     .with_extra("task_brief_preview", json!(truncate_brief_preview(&brief)));
+    // wave-19 / task 07 — when the dispatch flowed through a task-contract
+    // v1 file, surface the source path on the evidence ledger so observers
+    // can correlate the brief preview against the on-disk SSOT. Absent
+    // this annotation an audit could mistake a contract-flavoured brief
+    // for a legacy natural-language brief; the field disambiguates.
+    if let Some(p) = contract_source_path.as_deref() {
+        entry = entry.with_extra(
+            "task_contract_source_path",
+            json!(p.display().to_string()),
+        );
+    }
+    if let Some(eds) = contract_dispatch_strategy.as_deref() {
+        entry = entry.with_extra("contract_dispatch_strategy", json!(eds));
+    }
     let outcome = evidence_collector::append(
         state,
         plan.id,
@@ -1761,5 +2488,497 @@ mod tests {
         // changing them silently would break downstream observers.
         assert_eq!(BriefTaskKind::Code.as_str(), "code");
         assert_eq!(BriefTaskKind::ReadOnly.as_str(), "read-only");
+    }
+
+    // ── wave-19 / task 07 — task-contract v1 parser tests ────────────────
+
+    /// Reference contract body produced by the wave-19 / task 06 emitter.
+    /// We pin against the exact textual shape so a future emitter tweak
+    /// that breaks the parser surface trips a test rather than silently
+    /// downgrading to the legacy brief.
+    const SAMPLE_CONTRACT: &str = r#";; Generated by MissionD plan-runner (wave-19 / task 06).
+;; plan_id = 00000000-0000-0000-0000-000000000def
+;; board_task_id = btk-wd
+;; node_id = root
+
+(task plan-00000000-node-root
+  :schema "missiond.task-contract.v1"
+  :title "Plan 00000000-0000-0000-0000-000000000def node root — workstation task contract"
+  :kind code-alignment
+  :status ready
+  :owner "claudecode"
+  :dispatch-strategy "agent-team"
+  :goal "ship the wave-19 contract consumer"
+  :scope "wave 19 task 07 only"
+  :write-scope
+    ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"]
+  :must-not-touch
+    ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+     "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"]
+  :acceptance
+    ["cargo test -p missiond-daemon"
+     "cargo build --workspace"]
+  :commit
+    (:required true
+     :message "feat(workstation): consume Lisp task contracts"
+     :scope-check write-scope-only
+     :policy "scoped")
+  :target-project "missiond"
+  :requested-cwd "/Users/jinchen/Projects/missiond"
+  :target "mission_task_delegate"
+  :plan-id "00000000-0000-0000-0000-000000000def"
+  :node-id "root"
+)
+"#;
+
+    #[test]
+    fn parse_task_contract_extracts_every_consumed_field() {
+        let c = parse_task_contract(SAMPLE_CONTRACT).expect("must parse");
+        assert_eq!(c.schema, "missiond.task-contract.v1");
+        assert_eq!(c.goal, "ship the wave-19 contract consumer");
+        assert_eq!(c.scope.as_deref(), Some("wave 19 task 07 only"));
+        assert_eq!(
+            c.write_scope,
+            vec!["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"]
+        );
+        assert_eq!(c.must_not_touch.len(), 2);
+        assert!(c
+            .must_not_touch
+            .contains(&"crates/missiond-daemon/src/handlers/knowledge/plan.rs".to_string()));
+        assert_eq!(c.acceptance.len(), 2);
+        assert_eq!(c.commit_policy.as_deref(), Some("scoped"));
+        assert_eq!(c.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert_eq!(c.target_project.as_deref(), Some("missiond"));
+        assert_eq!(
+            c.requested_cwd.as_deref(),
+            Some("/Users/jinchen/Projects/missiond")
+        );
+        assert_eq!(c.target.as_deref(), Some("mission_task_delegate"));
+    }
+
+    #[test]
+    fn parse_task_contract_tolerates_optional_field_absence() {
+        // Minimal viable contract: schema + goal only.
+        let src = r#"(task minimal
+  :schema "missiond.task-contract.v1"
+  :goal "ship"
+  :write-scope []
+  :must-not-touch []
+)
+"#;
+        let c = parse_task_contract(src).expect("minimal parse");
+        assert_eq!(c.goal, "ship");
+        assert!(c.scope.is_none());
+        assert!(c.write_scope.is_empty());
+        assert!(c.must_not_touch.is_empty());
+        assert!(c.acceptance.is_empty());
+        assert!(c.commit_policy.is_none());
+        assert!(c.dispatch_strategy.is_none());
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_schema_mismatch() {
+        let src = r#"(task wrong
+  :schema "missiond.task-contract.v0"
+  :goal "ship"
+)"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        assert!(matches!(err, TaskContractParseError::SchemaMismatch(_)));
+        assert!(err.reason().contains("schema mismatch"));
+        assert!(err.reason().contains("v0"));
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_missing_schema() {
+        let src = r#"(task no-schema :goal "ship")"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        assert!(matches!(err, TaskContractParseError::SchemaMismatch(_)));
+        assert!(err.reason().contains("(absent)"));
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_missing_goal() {
+        let src = r#"(task no-goal
+  :schema "missiond.task-contract.v1"
+)"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        assert!(matches!(err, TaskContractParseError::MissingRequired("goal")));
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_blank_goal() {
+        let src = r#"(task blank
+  :schema "missiond.task-contract.v1"
+  :goal "   "
+)"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        assert!(matches!(err, TaskContractParseError::MissingRequired("goal")));
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_unbalanced_parens() {
+        let src = r#"(task bad
+  :schema "missiond.task-contract.v1"
+  :goal "ship"
+"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        assert!(matches!(err, TaskContractParseError::Lex(_)));
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_unterminated_string() {
+        let src = r#"(task bad :schema "unterminated"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        assert!(matches!(err, TaskContractParseError::Lex(_)));
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_non_task_top_form() {
+        let src = r#"(plan something :schema "missiond.task-contract.v1" :goal "x")"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        assert!(matches!(err, TaskContractParseError::NotATaskForm(_)));
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_wrong_field_shape() {
+        // :goal must be a string, not a list.
+        let src = r#"(task bad
+  :schema "missiond.task-contract.v1"
+  :goal ["a" "b"]
+)"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        match err {
+            TaskContractParseError::FieldShape { field, .. } => assert_eq!(field, "goal"),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_task_contract_rejects_non_string_in_write_scope() {
+        let src = r#"(task bad
+  :schema "missiond.task-contract.v1"
+  :goal "ship"
+  :write-scope [foo "bar"]
+)"#;
+        let err = parse_task_contract(src).expect_err("must reject");
+        match err {
+            TaskContractParseError::FieldShape { field, .. } => {
+                assert_eq!(field, "write-scope")
+            }
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_task_contract_handles_escaped_strings() {
+        let src = r#"(task esc
+  :schema "missiond.task-contract.v1"
+  :goal "ship \"quoted\" and \\backslash"
+)"#;
+        let c = parse_task_contract(src).expect("must parse");
+        assert_eq!(c.goal, "ship \"quoted\" and \\backslash");
+    }
+
+    #[test]
+    fn parse_task_contract_skips_unknown_fields() {
+        // A future emitter may add fields we do not consume — accept and
+        // ignore them so the parser stays forward-compatible. The
+        // authoritative checker (scripts/check-task-contract.mjs) is the
+        // gate for new fields.
+        let src = r#"(task fwd
+  :schema "missiond.task-contract.v1"
+  :goal "ship"
+  :unknown-future-field "ignored"
+  :requirements ["a" "b"]
+  :report ["x"]
+)"#;
+        let c = parse_task_contract(src).expect("must parse");
+        assert_eq!(c.goal, "ship");
+    }
+
+    #[test]
+    fn parse_task_contract_skips_comment_lines() {
+        let src = r#"
+;; comment 1
+;; comment 2 with paren ( and string "
+(task ok
+  ;; inline comment
+  :schema "missiond.task-contract.v1"
+  :goal "ship"
+)
+"#;
+        let c = parse_task_contract(src).expect("must parse");
+        assert_eq!(c.goal, "ship");
+    }
+
+    #[test]
+    fn extract_commit_policy_returns_none_when_policy_absent() {
+        let src = r#"(task np
+  :schema "missiond.task-contract.v1"
+  :goal "ship"
+  :commit (:required true :scope-check write-scope-only)
+)"#;
+        let c = parse_task_contract(src).expect("must parse");
+        assert!(c.commit_policy.is_none());
+    }
+
+    #[test]
+    fn extract_commit_policy_returns_value_when_present() {
+        let src = r#"(task wp
+  :schema "missiond.task-contract.v1"
+  :goal "ship"
+  :commit (:required true :policy "monorepo-cascade" :scope-check none)
+)"#;
+        let c = parse_task_contract(src).expect("must parse");
+        assert_eq!(c.commit_policy.as_deref(), Some("monorepo-cascade"));
+    }
+
+    #[test]
+    fn load_task_contract_round_trips_emitter_output() {
+        // Write the emitter sample to disk and confirm the loader returns
+        // the same projection as the in-memory parser.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("contract.lisp");
+        std::fs::write(&path, SAMPLE_CONTRACT).unwrap();
+        let c = load_task_contract(&path).expect("must load");
+        assert_eq!(c.goal, "ship the wave-19 contract consumer");
+        assert_eq!(c.dispatch_strategy.as_deref(), Some("agent-team"));
+    }
+
+    #[test]
+    fn load_task_contract_io_error_when_file_missing() {
+        let err = load_task_contract(Path::new("/nonexistent/path/contract.lisp"))
+            .expect_err("must fail");
+        assert!(matches!(err, TaskContractParseError::Io(_)));
+        assert!(err.reason().starts_with("io:"));
+    }
+
+    // ── wave-19 / task 07 — overlay tests ────────────────────────────────
+
+    #[test]
+    fn overlay_contract_overrides_objective_and_lists() {
+        let mut hints = WorkstationDispatchHints {
+            objective: Some("hint obj".to_string()),
+            owned_files: vec!["hint.rs".to_string()],
+            forbidden_files: vec!["hint_forbidden.rs".to_string()],
+            ..Default::default()
+        };
+        let contract = ParsedTaskContract {
+            schema: "missiond.task-contract.v1".to_string(),
+            goal: "contract goal".to_string(),
+            write_scope: vec!["contract_a.rs".to_string(), "contract_b.rs".to_string()],
+            must_not_touch: vec!["contract_no.rs".to_string()],
+            acceptance: vec!["cargo test".to_string()],
+            commit_policy: Some("scoped-strict".to_string()),
+            dispatch_strategy: Some("resident-lisp".to_string()),
+            target_project: Some("contract-proj".to_string()),
+            requested_cwd: Some("/contract/cwd".to_string()),
+            ..Default::default()
+        };
+        hints.overlay_contract(&contract);
+        assert_eq!(hints.objective.as_deref(), Some("contract goal"));
+        assert_eq!(hints.owned_files, vec!["contract_a.rs", "contract_b.rs"]);
+        assert_eq!(hints.forbidden_files, vec!["contract_no.rs"]);
+        assert_eq!(hints.acceptance_commands, vec!["cargo test"]);
+        assert_eq!(hints.commit_policy.as_deref(), Some("scoped-strict"));
+        assert_eq!(hints.dispatch_strategy.as_deref(), Some("resident-lisp"));
+        assert_eq!(hints.target_project.as_deref(), Some("contract-proj"));
+        assert_eq!(hints.requested_cwd.as_deref(), Some("/contract/cwd"));
+    }
+
+    #[test]
+    fn overlay_contract_preserves_arg_lists_when_contract_lists_are_empty() {
+        // The contract emitter only emits non-empty lists; an absent
+        // `:acceptance` should NOT erase a caller-supplied acceptance arg.
+        let mut hints = WorkstationDispatchHints {
+            objective: Some("hint obj".to_string()),
+            owned_files: vec!["arg.rs".to_string()],
+            acceptance_commands: vec!["arg cmd".to_string()],
+            ..Default::default()
+        };
+        let contract = ParsedTaskContract {
+            schema: "missiond.task-contract.v1".to_string(),
+            goal: "contract goal".to_string(),
+            // All list fields empty.
+            ..Default::default()
+        };
+        hints.overlay_contract(&contract);
+        // Objective overridden (non-empty contract goal beats arg).
+        assert_eq!(hints.objective.as_deref(), Some("contract goal"));
+        // Lists preserved (contract did not declare them).
+        assert_eq!(hints.owned_files, vec!["arg.rs"]);
+        assert_eq!(hints.acceptance_commands, vec!["arg cmd"]);
+    }
+
+    #[test]
+    fn overlay_contract_blank_scope_does_not_clobber_arg_scope() {
+        let mut hints = WorkstationDispatchHints {
+            objective: Some("o".to_string()),
+            scope: Some("arg scope".to_string()),
+            ..Default::default()
+        };
+        let contract = ParsedTaskContract {
+            schema: "missiond.task-contract.v1".to_string(),
+            goal: "g".to_string(),
+            scope: Some("   ".to_string()),
+            ..Default::default()
+        };
+        hints.overlay_contract(&contract);
+        assert_eq!(hints.scope.as_deref(), Some("arg scope"));
+    }
+
+    // ── wave-19 / task 07 — brief integration tests ──────────────────────
+
+    #[test]
+    fn build_task_brief_with_source_prefixes_contract_block_when_path_supplied() {
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let path = std::path::PathBuf::from("/tmp/contract.lisp");
+        let brief = build_task_brief_with_source(&plan, &hints, "agent-team", Some(&path));
+        // Contract preamble present.
+        assert!(brief.contains("## Source contract"));
+        assert!(brief.contains("/tmp/contract.lisp"));
+        assert!(brief.contains("treat the contract as the SSOT"));
+        // Existing canonical sections still present (wave-15/16/17 invariants).
+        assert!(brief.contains("## Objective"));
+        assert!(brief.contains("## Owned files"));
+        assert!(brief.contains("## Commit policy"));
+        assert!(brief.contains("## Completion handoff (scoped commit)"));
+        // Agent-team hint still appears exactly once.
+        assert_eq!(brief.matches(AGENT_TEAM_OBJECTIVE_HINT).count(), 1);
+    }
+
+    #[test]
+    fn build_task_brief_without_source_is_byte_identical_to_legacy_build_task_brief() {
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let legacy = build_task_brief(&plan, &hints, "agent-team");
+        let with_none = build_task_brief_with_source(&plan, &hints, "agent-team", None);
+        assert_eq!(
+            legacy, with_none,
+            "wave-19 wrapper must be byte-identical to legacy entry when no contract"
+        );
+    }
+
+    #[test]
+    fn build_task_brief_with_source_does_not_double_inject_completion_handoff() {
+        // The completion handoff section is independent of the contract
+        // preamble — it must appear exactly once even when the brief is
+        // contract-flavoured.
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let path = std::path::PathBuf::from("/tmp/contract.lisp");
+        let brief = build_task_brief_with_source(
+            &plan,
+            &hints,
+            "fresh-code-alignment",
+            Some(&path),
+        );
+        assert_eq!(
+            brief.matches("## Completion handoff (scoped commit)").count(),
+            1
+        );
+        // Code task kind still classified from owned_files presence.
+        assert!(brief.contains("- task kind: code"));
+    }
+
+    // ── wave-19 / task 07 — SafeDescriptor tests ─────────────────────────
+
+    #[test]
+    fn malformed_task_contract_descriptor_status_is_distinct() {
+        let r = SafeDescriptorReason::MalformedTaskContract {
+            path: "/tmp/x.lisp".to_string(),
+            reason: "schema mismatch".to_string(),
+        };
+        assert_eq!(r.status(), "skipped_malformed_task_contract");
+        let detail = r.detail();
+        assert!(detail.contains("/tmp/x.lisp"));
+        assert!(detail.contains("schema mismatch"));
+        assert!(detail.contains("SSOT"));
+    }
+
+    #[test]
+    fn outcome_to_response_malformed_contract_carries_full_detail() {
+        let outcome = WorkstationDispatchOutcome::SafeDescriptor {
+            reason: SafeDescriptorReason::MalformedTaskContract {
+                path: "/tmp/bad.lisp".to_string(),
+                reason: "lex: unbalanced parens".to_string(),
+            },
+            task_brief: None,
+        };
+        let v = outcome_to_response_fields(&outcome, "agent-team");
+        assert_eq!(v["workstation_dispatch_status"], "skipped_malformed_task_contract");
+        assert!(v["workstation_dispatch_reason"]
+            .as_str()
+            .unwrap()
+            .contains("/tmp/bad.lisp"));
+        assert!(v["workstation_dispatch_reason"]
+            .as_str()
+            .unwrap()
+            .contains("lex: unbalanced parens"));
+        // Scoped-commit policy contract still surfaces on the safe-descriptor
+        // branch (wave-17 / task 07 invariant — applies regardless of branch).
+        assert_eq!(v["scoped_commit_required"], json!(true));
+    }
+
+    // ── wave-19 / task 07 — path resolution tests ────────────────────────
+
+    #[test]
+    fn resolve_contract_path_keeps_absolute_paths_verbatim() {
+        let abs = Path::new("/tmp/abs/contract.lisp");
+        let root = Path::new("/Users/x/proj");
+        assert_eq!(resolve_contract_path(abs, root), abs.to_path_buf());
+    }
+
+    #[test]
+    fn resolve_contract_path_joins_relative_against_project_root() {
+        let rel = Path::new(".missiond/tasks/generated/abc/root.lisp");
+        let root = Path::new("/Users/x/proj");
+        assert_eq!(
+            resolve_contract_path(rel, root),
+            Path::new("/Users/x/proj/.missiond/tasks/generated/abc/root.lisp").to_path_buf()
+        );
+    }
+
+    // ── wave-19 / task 07 — parser error reason mapping pin ──────────────
+
+    #[test]
+    fn task_contract_parse_error_reason_strings_are_actionable() {
+        // Each variant produces a human-actionable reason string. Pinned so
+        // a future refactor that loses detail (e.g. dropping the offending
+        // schema value) trips a test.
+        assert!(TaskContractParseError::Io("perm denied".into())
+            .reason()
+            .contains("perm denied"));
+        assert!(TaskContractParseError::Lex("EOF".into())
+            .reason()
+            .contains("EOF"));
+        assert!(TaskContractParseError::NotATaskForm("(plan)".into())
+            .reason()
+            .contains("(plan)"));
+        assert!(TaskContractParseError::SchemaMismatch("v9".into())
+            .reason()
+            .contains("v9"));
+        assert!(TaskContractParseError::MissingRequired("goal")
+            .reason()
+            .contains("goal"));
+        assert!(TaskContractParseError::FieldShape {
+            field: "write-scope",
+            detail: "got 42".into(),
+        }
+        .reason()
+        .contains("write-scope"));
     }
 }
