@@ -20,7 +20,8 @@
 //!
 //! # Phase history
 //!
-//! Phase 1 added schema (12 domain enums + [`DomainEvent`] trait).
+//! Phase 1 added schema (initial domain enums + [`DomainEvent`] trait;
+//! the domain set started at 12 and is extensible — see `Domain::ALL`).
 //! Phase 2 added storage — the single-writer `LogWriter` + the
 //! [`blob_store::BlobStore`] claim-check layer.
 //! Phase 3 added routing — tail loop + per-domain topic broadcast.

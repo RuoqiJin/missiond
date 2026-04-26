@@ -105,7 +105,7 @@ impl Drop for InMemoryBusHandle {
 
 impl InMemoryBus {
     /// Build a bus with default wiring — no metrics, default dispatcher
-    /// builder covering all 12 domains.
+    /// builder covering every entry in `Domain::ALL`.
     pub async fn new() -> Self {
         let metrics = Arc::new(AtomicBusMetrics::new());
         let metrics_dyn: Arc<dyn BusMetrics> = metrics.clone();

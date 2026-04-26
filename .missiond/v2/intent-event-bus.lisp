@@ -69,7 +69,7 @@
     ;; ═════════════════════════════════════════════════
     (decided-options
       :seq                "DB BIGSERIAL + INSERT RETURNING — 单写入点,批量摊成本"
-      :topic              "一域一 Topic (12),按 Rust 类型订阅;variant 热点可后期提专属 topic"
+      :topic              "一域一 Topic (Domain::ALL,起步 12 域可扩展),按 Rust 类型订阅;variant 热点可后期提专属 topic"
       :delivery           "at-least-once — 消费者必须幂等(契约级要求,非类型强制)"
       :cursor             "subscription-name 为 PK,双阈值 flush (每 batch ack + 最长 1s)"
       :new-subscriber     "default latest;opt-in earliest / Seq(N)"
@@ -140,7 +140,7 @@
         (incident-tx    "→ IncidentEvent::Reported,走 log.append()")
         (cursor-ack-tx  "→ 不作为事件;光标追踪由 conversation-logger worker 内部 Mutex<HashMap> 共享,不占总线"
                          :runtime-location "crates/missiond-daemon/src/state.rs (conversation_cursor_map)")
-        (embedding-tx   "→ 保留为 embedding_worker 的 1:1 内部任务队列,不升级为 DomainEvent(符合 §4.2 prerequisite 的 12 域契约)"
+        (embedding-tx   "→ 保留为 embedding_worker 的 1:1 内部任务队列,不升级为 DomainEvent(符合 §4.2 prerequisite 的 Domain::ALL 契约,起步 12 域可扩展)"
                          :runtime-location "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs")
         (ast-sync-tx    "→ 保留为 ast_sync_worker 的 1:1 内部任务队列,不升级为 DomainEvent(同上)"
                          :runtime-location "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs")))
@@ -493,7 +493,7 @@
         (component topic-registry
           :target "crates/missiond-core/src/event/pipeline/step7_fanout/registry.rs"
           :type             "static HashMap<Domain, Box<dyn AnyTopic>>"
-          :init-time        "Dispatcher 启动时 register::<T>() 注入 12 个 Topic"
+          :init-time        "Dispatcher 启动时 register::<T>() 注入 Domain::ALL 全部 Topic(起步 12,可扩展)"
           :fanout-transport "tokio::broadcast::channel<Arc<T>> per Topic"
           :buffer-size      "默认每 topic 1024;慢订阅者溢出触发 SlowConsumer incident")
 
@@ -710,7 +710,7 @@
         (projection-framework    "Dispatcher + cursor 已够搭 projection;通用框架暂不做")
         (schema-registry         "Rust 类型 + Forge 即 schema;独立 registry 暂不引入")
         (producer-token-auth     "当前文档问题非技术问题;未来可在 append-api 加 ProducerToken")
-        (variant-level-topic     "当前 12 域 topic 足够;某 variant 真成热点再提升"))
+        (variant-level-topic     "当前 Domain::ALL topic 粒度足够(起步 12,可扩展);某 variant 真成热点再提升"))
 
       (deferred-implementations
         (desc "已在 lisp 声明但 MVP 未实现的功能,作为未来补齐基线")
@@ -761,7 +761,7 @@
         :migration "crates/missiond-core/migrations/20260419000000_event_log.sql"
         (columns
           (seq             :type "BIGSERIAL PRIMARY KEY"        :role "seq 权威, 全局单调")
-          (domain          :type "TEXT NOT NULL"                :role "12 域之一, topic 路由键")
+          (domain          :type "TEXT NOT NULL"                :role "Domain::ALL 之一(起步 12 域可扩展), topic 路由键")
           (kind            :type "TEXT NOT NULL"                :role "domain variant name")
           (payload_inline  :type "JSONB"                        :role "≤8KB payload 直存")
           (payload_ref     :type "TEXT"                         :role ">8KB payload → blob_storage.id")

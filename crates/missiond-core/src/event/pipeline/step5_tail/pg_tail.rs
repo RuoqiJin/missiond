@@ -6,7 +6,7 @@
 //! > PgTailSource impl TailSource — PG 长轮询 SELECT 实现
 //! > feature-gate: `#[cfg(feature = "postgres")]`
 //!
-//! The dispatcher reads across all 12 domains in a single query, ordered by
+//! The dispatcher reads across every domain in `Domain::ALL` in a single query, ordered by
 //! `seq` ascending; see [`super::dispatcher::run_tail`] for the polling
 //! loop. Payload refs (claim-check) are resolved here via the attached
 //! [`BlobStore`] so `LoggedEvent::payload` is always dense.

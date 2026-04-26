@@ -178,7 +178,8 @@ pub(crate) struct AppState {
     pub(crate) kb_search_cache: missiond_core::embedding::EmbeddingCache,
     /// Embedding worker channel: event-driven summary + embedding generation.
     /// Kept as an internal worker queue (not a bus event) per the v2 frozen
-    /// lisp §4.2.a 12-domain contract (no `EmbeddingEvent` domain exists).
+    /// lisp §4.2.a `Domain::ALL` contract (no `EmbeddingEvent` domain exists;
+    /// the domain set started at 12 and is extensible).
     pub(crate) embedding_tx: tokio::sync::mpsc::Sender<EmbeddingTask>,
     /// v2 event bus — every producer in the daemon publishes through this.
     pub(crate) bus: Arc<BusServices>,

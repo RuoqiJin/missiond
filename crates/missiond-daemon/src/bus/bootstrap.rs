@@ -148,8 +148,9 @@ impl BusServices {
         // to always instantiate.
         let metrics = Arc::new(AtomicBusMetrics::new());
 
-        // Dispatcher — registers all 12 domains up front so `topic::<T>()`
-        // never panics.
+        // Dispatcher — registers every domain in `Domain::ALL` up front so
+        // `topic::<T>()` never panics. The domain set started at 12 and is
+        // extensible.
         let dispatcher = register_all_domains(DispatcherBuilder::new()).build();
 
         // Control gate — adapter over the daemon's ControlManager.

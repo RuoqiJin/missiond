@@ -325,7 +325,8 @@ async fn main() -> Result<()> {
 
     // Embedding worker channel: event-driven, 0 CPU when idle. Kept as an
     // internal worker queue per deviation DC041 (no `EmbeddingEvent` domain
-    // in the 12 frozen domains — see `intent-event-bus.lisp` §4.2.a).
+    // in the current `Domain::ALL` set — see `intent-event-bus.lisp` §4.2.a;
+    // the domain set started at 12 and is extensible).
     let (embedding_tx, embedding_rx) = tokio::sync::mpsc::channel::<EmbeddingTask>(256);
 
     // AST sync worker channel: same story as embedding — internal queue only.

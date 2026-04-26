@@ -10,8 +10,8 @@
 //! * The v1 `ControlTree::CtlDomain` is a **coarse** 4-bucket set
 //!   (Memory / Flow / Board / Strategy) — it represents "functional area to
 //!   pause", not event topic type.
-//! * The v2 [`Domain`] is a fine-grained 12-value set — one per
-//!   `DomainEvent` enum.
+//! * The v2 [`Domain`] is a fine-grained set keyed by `Domain::ALL`
+//!   (started at 12 and is extensible) — one per `DomainEvent` enum.
 //! * Mapping is **many-to-one** and **partial**: some v2 domains have no
 //!   v1 counterpart and are therefore **never** subject to domain gating.
 //!   They remain gated by the coarser `global_paused` / `provider_paused`
@@ -19,8 +19,9 @@
 //!   frozen lisp §4.2.c keeps the dispatcher stateless w.r.t. pause
 //!   policy; slot-level or worker-level pause is the subscriber's concern.
 //!
-//! Keep the mapping aligned with the 12 domain enum definitions in
-//! `events/` — whenever a domain is added, update `domain_to_ctl_domain`.
+//! Keep the mapping aligned with the current domain enum definitions in
+//! `events/` (see `Domain::ALL`) — whenever a domain is added, update
+//! `domain_to_ctl_domain`.
 //!
 //! # Why the mapping is partial
 //!
