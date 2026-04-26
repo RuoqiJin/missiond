@@ -1095,6 +1095,18 @@ fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
 }
 
 fn scopes_overlap(a: &str, b: &str) -> bool {
+    scopes_overlap_pure(a, b)
+}
+
+/// wave-17 / task 02 — pure scope-overlap predicate exposed to the
+/// PLAN DAG scheduler so claim-lease conflict detection reuses the
+/// exact semantics established by wave12-01 (this module's
+/// `action_claim`) and wave16-06 (`enforce_scoped_commit_completion`).
+/// Same prefix-match contract: empty strings never overlap; strings
+/// match if they are equal OR one is a prefix of the other. Keeping
+/// the function here (and re-exporting it) prevents semantic drift
+/// across the three call sites.
+pub(super) fn scopes_overlap_pure(a: &str, b: &str) -> bool {
     if a.is_empty() || b.is_empty() {
         return false;
     }

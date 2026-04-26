@@ -346,6 +346,28 @@ fn build_properties() -> Value {
         "[execute internal resume_review_question_id=*] (wave-17 / task 01) free-form reason / next-step note. Echoed onto the response payload (`resume_note`) and into the audit evidence as the human-readable resume context.",
     ));
 
+    // ── wave-17 / task 02 — PLAN-DAG claim / lease discipline ──────────
+    //
+    // These knobs add claim/lease coordination to PLAN DAG node dispatch.
+    // The scheduler binds to the wave12-01 mission_execution coordination
+    // model: same `scopes_overlap` predicate, same lease semantics. There
+    // is NO new lock service — the per-DAG-run registry exists only
+    // for the lifetime of one execute call.
+    p.insert("claim_lease_secs".into(), prop(
+        "integer",
+        "[execute internal scheduler_mode=dag_v1] (wave-17 / task 02) per-node claim lease duration in seconds. Default 1800 (30 min). Clamped to [60, 14400] (1 min .. 4 hr) so authoring typos cannot stall the wave loop with a 0s lease nor pin a scope for the rest of the day. Mirrors the wave12-01 mission_execution lease defaults so the two surfaces print identical timestamps. Surfaced on every response (live + dry-run) under `claim_lease_secs`.",
+    ));
+
+    p.insert("claimer_name".into(), prop(
+        "string",
+        "[execute internal scheduler_mode=dag_v1] (wave-17 / task 02) identity stamped onto every plan-DAG claim record. Default `plan-dag-scheduler`. Empty / whitespace-only normalises to the default so a blank form field doesn't poison the audit log. Matches the wave12-01 `:claimer` vocabulary so audit dashboards can grep one identity across companion-log claims AND DAG claims. Echoed onto every response under `claimer_name`.",
+    ));
+
+    p.insert("enforce_claims".into(), prop(
+        "boolean",
+        "[execute internal scheduler_mode=dag_v1] (wave-17 / task 02) opt into strict claim enforcement. Default `false` (backward-compatible — claim metadata still surfaces on the evidence + response so observers can tell the discipline ran, but conflicts NEVER block dispatch). When `true`, an unresolvable scope overlap fails the node fast with structured `CLAIM_CONFLICT` (the inner handler is NEVER invoked); the per-node response carries `state=failed` + `reason=CLAIM_CONFLICT...` + `inner_payload.claim_status=conflict` + the conflicting claim snapshot. Reuses the same `scopes_overlap` predicate as wave12-01 (`mission_execution`) and wave16-06 (`enforce_scoped_commit_completion`) so the three call sites cannot drift. Per-node lifecycle becomes `pending -> claimed -> running -> {succeeded|failed} -> released` with one evidence row per transition; release timestamps land on the `claimed -> released` row. Dry-run shows planned claims under `planned_claims[]` without mutating.",
+    ));
+
     Value::Object(p)
 }
 
@@ -448,6 +470,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
          id scope=plan + action=plan-node 时, listener 自动调用同一 resume helper (approved → 重 dispatch；\
          rejected/needs_changes → 写 evidence keep paused)，非 plan-node id 保留旧行为。\
          未识别 resolution 字符串永远 ignore + warn, 绝不 dispatch。\
+         wave-17 / task 02 PLAN-DAG claim/lease discipline: scheduler_mode=dag_v1 时再传 \
+         claim_lease_secs (默认 1800, clamp [60, 14400]) / claimer_name (默认 plan-dag-scheduler) / \
+         enforce_claims (默认 false, 向后兼容) — 调度器在 pending 与 running 之间插入 claimed 中间态, \
+         绑定 wave12-01 mission_execution coordination 模型 (复用 scopes_overlap 谓词, 不引入新 lock service)。\
+         Node scope 派生优先级: :owned-files (每个文件单独成 scope token) > :scope (整段字符串) > \
+         plan/<plan_id>/node/<node_id> 合成 fallback (永不为空)。enforce_claims=true 时遇 overlap 立即 \
+         fail-fast 节点 (state=failed, reason=CLAIM_CONFLICT, 内层 handler 永不调用); enforce_claims=false 时 \
+         best-effort 记 claim metadata 但绝不 block dispatch。每个节点 lifecycle 变成 \
+         pending -> claimed -> running -> {succeeded|failed} -> released, 每次转移一条 evidence; \
+         claim_id / claimer / claim_scopes / claim_scope_source / claim_acquired_at / claim_lease_expires_at 写在 \
+         pending->claimed evidence; claim_released_at / claim_terminal_state 写在 claimed->released evidence。\
+         dry_run 在响应里附 planned_claims[] (含每个节点的 claim_id / scopes / scope_source / lease_secs / enforce_claims) \
+         不 mutate。响应总附 planned_claims / claim_lease_secs / claimer_name / enforce_claims, 调用方可对比 dry-run vs live。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \

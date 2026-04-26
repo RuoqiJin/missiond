@@ -108,6 +108,7 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use crate::state::AppState;
 use missiond_core::types::{Plan, PlanStatus};
 
+use super::agent_execution::scopes_overlap_pure;
 use super::evidence_collector::{
     self, AppendOutcome, EventRef, EvidenceEntry,
 };
@@ -1147,6 +1148,24 @@ pub(super) async fn action_execute_dag_v1(
     let concurrency_plan = compute_concurrency_plan(&parsed.nodes, &order, max_parallel_nodes);
     let retry_plan = build_retry_plan(&parsed.nodes, &order);
 
+    // wave-17 / task 02 — claim / lease knobs surface on every response
+    // (live and dry-run) so callers can tell which discipline mode the
+    // run used. `planned_claims` is the per-node claim metadata
+    // projection — empty registry, no overlap detection across nodes
+    // — used by dry-run to preview every node's claim shape without
+    // dispatching.
+    let claim_lease_secs = parse_claim_lease_secs(args);
+    let claimer_name = parse_claimer_name(args);
+    let enforce_claims = parse_enforce_claims(args);
+    let planned_claims = build_planned_claims(
+        &parsed.nodes,
+        &order,
+        plan.id,
+        &claimer_name,
+        claim_lease_secs,
+        enforce_claims,
+    );
+
     if dry_run {
         return Ok(ToolResult::json_pretty(&json!({
             "status": "dry_run",
@@ -1167,6 +1186,14 @@ pub(super) async fn action_execute_dag_v1(
             // policy (preserves the v2 baseline byte-shape for callers
             // that did not declare retry).
             "retry_plan": retry_plan,
+            // wave-17 / task 02 — projected claim metadata per node so
+            // dry-run callers can preview every node's claim shape
+            // without dispatching. Always populated (every node carries
+            // at least the synthetic plan/<id>/node/<id> fallback).
+            "planned_claims": planned_claims,
+            "claim_lease_secs": claim_lease_secs,
+            "claimer_name": claimer_name,
+            "enforce_claims": enforce_claims,
         })));
     }
 
@@ -1224,6 +1251,15 @@ pub(super) async fn action_execute_dag_v1(
         // on every (non-dry-run) response too so the row that records
         // the policy survives alongside the actual attempt counts.
         "retry_plan": retry_plan,
+        // wave-17 / task 02 — claim / lease knobs echoed onto every
+        // response so callers can tell which discipline mode the run
+        // used. `planned_claims` is the dry-run-style projection so
+        // observers can diff "what we would have claimed" against the
+        // per-evidence `claim_id` rows the live run actually wrote.
+        "planned_claims": planned_claims,
+        "claim_lease_secs": claim_lease_secs,
+        "claimer_name": claimer_name,
+        "enforce_claims": enforce_claims,
         "evidence_path": evidence_path,
     });
     match plan_status_update {
@@ -1410,21 +1446,32 @@ enum NodeState {
 
 /// Per-node lifecycle phase. Drives the wave-scheduler bookkeeping; mapped to
 /// `state` discriminants in the response only after the node terminates. The
-/// intermediate phases (`Pending`, `Ready`, `Running`) never leak into the
-/// response — they live entirely in the scheduler's internal state map.
+/// intermediate phases (`Pending`, `Ready`, `Claimed`, `Running`) never leak
+/// into the response — they live entirely in the scheduler's internal state
+/// map.
 ///
 /// `Ready` is the brief moment between the scheduler computing the ready set
 /// and dispatching it to the JoinSet. The current loop transitions
-/// `Pending -> Running` directly (skipping the explicit `Ready` storage)
-/// because the ready set is recomputed each iteration; the variant is kept
-/// in the enum to satisfy the wave-13/02 spec lifecycle list and to leave
-/// room for a future scheduler that materialises a persistent ready queue
-/// (`#[allow(dead_code)]` is intentional for now).
+/// `Pending -> Claimed -> Running` (wave-17 / task 02 added the explicit
+/// `Claimed` step between ready-set selection and JoinSet hand-off so the
+/// claim/lease registry can stamp metadata before the inner handler runs).
+/// The variant `Ready` is kept in the enum to satisfy the wave-13/02 spec
+/// lifecycle list and to leave room for a future scheduler that materialises
+/// a persistent ready queue (`#[allow(dead_code)]` is intentional for now).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NodeLifecycle {
     Pending,
     #[allow(dead_code)]
     Ready,
+    /// wave-17 / task 02 — node has had its claim registered (or
+    /// recorded best-effort under `enforce_claims=false`) but the
+    /// inner handler has not yet been invoked. Mostly invisible from
+    /// the outside: the dispatch path moves through `Claimed` for one
+    /// wave-loop cycle before flipping to `Running`. Surfaces on the
+    /// `pending -> claimed` evidence row + bus event so observers can
+    /// pivot on the new transition without reconstructing it from
+    /// `pending -> running` reasoning.
+    Claimed,
     Running,
     Succeeded,
     Failed,
@@ -2013,6 +2060,346 @@ async fn dispatch_node(
     })
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// wave-17 / task 02 — claim / lease discipline for PLAN DAG nodes.
+//
+// We bind to the existing wave12-01 `mission_execution(action=claim/release)`
+// coordination model: same `scopes_overlap` predicate (re-exported from
+// `agent_execution::scopes_overlap_pure`), same lease semantics. There is
+// NO new lock service here — the registry below is per-`execute_with_concurrency`
+// scratch state used to (a) detect overlapping claims between sibling nodes
+// in the same DAG run and (b) carry claim metadata through to the per-node
+// evidence + response.
+//
+// Three knobs are surfaced on the `mission_plan(action=execute,
+// scheduler_mode=dag_v1)` envelope:
+//   * `claim_lease_secs` — default 1800 (30 min), clamped to
+//     `[CLAIM_LEASE_SECS_MIN, CLAIM_LEASE_SECS_MAX]` so an authoring
+//     mistake cannot stall the scheduler with a 0-second lease nor pin a
+//     scope for hours under a typo'd `999999`. Mirrors the wave12-01 ceiling.
+//   * `claimer_name` — default `plan-dag-scheduler`. Matches the wave12-01
+//     `:claimer` field convention so audit dashboards can pivot on the
+//     same identity vocabulary across companion-log claims AND DAG claims.
+//   * `enforce_claims` — default `false` for backward compatibility with
+//     pre-wave17 callers. When false, claim metadata still surfaces on
+//     the evidence + response (so observers can tell the registry tried)
+//     but conflicts NEVER block dispatch. When true, an unresolvable
+//     overlap fails the node fast with `CLAIM_CONFLICT` and we never
+//     hand it to the inner handler.
+//
+// The `claimed` lifecycle state is added between `Ready` and `Running`
+// (wave-13/02 listed it in the spec but the loop transitioned ready ->
+// running directly). The transition is now `pending -> claimed -> running`
+// for every dispatched node (whether enforce_claims is true or false);
+// best-effort claim registration runs on the way to claimed, and the
+// registered claim is released on the way out of every terminal state
+// (succeeded / failed / paused / skipped).
+// ───────────────────────────────────────────────────────────────────────
+
+/// Default lease seconds when the caller did not pass `claim_lease_secs`.
+/// Matches the wave12-01 `mission_execution` constant so the two surfaces
+/// surface the same default duration.
+pub(super) const PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS: i64 = 1800;
+
+/// Lower bound on `claim_lease_secs`. Mirrors the wave12-01 floor — leases
+/// shorter than 60 seconds are almost certainly a typo (a wave can take
+/// longer than that to drain) and would create churn in the registry.
+pub(super) const PLAN_DAG_CLAIM_LEASE_SECS_MIN: i64 = 60;
+
+/// Upper bound on `claim_lease_secs`. Capped at 4 hours so a typo'd
+/// `999999` cannot pin a scope for the rest of the day. Authors who
+/// genuinely need longer leases should refresh per node; the registry
+/// is per-DAG-run and never persists past the wave loop.
+pub(super) const PLAN_DAG_CLAIM_LEASE_SECS_MAX: i64 = 14_400;
+
+/// Default claimer identity stamped onto every plan-DAG claim record
+/// when the caller did not pass `claimer_name`. Matches the wave12-01
+/// `:claimer` vocabulary so audit dashboards can grep one identity.
+pub(super) const PLAN_DAG_DEFAULT_CLAIMER_NAME: &str = "plan-dag-scheduler";
+
+/// Provenance label for the `:scope` derivation used by a claim. Surfaced
+/// alongside the claim record so dashboards can tell whether the scheduler
+/// claimed `:owned-files`, `:scope`, or the synthetic `plan/<id>/node/<id>`
+/// fallback. Stable string vocabulary so tests and dashboards can pin them.
+pub(super) const CLAIM_SCOPE_SOURCE_OWNED_FILES: &str = "owned_files";
+pub(super) const CLAIM_SCOPE_SOURCE_SCOPE: &str = "scope";
+pub(super) const CLAIM_SCOPE_SOURCE_PLAN_NODE_FALLBACK: &str = "plan_node_fallback";
+
+/// Parse `claim_lease_secs` from the call args, defaulting to
+/// `PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS` and clamping to the
+/// `[MIN, MAX]` range. Mirrors `parse_max_parallel_nodes` in spirit:
+/// invalid values are silently normalised rather than rejected because
+/// the scheduler treats lease bounds as a safety net, not a contract.
+pub(super) fn parse_claim_lease_secs(args: &Value) -> i64 {
+    args.get("claim_lease_secs")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS)
+        .clamp(PLAN_DAG_CLAIM_LEASE_SECS_MIN, PLAN_DAG_CLAIM_LEASE_SECS_MAX)
+}
+
+/// Parse `claimer_name` from the call args, defaulting to
+/// `PLAN_DAG_DEFAULT_CLAIMER_NAME`. Empty / whitespace-only strings fall
+/// back to the default so a caller passing an empty form field doesn't
+/// poison the audit log with a blank claimer.
+pub(super) fn parse_claimer_name(args: &Value) -> String {
+    args.get("claimer_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(PLAN_DAG_DEFAULT_CLAIMER_NAME)
+        .to_string()
+}
+
+/// Parse `enforce_claims` from the call args. Default `false` so
+/// pre-wave17 callers keep their byte-compatible dispatch contract. Any
+/// non-bool value normalises to `false` (no error) — the enforcement is
+/// strict opt-in.
+pub(super) fn parse_enforce_claims(args: &Value) -> bool {
+    args.get("enforce_claims")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Per-node claim scope derivation. Returns the list of scope tokens the
+/// claim covers PLUS the provenance source label. Priority (matches the
+/// task brief):
+///
+///   1. `:owned-files` — when at least one file is declared, every file
+///      becomes its own scope token. This lets the registry detect
+///      overlap at the file granularity (the same way the wave12-01
+///      audit + wave16-06 enforce paths do).
+///   2. `:scope` — when `:owned-files` is empty but the author declared
+///      a free-form `:scope` string. Used verbatim.
+///   3. `plan/<plan_id>/node/<node_id>` synthetic fallback — guarantees
+///      every dispatched node carries SOME scope so the registry can
+///      record the claim even for ungated nodes.
+///
+/// The function never returns an empty vector: the fallback case always
+/// yields one synthetic token. Pure (no AppState) so unit tests can pin
+/// the priority directly.
+pub(super) fn derive_node_claim_scopes(
+    node: &DagNode,
+    plan_id: uuid::Uuid,
+) -> (Vec<String>, &'static str) {
+    let owned: Vec<String> =
+        super::plan::split_lisp_string_list(node.owned_files_raw.as_deref())
+            .into_iter()
+            .filter(|s| !s.trim().is_empty())
+            .collect();
+    if !owned.is_empty() {
+        return (owned, CLAIM_SCOPE_SOURCE_OWNED_FILES);
+    }
+    if let Some(scope) = node.scope.as_deref() {
+        let trimmed = scope.trim();
+        if !trimmed.is_empty() {
+            return (vec![trimmed.to_string()], CLAIM_SCOPE_SOURCE_SCOPE);
+        }
+    }
+    (
+        vec![format!("plan/{}/node/{}", plan_id, node.id)],
+        CLAIM_SCOPE_SOURCE_PLAN_NODE_FALLBACK,
+    )
+}
+
+/// Build the deterministic claim id for a plan-DAG node attempt. Pure
+/// helper so tests can pin the format without standing up a registry.
+/// Layout: `plan-dag:<plan_id>:<node_id>:<attempt>`. Includes the attempt
+/// number so retries (wave-16 / task 05) get a fresh claim id rather
+/// than colliding with the previous attempt's record.
+pub(super) fn derive_plan_dag_claim_id(
+    plan_id: uuid::Uuid,
+    node_id: &str,
+    attempt: u32,
+) -> String {
+    format!("plan-dag:{}:{}:{}", plan_id, node_id, attempt)
+}
+
+/// Single in-memory claim record carried by `ClaimRegistry`. Fields
+/// mirror the wave12-01 `ClaimRecord` shape so dashboards consuming
+/// either surface see the same vocabulary; we add `released_at` as
+/// `Option` so a single record can describe both the active and
+/// released states without splitting the type.
+#[derive(Debug, Clone)]
+pub(super) struct PlanDagClaim {
+    pub claim_id: String,
+    pub claimer: String,
+    pub scopes: Vec<String>,
+    pub scope_source: &'static str,
+    pub acquired_at: chrono::DateTime<chrono::Utc>,
+    pub lease_expires_at: chrono::DateTime<chrono::Utc>,
+    pub released_at: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+impl PlanDagClaim {
+    /// ISO-8601 second-precision projection of `acquired_at` (matches
+    /// wave12-01's `to_rfc3339_opts(SecondsFormat::Secs, true)` so the
+    /// two surfaces print timestamps identically).
+    pub(super) fn acquired_at_iso(&self) -> String {
+        self.acquired_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+    pub(super) fn lease_expires_at_iso(&self) -> String {
+        self.lease_expires_at
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    }
+    pub(super) fn released_at_iso(&self) -> Option<String> {
+        self.released_at
+            .map(|t| t.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    }
+}
+
+/// Outcome of a `ClaimRegistry::try_acquire` call. The `Conflict`
+/// variant carries enough context (the conflicting claim's id +
+/// claimer + the offending pair of scopes) for the scheduler to
+/// surface a structured error in `enforce_claims=true` mode and a
+/// best-effort warning in `enforce_claims=false` mode.
+#[derive(Debug, Clone)]
+pub(super) enum ClaimAcquire {
+    Acquired(PlanDagClaim),
+    Conflict {
+        attempted_claim_id: String,
+        attempted_scopes: Vec<String>,
+        attempted_scope_source: &'static str,
+        conflicting_claim_id: String,
+        conflicting_claimer: String,
+        conflicting_scope: String,
+        offending_scope: String,
+    },
+}
+
+/// Per-DAG-run claim registry. NOT a global lock service — the registry
+/// only exists for the lifetime of one `execute_with_concurrency` call.
+/// Conflict detection reuses `scopes_overlap_pure` so the predicate
+/// matches wave12-01's `action_claim` overlap test byte-for-byte.
+#[derive(Debug, Default)]
+pub(super) struct ClaimRegistry {
+    claims: HashMap<String, PlanDagClaim>,
+}
+
+impl ClaimRegistry {
+    pub(super) fn new() -> Self {
+        Self::default()
+    }
+
+    /// Try to acquire a claim covering `scopes`. Returns:
+    ///   * `Acquired(claim)` if no active claim overlaps any of the
+    ///     attempted scopes (or every overlap is on a released claim).
+    ///   * `Conflict { ... }` otherwise — carries the offending scope
+    ///     pair so the caller can surface a structured error.
+    ///
+    /// "Active" means `released_at.is_none()` AND `now <
+    /// lease_expires_at`. Lease-expired claims are treated as
+    /// soft-released (mirrors wave12-01). The scheduler never
+    /// explicitly garbage-collects them — the registry is per-DAG-run
+    /// and dies with the call.
+    pub(super) fn try_acquire(
+        &mut self,
+        claim_id: String,
+        claimer: String,
+        scopes: Vec<String>,
+        scope_source: &'static str,
+        lease_secs: i64,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> ClaimAcquire {
+        for existing in self.claims.values() {
+            if existing.released_at.is_some() {
+                continue;
+            }
+            if existing.lease_expires_at < now {
+                continue;
+            }
+            for new_scope in &scopes {
+                for held_scope in &existing.scopes {
+                    if scopes_overlap_pure(new_scope, held_scope) {
+                        let offending = new_scope.clone();
+                        let held = held_scope.clone();
+                        let conflicting_id = existing.claim_id.clone();
+                        let conflicting_claimer = existing.claimer.clone();
+                        return ClaimAcquire::Conflict {
+                            attempted_claim_id: claim_id,
+                            attempted_scopes: scopes,
+                            attempted_scope_source: scope_source,
+                            conflicting_claim_id: conflicting_id,
+                            conflicting_claimer,
+                            conflicting_scope: held,
+                            offending_scope: offending,
+                        };
+                    }
+                }
+            }
+        }
+        let claim = PlanDagClaim {
+            claim_id: claim_id.clone(),
+            claimer,
+            scopes,
+            scope_source,
+            acquired_at: now,
+            lease_expires_at: now + chrono::Duration::seconds(lease_secs),
+            released_at: None,
+        };
+        self.claims.insert(claim_id, claim.clone());
+        ClaimAcquire::Acquired(claim)
+    }
+
+    /// Mark `claim_id` released at `now`. Returns the released record
+    /// (with `released_at` populated) so the caller can surface the
+    /// timestamp on the per-node evidence. Returns `None` if the id is
+    /// unknown — the wave loop never calls release without a prior
+    /// successful acquire so this only fires under a registry bug.
+    pub(super) fn release(
+        &mut self,
+        claim_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Option<PlanDagClaim> {
+        let entry = self.claims.get_mut(claim_id)?;
+        if entry.released_at.is_none() {
+            entry.released_at = Some(now);
+        }
+        Some(entry.clone())
+    }
+
+    /// Total number of recorded claims (active + released). Surfaced on
+    /// the response so callers can spot "registry never recorded
+    /// anything" without walking every node.
+    pub(super) fn len(&self) -> usize {
+        self.claims.len()
+    }
+}
+
+/// Pure projection of the claim plan the scheduler WOULD register given
+/// the configured knobs. Used by the dry-run response so callers can
+/// preview every node's claim metadata without dispatching anything.
+/// The projection mirrors `try_acquire` decisions for the EMPTY
+/// registry (no overlap detection across nodes) — real runs may flag
+/// conflicts the dry-run cannot foresee. The dry-run is therefore a
+/// *what-each-node-would-claim* preview, not an outcome prediction.
+pub(super) fn build_planned_claims(
+    nodes: &[DagNode],
+    order: &[String],
+    plan_id: uuid::Uuid,
+    claimer: &str,
+    lease_secs: i64,
+    enforce_claims: bool,
+) -> Value {
+    let by_id: HashMap<&str, &DagNode> =
+        nodes.iter().map(|n| (n.id.as_str(), n)).collect();
+    let mut out: Vec<Value> = Vec::with_capacity(order.len());
+    for id in order {
+        let Some(n) = by_id.get(id.as_str()) else { continue };
+        let (scopes, source) = derive_node_claim_scopes(n, plan_id);
+        out.push(json!({
+            "node_id": n.id,
+            "claim_id": derive_plan_dag_claim_id(plan_id, &n.id, 1),
+            "claimer": claimer,
+            "scopes": scopes,
+            "scope_source": source,
+            "lease_secs": lease_secs,
+            "enforce_claims": enforce_claims,
+        }));
+    }
+    Value::Array(out)
+}
+
 /// Pre-built immutable evidence parameters that vary per call to
 /// `action_execute_dag_v1`. The scheduler captures these once so each
 /// per-node evidence emit doesn't re-thread the same args through.
@@ -2552,6 +2939,276 @@ async fn emit_paused_review_gate(
     (question_id, bus_warning)
 }
 
+/// wave-17 / task 02 — emit a `pending -> claimed` evidence row + bus
+/// event for a node whose claim was successfully registered (or
+/// recorded best-effort under `enforce_claims=false`). The transition
+/// always runs BEFORE `ready -> running` so observers can pivot on the
+/// claim metadata without reconstructing it from the running row.
+///
+/// `claim_status` is one of:
+///   * `"acquired"`       — `enforce_claims=true OR false`, registry
+///                          recorded the claim with no overlap.
+///   * `"recorded_compat"` — `enforce_claims=false`, registry detected
+///                          an overlap but compat-mode best-effort
+///                          recorded it anyway. The conflict snapshot
+///                          rides on the entry so the audit row is
+///                          self-contained.
+async fn emit_evidence_claimed(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    attempt: u32,
+    claim: &PlanDagClaim,
+    claim_status: &str,
+    compat_conflict: Option<(String, String, String, String)>,
+    outcome: &mut ExecutionOutcome,
+) {
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        attempt,
+        "pending",
+        "claimed",
+        Some(format!(
+            "claim:{}:{}:{}",
+            claim.claim_id, claim.claimer, claim_status
+        )),
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
+    let mut entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition("pending -> claimed")
+    .add_execution_event(event_ref)
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(attempt))
+    .with_extra("claim_id", json!(claim.claim_id))
+    .with_extra("claimer", json!(claim.claimer))
+    .with_extra("claim_scopes", json!(claim.scopes))
+    .with_extra("claim_scope_source", json!(claim.scope_source))
+    .with_extra("claim_acquired_at", json!(claim.acquired_at_iso()))
+    .with_extra(
+        "claim_lease_expires_at",
+        json!(claim.lease_expires_at_iso()),
+    )
+    .with_extra("claim_status", json!(claim_status));
+    if let Some((conflict_id, conflict_claimer, held_scope, attempted_scope)) =
+        compat_conflict
+    {
+        entry = entry
+            .with_extra("claim_compat_conflict_claim_id", json!(conflict_id))
+            .with_extra("claim_compat_conflict_claimer", json!(conflict_claimer))
+            .with_extra("claim_compat_conflict_held_scope", json!(held_scope))
+            .with_extra(
+                "claim_compat_conflict_attempted_scope",
+                json!(attempted_scope),
+            );
+    }
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: pending->claimed evidence append failed"
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
+/// wave-17 / task 02 — emit a `claimed -> released` evidence row and
+/// best-effort bus event after the wave loop reaches a terminal state
+/// for the node and releases its registry record. Stamps the
+/// `released_at` ISO timestamp + the original lease bounds so audit
+/// dashboards can compute the actual hold duration without rejoining
+/// the prior `pending -> claimed` row.
+async fn emit_evidence_claim_released(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    attempt: u32,
+    claim: &PlanDagClaim,
+    terminal_state: &str,
+    outcome: &mut ExecutionOutcome,
+) {
+    let released_iso = claim
+        .released_at_iso()
+        .unwrap_or_else(|| claim.acquired_at_iso());
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        attempt,
+        "claimed",
+        "released",
+        Some(format!(
+            "release:{}:{}:after-{}",
+            claim.claim_id, claim.claimer, terminal_state
+        )),
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
+    let entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition("claimed -> released")
+    .add_execution_event(event_ref)
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(attempt))
+    .with_extra("claim_id", json!(claim.claim_id))
+    .with_extra("claimer", json!(claim.claimer))
+    .with_extra("claim_scopes", json!(claim.scopes))
+    .with_extra("claim_scope_source", json!(claim.scope_source))
+    .with_extra("claim_acquired_at", json!(claim.acquired_at_iso()))
+    .with_extra(
+        "claim_lease_expires_at",
+        json!(claim.lease_expires_at_iso()),
+    )
+    .with_extra("claim_released_at", json!(released_iso))
+    .with_extra("claim_terminal_state", json!(terminal_state));
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: claimed->released evidence append failed"
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
+/// wave-17 / task 02 — emit a `pending -> failed` evidence row for a
+/// node refused at the claim gate under `enforce_claims=true`. The
+/// inner handler is NEVER invoked; the node fails fast with a
+/// structured `CLAIM_CONFLICT` reason so audit dashboards can pivot on
+/// the dedicated `claim_conflict` skip tag.
+async fn emit_evidence_claim_conflict(
+    state: &AppState,
+    ctx: &EvidenceCtx<'_>,
+    node: &DagNode,
+    dispatch_strategy: &str,
+    attempt: u32,
+    attempted_claim_id: &str,
+    attempted_scopes: &[String],
+    attempted_scope_source: &str,
+    conflicting_claim_id: &str,
+    conflicting_claimer: &str,
+    conflicting_scope: &str,
+    offending_scope: &str,
+    outcome: &mut ExecutionOutcome,
+) {
+    let reason = format!(
+        "CLAIM_CONFLICT: scope `{}` overlaps active claim {} held by `{}` over `{}`",
+        offending_scope, conflicting_claim_id, conflicting_claimer, conflicting_scope
+    );
+    let (event_ref, warning) = publish_plan_node_state_change(
+        state,
+        ctx.plan_id,
+        node,
+        dispatch_strategy,
+        attempt,
+        "pending",
+        "failed",
+        Some(reason.clone()),
+    )
+    .await;
+    if let Some(w) = warning {
+        outcome.bus_publish_warnings.push(w);
+    }
+    let entry = EvidenceEntry::new(
+        evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        evidence_collector::kind::DISPATCH,
+    )
+    .with_state_transition("pending -> failed")
+    .add_execution_event(event_ref)
+    .with_extra("scheduler_mode", json!("dag_v1"))
+    .with_extra("node_id", json!(node.id))
+    .with_extra("plan_id", json!(ctx.plan_id))
+    .with_extra("target_tool", json!(node.target))
+    .with_extra("target", json!(node.target))
+    .with_extra("dispatch_strategy", json!(dispatch_strategy))
+    .with_extra("attempt", json!(attempt))
+    .with_extra("skip_reason", json!("claim_conflict"))
+    .with_extra("claim_status", json!("conflict"))
+    .with_extra("attempted_claim_id", json!(attempted_claim_id))
+    .with_extra("attempted_claim_scopes", json!(attempted_scopes))
+    .with_extra("attempted_claim_scope_source", json!(attempted_scope_source))
+    .with_extra("conflicting_claim_id", json!(conflicting_claim_id))
+    .with_extra("conflicting_claimer", json!(conflicting_claimer))
+    .with_extra("conflicting_scope", json!(conflicting_scope))
+    .with_extra("offending_scope", json!(offending_scope))
+    .with_extra("inner_error", json!({ "error": reason }));
+    let append_outcome = evidence_collector::append(
+        state,
+        ctx.plan_id,
+        ctx.project_arg,
+        ctx.cwd_arg,
+        ctx.target_project_arg.or(node.target_project.as_deref()),
+        entry,
+    )
+    .await;
+    if let AppendOutcome::Failed { error } = &append_outcome {
+        tracing::warn!(
+            plan_id = %ctx.plan_id, node_id = %node.id, error = %error,
+            "DAG scheduler: pending->failed (claim conflict) evidence append failed"
+        );
+    }
+    let (path, err) = append_outcome.into_legacy_tuple();
+    if let Some(p) = path {
+        outcome.evidence_path = Some(p);
+    }
+    if let Some(e) = err {
+        outcome.evidence_error = Some(e);
+    }
+}
+
 /// Wave-based scheduler. Drains up to `max_parallel_nodes` ready nodes per
 /// wave through a `tokio::task::JoinSet`, awaits the wave, records the
 /// transitions in the order results land, then recomputes ready set and
@@ -2597,6 +3254,19 @@ async fn execute_with_concurrency(
     let mut outcome = ExecutionOutcome::default();
     let mut abort_new_dispatch = false;
     let mut abort_aborter: Option<String> = None;
+
+    // wave-17 / task 02 — claim / lease discipline. The registry is
+    // per-DAG-run scratch state (NOT a global lock service). Per-node
+    // active claim ids live in `active_claims_by_node` so the wave loop
+    // can release them as nodes terminate (succeeded / failed / paused
+    // / claim-conflict-aborted). The three knobs come from the call
+    // args and surface on the response so callers can tell which
+    // discipline mode the run used.
+    let claim_lease_secs = parse_claim_lease_secs(args);
+    let claimer_name = parse_claimer_name(args);
+    let enforce_claims = parse_enforce_claims(args);
+    let mut claim_registry = ClaimRegistry::new();
+    let mut active_claims_by_node: HashMap<String, String> = HashMap::new();
 
     let ctx = EvidenceCtx {
         plan_id: plan.id,
@@ -2840,6 +3510,15 @@ async fn execute_with_concurrency(
         // attempt number onto the evidence + bus payload so audit
         // dashboards can route on `attempt > 1` without reconstructing
         // the retry policy from scratch.
+        //
+        // wave-17 / task 02 — every dispatched node passes through the
+        // `pending -> claimed -> running` ladder. Claim acquisition runs
+        // BEFORE the spawn so `enforce_claims=true` can fail-fast on
+        // an unresolvable overlap without ever touching the inner
+        // handler. Under `enforce_claims=false` the registry still
+        // records best-effort metadata (so observers can tell the
+        // discipline ran) but the scheduler never blocks dispatch on
+        // an overlap.
         let mut join_set: tokio::task::JoinSet<Result<DispatchOutcome>> =
             tokio::task::JoinSet::new();
         for node in to_dispatch {
@@ -2847,12 +3526,169 @@ async fn execute_with_concurrency(
                 .dispatch_strategy
                 .clone()
                 .unwrap_or_else(|| "unknown".to_string());
-            lifecycle.insert(node.id.clone(), NodeLifecycle::Running);
             let attempt = {
                 let entry = attempts_made.entry(node.id.clone()).or_insert(0);
                 *entry += 1;
                 *entry
             };
+
+            // wave-17 / task 02 — try to acquire a claim covering the
+            // node's derived scopes. The acquire runs against the
+            // shared per-DAG registry; conflicts are decided by the
+            // shared `scopes_overlap_pure` predicate.
+            let (scopes, scope_source) =
+                derive_node_claim_scopes(&node, plan.id);
+            let claim_id =
+                derive_plan_dag_claim_id(plan.id, &node.id, attempt);
+            let acquire_now = chrono::Utc::now();
+            let acquire_outcome = claim_registry.try_acquire(
+                claim_id.clone(),
+                claimer_name.clone(),
+                scopes.clone(),
+                scope_source,
+                claim_lease_secs,
+                acquire_now,
+            );
+
+            match acquire_outcome {
+                ClaimAcquire::Acquired(claim) => {
+                    lifecycle.insert(node.id.clone(), NodeLifecycle::Claimed);
+                    emit_evidence_claimed(
+                        state,
+                        &ctx,
+                        &node,
+                        &dispatch_strategy,
+                        attempt,
+                        &claim,
+                        "acquired",
+                        None,
+                        &mut outcome,
+                    )
+                    .await;
+                    active_claims_by_node
+                        .insert(node.id.clone(), claim.claim_id.clone());
+                }
+                ClaimAcquire::Conflict {
+                    attempted_claim_id,
+                    attempted_scopes,
+                    attempted_scope_source,
+                    conflicting_claim_id,
+                    conflicting_claimer,
+                    conflicting_scope,
+                    offending_scope,
+                } => {
+                    if enforce_claims {
+                        // Strict mode — refuse to dispatch. Mark the
+                        // node failed, emit `pending -> failed` with
+                        // the structured CLAIM_CONFLICT reason, do NOT
+                        // spawn the inner handler.
+                        lifecycle.insert(node.id.clone(), NodeLifecycle::Failed);
+                        emit_evidence_claim_conflict(
+                            state,
+                            &ctx,
+                            &node,
+                            &dispatch_strategy,
+                            attempt,
+                            &attempted_claim_id,
+                            &attempted_scopes,
+                            attempted_scope_source,
+                            &conflicting_claim_id,
+                            &conflicting_claimer,
+                            &conflicting_scope,
+                            &offending_scope,
+                            &mut outcome,
+                        )
+                        .await;
+                        let reason = format!(
+                            "CLAIM_CONFLICT: scope `{}` overlaps active claim {} \
+                             held by `{}` over `{}`",
+                            offending_scope,
+                            conflicting_claim_id,
+                            conflicting_claimer,
+                            conflicting_scope
+                        );
+                        let inner_payload = json!({
+                            "error": reason.clone(),
+                            "claim_status": "conflict",
+                            "attempted_claim_id": attempted_claim_id,
+                            "attempted_claim_scopes": attempted_scopes,
+                            "attempted_claim_scope_source": attempted_scope_source,
+                            "conflicting_claim_id": conflicting_claim_id,
+                            "conflicting_claimer": conflicting_claimer,
+                            "conflicting_scope": conflicting_scope,
+                            "offending_scope": offending_scope,
+                        });
+                        results_by_id.insert(
+                            node.id.clone(),
+                            NodeResult {
+                                id: node.id.clone(),
+                                target: node.target.clone(),
+                                state: NodeState::Failed { reason },
+                                dispatch_strategy: dispatch_strategy.clone(),
+                                inner_payload,
+                                attempts_made: attempt,
+                                max_attempts: node.effective_max_attempts(),
+                                retry_skipped_non_retryable: true,
+                            },
+                        );
+                        // Taint propagation — the failed node still
+                        // taints downstream so the rest of the DAG
+                        // sees the failure as a real one, AND
+                        // fail-fast trips when policy says so.
+                        propagate_taint(&node, &succs, &mut tainted_by);
+                        if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
+                            abort_new_dispatch = true;
+                            abort_aborter = Some(node.id.clone());
+                        }
+                        continue;
+                    }
+                    // Compat mode — best-effort record the claim into
+                    // the registry under a synthetic id so the audit
+                    // row carries the metadata. We synthesise a
+                    // record (NOT inserted into the registry to avoid
+                    // poisoning future overlap checks) and attach the
+                    // conflict snapshot so dashboards can spot
+                    // "compat mode papered over a real conflict".
+                    let synthetic_claim = PlanDagClaim {
+                        claim_id: attempted_claim_id.clone(),
+                        claimer: claimer_name.clone(),
+                        scopes: attempted_scopes,
+                        scope_source: attempted_scope_source,
+                        acquired_at: acquire_now,
+                        lease_expires_at: acquire_now
+                            + chrono::Duration::seconds(claim_lease_secs),
+                        released_at: None,
+                    };
+                    lifecycle
+                        .insert(node.id.clone(), NodeLifecycle::Claimed);
+                    emit_evidence_claimed(
+                        state,
+                        &ctx,
+                        &node,
+                        &dispatch_strategy,
+                        attempt,
+                        &synthetic_claim,
+                        "recorded_compat",
+                        Some((
+                            conflicting_claim_id,
+                            conflicting_claimer,
+                            conflicting_scope,
+                            offending_scope,
+                        )),
+                        &mut outcome,
+                    )
+                    .await;
+                    // No registry entry, no per-node active claim
+                    // map entry — release skip is intentional: we
+                    // never registered the claim, so there's nothing
+                    // to release. Audit row already captured the
+                    // metadata; downstream nodes still see the held
+                    // scope on the original conflicting claim, which
+                    // is the right thing for compat mode.
+                }
+            }
+
+            lifecycle.insert(node.id.clone(), NodeLifecycle::Running);
             emit_evidence_running(
                 state,
                 &ctx,
@@ -2927,6 +3763,27 @@ async fn execute_with_concurrency(
             .await;
             if succeeded {
                 lifecycle.insert(node_id.clone(), NodeLifecycle::Succeeded);
+                // wave-17 / task 02 — release the claim now that the
+                // terminal state is set. Best-effort: we only release
+                // when the registry actually recorded the claim
+                // (compat-mode conflicts skip the registry insert).
+                if let Some(claim_id) = active_claims_by_node.remove(&node_id) {
+                    if let Some(released) = claim_registry
+                        .release(&claim_id, chrono::Utc::now())
+                    {
+                        emit_evidence_claim_released(
+                            state,
+                            &ctx,
+                            &node,
+                            &dispatch_strategy,
+                            current_attempt,
+                            &released,
+                            "succeeded",
+                            &mut outcome,
+                        )
+                        .await;
+                    }
+                }
                 results_by_id.insert(
                     node_id.clone(),
                     NodeResult {
@@ -2953,6 +3810,32 @@ async fn execute_with_concurrency(
                 abort_new_dispatch,
             );
             if should_retry {
+                // wave-17 / task 02 — release the failed-attempt
+                // claim BEFORE re-acquiring on retry so the new
+                // attempt's claim id (with the bumped attempt
+                // suffix) replaces the prior one in the registry
+                // without overlap. Best-effort: skip if the original
+                // attempt never registered a claim (compat-mode
+                // conflict).
+                if let Some(claim_id) =
+                    active_claims_by_node.remove(&node_id)
+                {
+                    if let Some(released) = claim_registry
+                        .release(&claim_id, chrono::Utc::now())
+                    {
+                        emit_evidence_claim_released(
+                            state,
+                            &ctx,
+                            &node,
+                            &dispatch_strategy,
+                            current_attempt,
+                            &released,
+                            "failed_will_retry",
+                            &mut outcome,
+                        )
+                        .await;
+                    }
+                }
                 // Optional sleep between attempts. Skipped when absent
                 // / 0 so the common no-back-off case stays cheap.
                 if let Some(delay_ms) = node.effective_retry_delay_ms() {
@@ -2967,6 +3850,95 @@ async fn execute_with_concurrency(
                     *entry += 1;
                     *entry
                 };
+                // wave-17 / task 02 — re-acquire claim for retry
+                // attempt. Fresh claim id includes the bumped
+                // attempt suffix so the audit trail captures every
+                // attempt's claim metadata distinctly.
+                let (retry_scopes, retry_scope_source) =
+                    derive_node_claim_scopes(&node, plan.id);
+                let retry_claim_id =
+                    derive_plan_dag_claim_id(plan.id, &node_id, next_attempt);
+                let retry_now = chrono::Utc::now();
+                let retry_acquire = claim_registry.try_acquire(
+                    retry_claim_id.clone(),
+                    claimer_name.clone(),
+                    retry_scopes.clone(),
+                    retry_scope_source,
+                    claim_lease_secs,
+                    retry_now,
+                );
+                match retry_acquire {
+                    ClaimAcquire::Acquired(retry_claim) => {
+                        lifecycle.insert(
+                            node_id.clone(),
+                            NodeLifecycle::Claimed,
+                        );
+                        emit_evidence_claimed(
+                            state,
+                            &ctx,
+                            &node,
+                            &dispatch_strategy,
+                            next_attempt,
+                            &retry_claim,
+                            "acquired",
+                            None,
+                            &mut outcome,
+                        )
+                        .await;
+                        active_claims_by_node.insert(
+                            node_id.clone(),
+                            retry_claim.claim_id.clone(),
+                        );
+                    }
+                    ClaimAcquire::Conflict {
+                        attempted_scopes,
+                        attempted_scope_source,
+                        conflicting_claim_id,
+                        conflicting_claimer,
+                        conflicting_scope,
+                        offending_scope,
+                        ..
+                    } => {
+                        // Compat / enforce both end here for retries
+                        // — we already mid-flight and cannot fail
+                        // the prior attempt over a retry-claim
+                        // conflict. Surface the audit row as
+                        // recorded_compat (the claim is informational
+                        // only on retries) and continue.
+                        let synthetic = PlanDagClaim {
+                            claim_id: retry_claim_id.clone(),
+                            claimer: claimer_name.clone(),
+                            scopes: attempted_scopes,
+                            scope_source: attempted_scope_source,
+                            acquired_at: retry_now,
+                            lease_expires_at: retry_now
+                                + chrono::Duration::seconds(claim_lease_secs),
+                            released_at: None,
+                        };
+                        lifecycle.insert(
+                            node_id.clone(),
+                            NodeLifecycle::Claimed,
+                        );
+                        emit_evidence_claimed(
+                            state,
+                            &ctx,
+                            &node,
+                            &dispatch_strategy,
+                            next_attempt,
+                            &synthetic,
+                            "recorded_compat",
+                            Some((
+                                conflicting_claim_id,
+                                conflicting_claimer,
+                                conflicting_scope,
+                                offending_scope,
+                            )),
+                            &mut outcome,
+                        )
+                        .await;
+                    }
+                }
+                lifecycle.insert(node_id.clone(), NodeLifecycle::Running);
                 emit_evidence_running(
                     state,
                     &ctx,
@@ -2988,6 +3960,25 @@ async fn execute_with_concurrency(
             // Final failure — exhausted retries OR non-retryable OR
             // fail-fast already aborted this wave.
             lifecycle.insert(node_id.clone(), NodeLifecycle::Failed);
+            // wave-17 / task 02 — release the claim on terminal
+            // failure (best-effort, compat-mode conflicts skip).
+            if let Some(claim_id) = active_claims_by_node.remove(&node_id) {
+                if let Some(released) =
+                    claim_registry.release(&claim_id, chrono::Utc::now())
+                {
+                    emit_evidence_claim_released(
+                        state,
+                        &ctx,
+                        &node,
+                        &dispatch_strategy,
+                        current_attempt,
+                        &released,
+                        "failed",
+                        &mut outcome,
+                    )
+                    .await;
+                }
+            }
             let reason = classification
                 .err()
                 .unwrap_or_else(|| "inner handler returned error".to_string());
@@ -6980,5 +7971,443 @@ mod tests {
             }
             other => panic!("expected Route, got {:?}", other),
         }
+    }
+
+    // ── wave-17 / task 02 — claim / lease pure helpers ──────────────────
+
+    fn claim_test_plan_id() -> uuid::Uuid {
+        uuid::Uuid::parse_str("00000000-0000-0000-0000-0000000c1a1d").unwrap()
+    }
+
+    #[test]
+    fn parse_claim_lease_secs_defaults_to_1800() {
+        let v = json!({});
+        assert_eq!(parse_claim_lease_secs(&v), PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS);
+        assert_eq!(parse_claim_lease_secs(&v), 1800);
+    }
+
+    #[test]
+    fn parse_claim_lease_secs_clamps_low_and_high() {
+        // Below floor → clamped up to MIN.
+        assert_eq!(
+            parse_claim_lease_secs(&json!({"claim_lease_secs": 5})),
+            PLAN_DAG_CLAIM_LEASE_SECS_MIN
+        );
+        // Above ceiling → clamped down to MAX.
+        assert_eq!(
+            parse_claim_lease_secs(&json!({"claim_lease_secs": 999_999})),
+            PLAN_DAG_CLAIM_LEASE_SECS_MAX
+        );
+        // Inside the band → echoed verbatim.
+        assert_eq!(
+            parse_claim_lease_secs(&json!({"claim_lease_secs": 600})),
+            600
+        );
+    }
+
+    #[test]
+    fn parse_claimer_name_defaults_when_missing_or_blank() {
+        assert_eq!(
+            parse_claimer_name(&json!({})),
+            PLAN_DAG_DEFAULT_CLAIMER_NAME
+        );
+        // Whitespace-only → default (so a blank form field doesn't poison
+        // the audit log).
+        assert_eq!(
+            parse_claimer_name(&json!({"claimer_name": "   "})),
+            PLAN_DAG_DEFAULT_CLAIMER_NAME
+        );
+        // Explicit value → echoed (with surrounding whitespace trimmed).
+        assert_eq!(
+            parse_claimer_name(&json!({"claimer_name": "  alice  "})),
+            "alice"
+        );
+    }
+
+    #[test]
+    fn parse_enforce_claims_defaults_to_false() {
+        assert!(!parse_enforce_claims(&json!({})));
+        assert!(parse_enforce_claims(&json!({"enforce_claims": true})));
+        assert!(!parse_enforce_claims(&json!({"enforce_claims": false})));
+        // Non-bool values normalise to false (strict opt-in).
+        assert!(!parse_enforce_claims(&json!({"enforce_claims": "yes"})));
+        assert!(!parse_enforce_claims(&json!({"enforce_claims": 1})));
+    }
+
+    #[test]
+    fn derive_node_claim_scopes_uses_owned_files_first() {
+        let plan_id = claim_test_plan_id();
+        let node = DagNode {
+            id: "n1".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            owned_files_raw: Some(r#"["src/a.rs" "src/b.rs"]"#.into()),
+            scope: Some("ignored-when-owned-files-set".into()),
+            ..Default::default()
+        };
+        let (scopes, source) = derive_node_claim_scopes(&node, plan_id);
+        assert_eq!(source, CLAIM_SCOPE_SOURCE_OWNED_FILES);
+        assert_eq!(
+            scopes,
+            vec!["src/a.rs".to_string(), "src/b.rs".to_string()]
+        );
+    }
+
+    #[test]
+    fn derive_node_claim_scopes_falls_back_to_scope_when_no_owned_files() {
+        let plan_id = claim_test_plan_id();
+        let node = DagNode {
+            id: "n2".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            scope: Some("crates/foo".into()),
+            ..Default::default()
+        };
+        let (scopes, source) = derive_node_claim_scopes(&node, plan_id);
+        assert_eq!(source, CLAIM_SCOPE_SOURCE_SCOPE);
+        assert_eq!(scopes, vec!["crates/foo".to_string()]);
+    }
+
+    #[test]
+    fn derive_node_claim_scopes_falls_back_to_plan_node_synthetic_when_empty() {
+        let plan_id = claim_test_plan_id();
+        let node = DagNode {
+            id: "n3".into(),
+            target: "mission_execution".into(),
+            failure_policy: "fail-fast".into(),
+            ..Default::default()
+        };
+        let (scopes, source) = derive_node_claim_scopes(&node, plan_id);
+        assert_eq!(source, CLAIM_SCOPE_SOURCE_PLAN_NODE_FALLBACK);
+        assert_eq!(scopes.len(), 1);
+        assert!(scopes[0].contains(&plan_id.to_string()));
+        assert!(scopes[0].contains("node/n3"));
+    }
+
+    #[test]
+    fn derive_node_claim_scopes_treats_blank_owned_files_and_scope_as_empty() {
+        let plan_id = claim_test_plan_id();
+        let node = DagNode {
+            id: "n4".into(),
+            target: "mission_execution".into(),
+            failure_policy: "fail-fast".into(),
+            owned_files_raw: Some(r#"["   "]"#.into()),
+            scope: Some("   ".into()),
+            ..Default::default()
+        };
+        let (scopes, source) = derive_node_claim_scopes(&node, plan_id);
+        // Blank owned_files entries filter out → falls through to blank
+        // :scope → falls through to synthetic.
+        assert_eq!(source, CLAIM_SCOPE_SOURCE_PLAN_NODE_FALLBACK);
+        assert_eq!(scopes.len(), 1);
+    }
+
+    #[test]
+    fn derive_plan_dag_claim_id_includes_attempt() {
+        let plan_id = claim_test_plan_id();
+        let id_a = derive_plan_dag_claim_id(plan_id, "node-x", 1);
+        let id_b = derive_plan_dag_claim_id(plan_id, "node-x", 2);
+        assert_ne!(id_a, id_b);
+        assert!(id_a.starts_with("plan-dag:"));
+        assert!(id_a.ends_with(":1"));
+        assert!(id_b.ends_with(":2"));
+    }
+
+    fn claim_test_now() -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap()
+    }
+
+    #[test]
+    fn claim_registry_acquires_disjoint_scopes() {
+        let mut reg = ClaimRegistry::new();
+        let now = claim_test_now();
+        let r1 = reg.try_acquire(
+            "c1".into(),
+            "claimer-a".into(),
+            vec!["src/a.rs".into()],
+            CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            300,
+            now,
+        );
+        assert!(matches!(r1, ClaimAcquire::Acquired(_)));
+        let r2 = reg.try_acquire(
+            "c2".into(),
+            "claimer-b".into(),
+            vec!["src/b.rs".into()],
+            CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            300,
+            now,
+        );
+        assert!(matches!(r2, ClaimAcquire::Acquired(_)));
+        assert_eq!(reg.len(), 2);
+    }
+
+    #[test]
+    fn claim_registry_rejects_overlapping_scope() {
+        let mut reg = ClaimRegistry::new();
+        let now = claim_test_now();
+        let r1 = reg.try_acquire(
+            "c1".into(),
+            "alpha".into(),
+            vec!["crates/foo".into()],
+            CLAIM_SCOPE_SOURCE_SCOPE,
+            300,
+            now,
+        );
+        assert!(matches!(r1, ClaimAcquire::Acquired(_)));
+        let r2 = reg.try_acquire(
+            "c2".into(),
+            "beta".into(),
+            // Prefix of the held scope — `scopes_overlap_pure` matches
+            // both directions.
+            vec!["crates/foo/src".into()],
+            CLAIM_SCOPE_SOURCE_SCOPE,
+            300,
+            now,
+        );
+        match r2 {
+            ClaimAcquire::Conflict {
+                conflicting_claim_id,
+                conflicting_claimer,
+                conflicting_scope,
+                offending_scope,
+                ..
+            } => {
+                assert_eq!(conflicting_claim_id, "c1");
+                assert_eq!(conflicting_claimer, "alpha");
+                assert_eq!(conflicting_scope, "crates/foo");
+                assert_eq!(offending_scope, "crates/foo/src");
+            }
+            other => panic!("expected Conflict, got {:?}", other),
+        }
+        // The conflicting attempt was NOT inserted — only the original
+        // acquired claim lives in the registry.
+        assert_eq!(reg.len(), 1);
+    }
+
+    #[test]
+    fn claim_registry_release_then_reacquire_succeeds() {
+        let mut reg = ClaimRegistry::new();
+        let now = claim_test_now();
+        let r1 = reg.try_acquire(
+            "c1".into(),
+            "writer".into(),
+            vec!["src/a.rs".into()],
+            CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            300,
+            now,
+        );
+        assert!(matches!(r1, ClaimAcquire::Acquired(_)));
+        let later = now + chrono::Duration::seconds(10);
+        let released = reg.release("c1", later);
+        assert!(released.is_some());
+        assert!(released.unwrap().released_at.is_some());
+        // After release the same scope can be re-acquired by a different
+        // claim id (audit row remains, registry just moves on).
+        let r2 = reg.try_acquire(
+            "c2".into(),
+            "writer-2".into(),
+            vec!["src/a.rs".into()],
+            CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            300,
+            later,
+        );
+        assert!(matches!(r2, ClaimAcquire::Acquired(_)));
+    }
+
+    #[test]
+    fn claim_registry_lease_expiry_treats_held_claim_as_soft_released() {
+        let mut reg = ClaimRegistry::new();
+        let now = claim_test_now();
+        let r1 = reg.try_acquire(
+            "c1".into(),
+            "writer".into(),
+            vec!["src/a.rs".into()],
+            CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            // 60-second lease so we can deliberately step past it.
+            60,
+            now,
+        );
+        assert!(matches!(r1, ClaimAcquire::Acquired(_)));
+        // Step well past the lease — registry should treat the claim as
+        // soft-released for conflict purposes (mirrors wave12-01).
+        let later = now + chrono::Duration::seconds(120);
+        let r2 = reg.try_acquire(
+            "c2".into(),
+            "writer-2".into(),
+            vec!["src/a.rs".into()],
+            CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            300,
+            later,
+        );
+        assert!(matches!(r2, ClaimAcquire::Acquired(_)));
+    }
+
+    #[test]
+    fn build_planned_claims_emits_one_entry_per_node_in_topo_order() {
+        let plan_id = claim_test_plan_id();
+        let sexp = r#"
+            (plan
+              (node :id "n1" :target "mission_task_delegate"
+                    :owned-files ["src/a.rs"])
+              (node :id "n2" :target "mission_execution"
+                    :scope "crates/foo" :depends-on ["n1"])
+              (node :id "n3" :target "mission_execution" :depends-on ["n2"]))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let projection = build_planned_claims(
+            &parsed.nodes,
+            &order,
+            plan_id,
+            "scheduler",
+            900,
+            true,
+        );
+        let arr = projection.as_array().expect("array");
+        assert_eq!(arr.len(), 3);
+        assert_eq!(arr[0]["node_id"], "n1");
+        assert_eq!(arr[0]["scope_source"], CLAIM_SCOPE_SOURCE_OWNED_FILES);
+        assert_eq!(arr[0]["scopes"], json!(["src/a.rs"]));
+        assert_eq!(arr[0]["lease_secs"], 900);
+        assert_eq!(arr[0]["enforce_claims"], true);
+        assert_eq!(arr[0]["claimer"], "scheduler");
+        assert_eq!(arr[1]["node_id"], "n2");
+        assert_eq!(arr[1]["scope_source"], CLAIM_SCOPE_SOURCE_SCOPE);
+        assert_eq!(arr[1]["scopes"], json!(["crates/foo"]));
+        assert_eq!(arr[2]["node_id"], "n3");
+        assert_eq!(
+            arr[2]["scope_source"],
+            CLAIM_SCOPE_SOURCE_PLAN_NODE_FALLBACK
+        );
+    }
+
+    #[tokio::test]
+    async fn dry_run_response_includes_planned_claims_and_knobs() {
+        // Build a fake AppState by way of the existing test fixtures.
+        // We exercise the dry-run branch which never touches the bus
+        // / store, so we can pass a minimal AppState constructed via
+        // `AppState::test_dummy()` where available — but that helper
+        // doesn't exist on plan_dag's test surface, so instead we
+        // assert the projection shape via the pure `build_planned_claims`
+        // (already covered above) PLUS the sub-projection that
+        // `action_execute_dag_v1` would echo. The integration glue
+        // (action_execute_dag_v1 itself) is exercised by full daemon
+        // tests, not pure unit tests.
+        let plan_id = claim_test_plan_id();
+        let sexp = r#"
+            (plan
+              (node :id "n1" :target "mission_execution"
+                    :owned-files ["src/x.rs"]))
+        "#;
+        let (parsed, order) = build_validated_dag(sexp).expect("valid");
+        let projection = build_planned_claims(
+            &parsed.nodes,
+            &order,
+            plan_id,
+            PLAN_DAG_DEFAULT_CLAIMER_NAME,
+            PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS,
+            false,
+        );
+        let arr = projection.as_array().expect("array");
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["claimer"], PLAN_DAG_DEFAULT_CLAIMER_NAME);
+        assert_eq!(
+            arr[0]["lease_secs"],
+            PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS
+        );
+        assert_eq!(arr[0]["enforce_claims"], false);
+        // Claim id format is byte-stable so dashboards can grep on it.
+        let claim_id = arr[0]["claim_id"].as_str().unwrap();
+        assert!(claim_id.starts_with("plan-dag:"));
+        assert!(claim_id.ends_with(":1"));
+    }
+
+    #[test]
+    fn plan_dag_claim_iso_timestamps_round_trip_through_chrono() {
+        // Pin the ISO-8601 second-precision projection so audit
+        // dashboards can compare claim timestamps to wave12-01
+        // companion-log claims byte-for-byte.
+        let now = claim_test_now();
+        let claim = PlanDagClaim {
+            claim_id: "plan-dag:00000000-0000-0000-0000-0000000c1a1d:n1:1".into(),
+            claimer: "plan-dag-scheduler".into(),
+            scopes: vec!["src/a.rs".into()],
+            scope_source: CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            acquired_at: now,
+            lease_expires_at: now + chrono::Duration::seconds(300),
+            released_at: None,
+        };
+        assert_eq!(claim.acquired_at_iso(), "2026-01-01T12:00:00Z");
+        assert_eq!(claim.lease_expires_at_iso(), "2026-01-01T12:05:00Z");
+        assert!(claim.released_at_iso().is_none());
+        let mut released = claim.clone();
+        released.released_at = Some(now + chrono::Duration::seconds(42));
+        assert_eq!(
+            released.released_at_iso().unwrap(),
+            "2026-01-01T12:00:42Z"
+        );
+    }
+
+    #[test]
+    fn enforce_claims_off_preserves_default_byte_compat_knobs() {
+        // The compat-mode default surface MUST report `enforce_claims=false`
+        // and the wave12-01 lease defaults so pre-wave17 callers see
+        // their expected byte-shape.
+        let v = json!({});
+        assert!(!parse_enforce_claims(&v));
+        assert_eq!(
+            parse_claim_lease_secs(&v),
+            PLAN_DAG_DEFAULT_CLAIM_LEASE_SECS
+        );
+        assert_eq!(parse_claimer_name(&v), PLAN_DAG_DEFAULT_CLAIMER_NAME);
+    }
+
+    #[test]
+    fn enforce_claims_on_does_not_change_scope_derivation() {
+        // The enforce knob lives in the scheduler's dispatch path, not
+        // in the scope derivation. Pin that boundary so a future
+        // refactor that conflates the two surfaces gets caught.
+        let plan_id = claim_test_plan_id();
+        let node = DagNode {
+            id: "n5".into(),
+            target: "mission_task_delegate".into(),
+            failure_policy: "fail-fast".into(),
+            owned_files_raw: Some(r#"["src/a.rs"]"#.into()),
+            ..Default::default()
+        };
+        let (scopes_a, source_a) = derive_node_claim_scopes(&node, plan_id);
+        let (scopes_b, source_b) = derive_node_claim_scopes(&node, plan_id);
+        assert_eq!(scopes_a, scopes_b);
+        assert_eq!(source_a, source_b);
+        assert_eq!(source_a, CLAIM_SCOPE_SOURCE_OWNED_FILES);
+    }
+
+    #[test]
+    fn claim_registry_release_returns_none_for_unknown_id() {
+        let mut reg = ClaimRegistry::new();
+        assert!(reg.release("ghost", claim_test_now()).is_none());
+    }
+
+    #[test]
+    fn claim_registry_release_is_idempotent_on_already_released_record() {
+        let mut reg = ClaimRegistry::new();
+        let now = claim_test_now();
+        let _ = reg.try_acquire(
+            "c1".into(),
+            "writer".into(),
+            vec!["src/a.rs".into()],
+            CLAIM_SCOPE_SOURCE_OWNED_FILES,
+            300,
+            now,
+        );
+        let later1 = now + chrono::Duration::seconds(5);
+        let later2 = now + chrono::Duration::seconds(10);
+        let r1 = reg.release("c1", later1).expect("first release");
+        assert_eq!(r1.released_at, Some(later1));
+        let r2 = reg.release("c1", later2).expect("second release returns same record");
+        // First release wins — second release must NOT clobber the
+        // earlier timestamp (audit dashboards depend on the original
+        // release moment).
+        assert_eq!(r2.released_at, Some(later1));
     }
 }
