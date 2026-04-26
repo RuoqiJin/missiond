@@ -1803,6 +1803,13 @@ async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> 
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    // Wave 20 / Task 09 — surface the workstation-dispatch trio on the
+    // live event so a long-lived heartbeat stream stays correlatable
+    // against the dispatch context. The same projection rationale as
+    // `action_claim` / `action_complete`: read the trio from the
+    // post-write `file` handle so the meta block we observe is the one
+    // just persisted.
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::Heartbeat {
@@ -1811,6 +1818,9 @@ async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> 
             claimer: claimer.to_string(),
             heartbeat_at: now_s.clone(),
             lease_expires_at: expires.clone(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -1883,6 +1893,11 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    // Wave 20 / Task 09 — same dispatch-metadata projection rationale as
+    // `action_claim`. `Released` completes the pair with `Claimed`, so
+    // claim-lifetime aggregators can join the two events without
+    // re-loading the companion log.
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::Released {
@@ -1895,6 +1910,9 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
             } else {
                 Some(summary.to_string())
             },
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -1995,6 +2013,10 @@ async fn action_deviate(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    // Wave 20 / Task 09 — surface the workstation-dispatch trio so a
+    // deviation observer can route on dispatch context without re-loading
+    // the companion log. Read from the post-write `file` handle.
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::DeviationRecorded {
@@ -2002,6 +2024,9 @@ async fn action_deviate(state: &AppState, args: &Value) -> Result<ToolResult> {
             deviation_id: id.clone(),
             phase: phase.to_string(),
             approved_by: approved_by.to_string(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -2056,6 +2081,10 @@ async fn action_decide(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    // Wave 20 / Task 09 — surface the workstation-dispatch trio so a
+    // decision observer can route on dispatch context without re-loading
+    // the companion log. Read from the post-write `file` handle.
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::DecisionRecorded {
@@ -2063,6 +2092,9 @@ async fn action_decide(state: &AppState, args: &Value) -> Result<ToolResult> {
             decision_id: id.clone(),
             decided_by: decided_by.to_string(),
             at: date.clone(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -2112,6 +2144,10 @@ async fn action_issue(state: &AppState, args: &Value) -> Result<ToolResult> {
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
 
+    // Wave 20 / Task 09 — surface the workstation-dispatch trio so an
+    // issue observer can route on dispatch context without re-loading
+    // the companion log. Read from the post-write `file` handle.
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::IssueRecorded {
@@ -2119,6 +2155,9 @@ async fn action_issue(state: &AppState, args: &Value) -> Result<ToolResult> {
             issue_id: id.clone(),
             severity: severity.to_string(),
             owner: owner.to_string(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -2823,6 +2862,11 @@ async fn action_audit(state: &AppState, args: &Value) -> Result<ToolResult> {
         .iter()
         .filter(|f| f.get("severity").and_then(|v| v.as_str()) == Some("error"))
         .count() as u32;
+    // Wave 20 / Task 09 — surface the workstation-dispatch trio on the
+    // audit + stale-claim events. Audit is read-only so we don't write
+    // back to the file; the meta block we observe is whatever the latest
+    // writer left there.
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::Audited {
@@ -2830,6 +2874,9 @@ async fn action_audit(state: &AppState, args: &Value) -> Result<ToolResult> {
             ok,
             findings_count: findings.len() as u32,
             error_count,
+            dispatch_strategy: meta.dispatch_strategy.clone(),
+            target_project: meta.target_project.clone(),
+            requested_cwd: meta.requested_cwd.clone(),
         },
     )
     .await;
@@ -2859,6 +2906,9 @@ async fn action_audit(state: &AppState, args: &Value) -> Result<ToolResult> {
                 claim_id,
                 claimer,
                 lease_expires_at,
+                dispatch_strategy: meta.dispatch_strategy.clone(),
+                target_project: meta.target_project.clone(),
+                requested_cwd: meta.requested_cwd.clone(),
             },
         )
         .await;
@@ -3405,12 +3455,20 @@ async fn action_repair(state: &AppState, args: &Value) -> Result<ToolResult> {
         write_log_file(&path, &file)?;
     }
 
+    // Wave 20 / Task 09 — surface the workstation-dispatch trio on
+    // repair events. The same `file` handle is current after any
+    // apply-mode mutations above, so the meta block we observe is the
+    // post-write authoritative state.
+    let meta = read_dispatch_metadata_from_log(&file);
     emit_execution_event(
         state,
         ExecutionEvent::Repaired {
             execution_id: execution_id.to_string(),
             applied: mode == "apply",
             action_count: actions.len() as u32,
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
         },
     )
     .await;
@@ -4791,6 +4849,373 @@ mod tests {
         assert!(!completed.contains_key("dispatch_strategy"));
         assert!(!completed.contains_key("target_project"));
         assert!(!completed.contains_key("requested_cwd"));
+    }
+
+    // ── Wave 20 / Task 09 — legacy ExecutionEvent variants now project
+    //                       the workstation-dispatch trio from the
+    //                       companion-log meta block, mirroring what
+    //                       Opened / Claimed / Completed already do.
+    //
+    // The action_* runtime paths each call `read_dispatch_metadata_from_log`
+    // on the post-write `file` handle and forward the trio onto the
+    // emitted event. We don't have AppState in unit tests, so we mirror
+    // the same projection chain here against the canonical template
+    // (writer side) — this guarantees the wire shape the runtime emits
+    // tracks the writer contract exactly.
+
+    /// Helper that builds a canonical companion log carrying the full
+    /// dispatch trio so each swept-variant test below shares the same
+    /// fixture.
+    fn canonical_log_with_dispatch_trio() -> LogFile {
+        let body = render_canonical_template(
+            "exec-disp",
+            ".missiond/v2/disp.lisp",
+            "scope/x",
+            "owner-x",
+            "fresh-code-alignment",
+            Some("missiond"),
+            Some("/Users/x/Projects/missiond/crates/foo"),
+        );
+        LogFile::parse(body).expect("parse")
+    }
+
+    /// Helper that builds a legacy companion log (pre-wave12-01) with
+    /// no dispatch keys at all. Each swept variant must emit its
+    /// pre-trio wire shape against this fixture.
+    fn legacy_log_without_dispatch() -> LogFile {
+        let body = "(execution-log\n  \
+                    (meta\n    \
+                    :execution-id \"legacy-x\"\n    \
+                    :parent-design \"old.lisp\"\n    \
+                    :status \"open\"\n    \
+                    :owner \"old-owner\"\n    \
+                    :scope \"legacy/scope\"\n    \
+                    :companion-of \"old.lisp\")\n  \
+                    (claims))\n";
+        LogFile::parse(body.to_string()).expect("legacy parses")
+    }
+
+    fn assert_full_dispatch_trio(map: &serde_json::Map<String, serde_json::Value>) {
+        assert_eq!(map["dispatch_strategy"], "fresh-code-alignment");
+        assert_eq!(map["target_project"], "missiond");
+        assert_eq!(
+            map["requested_cwd"],
+            "/Users/x/Projects/missiond/crates/foo"
+        );
+    }
+
+    fn assert_no_dispatch_trio(map: &serde_json::Map<String, serde_json::Value>) {
+        assert!(!map.contains_key("dispatch_strategy"));
+        assert!(!map.contains_key("target_project"));
+        assert!(!map.contains_key("requested_cwd"));
+    }
+
+    #[test]
+    fn heartbeat_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Heartbeat {
+            execution_id: "exec-disp".into(),
+            claim_id: "C001".into(),
+            claimer: "claude".into(),
+            heartbeat_at: "2026-04-25T01:00:00Z".into(),
+            lease_expires_at: "2026-04-25T01:30:00Z".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Heartbeat").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 8);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn heartbeat_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Heartbeat {
+            execution_id: "legacy-x".into(),
+            claim_id: "C001".into(),
+            claimer: "old".into(),
+            heartbeat_at: "t".into(),
+            lease_expires_at: "t2".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Heartbeat").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 5);
+        assert_no_dispatch_trio(p);
+    }
+
+    #[test]
+    fn released_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Released {
+            execution_id: "exec-disp".into(),
+            claim_id: "C001".into(),
+            claimer: "claude".into(),
+            released_at: "2026-04-25T02:00:00Z".into(),
+            summary: Some("done".into()),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Released").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 8);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn released_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Released {
+            execution_id: "legacy-x".into(),
+            claim_id: "C001".into(),
+            claimer: "old".into(),
+            released_at: "t".into(),
+            summary: None,
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Released").and_then(|v| v.as_object()).unwrap();
+        // Released always carries the `summary` key (Option<String>
+        // without skip-serializing) so the legacy shape is 5 fields.
+        assert_eq!(p.len(), 5);
+        assert_no_dispatch_trio(p);
+    }
+
+    #[test]
+    fn deviation_recorded_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::DeviationRecorded {
+            execution_id: "exec-disp".into(),
+            deviation_id: "D001".into(),
+            phase: "phase-A".into(),
+            approved_by: "claude".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("DeviationRecorded").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 7);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn deviation_recorded_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::DeviationRecorded {
+            execution_id: "legacy-x".into(),
+            deviation_id: "D001".into(),
+            phase: "p".into(),
+            approved_by: "auto".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("DeviationRecorded").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 4);
+        assert_no_dispatch_trio(p);
+    }
+
+    #[test]
+    fn decision_recorded_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::DecisionRecorded {
+            execution_id: "exec-disp".into(),
+            decision_id: "DC001".into(),
+            decided_by: "claude".into(),
+            at: "2026-04-25T05:00:00Z".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("DecisionRecorded").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 7);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn decision_recorded_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::DecisionRecorded {
+            execution_id: "legacy-x".into(),
+            decision_id: "DC001".into(),
+            decided_by: "old".into(),
+            at: "t".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("DecisionRecorded").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 4);
+        assert_no_dispatch_trio(p);
+    }
+
+    #[test]
+    fn issue_recorded_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::IssueRecorded {
+            execution_id: "exec-disp".into(),
+            issue_id: "I001".into(),
+            severity: "high".into(),
+            owner: "claude".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("IssueRecorded").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 7);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn issue_recorded_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::IssueRecorded {
+            execution_id: "legacy-x".into(),
+            issue_id: "I001".into(),
+            severity: "low".into(),
+            owner: "".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("IssueRecorded").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 4);
+        assert_no_dispatch_trio(p);
+    }
+
+    #[test]
+    fn audited_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Audited {
+            execution_id: "exec-disp".into(),
+            ok: true,
+            findings_count: 0,
+            error_count: 0,
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Audited").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 7);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn audited_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Audited {
+            execution_id: "legacy-x".into(),
+            ok: false,
+            findings_count: 1,
+            error_count: 1,
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Audited").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 4);
+        assert_no_dispatch_trio(p);
+    }
+
+    #[test]
+    fn repaired_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Repaired {
+            execution_id: "exec-disp".into(),
+            applied: true,
+            action_count: 2,
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Repaired").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 6);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn repaired_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::Repaired {
+            execution_id: "legacy-x".into(),
+            applied: false,
+            action_count: 0,
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("Repaired").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 3);
+        assert_no_dispatch_trio(p);
+    }
+
+    #[test]
+    fn stale_claim_event_inherits_dispatch_trio_from_companion_log() {
+        let file = canonical_log_with_dispatch_trio();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::StaleClaim {
+            execution_id: "exec-disp".into(),
+            claim_id: "C001".into(),
+            claimer: "claude".into(),
+            lease_expires_at: "2026-04-25T00:30:00Z".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("StaleClaim").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 7);
+        assert_full_dispatch_trio(p);
+    }
+
+    #[test]
+    fn stale_claim_event_omits_dispatch_trio_for_legacy_log() {
+        let file = legacy_log_without_dispatch();
+        let dm = read_dispatch_metadata_from_log(&file);
+        let ev = ExecutionEvent::StaleClaim {
+            execution_id: "legacy-x".into(),
+            claim_id: "C001".into(),
+            claimer: "old".into(),
+            lease_expires_at: "t".into(),
+            dispatch_strategy: dm.dispatch_strategy,
+            target_project: dm.target_project,
+            requested_cwd: dm.requested_cwd,
+        };
+        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed.get("StaleClaim").and_then(|v| v.as_object()).unwrap();
+        assert_eq!(p.len(), 4);
+        assert_no_dispatch_trio(p);
     }
 
     // ── Wave 12 / Task 01 — scoped-commit handoff durability plane ──
