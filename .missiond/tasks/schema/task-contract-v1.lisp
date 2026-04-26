@@ -4,9 +4,10 @@
 
 (task-contract-schema missiond.task-contract.v1
   :version "v1"
-  :status "code-aligned initial — checker + renderer scripts implemented"
+  :status "code-aligned initial — checker + renderer + verifier scripts implemented"
   :checker "scripts/check-task-contract.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
+  :verifier "scripts/verify-task-contract.mjs"
 
   (purpose
     "S-expressions carry the machine contract: scope, forbidden files, dependencies, acceptance, commit policy, and report requirements."
@@ -40,4 +41,17 @@
     :input ".missiond/tasks/**/*.lisp"
     :output ".missiond/claudecode/<task-id>.md"
     :default "refuse overwrite unless --force"
-    :non-goal "renderer does not invent scope, acceptance, or commit policy; missing fields are checker errors"))
+    :non-goal "renderer does not invent scope, acceptance, or commit policy; missing fields are checker errors")
+
+  (verifier-contract
+    :input ".missiond/tasks/**/*.lisp + git commit (default HEAD)"
+    :flags [--commit --json --dry-fixture]
+    :checks
+      ["commit hash resolves and is reported"
+       "commit subject (first line) equals contract :commit :message when present"
+       "every changed file ⊆ :write-scope when :commit :scope-check is write-scope-only"
+       "no changed file overlaps :must-not-touch (always enforced regardless of :scope-check)"]
+    :read-only
+      ["never runs git add/commit/reset/checkout/stash/push/merge/rebase"
+       "only invokes git rev-parse, git log, git show with --pretty=format and --name-only"]
+    :glob-semantics "shared with checker via scripts/lib/missiond_lisp.mjs (pathMatchesPattern + pathMatchesAny)"))

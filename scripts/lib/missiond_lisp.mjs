@@ -93,6 +93,70 @@ export function formatLoc(file, loc) {
   return `${file}:${loc?.line ?? 1}:${loc?.column ?? 1}`;
 }
 
+// Convert a path-style glob pattern into a RegExp matching repo-relative paths.
+// Supports: `*` (single segment, no `/`), `**` (any number of segments incl. zero),
+// `?` (single non-`/` char). Other regex metacharacters are escaped.
+export function globToRegExp(pattern) {
+  const normalized = pattern.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  let regex = '';
+  let i = 0;
+  while (i < normalized.length) {
+    const c = normalized[i];
+    if (c === '*') {
+      if (normalized[i + 1] === '*') {
+        // `**` -> any sequence including `/`
+        regex += '.*';
+        i += 2;
+        // swallow a following `/` so `**/foo` matches `foo` and `a/foo`
+        if (normalized[i] === '/') {
+          regex += '(?:|/)?';
+          // we already consumed the `/`; skip nothing more to avoid double-encoding
+          // but we still want a `/` in matches when one is present, which `.*` covers
+          // so just step past it
+          i += 0;
+        }
+      } else {
+        // `*` -> any chars except `/`
+        regex += '[^/]*';
+        i += 1;
+      }
+    } else if (c === '?') {
+      regex += '[^/]';
+      i += 1;
+    } else if (/[.+^${}()|[\]\\]/.test(c)) {
+      regex += '\\' + c;
+      i += 1;
+    } else {
+      regex += c;
+      i += 1;
+    }
+  }
+  return new RegExp('^' + regex + '$');
+}
+
+// Match a single repo-relative path against a glob pattern.
+// A pattern without any glob metacharacters matches either the exact path
+// or any file under that path when the pattern names a directory prefix
+// (e.g. `crates/` or `crates` matches `crates/foo/bar.rs`).
+export function pathMatchesPattern(filePath, pattern) {
+  const norm = filePath.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  const pat = pattern.replace(/\\/g, '/').replace(/^\.\//, '').replace(/^\/+/, '');
+  if (!/[*?]/.test(pat)) {
+    if (norm === pat) return true;
+    const prefix = pat.endsWith('/') ? pat : pat + '/';
+    return norm.startsWith(prefix);
+  }
+  return globToRegExp(pat).test(norm);
+}
+
+export function pathMatchesAny(filePath, patterns) {
+  if (!patterns || patterns.length === 0) return false;
+  for (const pat of patterns) {
+    if (pathMatchesPattern(filePath, pat)) return true;
+  }
+  return false;
+}
+
 export class LispReaderError extends Error {
   constructor(file, loc, message) {
     super(message);
