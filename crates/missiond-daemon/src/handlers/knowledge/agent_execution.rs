@@ -3585,6 +3585,17 @@ fn rebuild_derived_indexes(file: &mut LogFile) -> Result<()> {
 // Pairs with `enforce_scoped_commit_completion` (wave16-06) which is the
 // post-commit gate; preflight catches the same violations one step
 // earlier so the writer doesn't have to roll back a bad stage.
+//
+// Wave 20 / Task 03 augmentation: when the caller threads
+// `task_contract_path` through the preflight call, daemon also loads the
+// task-contract v1 (read-only) and projects the staged set against the
+// contract's `:write-scope` / `:must-not-touch` patterns. Two new
+// top-level fields (`staged_out_of_scope`, `staged_forbidden`) plus
+// `unstaged_in_scope` and a `task_contract_status` label surface so the
+// writer learns about contract-level drift one hop earlier than the
+// post-commit `task-scope-guard.mjs`. Daemon still runs no mutating git
+// command — `evaluate_task_contract_for_preflight` is pure file IO + a
+// glob projection.
 // ───────────────────────────────────────────────────────────────────────
 
 /// Single-file entry from `git status --porcelain=v1`. The first byte is
@@ -3721,6 +3732,242 @@ fn collect_specific_claim_scope(
             )
             .with_suggestion("call action=status to list active claim ids"),
         )),
+    }
+}
+
+/// wave-20 / task 03 — repo-relative path-vs-pattern matcher used by the
+/// task-contract scope projection in preflight. Mirrors the JS helper in
+/// `scripts/lib/missiond_lisp.mjs::pathMatchesPattern` so daemon-side
+/// preflight, the post-commit guard (`scripts/task-scope-guard.mjs`), and
+/// the verifier (`scripts/verify-task-contract.mjs`) all key off the same
+/// glob semantics. The contract is intentionally narrow:
+///
+///   * Patterns and paths are normalised by stripping `\\` → `/`,
+///     leading `./`, and leading `/` so the comparison is repo-relative.
+///   * A pattern with no glob meta-characters matches either the exact
+///     path OR any file under that path when the pattern names a
+///     directory prefix (e.g. `crates/` or `crates` matches
+///     `crates/foo/bar.rs`).
+///   * `*` matches any sequence of characters except `/`.
+///   * `**` matches any sequence including `/` (folder hops).
+///   * `?` matches a single character except `/`.
+///   * Other regex meta-characters are escaped — the matcher is glob-only,
+///     never a full regex evaluator.
+///
+/// Daemon-only fail-fast posture: an empty pattern OR an empty path never
+/// matches. Empty inputs are a contract bug upstream; we surface them as
+/// "no match" so the caller sees the path land in `staged_out_of_scope`
+/// rather than silently coercing them through.
+pub(super) fn pattern_matches_path(file_path: &str, pattern: &str) -> bool {
+    if file_path.is_empty() || pattern.is_empty() {
+        return false;
+    }
+    let norm_path = normalize_repo_relative(file_path);
+    let pat = normalize_repo_relative(pattern);
+    if !pat.contains('*') && !pat.contains('?') {
+        if norm_path == pat {
+            return true;
+        }
+        let prefix = if pat.ends_with('/') {
+            pat.clone()
+        } else {
+            format!("{}/", pat)
+        };
+        return norm_path.starts_with(&prefix);
+    }
+    glob_to_regex(&pat).is_match(&norm_path)
+}
+
+/// Normalise a path or pattern to a repo-relative form: backslash → slash,
+/// strip a single leading `./`, and any leading `/` so absolute-style
+/// patterns (rare in our contracts) still match repo-relative entries.
+fn normalize_repo_relative(input: &str) -> String {
+    let mut s = input.replace('\\', "/");
+    if let Some(stripped) = s.strip_prefix("./") {
+        s = stripped.to_string();
+    }
+    while let Some(stripped) = s.strip_prefix('/') {
+        s = stripped.to_string();
+    }
+    s
+}
+
+/// Compile a glob pattern into a regex anchored on both ends. Mirrors the
+/// JS `globToRegExp` in `scripts/lib/missiond_lisp.mjs` so the JS guard
+/// and the daemon-side preflight stay in lock-step.
+fn glob_to_regex(pattern: &str) -> regex::Regex {
+    let mut out = String::with_capacity(pattern.len() + 4);
+    out.push('^');
+    let bytes: Vec<char> = pattern.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if c == '*' {
+            if i + 1 < bytes.len() && bytes[i + 1] == '*' {
+                out.push_str(".*");
+                i += 2;
+                // mirror the JS swallow: a following `/` is consumed by `.*`
+            } else {
+                out.push_str("[^/]*");
+                i += 1;
+            }
+        } else if c == '?' {
+            out.push_str("[^/]");
+            i += 1;
+        } else if matches!(c, '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' | '\\') {
+            out.push('\\');
+            out.push(c);
+            i += 1;
+        } else {
+            out.push(c);
+            i += 1;
+        }
+    }
+    out.push('$');
+    // Pattern is glob-derived so cannot fail; build a permissive fallback
+    // (matches nothing) to preserve fail-fast posture without panicking on
+    // pathological contract input.
+    regex::Regex::new(&out).unwrap_or_else(|_| regex::Regex::new("$.^").unwrap())
+}
+
+/// wave-20 / task 03 — pure projection of staged + changed files against a
+/// task-contract v1's `:write-scope` and `:must-not-touch` patterns.
+///
+/// Shape (folded into the preflight response under `task_contract_scope`):
+///   - `staged_out_of_scope`: staged paths that match no `:write-scope`
+///      entry (and are not on `:must-not-touch`). Authoritative drift
+///      signal; populates the new top-level `staged_out_of_scope` field.
+///   - `staged_forbidden`: staged paths that match at least one
+///      `:must-not-touch` pattern. Always considered out-of-scope.
+///   - `unstaged_in_scope`: changed-but-not-staged paths that DO overlap
+///      `:write-scope`. Surfaces "you edited it but forgot to stage it"
+///      so the writer knows what to add.
+///   - `next_step`: terse hint mirroring the wave16-06 enforcement
+///      prose so a single screen tells the writer what to fix.
+///   - `task_contract_status` is set by the caller (`loaded` / `missing` /
+///      `malformed`) and merged on top of this projection.
+///
+/// Empty `write_scope` is treated as "contract declared no scope" — every
+/// staged path then becomes out-of-scope, matching the verifier's
+/// fail-fast posture (`scripts/verify-task-contract.mjs` rejects when
+/// `:write-scope` is missing).
+fn build_contract_scope_summary(
+    staged_files: &[String],
+    changed_files: &[String],
+    write_scope: &[String],
+    must_not_touch: &[String],
+) -> Value {
+    let staged_forbidden: Vec<String> = staged_files
+        .iter()
+        .filter(|p| must_not_touch.iter().any(|pat| pattern_matches_path(p, pat)))
+        .cloned()
+        .collect();
+    let staged_out_of_scope: Vec<String> = staged_files
+        .iter()
+        .filter(|p| !write_scope.iter().any(|pat| pattern_matches_path(p, pat)))
+        .cloned()
+        .collect();
+    // `unstaged_in_scope` only counts paths that are changed but NOT
+    // staged AND fall inside :write-scope. Lets the writer notice "edit
+    // forgotten in `git add`" without flagging legitimate background
+    // edits outside scope.
+    let unstaged_in_scope: Vec<String> = changed_files
+        .iter()
+        .filter(|p| !staged_files.contains(p))
+        .filter(|p| write_scope.iter().any(|pat| pattern_matches_path(p, pat)))
+        .cloned()
+        .collect();
+
+    let next_step = if !staged_forbidden.is_empty() {
+        format!(
+            "unstage paths matching :must-not-touch before committing: {:?}",
+            staged_forbidden
+        )
+    } else if !staged_out_of_scope.is_empty() {
+        format!(
+            "unstage paths outside :write-scope before committing: {:?}",
+            staged_out_of_scope
+        )
+    } else if !unstaged_in_scope.is_empty() {
+        format!(
+            "stage the in-scope edits before committing: {:?}",
+            unstaged_in_scope
+        )
+    } else if staged_files.is_empty() {
+        "no staged files in scope yet — `git add` your write-scope edits".to_string()
+    } else {
+        "staged set respects :write-scope and :must-not-touch — proceed with scoped `git commit`".to_string()
+    };
+
+    json!({
+        "staged_out_of_scope": staged_out_of_scope,
+        "staged_forbidden": staged_forbidden,
+        "unstaged_in_scope": unstaged_in_scope,
+        "write_scope": write_scope,
+        "must_not_touch": must_not_touch,
+        "next_step": next_step,
+    })
+}
+
+/// wave-20 / task 03 — read-only contract loader for preflight. Resolves
+/// relative paths against the project root, loads via the shared
+/// workstation-dispatch projector, and returns the projection summary +
+/// `task_contract_status` label. Failures map to `missing` (IO) /
+/// `malformed` (parse) so preflight stays informational instead of
+/// rejecting — the post-commit gate is the authoritative enforcement.
+///
+/// Returns `(status, optional_summary, optional_resolved_path,
+/// optional_failure_message)`. Caller folds the tuple into the response.
+fn evaluate_task_contract_for_preflight(
+    project_root: &Path,
+    task_contract_path: &str,
+    staged_files: &[String],
+    changed_files: &[String],
+) -> (
+    &'static str,
+    Option<Value>,
+    Option<String>,
+    Option<String>,
+) {
+    let raw = std::path::Path::new(task_contract_path);
+    let resolved: PathBuf = if raw.is_absolute() {
+        raw.to_path_buf()
+    } else {
+        project_root.join(raw)
+    };
+    let resolved_str = resolved.display().to_string();
+    match super::workstation_dispatch::load_task_contract(&resolved) {
+        Ok(contract) => {
+            let summary = build_contract_scope_summary(
+                staged_files,
+                changed_files,
+                &contract.write_scope,
+                &contract.must_not_touch,
+            );
+            ("loaded", Some(summary), Some(resolved_str), None)
+        }
+        Err(err) => {
+            use super::workstation_dispatch::TaskContractParseError as Tce;
+            let (status, msg) = match &err {
+                Tce::Io(detail) => (
+                    "missing",
+                    format!(
+                        "task_contract_path `{}` is not readable: {}",
+                        resolved.display(),
+                        detail
+                    ),
+                ),
+                _ => (
+                    "malformed",
+                    format!(
+                        "task_contract_path `{}` failed schema parse: {}",
+                        resolved.display(),
+                        err.reason()
+                    ),
+                ),
+            };
+            (status, None, Some(resolved_str), Some(msg))
+        }
     }
 }
 
@@ -4012,12 +4259,15 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
     if let Some(cid) = args.get("claim_id").and_then(|v| v.as_str()) {
         summary["claim_id"] = json!(cid);
     }
-    // wave-19 / task 08 — metadata-only echo of the task-contract path
-    // when the caller threads it through preflight. Daemon does NOT load
-    // or validate the contract here; the contract-level gate runs at
-    // `action=complete` time. Surfacing the path lets the writer agent
-    // correlate the preflight response with the dispatch envelope and
-    // notice mismatches before staging.
+    // wave-20 / task 03 — when the caller threads `task_contract_path`
+    // through preflight, daemon now loads it (read-only) and projects
+    // staged/changed files against the contract's `:write-scope` +
+    // `:must-not-touch` so the writer sees scope drift BEFORE running
+    // `git commit`. Daemon never mutates the worktree here — load failures
+    // surface as `task_contract_status="missing"` / `"malformed"` so the
+    // writer can fix the path / file content without preflight hard-
+    // rejecting (the post-commit gate at `action=complete` is the
+    // authoritative enforcement).
     if let Some(tcp) = args
         .get("task_contract_path")
         .and_then(|v| v.as_str())
@@ -4025,6 +4275,73 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
         .filter(|s| !s.is_empty())
     {
         summary["task_contract_path"] = json!(tcp);
+        let staged: Vec<String> = summary
+            .get("staged_files")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let changed: Vec<String> = summary
+            .get("changed_files")
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let (status, scope_summary, resolved_path, failure) =
+            evaluate_task_contract_for_preflight(&root, tcp, &staged, &changed);
+        summary["task_contract_status"] = json!(status);
+        if let Some(rp) = resolved_path {
+            summary["task_contract_resolved_path"] = json!(rp);
+        }
+        if let Some(scope) = scope_summary {
+            // Promote the four contract-derived fields to the top level so
+            // dashboards keying off `task_contract_status` can read the
+            // drift signals without descending one more level. The full
+            // projection (including write_scope / must_not_touch echo)
+            // stays under `task_contract_scope` for inspectors that want
+            // the raw inputs.
+            for key in [
+                "staged_out_of_scope",
+                "staged_forbidden",
+                "unstaged_in_scope",
+            ] {
+                if let Some(v) = scope.get(key) {
+                    summary[key] = v.clone();
+                }
+            }
+            // Override `next_step` with the contract-aware hint when the
+            // contract added forbidden / out-of-scope drift the claim-only
+            // check missed (forbidden patterns aren't a claim concept).
+            // Otherwise prefer the existing claim-derived next_step.
+            let has_contract_drift = scope
+                .get("staged_forbidden")
+                .and_then(|v| v.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+                || scope
+                    .get("staged_out_of_scope")
+                    .and_then(|v| v.as_array())
+                    .map(|a| !a.is_empty())
+                    .unwrap_or(false);
+            if has_contract_drift {
+                if let Some(ns) = scope.get("next_step") {
+                    summary["next_step"] = ns.clone();
+                }
+                // Flip `ok=false` because contract-level drift is at least
+                // as serious as claim-level drift; downstream consumers
+                // already key off `ok` for go/no-go decisions.
+                summary["ok"] = json!(false);
+            }
+            summary["task_contract_scope"] = scope;
+        } else if let Some(msg) = failure {
+            summary["task_contract_error"] = json!(msg);
+        }
     }
 
     Ok(ToolResult::json_pretty(&summary))
@@ -5620,5 +5937,328 @@ mod tests {
             Some(&["src/a.rs".to_string(), "src/b.rs".to_string()]),
         );
         assert!(res.is_ok(), "staged paths alone should cover write-scope");
+    }
+
+    // ── Wave 20 / Task 03 — preflight task-contract scope projection ──
+    //
+    // These tests pin the new wave20-03 pure helpers used by
+    // `action_preflight_commit` when the caller threads
+    // `task_contract_path` through the call. They exercise the glob
+    // matcher, the four-field structured projection, and the contract
+    // loader's status labels (loaded / missing / malformed). The async
+    // path through `action_preflight_commit` itself is smoke-tested via
+    // these helpers — same approach the wave18-08 preflight tests use.
+
+    /// Bare prefix patterns must match the exact path AND any descendant
+    /// when the pattern denotes a directory. Mirrors the JS
+    /// `pathMatchesPattern` semantics so daemon-side preflight stays in
+    /// lock-step with `scripts/lib/missiond_lisp.mjs`.
+    #[test]
+    fn pattern_matches_path_handles_bare_prefix() {
+        // Exact match.
+        assert!(pattern_matches_path(
+            "crates/missiond-daemon/src/lib.rs",
+            "crates/missiond-daemon/src/lib.rs",
+        ));
+        // Directory prefix without trailing slash.
+        assert!(pattern_matches_path("crates/foo/bar.rs", "crates"));
+        // Directory prefix with trailing slash.
+        assert!(pattern_matches_path("crates/foo/bar.rs", "crates/"));
+        // Sibling path must NOT match (no false-positive prefix overlap).
+        assert!(!pattern_matches_path("crates2/foo.rs", "crates"));
+        // Empty inputs never match.
+        assert!(!pattern_matches_path("", "crates"));
+        assert!(!pattern_matches_path("crates/foo.rs", ""));
+    }
+
+    /// `**` must match across folder hops; `*` must NOT cross `/`.
+    /// Pinned because the wave20-03 contract for must-not-touch uses
+    /// `scripts/**` and `.missiond/v2/*.lisp` — both shapes need to work
+    /// or the task scope guard regresses.
+    #[test]
+    fn pattern_matches_path_handles_globs() {
+        // `**` crosses folder boundaries.
+        assert!(pattern_matches_path("scripts/foo.mjs", "scripts/**"));
+        assert!(pattern_matches_path(
+            "scripts/lib/missiond_lisp.mjs",
+            "scripts/**",
+        ));
+        // `*` does not cross `/`.
+        assert!(pattern_matches_path(".missiond/v2/foo.lisp", ".missiond/v2/*.lisp"));
+        assert!(!pattern_matches_path(
+            ".missiond/v2/sub/foo.lisp",
+            ".missiond/v2/*.lisp",
+        ));
+        // `?` matches a single non-`/` char.
+        assert!(pattern_matches_path("a.rs", "?.rs"));
+        assert!(!pattern_matches_path("ab.rs", "?.rs"));
+        // Regex meta-characters in pattern are escaped — a literal `.`
+        // matches a `.`, not "any char".
+        assert!(pattern_matches_path("a.rs", "a.rs"));
+        assert!(!pattern_matches_path("axrs", "a.rs"));
+    }
+
+    /// Backslashes / leading `./` / leading `/` collapse to repo-relative
+    /// before comparison so Windows-style paths and verbose contract
+    /// entries match the same canonical form.
+    #[test]
+    fn pattern_matches_path_normalizes_separators() {
+        assert!(pattern_matches_path("./crates/foo.rs", "crates/foo.rs"));
+        assert!(pattern_matches_path("crates\\foo.rs", "crates/foo.rs"));
+        assert!(pattern_matches_path("/crates/foo.rs", "crates/foo.rs"));
+        assert!(pattern_matches_path("crates/foo.rs", "./crates/foo.rs"));
+    }
+
+    /// Happy path: every staged path lands in :write-scope, none in
+    /// :must-not-touch, no unstaged drift. `next_step` confirms the
+    /// writer can proceed with the scoped commit.
+    #[test]
+    fn contract_scope_summary_clean_in_scope_set() {
+        let staged = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+            "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs".to_string(),
+        ];
+        let changed = staged.clone();
+        let write_scope = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+            "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs".to_string(),
+        ];
+        let must_not_touch = vec!["scripts/**".to_string()];
+        let summary =
+            build_contract_scope_summary(&staged, &changed, &write_scope, &must_not_touch);
+        assert_eq!(
+            summary.get("staged_out_of_scope").and_then(|v| v.as_array()).unwrap().len(),
+            0,
+        );
+        assert_eq!(
+            summary.get("staged_forbidden").and_then(|v| v.as_array()).unwrap().len(),
+            0,
+        );
+        assert_eq!(
+            summary.get("unstaged_in_scope").and_then(|v| v.as_array()).unwrap().len(),
+            0,
+        );
+        let next = summary.get("next_step").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            next.contains("respects :write-scope"),
+            "next_step should confirm clean state, got: {}",
+            next,
+        );
+    }
+
+    /// Staged path matches a `:must-not-touch` glob → surfaces in
+    /// `staged_forbidden` and the next_step prose tells the writer to
+    /// unstage. Mirrors what `scripts/task-scope-guard.mjs` rejects on
+    /// the post-commit side.
+    #[test]
+    fn contract_scope_summary_flags_must_not_touch_glob() {
+        let staged = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+            "scripts/render-claudecode-task.mjs".to_string(),
+        ];
+        let changed = staged.clone();
+        let write_scope = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+        ];
+        let must_not_touch = vec!["scripts/**".to_string()];
+        let summary =
+            build_contract_scope_summary(&staged, &changed, &write_scope, &must_not_touch);
+        let forbidden: Vec<&str> = summary
+            .get("staged_forbidden")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(forbidden, vec!["scripts/render-claudecode-task.mjs"]);
+        // The same path is also out-of-scope (it doesn't match write_scope).
+        let oos: Vec<&str> = summary
+            .get("staged_out_of_scope")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(oos, vec!["scripts/render-claudecode-task.mjs"]);
+        let next = summary.get("next_step").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            next.contains("must-not-touch"),
+            "next_step should mention must-not-touch, got: {}",
+            next,
+        );
+    }
+
+    /// Staged path lands outside both :write-scope and :must-not-touch →
+    /// only `staged_out_of_scope` populates; `staged_forbidden` stays
+    /// empty. Distinct signal from the `must-not-touch` case so dashboards
+    /// can distinguish "out of declared scope" from "explicitly off-limits".
+    #[test]
+    fn contract_scope_summary_flags_out_of_scope_without_forbidden() {
+        let staged = vec![
+            "crates/missiond-core/src/event/events/execution.rs".to_string(),
+        ];
+        let changed = staged.clone();
+        let write_scope = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+        ];
+        // execution.rs is in must-not-touch for wave20-03 but for this
+        // test we leave it empty so we get a pure "out-of-scope" signal.
+        let must_not_touch: Vec<String> = vec![];
+        let summary =
+            build_contract_scope_summary(&staged, &changed, &write_scope, &must_not_touch);
+        assert_eq!(
+            summary.get("staged_forbidden").and_then(|v| v.as_array()).unwrap().len(),
+            0,
+        );
+        let oos: Vec<&str> = summary
+            .get("staged_out_of_scope")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(oos, vec!["crates/missiond-core/src/event/events/execution.rs"]);
+    }
+
+    /// Unstaged-but-in-scope: a file the writer edited but forgot to
+    /// `git add` lands in `unstaged_in_scope`. Must NOT bleed into
+    /// `staged_out_of_scope` (it's not staged) and must NOT bleed into
+    /// `staged_forbidden`.
+    #[test]
+    fn contract_scope_summary_flags_unstaged_in_scope_drift() {
+        let staged = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+        ];
+        let changed = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+            "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs".to_string(),
+        ];
+        let write_scope = vec![
+            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+            "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs".to_string(),
+        ];
+        let summary = build_contract_scope_summary(&staged, &changed, &write_scope, &[]);
+        let unstaged: Vec<&str> = summary
+            .get("unstaged_in_scope")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            unstaged,
+            vec!["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"],
+        );
+        assert_eq!(
+            summary.get("staged_out_of_scope").and_then(|v| v.as_array()).unwrap().len(),
+            0,
+        );
+        let next = summary.get("next_step").and_then(|v| v.as_str()).unwrap_or("");
+        assert!(
+            next.contains("stage the in-scope edits"),
+            "next_step should suggest staging, got: {}",
+            next,
+        );
+    }
+
+    /// Empty :write-scope → every staged path lands in
+    /// `staged_out_of_scope`. Matches the verifier's posture: a contract
+    /// without `:write-scope` cannot grant any path.
+    #[test]
+    fn contract_scope_summary_empty_write_scope_rejects_everything() {
+        let staged = vec!["crates/foo.rs".to_string()];
+        let summary = build_contract_scope_summary(&staged, &staged, &[], &[]);
+        let oos: Vec<&str> = summary
+            .get("staged_out_of_scope")
+            .and_then(|v| v.as_array())
+            .unwrap()
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(oos, vec!["crates/foo.rs"]);
+    }
+
+    /// Loader happy path: contract on disk + matching staged set →
+    /// `task_contract_status="loaded"`, scope summary populated, no
+    /// failure message.
+    #[test]
+    fn evaluate_contract_for_preflight_loaded_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolved =
+            write_task_contract(dir.path(), "tasks/wave20-03.lisp", SAMPLE_CONTRACT_BODY);
+        let staged = vec!["src/a.rs".to_string()];
+        let changed = vec!["src/a.rs".to_string()];
+        let (status, summary, resolved_path, failure) = evaluate_task_contract_for_preflight(
+            dir.path(),
+            "tasks/wave20-03.lisp",
+            &staged,
+            &changed,
+        );
+        assert_eq!(status, "loaded");
+        assert!(failure.is_none());
+        assert_eq!(
+            resolved_path.as_deref(),
+            Some(resolved.display().to_string().as_str()),
+        );
+        let scope = summary.expect("loaded path must produce summary");
+        assert_eq!(
+            scope.get("staged_out_of_scope").and_then(|v| v.as_array()).unwrap().len(),
+            0,
+        );
+    }
+
+    /// Loader missing-file path: returns `task_contract_status="missing"`
+    /// and a failure message that names the resolved path so the caller
+    /// can correct the brief without spawning git.
+    #[test]
+    fn evaluate_contract_for_preflight_missing_file_returns_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (status, summary, resolved_path, failure) = evaluate_task_contract_for_preflight(
+            dir.path(),
+            "tasks/does-not-exist.lisp",
+            &[],
+            &[],
+        );
+        assert_eq!(status, "missing");
+        assert!(summary.is_none(), "missing file must not yield a scope summary");
+        assert!(resolved_path.is_some());
+        let msg = failure.expect("missing file must produce failure message");
+        assert!(msg.contains("not readable"), "msg should describe IO failure, got: {}", msg);
+    }
+
+    /// Loader malformed-file path: returns `task_contract_status="malformed"`
+    /// distinct from `missing` so the caller can tell "wrong path" from
+    /// "wrong content" without re-reading the file.
+    #[test]
+    fn evaluate_contract_for_preflight_malformed_returns_status() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad = "(task wave20-03-bad\n  :schema \"missiond.task-contract.v0\"\n  :goal \"bad\")";
+        write_task_contract(dir.path(), "tasks/bad.lisp", bad);
+        let (status, summary, _resolved, failure) =
+            evaluate_task_contract_for_preflight(dir.path(), "tasks/bad.lisp", &[], &[]);
+        assert_eq!(status, "malformed");
+        assert!(summary.is_none());
+        let msg = failure.expect("malformed file must produce failure message");
+        assert!(
+            msg.contains("schema parse"),
+            "msg should describe schema mismatch, got: {}",
+            msg,
+        );
+    }
+
+    /// Absolute task_contract_path must NOT be re-anchored against the
+    /// project root. Resolved path echoed back is byte-equal to the input.
+    #[test]
+    fn evaluate_contract_for_preflight_accepts_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let resolved =
+            write_task_contract(dir.path(), "tasks/wave20-03.lisp", SAMPLE_CONTRACT_BODY);
+        let abs = resolved.display().to_string();
+        let unrelated = tempfile::tempdir().expect("tempdir");
+        let (status, summary, resolved_path, _failure) =
+            evaluate_task_contract_for_preflight(unrelated.path(), &abs, &[], &[]);
+        assert_eq!(status, "loaded");
+        assert!(summary.is_some());
+        assert_eq!(resolved_path.as_deref(), Some(abs.as_str()));
     }
 }

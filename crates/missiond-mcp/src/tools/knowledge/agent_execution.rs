@@ -305,7 +305,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         "task_contract_path".into(),
         prop(
             "string",
-            "[complete|preflight_commit] relative-or-absolute path to the task-contract v1 Lisp file the dispatch brief pointed at (wave19-06). Recorded verbatim into the completion entry as `:task-contract-path`. When `enforce_scoped_commit=true` is also set on `action=complete`, daemon loads the file (read-only) and asserts every `:write-scope` entry overlaps an active/released claim or a `staged_files` path; missing critical data rejects with structured `TASK_CONTRACT_*` errors. Absent → legacy completion behavior (no contract-level checks, audit-only handoff).",
+            "[complete|preflight_commit] relative-or-absolute path to the task-contract v1 Lisp file the dispatch brief pointed at (wave19-06). Recorded verbatim into the completion entry as `:task-contract-path`. When `enforce_scoped_commit=true` is also set on `action=complete`, daemon loads the file (read-only) and asserts every `:write-scope` entry overlaps an active/released claim or a `staged_files` path; missing critical data rejects with structured `TASK_CONTRACT_*` errors. wave20-03: `action=preflight_commit` also accepts this field — daemon loads the contract (read-only) and projects the staged/changed set against `:write-scope` + `:must-not-touch`, surfacing `task_contract_status` (`loaded`/`missing`/`malformed`), `staged_out_of_scope`, `staged_forbidden`, `unstaged_in_scope`, and a contract-aware `next_step`. Preflight stays informational on contract load failure (no hard reject) — the post-commit gate (`enforce_scoped_commit=true` + scripts/task-scope-guard.mjs) is the authoritative enforcement. Absent → legacy completion / preflight behavior (no contract-level checks, audit-only handoff).",
         ),
     );
     properties.insert(
@@ -351,6 +351,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
          expected_unexpected?, claim_scopes, next_step}`. Daemon NEVER runs `git add/commit/reset/checkout` — \
          only inspects. Pairs with `enforce_scoped_commit=true` on action=complete (wave16-06) which is the \
          post-commit gate; preflight catches the same SCOPED_COMMIT_VIOLATION one step earlier. \
+         Wave20-03: preflight_commit also accepts `task_contract_path`; when supplied daemon loads \
+         the contract (read-only) and folds `task_contract_status` (loaded|missing|malformed), \
+         `staged_out_of_scope`, `staged_forbidden`, `unstaged_in_scope`, plus a contract-aware \
+         `next_step` into the response so contract-level drift surfaces before the writer commits. \
+         Contract load failure surfaces as a status label, not a hard reject — task-scope-guard.mjs \
+         remains the post-commit authoritative gate. \
          Wave19-08: action=complete also accepts `task_contract_path` / `task_report_path` / \
          `verifier_status` / `verifier_notes` as optional metadata recorded into the completion entry. \
          When `enforce_scoped_commit=true` AND `task_contract_path` is supplied, daemon loads the \
