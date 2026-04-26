@@ -9,7 +9,7 @@
 
 mod comm;
 mod compute;
-mod knowledge;
+pub(crate) mod knowledge;
 mod sysinfra;
 
 use anyhow::Result;

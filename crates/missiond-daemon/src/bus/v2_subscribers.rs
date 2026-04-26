@@ -63,6 +63,20 @@ use crate::experience_harvester;
 use crate::extraction::{
     check_deep_analysis, check_kb_consolidation, check_realtime_extraction,
 };
+use crate::handlers::knowledge::directive::{
+    handle_review_resolved_event as directive_handle_review_resolved,
+    DirectiveSubscriberOutcome,
+};
+use crate::handlers::knowledge::plan::{
+    handle_review_resolved_event as plan_handle_review_resolved, PlanSubscriberOutcome,
+};
+use crate::handlers::knowledge::review_gate::{
+    plan_review_resolved_dispatch, ReviewResolvedDispatch,
+};
+use crate::handlers::knowledge::workflow::{
+    handle_review_resolved_event as workflow_handle_review_resolved,
+    WorkflowSubscriberOutcome,
+};
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks};
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 
@@ -88,7 +102,14 @@ pub(crate) fn start_v2_subscribers(
     // Incident reactor: every `IncidentEvent::Reported` → aiops::process_incident.
     spawn_incident_reactor(bus.clone(), state.clone(), shutdown_rx.clone());
 
-    info!("v2 event-bus subscribers started (8 router consumers + 1 incident reactor)");
+    // wave-16 :: review-gate Resolved listener — reads QuestionEvent::Resolved
+    // and routes deterministic `review:*` ids through the same explicit
+    // resolution validators each manager handler owns. Independent
+    // Subscription so it doesn't compete with the decision-engine
+    // Created-path consumer above.
+    spawn_review_resolution_sub(bus.clone(), state.clone(), shutdown_rx.clone());
+
+    info!("v2 event-bus subscribers started (8 router consumers + 1 incident reactor + 1 review-resolution listener)");
 }
 
 /// Incident reactor — subscribes to IncidentEvent and triages via
@@ -418,4 +439,264 @@ fn spawn_intent_analyst_sub(bus: Arc<BusServices>, state: AppState, mut shutdown
 // Workers (translation / arch_maintenance / lisp_survey / conversation_organizer /
 // tagger_chunker / gemini_logger) now own their own v2 subscriptions directly
 // (Phase 8 flip). No passive observers remain in this module.
+
+// ═════════════════════════════════════════════════════════════════════════
+// wave-16 :: review-gate Resolved listener
+//
+// The decision subscriber above (`spawn_decision_sub`) handles
+// `QuestionEvent::Created`. This listener handles the symmetric
+// `QuestionEvent::Resolved` path: when an inbound Resolved event carries
+// a deterministic `review:*` envelope, the planner classifies it and the
+// per-scope handler bridges the resolution back into the same DB
+// transition the explicit caller-side path uses.
+//
+// Conservatism contract:
+//   * Non-review ids are ignored after ack (other consumers may handle).
+//   * Malformed review ids → log warning + ack; never mutate.
+//   * Unknown resolution strings → log warning + ack; never mutate.
+//   * Recognised review id + recognised resolution → route through the
+//     handler-side bridge (validates envelope against current DB state,
+//     performs DB transition only on Approved + transition action).
+//   * The subscriber NEVER re-publishes a Resolved event (the inbound
+//     event we just consumed IS the downstream signal).
+//   * The subscriber NEVER auto-approves arbitrary text — only
+//     deterministic `review:*` ids resolve through this path.
+// ═════════════════════════════════════════════════════════════════════════
+fn spawn_review_resolution_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let Some(mut sub) = subscribe_or_warn::<QuestionEvent>(
+            &bus,
+            "v2_review_resolution",
+            "review_resolution",
+        )
+        .await
+        else {
+            return;
+        };
+        info!("v2[review_resolution]: subscription live");
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    if let QuestionEvent::Resolved { question_id, resolution } = ack.event() {
+                        handle_review_resolved(&state, question_id, resolution).await;
+                    }
+                    ack.ack().await;
+                }
+            }
+        }
+        info!("v2[review_resolution]: shutdown");
+    });
+}
+
+/// Per-event handler. Pure routing layer — defers all matching to
+/// `plan_review_resolved_dispatch` (pure planner) and all DB work to the
+/// per-scope handler bridges. Errors are logged + ignored; the bus
+/// message has already been (or will be) acked by the spawn loop above.
+async fn handle_review_resolved(state: &AppState, question_id: &str, resolution: &str) {
+    let dispatch = plan_review_resolved_dispatch(question_id, resolution);
+    match dispatch {
+        ReviewResolvedDispatch::IgnoreNonReviewId => {
+            // Quiet — non-review ids are off-route by design.
+            debug!(
+                question_id = %question_id,
+                "v2[review_resolution]: non-review id, ignoring"
+            );
+        }
+        ReviewResolvedDispatch::IgnoreMalformedId(err) => {
+            warn!(
+                question_id = %question_id,
+                error = %err.message(),
+                "v2[review_resolution]: malformed review id, ignoring"
+            );
+        }
+        ReviewResolvedDispatch::IgnoreUnsupportedScope { scope } => {
+            warn!(
+                question_id = %question_id,
+                scope = %scope,
+                "v2[review_resolution]: unsupported review scope, ignoring"
+            );
+        }
+        ReviewResolvedDispatch::IgnoreUnknownResolution { resolution } => {
+            warn!(
+                question_id = %question_id,
+                resolution = %resolution,
+                "v2[review_resolution]: unknown resolution string, ignoring (no auto-approve for arbitrary text)"
+            );
+        }
+        ReviewResolvedDispatch::Route { parsed, decision } => match parsed.scope.as_str() {
+            "directive" => {
+                let outcome =
+                    directive_handle_review_resolved(state, &parsed, decision).await;
+                log_directive_outcome(question_id, &outcome);
+            }
+            "plan" => {
+                let outcome = plan_handle_review_resolved(state, &parsed, decision).await;
+                log_plan_outcome(question_id, &outcome);
+            }
+            "workflow" => {
+                let outcome =
+                    workflow_handle_review_resolved(state, &parsed, decision).await;
+                log_workflow_outcome(question_id, &outcome);
+            }
+            other => {
+                // Defensive: planner should have rejected via
+                // IgnoreUnsupportedScope before we got here.
+                warn!(
+                    question_id = %question_id,
+                    scope = %other,
+                    "v2[review_resolution]: planner allowed unknown scope through; ignoring"
+                );
+            }
+        },
+    }
+}
+
+fn log_directive_outcome(qid: &str, outcome: &DirectiveSubscriberOutcome) {
+    match outcome {
+        DirectiveSubscriberOutcome::Approved => {
+            info!(question_id = %qid, "v2[review_resolution]: directive approved via bus");
+        }
+        DirectiveSubscriberOutcome::Archived => {
+            info!(question_id = %qid, "v2[review_resolution]: directive archived via bus");
+        }
+        DirectiveSubscriberOutcome::KeptArtifact { decision } => {
+            info!(question_id = %qid, decision = decision.as_str(), "v2[review_resolution]: directive kept (rejected/needs_changes)");
+        }
+        DirectiveSubscriberOutcome::CompileNoOp { decision } => {
+            debug!(question_id = %qid, decision = decision.as_str(), "v2[review_resolution]: directive compile-action no-op");
+        }
+        DirectiveSubscriberOutcome::ArtifactIdNotUuid { artifact_id, error } => {
+            warn!(question_id = %qid, artifact_id = %artifact_id, error = %error, "v2[review_resolution]: directive artifact_id not a UUID");
+        }
+        DirectiveSubscriberOutcome::NotFound { artifact_id } => {
+            warn!(question_id = %qid, artifact_id = %artifact_id, "v2[review_resolution]: directive not found");
+        }
+        DirectiveSubscriberOutcome::EnvelopeRejected { code, message } => {
+            warn!(question_id = %qid, code = %code, error = %message, "v2[review_resolution]: directive envelope rejected");
+        }
+        DirectiveSubscriberOutcome::DbError { detail } => {
+            warn!(question_id = %qid, error = %detail, "v2[review_resolution]: directive DB error");
+        }
+    }
+}
+
+fn log_plan_outcome(qid: &str, outcome: &PlanSubscriberOutcome) {
+    match outcome {
+        PlanSubscriberOutcome::Approved => {
+            info!(question_id = %qid, "v2[review_resolution]: plan approved via bus");
+        }
+        PlanSubscriberOutcome::MarkNeedsExplicitCall => {
+            warn!(question_id = %qid, "v2[review_resolution]: plan mark requires explicit caller (qid envelope lacks target status)");
+        }
+        PlanSubscriberOutcome::SupersedeNeedsExplicitCall => {
+            warn!(question_id = %qid, "v2[review_resolution]: plan supersede requires explicit caller (qid envelope lacks new_plan_id)");
+        }
+        PlanSubscriberOutcome::KeptArtifact { decision } => {
+            info!(question_id = %qid, decision = decision.as_str(), "v2[review_resolution]: plan kept (rejected/needs_changes)");
+        }
+        PlanSubscriberOutcome::CompileNoOp { decision } => {
+            debug!(question_id = %qid, decision = decision.as_str(), "v2[review_resolution]: plan compile-action no-op");
+        }
+        PlanSubscriberOutcome::ArtifactIdNotUuid { artifact_id, error } => {
+            warn!(question_id = %qid, artifact_id = %artifact_id, error = %error, "v2[review_resolution]: plan artifact_id not a UUID");
+        }
+        PlanSubscriberOutcome::NotFound { artifact_id } => {
+            warn!(question_id = %qid, artifact_id = %artifact_id, "v2[review_resolution]: plan not found");
+        }
+        PlanSubscriberOutcome::EnvelopeRejected { code, message } => {
+            warn!(question_id = %qid, code = %code, error = %message, "v2[review_resolution]: plan envelope rejected");
+        }
+        PlanSubscriberOutcome::DbError { detail } => {
+            warn!(question_id = %qid, error = %detail, "v2[review_resolution]: plan DB error");
+        }
+    }
+}
+
+fn log_workflow_outcome(qid: &str, outcome: &WorkflowSubscriberOutcome) {
+    match outcome {
+        WorkflowSubscriberOutcome::PersistedReceipt { workflow_id, decision } => {
+            info!(question_id = %qid, workflow_id = %workflow_id, decision = decision.as_str(), "v2[review_resolution]: workflow persisted receipt (no DB transition; row has no status column)");
+        }
+        WorkflowSubscriberOutcome::MethodologyReceipt { flow_id, decision } => {
+            info!(question_id = %qid, flow_id = %flow_id, decision = decision.as_str(), "v2[review_resolution]: workflow methodology receipt");
+        }
+        WorkflowSubscriberOutcome::NotFound { artifact_id } => {
+            warn!(question_id = %qid, artifact_id = %artifact_id, "v2[review_resolution]: workflow not found");
+        }
+        WorkflowSubscriberOutcome::EnvelopeRejected { code, message } => {
+            warn!(question_id = %qid, code = %code, error = %message, "v2[review_resolution]: workflow envelope rejected");
+        }
+        WorkflowSubscriberOutcome::DbError { detail } => {
+            warn!(question_id = %qid, error = %detail, "v2[review_resolution]: workflow DB error");
+        }
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// tests — pure routing layer (no bus, no DB)
+//
+// Direct subscriber tests would require building a full bus + AppState;
+// the brief explicitly endorses "extract a pure planner and test that"
+// for that case. The pure planner tests live in
+// `handlers::knowledge::review_gate::tests`. Here we pin a couple of
+// router-shape invariants on the dispatch enum so future refactors don't
+// silently regress (e.g. someone adding an enum variant without wiring
+// the warn! arm).
+// ───────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::handlers::knowledge::review_gate::ReviewDecision;
+
+    #[test]
+    fn dispatch_routes_resident_three_scopes_per_envelope() {
+        // Pin the assumption that the planner only routes on the three
+        // wave-14 scopes; the subscriber's match arm relies on this.
+        for (qid, scope) in [
+            ("review:directive:abc:v1:approve", "directive"),
+            ("review:plan:abc:v1:approve", "plan"),
+            ("review:workflow:abc:v1:compile", "workflow"),
+        ] {
+            let d = plan_review_resolved_dispatch(qid, "approved");
+            match d {
+                ReviewResolvedDispatch::Route { parsed, decision } => {
+                    assert_eq!(parsed.scope, scope);
+                    assert_eq!(decision, ReviewDecision::Approved);
+                }
+                other => panic!("expected Route for `{}`, got {:?}", qid, other),
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_unknown_resolution_does_not_route() {
+        // A wave-14-shaped review id with garbage resolution string MUST
+        // hit IgnoreUnknownResolution rather than Route — this is the
+        // "no auto-approve for arbitrary text" guarantee.
+        let d = plan_review_resolved_dispatch(
+            "review:directive:abc:v1:approve",
+            "looks-good-to-me",
+        );
+        assert!(matches!(
+            d,
+            ReviewResolvedDispatch::IgnoreUnknownResolution { .. }
+        ));
+    }
+
+    #[test]
+    fn dispatch_non_review_id_does_not_route() {
+        // Decision-engine `master:*` ids must be ignored — the subscriber
+        // never auto-approves non-review questions.
+        let d = plan_review_resolved_dispatch("master:question:abc", "approved");
+        assert!(matches!(d, ReviewResolvedDispatch::IgnoreNonReviewId));
+    }
+}
 

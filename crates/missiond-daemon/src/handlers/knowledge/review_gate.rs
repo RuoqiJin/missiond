@@ -1236,6 +1236,114 @@ pub(crate) fn resolution_wire_string(decision: ReviewDecision) -> &'static str {
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// wave-16 :: subscriber-side resolution dispatcher
+//
+// The wave-16 `QuestionEvent::Resolved` listener (see
+// `crates/missiond-daemon/src/bus/v2_subscribers.rs::spawn_review_resolution_sub`)
+// consumes Resolved events and routes deterministic `review:*` ids back
+// through the same explicit-resolution validators each manager handler
+// already owns. This block is the PURE planner the subscriber uses so the
+// dispatch logic is testable without spinning a bus / DB.
+//
+// Conservatism contract:
+//   * Non-review ids → `IgnoreNonReviewId`. We never auto-act on
+//     decision-engine answers for non-review questions.
+//   * Malformed `review:*` ids → `IgnoreMalformedId`. Surface the parse
+//     error so observability sees a loud signal; do NOT mutate.
+//   * Resolution string outside the recognised vocabulary →
+//     `IgnoreUnknownResolution`. Wider than the strict `ReviewDecision::parse`
+//     vocabulary so wave-14 emitters / decision-engine tier output that
+//     uses synonyms (`yes` / `accepted` / `fix` / `revise` / etc.) still
+//     resolves cleanly.
+//   * Recognised review id + recognised resolution → `Route` carrying the
+//     parsed envelope and decision. The subscriber applies the per-scope
+//     side-effect (no double-publish; the inbound Resolved is the
+//     downstream signal).
+// ───────────────────────────────────────────────────────────────────────
+
+/// Dispatch outcome for a `(question_id, resolution)` pair pulled off the
+/// `QuestionEvent::Resolved` topic. Pure / side-effect free.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ReviewResolvedDispatch {
+    /// `question_id` does not start with the `review:` prefix — wave-16
+    /// subscriber ignores it (other consumers may handle it).
+    IgnoreNonReviewId,
+    /// `question_id` started with `review:` but the envelope was malformed
+    /// (missing segments / bad version / empty segment / unsupported
+    /// scope). Subscriber logs a warning and acks; never mutates.
+    IgnoreMalformedId(ReviewIdParseError),
+    /// `question_id` was a recognised wave-14 id but the envelope's scope
+    /// is not one of `directive | plan | workflow`. Defensive against
+    /// third-party emitters that reuse the `review:` prefix.
+    IgnoreUnsupportedScope { scope: String },
+    /// Resolution string did not map to any known decision after the
+    /// conservative vocabulary expansion. Subscriber logs a warning and
+    /// acks; never mutates.
+    IgnoreUnknownResolution { resolution: String },
+    /// Recognised review id + recognised resolution → subscriber may
+    /// route through the per-scope handler (`directive::resolve_from_event`
+    /// / `plan::resolve_from_event` / `workflow::resolve_from_event`).
+    Route {
+        parsed: ParsedReviewQuestionId,
+        decision: ReviewDecision,
+    },
+}
+
+/// Conservative resolution-string mapper for the subscriber path. WIDER
+/// vocabulary than `ReviewDecision::parse` (which is the strict explicit
+/// API):
+///
+///   * `approved | approve | yes | accepted` → `Approved`
+///   * `rejected | reject | no`              → `Rejected`
+///   * `needs_changes | needs-changes | changes | revise | fix`
+///                                            → `NeedsChanges`
+///   * anything else                          → `None` (caller logs a
+///     warning and acks the bus message; no mutation)
+///
+/// Case-insensitive + trimmed. Returns `None` rather than `Err` because
+/// the subscriber never fails — it just ignores unknown vocabulary.
+pub(crate) fn parse_subscriber_resolution_string(raw: &str) -> Option<ReviewDecision> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "approved" | "approve" | "yes" | "accepted" => Some(ReviewDecision::Approved),
+        "rejected" | "reject" | "no" => Some(ReviewDecision::Rejected),
+        "needs_changes" | "needs-changes" | "changes" | "revise" | "fix" => {
+            Some(ReviewDecision::NeedsChanges)
+        }
+        _ => None,
+    }
+}
+
+/// Pure planner: decide what the `QuestionEvent::Resolved` subscriber
+/// should do with a `(question_id, resolution)` pair. Does NOT touch DB
+/// or bus.
+pub(crate) fn plan_review_resolved_dispatch(
+    question_id: &str,
+    resolution: &str,
+) -> ReviewResolvedDispatch {
+    if !question_id.trim_start().starts_with("review:") {
+        return ReviewResolvedDispatch::IgnoreNonReviewId;
+    }
+    let parsed = match parse_review_question_id_struct(question_id) {
+        Ok(p) => p,
+        Err(e) => return ReviewResolvedDispatch::IgnoreMalformedId(e),
+    };
+    if !WAVE14_SUPPORTED_SCOPES.contains(&parsed.scope.as_str()) {
+        return ReviewResolvedDispatch::IgnoreUnsupportedScope {
+            scope: parsed.scope.clone(),
+        };
+    }
+    let decision = match parse_subscriber_resolution_string(resolution) {
+        Some(d) => d,
+        None => {
+            return ReviewResolvedDispatch::IgnoreUnknownResolution {
+                resolution: resolution.to_string(),
+            }
+        }
+    };
+    ReviewResolvedDispatch::Route { parsed, decision }
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // tests — pure helpers only (no bus, no DB).
 // ───────────────────────────────────────────────────────────────────────
 
@@ -2174,5 +2282,183 @@ mod tests {
             ResolutionOutcome::KeepArtifact,
             ResolutionOutcome::RequestChanges
         );
+    }
+
+    // ── wave-16 :: subscriber-side resolution dispatcher ────────────────
+
+    #[test]
+    fn subscriber_resolution_string_approve_synonyms_collapse_to_approved() {
+        for raw in ["approved", "approve", "yes", "accepted", "Approved", "  YES  "] {
+            assert_eq!(
+                parse_subscriber_resolution_string(raw),
+                Some(ReviewDecision::Approved),
+                "expected Approved for `{}`",
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn subscriber_resolution_string_reject_synonyms_collapse_to_rejected() {
+        for raw in ["rejected", "reject", "no", "Reject", " NO "] {
+            assert_eq!(
+                parse_subscriber_resolution_string(raw),
+                Some(ReviewDecision::Rejected),
+                "expected Rejected for `{}`",
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn subscriber_resolution_string_needs_changes_synonyms_collapse() {
+        for raw in [
+            "needs_changes",
+            "needs-changes",
+            "changes",
+            "revise",
+            "fix",
+            "Revise",
+            "  FIX  ",
+        ] {
+            assert_eq!(
+                parse_subscriber_resolution_string(raw),
+                Some(ReviewDecision::NeedsChanges),
+                "expected NeedsChanges for `{}`",
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn subscriber_resolution_string_unknown_returns_none() {
+        for raw in ["", "maybe", "deferred", "unsure", "abstain"] {
+            assert!(
+                parse_subscriber_resolution_string(raw).is_none(),
+                "expected None for `{}`",
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_ignores_non_review_id() {
+        let d = plan_review_resolved_dispatch("master:abc:approve", "approved");
+        assert_eq!(d, ReviewResolvedDispatch::IgnoreNonReviewId);
+    }
+
+    #[test]
+    fn dispatch_ignores_blank_id_as_non_review() {
+        let d = plan_review_resolved_dispatch("", "approved");
+        assert_eq!(d, ReviewResolvedDispatch::IgnoreNonReviewId);
+    }
+
+    #[test]
+    fn dispatch_ignores_malformed_review_id() {
+        let d = plan_review_resolved_dispatch("review:directive", "approved");
+        match d {
+            ReviewResolvedDispatch::IgnoreMalformedId(_) => {}
+            other => panic!("expected IgnoreMalformedId, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_ignores_unsupported_scope_even_when_id_well_formed() {
+        // `chat` is not directive/plan/workflow → defensive ignore.
+        let d = plan_review_resolved_dispatch("review:chat:abc:v1:approve", "approved");
+        match d {
+            ReviewResolvedDispatch::IgnoreUnsupportedScope { scope } => {
+                assert_eq!(scope, "chat");
+            }
+            other => panic!("expected IgnoreUnsupportedScope, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_ignores_unknown_resolution() {
+        let d = plan_review_resolved_dispatch(
+            "review:directive:abc:v1:approve",
+            "deferred",
+        );
+        match d {
+            ReviewResolvedDispatch::IgnoreUnknownResolution { resolution } => {
+                assert_eq!(resolution, "deferred");
+            }
+            other => panic!("expected IgnoreUnknownResolution, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_directive_approved() {
+        let d = plan_review_resolved_dispatch(
+            "review:directive:abc-123:v1:approve",
+            "approved",
+        );
+        match d {
+            ReviewResolvedDispatch::Route { parsed, decision } => {
+                assert_eq!(parsed.scope, "directive");
+                assert_eq!(parsed.artifact_id, "abc-123");
+                assert_eq!(parsed.version, 1);
+                assert_eq!(parsed.action, "approve");
+                assert_eq!(decision, ReviewDecision::Approved);
+            }
+            other => panic!("expected Route, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_plan_rejected_via_synonym() {
+        let d = plan_review_resolved_dispatch(
+            "review:plan:9f3c:v2:supersede",
+            "no",
+        );
+        match d {
+            ReviewResolvedDispatch::Route { parsed, decision } => {
+                assert_eq!(parsed.scope, "plan");
+                assert_eq!(parsed.artifact_id, "9f3c");
+                assert_eq!(parsed.version, 2);
+                assert_eq!(parsed.action, "supersede");
+                assert_eq!(decision, ReviewDecision::Rejected);
+            }
+            other => panic!("expected Route, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_workflow_needs_changes_via_synonym() {
+        let d = plan_review_resolved_dispatch(
+            "review:workflow:methodology-deploy-v0:v1:compile",
+            "fix",
+        );
+        match d {
+            ReviewResolvedDispatch::Route { parsed, decision } => {
+                assert_eq!(parsed.scope, "workflow");
+                assert_eq!(parsed.artifact_id, "methodology-deploy-v0");
+                assert_eq!(parsed.version, 1);
+                assert_eq!(parsed.action, "compile");
+                assert_eq!(decision, ReviewDecision::NeedsChanges);
+            }
+            other => panic!("expected Route, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn dispatch_routes_with_topic_hash_suffix() {
+        let d = plan_review_resolved_dispatch(
+            "review:directive:abc:v3:compile:0123456789abcdef",
+            "approve",
+        );
+        match d {
+            ReviewResolvedDispatch::Route { parsed, decision } => {
+                assert_eq!(parsed.scope, "directive");
+                assert_eq!(parsed.action, "compile");
+                assert_eq!(
+                    parsed.topic_hash.as_deref(),
+                    Some("0123456789abcdef")
+                );
+                assert_eq!(decision, ReviewDecision::Approved);
+            }
+            other => panic!("expected Route, got {:?}", other),
+        }
     }
 }

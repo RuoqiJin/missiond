@@ -49,8 +49,8 @@ use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
     parse_review_gate_policy, parse_review_question_id_struct, parse_review_resolution_input,
     resolution_wire_string, review_gate_policy_was_explicit, stamp_needs_changes_next_step,
-    stamp_resolution_payload, validate_review_resolution_envelope, ResolutionOutcome,
-    ReviewResolutionInput,
+    stamp_resolution_payload, validate_review_resolution_envelope, ParsedReviewQuestionId,
+    ResolutionOutcome, ReviewDecision, ReviewResolutionInput,
 };
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
@@ -1281,6 +1281,88 @@ async fn action_resolve_review_methodology(
     )
     .await;
     Ok(ToolResult::json_pretty(&payload))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-16 :: subscriber-side resolution bridge
+//
+// Called by `bus::v2_subscribers::spawn_review_resolution_sub` after the
+// pure planner classified the inbound `QuestionEvent::Resolved` event as a
+// workflow route. Workflow rows have no `status` / `version` columns, so
+// even on Approved we never perform a DB transition — the resolution is
+// receipt-only (mirrors `action_resolve_review_persisted`). The
+// methodology path (artifact_id is the flow_id string, not a UUID) is
+// also receipt-only. The subscriber records the outcome and never
+// re-publishes a Resolved bus event.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Outcome of routing a `QuestionEvent::Resolved` event through the
+/// workflow-side bridge. Surfaced to the subscriber so it can record
+/// observability without re-doing the match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WorkflowSubscriberOutcome {
+    /// `artifact_id` parsed as UUID and the workflow row was found. No
+    /// DB transition is performed (Workflow has no status column); the
+    /// decision is receipt-only.
+    PersistedReceipt {
+        workflow_id: uuid::Uuid,
+        decision: ReviewDecision,
+    },
+    /// `artifact_id` did not parse as UUID — interpreted as a methodology
+    /// flow_id (e.g. `methodology-deploy-v0`). Receipt-only; never fakes
+    /// DB state because no DB row exists.
+    MethodologyReceipt {
+        flow_id: String,
+        decision: ReviewDecision,
+    },
+    /// `artifact_id` parsed as UUID but no workflow row was found.
+    NotFound { artifact_id: uuid::Uuid },
+    /// Envelope failed re-validation (scope / version / action).
+    EnvelopeRejected { code: &'static str, message: String },
+    /// Underlying DB lookup failed.
+    DbError { detail: String },
+}
+
+/// Re-route a `QuestionEvent::Resolved` event whose envelope was parsed
+/// as `scope=workflow` through the same validators as the explicit
+/// caller-side bridge. Workflow rows carry no status column, so even an
+/// `Approved` decision never mutates DB state — the outcome is
+/// receipt-only. Pure side-effects: at most one DB read; no bus publish.
+pub(crate) async fn handle_review_resolved_event(
+    state: &AppState,
+    parsed: &ParsedReviewQuestionId,
+    decision: ReviewDecision,
+) -> WorkflowSubscriberOutcome {
+    if let Err(e) = validate_review_resolution_envelope(
+        parsed,
+        "workflow",
+        &parsed.artifact_id,
+        WORKFLOW_REVIEW_VERSION,
+        WORKFLOW_REVIEW_ACTIONS,
+    ) {
+        return WorkflowSubscriberOutcome::EnvelopeRejected {
+            code: e.code(),
+            message: e.message(),
+        };
+    }
+    match uuid::Uuid::parse_str(&parsed.artifact_id) {
+        Ok(workflow_id) => match state.store.workflow_get_by_id(workflow_id).await {
+            Ok(Some(_)) => WorkflowSubscriberOutcome::PersistedReceipt {
+                workflow_id,
+                decision,
+            },
+            Ok(None) => WorkflowSubscriberOutcome::NotFound {
+                artifact_id: workflow_id,
+            },
+            Err(e) => WorkflowSubscriberOutcome::DbError {
+                detail: format!("workflow_get_by_id: {}", e),
+            },
+        },
+        Err(_) => WorkflowSubscriberOutcome::MethodologyReceipt {
+            flow_id: parsed.artifact_id.clone(),
+            decision,
+        },
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -4391,5 +4473,41 @@ mod tests {
         )
         .expect("round-tripped methodology id must validate");
         assert!(uuid::Uuid::parse_str(&parsed.artifact_id).is_err());
+    }
+
+    // ── wave-16 :: subscriber outcome enum is loud + receipt-only ───────
+
+    #[test]
+    fn workflow_subscriber_outcome_methodology_receipt_carries_flow_id_and_decision() {
+        let outcome = WorkflowSubscriberOutcome::MethodologyReceipt {
+            flow_id: "methodology-deploy-v0".to_string(),
+            decision: ReviewDecision::Approved,
+        };
+        match outcome {
+            WorkflowSubscriberOutcome::MethodologyReceipt { flow_id, decision } => {
+                assert_eq!(flow_id, "methodology-deploy-v0");
+                assert_eq!(decision, ReviewDecision::Approved);
+            }
+            _ => panic!("expected MethodologyReceipt"),
+        }
+    }
+
+    #[test]
+    fn workflow_subscriber_outcome_persisted_receipt_is_loud() {
+        let id = uuid::Uuid::nil();
+        let outcome = WorkflowSubscriberOutcome::PersistedReceipt {
+            workflow_id: id,
+            decision: ReviewDecision::Rejected,
+        };
+        match outcome {
+            WorkflowSubscriberOutcome::PersistedReceipt {
+                workflow_id,
+                decision,
+            } => {
+                assert_eq!(workflow_id, id);
+                assert_eq!(decision, ReviewDecision::Rejected);
+            }
+            _ => panic!("expected PersistedReceipt"),
+        }
     }
 }
