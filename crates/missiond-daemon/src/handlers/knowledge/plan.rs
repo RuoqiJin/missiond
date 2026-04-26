@@ -3818,6 +3818,15 @@ async fn action_execute_internal(
 ) -> Result<ToolResult> {
     let dry_run = args.get("dry_run").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    // wave-19 / task 06 — pre-flight validate the task-contract emit knobs
+    // BEFORE any dispatch path so a typo (`task_contract_mode="emi"`)
+    // fails fast rather than after a dispatch already produced side
+    // effects. Default mode is `Off`: byte-compatible with pre-wave19.
+    let task_contract_mode = match parse_task_contract_emit_mode(args) {
+        Ok(m) => m,
+        Err(err_result) => return Ok(err_result),
+    };
+
     // wave-15 / task 05 + wave-16 / task 03 — workstation-dispatch routing.
     // Wave-15 honours explicit opt-in (caller arg `workstation_dispatch=true`
     // or PLAN.lisp `:workstation-dispatch true`). Wave-16 layers conservative
@@ -3854,6 +3863,61 @@ async fn action_execute_internal(
         &inference_ctx,
     );
 
+    // wave-19 / task 06 — emit the task-contract sidecar BEFORE any
+    // dispatch path so the contract is the SSOT for whatever work
+    // happens next. Failures REFUSE the dispatch (a missing contract
+    // must not be papered over by a successful inner call). EmitDryRun
+    // additionally skips substrate / inner dispatch once the contract
+    // has been written. Default mode (`Off`) returns an empty record
+    // and the response payload omits the task-contract fields entirely.
+    let task_contract_inputs = task_contract_inputs_from_hints(
+        &merged_hints,
+        resolved.target,
+        resolved.dispatch_strategy,
+    );
+    let project_arg_for_emit = args.get("project").and_then(|v| v.as_str());
+    let cwd_arg_for_emit = args.get("cwd").and_then(|v| v.as_str());
+    let target_project_arg_for_emit = args
+        .get("target_project")
+        .and_then(|v| v.as_str())
+        .or(hints.target_project.as_deref());
+    let emission = emit_task_contract(
+        state,
+        plan.id,
+        &plan.board_task_id,
+        "root",
+        task_contract_mode,
+        &task_contract_inputs,
+        project_arg_for_emit,
+        cwd_arg_for_emit,
+        target_project_arg_for_emit,
+    )
+    .await;
+
+    if emission.is_failure() {
+        // Refuse dispatch — surface the IO failure plus the
+        // resolved plan/target so the caller can fix permissions
+        // or registry config and retry. Plan FSM untouched.
+        return Ok(build_task_contract_failure_response(
+            plan,
+            resolved,
+            &dispatch_decision,
+            &emission,
+        ));
+    }
+
+    if task_contract_mode.is_dry_run() {
+        // Skip substrate / inner dispatch — surface the contract path
+        // so the caller can render the markdown brief without touching
+        // the inner tool. Plan FSM untouched.
+        return Ok(build_task_contract_dry_run_response(
+            plan,
+            resolved,
+            &dispatch_decision,
+            &emission,
+        ));
+    }
+
     if dispatch_decision.is_enabled() {
         let outcome = super::workstation_dispatch::run_workstation_dispatch(
             state,
@@ -3889,6 +3953,7 @@ async fn action_execute_internal(
             resolved,
             outcome,
             &dispatch_decision,
+            &emission,
         ));
     }
 
@@ -3921,6 +3986,7 @@ async fn action_execute_internal(
         if let Some(reason) = dispatch_decision.reason.as_deref() {
             payload["workstation_dispatch_inference_reason"] = json!(reason);
         }
+        merge_task_contract_block(&mut payload, &emission);
         return Ok(ToolResult::json_pretty(&payload));
     }
 
@@ -3966,6 +4032,7 @@ async fn action_execute_internal(
         if let Some(reason) = dispatch_decision.reason.as_deref() {
             payload["workstation_dispatch_inference_reason"] = json!(reason);
         }
+        merge_task_contract_block(&mut payload, &emission);
         return Ok(ToolResult::json_pretty(&payload));
     }
 
@@ -4067,7 +4134,90 @@ async fn action_execute_internal(
         evidence_error,
         status_update_error,
         &dispatch_decision,
+        &emission,
     ))
+}
+
+/// Merge the wave-19 / task 06 task-contract emission record into a
+/// response payload. No-op when the emitter was off and produced
+/// nothing observable — preserves the pre-wave19 byte-shape on the
+/// default code path.
+pub(super) fn merge_task_contract_block(
+    payload: &mut Value,
+    emission: &TaskContractEmissionRecord,
+) {
+    let Some(block) = emission.to_response_block() else {
+        return;
+    };
+    let Some(map) = payload.as_object_mut() else {
+        return;
+    };
+    if let Value::Object(block_map) = block {
+        for (k, v) in block_map {
+            map.insert(k, v);
+        }
+    }
+}
+
+/// wave-19 / task 06 — response shape when task-contract emission was
+/// requested but the write failed. We refuse the dispatch entirely so
+/// downstream callers cannot mistake a missing contract for a
+/// successful run; plan FSM is untouched, no inner side effect was
+/// produced, the response carries the structured emission record.
+fn build_task_contract_failure_response(
+    plan: &Plan,
+    resolved: &ResolvedExec,
+    decision: &super::workstation_dispatch::DispatchDecision,
+    emission: &TaskContractEmissionRecord,
+) -> ToolResult {
+    let mut payload = json!({
+        "status": "dispatch_skipped",
+        "execute_mode": "internal",
+        "runner_status": "task_contract_emit_failed",
+        "plan_id": plan.id,
+        "board_task_id": plan.board_task_id,
+        "target_tool": resolved.target,
+        "target_source": resolved.target_source,
+        "dispatch_strategy": resolved.dispatch_strategy,
+        "dispatch_strategy_source": resolved.dispatch_strategy_source,
+        "plan_hint_summary": resolved.plan_hint_summary,
+        "workstation_dispatch_source": decision.source.as_str(),
+    });
+    if let Some(reason) = decision.reason.as_deref() {
+        payload["workstation_dispatch_inference_reason"] = json!(reason);
+    }
+    merge_task_contract_block(&mut payload, emission);
+    ToolResult::json_pretty(&payload)
+}
+
+/// wave-19 / task 06 — response shape when the caller asked for
+/// `task_contract_mode="emit_dry_run"`. The contract is on disk; the
+/// inner substrate is never invoked. Plan FSM is untouched (the
+/// caller can flip to `emit` mode for a real dispatch).
+fn build_task_contract_dry_run_response(
+    plan: &Plan,
+    resolved: &ResolvedExec,
+    decision: &super::workstation_dispatch::DispatchDecision,
+    emission: &TaskContractEmissionRecord,
+) -> ToolResult {
+    let mut payload = json!({
+        "status": "dry_run",
+        "execute_mode": "internal",
+        "runner_status": "task_contract_emit_dry_run",
+        "plan_id": plan.id,
+        "board_task_id": plan.board_task_id,
+        "target_tool": resolved.target,
+        "target_source": resolved.target_source,
+        "dispatch_strategy": resolved.dispatch_strategy,
+        "dispatch_strategy_source": resolved.dispatch_strategy_source,
+        "plan_hint_summary": resolved.plan_hint_summary,
+        "workstation_dispatch_source": decision.source.as_str(),
+    });
+    if let Some(reason) = decision.reason.as_deref() {
+        payload["workstation_dispatch_inference_reason"] = json!(reason);
+    }
+    merge_task_contract_block(&mut payload, emission);
+    ToolResult::json_pretty(&payload)
 }
 
 /// Render a workstation-dispatch outcome into the same response envelope
@@ -4090,6 +4240,7 @@ fn build_workstation_dispatch_response(
     resolved: &ResolvedExec,
     outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
     decision: &super::workstation_dispatch::DispatchDecision,
+    emission: &TaskContractEmissionRecord,
 ) -> ToolResult {
     let status = match &outcome {
         super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. } => "executing",
@@ -4134,6 +4285,7 @@ fn build_workstation_dispatch_response(
             }
         }
     }
+    merge_task_contract_block(&mut payload, emission);
     ToolResult::json_pretty(&payload)
 }
 
@@ -4158,6 +4310,7 @@ fn build_internal_dispatch_success_response(
     evidence_error: Option<String>,
     status_update_error: Option<String>,
     decision: &super::workstation_dispatch::DispatchDecision,
+    emission: &TaskContractEmissionRecord,
 ) -> ToolResult {
     let (status, runner_status) = if status_update_error.is_some() {
         ("dispatch_partial", "status_update_failed")
@@ -4189,6 +4342,7 @@ fn build_internal_dispatch_success_response(
     if let Some(err) = status_update_error {
         payload["status_update_error"] = json!(err);
     }
+    merge_task_contract_block(&mut payload, emission);
     ToolResult::json_pretty(&payload)
 }
 
@@ -4586,6 +4740,597 @@ pub(super) async fn append_plan_evidence_entry(
     std::fs::rename(&tmp, &path).map_err(|e| anyhow!("rename: {}", e))?;
 
     Ok((path, entry_count))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-19 / task 06 — plan-runner task-contract emitter v0
+//
+// Opt-in: callers pass `emit_task_contract=true` (or
+// `task_contract_mode="emit"|"emit_dry_run"`). When the resolved
+// dispatch shape is workstation-eligible (target=mission_task_delegate
+// + non-empty objective), the runner writes a task-contract v1 Lisp
+// sidecar BEFORE handing off to the workstation-dispatch substrate.
+// Path convention:
+//
+//   <project_root>/.missiond/tasks/generated/<plan_id>/<node_id>.lisp
+//
+// (Single-node executes pass `node_id="root"`; DAG nodes use the
+// PLAN.lisp `:id`.)
+//
+// Default behaviour is byte-compatible: when neither knob is set the
+// runner skips emission entirely and the response payload omits the
+// task-contract fields. The renderer is OUT OF PROCESS — we surface
+// `render_command` (a `node scripts/render-claudecode-task.mjs ...`
+// invocation) instead of shelling out from Rust, which keeps the
+// daemon free of Node dependency.
+//
+// Failure semantics: emit BEFORE dispatch. If the write fails, the
+// dispatch is REFUSED with a structured `task_contract_emit_failed`
+// status — the contract is the SSOT, so a missing contract MUST NOT
+// be papered over by a successful inner call. Dry-run (`emit_dry_run`
+// or the existing `dry_run=true` flag) returns the contract path
+// without touching the inner substrate.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Canonical task-contract emit modes. Mirrors the MCP descriptor enum.
+pub(super) const TASK_CONTRACT_MODE_OFF: &str = "off";
+pub(super) const TASK_CONTRACT_MODE_EMIT: &str = "emit";
+pub(super) const TASK_CONTRACT_MODE_EMIT_DRY_RUN: &str = "emit_dry_run";
+
+/// Resolved emission policy after parsing the `emit_task_contract` /
+/// `task_contract_mode` args.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum TaskContractEmitMode {
+    /// Default — no emission, byte-compatible with pre-wave19 behaviour.
+    Off,
+    /// Emit the contract AND let the dispatch proceed.
+    Emit,
+    /// Emit the contract but skip the actual inner dispatch (preview).
+    EmitDryRun,
+}
+
+impl TaskContractEmitMode {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            TaskContractEmitMode::Off => TASK_CONTRACT_MODE_OFF,
+            TaskContractEmitMode::Emit => TASK_CONTRACT_MODE_EMIT,
+            TaskContractEmitMode::EmitDryRun => TASK_CONTRACT_MODE_EMIT_DRY_RUN,
+        }
+    }
+
+    pub(super) fn is_enabled(self) -> bool {
+        !matches!(self, TaskContractEmitMode::Off)
+    }
+
+    pub(super) fn is_dry_run(self) -> bool {
+        matches!(self, TaskContractEmitMode::EmitDryRun)
+    }
+}
+
+/// Parse the opt-in args. Precedence:
+///   1. `task_contract_mode` (string, "off"|"emit"|"emit_dry_run")
+///   2. `emit_task_contract` (boolean, true ⇒ Emit, false ⇒ Off)
+///   3. default ⇒ Off
+///
+/// Returns `Err(structured)` for malformed values so the caller surfaces
+/// a typo (`task_contract_mode="emi"`) instead of silently falling back
+/// to Off.
+pub(super) fn parse_task_contract_emit_mode(
+    args: &Value,
+) -> std::result::Result<TaskContractEmitMode, ToolResult> {
+    if let Some(raw) = args.get("task_contract_mode") {
+        let s = match raw.as_str() {
+            Some(s) => s.trim(),
+            None => {
+                return Err(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        "task_contract_mode must be a string",
+                    )
+                    .with_suggestion(
+                        "expected one of: \"off\", \"emit\", \"emit_dry_run\"",
+                    ),
+                ));
+            }
+        };
+        return match s {
+            TASK_CONTRACT_MODE_OFF => Ok(TaskContractEmitMode::Off),
+            TASK_CONTRACT_MODE_EMIT => Ok(TaskContractEmitMode::Emit),
+            TASK_CONTRACT_MODE_EMIT_DRY_RUN => Ok(TaskContractEmitMode::EmitDryRun),
+            other => Err(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!("task_contract_mode `{}` is not supported", other),
+                )
+                .with_suggestion(
+                    "expected one of: \"off\", \"emit\", \"emit_dry_run\"",
+                ),
+            )),
+        };
+    }
+    match args.get("emit_task_contract").and_then(|v| v.as_bool()) {
+        Some(true) => Ok(TaskContractEmitMode::Emit),
+        Some(false) | None => Ok(TaskContractEmitMode::Off),
+    }
+}
+
+/// Lightweight projection of a workstation-dispatch task surface —
+/// independent of the wave-15 `WorkstationDispatchHints` struct so the
+/// emitter does not own any reformatting that the dispatch layer cares
+/// about. Owned by the emitter; populated by the caller from either the
+/// single-node merged hints or the DAG node hints.
+#[derive(Debug, Clone, Default)]
+pub(super) struct TaskContractInputs {
+    pub objective: String,
+    pub scope: Option<String>,
+    pub owned_files: Vec<String>,
+    pub forbidden_files: Vec<String>,
+    pub acceptance_commands: Vec<String>,
+    pub commit_policy: Option<String>,
+    pub dispatch_strategy: String,
+    pub target: String,
+    pub target_project: Option<String>,
+    pub requested_cwd: Option<String>,
+}
+
+/// Escape a string for inclusion inside a Lisp double-quoted literal.
+/// We only need to handle backslash + double-quote — task-contract
+/// readers go through the shared MissionD Lisp parser which treats
+/// every other byte literally.
+pub(super) fn lisp_escape_string(input: &str) -> String {
+    let mut out = String::with_capacity(input.len() + 2);
+    for ch in input.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            // Newlines in a Lisp string literal are valid; preserve verbatim.
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Render a non-empty string vector as a bracketed string list:
+///   `["a" "b"]`
+fn render_lisp_string_list(items: &[String]) -> String {
+    let mut out = String::from("[");
+    for (i, s) in items.iter().enumerate() {
+        if i > 0 {
+            out.push(' ');
+        }
+        out.push('"');
+        out.push_str(&lisp_escape_string(s));
+        out.push('"');
+    }
+    out.push(']');
+    out
+}
+
+/// Build a task-contract v1 Lisp document from the resolved inputs.
+///
+/// Mirrors `.missiond/tasks/schema/task-contract-v1.lisp`:
+///   - schema = "missiond.task-contract.v1"
+///   - kind   = "code-alignment" (workstation-dispatchable nodes carry
+///              code intent; if/when the emitter learns to project
+///              read-only briefs we'll add "review" branching here)
+///   - status = "ready"
+///   - owner  = "claudecode"
+///   - commit = (:required true :scope-check write-scope-only ...)
+///
+/// `node_id` doubles as the contract id (`<plan-uuid-prefix>-<node>`)
+/// so `check-task-contract.mjs --all` can pivot on a stable identifier
+/// after sweeping `.missiond/tasks/generated/`.
+pub(super) fn build_task_contract_lisp(
+    plan_id: uuid::Uuid,
+    node_id: &str,
+    board_task_id: &str,
+    inputs: &TaskContractInputs,
+) -> String {
+    let plan_short = plan_id
+        .to_string()
+        .chars()
+        .take(8)
+        .collect::<String>();
+    let contract_id = format!("plan-{}-node-{}", plan_short, sanitize_for_id(node_id));
+    let title = format!(
+        "Plan {} node {} — workstation task contract",
+        plan_id, node_id
+    );
+    let commit_message = format!("feat(plan-node): execute node {} for plan {}", node_id, plan_id);
+
+    let mut out = String::new();
+    out.push_str(";; Generated by MissionD plan-runner (wave-19 / task 06).\n");
+    out.push_str(&format!(
+        ";; plan_id = {}\n;; board_task_id = {}\n;; node_id = {}\n\n",
+        plan_id, board_task_id, node_id
+    ));
+    out.push_str(&format!("(task {}\n", contract_id));
+    out.push_str("  :schema \"missiond.task-contract.v1\"\n");
+    out.push_str(&format!("  :title \"{}\"\n", lisp_escape_string(&title)));
+    out.push_str("  :kind code-alignment\n");
+    out.push_str("  :status ready\n");
+    out.push_str("  :owner \"claudecode\"\n");
+    out.push_str(&format!(
+        "  :dispatch-strategy \"{}\"\n",
+        lisp_escape_string(&inputs.dispatch_strategy)
+    ));
+    out.push_str(&format!(
+        "  :goal \"{}\"\n",
+        lisp_escape_string(inputs.objective.trim())
+    ));
+
+    if let Some(scope) = inputs.scope.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        out.push_str(&format!(
+            "  :scope \"{}\"\n",
+            lisp_escape_string(scope)
+        ));
+    }
+
+    // :write-scope is required and non-empty per task-contract v1. When
+    // the caller did not declare `owned_files`, fall back to a single
+    // sentinel that the checker will reject — better to fail loudly on
+    // the contract than silently let the worker stage anything.
+    out.push_str("  :write-scope\n    ");
+    if inputs.owned_files.is_empty() {
+        out.push_str("[]\n");
+    } else {
+        out.push_str(&render_lisp_string_list(&inputs.owned_files));
+        out.push('\n');
+    }
+
+    out.push_str("  :must-not-touch\n    ");
+    out.push_str(&render_lisp_string_list(&inputs.forbidden_files));
+    out.push('\n');
+
+    if !inputs.acceptance_commands.is_empty() {
+        out.push_str("  :acceptance\n    ");
+        out.push_str(&render_lisp_string_list(&inputs.acceptance_commands));
+        out.push('\n');
+    } else {
+        // task-contract v1 demands `:acceptance` non-empty — surface a
+        // sentinel so the contract round-trips through the checker as
+        // an authoring failure rather than silently dispatching.
+        out.push_str("  :acceptance\n    []\n");
+    }
+
+    let commit_policy = inputs
+        .commit_policy
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("scoped");
+    out.push_str("  :commit\n");
+    out.push_str("    (:required true\n");
+    out.push_str(&format!(
+        "     :message \"{}\"\n",
+        lisp_escape_string(&commit_message)
+    ));
+    out.push_str("     :scope-check write-scope-only\n");
+    out.push_str(&format!(
+        "     :policy \"{}\")\n",
+        lisp_escape_string(commit_policy)
+    ));
+
+    if let Some(tp) = inputs
+        .target_project
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!(
+            "  :target-project \"{}\"\n",
+            lisp_escape_string(tp)
+        ));
+    }
+    if let Some(cwd) = inputs
+        .requested_cwd
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!(
+            "  :requested-cwd \"{}\"\n",
+            lisp_escape_string(cwd)
+        ));
+    }
+    out.push_str(&format!(
+        "  :target \"{}\"\n",
+        lisp_escape_string(&inputs.target)
+    ));
+    out.push_str(&format!(
+        "  :plan-id \"{}\"\n",
+        plan_id
+    ));
+    out.push_str(&format!(
+        "  :node-id \"{}\"\n",
+        lisp_escape_string(node_id)
+    ));
+    out.push_str(")\n");
+    out
+}
+
+/// Sanitise an arbitrary node id into the lowercase kebab-friendly form
+/// task-contract v1 demands of `:id`. Unknown characters collapse to
+/// `-`; collapsing repeats keeps the result readable.
+fn sanitize_for_id(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    let mut out = String::with_capacity(lower.len());
+    let mut prev_dash = false;
+    for ch in lower.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+            out.push(ch);
+            prev_dash = false;
+        } else if ch == '-' || ch.is_whitespace() || ch == '/' {
+            if !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        } else {
+            // Drop everything else conservatively (no random unicode in ids).
+            if !prev_dash {
+                out.push('-');
+                prev_dash = true;
+            }
+        }
+    }
+    let trimmed = out.trim_matches('-').to_string();
+    if trimmed.is_empty() {
+        "unnamed".to_string()
+    } else {
+        trimmed
+    }
+}
+
+/// Compute the on-disk path for a generated task contract. Caller-resolved
+/// project root MUST already be canonical (we do not invent one here).
+pub(super) fn task_contract_path(
+    project_root: &std::path::Path,
+    plan_id: uuid::Uuid,
+    node_id: &str,
+) -> PathBuf {
+    project_root
+        .join(".missiond")
+        .join("tasks")
+        .join("generated")
+        .join(plan_id.to_string())
+        .join(format!("{}.lisp", sanitize_for_id(node_id)))
+}
+
+/// Build the deterministic `node scripts/render-claudecode-task.mjs ...`
+/// invocation paired with each generated contract. Surfaced on the
+/// response so a caller can render the markdown brief without the
+/// daemon shelling out to Node.
+pub(super) fn render_command_for(contract_path: &std::path::Path) -> String {
+    format!(
+        "node scripts/render-claudecode-task.mjs --force {}",
+        contract_path.display()
+    )
+}
+
+/// Write the generated contract to `<project_root>/.missiond/tasks/generated/
+/// <plan_id>/<node_id>.lisp` atomically (tmp → rename).
+///
+/// Returns the absolute path on success. Any IO failure surfaces a
+/// structured `anyhow::Error` so the caller can refuse the dispatch.
+pub(super) async fn write_task_contract(
+    state: &AppState,
+    plan_id: uuid::Uuid,
+    node_id: &str,
+    project_arg: Option<&str>,
+    cwd_arg: Option<&str>,
+    target_project_arg: Option<&str>,
+    body: &str,
+) -> Result<PathBuf> {
+    let project_root = resolve_project_root(
+        &state.project_registry,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+    )
+    .await?;
+    write_task_contract_under_root(&project_root, plan_id, node_id, body)
+}
+
+/// Inner half of [`write_task_contract`] that takes an already-resolved
+/// project root. Split out so unit tests can exercise the on-disk
+/// contract without materialising a full [`AppState`] (the same
+/// pattern [`resolve_project_root`] tests use against
+/// [`SharedProjectRegistry`]).
+pub(super) fn write_task_contract_under_root(
+    project_root: &std::path::Path,
+    plan_id: uuid::Uuid,
+    node_id: &str,
+    body: &str,
+) -> Result<PathBuf> {
+    let path = task_contract_path(project_root, plan_id, node_id);
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("task contract path missing parent: {}", path.display()))?;
+    std::fs::create_dir_all(dir)
+        .map_err(|e| anyhow!("mkdir {}: {}", dir.display(), e))?;
+    let tmp = path.with_extension("lisp.tmp");
+    std::fs::write(&tmp, body.as_bytes())
+        .map_err(|e| anyhow!("write tmp {}: {}", tmp.display(), e))?;
+    std::fs::rename(&tmp, &path)
+        .map_err(|e| anyhow!("rename {} -> {}: {}", tmp.display(), path.display(), e))?;
+    Ok(path)
+}
+
+/// Whether the resolved dispatch shape is eligible for task-contract
+/// emission. Mirrors the workstation-dispatch eligibility floor:
+/// target must be `mission_task_delegate` and the objective must be
+/// non-empty. Other gates (owned-files / scope) are NOT enforced here
+/// because the emitter writes a contract that surfaces them as
+/// authoring violations through `check-task-contract.mjs`.
+pub(super) fn is_task_contract_eligible(
+    target: &str,
+    objective: Option<&str>,
+) -> bool {
+    if target != "mission_task_delegate" {
+        return false;
+    }
+    objective
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// The result of a single task-contract emission attempt — surfaced
+/// verbatim onto the response payload regardless of dispatch outcome.
+#[derive(Debug, Clone)]
+pub(super) struct TaskContractEmissionRecord {
+    pub mode: TaskContractEmitMode,
+    pub eligible: bool,
+    /// Set when `eligible=false` so the caller can read the skip reason.
+    pub skip_reason: Option<String>,
+    /// Set when emission succeeded.
+    pub path: Option<PathBuf>,
+    /// Set when emission attempted but failed.
+    pub error: Option<String>,
+    /// Set when emission succeeded.
+    pub render_command: Option<String>,
+}
+
+impl TaskContractEmissionRecord {
+    pub(super) fn off() -> Self {
+        Self {
+            mode: TaskContractEmitMode::Off,
+            eligible: false,
+            skip_reason: None,
+            path: None,
+            error: None,
+            render_command: None,
+        }
+    }
+
+    pub(super) fn skipped(mode: TaskContractEmitMode, reason: &str) -> Self {
+        Self {
+            mode,
+            eligible: false,
+            skip_reason: Some(reason.to_string()),
+            path: None,
+            error: None,
+            render_command: None,
+        }
+    }
+
+    pub(super) fn ok(mode: TaskContractEmitMode, path: PathBuf) -> Self {
+        let cmd = render_command_for(&path);
+        Self {
+            mode,
+            eligible: true,
+            skip_reason: None,
+            path: Some(path),
+            error: None,
+            render_command: Some(cmd),
+        }
+    }
+
+    pub(super) fn failed(mode: TaskContractEmitMode, error: String) -> Self {
+        Self {
+            mode,
+            eligible: true,
+            skip_reason: None,
+            path: None,
+            error: Some(error),
+            render_command: None,
+        }
+    }
+
+    pub(super) fn is_failure(&self) -> bool {
+        self.error.is_some()
+    }
+
+    /// Project the record onto a JSON block to be merged into the
+    /// response payload. Returns `None` when the emitter was OFF and
+    /// nothing observable happened — keeps the response byte-shape
+    /// identical to the pre-wave19 baseline for the default path.
+    pub(super) fn to_response_block(&self) -> Option<Value> {
+        if matches!(self.mode, TaskContractEmitMode::Off) && self.path.is_none() && self.error.is_none() {
+            return None;
+        }
+        let mut map = serde_json::Map::new();
+        map.insert("task_contract_mode".to_string(), json!(self.mode.as_str()));
+        map.insert("task_contract_eligible".to_string(), json!(self.eligible));
+        if let Some(reason) = &self.skip_reason {
+            map.insert("task_contract_skip_reason".to_string(), json!(reason));
+        }
+        if let Some(path) = &self.path {
+            map.insert("task_contract_path".to_string(), json!(path.display().to_string()));
+        }
+        if let Some(cmd) = &self.render_command {
+            map.insert("render_command".to_string(), json!(cmd));
+        }
+        if let Some(err) = &self.error {
+            map.insert("task_contract_error".to_string(), json!(err));
+        }
+        Some(Value::Object(map))
+    }
+}
+
+/// Drive one emission pass given resolved inputs. Always returns a
+/// record; never panics, never silently swallows IO failure (failures
+/// land on `record.error`).
+pub(super) async fn emit_task_contract(
+    state: &AppState,
+    plan_id: uuid::Uuid,
+    board_task_id: &str,
+    node_id: &str,
+    mode: TaskContractEmitMode,
+    inputs: &TaskContractInputs,
+    project_arg: Option<&str>,
+    cwd_arg: Option<&str>,
+    target_project_arg: Option<&str>,
+) -> TaskContractEmissionRecord {
+    if !mode.is_enabled() {
+        return TaskContractEmissionRecord::off();
+    }
+    if !is_task_contract_eligible(&inputs.target, Some(&inputs.objective)) {
+        return TaskContractEmissionRecord::skipped(
+            mode,
+            "target is not mission_task_delegate or objective is empty",
+        );
+    }
+    let body = build_task_contract_lisp(plan_id, node_id, board_task_id, inputs);
+    match write_task_contract(
+        state,
+        plan_id,
+        node_id,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+        &body,
+    )
+    .await
+    {
+        Ok(path) => TaskContractEmissionRecord::ok(mode, path),
+        Err(e) => TaskContractEmissionRecord::failed(mode, e.to_string()),
+    }
+}
+
+/// Build a `TaskContractInputs` view from the wave-15 workstation hint
+/// projection. Used by the single-node `action_execute_internal` path
+/// where the merged hints live; the DAG path constructs the inputs
+/// directly from the per-node `WorkstationDispatchHints`.
+pub(super) fn task_contract_inputs_from_hints(
+    hints: &super::workstation_dispatch::WorkstationDispatchHints,
+    target: &str,
+    dispatch_strategy: &str,
+) -> TaskContractInputs {
+    TaskContractInputs {
+        objective: hints
+            .objective
+            .clone()
+            .unwrap_or_default(),
+        scope: hints.scope.clone(),
+        owned_files: hints.owned_files.clone(),
+        forbidden_files: hints.forbidden_files.clone(),
+        acceptance_commands: hints.acceptance_commands.clone(),
+        commit_policy: hints.commit_policy.clone(),
+        dispatch_strategy: dispatch_strategy.to_string(),
+        target: target.to_string(),
+        target_project: hints.target_project.clone(),
+        requested_cwd: hints.requested_cwd.clone(),
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -5542,6 +6287,7 @@ mod tests {
             None,
             None,
             &fixture_decision_not_applicable(),
+            &TaskContractEmissionRecord::off(),
         );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "executing");
@@ -5571,6 +6317,7 @@ mod tests {
             Some("mkdir failed: read-only fs".to_string()),
             None,
             &fixture_decision_not_applicable(),
+            &TaskContractEmissionRecord::off(),
         );
         let v = parse_payload(&result);
         // Inner tool already produced durable side effects; we keep
@@ -5594,6 +6341,7 @@ mod tests {
             None,
             Some("DB error: connection lost".to_string()),
             &fixture_decision_not_applicable(),
+            &TaskContractEmissionRecord::off(),
         );
         let v = parse_payload(&result);
         assert_ne!(v["status"], "executing");
@@ -5825,6 +6573,7 @@ mod tests {
             Some("disk full".to_string()),
             Some("DB error: timeout".to_string()),
             &fixture_decision_not_applicable(),
+            &TaskContractEmissionRecord::off(),
         );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "dispatch_partial");
@@ -6409,6 +7158,253 @@ mod tests {
         assert_eq!(resolved, root_a);
     }
 
+    // ── wave-19 / task 06 — task-contract emitter v0 ────────────────────
+
+    #[test]
+    fn parse_task_contract_emit_mode_default_is_off() {
+        let v = json!({});
+        let m = parse_task_contract_emit_mode(&v).expect("default ok");
+        assert_eq!(m, TaskContractEmitMode::Off);
+    }
+
+    #[test]
+    fn parse_task_contract_emit_mode_boolean_shorthand_true_is_emit() {
+        let v = json!({"emit_task_contract": true});
+        let m = parse_task_contract_emit_mode(&v).expect("bool ok");
+        assert_eq!(m, TaskContractEmitMode::Emit);
+    }
+
+    #[test]
+    fn parse_task_contract_emit_mode_boolean_shorthand_false_is_off() {
+        let v = json!({"emit_task_contract": false});
+        let m = parse_task_contract_emit_mode(&v).expect("bool ok");
+        assert_eq!(m, TaskContractEmitMode::Off);
+    }
+
+    #[test]
+    fn parse_task_contract_emit_mode_explicit_emit_dry_run() {
+        let v = json!({"task_contract_mode": "emit_dry_run"});
+        let m = parse_task_contract_emit_mode(&v).expect("dry-run ok");
+        assert_eq!(m, TaskContractEmitMode::EmitDryRun);
+    }
+
+    #[test]
+    fn parse_task_contract_emit_mode_explicit_wins_over_boolean() {
+        let v = json!({
+            "task_contract_mode": "off",
+            "emit_task_contract": true,
+        });
+        let m = parse_task_contract_emit_mode(&v).expect("explicit wins");
+        // Explicit string "off" beats boolean shorthand `true`.
+        assert_eq!(m, TaskContractEmitMode::Off);
+    }
+
+    #[test]
+    fn parse_task_contract_emit_mode_unknown_string_is_structured_error() {
+        let v = json!({"task_contract_mode": "emi"});
+        let err = parse_task_contract_emit_mode(&v).expect_err("typo rejected");
+        assert!(err.is_error.unwrap_or(false));
+    }
+
+    #[test]
+    fn parse_task_contract_emit_mode_non_string_value_is_structured_error() {
+        let v = json!({"task_contract_mode": 7});
+        let err = parse_task_contract_emit_mode(&v).expect_err("non-string rejected");
+        assert!(err.is_error.unwrap_or(false));
+    }
+
+    #[test]
+    fn lisp_escape_string_passes_plain_text() {
+        assert_eq!(lisp_escape_string("hello world"), "hello world");
+    }
+
+    #[test]
+    fn lisp_escape_string_escapes_backslash_and_quote() {
+        assert_eq!(lisp_escape_string("a\"b\\c"), "a\\\"b\\\\c");
+    }
+
+    #[test]
+    fn is_task_contract_eligible_requires_task_delegate() {
+        assert!(is_task_contract_eligible("mission_task_delegate", Some("ship")));
+        assert!(!is_task_contract_eligible("mission_execution", Some("ship")));
+        assert!(!is_task_contract_eligible("mission_flow_run", Some("ship")));
+    }
+
+    #[test]
+    fn is_task_contract_eligible_rejects_empty_objective() {
+        assert!(!is_task_contract_eligible("mission_task_delegate", Some("")));
+        assert!(!is_task_contract_eligible("mission_task_delegate", Some("   ")));
+        assert!(!is_task_contract_eligible("mission_task_delegate", None));
+    }
+
+    #[test]
+    fn build_task_contract_lisp_round_trips_required_fields() {
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-0000deadbeef").unwrap();
+        let inputs = TaskContractInputs {
+            objective: "ship feature X".to_string(),
+            scope: Some("only the renderer".to_string()),
+            owned_files: vec!["a.rs".to_string(), "b.rs".to_string()],
+            forbidden_files: vec!["src/lib.rs".to_string()],
+            acceptance_commands: vec!["cargo test".to_string(), "cargo build".to_string()],
+            commit_policy: Some("scoped".to_string()),
+            dispatch_strategy: "agent-team".to_string(),
+            target: "mission_task_delegate".to_string(),
+            target_project: Some("missiond".to_string()),
+            requested_cwd: None,
+        };
+        let body = build_task_contract_lisp(plan_id, "node-1", "btk-7", &inputs);
+        // Must declare schema, kind, status, owner, write-scope, must-not-touch,
+        // acceptance, commit (the task-contract v1 required floor).
+        assert!(body.contains(":schema \"missiond.task-contract.v1\""));
+        assert!(body.contains(":kind code-alignment"));
+        assert!(body.contains(":status ready"));
+        assert!(body.contains(":owner \"claudecode\""));
+        assert!(body.contains(":dispatch-strategy \"agent-team\""));
+        assert!(body.contains(":goal \"ship feature X\""));
+        assert!(body.contains(":scope \"only the renderer\""));
+        assert!(body.contains("[\"a.rs\" \"b.rs\"]"));
+        assert!(body.contains("[\"src/lib.rs\"]"));
+        assert!(body.contains("[\"cargo test\" \"cargo build\"]"));
+        assert!(body.contains(":scope-check write-scope-only"));
+        assert!(body.contains(":target-project \"missiond\""));
+        // node-id stamped verbatim
+        assert!(body.contains(":node-id \"node-1\""));
+        // plan id traced for downstream observers
+        assert!(body.contains(&plan_id.to_string()));
+        // task id derived from plan + node prefix
+        assert!(body.contains("(task plan-00000000-node-node-1\n"));
+    }
+
+    #[test]
+    fn build_task_contract_lisp_escapes_quotes_in_objective() {
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-0000feedface").unwrap();
+        let inputs = TaskContractInputs {
+            objective: r#"ship "thing" now"#.to_string(),
+            owned_files: vec!["a.rs".to_string()],
+            target: "mission_task_delegate".to_string(),
+            dispatch_strategy: "agent-team".to_string(),
+            ..Default::default()
+        };
+        let body = build_task_contract_lisp(plan_id, "node-x", "btk-1", &inputs);
+        assert!(
+            body.contains(r#":goal "ship \"thing\" now""#),
+            "expected escaped quotes, got: {}",
+            body
+        );
+    }
+
+    #[test]
+    fn task_contract_path_uses_plan_then_node_layout() {
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-000000abcdef").unwrap();
+        let root = std::path::Path::new("/tmp/missiond-root");
+        let p = task_contract_path(root, plan_id, "node-7");
+        let s = p.display().to_string();
+        assert!(s.ends_with(&format!(
+            ".missiond/tasks/generated/{}/node-7.lisp",
+            plan_id
+        )));
+    }
+
+    #[test]
+    fn task_contract_path_sanitizes_node_id() {
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-000000000111").unwrap();
+        let root = std::path::Path::new("/tmp/missiond-root");
+        // path-traversal characters collapse to a single dash
+        let p = task_contract_path(root, plan_id, "node/with/slashes");
+        assert!(p.display().to_string().ends_with("node-with-slashes.lisp"));
+    }
+
+    #[test]
+    fn render_command_includes_renderer_script_and_force_flag() {
+        let cmd = render_command_for(std::path::Path::new("/tmp/a.lisp"));
+        assert!(cmd.contains("scripts/render-claudecode-task.mjs"));
+        assert!(cmd.contains("--force"));
+        assert!(cmd.contains("/tmp/a.lisp"));
+    }
+
+    #[test]
+    fn task_contract_emission_record_off_has_no_response_block() {
+        let r = TaskContractEmissionRecord::off();
+        assert!(r.to_response_block().is_none());
+        assert!(!r.is_failure());
+    }
+
+    #[test]
+    fn task_contract_emission_record_skipped_surfaces_reason() {
+        let r =
+            TaskContractEmissionRecord::skipped(TaskContractEmitMode::Emit, "objective empty");
+        let block = r.to_response_block().expect("skipped surfaces a block");
+        assert_eq!(block["task_contract_mode"], "emit");
+        assert_eq!(block["task_contract_eligible"], false);
+        assert_eq!(block["task_contract_skip_reason"], "objective empty");
+        assert!(block.get("task_contract_path").is_none());
+        assert!(!r.is_failure());
+    }
+
+    #[test]
+    fn task_contract_emission_record_ok_includes_path_and_render_command() {
+        let r = TaskContractEmissionRecord::ok(
+            TaskContractEmitMode::Emit,
+            std::path::PathBuf::from("/tmp/a.lisp"),
+        );
+        let block = r.to_response_block().expect("ok surfaces block");
+        assert_eq!(block["task_contract_mode"], "emit");
+        assert_eq!(block["task_contract_eligible"], true);
+        assert_eq!(block["task_contract_path"], "/tmp/a.lisp");
+        assert!(block["render_command"]
+            .as_str()
+            .unwrap_or("")
+            .contains("render-claudecode-task.mjs"));
+        assert!(!r.is_failure());
+    }
+
+    #[test]
+    fn task_contract_emission_record_failed_surfaces_error() {
+        let r = TaskContractEmissionRecord::failed(
+            TaskContractEmitMode::Emit,
+            "disk full".to_string(),
+        );
+        let block = r.to_response_block().expect("failure surfaces block");
+        assert_eq!(block["task_contract_error"], "disk full");
+        assert!(r.is_failure());
+    }
+
+    #[test]
+    fn write_task_contract_under_root_creates_canonical_path() {
+        // Pure on-disk test that does not need an AppState — exercise the
+        // path layout + atomic write under a tempdir.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-0000ffffffff").unwrap();
+        let body = "(task fixture :schema \"missiond.task-contract.v1\")\n";
+        let path = write_task_contract_under_root(&root, plan_id, "node-a", body)
+            .expect("write should succeed");
+        let s = path.display().to_string();
+        assert!(s.ends_with(&format!(
+            ".missiond/tasks/generated/{}/node-a.lisp",
+            plan_id
+        )));
+        let read_back = std::fs::read_to_string(&path).expect("read back contract");
+        assert_eq!(read_back, body);
+    }
+
+    #[test]
+    fn write_task_contract_under_root_overwrites_existing_atomically() {
+        // Second write should replace the prior body via the tmp+rename
+        // dance. No leftover .lisp.tmp file may remain.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-0000ffffeeee").unwrap();
+        let _ = write_task_contract_under_root(&root, plan_id, "node-a", "first")
+            .expect("first write");
+        let path = write_task_contract_under_root(&root, plan_id, "node-a", "second")
+            .expect("second write");
+        let read_back = std::fs::read_to_string(&path).expect("read");
+        assert_eq!(read_back, "second");
+        let tmp_sibling = path.with_extension("lisp.tmp");
+        assert!(!tmp_sibling.exists(), "tmp leftover detected");
+    }
+
     // ── wave-12 :: record_evidence routing decision ──────────────────
     //
     // The action handler picks between the historical untagged shape
@@ -6816,7 +7812,13 @@ mod tests {
             inner_payload: json!({"task_id": "btk-7"}),
         };
         let decision = fixture_decision(wd::WorkstationDispatchSource::ExplicitArg);
-        let result = build_workstation_dispatch_response(&plan, &resolved, outcome, &decision);
+        let result = build_workstation_dispatch_response(
+            &plan,
+            &resolved,
+            outcome,
+            &decision,
+            &TaskContractEmissionRecord::off(),
+        );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "executing");
         assert_eq!(v["runner_status"], "workstation_dispatch_v0");
@@ -6841,7 +7843,13 @@ mod tests {
             task_brief: None,
         };
         let decision = fixture_decision(wd::WorkstationDispatchSource::Inferred);
-        let result = build_workstation_dispatch_response(&plan, &resolved, outcome, &decision);
+        let result = build_workstation_dispatch_response(
+            &plan,
+            &resolved,
+            outcome,
+            &decision,
+            &TaskContractEmissionRecord::off(),
+        );
         let v = parse_payload(&result);
         assert_ne!(v["status"], "executing");
         assert_eq!(v["status"], "dispatch_skipped");
@@ -6862,7 +7870,13 @@ mod tests {
             task_brief: "## Objective\nship\n".to_string(),
         };
         let decision = fixture_decision(wd::WorkstationDispatchSource::PlanHint);
-        let result = build_workstation_dispatch_response(&plan, &resolved, outcome, &decision);
+        let result = build_workstation_dispatch_response(
+            &plan,
+            &resolved,
+            outcome,
+            &decision,
+            &TaskContractEmissionRecord::off(),
+        );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "dry_run");
         assert_eq!(v["workstation_dispatch_status"], "dry_run_no_dispatch");

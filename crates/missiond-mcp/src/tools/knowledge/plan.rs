@@ -630,6 +630,30 @@ fn build_properties() -> Value {
         &["off", "preview", "apply_safe"],
     ));
 
+    // ── wave-19 / task 06 — plan-runner task-contract emitter v0 ────────
+    //
+    // Opt-in: callers pass `emit_task_contract=true` (boolean shorthand)
+    // or `task_contract_mode` (`off` | `emit` | `emit_dry_run`). When
+    // enabled the runner writes a task-contract v1 Lisp sidecar at
+    // `<project_root>/.missiond/tasks/generated/<plan_id>/<node_id>.lisp`
+    // BEFORE handing the work off to the workstation-dispatch substrate
+    // (or before the inner-handler call on the legacy path). The
+    // emission failure path REFUSES dispatch (the Lisp contract is the
+    // SSOT for the dispatched work); EmitDryRun additionally skips the
+    // inner dispatch once the contract has been written.
+    //
+    // Default mode is `off` ⇒ pre-wave19 byte-shape preserved.
+    p.insert("emit_task_contract".into(), prop(
+        "boolean",
+        "[execute] (wave-19 / task 06) shorthand for `task_contract_mode`. `true` ⇒ \"emit\" (write the contract Lisp file BEFORE dispatch then proceed with the workstation / inner substrate); `false` / omitted ⇒ \"off\" (no emission, byte-compatible with the pre-wave19 contract). When BOTH `task_contract_mode` and `emit_task_contract` are supplied, `task_contract_mode` wins. The emitter writes `<project_root>/.missiond/tasks/generated/<plan_id>/<node_id>.lisp` (single-node executes use `node_id=\"root\"`; DAG nodes use the PLAN.lisp `:id`); response surfaces `task_contract_path` + `render_command` (a `node scripts/render-claudecode-task.mjs --force <path>` invocation a caller can run to render the markdown brief without the daemon shelling out to Node). On write failure the dispatch is REFUSED (status=\"dispatch_skipped\", runner_status=\"task_contract_emit_failed\") so the contract stays the SSOT — a missing contract MUST NOT be papered over by a successful inner call.",
+    ));
+
+    p.insert("task_contract_mode".into(), prop_enum(
+        "string",
+        "[execute] (wave-19 / task 06) explicit task-contract emission mode. `off` (default) preserves the pre-wave19 byte-shape (no emission, response omits the wave-19 fields entirely). `emit` writes `<project_root>/.missiond/tasks/generated/<plan_id>/<node_id>.lisp` BEFORE handing off to the workstation substrate / inner handler — the contract is the Lisp SSOT and downstream consumers (workstation dispatch v0 in wave-19/07, execution complete in wave-19/08) read it in subsequent waves. `emit_dry_run` writes the contract AND skips the inner dispatch — useful for previewing the per-node Lisp without consuming substrate side effects. Eligibility: only nodes resolving to `target=mission_task_delegate` with a non-empty objective have a contract written; ineligible nodes surface `task_contract_eligible=false` + `task_contract_skip_reason` rather than silently dispatching. Failure semantics: any IO failure REFUSES the dispatch (status=\"dispatch_skipped\"); a contract failure is non-retryable in DAG mode (re-running an inner handler with no contract on disk would defeat the SSOT). Single-node response surfaces `task_contract_path` + `render_command`; DAG `node_results[]` carry the same fields per node.",
+        &["off", "emit", "emit_dry_run"],
+    ));
+
     Value::Object(p)
 }
 
@@ -808,7 +832,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \
          + intent-flow.lisp :: F-workstation-dispatch-policy \
          + intent-worker.lisp :: claudecode-workstation-orchestration \
-         + intent-memory.lisp :: directive-layer :: file-first-artifacts :: plan-lisp。",
+         + intent-memory.lisp :: directive-layer :: file-first-artifacts :: plan-lisp。\
+         wave-19 / task 06 plan-runner task-contract emitter v0: execute (single-node + DAG) 接受 \
+         emit_task_contract=true (boolean shorthand) 或 task_contract_mode (off|emit|emit_dry_run) \
+         opt-in 写出 task-contract v1 Lisp sidecar (`<project_root>/.missiond/tasks/generated/<plan_id>/<node_id>.lisp`, \
+         单节点用 node_id=\"root\", DAG 用 PLAN.lisp `:id`) BEFORE 执行 workstation substrate / inner handler — \
+         Lisp 成为 dispatch SSOT。响应附 task_contract_path + render_command \
+         (`node scripts/render-claudecode-task.mjs --force <path>`) 让 caller 自行 render markdown 而 daemon 不 spawn Node。\
+         eligibility: 仅 target=mission_task_delegate 且 objective 非空才写, 否则 surface task_contract_eligible=false + \
+         task_contract_skip_reason。失败语义: 写失败立即 REFUSE dispatch (status=\"dispatch_skipped\", \
+         runner_status=\"task_contract_emit_failed\") — missing contract 绝不被 inner success 覆盖; DAG 节点 emit 失败 \
+         non-retryable (IO 错误重试无意义)。task_contract_mode=\"emit_dry_run\" 写完 contract 就 return, 不调 substrate。\
+         默认 mode=off ⇒ 与 pre-wave19 byte-shape 完全一致。\
+         Lisp 源 (forward ref): .missiond/tasks/schema/task-contract-v1.lisp + intent-tools.lisp :: implemented-surface \
+         mission_plan :: :task-contract-emitter (wave-19/12 backfill)。",
         schema,
     )]
 }

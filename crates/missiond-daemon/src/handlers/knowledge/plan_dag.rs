@@ -3341,6 +3341,14 @@ pub(super) async fn action_execute_dag_v1(
         return Ok(err);
     }
 
+    // wave-19 / task 06 — task-contract emit knob validated up-front so
+    // a typo (`task_contract_mode="emi"`) fails fast before the DAG
+    // executes. Default `Off` is byte-compatible with pre-wave19.
+    let task_contract_ctx = match TaskContractDispatchCtx::from_args(args) {
+        Ok(c) => c,
+        Err(err) => return Ok(err),
+    };
+
     let (parsed, order) = match build_validated_dag(&plan.sexp_text) {
         Ok(v) => v,
         Err(e) => return Ok(e.into_tool_result()),
@@ -3370,7 +3378,7 @@ pub(super) async fn action_execute_dag_v1(
     );
 
     if dry_run {
-        return Ok(ToolResult::json_pretty(&json!({
+        let mut payload = json!({
             "status": "dry_run",
             "execute_mode": "internal",
             "scheduler_mode": "dag_v1",
@@ -3397,11 +3405,28 @@ pub(super) async fn action_execute_dag_v1(
             "claim_lease_secs": claim_lease_secs,
             "claimer_name": claimer_name,
             "enforce_claims": enforce_claims,
-        })));
+        });
+        // wave-19 / task 06 — surface the resolved emission mode in
+        // dry-run responses too so callers can preview the contract
+        // policy without dispatching. Quiet when mode=Off so the
+        // pre-wave19 byte-shape is preserved.
+        if task_contract_ctx.mode.is_enabled() {
+            payload["task_contract_mode"] = json!(task_contract_ctx.mode.as_str());
+        }
+        return Ok(ToolResult::json_pretty(&payload));
     }
 
     let outcome =
-        execute_with_concurrency(state, args, plan, &parsed, &order, max_parallel_nodes).await?;
+        execute_with_concurrency(
+            state,
+            args,
+            plan,
+            &parsed,
+            &order,
+            max_parallel_nodes,
+            task_contract_ctx.clone(),
+        )
+        .await?;
     let aggregate_status = outcome.aggregate_status();
     let evidence_path = outcome.evidence_path.clone();
     let evidence_error = outcome.evidence_error.clone();
@@ -4460,10 +4485,60 @@ fn workstation_outcome_to_dispatch_pair(
     (payload, classification, non_retryable)
 }
 
+/// wave-19 / task 06 — per-DAG-run task-contract emission context. The
+/// scheduler resolves the mode + project-resolution signals once at the
+/// top of `action_execute_dag_v1` and clones one of these into every
+/// `dispatch_node` task so the per-node emit does not have to re-parse
+/// the caller args (and stays aligned with the single-node runner's
+/// project-root resolution path). All fields are owned (no borrowed
+/// references) so the struct survives `tokio::JoinSet::spawn`'s
+/// `'static` requirement.
+#[derive(Debug, Clone)]
+pub(super) struct TaskContractDispatchCtx {
+    pub mode: super::plan::TaskContractEmitMode,
+    pub project_arg: Option<String>,
+    pub cwd_arg: Option<String>,
+    pub target_project_arg: Option<String>,
+}
+
+impl TaskContractDispatchCtx {
+    pub(super) fn off() -> Self {
+        Self {
+            mode: super::plan::TaskContractEmitMode::Off,
+            project_arg: None,
+            cwd_arg: None,
+            target_project_arg: None,
+        }
+    }
+
+    /// Build the ctx from caller args. Returns
+    /// `Err(structured)` for malformed `task_contract_mode` values so
+    /// the scheduler fails fast before spawning any node task.
+    pub(super) fn from_args(args: &Value) -> std::result::Result<Self, ToolResult> {
+        let mode = super::plan::parse_task_contract_emit_mode(args)?;
+        Ok(Self {
+            mode,
+            project_arg: args
+                .get("project")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            cwd_arg: args
+                .get("cwd")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            target_project_arg: args
+                .get("target_project")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        })
+    }
+}
+
 async fn dispatch_node(
     state: AppState,
     plan: Plan,
     node: DagNode,
+    task_contract_ctx: TaskContractDispatchCtx,
 ) -> Result<DispatchOutcome> {
     let inner_args_built = build_node_inner_args(&node, &plan);
     let dispatch_strategy = inner_args_built.dispatch_strategy.clone();
@@ -4508,6 +4583,88 @@ async fn dispatch_node(
     );
 
     if dispatch_decision.is_enabled() {
+        // wave-19 / task 06 — emit the per-node task-contract sidecar
+        // BEFORE handing the node to the workstation substrate. The
+        // contract is the SSOT, so a failed write REFUSES dispatch
+        // for this node; non-retryable so the wave loop does not loop
+        // through the inner handler hoping the disk recovers. Default
+        // mode (`Off`) returns an empty record and the per-node
+        // payload omits the wave-19 fields entirely.
+        let inputs = super::plan::task_contract_inputs_from_hints(
+            &merged,
+            &node.target,
+            &dispatch_strategy,
+        );
+        let emission = super::plan::emit_task_contract(
+            &state,
+            plan.id,
+            &plan.board_task_id,
+            &node.id,
+            task_contract_ctx.mode,
+            &inputs,
+            task_contract_ctx.project_arg.as_deref(),
+            task_contract_ctx.cwd_arg.as_deref(),
+            task_contract_ctx.target_project_arg.as_deref(),
+        )
+        .await;
+
+        if emission.is_failure() {
+            // Refuse the per-node dispatch — the missing contract
+            // would leave downstream consumers with no Lisp SSOT.
+            // Mark non-retryable: an IO failure is unlikely to fix
+            // itself by re-running the inner handler.
+            let mut payload = json!({
+                "node_id": node.id,
+                "target": node.target,
+                "workstation_dispatch_status": "skipped_task_contract_emit_failed",
+                "workstation_dispatch_source": dispatch_decision.source.as_str(),
+            });
+            if let Some(reason) = dispatch_decision.reason.as_deref() {
+                payload["workstation_dispatch_inference_reason"] = json!(reason);
+            }
+            super::plan::merge_task_contract_block(&mut payload, &emission);
+            let reason = emission
+                .error
+                .clone()
+                .unwrap_or_else(|| "task_contract_emit_failed".to_string());
+            return Ok(DispatchOutcome {
+                node_id: node.id.clone(),
+                target: node.target.clone(),
+                dispatch_strategy,
+                inner_payload: payload,
+                classification: Err(format!(
+                    "task_contract emit failed for node `{}`: {}",
+                    node.id, reason
+                )),
+                non_retryable: true,
+            });
+        }
+
+        if task_contract_ctx.mode.is_dry_run() {
+            // EmitDryRun — never call the substrate. We mark the
+            // node succeeded (the contract write IS the work in
+            // dry-run mode); downstream nodes proceed normally so
+            // the caller can preview the full DAG with one pass.
+            let mut payload = json!({
+                "node_id": node.id,
+                "target": node.target,
+                "workstation_dispatch_status": "task_contract_emit_dry_run",
+                "workstation_dispatch_source": dispatch_decision.source.as_str(),
+            });
+            if let Some(reason) = dispatch_decision.reason.as_deref() {
+                payload["workstation_dispatch_inference_reason"] = json!(reason);
+            }
+            super::plan::merge_task_contract_block(&mut payload, &emission);
+            return Ok(DispatchOutcome {
+                node_id: node.id.clone(),
+                target: node.target.clone(),
+                dispatch_strategy,
+                inner_payload: payload,
+                classification: Ok(()),
+                non_retryable: false,
+            });
+        }
+
         let outcome = super::workstation_dispatch::run_workstation_dispatch(
             &state,
             &plan,
@@ -4517,13 +4674,14 @@ async fn dispatch_node(
             false,
         )
         .await;
-        let (inner_payload, classification, non_retryable) =
+        let (mut inner_payload, classification, non_retryable) =
             workstation_outcome_to_dispatch_pair(
                 &node,
                 &dispatch_strategy,
                 outcome,
                 &dispatch_decision,
             );
+        super::plan::merge_task_contract_block(&mut inner_payload, &emission);
         return Ok(DispatchOutcome {
             node_id: node.id.clone(),
             target: node.target.clone(),
@@ -6947,6 +7105,7 @@ async fn execute_with_concurrency(
     parsed: &ParsedDag,
     order: &[String],
     max_parallel_nodes: usize,
+    task_contract_ctx: TaskContractDispatchCtx,
 ) -> Result<ExecutionOutcome> {
     let max_parallel = max_parallel_nodes.max(1);
     let by_id: HashMap<String, DagNode> =
@@ -7440,7 +7599,10 @@ async fn execute_with_concurrency(
             .await;
             let state_clone = state.clone();
             let plan_clone = plan.clone();
-            join_set.spawn(async move { dispatch_node(state_clone, plan_clone, node).await });
+            let task_contract_ctx_clone = task_contract_ctx.clone();
+            join_set.spawn(async move {
+                dispatch_node(state_clone, plan_clone, node, task_contract_ctx_clone).await
+            });
         }
 
         // 7. Drain wave; for each result decide success/failure, update
@@ -7829,8 +7991,15 @@ async fn execute_with_concurrency(
                 let state_clone = state.clone();
                 let plan_clone = plan.clone();
                 let node_clone = node.clone();
+                let task_contract_ctx_clone = task_contract_ctx.clone();
                 join_set.spawn(async move {
-                    dispatch_node(state_clone, plan_clone, node_clone).await
+                    dispatch_node(
+                        state_clone,
+                        plan_clone,
+                        node_clone,
+                        task_contract_ctx_clone,
+                    )
+                    .await
                 });
                 continue;
             }
@@ -8454,10 +8623,22 @@ pub(super) async fn action_execute_resume(
                 &mut outcome,
             )
             .await;
+            // wave-19 / task 06 — resume path also honours the
+            // task-contract knobs from the resume call. We re-build
+            // the ctx from `args` because the paused-node code path
+            // never threaded the original DAG run's ctx through —
+            // and that's the right semantic: the resume request is a
+            // fresh execute call so it gets to set its own contract
+            // policy.
+            let resume_task_contract_ctx = match TaskContractDispatchCtx::from_args(args) {
+                Ok(c) => c,
+                Err(err) => return Ok(err),
+            };
             let dispatch_outcome = match dispatch_node(
                 state.clone(),
                 plan.clone(),
                 node.clone(),
+                resume_task_contract_ctx,
             )
             .await
             {
@@ -8792,10 +8973,17 @@ pub(crate) async fn handle_review_resolved_plan_node_event(
                 &mut outcome,
             )
             .await;
+            // wave-19 / task 06 — listener-driven resumes never see
+            // caller args (they fire from a bus event), so the
+            // task-contract emitter defaults to Off here. Callers
+            // that want a contract emitted must hit the explicit
+            // `mission_plan(action=execute, resume_review_question_id=...)`
+            // path so they can pass `task_contract_mode`.
             let dispatch_outcome = match dispatch_node(
                 state.clone(),
                 plan.clone(),
                 node.clone(),
+                TaskContractDispatchCtx::off(),
             )
             .await
             {
