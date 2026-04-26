@@ -61,7 +61,7 @@ async fn dispatcher_fans_out_to_all_12_domain_topics() {
     let blob: Arc<dyn BlobStore> = Arc::new(LocalFileBlobStore::new(dir.path()));
     let writer = spawn_log_writer(pool.clone(), blob.clone());
 
-    // Build dispatcher + register all 12 domains.
+    // Build dispatcher + register all current domains.
     let dispatcher = register_all_domains(DispatcherBuilder::new()).build();
 
     // Subscribe BEFORE starting the tail loop so we don't miss anything.
@@ -332,9 +332,20 @@ async fn dispatcher_preserves_seq_order_across_one_domain() {
 
 /// Domain enum coverage — compile-time sanity that any new domain is
 /// visible through `Domain::ALL`. Not strictly a dispatcher test, but
-/// guards against drift.
+/// guards against drift. Asserts inclusion of `Domain::Execution`
+/// (added after the original 12-domain set) and a regression floor of
+/// 13 entries; deliberately avoids hardcoding an exact count so that
+/// future domain additions remain extensible without churn.
 #[test]
-fn domain_all_length_is_12() {
-    assert_eq!(Domain::ALL.len(), 12);
+fn domain_all_includes_execution() {
+    assert!(
+        Domain::ALL.contains(&Domain::Execution),
+        "Domain::ALL must expose Domain::Execution"
+    );
+    assert!(
+        Domain::ALL.len() >= 13,
+        "Domain::ALL regressed below known floor: {}",
+        Domain::ALL.len()
+    );
     let _ = BoardEvent::domain(); // reference-only
 }
