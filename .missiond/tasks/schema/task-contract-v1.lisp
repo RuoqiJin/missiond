@@ -4,10 +4,12 @@
 
 (task-contract-schema missiond.task-contract.v1
   :version "v1"
-  :status "code-aligned initial — checker + renderer + verifier scripts implemented"
+  :status "code-aligned initial — checker + renderer + verifier + scope-guard scripts implemented"
   :checker "scripts/check-task-contract.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :verifier "scripts/verify-task-contract.mjs"
+  :scope-guard "scripts/task-scope-guard.mjs"
+  :pre-commit-hook ".githooks/pre-commit"
 
   (purpose
     "S-expressions carry the machine contract: scope, forbidden files, dependencies, acceptance, commit policy, and report requirements."
@@ -65,4 +67,29 @@
     :read-only
       ["never runs git add/commit/reset/checkout/stash/push/merge/rebase"
        "only invokes git rev-parse, git log, git show with --pretty=format and --name-only"]
-    :glob-semantics "shared with checker via scripts/lib/missiond_lisp.mjs (pathMatchesPattern + pathMatchesAny)"))
+    :glob-semantics "shared with checker via scripts/lib/missiond_lisp.mjs (pathMatchesPattern + pathMatchesAny)")
+
+  (scope-guard-contract
+    :purpose "Pre-commit defense against the Wave 19 git-index pollution failure where parallel sessions cross-staged files outside their task scope."
+    :input ".missiond/tasks/**/*.lisp + git index (staged files) | git commit"
+    :flags [--task --mode --commit --json --dry-fixture]
+    :modes
+      [(staged
+         "reads `git diff --cached --name-only -z` and fails if any staged path is outside :write-scope (when :scope-check is write-scope-only) or matches :must-not-touch (always enforced)"
+         "intended to fire from a pre-commit hook so the commit is blocked before the index is locked in")
+       (commit
+         "delegates to verify-task-contract semantics (subject + scope + forbidden) by reusing readCommit + verifyContract from scripts/verify-task-contract.mjs"
+         "accepts --commit <hash> to verify any commit, defaults to HEAD")]
+    :shared-logic
+      ["loadContract / loadContractFromSource / verifyContract / readCommit imported from scripts/verify-task-contract.mjs"
+       "pathMatchesAny imported from scripts/lib/missiond_lisp.mjs"]
+    :read-only
+      ["never runs git add/commit/reset/checkout/stash/push/merge/rebase"
+       "staged-mode only invokes git diff --cached --name-only --no-renames -z"
+       "commit-mode only invokes git rev-parse, git log, git show with --pretty=format and --name-only"]
+    :pre-commit-hook
+      (:path ".githooks/pre-commit"
+       :activation "MISSIOND_TASK_CONTRACT env var must point at a task.lisp; otherwise hook exits 0"
+       :enable "git config core.hooksPath .githooks (per-clone opt-in)"
+       :delegates-to "scripts/task-scope-guard.mjs --mode staged"
+       :read-only true)))

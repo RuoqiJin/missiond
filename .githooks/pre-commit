@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+# MissionD task-contract aware pre-commit hook.
+#
+# Activation rule:
+#   Runs scripts/task-scope-guard.mjs in --mode staged ONLY when the
+#   environment variable MISSIOND_TASK_CONTRACT is set to a task.lisp path.
+#   Without that variable the hook is a no-op (exit 0) so it stays opt-in
+#   per commit / per agent session.
+#
+# To enable for the local clone:
+#   git config core.hooksPath .githooks
+#
+# To run the guard for a single commit:
+#   MISSIOND_TASK_CONTRACT=.missiond/tasks/wave20/wave20-01-task-scope-index-guard-v1.lisp \
+#     git commit -m "feat(tasks): ..."
+#
+# The guard itself is read-only: no git add / commit / reset / checkout /
+# stash / push / merge / rebase. This wrapper only forwards exit codes; it
+# never mutates the index, working tree, or remotes.
+
+set -euo pipefail
+
+if [ -z "${MISSIOND_TASK_CONTRACT:-}" ]; then
+  exit 0
+fi
+
+repo_root="$(git rev-parse --show-toplevel)"
+guard="${repo_root}/scripts/task-scope-guard.mjs"
+contract="${MISSIOND_TASK_CONTRACT}"
+
+if [ ! -f "${guard}" ]; then
+  echo "pre-commit: task-scope-guard.mjs not found at ${guard}" >&2
+  exit 1
+fi
+
+# Resolve the contract path relative to the repo root if it is not absolute
+# and not already resolvable from the current working directory.
+case "${contract}" in
+  /*) ;;
+  *)
+    if [ ! -f "${contract}" ] && [ -f "${repo_root}/${contract}" ]; then
+      contract="${repo_root}/${contract}"
+    fi
+    ;;
+esac
+
+if [ ! -f "${contract}" ]; then
+  echo "pre-commit: task contract file not found: ${MISSIOND_TASK_CONTRACT}" >&2
+  exit 1
+fi
+
+exec node "${guard}" --task "${contract}" --mode staged
