@@ -1965,6 +1965,421 @@ pub(crate) fn plan_review_resolved_dispatch(
 }
 
 // ───────────────────────────────────────────────────────────────────────
+// wave-20 / task 08 — review auto-answer policy v0
+//
+// Adds an EXPLICIT auto-answer policy layered on top of the wave-18 / task
+// 07 [`ReviewAutomationPolicy`] (`manual | suggest | auto_safe`). Where
+// `review_automation_policy` controls the wave-15/16 manager-action
+// resolution surfaces (directive approve/archive, plan approve/mark/
+// supersede, workflow resolve_review), the `auto_answer_policy` controls
+// the wave-16/02 [`spawn_review_resolution_sub`] LISTENER path: when a
+// `QuestionEvent::Resolved` (or a deterministic dispatch outcome) arrives
+// on the bus, MAY the listener auto-answer the review question without a
+// human reviewing the inbound resolution string.
+//
+// Three states (default = `Off` so legacy callers stay byte-identical
+// when they never sent the field):
+//
+//   off                → existing behaviour. Listener routes the inbound
+//                        decision through the per-scope handler exactly as
+//                        the bus delivered it. No deterministic safety
+//                        recomputation.
+//   deterministic_safe → listener computes a [`AutoAnswerOutcome`] from
+//                        the wave-18/07 deterministic safety inspector
+//                        ([`evaluate_review_automation`]) PLUS the
+//                        wave-20/08 destructive-action guard. When EVERY
+//                        rule passes AND the suggested decision is
+//                        `Approved` AND the action is non-destructive,
+//                        the helper returns `selected_decision=Approved`
+//                        + `requires_human=false`. Otherwise
+//                        `requires_human=true` and the listener MUST
+//                        defer to the human reviewer.
+//   dry_run            → run the same inspector + destructive-action
+//                        guard but ALWAYS surface `requires_human=true`.
+//                        The selected_decision is still computed (so
+//                        observability dashboards see what we WOULD have
+//                        done) but never used as authority. Useful for
+//                        operators who want to validate the policy
+//                        outcome shape on a real review question without
+//                        the policy actually mutating state.
+//
+// Authority hierarchy (most → least):
+//   1. Caller-supplied `review_decision` (when present in the same call)
+//      — explicit human authority always wins.
+//   2. `deterministic_safe` policy auto-promotion to `Approved` (only
+//      when every safety + destructive-action rule passes).
+//   3. Otherwise the suggestion is informational (`requires_human=true`).
+//
+// Hard invariants — every implementation MUST satisfy these without
+// exception (pinned by tests):
+//
+//   I1. NEVER auto-reject. `selected_decision=Rejected` is impossible
+//       under any policy mode — refusing a draft is a human-only
+//       decision.
+//   I2. NEVER auto-promote on a destructive action. `archive`,
+//       `supersede`, `remove` (case-insensitive) ALWAYS land
+//       `requires_human=true` regardless of the safety inspector
+//       result. The wave-15 manager-action whitelist makes this
+//       enforceable per-scope; we keep the rule loud here so the
+//       LISTENER path also refuses the promotion.
+//   I3. The policy NEVER calls an LLM. All inputs are pure data
+//       supplied by the caller; the inspector logic is deterministic.
+//   I4. When skipped (any non-Off mode that did not reach `Approved`),
+//       the response carries `policy_result`, `selected_decision`,
+//       `safety_rule_results[]`, and `requires_human=true` so observers
+//       can audit the decision.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Wave-20 / task 08 — three-state policy controlling whether the
+/// review-question LISTENER path may auto-answer an inbound resolution
+/// without a human reviewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoAnswerPolicy {
+    /// Default: no listener-side auto-answer. Inbound decisions route
+    /// through the per-scope handler exactly as the bus delivered them.
+    Off,
+    /// Compute a deterministic outcome via the wave-18/07 safety
+    /// inspector + the wave-20/08 destructive-action guard. When every
+    /// rule passes AND the suggestion is `Approved` AND the action is
+    /// non-destructive, the helper auto-answers `Approved`.
+    DeterministicSafe,
+    /// Compute the same outcome but ALWAYS set `requires_human=true`.
+    /// Used to validate the policy shape without mutating state.
+    DryRun,
+}
+
+impl AutoAnswerPolicy {
+    /// Lower-snake-case label for the response payload.
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            AutoAnswerPolicy::Off => "off",
+            AutoAnswerPolicy::DeterministicSafe => "deterministic_safe",
+            AutoAnswerPolicy::DryRun => "dry_run",
+        }
+    }
+}
+
+/// Parse the wave-20 / task 08 `auto_answer_policy` arg. Unknown / absent
+/// / blank values collapse to `Off` so legacy callers (which never sent
+/// the field) keep their byte-identical response shape.
+///
+/// Recognised values (case-insensitive, trimmed):
+///   * `"off"`                → [`AutoAnswerPolicy::Off`] (default)
+///   * `"deterministic_safe"` → [`AutoAnswerPolicy::DeterministicSafe`]
+///                              (hyphenated `"deterministic-safe"` accepted)
+///   * `"dry_run"`            → [`AutoAnswerPolicy::DryRun`]
+///                              (hyphenated `"dry-run"` accepted)
+pub(crate) fn parse_auto_answer_policy(args: &Value) -> AutoAnswerPolicy {
+    let raw = args
+        .get("auto_answer_policy")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_ascii_lowercase());
+    match raw.as_deref() {
+        Some("deterministic_safe") | Some("deterministic-safe") => {
+            AutoAnswerPolicy::DeterministicSafe
+        }
+        Some("dry_run") | Some("dry-run") => AutoAnswerPolicy::DryRun,
+        _ => AutoAnswerPolicy::Off,
+    }
+}
+
+/// True iff the caller actually included an `auto_answer_policy` key in
+/// the request JSON (regardless of value). Used to keep pre-wave-20/08
+/// callers byte-identical when they never opted in.
+pub(crate) fn auto_answer_policy_was_explicit(args: &Value) -> bool {
+    args.get("auto_answer_policy").is_some()
+}
+
+/// Wave-20 / task 08 — destructive review actions. Promoting any of
+/// these to `Approved` via auto-answer is forbidden; the listener MUST
+/// defer to a human reviewer. Centralised here so both the listener and
+/// the dry-run preview path apply the same rule.
+///
+/// The action vocabulary mirrors the wave-15 manager-action whitelist
+/// (`compile|approve|archive|supersede|mark`) plus `remove` for forward-
+/// compat with deletion paths (e.g. KB rows, generated artefacts) that
+/// future scopes may need to gate.
+const DESTRUCTIVE_REVIEW_ACTIONS: &[&str] = &["archive", "supersede", "remove"];
+
+/// True iff the supplied action label is on the destructive list.
+/// Case-insensitive + trimmed so caller variations (`"Archive"`,
+/// `"  REMOVE  "`) collide with the canonical lowercase form.
+pub(crate) fn is_destructive_review_action(action: &str) -> bool {
+    let normalised = action.trim().to_ascii_lowercase();
+    DESTRUCTIVE_REVIEW_ACTIONS
+        .iter()
+        .any(|a| **a == normalised)
+}
+
+/// Status label surfaced under `policy_result` on the response. Pure
+/// projection of the policy + inspector + destructive-action rule
+/// outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AutoAnswerStatus {
+    /// `policy=off` (default). Listener routes the inbound decision
+    /// without recomputation. Response stays pre-wave-20/08
+    /// byte-identical.
+    NotEvaluated,
+    /// `policy=deterministic_safe` AND every safety rule passed AND the
+    /// suggestion is `Approved` AND the action is non-destructive — the
+    /// listener may auto-answer `Approved`.
+    AutoAnswered,
+    /// `policy=deterministic_safe` AND at least one safety rule failed
+    /// (or the suggestion was not `Approved`). Listener defers to the
+    /// human reviewer; payload carries the suggestion + blocking rules.
+    SkippedRulesFailed,
+    /// `policy=deterministic_safe` AND the action is destructive
+    /// (archive/supersede/remove). Even if every other rule passes, we
+    /// refuse to auto-promote. Pinned as a SEPARATE status so audit
+    /// dashboards can grep for "auto-answer refused destructive
+    /// promotion" without inspecting the rule outcomes.
+    SkippedDestructiveAction,
+    /// `policy=dry_run`. Every rule was evaluated and the
+    /// `selected_decision` is the suggestion the helper would have
+    /// chosen — but `requires_human=true` is always set so the listener
+    /// MUST defer to a human reviewer. Distinct from
+    /// `SkippedRulesFailed` so observers can tell the difference
+    /// between "operator opted into dry-run" and "rules failed".
+    DryRunPreview,
+}
+
+impl AutoAnswerStatus {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            AutoAnswerStatus::NotEvaluated => "not_evaluated",
+            AutoAnswerStatus::AutoAnswered => "auto_answered",
+            AutoAnswerStatus::SkippedRulesFailed => "skipped_rules_failed",
+            AutoAnswerStatus::SkippedDestructiveAction => {
+                "skipped_destructive_action"
+            }
+            AutoAnswerStatus::DryRunPreview => "dry_run_preview",
+        }
+    }
+}
+
+/// Pure outcome of [`evaluate_auto_answer_policy`]. Side-effect free —
+/// no DB, no bus, no LLM. The listener consumes this projection to
+/// decide whether to auto-answer or defer to the human reviewer.
+///
+/// Field invariants:
+///   * `selected_decision` is `Some(Approved)` ONLY when the listener may
+///     auto-answer (status = `AutoAnswered`). Under every other status
+///     the field carries the SUGGESTION (so dashboards see what we
+///     would have done) but the listener MUST NOT use it as authority.
+///   * `requires_human=true` whenever `status != AutoAnswered`. Pinned
+///     so callers never have to inspect the status to know whether to
+///     defer.
+///   * `safety_rule_results[]` is a flat list of `code:detail` strings
+///     mirroring the wave-18/07 inspector vocabulary plus the wave-20/08
+///     destructive-action rule.
+///   * The outcome NEVER carries `Rejected` as the selected decision —
+///     auto-rejection is impossible under any policy mode (invariant I1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AutoAnswerOutcome {
+    pub policy: AutoAnswerPolicy,
+    pub status: AutoAnswerStatus,
+    /// Decision the listener should apply. `Some(Approved)` iff the
+    /// listener may auto-answer; otherwise carries the suggestion (or
+    /// `None` under `Off` where no inspection ran).
+    pub selected_decision: Option<ReviewDecision>,
+    /// Flat list of `code:detail` strings from the inspector + the
+    /// destructive-action rule. Always populated under non-Off modes.
+    pub safety_rule_results: Vec<String>,
+    /// `true` iff the listener MUST defer to a human reviewer. Pinned
+    /// separately from the status so callers don't have to pattern
+    /// match.
+    pub requires_human: bool,
+}
+
+/// Run the wave-20 / task 08 deterministic auto-answer evaluation.
+/// Pure / side-effect free / NEVER calls an LLM.
+///
+/// Inputs:
+///   * `policy` — resolved [`AutoAnswerPolicy`]; `Off` short-circuits.
+///   * `ctx` — wave-18/07 [`ReviewAutomationContext`]; reused so the
+///     same safety vocabulary surfaces under both knobs.
+///   * `action` — the parsed review action (e.g. `"compile"`,
+///     `"approve"`, `"archive"`, `"supersede"`). Folded into the
+///     destructive-action rule.
+///   * `caller_decision` — explicit `review_decision` the caller
+///     supplied. When present, the helper refuses to auto-answer (the
+///     human authority wins) and surfaces a "caller_decision_present"
+///     blocker.
+pub(crate) fn evaluate_auto_answer_policy(
+    policy: AutoAnswerPolicy,
+    ctx: &ReviewAutomationContext,
+    action: &str,
+    caller_decision: Option<ReviewDecision>,
+) -> AutoAnswerOutcome {
+    if matches!(policy, AutoAnswerPolicy::Off) {
+        return AutoAnswerOutcome {
+            policy,
+            status: AutoAnswerStatus::NotEvaluated,
+            selected_decision: None,
+            safety_rule_results: Vec::new(),
+            requires_human: false,
+        };
+    }
+
+    // Reuse the wave-18/07 deterministic inspector. It already covers
+    // deterministic_mode / file_write / file_hash / protected source /
+    // additional blockers, so the wave-20/08 layer just needs to add
+    // the destructive-action + caller-decision guards on top.
+    let inner = evaluate_review_automation(
+        ReviewAutomationPolicy::AutoSafe,
+        ctx,
+        caller_decision,
+    );
+    let mut rule_results = inner.reasons.clone();
+
+    // Destructive-action guard — invariant I2. Pinned BEFORE the
+    // rule-failure check so a destructive action whose other rules
+    // pass surfaces under the dedicated `SkippedDestructiveAction`
+    // status (so observers can tell "destructive blocked" apart from
+    // "rules failed").
+    let destructive = is_destructive_review_action(action);
+    if destructive {
+        rule_results.push(format!(
+            "rule:destructive_action:`{}` is on the destructive list (archive|supersede|remove); auto-answer refuses to promote",
+            action.trim().to_ascii_lowercase()
+        ));
+    } else {
+        rule_results.push(format!(
+            "rule:non_destructive_action:`{}` is not on the destructive list",
+            action.trim().to_ascii_lowercase()
+        ));
+    }
+
+    // Caller-decision guard — invariant: explicit human authority
+    // ALWAYS wins over the policy. Pinned as an explicit rule-result so
+    // observers see WHY we deferred even when every other rule passed.
+    if caller_decision.is_some() {
+        rule_results.push(
+            "rule:caller_decision_present:explicit review_decision supplied by caller; auto-answer defers to human authority"
+                .to_string(),
+        );
+    }
+
+    // Suggestion: take the wave-18/07 outcome's suggestion as the
+    // baseline. The inspector defaults to `Approved` and degrades to
+    // `NeedsChanges` when blocking rules trip — `Rejected` is
+    // impossible (invariant I1).
+    let suggestion = inner
+        .suggested_decision
+        .unwrap_or(ReviewDecision::NeedsChanges);
+
+    // Defensive: belt-and-braces against a future inspector change
+    // that might emit `Rejected`. The auto-answer layer NEVER returns
+    // `Rejected` as the selected decision (invariant I1); we degrade
+    // it to `NeedsChanges` so the listener defers to a human reviewer.
+    let suggestion = match suggestion {
+        ReviewDecision::Rejected => {
+            rule_results.push(
+                "rule:rejection_demoted:upstream inspector emitted Rejected; auto-answer never auto-rejects, demoting to NeedsChanges"
+                    .to_string(),
+            );
+            ReviewDecision::NeedsChanges
+        }
+        other => other,
+    };
+
+    // dry_run mode short-circuits to the preview status REGARDLESS of
+    // whether every rule passed. The selected_decision still carries
+    // the suggestion (so dashboards see what we would have done) but
+    // the listener MUST defer to a human reviewer.
+    if matches!(policy, AutoAnswerPolicy::DryRun) {
+        return AutoAnswerOutcome {
+            policy,
+            status: AutoAnswerStatus::DryRunPreview,
+            selected_decision: Some(suggestion),
+            safety_rule_results: rule_results,
+            requires_human: true,
+        };
+    }
+
+    // deterministic_safe mode. The promotion rules are:
+    //   * caller_decision is None
+    //   * action is non-destructive
+    //   * inspector's may_auto_resolve = true (every safety rule passed)
+    //   * suggestion is Approved
+    let approved_suggestion = matches!(suggestion, ReviewDecision::Approved);
+
+    if destructive {
+        // Destructive-action gate fires before the rule check so we can
+        // surface a separate status. Even if every other rule passes,
+        // the listener MUST defer for archive/supersede/remove actions.
+        return AutoAnswerOutcome {
+            policy,
+            status: AutoAnswerStatus::SkippedDestructiveAction,
+            selected_decision: Some(suggestion),
+            safety_rule_results: rule_results,
+            requires_human: true,
+        };
+    }
+
+    if !inner.may_auto_resolve || !approved_suggestion || caller_decision.is_some() {
+        return AutoAnswerOutcome {
+            policy,
+            status: AutoAnswerStatus::SkippedRulesFailed,
+            selected_decision: Some(suggestion),
+            safety_rule_results: rule_results,
+            requires_human: true,
+        };
+    }
+
+    AutoAnswerOutcome {
+        policy,
+        status: AutoAnswerStatus::AutoAnswered,
+        selected_decision: Some(ReviewDecision::Approved),
+        safety_rule_results: rule_results,
+        requires_human: false,
+    }
+}
+
+/// Stamp the wave-20 / task 08 outcome onto a response payload. Pure /
+/// no bus calls. Always called when the resolved policy is non-Off; the
+/// caller is responsible for skipping this under `Off` to keep
+/// pre-wave-20/08 callers byte-identical.
+///
+/// Mutates `payload` with:
+///   * `auto_answer_policy`     — resolved policy label
+///   * `policy_result`          — outcome status label
+///   * `selected_decision`      — `approved | needs_changes` (omitted
+///                                 under `Off`; never `rejected`)
+///   * `safety_rule_results`    — array of `code:detail` strings
+///   * `requires_human`         — true whenever the listener must defer
+pub(crate) fn stamp_auto_answer_payload(
+    payload: &mut Value,
+    outcome: &AutoAnswerOutcome,
+) {
+    let Some(map) = payload.as_object_mut() else {
+        return;
+    };
+    map.insert(
+        "auto_answer_policy".to_string(),
+        json!(outcome.policy.as_str()),
+    );
+    map.insert(
+        "policy_result".to_string(),
+        json!(outcome.status.as_str()),
+    );
+    if let Some(d) = outcome.selected_decision {
+        map.insert(
+            "selected_decision".to_string(),
+            json!(d.as_str()),
+        );
+    }
+    map.insert(
+        "safety_rule_results".to_string(),
+        json!(outcome.safety_rule_results),
+    );
+    map.insert(
+        "requires_human".to_string(),
+        json!(outcome.requires_human),
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────
 // tests — pure helpers only (no bus, no DB).
 // ───────────────────────────────────────────────────────────────────────
 
@@ -3644,5 +4059,597 @@ mod tests {
         assert_eq!(p["review_automation_policy"], "auto_safe");
         assert_eq!(p["review_automation_status"], "auto_approved");
         assert_eq!(p["suggested_review_decision"], "approved");
+    }
+
+    // ── wave-20 / task 08 — review auto-answer policy ────────────────────
+
+    #[test]
+    fn parse_auto_answer_policy_default_is_off() {
+        assert_eq!(
+            parse_auto_answer_policy(&json!({})),
+            AutoAnswerPolicy::Off
+        );
+    }
+
+    #[test]
+    fn parse_auto_answer_policy_recognises_deterministic_safe() {
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "deterministic_safe"})),
+            AutoAnswerPolicy::DeterministicSafe
+        );
+        // Hyphenated alias accepted to keep authoring typos loud only on
+        // truly unknown values.
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "deterministic-safe"})),
+            AutoAnswerPolicy::DeterministicSafe
+        );
+    }
+
+    #[test]
+    fn parse_auto_answer_policy_recognises_dry_run() {
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "dry_run"})),
+            AutoAnswerPolicy::DryRun
+        );
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "dry-run"})),
+            AutoAnswerPolicy::DryRun
+        );
+    }
+
+    #[test]
+    fn parse_auto_answer_policy_is_case_insensitive_and_trims() {
+        assert_eq!(
+            parse_auto_answer_policy(
+                &json!({"auto_answer_policy": "  DETERMINISTIC_SAFE  "})
+            ),
+            AutoAnswerPolicy::DeterministicSafe
+        );
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "Dry_Run"})),
+            AutoAnswerPolicy::DryRun
+        );
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "OFF"})),
+            AutoAnswerPolicy::Off
+        );
+    }
+
+    #[test]
+    fn parse_auto_answer_policy_unknown_collapses_to_off() {
+        // Unknown values silently map to the default rather than rejected
+        // — the response always echoes the resolved policy so a typo is
+        // observable downstream.
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "auto_approve"})),
+            AutoAnswerPolicy::Off
+        );
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": ""})),
+            AutoAnswerPolicy::Off
+        );
+        assert_eq!(
+            parse_auto_answer_policy(&json!({"auto_answer_policy": "   "})),
+            AutoAnswerPolicy::Off
+        );
+    }
+
+    #[test]
+    fn auto_answer_policy_was_explicit_detects_presence() {
+        assert!(!auto_answer_policy_was_explicit(&json!({})));
+        assert!(auto_answer_policy_was_explicit(
+            &json!({"auto_answer_policy": ""})
+        ));
+        assert!(auto_answer_policy_was_explicit(
+            &json!({"auto_answer_policy": "dry_run"})
+        ));
+        assert!(auto_answer_policy_was_explicit(
+            &json!({"auto_answer_policy": "off"})
+        ));
+    }
+
+    #[test]
+    fn auto_answer_policy_label_round_trips() {
+        assert_eq!(AutoAnswerPolicy::Off.as_str(), "off");
+        assert_eq!(
+            AutoAnswerPolicy::DeterministicSafe.as_str(),
+            "deterministic_safe"
+        );
+        assert_eq!(AutoAnswerPolicy::DryRun.as_str(), "dry_run");
+    }
+
+    #[test]
+    fn auto_answer_status_label_round_trips() {
+        assert_eq!(AutoAnswerStatus::NotEvaluated.as_str(), "not_evaluated");
+        assert_eq!(AutoAnswerStatus::AutoAnswered.as_str(), "auto_answered");
+        assert_eq!(
+            AutoAnswerStatus::SkippedRulesFailed.as_str(),
+            "skipped_rules_failed"
+        );
+        assert_eq!(
+            AutoAnswerStatus::SkippedDestructiveAction.as_str(),
+            "skipped_destructive_action"
+        );
+        assert_eq!(
+            AutoAnswerStatus::DryRunPreview.as_str(),
+            "dry_run_preview"
+        );
+    }
+
+    // ── wave-20 / task 08 — destructive-action guard ─────────────────────
+
+    #[test]
+    fn destructive_action_recognises_archive_supersede_remove() {
+        for raw in [
+            "archive",
+            "supersede",
+            "remove",
+            "Archive",
+            "SUPERSEDE",
+            "  Remove  ",
+        ] {
+            assert!(
+                is_destructive_review_action(raw),
+                "expected destructive for `{}`",
+                raw
+            );
+        }
+    }
+
+    #[test]
+    fn non_destructive_actions_are_safe() {
+        for raw in [
+            "compile",
+            "approve",
+            "mark",
+            "plan-node",
+            "human-checkpoint",
+            "",
+            "  ",
+        ] {
+            assert!(
+                !is_destructive_review_action(raw),
+                "expected non-destructive for `{}`",
+                raw
+            );
+        }
+    }
+
+    // ── wave-20 / task 08 — evaluate_auto_answer_policy ──────────────────
+
+    #[test]
+    fn evaluate_auto_answer_off_returns_not_evaluated_with_empty_block() {
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::Off,
+            &safe_ctx(),
+            "approve",
+            None,
+        );
+        assert_eq!(outcome.policy, AutoAnswerPolicy::Off);
+        assert_eq!(outcome.status, AutoAnswerStatus::NotEvaluated);
+        assert!(outcome.selected_decision.is_none());
+        assert!(outcome.safety_rule_results.is_empty());
+        // Off mode does NOT defer — caller routes the inbound decision
+        // unchanged. requires_human=false matches the byte-identical
+        // pre-wave-20/08 contract.
+        assert!(!outcome.requires_human);
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_auto_answers_when_every_rule_passes() {
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "approve",
+            None,
+        );
+        assert_eq!(outcome.status, AutoAnswerStatus::AutoAnswered);
+        assert_eq!(outcome.selected_decision, Some(ReviewDecision::Approved));
+        assert!(!outcome.requires_human);
+        // The destructive-action rule surfaces even on the happy path so
+        // observers see why the action was eligible.
+        assert!(outcome
+            .safety_rule_results
+            .iter()
+            .any(|r| r.contains("non_destructive_action")));
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_blocks_destructive_archive() {
+        // Even when every other rule passes, archive MUST defer.
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "archive",
+            None,
+        );
+        assert_eq!(
+            outcome.status,
+            AutoAnswerStatus::SkippedDestructiveAction
+        );
+        assert!(outcome.requires_human);
+        assert!(outcome
+            .safety_rule_results
+            .iter()
+            .any(|r| r.contains("destructive_action") && r.contains("archive")));
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_blocks_destructive_supersede() {
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "supersede",
+            None,
+        );
+        assert_eq!(
+            outcome.status,
+            AutoAnswerStatus::SkippedDestructiveAction
+        );
+        assert!(outcome.requires_human);
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_blocks_destructive_remove() {
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "remove",
+            None,
+        );
+        assert_eq!(
+            outcome.status,
+            AutoAnswerStatus::SkippedDestructiveAction
+        );
+        assert!(outcome.requires_human);
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_blocked_when_protected_source_target() {
+        let mut ctx = safe_ctx();
+        ctx.protected_source_or_target = true;
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &ctx,
+            "approve",
+            None,
+        );
+        assert_eq!(outcome.status, AutoAnswerStatus::SkippedRulesFailed);
+        assert!(outcome.requires_human);
+        // Suggestion degraded to NeedsChanges by the upstream inspector
+        // because of the protected source/target rule.
+        assert_eq!(
+            outcome.selected_decision,
+            Some(ReviewDecision::NeedsChanges)
+        );
+        assert!(outcome
+            .safety_rule_results
+            .iter()
+            .any(|r| r.contains("protected_source_or_target")));
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_blocked_when_not_deterministic() {
+        // sonnet / LLM-driven artefact → wave-18/07 rule trips.
+        let mut ctx = safe_ctx();
+        ctx.deterministic_mode = false;
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &ctx,
+            "approve",
+            None,
+        );
+        assert_eq!(outcome.status, AutoAnswerStatus::SkippedRulesFailed);
+        assert!(outcome.requires_human);
+        assert!(outcome
+            .safety_rule_results
+            .iter()
+            .any(|r| r.contains("deterministic_mode")));
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_blocked_by_additional_blocker() {
+        let mut ctx = safe_ctx();
+        ctx.additional_blockers
+            .push("review_question_warning present".to_string());
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &ctx,
+            "approve",
+            None,
+        );
+        assert_eq!(outcome.status, AutoAnswerStatus::SkippedRulesFailed);
+        assert!(outcome.requires_human);
+    }
+
+    #[test]
+    fn evaluate_auto_answer_deterministic_safe_defers_when_caller_decision_present() {
+        // Explicit caller decision wins — the policy NEVER overrides
+        // human authority.
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "approve",
+            Some(ReviewDecision::Approved),
+        );
+        assert_eq!(outcome.status, AutoAnswerStatus::SkippedRulesFailed);
+        assert!(outcome.requires_human);
+        assert!(outcome
+            .safety_rule_results
+            .iter()
+            .any(|r| r.contains("caller_decision_present")));
+    }
+
+    #[test]
+    fn evaluate_auto_answer_dry_run_always_defers_even_on_safe_inputs() {
+        // dry_run NEVER auto-answers — even when every rule passes the
+        // selected_decision is informational and requires_human=true.
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DryRun,
+            &safe_ctx(),
+            "approve",
+            None,
+        );
+        assert_eq!(outcome.status, AutoAnswerStatus::DryRunPreview);
+        assert!(outcome.requires_human);
+        assert_eq!(outcome.selected_decision, Some(ReviewDecision::Approved));
+    }
+
+    #[test]
+    fn evaluate_auto_answer_dry_run_preview_for_destructive_still_surfaces_rule() {
+        // dry_run preview still surfaces the destructive-action rule on
+        // the result block so dashboards see what would have happened.
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DryRun,
+            &safe_ctx(),
+            "supersede",
+            None,
+        );
+        assert_eq!(outcome.status, AutoAnswerStatus::DryRunPreview);
+        assert!(outcome.requires_human);
+        assert!(outcome
+            .safety_rule_results
+            .iter()
+            .any(|r| r.contains("destructive_action") && r.contains("supersede")));
+    }
+
+    #[test]
+    fn evaluate_auto_answer_never_returns_rejected_decision_invariant_i1() {
+        // Invariant I1: auto-answer NEVER returns Rejected as the
+        // selected decision. Even when the upstream inspector degrades
+        // the suggestion under blocking rules, we surface NeedsChanges
+        // instead of Rejected.
+        for ctx_mutation in [
+            // Non-deterministic mode trips a blocker.
+            |c: &mut ReviewAutomationContext| c.deterministic_mode = false,
+            // Protected source/target trips a blocker.
+            |c: &mut ReviewAutomationContext| c.protected_source_or_target = true,
+            // Hash mismatch trips a blocker.
+            |c: &mut ReviewAutomationContext| {
+                c.actual_file_sha256 = Some("aaaa".repeat(8));
+                c.expected_file_sha256 = Some("bbbb".repeat(8));
+            },
+        ] {
+            let mut ctx = safe_ctx();
+            ctx_mutation(&mut ctx);
+            for policy in [
+                AutoAnswerPolicy::DeterministicSafe,
+                AutoAnswerPolicy::DryRun,
+            ] {
+                let outcome = evaluate_auto_answer_policy(policy, &ctx, "approve", None);
+                assert_ne!(
+                    outcome.selected_decision,
+                    Some(ReviewDecision::Rejected),
+                    "invariant I1: auto-answer must NEVER return Rejected (policy={:?})",
+                    policy
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_auto_answer_never_promotes_destructive_actions_invariant_i2() {
+        // Invariant I2: archive / supersede / remove NEVER auto-promote,
+        // even when every safety rule passes. Pinned across both policy
+        // modes that evaluate.
+        for action in DESTRUCTIVE_REVIEW_ACTIONS {
+            // deterministic_safe → SkippedDestructiveAction.
+            let outcome = evaluate_auto_answer_policy(
+                AutoAnswerPolicy::DeterministicSafe,
+                &safe_ctx(),
+                action,
+                None,
+            );
+            assert_ne!(
+                outcome.status,
+                AutoAnswerStatus::AutoAnswered,
+                "invariant I2: destructive `{}` must NEVER auto-answer",
+                action
+            );
+            assert!(
+                outcome.requires_human,
+                "invariant I2: destructive `{}` must require human",
+                action
+            );
+            assert_ne!(
+                outcome.selected_decision,
+                Some(ReviewDecision::Rejected),
+                "invariant I1+I2: destructive `{}` must NEVER auto-reject",
+                action
+            );
+
+            // dry_run → DryRunPreview (never AutoAnswered) regardless.
+            let dry = evaluate_auto_answer_policy(
+                AutoAnswerPolicy::DryRun,
+                &safe_ctx(),
+                action,
+                None,
+            );
+            assert_eq!(dry.status, AutoAnswerStatus::DryRunPreview);
+            assert!(dry.requires_human);
+        }
+    }
+
+    #[test]
+    fn evaluate_auto_answer_never_calls_llm_invariant_i3() {
+        // Invariant I3: the policy is pure / deterministic / never
+        // touches an LLM. We can't directly assert on the absence of a
+        // network call, but we CAN pin that the function is sync (no
+        // async / no .await) by simply calling it in a sync context.
+        // The signature itself enforces this — if a future refactor
+        // adds `async fn`, this test fails to compile.
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "approve",
+            None,
+        );
+        // And the decision is deterministic — running twice with the
+        // same inputs MUST produce the same output.
+        let outcome2 = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "approve",
+            None,
+        );
+        assert_eq!(outcome, outcome2);
+    }
+
+    #[test]
+    fn evaluate_auto_answer_skipped_block_carries_full_audit_invariant_i4() {
+        // Invariant I4: when skipped (any non-Off mode that did not
+        // reach AutoAnswered), the response carries policy_result,
+        // selected_decision, safety_rule_results, and requires_human.
+        let mut ctx = safe_ctx();
+        ctx.protected_source_or_target = true;
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &ctx,
+            "approve",
+            None,
+        );
+        // policy_result label set.
+        assert_ne!(outcome.status, AutoAnswerStatus::AutoAnswered);
+        assert_eq!(outcome.status.as_str(), "skipped_rules_failed");
+        // selected_decision present (suggestion degraded to NeedsChanges).
+        assert!(outcome.selected_decision.is_some());
+        // safety_rule_results non-empty.
+        assert!(!outcome.safety_rule_results.is_empty());
+        // requires_human=true.
+        assert!(outcome.requires_human);
+    }
+
+    // ── wave-20 / task 08 — stamp_auto_answer_payload ────────────────────
+
+    #[test]
+    fn stamp_auto_answer_payload_under_off_carries_minimal_block() {
+        // Helper writes the full block when called even under Off so a
+        // future caller that DOES call it sees a well-formed payload.
+        // The handler is responsible for skipping the call under Off to
+        // keep pre-wave-20/08 callers byte-identical.
+        let mut p = json!({"status": "approved"});
+        let outcome = AutoAnswerOutcome {
+            policy: AutoAnswerPolicy::Off,
+            status: AutoAnswerStatus::NotEvaluated,
+            selected_decision: None,
+            safety_rule_results: Vec::new(),
+            requires_human: false,
+        };
+        stamp_auto_answer_payload(&mut p, &outcome);
+        assert_eq!(p["auto_answer_policy"], "off");
+        assert_eq!(p["policy_result"], "not_evaluated");
+        // No selected_decision when None.
+        assert!(p.get("selected_decision").is_none());
+        assert_eq!(p["safety_rule_results"], json!([]));
+        assert_eq!(p["requires_human"], false);
+    }
+
+    #[test]
+    fn stamp_auto_answer_payload_under_auto_answered_carries_approved_decision() {
+        let mut p = json!({"status": "approved"});
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "approve",
+            None,
+        );
+        stamp_auto_answer_payload(&mut p, &outcome);
+        assert_eq!(p["auto_answer_policy"], "deterministic_safe");
+        assert_eq!(p["policy_result"], "auto_answered");
+        assert_eq!(p["selected_decision"], "approved");
+        assert!(p["safety_rule_results"].is_array());
+        assert_eq!(p["requires_human"], false);
+    }
+
+    #[test]
+    fn stamp_auto_answer_payload_under_skipped_destructive_action() {
+        let mut p = json!({"status": "draft"});
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DeterministicSafe,
+            &safe_ctx(),
+            "archive",
+            None,
+        );
+        stamp_auto_answer_payload(&mut p, &outcome);
+        assert_eq!(p["auto_answer_policy"], "deterministic_safe");
+        assert_eq!(p["policy_result"], "skipped_destructive_action");
+        // Suggestion still surfaces (Approved for the safe ctx) even
+        // though the listener will defer.
+        assert_eq!(p["selected_decision"], "approved");
+        assert_eq!(p["requires_human"], true);
+        let rules = p["safety_rule_results"].as_array().unwrap();
+        assert!(rules
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("destructive_action")));
+    }
+
+    #[test]
+    fn stamp_auto_answer_payload_under_dry_run_preview() {
+        let mut p = json!({"status": "draft"});
+        let outcome = evaluate_auto_answer_policy(
+            AutoAnswerPolicy::DryRun,
+            &safe_ctx(),
+            "approve",
+            None,
+        );
+        stamp_auto_answer_payload(&mut p, &outcome);
+        assert_eq!(p["auto_answer_policy"], "dry_run");
+        assert_eq!(p["policy_result"], "dry_run_preview");
+        assert_eq!(p["selected_decision"], "approved");
+        // dry_run ALWAYS defers — pinning the invariant on the stamped
+        // shape so a future refactor can't silently flip it.
+        assert_eq!(p["requires_human"], true);
+    }
+
+    #[test]
+    fn stamp_auto_answer_payload_never_emits_rejected_invariant_i1_round_trip() {
+        // Belt-and-braces stamping check: even if a synthetic outcome
+        // somehow carried Rejected, the stamper should serialise it as
+        // the canonical `rejected` label — but the policy CONSTRUCTORS
+        // (evaluate_auto_answer_policy) MUST never emit Rejected. Pinning
+        // the invariant here as a defensive contract test.
+        for ctx_mutation in [
+            |c: &mut ReviewAutomationContext| c.deterministic_mode = false,
+            |c: &mut ReviewAutomationContext| c.protected_source_or_target = true,
+        ] {
+            let mut ctx = safe_ctx();
+            ctx_mutation(&mut ctx);
+            let outcome = evaluate_auto_answer_policy(
+                AutoAnswerPolicy::DeterministicSafe,
+                &ctx,
+                "approve",
+                None,
+            );
+            let mut p = json!({});
+            stamp_auto_answer_payload(&mut p, &outcome);
+            // selected_decision MUST NOT be `rejected` after the
+            // evaluator + stamper round trip.
+            if let Some(s) = p.get("selected_decision").and_then(|v| v.as_str()) {
+                assert_ne!(
+                    s, "rejected",
+                    "invariant I1 round-trip: stamper MUST NOT surface `rejected`"
+                );
+            }
+        }
     }
 }

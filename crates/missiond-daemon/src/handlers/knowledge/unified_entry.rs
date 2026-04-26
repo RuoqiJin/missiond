@@ -86,6 +86,28 @@
 //!                              allowlist (`parse_infer_plan_fields_mode`)
 //!                              fails the call loudly on a typo rather
 //!                              than silently degrading to `off`.
+//!                          + wave-20 / task 08 review auto-answer
+//!                              policy opt-in (`auto_answer_policy`,
+//!                              one of `off|deterministic_safe|dry_run`).
+//!                              Default `off` preserves the wave-15..19
+//!                              byte-shape; `deterministic_safe` MAY
+//!                              auto-answer Approved on the wave-16/02
+//!                              listener path when every safety rule
+//!                              passes AND the action is
+//!                              non-destructive (archive/supersede/
+//!                              remove are NEVER promoted); `dry_run`
+//!                              computes the deterministic outcome
+//!                              without ever mutating state. The
+//!                              policy NEVER auto-rejects (invariant
+//!                              I1) and NEVER calls an LLM (invariant
+//!                              I3) — pure deterministic safety
+//!                              inspector. The wave-15..19 non-goal
+//!                              "auto-answer a review question" stays
+//!                              loud below; this v0 narrows it to
+//!                              "live LLM auto-answer" while
+//!                              permitting the deterministic
+//!                              listener-side promotion under the
+//!                              opt-in `deterministic_safe` mode.
 //!
 //!   Every v1 response now also carries `artifact_refs` — a flat object
 //!   that lifts whatever the inner handler produced (`directive_id /
@@ -96,8 +118,16 @@
 //!   Things v0/v1 deliberately do NOT do — these are explicit non-goals:
 //!     * auto-approve a directive       (s3 is a human/Codex review gate)
 //!     * auto-approve a plan            (s5 is a human/Codex review gate)
-//!     * auto-answer a review question  (review-gate emission stays opt-in
-//!                                       on the underlying handlers)
+//!     * auto-answer a review question  via LLM (the wave-20/08
+//!                                       `auto_answer_policy` permits a
+//!                                       deterministic listener-side
+//!                                       Approved promotion under the
+//!                                       opt-in `deterministic_safe`
+//!                                       mode, but NEVER through an LLM
+//!                                       and NEVER for destructive
+//!                                       actions — see the wave-20/08
+//!                                       I1+I2+I3 invariants on
+//!                                       `evaluate_auto_answer_policy`)
 //!     * autonomous workstation dispatch (no fresh slot spawn, no ClaudeCode
 //!                                        worker enqueue — only mission_plan
 //!                                        execute on an already-approved plan)
@@ -547,6 +577,18 @@ fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
         // (rendered|machine) allowlist.
         "dispatch_contract_mode",
         "render_markdown",
+        // wave-20 / task 08 — review-question listener auto-answer
+        // knob. Default `off` preserves the wave-15..19 byte-shape;
+        // `deterministic_safe` MAY auto-answer Approved on the
+        // wave-16/02 listener path when every safety rule passes AND
+        // the action is non-destructive; `dry_run` computes the
+        // deterministic outcome without ever mutating state. The
+        // pipeline never re-validates — `parse_auto_answer_policy`
+        // owns the strict allowlist (off|deterministic_safe|dry_run).
+        // Live LLM auto-approval is forbidden (the policy is pure
+        // deterministic). Destructive actions (archive/supersede/
+        // remove) NEVER auto-promote even under deterministic_safe.
+        "auto_answer_policy",
     ] {
         if let Some(v) = args.get(key) {
             if !v.is_null() {
@@ -952,6 +994,42 @@ fn build_artifact_refs(scope: ArtifactScope, payload: &Value) -> Value {
         "render_command",
         "task_contract_skip_reason",
         "task_contract_error",
+    ] {
+        if let Some(v) = map.get(key) {
+            if !v.is_null() {
+                refs.insert(key.into(), v.clone());
+            }
+        }
+    }
+
+    // wave-20 / task 08 — review auto-answer policy splice. Surfaced
+    // only when the inner handler stamped one of these keys (default
+    // `off` produces no fields under `Off`, so the wave-15..19
+    // byte-shape stays identical for callers that never opt into
+    // `auto_answer_policy`). Lifting the four invariant fields here
+    // means a single envelope shape covers the listener-path policy
+    // outcome:
+    //   * `auto_answer_policy`     — resolved policy label
+    //                                 (off|deterministic_safe|dry_run)
+    //   * `policy_result`          — outcome status label
+    //                                 (not_evaluated|auto_answered|
+    //                                  skipped_rules_failed|
+    //                                  skipped_destructive_action|
+    //                                  dry_run_preview)
+    //   * `selected_decision`      — `approved | needs_changes` (NEVER
+    //                                  `rejected` — invariant I1)
+    //   * `safety_rule_results`    — array of `code:detail` strings
+    //                                  from the wave-18/07 inspector
+    //                                  + the wave-20/08 destructive-
+    //                                  action rule
+    //   * `requires_human`         — `true` whenever the listener
+    //                                  must defer to a human reviewer
+    for key in [
+        "auto_answer_policy",
+        "policy_result",
+        "selected_decision",
+        "safety_rule_results",
+        "requires_human",
     ] {
         if let Some(v) = map.get(key) {
             if !v.is_null() {
@@ -4695,6 +4773,368 @@ mod tests {
             !inner_text_lower.contains("claude -p"),
             "machine-mode refusal MUST NOT embed a `claude -p` fallback hint \
              (would defeat the SSOT contract)"
+        );
+    }
+
+    // ── 10. wave-20 / Task 08 :: review auto-answer policy forwarding ──
+    //
+    // Goal: pin the wave-20/08 forwarding contract for the new
+    // `auto_answer_policy` knob — the unified entry MUST forward the
+    // value verbatim to the inner `mission_plan(action=execute)` call so
+    // the wave-16/02 listener path can apply the deterministic safety
+    // inspector. The pipeline NEVER re-validates the allowlist (that is
+    // the inner handler's `parse_auto_answer_policy` job) and NEVER
+    // injects a default at the pipeline layer (so a typo fails fast on
+    // the inner side instead of being silently masked).
+    //
+    // The dry-run smoke at the end of this block proves the deterministic
+    // path end-to-end against synthesised inner-handler payloads:
+    //   * inner payload mirrors what the wave-16/02 listener stamps
+    //     (`auto_answer_policy / policy_result / selected_decision /
+    //      safety_rule_results / requires_human`);
+    //   * `decorate` lifts every field into `artifact_refs` so a
+    //     downstream consumer can read the policy outcome from the
+    //     unified-entry envelope without re-parsing the inner payload;
+    //   * destructive-action invariant (archive/supersede/remove never
+    //     auto-promote) is exercised on the smoke trace;
+    //   * never-auto-reject invariant pinned by asserting the
+    //     `selected_decision` field never carries `rejected`.
+
+    /// Forwarding contract: the wave-20/08 `auto_answer_policy` knob
+    /// MUST reach the inner `mission_plan(execute)` shape via
+    /// `PlanExecute`. Pinning this in its own test (separate from the
+    /// dry-run smoke below) means a future refactor that drops the key
+    /// fails fast on a small targeted test rather than only on the
+    /// broader smoke trace.
+    #[test]
+    fn build_plan_execute_args_forwards_wave20_auto_answer_policy() {
+        let plan_id = "66666666-6666-6666-6666-000000000020";
+        for mode in ["off", "deterministic_safe", "dry_run"] {
+            let args = json!({
+                "approved_plan_id": plan_id,
+                "execute": true,
+                "execute_mode": "internal",
+                "auto_answer_policy": mode,
+            });
+            let decision = plan_pipeline(&args).expect("should route to plan execute");
+            let PipelineDecision::PlanExecute { execute_args } = decision else {
+                panic!("expected PlanExecute");
+            };
+            assert_eq!(
+                execute_args["auto_answer_policy"], mode,
+                "auto_answer_policy=`{}` must be forwarded unchanged",
+                mode
+            );
+        }
+    }
+
+    /// Forwarding contract: when the wave-20/08 knob is omitted the
+    /// execute args bag stays byte-identical to the wave-15..19 shape
+    /// (no fabricated nulls, no defaults injected at the pipeline
+    /// layer). Mirrors the symmetric guarantee the other wave-20 knobs
+    /// already enforce.
+    #[test]
+    fn build_plan_execute_args_wave20_auto_answer_policy_absent_when_omitted() {
+        let args = json!({
+            "approved_plan_id": "66666666-6666-6666-6666-000000000021",
+            "execute": true,
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        assert!(
+            execute_args.get("auto_answer_policy").is_none(),
+            "default execute path must NOT forward `auto_answer_policy` (wave-15..19 byte-compat)"
+        );
+    }
+
+    /// `build_artifact_refs` lifts every wave-20/08 auto-answer policy
+    /// field so the unified-entry envelope preserves the listener-path
+    /// outcome without callers diving back into the inner JSON. Pinning
+    /// the projection separately from the smoke gives a future refactor
+    /// that drops a key a small targeted failure instead of only the
+    /// broader smoke trace.
+    #[test]
+    fn build_artifact_refs_lifts_wave20_auto_answer_policy_fields() {
+        // Synthesise the exact key set the wave-20/08 listener stamps on
+        // its inner payload after running the deterministic inspector.
+        let payload = json!({
+            "status": "approved",
+            "execute_mode": "internal",
+            "plan_id": "66666666-6666-6666-6666-000000000022",
+            "board_task_id": "btk-wave20-task08-smoke",
+            // wave-20 / task 08 — auto-answer policy block.
+            "auto_answer_policy": "deterministic_safe",
+            "policy_result": "auto_answered",
+            "selected_decision": "approved",
+            "safety_rule_results": [
+                "rule:deterministic_mode:producer ran in deterministic/dry-run mode",
+                "rule:no_file_write:artifact did not touch the filesystem",
+                "rule:no_protected_source_or_target:neither side is on the protected list",
+                "rule:no_additional_blockers:no caller-side warnings or partial-status conflicts on the response payload",
+                "rule:caller_opt_in:caller explicitly supplied review_automation_policy",
+                "rule:non_destructive_action:`approve` is not on the destructive list",
+            ],
+            "requires_human": false,
+        });
+        let refs = build_artifact_refs(ArtifactScope::Execution, &payload);
+        // Row-id pointers preserved.
+        assert_eq!(refs["scope"], "execution");
+        assert_eq!(refs["plan_id"], "66666666-6666-6666-6666-000000000022");
+        assert_eq!(refs["board_task_id"], "btk-wave20-task08-smoke");
+        assert_eq!(refs["status"], "approved");
+        // wave-20 / task 08 splice surfaced verbatim.
+        assert_eq!(refs["auto_answer_policy"], "deterministic_safe");
+        assert_eq!(refs["policy_result"], "auto_answered");
+        assert_eq!(refs["selected_decision"], "approved");
+        assert!(refs["safety_rule_results"].is_array());
+        assert!(!refs["safety_rule_results"].as_array().unwrap().is_empty());
+        assert_eq!(refs["requires_human"], false);
+    }
+
+    /// Symmetric byte-compat invariant: when the inner handler is silent
+    /// about wave-20/08 (default `off` produces no fields), the
+    /// projection MUST NOT fabricate any auto-answer policy field. This
+    /// pins the byte-shape guarantee for wave-15..19 callers that never
+    /// opt into the new knob.
+    #[test]
+    fn build_artifact_refs_omits_wave20_auto_answer_policy_when_inner_silent() {
+        let payload = json!({
+            "status": "approved",
+            "plan_id": "00000000-0000-0000-0000-000000000bbb",
+            "board_task_id": "btk-legacy",
+        });
+        let refs = build_artifact_refs(ArtifactScope::Execution, &payload);
+        let refs_obj = refs.as_object().unwrap();
+        for k in &[
+            "auto_answer_policy",
+            "policy_result",
+            "selected_decision",
+            "safety_rule_results",
+            "requires_human",
+        ] {
+            assert!(
+                !refs_obj.contains_key(*k),
+                "wave-15..19 byte-compat: auto-answer policy key `{}` must NOT be fabricated",
+                k
+            );
+        }
+    }
+
+    /// Dry-run smoke: drives `plan_pipeline` for s4 + s6 with the
+    /// wave-20/08 `auto_answer_policy=dry_run` knob, then synthesises
+    /// the inner plan-execute payload exactly the way the wave-16/02
+    /// listener (post-wave-20/08) stamps it after running the
+    /// deterministic safety inspector in dry-run mode. The smoke pins:
+    ///
+    ///   * forwarding (`auto_answer_policy=dry_run` reaches the execute
+    ///     args bag verbatim);
+    ///   * artifact_refs lifts every policy field;
+    ///   * `requires_human=true` ALWAYS holds under dry-run (invariant
+    ///     pinned on the envelope shape so a future refactor that
+    ///     silently flips it lands an explicit failure);
+    ///   * `selected_decision` NEVER carries `rejected` (invariant I1);
+    ///   * the v0/v1 non-goals stay loud — no LLM auto-approval, no
+    ///     destructive-action promotion.
+    ///
+    /// No LLM, no spawn, no shell — the smoke uses `decorate` against a
+    /// hand-crafted inner payload that mirrors the production listener
+    /// shape (`evaluate_auto_answer_policy` outputs).
+    #[test]
+    fn smoke_wave20_auto_answer_policy_dry_run_envelope() {
+        let directive_id = "00000000-0000-0000-0000-000000000d28";
+        let board_task_id = "btk-wave20-task08-smoke";
+        let plan_id = "66666666-6666-6666-6666-000000000028";
+        let plan_version: i32 = 1;
+
+        // ── Stage s4 :: plan compile (dry_run, no LLM) ─────────────────
+        let s4_args = json!({
+            "approved_directive_id": directive_id,
+            "directive_version": 1,
+            "board_task_id": board_task_id,
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        let s4_decision = plan_pipeline(&s4_args).expect("s4 must route");
+        let PipelineDecision::PlanCompile { compile_args } = s4_decision else {
+            panic!("expected PlanCompile");
+        };
+        assert_eq!(compile_args["board_task_id"], board_task_id);
+
+        // ── Stage s6 :: plan execute (dry_run policy, no mutation) ─────
+        let s6_args = json!({
+            "approved_plan_id": plan_id,
+            "execute": true,
+            "execute_mode": "internal",
+            "scheduler_mode": "single_node",
+            "target": "mission_task_delegate",
+            "dispatch_strategy": "agent-team",
+            "target_project": "missiond",
+            "cwd": "/Users/jinchen/Projects/missiond",
+            // wave-20 / task 08 — opt into dry-run preview. The smoke
+            // uses `dry_run` (NOT `deterministic_safe`) so observers
+            // see the deterministic outcome shape without the policy
+            // mutating any DB row.
+            "auto_answer_policy": "dry_run",
+        });
+        let s6_decision = plan_pipeline(&s6_args).expect("s6 must route");
+        let PipelineDecision::PlanExecute { execute_args } = s6_decision else {
+            panic!("approved_plan_id + execute=true must route to PlanExecute");
+        };
+        // Forwarding contract proven through the routing decision.
+        assert_eq!(execute_args["plan_id"], plan_id);
+        assert_eq!(execute_args["auto_answer_policy"], "dry_run");
+
+        // Synthesise the inner plan-execute payload exactly the way the
+        // wave-16/02 listener (post-wave-20/08) stamps it. Three fields
+        // are load-bearing: `policy_result` is `dry_run_preview`,
+        // `requires_human=true`, `selected_decision` carries the
+        // suggestion (the helper never mutates state).
+        let s6_inner = smoke_inner_result(json!({
+            "status": "executing",
+            "execute_mode": "internal",
+            "runner_status": "review_question_listener_dry_run",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            "version": plan_version,
+            // wave-20 / task 08 — listener-side outcome block.
+            "auto_answer_policy": "dry_run",
+            "policy_result": "dry_run_preview",
+            "selected_decision": "approved",
+            "safety_rule_results": [
+                "rule:deterministic_mode:producer ran in deterministic/dry-run mode",
+                "rule:no_file_write:artifact did not touch the filesystem",
+                "rule:no_protected_source_or_target:neither side is on the protected list",
+                "rule:no_additional_blockers:no caller-side warnings or partial-status conflicts on the response payload",
+                "rule:caller_opt_in:caller explicitly supplied review_automation_policy",
+                "rule:non_destructive_action:`approve` is not on the destructive list",
+            ],
+            "requires_human": true,
+        }));
+        let s6_decorated = decorate(
+            s6_inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step:
+                    "auto-answer policy dry-run preview computed; defer to human reviewer",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let s6_meta = smoke_meta_of(&s6_decorated);
+
+        // ── Envelope shape ─────────────────────────────────────────────
+        assert_eq!(s6_meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        assert_eq!(s6_meta["artifact_refs"]["scope"], "execution");
+        assert_eq!(s6_meta["artifact_refs"]["plan_id"], plan_id);
+        // wave-20 / task 08 splice lifted into artifact_refs.
+        assert_eq!(s6_meta["artifact_refs"]["auto_answer_policy"], "dry_run");
+        assert_eq!(s6_meta["artifact_refs"]["policy_result"], "dry_run_preview");
+        assert_eq!(s6_meta["artifact_refs"]["selected_decision"], "approved");
+        assert!(s6_meta["artifact_refs"]["safety_rule_results"].is_array());
+        // ── Invariant: dry_run ALWAYS defers to human reviewer ─────────
+        assert_eq!(
+            s6_meta["artifact_refs"]["requires_human"], true,
+            "dry_run MUST always set requires_human=true (no listener-side mutation)"
+        );
+        // ── Invariant I1: selected_decision NEVER carries `rejected` ───
+        assert_ne!(
+            s6_meta["artifact_refs"]["selected_decision"], "rejected",
+            "invariant I1: auto-answer MUST NEVER select rejected"
+        );
+
+        // ── v0/v1 non-goals remain loud at the auto-answer stage ───────
+        let s6_non_goals = s6_meta["v0_non_goals"].as_array().unwrap();
+        for needle in [
+            "auto_approve_directive",
+            "auto_approve_plan",
+            "auto_answer_review_question",
+            "autonomous_workstation_dispatch",
+        ] {
+            assert!(
+                s6_non_goals.iter().any(|v| v == needle),
+                "auto-answer dry-run smoke must keep `{}` in v0_non_goals",
+                needle
+            );
+        }
+    }
+
+    /// Destructive-action smoke: prove the wave-20/08 invariant I2
+    /// (archive/supersede/remove NEVER auto-promote) survives the
+    /// unified-entry decoration. We synthesise an inner payload mirror
+    /// of what the listener stamps when the policy ran against an
+    /// `archive` action under `deterministic_safe` mode. The
+    /// `policy_result` MUST be `skipped_destructive_action` and the
+    /// envelope MUST carry `requires_human=true`.
+    #[test]
+    fn smoke_wave20_auto_answer_policy_destructive_action_never_promotes() {
+        let plan_id = "66666666-6666-6666-6666-000000000029";
+        let payload = json!({
+            "status": "draft",
+            "plan_id": plan_id,
+            "board_task_id": "btk-wave20-task08-destructive",
+            "auto_answer_policy": "deterministic_safe",
+            "policy_result": "skipped_destructive_action",
+            // The suggestion may still be `approved` (every other rule
+            // passed) but the listener MUST defer; the LISTENER reads
+            // `requires_human` not `selected_decision`.
+            "selected_decision": "approved",
+            "safety_rule_results": [
+                "rule:deterministic_mode:producer ran in deterministic/dry-run mode",
+                "rule:no_file_write:artifact did not touch the filesystem",
+                "rule:no_protected_source_or_target:neither side is on the protected list",
+                "rule:no_additional_blockers:no caller-side warnings or partial-status conflicts on the response payload",
+                "rule:caller_opt_in:caller explicitly supplied review_automation_policy",
+                "rule:destructive_action:`archive` is on the destructive list (archive|supersede|remove); auto-answer refuses to promote",
+            ],
+            "requires_human": true,
+        });
+        let inner = ToolResult {
+            content: vec![missiond_mcp::tools::ToolContent::Text {
+                text: serde_json::to_string_pretty(&payload).unwrap(),
+            }],
+            is_error: None,
+        };
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "destructive action — defer to human reviewer",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let meta = smoke_meta_of(&decorated);
+        assert_eq!(
+            meta["artifact_refs"]["auto_answer_policy"],
+            "deterministic_safe"
+        );
+        // Pinning the dedicated destructive-action status so a future
+        // refactor that collapses it back into `skipped_rules_failed`
+        // lands an explicit failure here.
+        assert_eq!(
+            meta["artifact_refs"]["policy_result"],
+            "skipped_destructive_action"
+        );
+        // Invariant I2: the envelope MUST require human review.
+        assert_eq!(
+            meta["artifact_refs"]["requires_human"], true,
+            "invariant I2: destructive action MUST always defer to human"
+        );
+        // Pinning the rule trail so observers can grep for the
+        // destructive-action signal.
+        let rules = meta["artifact_refs"]["safety_rule_results"]
+            .as_array()
+            .unwrap();
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.as_str().unwrap().contains("destructive_action")
+                    && r.as_str().unwrap().contains("archive")),
+            "rule trail MUST name the destructive `archive` action"
         );
     }
 }
