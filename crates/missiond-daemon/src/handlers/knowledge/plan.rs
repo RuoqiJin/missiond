@@ -50,7 +50,7 @@ use crate::handlers::knowledge::file_artifacts::{
 };
 use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
-    parse_resolution_review_question_id, parse_review_gate_policy,
+    parse_plan_node_resume_input, parse_resolution_review_question_id, parse_review_gate_policy,
     parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
     review_gate_policy_was_explicit, stamp_needs_changes_next_step, stamp_resolution_payload,
     validate_review_resolution_envelope, ParsedReviewQuestionId, ResolutionOutcome,
@@ -2026,6 +2026,38 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
                 ),
             ),
         ));
+    }
+
+    // wave-17 / task 01 — explicit PLAN-DAG paused-node resume hook.
+    // When the caller supplies `resume_review_question_id` (with
+    // `resume_review_decision`), we route through the dedicated resume
+    // helper instead of the standard execute pipeline. The helper only
+    // resumes one paused node — downstream nodes that were left
+    // pending after the original paused dispatch stay pending until a
+    // follow-up `mission_plan(execute)` call. This is NOT general
+    // auto-approve: only ids whose envelope round-trips to a
+    // paused-eligible node carry through.
+    let resume_input = match parse_plan_node_resume_input(args) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(e.code(), e.message()),
+            ))
+        }
+    };
+    if let Some(input) = resume_input {
+        if execute_mode != "internal" {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    "resume_review_question_id requires execute_mode=internal",
+                )
+                .with_suggestion(
+                    "the paused-node resume hook dispatches inside the daemon; pass execute_mode=\"internal\"",
+                ),
+            ));
+        }
+        return super::plan_dag::action_execute_resume(state, args, &plan, input).await;
     }
 
     // scheduler_mode hook (Wave 12 / Task 02): when the caller asks for the
@@ -5163,5 +5195,44 @@ mod tests {
                 decision: ReviewDecision::Approved
             }
         );
+    }
+
+    // ── wave-17 / task 01 — resume input field set ─────────────────────
+
+    #[test]
+    fn parse_plan_node_resume_input_via_handler_boundary_matches_review_gate_helper() {
+        // The plan handler invokes `parse_plan_node_resume_input` from
+        // `review_gate.rs`. Pin the wire shape end-to-end so the handler
+        // boundary stays in sync with the helper's contract.
+        let args = json!({
+            "resume_review_question_id": "review:plan:abc:v1:plan-node:0123456789abcdef",
+            "resume_review_decision": "approved",
+            "resume_actor": "agent-team",
+            "resume_note": "proceed",
+        });
+        let input = parse_plan_node_resume_input(&args)
+            .expect("ok")
+            .expect("some");
+        assert_eq!(
+            input.question_id,
+            "review:plan:abc:v1:plan-node:0123456789abcdef"
+        );
+        assert_eq!(input.decision, ReviewDecision::Approved);
+        assert_eq!(input.actor.as_deref(), Some("agent-team"));
+        assert_eq!(input.note.as_deref(), Some("proceed"));
+    }
+
+    #[test]
+    fn parse_plan_node_resume_input_handler_boundary_quiet_when_id_absent() {
+        // No resume id → caller falls through to the standard execute
+        // pipeline. Must NOT error so the wave-15 manager-side resolution
+        // input contract stays byte-identical.
+        let args = json!({
+            "review_question_id": "review:plan:abc:v1:approve",
+            "review_decision": "approved",
+        });
+        assert!(parse_plan_node_resume_input(&args)
+            .expect("ok")
+            .is_none());
     }
 }

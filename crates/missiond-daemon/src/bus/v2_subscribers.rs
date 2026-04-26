@@ -70,8 +70,12 @@ use crate::handlers::knowledge::directive::{
 use crate::handlers::knowledge::plan::{
     handle_review_resolved_event as plan_handle_review_resolved, PlanSubscriberOutcome,
 };
+use crate::handlers::knowledge::plan_dag::{
+    handle_review_resolved_plan_node_event as plan_node_handle_review_resolved,
+    PlanNodeResumeListenerOutcome,
+};
 use crate::handlers::knowledge::review_gate::{
-    plan_review_resolved_dispatch, ReviewResolvedDispatch,
+    is_plan_node_review_action, plan_review_resolved_dispatch, ReviewResolvedDispatch,
 };
 use crate::handlers::knowledge::workflow::{
     handle_review_resolved_event as workflow_handle_review_resolved,
@@ -544,8 +548,23 @@ async fn handle_review_resolved(state: &AppState, question_id: &str, resolution:
                 log_directive_outcome(question_id, &outcome);
             }
             "plan" => {
-                let outcome = plan_handle_review_resolved(state, &parsed, decision).await;
-                log_plan_outcome(question_id, &outcome);
+                // wave-17 / task 01 — branch on action so deterministic
+                // plan-node review ids (`action="plan-node"`) route
+                // through the DAG resume helper while the wave-15
+                // manager-action ids (compile / approve / mark /
+                // supersede) keep the existing handler. Non-plan-node
+                // ids that happen to encode `plan-node` for an
+                // unsupported scope already failed earlier in the
+                // planner; we only need to split here.
+                if is_plan_node_review_action(&parsed.action) {
+                    let outcome =
+                        plan_node_handle_review_resolved(state, &parsed, decision).await;
+                    log_plan_node_resume_outcome(question_id, &outcome);
+                } else {
+                    let outcome =
+                        plan_handle_review_resolved(state, &parsed, decision).await;
+                    log_plan_outcome(question_id, &outcome);
+                }
             }
             "workflow" => {
                 let outcome =
@@ -622,6 +641,89 @@ fn log_plan_outcome(qid: &str, outcome: &PlanSubscriberOutcome) {
         }
         PlanSubscriberOutcome::DbError { detail } => {
             warn!(question_id = %qid, error = %detail, "v2[review_resolution]: plan DB error");
+        }
+    }
+}
+
+fn log_plan_node_resume_outcome(qid: &str, outcome: &PlanNodeResumeListenerOutcome) {
+    match outcome {
+        PlanNodeResumeListenerOutcome::Dispatched {
+            plan_id,
+            node_id,
+            succeeded,
+        } => {
+            if *succeeded {
+                info!(
+                    question_id = %qid,
+                    plan_id = %plan_id,
+                    node_id = %node_id,
+                    "v2[review_resolution]: plan-node resume dispatched (approved)"
+                );
+            } else {
+                warn!(
+                    question_id = %qid,
+                    plan_id = %plan_id,
+                    node_id = %node_id,
+                    "v2[review_resolution]: plan-node resume dispatched but inner handler failed"
+                );
+            }
+        }
+        PlanNodeResumeListenerOutcome::KeptPaused {
+            plan_id,
+            node_id,
+            decision,
+        } => {
+            info!(
+                question_id = %qid,
+                plan_id = %plan_id,
+                node_id = %node_id,
+                decision = %decision,
+                "v2[review_resolution]: plan-node kept paused (rejected/needs_changes)"
+            );
+        }
+        PlanNodeResumeListenerOutcome::ArtifactIdNotUuid { artifact_id, error } => {
+            warn!(
+                question_id = %qid,
+                artifact_id = %artifact_id,
+                error = %error,
+                "v2[review_resolution]: plan-node artifact_id not a UUID"
+            );
+        }
+        PlanNodeResumeListenerOutcome::NotFound { artifact_id } => {
+            warn!(
+                question_id = %qid,
+                artifact_id = %artifact_id,
+                "v2[review_resolution]: plan-node plan not found"
+            );
+        }
+        PlanNodeResumeListenerOutcome::ValidationRejected {
+            plan_id,
+            code,
+            message,
+        } => {
+            warn!(
+                question_id = %qid,
+                plan_id = %plan_id,
+                code = %code,
+                error = %message,
+                "v2[review_resolution]: plan-node resume validation rejected"
+            );
+        }
+        PlanNodeResumeListenerOutcome::DagBuildFailed { plan_id, detail } => {
+            warn!(
+                question_id = %qid,
+                plan_id = %plan_id,
+                error = %detail,
+                "v2[review_resolution]: plan-node DAG build failed"
+            );
+        }
+        PlanNodeResumeListenerOutcome::DispatchError { plan_id, detail } => {
+            warn!(
+                question_id = %qid,
+                plan_id = %plan_id,
+                error = %detail,
+                "v2[review_resolution]: plan-node resume dispatch error"
+            );
         }
     }
 }
@@ -777,6 +879,46 @@ mod tests {
         // never auto-approves non-review questions.
         let d = plan_review_resolved_dispatch("master:question:abc", "approved");
         assert!(matches!(d, ReviewResolvedDispatch::IgnoreNonReviewId));
+    }
+
+    #[test]
+    fn dispatch_routes_plan_node_action_separately_from_manager_actions() {
+        // Wave-17 / task 01 — the planner routes both
+        // `review:plan:*:plan-node:<hash>` (DAG paused-node ids) and
+        // `review:plan:*:approve` (manager-action ids) under
+        // scope=plan. The subscriber's `handle_review_resolved` MUST
+        // branch on `parsed.action` so plan-node ids hit the resume
+        // helper while manager-action ids stay on the wave-15 bridge.
+        // This test pins the predicate the subscriber relies on.
+        use crate::handlers::knowledge::review_gate::is_plan_node_review_action;
+
+        // Manager-action id — NOT routed through the resume helper.
+        let d = plan_review_resolved_dispatch(
+            "review:plan:abc:v1:approve",
+            "approved",
+        );
+        match d {
+            ReviewResolvedDispatch::Route { parsed, .. } => {
+                assert_eq!(parsed.scope, "plan");
+                assert!(!is_plan_node_review_action(&parsed.action));
+            }
+            other => panic!("expected Route, got {:?}", other),
+        }
+
+        // Plan-node id — MUST route through the resume helper.
+        let d = plan_review_resolved_dispatch(
+            "review:plan:abc:v1:plan-node:0123456789abcdef",
+            "approved",
+        );
+        match d {
+            ReviewResolvedDispatch::Route { parsed, decision } => {
+                assert_eq!(parsed.scope, "plan");
+                assert!(is_plan_node_review_action(&parsed.action));
+                assert_eq!(decision, ReviewDecision::Approved);
+                assert_eq!(parsed.topic_hash.as_deref(), Some("0123456789abcdef"));
+            }
+            other => panic!("expected Route for plan-node id, got {:?}", other),
+        }
     }
 }
 

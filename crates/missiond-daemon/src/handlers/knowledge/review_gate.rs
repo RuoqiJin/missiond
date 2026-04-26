@@ -370,6 +370,28 @@ pub(crate) fn derive_plan_node_review_question_id(
     )
 }
 
+/// wave-17 / task 01 — pure projection of a plan-node review id's
+/// trailing topic-hash. Used by the resume helper to map the supplied
+/// `resume_review_question_id` back to the originating paused node id
+/// without standing up an AppState (the node id itself never appears
+/// in the envelope — only its 16-char SHA-256 prefix does).
+///
+/// `node_id` is normalised the same way wave-16 / task 04 hashed it
+/// (raw bytes; no trim) so the round-trip stays consistent with the
+/// pause emitter.
+pub(crate) fn derive_plan_node_topic_hash(node_id: &str) -> String {
+    topic_hash_short(node_id)
+}
+
+/// True iff `parsed.action` is the wave-16 PLAN-DAG review action
+/// (`plan-node`, case-insensitive). The wave-17 / task 01 listener
+/// branches on this to route plan-node ids to the resume helper
+/// instead of the existing `plan_handle_review_resolved` (which only
+/// understands compile/approve/mark/supersede).
+pub(crate) fn is_plan_node_review_action(action: &str) -> bool {
+    action.trim().eq_ignore_ascii_case(PLAN_NODE_REVIEW_DEFAULT_ACTION)
+}
+
 /// SHA-256 over the input, truncated to the leading 16 hex chars. Bounded
 /// length keeps log lines + retro queries readable while still giving us
 /// 64 bits of collision space across topic/path strings.
@@ -941,6 +963,97 @@ pub(crate) fn parse_review_resolution_input(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
     Ok(Some(ReviewResolutionInput {
+        question_id: qid,
+        decision,
+        actor,
+        note,
+    }))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-17 :: PLAN-DAG paused-node resume input
+//
+// Wave-16 / task 04 added the `:review-gate "question-event"` per-node
+// pause path; wave-17 / task 01 closes the loop with an EXPLICIT
+// (non-autonomous) resume bridge for `mission_plan(action=execute)`.
+//
+// The resume input is intentionally a SEPARATE field-set from
+// `review_question_id` / `review_decision` (the wave-15 manager-action
+// resolution input above) so the same JSON request never accidentally
+// triggers BOTH the manager-side approve transition AND the DAG-node
+// resume helper. The ergonomic split also keeps the wave-15 contract
+// byte-identical for callers that only used the manager actions.
+//
+// Input shape (all opt-in; absent → legacy quiet path):
+//
+//   resume_review_question_id : string  — the deterministic id wave-16 produced
+//                                          (`review:plan:<plan_id>:v<version>:plan-node:<node-id-hash>`)
+//   resume_review_decision    : string  — "approved" | "rejected" | "needs_changes"
+//   resume_actor              : string  — free-form identity of the resolver
+//   resume_note               : string  — free-form reason / next-step note
+//
+// This is NOT general auto-approve: only resumes nodes paused via the
+// deterministic plan-node review id; non-plan-node ids in the field
+// fail validation at the action_execute_resume call site.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Wave-17 / task 01 — structured resume input pulled out of the
+/// `mission_plan(action=execute)` request JSON. Same shape as
+/// [`ReviewResolutionInput`] but lives under a distinct field set so
+/// the wave-15 manager-side resolution input contract stays
+/// byte-identical for callers that did not opt in to plan-node resume.
+#[derive(Debug, Clone)]
+pub(crate) struct PlanNodeResumeInput {
+    pub(crate) question_id: String,
+    pub(crate) decision: ReviewDecision,
+    pub(crate) actor: Option<String>,
+    pub(crate) note: Option<String>,
+}
+
+/// Wave-17 / task 01 — pull `resume_review_question_id`,
+/// `resume_review_decision`, `resume_actor`, `resume_note` out of the
+/// args JSON object.
+///
+/// Returns:
+///   * `Ok(None)`      — no `resume_review_question_id` → caller falls
+///                        through to the standard execute path.
+///   * `Ok(Some(...))` — full input; caller must validate the envelope
+///                        + paused-node mapping before dispatching.
+///   * `Err(...)`      — id supplied without decision OR decision
+///                        outside the {approved, rejected, needs_changes}
+///                        whitelist. Caller must surface as structured
+///                        error and refuse the action.
+pub(crate) fn parse_plan_node_resume_input(
+    args: &Value,
+) -> Result<Option<PlanNodeResumeInput>, ResolutionInputError> {
+    let qid = args
+        .get("resume_review_question_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let Some(qid) = qid else {
+        return Ok(None);
+    };
+    let decision_raw = args
+        .get("resume_review_decision")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let decision = match decision_raw {
+        Some(s) => ReviewDecision::parse(&s)?,
+        None => return Err(ResolutionInputError::MissingDecision),
+    };
+    let actor = args
+        .get("resume_actor")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let note = args
+        .get("resume_note")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    Ok(Some(PlanNodeResumeInput {
         question_id: qid,
         decision,
         actor,
@@ -2577,5 +2690,134 @@ mod tests {
             }
             other => panic!("expected Route, got {:?}", other),
         }
+    }
+
+    // ── wave-17 / task 01 — plan-node resume helpers ──────────────────
+
+    #[test]
+    fn derive_plan_node_topic_hash_matches_emitter_round_trip() {
+        // The hash the resume helper extracts MUST equal the hash the
+        // wave-16 / task 04 pause emitter folds into the deterministic id —
+        // otherwise the resume listener can never map an inbound qid back
+        // to its originating paused node id.
+        let plan_id = "00000000-0000-0000-0000-000000000abc";
+        let qid = derive_plan_node_review_question_id(plan_id, 1, "node-g", None);
+        let parsed = parse_review_question_id_struct(&qid).expect("valid envelope");
+        let hash = derive_plan_node_topic_hash("node-g");
+        assert_eq!(parsed.topic_hash.as_deref(), Some(hash.as_str()));
+        // Hash length is the wave-14 contract: 16 hex chars.
+        assert_eq!(hash.len(), 16);
+    }
+
+    #[test]
+    fn derive_plan_node_topic_hash_is_deterministic_per_node_id() {
+        // Same node id always hashes to the same prefix so the resume
+        // helper's lookup is stable across daemon restarts.
+        let a = derive_plan_node_topic_hash("alpha");
+        let b = derive_plan_node_topic_hash("alpha");
+        assert_eq!(a, b);
+        assert_ne!(a, derive_plan_node_topic_hash("beta"));
+    }
+
+    #[test]
+    fn is_plan_node_review_action_matches_default_action_case_insensitive() {
+        assert!(is_plan_node_review_action("plan-node"));
+        assert!(is_plan_node_review_action("PLAN-NODE"));
+        assert!(is_plan_node_review_action("  plan-node  "));
+        assert!(!is_plan_node_review_action("compile"));
+        assert!(!is_plan_node_review_action("approve"));
+        assert!(!is_plan_node_review_action(""));
+    }
+
+    // ── wave-17 / task 01 — resume input parser ───────────────────────
+
+    #[test]
+    fn parse_plan_node_resume_input_returns_none_when_id_absent() {
+        // Quiet path: no `resume_review_question_id` → caller falls
+        // through to the standard execute pipeline. Must NOT error
+        // because absence is the legacy-quiet contract.
+        assert!(parse_plan_node_resume_input(&json!({})).expect("ok").is_none());
+        assert!(parse_plan_node_resume_input(&json!({
+            "resume_review_question_id": "   "
+        }))
+        .expect("ok")
+        .is_none());
+    }
+
+    #[test]
+    fn parse_plan_node_resume_input_extracts_full_envelope() {
+        let input = parse_plan_node_resume_input(&json!({
+            "resume_review_question_id": "  review:plan:abc:v1:plan-node:0123456789abcdef  ",
+            "resume_review_decision": "approved",
+            "resume_actor": "  agent-team  ",
+            "resume_note": "  proceed  ",
+        }))
+        .expect("ok")
+        .expect("some");
+        assert_eq!(
+            input.question_id,
+            "review:plan:abc:v1:plan-node:0123456789abcdef"
+        );
+        assert_eq!(input.decision, ReviewDecision::Approved);
+        assert_eq!(input.actor.as_deref(), Some("agent-team"));
+        assert_eq!(input.note.as_deref(), Some("proceed"));
+    }
+
+    #[test]
+    fn parse_plan_node_resume_input_parses_rejected_and_needs_changes() {
+        for (raw, expected) in [
+            ("rejected", ReviewDecision::Rejected),
+            ("needs_changes", ReviewDecision::NeedsChanges),
+            ("REJECTED", ReviewDecision::Rejected),
+            ("changes", ReviewDecision::NeedsChanges),
+        ] {
+            let input = parse_plan_node_resume_input(&json!({
+                "resume_review_question_id": "review:plan:abc:v1:plan-node:0123456789abcdef",
+                "resume_review_decision": raw,
+            }))
+            .expect("ok")
+            .expect("some");
+            assert_eq!(input.decision, expected, "decision raw={}", raw);
+        }
+    }
+
+    #[test]
+    fn parse_plan_node_resume_input_id_without_decision_is_missing_decision_error() {
+        // The id is load-bearing — supplying it without a decision is
+        // fail-fast (mirrors the wave-15 manager-side parser behaviour).
+        let err = parse_plan_node_resume_input(&json!({
+            "resume_review_question_id": "review:plan:abc:v1:plan-node:0123456789abcdef",
+        }))
+        .expect_err("missing decision");
+        assert_eq!(err, ResolutionInputError::MissingDecision);
+    }
+
+    #[test]
+    fn parse_plan_node_resume_input_unknown_decision_is_unknown_decision_error() {
+        let err = parse_plan_node_resume_input(&json!({
+            "resume_review_question_id": "review:plan:abc:v1:plan-node:0123456789abcdef",
+            "resume_review_decision": "looks-good-to-me",
+        }))
+        .expect_err("unknown decision");
+        match err {
+            ResolutionInputError::UnknownDecision(raw) => {
+                assert_eq!(raw, "looks-good-to-me");
+            }
+            other => panic!("expected UnknownDecision, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_plan_node_resume_input_filters_blank_actor_and_note() {
+        let input = parse_plan_node_resume_input(&json!({
+            "resume_review_question_id": "review:plan:abc:v1:plan-node:0123456789abcdef",
+            "resume_review_decision": "approved",
+            "resume_actor": "   ",
+            "resume_note": "",
+        }))
+        .expect("ok")
+        .expect("some");
+        assert!(input.actor.is_none());
+        assert!(input.note.is_none());
     }
 }

@@ -317,6 +317,35 @@ fn build_properties() -> Value {
         "[approve | mark | supersede review_decision=*] (wave-15) free-form reason / next-step note. Echoed onto the response payload (`review_note`) and surfaced to downstream consumers as the human-readable resolution context.",
     ));
 
+    // ── wave-17 / task 01 — PLAN-DAG paused-node resume hook ────────────
+    //
+    // These knobs are opt-in. They route `mission_plan(action=execute,
+    // execute_mode=internal)` through the dedicated paused-node resume
+    // helper instead of the standard execute pipeline. Only resumes
+    // nodes that paused via the deterministic
+    // `review:plan:<plan_id>:v<version>:plan-node:<node-hash>` envelope
+    // wave-16 / task 04 emits.
+    p.insert("resume_review_question_id".into(), prop(
+        "string",
+        "[execute internal] (wave-17 / task 01) deterministic plan-node review question id from a wave-16 paused dispatch. Layout: `review:plan:<plan_id>:v<version>:plan-node:<sha256(node_id)[..16]>`. When supplied (with `resume_review_decision`), `mission_plan(action=execute)` routes through the paused-node resume helper: validates the envelope (plan id match, plan version match, action=plan-node, node-hash maps to exactly one node carrying `:review-gate \"question-event\"`), then on `approved` re-dispatches the paused node fresh (attempt 1; paused is non-terminal, not a failed attempt). `rejected` / `needs_changes` keep the node paused, write an audit row, and surface a next_step. Only resumes ONE node — downstream nodes still pending after the original paused dispatch stay pending until a follow-up execute call. Not general auto-approve: non-plan-node ids fail validation. `mission_plan` returns the existing wave-15 manager-side resolution input (`review_question_id` + `review_decision`) for compile/approve/mark/supersede actions; the resume input is a SEPARATE field set so the same request never accidentally triggers both paths.",
+    ));
+
+    p.insert("resume_review_decision".into(), prop_enum(
+        "string",
+        "[execute internal resume_review_question_id=*] (wave-17 / task 01) explicit decision attached to the supplied `resume_review_question_id`. Required when the id is supplied; absence with the id triggers a structured MISSING_PARAM error. `approved` re-dispatches the paused node fresh (attempt 1) and writes `paused -> resume_approved` + `ready -> running` + `running -> {succeeded|failed}` evidence; `rejected` keeps the node paused with `paused -> resume_rejected` evidence; `needs_changes` keeps it paused with `paused -> resume_needs_changes` evidence and a `next_step` recommendation in the response. Same vocabulary as the wave-15 review_decision contract.",
+        &["approved", "rejected", "needs_changes"],
+    ));
+
+    p.insert("resume_actor".into(), prop(
+        "string",
+        "[execute internal resume_review_question_id=*] (wave-17 / task 01) free-form identity of the resolver. Echoed onto the response payload (`resume_actor`) and into the audit evidence so callers can correlate the decision with whoever made it; never used for authentication.",
+    ));
+
+    p.insert("resume_note".into(), prop(
+        "string",
+        "[execute internal resume_review_question_id=*] (wave-17 / task 01) free-form reason / next-step note. Echoed onto the response payload (`resume_note`) and into the audit evidence as the human-readable resume context.",
+    ));
+
     Value::Object(p)
 }
 
@@ -402,6 +431,23 @@ pub fn definitions() -> Vec<ToolDefinition> {
          caller 未显式 workstation_dispatch=false。`mission_execution` / `mission_flow_run` 永不自动推断；target / project root 未解析时不推断；\
          显式 false 始终压制推断。响应始终附带 workstation_dispatch_source ∈ {explicit_arg, plan_hint, inferred, disabled, not_applicable} \
          + workstation_dispatch_inference_reason (when set)；DAG 节点同样规则 (per-node 字段)。\
+         wave-17 / task 01 PLAN-DAG paused-node resume hook: execute internal 时再传 \
+         resume_review_question_id (= 上一次 wave-16 paused dispatch 返回的 \
+         `review:plan:<plan_id>:v<version>:plan-node:<sha256(node_id)[..16]>` id) + \
+         resume_review_decision (approved | rejected | needs_changes) 即路由到 plan-node 恢复 helper — \
+         先 validate envelope (plan id 一致, plan version 一致, action=plan-node, \
+         node-hash 唯一映射到一个仍带 :review-gate \"question-event\" 的节点)，\
+         approved → 以 fresh attempt 1 重 dispatch 那一个节点 (paused 不算失败 attempt) 并写 \
+         paused→resume_approved + ready→running + running→{succeeded|failed} 三条 evidence；\
+         rejected → 节点保持 paused, 写 paused→resume_rejected evidence, surface next_step；\
+         needs_changes → 同上但 paused→resume_needs_changes + 不同 next_step。只 resume 这一个节点, \
+         downstream pending 节点不动 (后续 execute 推进)。非 plan-node id 在 validation 阶段 fail-fast。\
+         同一份 review:plan:* 但 action 不是 plan-node 时仍走 wave-15 的 review_question_id + review_decision \
+         manager-action bridge — 两个 input field set 严格分离, 同一请求绝不会同时触发。\
+         wave-16 / task 02 review-resolution listener 同步扩展: 收到 QuestionEvent::Resolved 且 \
+         id scope=plan + action=plan-node 时, listener 自动调用同一 resume helper (approved → 重 dispatch；\
+         rejected/needs_changes → 写 evidence keep paused)，非 plan-node id 保留旧行为。\
+         未识别 resolution 字符串永远 ignore + warn, 绝不 dispatch。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \
