@@ -447,6 +447,28 @@ fn build_properties() -> Value {
         "[execute internal scheduler_mode=dag_v1] (wave-17 / task 02) opt into strict claim enforcement. Default `false` (backward-compatible — claim metadata still surfaces on the evidence + response so observers can tell the discipline ran, but conflicts NEVER block dispatch). When `true`, an unresolvable scope overlap fails the node fast with structured `CLAIM_CONFLICT` (the inner handler is NEVER invoked); the per-node response carries `state=failed` + `reason=CLAIM_CONFLICT...` + `inner_payload.claim_status=conflict` + the conflicting claim snapshot. Reuses the same `scopes_overlap` predicate as wave12-01 (`mission_execution`) and wave16-06 (`enforce_scoped_commit_completion`) so the three call sites cannot drift. Per-node lifecycle becomes `pending -> claimed -> running -> {succeeded|failed} -> released` with one evidence row per transition; release timestamps land on the `claimed -> released` row. Dry-run shows planned claims under `planned_claims[]` without mutating.",
     ));
 
+    // ── wave-17 / task 05 — DAG finalize + distill trigger v0 ──────────
+    //
+    // These knobs are opt-in. Without `finalize_plan=true` the response
+    // shape stays byte-identical with the wave-17 / task 04 baseline; the
+    // existing per-aggregate `plan_update_status` side-effect already runs
+    // unconditionally so backward-compat callers see no behaviour change.
+    p.insert("finalize_plan".into(), prop(
+        "boolean",
+        "[execute scheduler_mode=dag_v1] (wave-17 / task 05) opt into the explicit finalization pass. Default `false` (preserves the wave-17 / task 04 byte-shape — only the existing plan_update_status side-effect runs). When `true`, the response carries an additional `finalization` block describing the aggregate -> plan_status mapping (`dag_succeeded` → succeeded; `dag_failed` / `dag_partial` → failed; `dag_paused` → preserves current status — the runner refuses to claim success while a node awaits review) plus an audit `dag_finalized` evidence row with the same projection. Setting `distill_on_success=true` requires this knob to be `true` too — distill is gated on a successful finalization.",
+    ));
+
+    p.insert("distill_on_success".into(), prop(
+        "boolean",
+        "[execute scheduler_mode=dag_v1 finalize_plan=true] (wave-17 / task 05) when true AND `finalize_plan=true` AND the aggregate resolves to `dag_succeeded` AND the plan FSM update lands on `succeeded`, automatically invoke `mission_workflow(action=distill, plan_id=<plan>)` after the finalization step. The response surfaces a `finalization.distill` block with `triggered` + `reason` + `distill_mode` + the inner workflow payload under `result`. Distill failure surfaces a non-fatal `warning` on the same block — the plan final state is NEVER downgraded when distill errors (per the wave-17 / task 05 brief: distill failure does NOT corrupt the plan final state). Project / cwd / target_project signals are forwarded verbatim so the distill handler resolves the same project root the DAG run wrote evidence into. `distill_on_success=true` without `finalize_plan=true` returns INVALID_PARAM (fail-fast: silently ignoring the request would mask caller intent).",
+    ));
+
+    p.insert("distill_mode".into(), prop_enum(
+        "string",
+        "[execute scheduler_mode=dag_v1 finalize_plan=true distill_on_success=true] (wave-17 / task 05) forwarded verbatim to `mission_workflow(action=distill)`. Default `dry_run` (the conservative preview: emits a `(workflow-draft …)` descriptor, no LLM, no persistence). Set `sonnet` to invoke the workflow-distiller actor v0 (Sonnet over plan + evidence sidecar). Allowlist matches `workflow.rs::parse_distill_mode` so the two surfaces cannot drift. Validation runs even in dry-run / `distill_on_success=false` so a typo (`sonet`) fails fast on the next live run instead of being silently ignored.",
+        &["dry_run", "sonnet"],
+    ));
+
     Value::Object(p)
 }
 
