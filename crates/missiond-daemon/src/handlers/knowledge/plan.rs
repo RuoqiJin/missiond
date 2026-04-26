@@ -4609,6 +4609,16 @@ async fn action_execute_internal(
         Err(err_result) => return Ok(err_result),
     };
 
+    // wave-20 / task 04 — pre-flight validate the dispatch-contract mode
+    // (rendered = wave-15..19 byte-compat; machine = consumer reads the
+    // emitted task.lisp directly). A typo
+    // (`dispatch_contract_mode="machin"`) fails fast before any
+    // workstation substrate side effect.
+    let dispatch_contract_mode = match parse_dispatch_contract_mode(args) {
+        Ok(m) => m,
+        Err(err_result) => return Ok(err_result),
+    };
+
     // wave-15 / task 05 + wave-16 / task 03 — workstation-dispatch routing.
     // Wave-15 honours explicit opt-in (caller arg `workstation_dispatch=true`
     // or PLAN.lisp `:workstation-dispatch true`). Wave-16 layers conservative
@@ -4701,13 +4711,34 @@ async fn action_execute_internal(
     }
 
     if dispatch_decision.is_enabled() {
-        let outcome = super::workstation_dispatch::run_workstation_dispatch(
+        // wave-20 / task 04 — when caller opted into machine-driven
+        // dispatch AND the wave-19 / task 06 emitter actually wrote a
+        // contract for this dispatch, hand the absolute path to the
+        // wave-19 / task 07 consumer so the brief is built FROM the
+        // on-disk Lisp SSOT rather than the in-memory hints. The
+        // consumer reads the contract, overlays it onto the hints
+        // (contract wins on every non-empty field), and refuses to
+        // fall back to the legacy natural-language brief on a
+        // malformed contract — that refusal surfaces verbatim as
+        // `SafeDescriptor` (status=`skipped_malformed_task_contract`),
+        // never `claude -p`. When the emitter is OFF (default) or the
+        // node was ineligible, machine mode is a no-op for THIS
+        // dispatch — the runner falls back to the legacy rendered
+        // path so existing callers that opt into machine mode without
+        // pairing it with `task_contract_mode="emit"` keep working.
+        let task_contract_path_for_machine = if dispatch_contract_mode.is_machine() {
+            emission.path.clone()
+        } else {
+            None
+        };
+        let outcome = super::workstation_dispatch::run_workstation_dispatch_with_contract(
             state,
             plan,
             resolved.target,
             resolved.dispatch_strategy,
             merged_hints,
             dry_run,
+            task_contract_path_for_machine.as_deref(),
         )
         .await;
         // Only transition the plan FSM on the Dispatched branch — every
@@ -4736,6 +4767,7 @@ async fn action_execute_internal(
             outcome,
             &dispatch_decision,
             &emission,
+            dispatch_contract_mode,
         ));
     }
 
@@ -5023,6 +5055,7 @@ fn build_workstation_dispatch_response(
     outcome: super::workstation_dispatch::WorkstationDispatchOutcome,
     decision: &super::workstation_dispatch::DispatchDecision,
     emission: &TaskContractEmissionRecord,
+    dispatch_contract_mode: DispatchContractMode,
 ) -> ToolResult {
     let status = match &outcome {
         super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. } => "executing",
@@ -5051,6 +5084,13 @@ fn build_workstation_dispatch_response(
         // wave-16 / task 03 — surface the routing decision so callers can
         // tell apart explicit opt-in (wave-15) from auto-inference (wave-16).
         "workstation_dispatch_source": decision.source.as_str(),
+        // wave-20 / task 04 — surface the resolved dispatch-contract
+        // mode so observers can pin which dispatch contract drove the
+        // brief. `rendered` (default) preserves wave-15..19 byte-shape;
+        // `machine` proves the consumer read the on-disk Lisp SSOT
+        // (cross-check against `task_contract_source_path` on the
+        // workstation extension when present).
+        "dispatch_contract_mode": dispatch_contract_mode.as_str(),
     });
     if let Some(reason) = decision.reason.as_deref() {
         if let Some(map) = payload.as_object_mut() {
@@ -5633,6 +5673,119 @@ pub(super) fn parse_task_contract_emit_mode(
     match args.get("emit_task_contract").and_then(|v| v.as_bool()) {
         Some(true) => Ok(TaskContractEmitMode::Emit),
         Some(false) | None => Ok(TaskContractEmitMode::Off),
+    }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-20 / task 04 — machine-driven dispatch v0
+//
+// The wave-19 / task 06 emitter writes a task-contract v1 Lisp sidecar at
+// `<project_root>/.missiond/tasks/generated/<plan_id>/<node_id>.lisp`
+// BEFORE handing off to the workstation substrate. The wave-19 / task 07
+// consumer (`run_workstation_dispatch_with_contract`) is already capable
+// of loading + parsing that file and overlaying the contract onto the
+// brief, but the production wiring still passes `task_contract_path =
+// None` — the consumer has been dormant. Wave-20 / task 04 adds an
+// opt-in mode (`dispatch_contract_mode="machine"` or the boolean
+// shorthand `render_markdown=false`) that activates the consumer wiring:
+// when enabled AND emission produced a path AND the dispatch routes
+// through the workstation substrate, the runner forwards the resolved
+// contract path so the brief is built FROM the on-disk Lisp SSOT.
+//
+// Default mode (`rendered`) preserves wave-15..19 behaviour byte-for-
+// byte: the brief is built from the in-memory hints and the optional
+// `render_command` lets a caller render the markdown out of process.
+// In machine mode the markdown rendering is NOT load-bearing — the
+// `render_command` is still surfaced as compatibility metadata, but
+// observers can prove the Lisp drove the dispatch via the new
+// `task_contract_source_path` field on the workstation response.
+//
+// Failure semantics (machine mode):
+//   * malformed contract on disk → `SafeDescriptor` from the consumer
+//     (status="skipped_malformed_task_contract"). MUST NOT fall back to
+//     `claude -p` or the unscoped prompt path.
+//   * emission disabled / not eligible → falls back to legacy rendered
+//     dispatch (machine mode is a no-op without an emitted contract;
+//     authors who insist on machine SSOT pair `dispatch_contract_mode=
+//     machine` with `task_contract_mode="emit"`).
+// ───────────────────────────────────────────────────────────────────────
+
+/// Canonical dispatch-contract modes. Mirrors the MCP descriptor enum.
+pub(super) const DISPATCH_CONTRACT_MODE_RENDERED: &str = "rendered";
+pub(super) const DISPATCH_CONTRACT_MODE_MACHINE: &str = "machine";
+
+/// Resolved dispatch-contract mode after parsing the
+/// `dispatch_contract_mode` / `render_markdown` args.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DispatchContractMode {
+    /// Default — wave-15..19 byte-shape. Brief is built from in-memory
+    /// hints. The optional `render_command` lets a caller render the
+    /// markdown brief out of process; the markdown is the load-bearing
+    /// artifact for human review.
+    Rendered,
+    /// Machine SSOT — when an emitted task-contract path exists AND the
+    /// dispatch routes through the workstation substrate, the consumer
+    /// loads + parses the on-disk Lisp and overlays it onto the brief.
+    /// The markdown becomes optional compatibility metadata.
+    Machine,
+}
+
+impl DispatchContractMode {
+    pub(super) fn as_str(self) -> &'static str {
+        match self {
+            DispatchContractMode::Rendered => DISPATCH_CONTRACT_MODE_RENDERED,
+            DispatchContractMode::Machine => DISPATCH_CONTRACT_MODE_MACHINE,
+        }
+    }
+
+    pub(super) fn is_machine(self) -> bool {
+        matches!(self, DispatchContractMode::Machine)
+    }
+}
+
+/// Parse the dispatch-contract mode opt-in args. Precedence:
+///   1. `dispatch_contract_mode` (string, "rendered" | "machine")
+///   2. `render_markdown` (boolean, `false` ⇒ Machine, `true` ⇒ Rendered)
+///   3. default ⇒ Rendered (wave-15..19 byte-compat)
+///
+/// Returns `Err(structured)` for malformed string values so a typo
+/// (`dispatch_contract_mode="machin"`) fails fast rather than silently
+/// degrading to `Rendered`.
+pub(super) fn parse_dispatch_contract_mode(
+    args: &Value,
+) -> std::result::Result<DispatchContractMode, ToolResult> {
+    if let Some(raw) = args.get("dispatch_contract_mode") {
+        let s = match raw.as_str() {
+            Some(s) => s.trim(),
+            None => {
+                return Err(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        "dispatch_contract_mode must be a string",
+                    )
+                    .with_suggestion(
+                        "expected one of: \"rendered\", \"machine\"",
+                    ),
+                ));
+            }
+        };
+        return match s {
+            DISPATCH_CONTRACT_MODE_RENDERED => Ok(DispatchContractMode::Rendered),
+            DISPATCH_CONTRACT_MODE_MACHINE => Ok(DispatchContractMode::Machine),
+            other => Err(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!("dispatch_contract_mode `{}` is not supported", other),
+                )
+                .with_suggestion(
+                    "expected one of: \"rendered\", \"machine\"",
+                ),
+            )),
+        };
+    }
+    match args.get("render_markdown").and_then(|v| v.as_bool()) {
+        Some(false) => Ok(DispatchContractMode::Machine),
+        Some(true) | None => Ok(DispatchContractMode::Rendered),
     }
 }
 
@@ -7995,6 +8148,86 @@ mod tests {
         assert!(err.is_error.unwrap_or(false));
     }
 
+    // ── wave-20 / task 04 — dispatch_contract_mode parser tests ─────────
+
+    /// Default mode is `Rendered` so the wave-15..19 byte-shape is
+    /// preserved for callers that never opt in.
+    #[test]
+    fn parse_dispatch_contract_mode_default_is_rendered() {
+        let v = json!({});
+        let m = parse_dispatch_contract_mode(&v).expect("default ok");
+        assert!(matches!(m, DispatchContractMode::Rendered));
+        assert_eq!(m.as_str(), "rendered");
+        assert!(!m.is_machine());
+    }
+
+    /// Explicit `dispatch_contract_mode="machine"` flips the mode.
+    #[test]
+    fn parse_dispatch_contract_mode_explicit_machine() {
+        let v = json!({"dispatch_contract_mode": "machine"});
+        let m = parse_dispatch_contract_mode(&v).expect("machine ok");
+        assert!(matches!(m, DispatchContractMode::Machine));
+        assert_eq!(m.as_str(), "machine");
+        assert!(m.is_machine());
+    }
+
+    /// Explicit `dispatch_contract_mode="rendered"` is a no-op default.
+    #[test]
+    fn parse_dispatch_contract_mode_explicit_rendered() {
+        let v = json!({"dispatch_contract_mode": "rendered"});
+        let m = parse_dispatch_contract_mode(&v).expect("rendered ok");
+        assert!(matches!(m, DispatchContractMode::Rendered));
+    }
+
+    /// `render_markdown=false` is the boolean shorthand for machine mode.
+    #[test]
+    fn parse_dispatch_contract_mode_render_markdown_false_is_machine() {
+        let v = json!({"render_markdown": false});
+        let m = parse_dispatch_contract_mode(&v).expect("shorthand ok");
+        assert!(matches!(m, DispatchContractMode::Machine));
+    }
+
+    /// `render_markdown=true` is the explicit rendered (default) form.
+    #[test]
+    fn parse_dispatch_contract_mode_render_markdown_true_is_rendered() {
+        let v = json!({"render_markdown": true});
+        let m = parse_dispatch_contract_mode(&v).expect("shorthand ok");
+        assert!(matches!(m, DispatchContractMode::Rendered));
+    }
+
+    /// Explicit `dispatch_contract_mode` wins over the boolean shorthand
+    /// when both are set so a caller cannot accidentally downgrade an
+    /// explicit machine opt-in.
+    #[test]
+    fn parse_dispatch_contract_mode_explicit_wins_over_shorthand() {
+        let v = json!({
+            "dispatch_contract_mode": "machine",
+            "render_markdown": true,
+        });
+        let m = parse_dispatch_contract_mode(&v).expect("explicit wins");
+        assert!(matches!(m, DispatchContractMode::Machine));
+    }
+
+    /// Typo (`dispatch_contract_mode="machin"`) MUST fail fast — never
+    /// silently degrade to `rendered`. This is the contract that
+    /// prevents a caller from accidentally falling back to the legacy
+    /// markdown-driven brief without noticing.
+    #[test]
+    fn parse_dispatch_contract_mode_unknown_string_is_structured_error() {
+        let v = json!({"dispatch_contract_mode": "machin"});
+        let err = parse_dispatch_contract_mode(&v).expect_err("typo rejected");
+        assert!(err.is_error.unwrap_or(false));
+    }
+
+    /// Non-string `dispatch_contract_mode` is rejected (no silent
+    /// conversion of `7` → "rendered").
+    #[test]
+    fn parse_dispatch_contract_mode_non_string_value_is_structured_error() {
+        let v = json!({"dispatch_contract_mode": 7});
+        let err = parse_dispatch_contract_mode(&v).expect_err("non-string rejected");
+        assert!(err.is_error.unwrap_or(false));
+    }
+
     #[test]
     fn lisp_escape_string_passes_plain_text() {
         assert_eq!(lisp_escape_string("hello world"), "hello world");
@@ -8589,6 +8822,7 @@ mod tests {
         let outcome = wd::WorkstationDispatchOutcome::Dispatched {
             task_brief: "## Objective\nship\n".to_string(),
             task_brief_path: None,
+            task_contract_source_path: None,
             evidence_path: Some("/tmp/sidecar.json".to_string()),
             evidence_error: None,
             inner_payload: json!({"task_id": "btk-7"}),
@@ -8600,6 +8834,7 @@ mod tests {
             outcome,
             &decision,
             &TaskContractEmissionRecord::off(),
+            DispatchContractMode::Rendered,
         );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "executing");
@@ -8611,6 +8846,15 @@ mod tests {
         assert_eq!(v["inner_result"]["task_id"], "btk-7");
         assert_eq!(v["workstation_dispatch_source"], "explicit_arg");
         assert_eq!(v["workstation_dispatch_inference_reason"], "test fixture");
+        // wave-20 / task 04 — default rendered mode is byte-stable on
+        // the wire: the new `dispatch_contract_mode` key surfaces but
+        // the legacy `task_contract_source_path` extension stays
+        // absent.
+        assert_eq!(v["dispatch_contract_mode"], "rendered");
+        assert!(
+            v.get("task_contract_source_path").is_none(),
+            "rendered-mode dispatch must omit task_contract_source_path"
+        );
     }
 
     #[test]
@@ -8631,6 +8875,7 @@ mod tests {
             outcome,
             &decision,
             &TaskContractEmissionRecord::off(),
+            DispatchContractMode::Rendered,
         );
         let v = parse_payload(&result);
         assert_ne!(v["status"], "executing");
@@ -8658,11 +8903,117 @@ mod tests {
             outcome,
             &decision,
             &TaskContractEmissionRecord::off(),
+            DispatchContractMode::Rendered,
         );
         let v = parse_payload(&result);
         assert_eq!(v["status"], "dry_run");
         assert_eq!(v["workstation_dispatch_status"], "dry_run_no_dispatch");
         assert_eq!(v["workstation_dispatch_source"], "plan_hint");
+    }
+
+    /// wave-20 / task 04 — when the runner dispatched in machine mode,
+    /// the response carries `dispatch_contract_mode="machine"` AND the
+    /// resolved `task_contract_source_path` so observers (audit, PR
+    /// review, CI) can prove the on-disk Lisp drove the brief — the
+    /// markdown rendering (if requested via `render_command`) is
+    /// purely compatibility metadata in this mode.
+    #[test]
+    fn build_workstation_dispatch_response_machine_mode_pins_contract_path() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "agent-team");
+        let outcome = wd::WorkstationDispatchOutcome::Dispatched {
+            task_brief: "## Source contract\n- task-contract v1: `/tmp/p/.missiond/tasks/generated/plan/root.lisp`\n## Objective\nship\n".to_string(),
+            task_brief_path: None,
+            task_contract_source_path: Some(
+                "/tmp/p/.missiond/tasks/generated/plan/root.lisp".to_string(),
+            ),
+            evidence_path: Some("/tmp/sidecar.json".to_string()),
+            evidence_error: None,
+            inner_payload: json!({"task_id": "btk-machine"}),
+        };
+        let decision = fixture_decision(wd::WorkstationDispatchSource::ExplicitArg);
+        let result = build_workstation_dispatch_response(
+            &plan,
+            &resolved,
+            outcome,
+            &decision,
+            &TaskContractEmissionRecord::off(),
+            DispatchContractMode::Machine,
+        );
+        let v = parse_payload(&result);
+        assert_eq!(v["status"], "executing");
+        assert_eq!(v["workstation_dispatch_status"], "dispatched");
+        assert_eq!(v["dispatch_contract_mode"], "machine");
+        assert_eq!(
+            v["task_contract_source_path"],
+            "/tmp/p/.missiond/tasks/generated/plan/root.lisp",
+            "machine-mode dispatch must surface the resolved contract path \
+             so observers can prove the Lisp drove the brief (load-bearing SSOT)"
+        );
+        // The brief preview reflects the consumer overlay — the
+        // `## Source contract` preamble is present, naming the same
+        // on-disk path. This pins the requirement that markdown
+        // rendering becomes optional compatibility metadata in
+        // machine mode (not load-bearing).
+        let preview = v["task_brief_preview"].as_str().unwrap_or("");
+        assert!(
+            preview.contains("## Source contract"),
+            "machine-mode brief must carry the wave-19/07 `## Source contract` preamble"
+        );
+    }
+
+    /// wave-20 / task 04 — when the workstation substrate refuses a
+    /// machine-mode dispatch because the on-disk task.lisp is malformed,
+    /// the response surfaces `SafeDescriptor` (status=
+    /// `skipped_malformed_task_contract`) with `dispatch_contract_mode=
+    /// "machine"`. We MUST NOT downgrade to `claude -p` or the legacy
+    /// natural-language brief — silently falling back would defeat the
+    /// machine SSOT contract.
+    #[test]
+    fn build_workstation_dispatch_response_machine_mode_malformed_contract_refuses() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let outcome = wd::WorkstationDispatchOutcome::SafeDescriptor {
+            reason: wd::SafeDescriptorReason::MalformedTaskContract {
+                path: "/tmp/p/.missiond/tasks/generated/plan/root.lisp".to_string(),
+                reason: "missing required `goal` field".to_string(),
+            },
+            task_brief: None,
+        };
+        let decision = fixture_decision(wd::WorkstationDispatchSource::ExplicitArg);
+        let result = build_workstation_dispatch_response(
+            &plan,
+            &resolved,
+            outcome,
+            &decision,
+            &TaskContractEmissionRecord::off(),
+            DispatchContractMode::Machine,
+        );
+        let v = parse_payload(&result);
+        // No silent prompt fallback — the runner must surface the
+        // refusal verbatim.
+        assert_eq!(v["status"], "dispatch_skipped");
+        assert_eq!(
+            v["workstation_dispatch_status"],
+            "skipped_malformed_task_contract"
+        );
+        assert_eq!(v["dispatch_contract_mode"], "machine");
+        // Inner result must not have leaked through — we never
+        // dispatched.
+        assert!(v.get("inner_result").is_none());
+        // The reason text must name the path so the caller can fix
+        // and retry.
+        let reason = v["workstation_dispatch_reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains(".missiond/tasks/generated"),
+            "malformed-contract refusal must name the offending path"
+        );
+        assert!(
+            reason.contains("missing required `goal` field"),
+            "malformed-contract refusal must explain why the parse failed"
+        );
     }
 
     // ── wave-16 / task 03 — auto-inference integration with plan hints ──

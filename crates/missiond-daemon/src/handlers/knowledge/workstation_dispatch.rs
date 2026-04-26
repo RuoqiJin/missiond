@@ -947,9 +947,16 @@ pub(crate) fn evaluate_dispatch_decision(
 pub(crate) enum WorkstationDispatchOutcome {
     /// Inner `mission_task_delegate` returned non-error. `inner_payload`
     /// carries the delegated task's response.
+    ///
+    /// wave-20 / task 04 — `task_contract_source_path` carries the
+    /// resolved on-disk task-contract v1 path WHEN the dispatch consumed
+    /// the contract directly (machine-driven mode). It is `None` for
+    /// the legacy / rendered path so the response stays byte-compatible
+    /// with wave-15..19.
     Dispatched {
         task_brief: String,
         task_brief_path: Option<String>,
+        task_contract_source_path: Option<String>,
         evidence_path: Option<String>,
         evidence_error: Option<String>,
         inner_payload: Value,
@@ -1580,6 +1587,14 @@ pub(crate) async fn run_workstation_dispatch_with_contract(
         // inline on the response. None signals the file-mirror is not yet
         // wired so callers know to read `task_brief_preview` instead.
         task_brief_path: None,
+        // wave-20 / task 04 — surface the on-disk task-contract source
+        // path on the response when the dispatch consumed the contract
+        // directly (machine-driven mode). The legacy / rendered path
+        // leaves it `None` so the wire shape stays byte-compatible with
+        // wave-15..19 callers that only watch for `task_brief_preview`.
+        task_contract_source_path: contract_source_path
+            .as_deref()
+            .map(|p| p.display().to_string()),
         evidence_path,
         evidence_error,
         inner_payload,
@@ -1614,6 +1629,7 @@ pub(crate) fn outcome_to_response_fields(
         WorkstationDispatchOutcome::Dispatched {
             task_brief,
             task_brief_path,
+            task_contract_source_path,
             evidence_path,
             evidence_error,
             inner_payload,
@@ -1624,6 +1640,18 @@ pub(crate) fn outcome_to_response_fields(
             );
             if let Some(p) = task_brief_path {
                 m.insert("task_brief_path".to_string(), json!(p));
+            }
+            // wave-20 / task 04 — when the dispatch consumed the
+            // task-contract v1 file directly, surface the resolved
+            // source path so observers (CI, PR review, audit) can prove
+            // the Lisp was load-bearing rather than the rendered
+            // markdown brief. Absent on the legacy / rendered path so
+            // the wire shape stays byte-compatible with wave-15..19.
+            if let Some(p) = task_contract_source_path {
+                m.insert(
+                    "task_contract_source_path".to_string(),
+                    json!(p),
+                );
             }
             if let Some(p) = evidence_path {
                 m.insert("evidence_path".to_string(), json!(p));
@@ -2157,6 +2185,7 @@ mod tests {
         let outcome = WorkstationDispatchOutcome::Dispatched {
             task_brief: "## Objective\nship\n".to_string(),
             task_brief_path: None,
+            task_contract_source_path: None,
             evidence_path: Some("/tmp/sidecar.json".to_string()),
             evidence_error: None,
             inner_payload: json!({"task_id": "btk-9"}),
@@ -2167,6 +2196,36 @@ mod tests {
         assert_eq!(v["evidence_path"], "/tmp/sidecar.json");
         assert!(v["task_brief_preview"].as_str().unwrap().contains("## Objective"));
         assert_eq!(v["inner_result"]["task_id"], "btk-9");
+        // wave-20 / task 04 — legacy / rendered path leaves the
+        // `task_contract_source_path` key OFF so the wire shape stays
+        // byte-compatible with wave-15..19 callers.
+        assert!(
+            v.get("task_contract_source_path").is_none(),
+            "rendered-path dispatch must omit task_contract_source_path \
+             (wave-15..19 byte-compat)"
+        );
+    }
+
+    /// wave-20 / task 04 — when the dispatch ran in machine-driven mode
+    /// the response must carry the resolved on-disk task-contract path
+    /// so observers can prove the Lisp was load-bearing.
+    #[test]
+    fn outcome_to_response_dispatched_machine_mode_surfaces_contract_path() {
+        let outcome = WorkstationDispatchOutcome::Dispatched {
+            task_brief: "## Objective\nship\n".to_string(),
+            task_brief_path: None,
+            task_contract_source_path: Some(
+                "/tmp/p/.missiond/tasks/generated/plan/root.lisp".to_string(),
+            ),
+            evidence_path: None,
+            evidence_error: None,
+            inner_payload: json!({"task_id": "btk-9"}),
+        };
+        let v = outcome_to_response_fields(&outcome, "agent-team");
+        assert_eq!(
+            v["task_contract_source_path"],
+            "/tmp/p/.missiond/tasks/generated/plan/root.lisp"
+        );
     }
 
     #[test]
@@ -2438,6 +2497,7 @@ mod tests {
         let outcome = WorkstationDispatchOutcome::Dispatched {
             task_brief: "## Objective\nship\n".to_string(),
             task_brief_path: None,
+            task_contract_source_path: None,
             evidence_path: None,
             evidence_error: None,
             inner_payload: json!({"task_id": "btk-9"}),

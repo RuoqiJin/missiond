@@ -3414,6 +3414,15 @@ pub(super) async fn action_execute_dag_v1(
         if task_contract_ctx.mode.is_enabled() {
             payload["task_contract_mode"] = json!(task_contract_ctx.mode.as_str());
         }
+        // wave-20 / task 04 — surface the dispatch-contract mode on
+        // dry-run too so callers can preview the SSOT routing decision
+        // without dispatching. Quiet when mode is the default
+        // `rendered` so the pre-wave20 byte-shape is preserved for
+        // legacy callers.
+        if task_contract_ctx.dispatch_contract_mode.is_machine() {
+            payload["dispatch_contract_mode"] =
+                json!(task_contract_ctx.dispatch_contract_mode.as_str());
+        }
         return Ok(ToolResult::json_pretty(&payload));
     }
 
@@ -4494,9 +4503,16 @@ fn workstation_outcome_to_dispatch_pair(
 /// project-root resolution path). All fields are owned (no borrowed
 /// references) so the struct survives `tokio::JoinSet::spawn`'s
 /// `'static` requirement.
+///
+/// wave-20 / task 04 — extended with `dispatch_contract_mode` so DAG
+/// nodes can opt the workstation substrate into machine-driven dispatch
+/// (read the emitted task.lisp directly). The mode is parsed once at
+/// the scheduler entry point and cloned into every per-node task —
+/// per-node mode overrides would defeat the cross-node SSOT contract.
 #[derive(Debug, Clone)]
 pub(super) struct TaskContractDispatchCtx {
     pub mode: super::plan::TaskContractEmitMode,
+    pub dispatch_contract_mode: super::plan::DispatchContractMode,
     pub project_arg: Option<String>,
     pub cwd_arg: Option<String>,
     pub target_project_arg: Option<String>,
@@ -4506,6 +4522,7 @@ impl TaskContractDispatchCtx {
     pub(super) fn off() -> Self {
         Self {
             mode: super::plan::TaskContractEmitMode::Off,
+            dispatch_contract_mode: super::plan::DispatchContractMode::Rendered,
             project_arg: None,
             cwd_arg: None,
             target_project_arg: None,
@@ -4513,12 +4530,15 @@ impl TaskContractDispatchCtx {
     }
 
     /// Build the ctx from caller args. Returns
-    /// `Err(structured)` for malformed `task_contract_mode` values so
-    /// the scheduler fails fast before spawning any node task.
+    /// `Err(structured)` for malformed `task_contract_mode` /
+    /// `dispatch_contract_mode` values so the scheduler fails fast
+    /// before spawning any node task.
     pub(super) fn from_args(args: &Value) -> std::result::Result<Self, ToolResult> {
         let mode = super::plan::parse_task_contract_emit_mode(args)?;
+        let dispatch_contract_mode = super::plan::parse_dispatch_contract_mode(args)?;
         Ok(Self {
             mode,
+            dispatch_contract_mode,
             project_arg: args
                 .get("project")
                 .and_then(|v| v.as_str())
@@ -4666,13 +4686,32 @@ async fn dispatch_node(
             });
         }
 
-        let outcome = super::workstation_dispatch::run_workstation_dispatch(
+        // wave-20 / task 04 — when the per-DAG-run dispatch_contract_mode
+        // is `machine` AND emission produced a contract path for THIS
+        // node, hand the on-disk Lisp to the wave-19 / task 07
+        // consumer. The consumer overlays the contract onto the
+        // hints (contract is the SSOT) and refuses to fall back to
+        // the legacy natural-language brief on a malformed contract
+        // (surfacing as `SafeDescriptor` →
+        // status="skipped_malformed_task_contract", non-retryable
+        // because re-loading a syntactically broken file deterministically
+        // fails again). Default mode (`rendered`) preserves wave-15..19
+        // byte-shape: `task_contract_path = None` and the brief is
+        // built from the in-memory hints.
+        let task_contract_path_for_machine =
+            if task_contract_ctx.dispatch_contract_mode.is_machine() {
+                emission.path.clone()
+            } else {
+                None
+            };
+        let outcome = super::workstation_dispatch::run_workstation_dispatch_with_contract(
             &state,
             &plan,
             &node.target,
             &dispatch_strategy,
             merged,
             false,
+            task_contract_path_for_machine.as_deref(),
         )
         .await;
         let (mut inner_payload, classification, non_retryable) =
@@ -4682,6 +4721,17 @@ async fn dispatch_node(
                 outcome,
                 &dispatch_decision,
             );
+        // wave-20 / task 04 — surface the resolved dispatch-contract
+        // mode so observers (PR review, CI, audit) can pin which
+        // dispatch contract drove the brief at this node. The wire
+        // shape adds one new key per node — existing callers that
+        // ignore it keep working.
+        if let Some(map) = inner_payload.as_object_mut() {
+            map.insert(
+                "dispatch_contract_mode".to_string(),
+                json!(task_contract_ctx.dispatch_contract_mode.as_str()),
+            );
+        }
         super::plan::merge_task_contract_block(&mut inner_payload, &emission);
         return Ok(DispatchOutcome {
             node_id: node.id.clone(),
@@ -10873,6 +10923,7 @@ mod tests {
         let outcome = wd::WorkstationDispatchOutcome::Dispatched {
             task_brief: "## Objective\nship\n".to_string(),
             task_brief_path: None,
+            task_contract_source_path: None,
             evidence_path: Some("/tmp/sidecar.json".to_string()),
             evidence_error: None,
             inner_payload: json!({"task_id": "btk-7"}),
@@ -15437,5 +15488,57 @@ mod tests {
             .safety_check_for_workstation(&comp)
             .expect_err("safety gate must still refuse without objective");
         assert!(err.contains(":rollback-objective"));
+    }
+
+    // ── wave-20 / task 04 — TaskContractDispatchCtx parse coverage ──────
+
+    /// Default dispatch_contract_mode is `Rendered` so the wave-15..19
+    /// byte-shape is preserved across the DAG scheduler entry point.
+    #[test]
+    fn task_contract_dispatch_ctx_default_dispatch_contract_mode_is_rendered() {
+        let ctx = TaskContractDispatchCtx::from_args(&json!({})).expect("default ok");
+        assert!(matches!(
+            ctx.dispatch_contract_mode,
+            super::super::plan::DispatchContractMode::Rendered
+        ));
+        assert!(matches!(
+            ctx.mode,
+            super::super::plan::TaskContractEmitMode::Off
+        ));
+    }
+
+    /// Explicit `dispatch_contract_mode="machine"` is captured on the
+    /// per-DAG-run ctx so every per-node dispatch sees the same mode.
+    #[test]
+    fn task_contract_dispatch_ctx_captures_machine_mode_for_dag() {
+        let v = json!({
+            "task_contract_mode": "emit",
+            "dispatch_contract_mode": "machine",
+        });
+        let ctx = TaskContractDispatchCtx::from_args(&v).expect("machine ok");
+        assert!(ctx.dispatch_contract_mode.is_machine());
+        assert!(matches!(
+            ctx.mode,
+            super::super::plan::TaskContractEmitMode::Emit
+        ));
+    }
+
+    /// Boolean shorthand `render_markdown=false` flows through the DAG
+    /// ctx the same way the single-node runner picks it up.
+    #[test]
+    fn task_contract_dispatch_ctx_render_markdown_false_is_machine_for_dag() {
+        let v = json!({"render_markdown": false});
+        let ctx = TaskContractDispatchCtx::from_args(&v).expect("shorthand ok");
+        assert!(ctx.dispatch_contract_mode.is_machine());
+    }
+
+    /// A typo in `dispatch_contract_mode` MUST fail fast at the
+    /// scheduler entry point — the runner never silently degrades to
+    /// `rendered` and never spawns a node task on a malformed input.
+    #[test]
+    fn task_contract_dispatch_ctx_rejects_unknown_dispatch_contract_mode() {
+        let v = json!({"dispatch_contract_mode": "machin"});
+        let err = TaskContractDispatchCtx::from_args(&v).expect_err("typo rejected");
+        assert!(err.is_error.unwrap_or(false));
     }
 }

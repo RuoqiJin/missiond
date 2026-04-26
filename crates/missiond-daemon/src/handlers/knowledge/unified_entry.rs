@@ -530,6 +530,23 @@ fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
         // rather than silently degrading to "off" at the pipeline
         // layer.
         "infer_plan_fields",
+        // wave-19 / task 06 — task-contract emitter knobs. Off by
+        // default; forwarded verbatim so a unified-entry caller can
+        // opt the workstation substrate into the wave-19 emitter
+        // without dropping back to a direct mission_plan call. The
+        // inner `parse_task_contract_emit_mode` enforces the
+        // (off|emit|emit_dry_run) allowlist.
+        "task_contract_mode",
+        "emit_task_contract",
+        // wave-20 / task 04 — machine-driven dispatch knobs. Default
+        // `rendered` preserves the wave-15..19 byte-shape; `machine`
+        // (or `render_markdown=false`) instructs the workstation
+        // substrate to consume the emitted task.lisp directly.
+        // Forwarded verbatim so the inner
+        // `parse_dispatch_contract_mode` enforces the
+        // (rendered|machine) allowlist.
+        "dispatch_contract_mode",
+        "render_markdown",
     ] {
         if let Some(v) = args.get(key) {
             if !v.is_null() {
@@ -1680,6 +1697,67 @@ mod tests {
                 key
             );
         }
+    }
+
+    /// wave-19 / task 06 + wave-20 / task 04 — task-contract emit knobs
+    /// + machine-driven dispatch knobs MUST flow through the unified
+    /// entry pipeline so a v1 caller can drive the new modes without
+    /// dropping back to a direct `mission_plan(action=execute)` call.
+    /// Verbatim forwarding — the inner handler owns the allowlist.
+    #[test]
+    fn build_plan_execute_args_forwards_task_contract_and_dispatch_contract_knobs() {
+        let args = json!({
+            "approved_plan_id": "11111111-1111-1111-1111-111111111111",
+            "execute": true,
+            "execute_mode": "internal",
+            "scheduler_mode": "dag_v1",
+            // wave-19 / task 06 — emit knobs.
+            "task_contract_mode": "emit",
+            "emit_task_contract": true,
+            // wave-20 / task 04 — dispatch knobs.
+            "dispatch_contract_mode": "machine",
+            "render_markdown": false,
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        assert_eq!(execute_args["task_contract_mode"], "emit");
+        assert_eq!(execute_args["emit_task_contract"], true);
+        assert_eq!(execute_args["dispatch_contract_mode"], "machine");
+        assert_eq!(execute_args["render_markdown"], false);
+    }
+
+    /// Default unified-entry call must NOT inject the new knobs — the
+    /// inner handler's defaults (`task_contract_mode=off`,
+    /// `dispatch_contract_mode=rendered`) preserve the wave-15..19
+    /// byte-shape for callers that never opt in.
+    #[test]
+    fn build_plan_execute_args_omits_task_contract_knobs_by_default() {
+        let args = json!({
+            "approved_plan_id": "11111111-1111-1111-1111-111111111111",
+            "execute": true,
+        });
+        let decision = plan_pipeline(&args).expect("should route to plan execute");
+        let PipelineDecision::PlanExecute { execute_args } = decision else {
+            panic!("expected PlanExecute");
+        };
+        assert!(
+            execute_args.get("task_contract_mode").is_none(),
+            "default pipeline must not inject task_contract_mode"
+        );
+        assert!(
+            execute_args.get("emit_task_contract").is_none(),
+            "default pipeline must not inject emit_task_contract"
+        );
+        assert!(
+            execute_args.get("dispatch_contract_mode").is_none(),
+            "default pipeline must not inject dispatch_contract_mode"
+        );
+        assert!(
+            execute_args.get("render_markdown").is_none(),
+            "default pipeline must not inject render_markdown"
+        );
     }
 
     // ── 3. artifact_refs projection ─────────────────────────────────

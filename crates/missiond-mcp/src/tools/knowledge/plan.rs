@@ -654,6 +654,43 @@ fn build_properties() -> Value {
         &["off", "emit", "emit_dry_run"],
     ));
 
+    // ── wave-20 / task 04 — machine-driven task-contract dispatch v0 ────
+    //
+    // Opt-in mode that activates the wave-19 / task 07 consumer wiring.
+    // When `dispatch_contract_mode="machine"` (or the boolean shorthand
+    // `render_markdown=false`) AND the wave-19 emitter wrote a task
+    // contract for this dispatch, the workstation substrate consumes
+    // the on-disk task.lisp directly (overlaying contract fields onto
+    // the brief — contract wins on every non-empty field). The
+    // markdown brief becomes optional compatibility metadata: the
+    // `render_command` is still surfaced for callers that want to
+    // render it out of process, but it is no longer load-bearing for
+    // the dispatch.
+    //
+    // Default mode (`rendered`) preserves wave-15..19 behaviour byte-
+    // for-byte: brief built from in-memory hints, markdown remains
+    // the human-review artifact.
+    //
+    // Failure semantics (machine mode):
+    //   * malformed contract on disk → `SafeDescriptor` from the
+    //     consumer (status=`skipped_malformed_task_contract`); MUST
+    //     NOT fall back to `claude -p` or the unscoped prompt path.
+    //   * emitter OFF / node ineligible → falls back to legacy
+    //     rendered dispatch (machine mode is a no-op without an
+    //     emitted contract). Authors who insist on machine SSOT pair
+    //     `dispatch_contract_mode=machine` with
+    //     `task_contract_mode="emit"`.
+    p.insert("dispatch_contract_mode".into(), prop_enum(
+        "string",
+        "[execute] (wave-20 / task 04) explicit dispatch-contract mode for the workstation substrate. `rendered` (default) preserves the wave-15..19 byte-shape — the brief is built from in-memory hints and the markdown rendered via `render_command` is the load-bearing artifact for human review. `machine` activates the wave-19 / task 07 consumer wiring: when the wave-19 emitter wrote a contract for this dispatch (paired with `task_contract_mode=\"emit\"` or `emit_task_contract=true`), the workstation substrate loads the on-disk task.lisp directly, overlays its `:goal` / `:scope` / `:write-scope` / `:must-not-touch` / `:acceptance` / `:dispatch-strategy` / `:commit (:policy ...)` fields onto the hints (contract wins on every non-empty field), and prefixes the brief with a `## Source contract` block. The markdown brief becomes optional compatibility metadata. Response surfaces `dispatch_contract_mode` (always) and `task_contract_source_path` (machine mode + dispatched only — proves the Lisp drove the brief). When the contract on disk is malformed, the substrate refuses the dispatch with `workstation_dispatch_status=\"skipped_malformed_task_contract\"` (SafeDescriptor) — NEVER falls back to `claude -p` or the legacy natural-language brief, because silently downgrading would defeat the machine SSOT contract. When the emitter is OFF or the node is ineligible, machine mode is a no-op for that dispatch and the runner falls back to rendered behaviour — `dispatch_contract_mode=\"machine\"` paired with `task_contract_mode=\"emit\"` is the canonical full machine-driven invocation. A typo (`dispatch_contract_mode=\"machin\"`) fails fast with `INVALID_PARAM` — the runner never silently degrades to `rendered`.",
+        &["rendered", "machine"],
+    ));
+
+    p.insert("render_markdown".into(), prop(
+        "boolean",
+        "[execute] (wave-20 / task 04) shorthand for `dispatch_contract_mode`. `false` ⇒ \"machine\" (workstation substrate consumes the emitted task.lisp directly when the wave-19 emitter wrote one); `true` / omitted ⇒ \"rendered\" (preserves the wave-15..19 byte-shape — markdown brief is the load-bearing artifact). When BOTH `dispatch_contract_mode` and `render_markdown` are supplied, `dispatch_contract_mode` wins. See `dispatch_contract_mode` for the full semantics, response shape, and failure modes (malformed contract → SafeDescriptor, never `claude -p` fallback).",
+    ));
+
     Value::Object(p)
 }
 
