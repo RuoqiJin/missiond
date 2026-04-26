@@ -330,6 +330,54 @@ pub fn definitions() -> Vec<ToolDefinition> {
             "[complete] free-form prose describing the verifier outcome (e.g. error summary, warnings, command line used). Recorded verbatim into the completion entry as `:verifier-notes` when supplied.",
         ),
     );
+    // ── wave-21 / task 03 — task-run verifier integration metadata ──
+    //
+    // These four fields are the wave21-03 counterparts to the
+    // wave19-08 `verifier_status` / `verifier_notes` slots. They
+    // capture the END-TO-END verifier outcome (task contract + report
+    // + shared-memory completion + commit scope all proven in one
+    // pass — see wave21-02 `scripts/verify-task-run.mjs`). All four
+    // are optional and recorded verbatim into the companion log when
+    // supplied; `verified=true` ALSO triggers a daemon-side read-only
+    // cross-check that loads the report-contract off disk and asserts
+    // `:schema = missiond.report-contract.v1`, `:task_id` matches the
+    // task contract head id, and `:commit_hash` matches the supplied
+    // `commit_hash`. Fail-fast preconditions: `verified=true` requires
+    // `enforce_scoped_commit=true`, `task_contract_path`,
+    // `task_report_path`, and `commit_hash` — daemon rejects with
+    // `VERIFIED_REQUIRES_*` codes BEFORE any companion log mutation.
+    // Daemon NEVER spawns Node here; the script-side verifier is the
+    // out-of-process authority and these fields are the durable
+    // record that the writer asserted it passed.
+    properties.insert(
+        "task_run_verifier_status".into(),
+        prop_enum(
+            "string",
+            "[complete] outcome from the writer-side end-to-end task-run verifier (typically `node scripts/verify-task-run.mjs` from wave21-02). Recorded verbatim into the completion entry as `:task-run-verifier-status`. Distinct slot from `verifier_status` (the wave19-08 task-contract verifier outcome) so callers can record both signals on the same completion. `passed` = verifier exited 0; `failed` = verifier reported errors; `skipped` = verifier intentionally not run; `unknown` = outcome could not be determined. Daemon never runs the verifier itself.",
+            &["passed", "failed", "skipped", "unknown"],
+        ),
+    );
+    properties.insert(
+        "shared_memory_path".into(),
+        prop(
+            "string",
+            "[complete|preflight_commit] relative-or-absolute path to the wave's shared-memory ledger (`.missiond/tasks/<wave>/shared-memory.lisp`). Metadata only — daemon does NOT parse the ledger here; the wave21-02 script-side verifier consumes it. On `action=complete` recorded verbatim as `:shared-memory-path`; on `action=preflight_commit` echoed back as an advisory hint so the writer can confirm the dispatch envelope matches what the script-side verifier will load post-commit.",
+        ),
+    );
+    properties.insert(
+        "verifier_diagnostics".into(),
+        prop(
+            "string",
+            "[complete] free-form prose describing the task-run verifier outcome (e.g. error summary, warnings, command line used, JSON diagnostic blob). Recorded verbatim into the completion entry as `:verifier-diagnostics` when supplied.",
+        ),
+    );
+    properties.insert(
+        "verified".into(),
+        prop(
+            "boolean",
+            "[complete] writer-asserted end-to-end verification flag (wave21-03). When `true`, daemon enforces preconditions (`enforce_scoped_commit=true` + `task_contract_path` + `task_report_path` + `commit_hash` all present) and then loads the report file off disk for a read-only cross-check (`:schema` must equal `missiond.report-contract.v1`, `:task_id` must match the contract head id, `:commit_hash` must match the supplied `commit_hash`). Failures reject with structured `VERIFIED_REQUIRES_ENFORCEMENT` / `VERIFIED_REQUIRES_TASK_CONTRACT` / `VERIFIED_REQUIRES_TASK_REPORT` / `VERIFIED_REQUIRES_COMMIT_HASH` / `TASK_REPORT_REQUIRED` / `TASK_REPORT_MALFORMED` / `TASK_REPORT_TASK_ID_MISMATCH` / `TASK_REPORT_COMMIT_HASH_MISMATCH` codes BEFORE any companion log mutation. `false` is recorded verbatim (writer explicitly opted out of verification); absent → legacy completion shape with no extra check. Daemon never spawns Node; the wave21-02 `scripts/verify-task-run.mjs` is the out-of-process authority.",
+        ),
+    );
 
     let schema = json!({
         "type": "object",
@@ -365,6 +413,17 @@ pub fn definitions() -> Vec<ToolDefinition> {
          TASK_CONTRACT_REQUIRED / TASK_CONTRACT_MALFORMED / COMMIT_HASH_REQUIRED_FOR_CONTRACT / \
          CLAIM_SCOPE_MISSING errors when critical data is missing. Daemon NEVER runs the verifier \
          itself — verifier_status is reported by the caller (e.g. via scripts/verify-task-contract.mjs). \
+         Wave21-03: action=complete also accepts `task_run_verifier_status` / `shared_memory_path` / \
+         `verifier_diagnostics` / `verified` as optional task-run verifier metadata (counterpart to the \
+         wave19-08 contract verifier slots — see wave21-02 scripts/verify-task-run.mjs). When \
+         `verified=true`, daemon enforces preconditions (`enforce_scoped_commit=true` + \
+         `task_contract_path` + `task_report_path` + `commit_hash` all present) and loads the report \
+         file off disk for a read-only cross-check (`:schema` = missiond.report-contract.v1, \
+         `:task_id` matches the contract head id, `:commit_hash` matches the supplied hash). Failures \
+         reject with VERIFIED_REQUIRES_* / TASK_REPORT_REQUIRED / TASK_REPORT_MALFORMED / \
+         TASK_REPORT_TASK_ID_MISMATCH / TASK_REPORT_COMMIT_HASH_MISMATCH BEFORE any companion log \
+         mutation. Daemon never spawns Node here either. action=preflight_commit also echoes \
+         `task_report_path` / `shared_memory_path` advisory hints when supplied. \
          Lisp 源: intent-memory.lisp :: agent-execution-coordination + \
          intent-worker.lisp :: agent-execution-manager-interface + intent-flow.lisp :: \
          F-execution-log-governance + F-scoped-commit-handoff。注意:event-bus ExecutionEvent::* 暂未发射,等域扩展落地。",

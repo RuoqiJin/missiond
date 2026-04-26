@@ -168,6 +168,19 @@ const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
 /// `unknown` — caller could not determine the outcome.
 const VALID_VERIFIER_STATUSES: &[&str] = &["passed", "failed", "skipped", "unknown"];
 
+/// Canonical task-run verifier-status values surfaced by wave21-03 ::
+/// task-run verification metadata. Distinct slot from `verifier_status`
+/// (which is the wave19-08 task-contract verifier outcome) so callers
+/// can record both signals on the same completion: contract-shape
+/// verification (verify-task-contract.mjs) vs. end-to-end task-run
+/// verification (verify-task-run.mjs from wave21-02 — task contract +
+/// report + shared-memory completion + commit scope all proven in one
+/// pass). The daemon never spawns Node here either; the writer reports
+/// the outcome verbatim and (when `verified=true`) the daemon re-loads
+/// the report file off disk for read-only cross-checks.
+const VALID_TASK_RUN_VERIFIER_STATUSES: &[&str] =
+    &["passed", "failed", "skipped", "unknown"];
+
 /// Normalize an optional dispatch strategy string against the canonical set.
 /// Unknown / empty values fall back to `DEFAULT_DISPATCH_STRATEGY` (`"unknown"`)
 /// without erroring; we never hard-fail open() on a strategy mismatch because
@@ -214,6 +227,23 @@ fn normalize_verifier_status(raw: &str) -> Option<&'static str> {
         return None;
     }
     for &known in VALID_VERIFIER_STATUSES {
+        if known == v {
+            return Some(known);
+        }
+    }
+    None
+}
+
+/// Same canonicalize-or-reject contract as `normalize_verifier_status`
+/// but for the wave21-03 task-run verifier-status enum. Unknown labels
+/// return `None` so `action_complete` can hard-fail with `INVALID_PARAM`
+/// before any file mutation.
+fn normalize_task_run_verifier_status(raw: &str) -> Option<&'static str> {
+    let v = raw.trim();
+    if v.is_empty() {
+        return None;
+    }
+    for &known in VALID_TASK_RUN_VERIFIER_STATUSES {
         if known == v {
             return Some(known);
         }
@@ -1218,6 +1248,20 @@ struct CompletionRecord {
     task_report_path: Option<String>,
     verifier_status: Option<String>,
     verifier_notes: Option<String>,
+    // ── wave-21 / task 03 — task-run verifier completion metadata ──
+    // Records the outcome of an end-to-end task-run verifier (e.g.
+    // `node scripts/verify-task-run.mjs` from wave21-02) which folds
+    // the contract, report, shared-memory completion, and commit scope
+    // into one proof. `verified=true` lights up the daemon-side
+    // read-only re-check that loads the report file off disk and
+    // cross-validates `:task_id` + `:commit_hash` against the supplied
+    // metadata. `task_run_verifier_status` lives next to the wave19-08
+    // `verifier_status` slot — the two enums share a vocabulary but
+    // describe orthogonal verifiers, so we persist them independently.
+    task_run_verifier_status: Option<String>,
+    shared_memory_path: Option<String>,
+    verifier_diagnostics: Option<String>,
+    verified: Option<bool>,
 }
 
 fn parse_completions(file: &LogFile) -> Vec<CompletionRecord> {
@@ -1306,6 +1350,36 @@ fn parse_completions(file: &LogFile) -> Vec<CompletionRecord> {
             .map(|raw| unwrap_str(raw))
             .filter(|s| !s.is_empty());
 
+        // wave-21 / task 03 — task-run verifier metadata. Same
+        // empty-collapse + legacy-tolerant rules as the wave19-08
+        // fields above. `verified` parses both `true`/`false` atoms
+        // (the canonical write form) so a round-trip through this
+        // reader recovers the boolean without quoted-string handling.
+        let task_run_verifier_status = kvs
+            .get("task-run-verifier-status")
+            .or_else(|| kvs.get("task_run_verifier_status"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let shared_memory_path = kvs
+            .get("shared-memory-path")
+            .or_else(|| kvs.get("shared_memory_path"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let verifier_diagnostics = kvs
+            .get("verifier-diagnostics")
+            .or_else(|| kvs.get("verifier_diagnostics"))
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty());
+        let verified = kvs
+            .get("verified")
+            .map(|raw| unwrap_str(raw))
+            .filter(|s| !s.is_empty())
+            .and_then(|s| match s.as_str() {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            });
+
         out.push(CompletionRecord {
             id,
             phase: kvs.get("phase").map(|s| unwrap_str(s)).unwrap_or_default(),
@@ -1320,6 +1394,10 @@ fn parse_completions(file: &LogFile) -> Vec<CompletionRecord> {
             task_report_path,
             verifier_status,
             verifier_notes,
+            task_run_verifier_status,
+            shared_memory_path,
+            verifier_diagnostics,
+            verified,
         });
     }
     out
@@ -2291,6 +2369,59 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    // ── wave-21 / task 03 — task-run verifier completion metadata.
+    //
+    // `task_run_verifier_status` / `shared_memory_path` /
+    // `verifier_diagnostics` / `verified` mirror the wave19-08 fields
+    // but capture the END-TO-END verifier outcome (task contract +
+    // report + shared-memory completion + commit scope all proven in
+    // one pass — see wave21-02 :: scripts/verify-task-run.mjs). All
+    // four are optional and recorded verbatim into the companion log;
+    // `task_run_verifier_status` rejects unknown labels at parse time
+    // so audit / dashboard consumers can key off the canonical enum.
+    let task_run_verifier_status_raw = args
+        .get("task_run_verifier_status")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty());
+    let task_run_verifier_status = match task_run_verifier_status_raw {
+        Some(s) => match normalize_task_run_verifier_status(s) {
+            Some(canonical) => Some(canonical.to_string()),
+            None => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "task_run_verifier_status must be one of {:?}, got `{}`",
+                            VALID_TASK_RUN_VERIFIER_STATUSES, s
+                        ),
+                    )
+                    .with_suggestion(
+                        "see wave21-03 :: task-run-verifier-status enum (passed|failed|skipped|unknown)",
+                    ),
+                ));
+            }
+        },
+        None => None,
+    };
+    let shared_memory_path = args
+        .get("shared_memory_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    let verifier_diagnostics = args
+        .get("verifier_diagnostics")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+    // `verified` is a tri-state at parse time: absent → None (legacy
+    // shape, no extra gate), false → Some(false) (caller explicitly
+    // recorded a non-verified completion), true → Some(true) (gate
+    // runs). We persist the explicit `false` so audit can tell "writer
+    // intentionally skipped verification" from "writer omitted the
+    // field because they're a legacy caller".
+    let verified_flag = args.get("verified").and_then(|v| v.as_bool());
+
     // ── Optional fail-fast enforcement (wave16-06).
     //
     // `enforce_scoped_commit=true` flips the existing audit-only handoff
@@ -2340,6 +2471,31 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
             path_arg,
             commit_hash.as_deref(),
             staged_files.as_deref(),
+        ) {
+            Ok(v) => Some(v),
+            Err(err) => return Ok(err),
+        }
+    } else {
+        None
+    };
+
+    // wave-21 / task 03 — verified-completion gate. Runs only when the
+    // caller explicitly opted in with `verified=true`. The gate enforces
+    // that every input the daemon needs for an end-to-end cross-check
+    // is present (enforce_scoped_commit + task_contract_path +
+    // task_report_path + commit_hash) and then loads the report off
+    // disk to confirm `:schema`, `:task_id`, and `:commit_hash` line up
+    // with the task contract head id and supplied commit hash. Failures
+    // surface a structured `VERIFIED_*` / `TASK_REPORT_*` code BEFORE
+    // any companion-log mutation. `verified=false` records the explicit
+    // negative without running the gate; absent → no extra check.
+    let verified_validation = if verified_flag == Some(true) {
+        match enforce_verified_completion(
+            &root,
+            enforce_scoped_commit,
+            task_contract_path.as_deref(),
+            task_report_path.as_deref(),
+            commit_hash.as_deref(),
         ) {
             Ok(v) => Some(v),
             Err(err) => return Ok(err),
@@ -2419,6 +2575,33 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
             lisp_quote_string(vn)
         ));
     }
+    // wave-21 / task 03 — task-run verifier metadata. Each field skips
+    // when absent so legacy callers (and wave19-08 callers that never
+    // touched the wave21 slots) keep their byte-identical companion log
+    // shape. `verified` is written as a bare `true`/`false` atom so a
+    // round-trip through `parse_completions` recovers the boolean
+    // without quoted-string handling.
+    if let Some(ref trvs) = task_run_verifier_status {
+        entry.push_str(&format!(
+            "\n      :task-run-verifier-status {}",
+            lisp_quote_string(trvs)
+        ));
+    }
+    if let Some(ref smp) = shared_memory_path {
+        entry.push_str(&format!(
+            "\n      :shared-memory-path {}",
+            lisp_quote_string(smp)
+        ));
+    }
+    if let Some(ref vd) = verifier_diagnostics {
+        entry.push_str(&format!(
+            "\n      :verifier-diagnostics {}",
+            lisp_quote_string(vd)
+        ));
+    }
+    if let Some(v) = verified_flag {
+        entry.push_str(&format!("\n      :verified {}", v));
+    }
     entry.push(')');
 
     append_to_block(&mut file, "completions", &entry)?;
@@ -2495,6 +2678,25 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     if let Some(v) = task_contract_validation {
         response["task_contract_validation"] = v;
+    }
+    // wave-21 / task 03 — surface task-run verifier metadata + the
+    // verified-gate validation summary. Same skip-serialize semantics
+    // as the wave19-08 fields above so legacy callers stay byte-
+    // identical when they omit every wave21 field.
+    if let Some(trvs) = task_run_verifier_status {
+        response["task_run_verifier_status"] = json!(trvs);
+    }
+    if let Some(smp) = shared_memory_path {
+        response["shared_memory_path"] = json!(smp);
+    }
+    if let Some(vd) = verifier_diagnostics {
+        response["verifier_diagnostics"] = json!(vd);
+    }
+    if let Some(v) = verified_flag {
+        response["verified"] = json!(v);
+    }
+    if let Some(v) = verified_validation {
+        response["verified_validation"] = v;
     }
     Ok(ToolResult::json_pretty(&response))
 }
@@ -3363,6 +3565,355 @@ fn enforce_task_contract_completion(
         "write_scope_entries": contract.write_scope.len(),
         "claim_scopes": claim_scopes,
         "staged_files_checked": staged.len(),
+    }))
+}
+
+/// wave-21 / task 03 — minimal report-contract reader.
+///
+/// Pulls just the keys the daemon-side cross-check needs (`:schema`,
+/// `:task_id`, `:commit_hash`) out of a `(report <id> ...)` form using
+/// the local sexp parser. No new dependency, no new lisp dialect — the
+/// projector trusts the authoritative schema checker
+/// (`scripts/check-task-report.mjs`) for shape policing and only echoes
+/// the three fields the daemon needs for the wave21-03 verified-gate
+/// cross-check.
+struct ReportSummary {
+    schema: Option<String>,
+    task_id: Option<String>,
+    commit_hash: Option<String>,
+}
+
+fn read_report_summary(text: &str) -> Result<ReportSummary, anyhow::Error> {
+    let nodes = sexp::parse(text)?;
+    let top = nodes
+        .first()
+        .ok_or_else(|| anyhow!("report file is empty"))?;
+    if top.head_atom() != Some("report") {
+        return Err(anyhow!(
+            "top-level form must be `(report <id> ...)`, got `{}`",
+            top.head_atom().unwrap_or("<non-atom>")
+        ));
+    }
+    // children = [Atom("report"), Atom(<id>), :keyword, value, :keyword, value, ...]
+    let kids = top.children();
+    let mut schema = None;
+    let mut task_id = None;
+    let mut commit_hash = None;
+    let mut i = 2;
+    while i + 1 < kids.len() {
+        let key = match kids[i].as_atom() {
+            Some(a) if a.starts_with(':') => &a[1..],
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        let val = &kids[i + 1];
+        let val_str = match &val.kind {
+            NodeKind::Str(s) => Some(s.clone()),
+            NodeKind::Atom(a) => Some(a.clone()),
+            _ => None,
+        };
+        match key {
+            "schema" => schema = val_str.filter(|s| !s.is_empty()),
+            "task_id" => task_id = val_str.filter(|s| !s.is_empty()),
+            "commit_hash" => commit_hash = val_str.filter(|s| !s.is_empty()),
+            _ => {}
+        }
+        i += 2;
+    }
+    Ok(ReportSummary {
+        schema,
+        task_id,
+        commit_hash,
+    })
+}
+
+/// wave-21 / task 03 — pull the task-contract head id (the `<id>` in
+/// `(task <id> ...)`) so the daemon-side cross-check can match it
+/// against the report's `:task_id`. Returns `None` when the file is
+/// shaped unexpectedly — caller treats that as advisory.
+fn read_task_contract_id(text: &str) -> Option<String> {
+    let nodes = sexp::parse(text).ok()?;
+    let top = nodes.first()?;
+    if top.head_atom() != Some("task") {
+        return None;
+    }
+    let kids = top.children();
+    kids.get(1).and_then(|n| n.as_atom().map(|s| s.to_string()))
+}
+
+/// wave-21 / task 03 — verified-completion gate.
+///
+/// Runs only when `action_complete` saw `verified=true`. Enforces the
+/// caller-asserted "task-run verifier passed end-to-end" claim with the
+/// cross-checks the daemon can perform purely from local files:
+///
+///   1. Pre-conditions — `verified=true` is meaningless without
+///      `enforce_scoped_commit=true`, a `task_contract_path`, a
+///      `task_report_path`, and a `commit_hash`. Missing any of those
+///      rejects with a structured `VERIFIED_REQUIRES_*` code BEFORE any
+///      file mutation, mirroring the wave19-08 fail-fast posture.
+///   2. Read-only file parses — load the report off disk (resolved
+///      against the project root), confirm `:schema =
+///      missiond.report-contract.v1`, confirm `:task_id` matches the
+///      head id of the task contract, confirm the report's
+///      `:commit_hash` matches the supplied `commit_hash`.
+///
+/// Daemon never spawns Node here — this is purely caller-supplied
+/// metadata + read-only file inspection. The script-side
+/// `scripts/verify-task-run.mjs` (wave21-02) is the authoritative
+/// out-of-process verifier; this gate is the durable record that the
+/// caller asserted it passed and that the assertion still survives a
+/// daemon-side cross-check from the same files.
+#[allow(clippy::too_many_arguments)]
+fn enforce_verified_completion(
+    project_root: &Path,
+    enforce_scoped_commit: bool,
+    task_contract_path: Option<&str>,
+    task_report_path: Option<&str>,
+    commit_hash: Option<&str>,
+) -> std::result::Result<Value, ToolResult> {
+    if !enforce_scoped_commit {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "VERIFIED_REQUIRES_ENFORCEMENT",
+                "verified=true requires enforce_scoped_commit=true so the underlying scope + contract gates also run",
+            )
+            .with_suggestion(
+                "set enforce_scoped_commit=true alongside verified=true, or omit verified for legacy completions",
+            ),
+        ));
+    }
+    let tcp = task_contract_path
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ToolResult::structured_error(
+                ToolError::new(
+                    "VERIFIED_REQUIRES_TASK_CONTRACT",
+                    "verified=true requires a non-empty task_contract_path so the daemon-side cross-check can resolve the contract",
+                )
+                .with_suggestion(
+                    "supply task_contract_path pointing at the task-contract v1 lisp file the dispatch brief used",
+                ),
+            )
+        })?;
+    let trp = task_report_path
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ToolResult::structured_error(
+                ToolError::new(
+                    "VERIFIED_REQUIRES_TASK_REPORT",
+                    "verified=true requires a non-empty task_report_path so the daemon can read the report-contract off disk",
+                )
+                .with_suggestion(
+                    "supply task_report_path pointing at the report-contract v1 lisp file the writer produced",
+                ),
+            )
+        })?;
+    let hash = commit_hash
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| {
+            ToolResult::structured_error(
+                ToolError::new(
+                    "VERIFIED_REQUIRES_COMMIT_HASH",
+                    "verified=true requires a non-empty commit_hash so the daemon can match it against the report's :commit_hash",
+                )
+                .with_suggestion(
+                    "report the durable scoped commit hash, or omit verified for non-verified completions",
+                ),
+            )
+        })?;
+
+    // Resolve the report path (relative anchors at the project root,
+    // absolute paths flow through verbatim — same semantics as the
+    // wave19-08 contract gate).
+    let report_raw = std::path::Path::new(trp);
+    let report_resolved: PathBuf = if report_raw.is_absolute() {
+        report_raw.to_path_buf()
+    } else {
+        project_root.join(report_raw)
+    };
+    let report_text = match std::fs::read_to_string(&report_resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_REQUIRED",
+                    format!(
+                        "task_report_path `{}` is not readable: {}",
+                        report_resolved.display(),
+                        e
+                    ),
+                )
+                .with_suggestion(
+                    "ensure the path resolves under the project root and the writer wrote the report-contract v1 file",
+                ),
+            ));
+        }
+    };
+    let report = match read_report_summary(&report_text) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` failed structural parse: {}",
+                        report_resolved.display(),
+                        e
+                    ),
+                )
+                .with_suggestion(
+                    "run `node scripts/check-task-report.mjs <path>` to see the exact schema error",
+                ),
+            ));
+        }
+    };
+    match report.schema.as_deref() {
+        Some("missiond.report-contract.v1") => {}
+        Some(other) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` :schema must equal `missiond.report-contract.v1`, got `{}`",
+                        report_resolved.display(),
+                        other
+                    ),
+                ),
+            ));
+        }
+        None => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` has no `:schema` field",
+                        report_resolved.display()
+                    ),
+                ),
+            ));
+        }
+    }
+
+    // Load the contract to recover the head id for the cross-check.
+    // Failures here re-use the wave19-08 error codes so callers see a
+    // single vocabulary across the two gates.
+    let contract_raw = std::path::Path::new(tcp);
+    let contract_resolved: PathBuf = if contract_raw.is_absolute() {
+        contract_raw.to_path_buf()
+    } else {
+        project_root.join(contract_raw)
+    };
+    let contract_text = match std::fs::read_to_string(&contract_resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_CONTRACT_REQUIRED",
+                    format!(
+                        "task_contract_path `{}` is not readable: {}",
+                        contract_resolved.display(),
+                        e
+                    ),
+                ),
+            ));
+        }
+    };
+    let contract_id = read_task_contract_id(&contract_text).ok_or_else(|| {
+        ToolResult::structured_error(
+            ToolError::new(
+                "TASK_CONTRACT_MALFORMED",
+                format!(
+                    "task_contract_path `{}` is not a `(task <id> ...)` form",
+                    contract_resolved.display()
+                ),
+            ),
+        )
+    })?;
+
+    if let Some(report_task_id) = report.task_id.as_deref() {
+        if report_task_id != contract_id {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_TASK_ID_MISMATCH",
+                    format!(
+                        "task_report :task_id `{}` does not match task contract head id `{}` (contract `{}`, report `{}`)",
+                        report_task_id,
+                        contract_id,
+                        contract_resolved.display(),
+                        report_resolved.display(),
+                    ),
+                )
+                .with_suggestion(
+                    "regenerate the report against the matching contract, or fix the report :task_id field",
+                ),
+            ));
+        }
+    } else {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "TASK_REPORT_MALFORMED",
+                format!(
+                    "task_report_path `{}` is missing required `:task_id` field",
+                    report_resolved.display()
+                ),
+            ),
+        ));
+    }
+
+    if let Some(report_hash) = report.commit_hash.as_deref() {
+        // Accept short<->long sha overlap: either side may be a prefix
+        // of the other. Mirrors how `git log --format=%h` truncates
+        // hashes to 7+ chars by default, while `git rev-parse HEAD`
+        // returns the full 40-char form.
+        let matches =
+            report_hash == hash || report_hash.starts_with(hash) || hash.starts_with(report_hash);
+        if !matches {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_COMMIT_HASH_MISMATCH",
+                    format!(
+                        "task_report :commit_hash `{}` does not match completion commit_hash `{}` (report `{}`)",
+                        report_hash,
+                        hash,
+                        report_resolved.display(),
+                    ),
+                )
+                .with_suggestion(
+                    "regenerate the report against the durable commit, or correct the completion commit_hash",
+                ),
+            ));
+        }
+    } else {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "TASK_REPORT_MALFORMED",
+                format!(
+                    "task_report_path `{}` is missing required `:commit_hash` field",
+                    report_resolved.display()
+                ),
+            ),
+        ));
+    }
+
+    Ok(json!({
+        "task_report_path": trp,
+        "task_report_resolved_path": report_resolved.display().to_string(),
+        "task_contract_path": tcp,
+        "task_contract_resolved_path": contract_resolved.display().to_string(),
+        "task_id": contract_id,
+        "checked": [
+            "preconditions_present",
+            "task_report_loadable",
+            "task_report_schema",
+            "task_id_matches_contract",
+            "commit_hash_matches_report",
+        ],
     }))
 }
 
@@ -4400,6 +4951,30 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
         } else if let Some(msg) = failure {
             summary["task_contract_error"] = json!(msg);
         }
+    }
+
+    // wave-21 / task 03 — echo the task-run verifier hint paths when
+    // the caller threads them through preflight. These are advisory
+    // only (the daemon does not load the report at preflight time;
+    // the wave21-03 verified-gate at `action=complete` is the
+    // authoritative cross-check). Surfacing them here lets the writer
+    // confirm the dispatch envelope matches what the script-side
+    // verifier (`scripts/verify-task-run.mjs`) will load post-commit.
+    if let Some(trp) = args
+        .get("task_report_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        summary["task_report_path"] = json!(trp);
+    }
+    if let Some(smp) = args
+        .get("shared_memory_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        summary["shared_memory_path"] = json!(smp);
     }
 
     Ok(ToolResult::json_pretty(&summary))
@@ -5554,6 +6129,10 @@ mod tests {
                 task_report_path: None,
                 verifier_status: None,
                 verifier_notes: None,
+                task_run_verifier_status: None,
+                shared_memory_path: None,
+                verifier_diagnostics: None,
+                verified: None,
             },
             CompletionRecord {
                 id: "COMP002".into(),
@@ -5569,6 +6148,10 @@ mod tests {
                 task_report_path: None,
                 verifier_status: None,
                 verifier_notes: None,
+                task_run_verifier_status: None,
+                shared_memory_path: None,
+                verifier_diagnostics: None,
+                verified: None,
             },
         ];
         let v = summarize_durability(&records);
@@ -6685,5 +7268,446 @@ mod tests {
         assert_eq!(status, "loaded");
         assert!(summary.is_some());
         assert_eq!(resolved_path.as_deref(), Some(abs.as_str()));
+    }
+
+    // ── Wave 21 / Task 03 — execution report verifier integration ──
+    //
+    // Pin the wave21-03 surface: enum normalizer, the four-field
+    // companion-log round-trip via `parse_completions`, the mini
+    // report-summary reader, the contract head-id reader, and the
+    // `enforce_verified_completion` gate covering every documented
+    // failure code plus the happy path.
+
+    /// `task_run_verifier_status` normalizer accepts every canonical
+    /// label (with whitespace) and rejects typos. Mirrors the contract
+    /// of the wave19-08 `verifier_status` normalizer.
+    #[test]
+    fn task_run_verifier_status_normalizer_accepts_canonical_only() {
+        for &status in VALID_TASK_RUN_VERIFIER_STATUSES {
+            assert_eq!(normalize_task_run_verifier_status(status), Some(status));
+        }
+        assert_eq!(
+            normalize_task_run_verifier_status("  passed  "),
+            Some("passed")
+        );
+        assert!(normalize_task_run_verifier_status("").is_none());
+        assert!(normalize_task_run_verifier_status("done").is_none());
+        assert!(normalize_task_run_verifier_status("PASSED").is_none());
+    }
+
+    /// `parse_completions` round-trips the wave21-03 metadata when
+    /// every new field is present, including `verified=true` written
+    /// as a bare atom and `verifier_diagnostics` prose with
+    /// punctuation.
+    #[test]
+    fn parse_completions_reads_task_run_verifier_metadata() {
+        let body = "(execution-log\n  (completions\n    (COMP001\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :commit-hash \"abc1234\"\n      :commit-status \"committed\"\n      :task-run-verifier-status \"passed\"\n      :shared-memory-path \".missiond/tasks/wave21/shared-memory.lisp\"\n      :verifier-diagnostics \"verify-task-run.mjs OK against abc1234\"\n      :verified true)))\n";
+        let file = LogFile::parse(body.to_string()).expect("parse");
+        let comps = parse_completions(&file);
+        assert_eq!(comps.len(), 1);
+        let c = &comps[0];
+        assert_eq!(c.task_run_verifier_status.as_deref(), Some("passed"));
+        assert_eq!(
+            c.shared_memory_path.as_deref(),
+            Some(".missiond/tasks/wave21/shared-memory.lisp"),
+        );
+        assert_eq!(
+            c.verifier_diagnostics.as_deref(),
+            Some("verify-task-run.mjs OK against abc1234"),
+        );
+        assert_eq!(c.verified, Some(true));
+    }
+
+    /// Legacy completions (no wave21-03 fields) parse cleanly and
+    /// surface `None` everywhere new — the same backward-compat
+    /// contract every prior wave upholds.
+    #[test]
+    fn parse_completions_legacy_omits_task_run_verifier_metadata() {
+        let body = "(execution-log\n  (completions\n    (COMP001\n      :phase \"phase-A\"\n      :agent \"agent\"\n      :summary \"done\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\")))\n";
+        let file = LogFile::parse(body.to_string()).expect("parse");
+        let c = &parse_completions(&file)[0];
+        assert!(c.task_run_verifier_status.is_none());
+        assert!(c.shared_memory_path.is_none());
+        assert!(c.verifier_diagnostics.is_none());
+        assert!(c.verified.is_none());
+    }
+
+    /// Explicit `verified=false` round-trips to `Some(false)` so audit
+    /// can tell "writer intentionally skipped verification" from "writer
+    /// omitted the field" (legacy caller).
+    #[test]
+    fn parse_completions_round_trips_verified_false() {
+        let body = "(execution-log\n  (completions\n    (COMP001\n      :phase \"p\"\n      :agent \"a\"\n      :summary \"s\"\n      :deliverables \"d\"\n      :verification \"v\"\n      :at \"2026-04-26T00:00:00Z\"\n      :verified false)))\n";
+        let file = LogFile::parse(body.to_string()).expect("parse");
+        let c = &parse_completions(&file)[0];
+        assert_eq!(c.verified, Some(false));
+    }
+
+    /// Mini report reader pulls just the three keys the gate cares
+    /// about and ignores everything else (notes, files_changed, etc.).
+    #[test]
+    fn read_report_summary_extracts_required_fields() {
+        let body = r#"
+(report wave21-03-sample
+  :schema "missiond.report-contract.v1"
+  :task_id "wave21-03-sample"
+  :status done
+  :commit_hash "deadbeef0123"
+  :files_changed ["a.rs" "b.rs"]
+  :acceptance_results []
+  :notes "ignored")"#;
+        let r = read_report_summary(body).expect("parse");
+        assert_eq!(r.schema.as_deref(), Some("missiond.report-contract.v1"));
+        assert_eq!(r.task_id.as_deref(), Some("wave21-03-sample"));
+        assert_eq!(r.commit_hash.as_deref(), Some("deadbeef0123"));
+    }
+
+    /// Non-`(report ...)` top form rejects so the reader cannot be
+    /// tricked into projecting a contract or a companion log.
+    #[test]
+    fn read_report_summary_rejects_non_report_form() {
+        let body = r#"(task wave21-03-not-a-report :schema "missiond.task-contract.v1" :goal "x")"#;
+        assert!(read_report_summary(body).is_err());
+    }
+
+    /// Contract head-id reader pulls the `<id>` symbol from
+    /// `(task <id> ...)`. Used by the verified-gate to cross-check
+    /// the report `:task_id`.
+    #[test]
+    fn read_task_contract_id_extracts_head_symbol() {
+        let body = r#"(task wave21-03-test-contract :schema "missiond.task-contract.v1" :goal "x")"#;
+        assert_eq!(
+            read_task_contract_id(body).as_deref(),
+            Some("wave21-03-test-contract"),
+        );
+        let other = r#"(plan p :schema "x")"#;
+        assert!(read_task_contract_id(other).is_none());
+    }
+
+    /// Sample report body matching SAMPLE_CONTRACT_BODY's head id.
+    /// Hash is the `abc1234` short sha used across the wave19-08 tests
+    /// so the verified-gate hash-prefix overlap rule lights up cleanly.
+    const SAMPLE_REPORT_BODY: &str = r#"
+(report wave19-08-test-contract
+  :schema "missiond.report-contract.v1"
+  :task_id "wave19-08-test-contract"
+  :status done
+  :commit_hash "abc1234"
+  :files_changed ["src/a.rs" "src/b.rs"]
+  :acceptance_results [(:command "x" :exit_code 0 :ok true)]
+  :notes "wave21-03 test fixture")
+"#;
+
+    fn write_task_report(dir: &Path, rel: &str, body: &str) -> PathBuf {
+        let abs = dir.join(rel);
+        if let Some(parent) = abs.parent() {
+            std::fs::create_dir_all(parent).expect("mkdir");
+        }
+        let mut f = std::fs::File::create(&abs).expect("create");
+        f.write_all(body.as_bytes()).expect("write");
+        abs
+    }
+
+    /// `verified=true` without `enforce_scoped_commit=true` rejects
+    /// with `VERIFIED_REQUIRES_ENFORCEMENT`. The verified flag is
+    /// meaningless without the underlying scope gate also running.
+    #[test]
+    fn verified_rejects_without_enforce_scoped_commit() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let res = enforce_verified_completion(
+            dir.path(),
+            false,
+            Some("tasks/x.lisp"),
+            Some("tasks/x.report.lisp"),
+            Some("abc1234"),
+        );
+        let err = res.expect_err("must reject without enforcement");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("VERIFIED_REQUIRES_ENFORCEMENT"),
+        );
+    }
+
+    /// Missing task_contract_path → `VERIFIED_REQUIRES_TASK_CONTRACT`.
+    #[test]
+    fn verified_rejects_missing_task_contract_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            None,
+            Some("tasks/x.report.lisp"),
+            Some("abc1234"),
+        );
+        let err = res.expect_err("must reject missing contract");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("VERIFIED_REQUIRES_TASK_CONTRACT"),
+        );
+    }
+
+    /// Missing task_report_path → `VERIFIED_REQUIRES_TASK_REPORT`.
+    #[test]
+    fn verified_rejects_missing_task_report_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/x.lisp"),
+            None,
+            Some("abc1234"),
+        );
+        let err = res.expect_err("must reject missing report");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("VERIFIED_REQUIRES_TASK_REPORT"),
+        );
+    }
+
+    /// Missing commit_hash → `VERIFIED_REQUIRES_COMMIT_HASH`.
+    /// Whitespace-only also rejects via the trim-then-filter-empty
+    /// pipeline.
+    #[test]
+    fn verified_rejects_missing_commit_hash() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/x.lisp"),
+            Some("tasks/x.report.lisp"),
+            None,
+        );
+        let err = res.expect_err("must reject absent hash");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("VERIFIED_REQUIRES_COMMIT_HASH"),
+        );
+
+        let res2 = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/x.lisp"),
+            Some("tasks/x.report.lisp"),
+            Some("   "),
+        );
+        let err2 = res2.expect_err("must reject blank hash");
+        assert_eq!(
+            extract_error_code(&err2).as_deref(),
+            Some("VERIFIED_REQUIRES_COMMIT_HASH"),
+        );
+    }
+
+    /// Missing report file → `TASK_REPORT_REQUIRED`. The error must
+    /// surface BEFORE the daemon mutates the companion log.
+    #[test]
+    fn verified_rejects_missing_report_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/ok.lisp"),
+            Some("tasks/does-not-exist.report.lisp"),
+            Some("abc1234"),
+        );
+        let err = res.expect_err("missing report must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_REQUIRED"),
+        );
+    }
+
+    /// Report with a wrong `:schema` → `TASK_REPORT_MALFORMED`.
+    #[test]
+    fn verified_rejects_report_schema_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let bad = r#"(report wave19-08-test-contract :schema "missiond.report-contract.v0" :task_id "wave19-08-test-contract" :commit_hash "abc1234")"#;
+        write_task_report(dir.path(), "tasks/bad.report.lisp", bad);
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/ok.lisp"),
+            Some("tasks/bad.report.lisp"),
+            Some("abc1234"),
+        );
+        let err = res.expect_err("schema mismatch must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_MALFORMED"),
+        );
+    }
+
+    /// Report `:task_id` not matching the contract head id →
+    /// `TASK_REPORT_TASK_ID_MISMATCH`. Distinct from the schema error
+    /// so the writer can tell "wrong file referenced" from "wrong
+    /// file shape".
+    #[test]
+    fn verified_rejects_report_task_id_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let body = r#"
+(report wave21-03-other-task
+  :schema "missiond.report-contract.v1"
+  :task_id "wave21-03-other-task"
+  :status done
+  :commit_hash "abc1234"
+  :files_changed []
+  :acceptance_results [])
+"#;
+        write_task_report(dir.path(), "tasks/wrong.report.lisp", body);
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/ok.lisp"),
+            Some("tasks/wrong.report.lisp"),
+            Some("abc1234"),
+        );
+        let err = res.expect_err("task_id mismatch must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_TASK_ID_MISMATCH"),
+        );
+    }
+
+    /// Report `:commit_hash` not matching the supplied hash →
+    /// `TASK_REPORT_COMMIT_HASH_MISMATCH`. Tests with a clearly
+    /// different hash so the prefix-overlap rule cannot accidentally
+    /// pass.
+    #[test]
+    fn verified_rejects_report_commit_hash_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let body = r#"
+(report wave19-08-test-contract
+  :schema "missiond.report-contract.v1"
+  :task_id "wave19-08-test-contract"
+  :status done
+  :commit_hash "feedbeef9999"
+  :files_changed []
+  :acceptance_results [])
+"#;
+        write_task_report(dir.path(), "tasks/x.report.lisp", body);
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/ok.lisp"),
+            Some("tasks/x.report.lisp"),
+            Some("abc1234"),
+        );
+        let err = res.expect_err("hash mismatch must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_COMMIT_HASH_MISMATCH"),
+        );
+    }
+
+    /// Happy path: every precondition met, report loadable, schema +
+    /// task_id + commit_hash all match. Validation summary echoes the
+    /// resolved paths + the checked rules.
+    #[test]
+    fn verified_accepts_aligned_report() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let contract_resolved =
+            write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let report_resolved =
+            write_task_report(dir.path(), "tasks/ok.report.lisp", SAMPLE_REPORT_BODY);
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/ok.lisp"),
+            Some("tasks/ok.report.lisp"),
+            Some("abc1234"),
+        );
+        let summary = res.expect("aligned report must pass");
+        assert_eq!(
+            summary.get("task_id").and_then(|v| v.as_str()),
+            Some("wave19-08-test-contract"),
+        );
+        assert_eq!(
+            summary
+                .get("task_contract_resolved_path")
+                .and_then(|v| v.as_str()),
+            Some(contract_resolved.display().to_string().as_str()),
+        );
+        assert_eq!(
+            summary
+                .get("task_report_resolved_path")
+                .and_then(|v| v.as_str()),
+            Some(report_resolved.display().to_string().as_str()),
+        );
+        let checked = summary
+            .get("checked")
+            .and_then(|v| v.as_array())
+            .expect("checked");
+        assert!(checked.iter().any(|v| v.as_str() == Some("preconditions_present")));
+        assert!(checked.iter().any(|v| v.as_str() == Some("task_report_loadable")));
+        assert!(checked.iter().any(|v| v.as_str() == Some("task_report_schema")));
+        assert!(checked
+            .iter()
+            .any(|v| v.as_str() == Some("task_id_matches_contract")));
+        assert!(checked
+            .iter()
+            .any(|v| v.as_str() == Some("commit_hash_matches_report")));
+    }
+
+    /// Long-sha completion hash + short-sha report hash overlap via
+    /// `starts_with`. Matches the way `git log --format=%h` truncates
+    /// to 7+ chars while `git rev-parse HEAD` returns the full
+    /// 40-char form.
+    #[test]
+    fn verified_accepts_short_long_sha_prefix_overlap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(dir.path(), "tasks/ok.lisp", SAMPLE_CONTRACT_BODY);
+        let body = r#"
+(report wave19-08-test-contract
+  :schema "missiond.report-contract.v1"
+  :task_id "wave19-08-test-contract"
+  :status done
+  :commit_hash "abc1234"
+  :files_changed []
+  :acceptance_results [])
+"#;
+        write_task_report(dir.path(), "tasks/x.report.lisp", body);
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some("tasks/ok.lisp"),
+            Some("tasks/x.report.lisp"),
+            Some("abc1234567890abcdef"),
+        );
+        assert!(res.is_ok(), "long↔short sha overlap should pass");
+    }
+
+    /// Read-only proof: this whole file may only spawn `git` for
+    /// `git status --porcelain=v1` (the wave18-08 preflight check).
+    /// We grep the file at test time so the proof survives future
+    /// edits — exactly one `Command::new(<git>)` site is allowed.
+    /// Anchor at `CARGO_MANIFEST_DIR` so the test stays robust to
+    /// whichever working directory the cargo harness picks. The
+    /// search needle is built at runtime via `format!` so the test
+    /// source itself doesn't count toward the match (a self-counting
+    /// literal would always inflate the total by one).
+    #[test]
+    fn daemon_never_invokes_mutating_git() {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        let path = std::path::Path::new(manifest_dir)
+            .join("src/handlers/knowledge/agent_execution.rs");
+        let src = std::fs::read_to_string(&path).expect("read self");
+        let needle = format!("Command::new({}git{})", '"', '"');
+        let command_git = src.matches(needle.as_str()).count();
+        assert_eq!(
+            command_git, 1,
+            "expected exactly one git Command::new site (the wave18-08 status read), found {}",
+            command_git
+        );
+        let argv_needle = format!(
+            ".args([{}status{}, {}--porcelain=v1{}])",
+            '"', '"', '"', '"'
+        );
+        assert!(
+            src.contains(argv_needle.as_str()),
+            "the single git Command::new site must use the wave18-08 status argv",
+        );
     }
 }
