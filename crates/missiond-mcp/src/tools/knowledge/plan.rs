@@ -148,7 +148,7 @@ fn build_properties() -> Value {
 
     p.insert("cwd".into(), prop(
         "string",
-        "[execute internal mission_task_delegate] working directory passed through to mission_task_delegate",
+        "[execute internal mission_task_delegate | compile persist=true write_file=true] working directory passed through to mission_task_delegate. wave-14 file-first writer also accepts it as the project-root signal — must be ABSOLUTE (relative paths are refused; no process-cwd fallback per intent-worker.lisp :: project-root-spawn-cwd).",
     ));
 
     p.insert("requested_cwd".into(), prop(
@@ -227,7 +227,22 @@ fn build_properties() -> Value {
 
     p.insert("project".into(), prop(
         "string",
-        "[record_evidence|execute] project id (registry-resolved root); defaults to CWD",
+        "[record_evidence|execute|compile persist=true write_file=true] project id (registry-resolved root); defaults to CWD. wave-14 file-first writer additionally treats it as the primary signal for project-root resolution.",
+    ));
+
+    p.insert("write_file".into(), prop(
+        "boolean",
+        "[compile persist=true] (wave-14 file-first SSOT) mirror the compiled PLAN sexp to `<project_root>/.missiond/plans/<topic>/PLAN.lisp` after the DB row is committed. Default false. Topic defaults to `board_task_id` when not supplied. DB row is NEVER rolled back on file failure — response surfaces status=\"partial\" + file_write_error in that case.",
+    ));
+
+    p.insert("overwrite_file".into(), prop(
+        "boolean",
+        "[compile persist=true write_file=true] allow replacing an existing PLAN.lisp at the target path (default false → atomic refusal).",
+    ));
+
+    p.insert("topic".into(), prop(
+        "string",
+        "[compile persist=true write_file=true] file-first SSOT topic segment used to derive `.missiond/plans/<topic>/PLAN.lisp`. Defaults to `board_task_id`. Sanitized (alnum / `_` / `-`).",
     ));
 
     Value::Object(p)
@@ -276,6 +291,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
          entry 会被 wrap 为带 `schema_version=\"v0\"` + canonical `source` + canonical `kind` 的 typed 形态\
          (kind 默认 `note`, source 默认 `record_evidence_manual`); 两个都不传时仍保留 legacy `{\"evidence\": …}` wire form,\
          向后兼容。\
+         wave-14 file-first SSOT: compile persist=true 时再传 write_file=true 即把 compiled_sexp 镜像到 \
+         `<project_root>/.missiond/plans/<topic>/PLAN.lisp` (ArtifactKind::Plan, atomic, 默认拒覆, \
+         overwrite_file=true 替换); topic 默认取 board_task_id; project root 解析强制走 \
+         resolve_target_project_root (project > absolute cwd > target_project, 禁止 process cwd fallback); \
+         DB 行已写但 file 写失败 → status=\"partial\" + file_write_error, 不回滚 row; \
+         成功响应附 file_written / file_path / file_sha256 / file_bytes / file_created / file_overwritten。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \

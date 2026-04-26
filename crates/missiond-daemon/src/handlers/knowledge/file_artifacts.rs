@@ -1,5 +1,5 @@
-//! file_artifacts — file-first SSOT writer foundation for directive / plan /
-//! workflow artifacts.
+//! file_artifacts — file-first SSOT writer for directive / plan / workflow
+//! artifacts.
 //!
 //! Lisp authority:
 //!   - intent-flow.lisp ::
@@ -12,17 +12,24 @@
 //!   - plan      : <project_root>/.missiond/plans/<topic>/PLAN.lisp
 //!   - workflow  : <project_root>/.missiond/workflows/<topic>.lisp
 //!
-//! Scope of this module (wave-11 foundation):
-//!   - pure helpers used by the upcoming directive / plan / workflow file-first
-//!     writers; does NOT touch DB rows, does NOT publish events.
-//!   - parents are auto-created.
-//!   - default policy is no-overwrite; callers must opt in via `overwrite=true`.
-//!   - writes are atomic (`tmp` + `rename`).
-//!   - returned `WriteOutcome` carries `path`, `created`, `overwritten`,
-//!     `sha256`, `bytes` for downstream auditing / DB mirror sync.
+//! Layered surface:
+//!   - Pure helpers (`artifact_path`, `atomic_write_artifact`,
+//!     `unique_temp_path_in_dir`, `read_existing_metadata`,
+//!     `sanitize_topic_segment`) — no `AppState`, no DB, no events. Foundation
+//!     wave-11 introduced these so other writers can compose them.
+//!   - `WriterContext` + `attempt_artifact_write` — the manager-side helper
+//!     that resolves `project_root` through the canonical
+//!     `slot_orchestrator::project_root::resolve_target_project_root` resolver,
+//!     enforces the no-process-cwd-fallback contract
+//!     (intent-worker.lisp :: project-root-spawn-cwd), and routes overwrite
+//!     policy. Compiler actors (`directive`, `plan`, `workflow`) call this
+//!     after their DB mirror commit so the file-first SSOT and the row stay
+//!     in sync, with `partial`/`error` semantics surfaced to the caller.
 //!
-//! This module is intentionally small: handlers compose it; it does not
-//! itself know about handlers / state / events.
+//! `attempt_artifact_write` deliberately does NOT touch DB rows and does NOT
+//! publish events — that contract belongs to the calling action so the file
+//! write can fail without dragging down the row, and so this module stays
+//! easy to unit-test end-to-end against `tempfile`.
 
 use std::fmt;
 use std::fs;
@@ -33,7 +40,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use serde::Serialize;
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+
+use crate::slot_orchestrator::project_root::{
+    resolve_target_project_root, ResolutionError,
+};
+use missiond_core::types::SharedProjectRegistry;
 
 /// Process-wide monotonic counter consumed by [`unique_temp_path_in_dir`].
 ///
@@ -93,8 +106,13 @@ impl fmt::Display for ArtifactKind {
 /// workflow puts the topic itself in the file name). It is wired through so
 /// future topics (e.g. multi-version `intent-alignment-v2.lisp`) can opt in
 /// without touching `artifact_path` callers.
+///
+/// Today the directive / plan / workflow writers all construct artifact paths
+/// directly via [`artifact_path`]; the spec form remains as a foundation API
+/// so future multi-version writers (e.g. `intent-alignment-v2.lisp`) can opt
+/// into [`artifact_path_from_spec`] without touching the existing call sites.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // foundation API; consumed by wave-11 directive/plan/workflow writers
+#[allow(dead_code)] // foundation API; future multi-version writers may opt into spec form
 pub(crate) struct ArtifactSpec {
     pub kind: ArtifactKind,
     pub topic: String,
@@ -349,6 +367,7 @@ pub(crate) fn atomic_write_artifact(
 ///
 /// IO errors other than `NotFound` propagate so the daemon never silently
 /// downgrades a permission error into "no artifact present".
+#[allow(dead_code)] // foundation API; reserved for drift-detection callers (no live consumer yet)
 pub(crate) fn read_existing_metadata(path: &Path) -> Result<Option<ArtifactMetadata>> {
     let bytes = match fs::read(path) {
         Ok(b) => b,
@@ -371,6 +390,204 @@ pub(crate) fn read_existing_metadata(path: &Path) -> Result<Option<ArtifactMetad
         sha256,
         bytes: bytes.len() as u64,
     }))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// State-bound writer surface — composed by the directive / plan / workflow
+// compilers. Resolves project_root via the canonical
+// `slot_orchestrator::project_root::resolve_target_project_root` so every
+// file-first write lands under a registered project (no process-cwd
+// fallback). Returns a structured outcome the caller can splice into the
+// JSON response without re-implementing the file-vs-db contract.
+// ───────────────────────────────────────────────────────────────────────
+
+/// The compiler-visible request to write one file-first artifact. All four
+/// fields come from the action's args (`project` / `cwd` / `target_project`
+/// + `topic` / `overwrite_file`); the writer enforces:
+///   - `cwd` must be absolute when supplied (no process-cwd join).
+///   - at least one project signal is required (no implicit registry guess).
+///   - `topic` is sanitized via [`sanitize_topic_segment`].
+///
+/// The `kind` is set by the calling action and locks the on-disk layout via
+/// [`artifact_path`].
+#[derive(Debug, Clone)]
+pub(crate) struct WriterContext<'a> {
+    pub kind: ArtifactKind,
+    pub topic: &'a str,
+    /// Optional explicit `project=<id>` arg.
+    pub project: Option<&'a str>,
+    /// Optional explicit `cwd=<absolute path>` arg.
+    pub cwd: Option<&'a str>,
+    /// Optional fallback `target_project=<id>` arg.
+    pub target_project: Option<&'a str>,
+    /// `overwrite_file=true` opts into replacing an existing artifact;
+    /// default policy refuses to overwrite (file-first SSOT immutability).
+    pub overwrite: bool,
+}
+
+/// Outcome of an [`attempt_artifact_write`] call. The three variants mirror
+/// the partial / error semantics surfaced in the action response:
+///   - [`AttemptOutcome::Written`]: file was created or overwritten — caller
+///     splices `file_written=true` + path/sha/bytes/created/overwritten.
+///   - [`AttemptOutcome::ResolveFailed`]: project root could not be resolved;
+///     the DB row was already committed, so the caller surfaces
+///     `status="partial"` + `file_write_error` carrying this reason. The DB
+///     row is NEVER rolled back — the file-vs-db contract requires the row
+///     to remain visible so the caller can retry the file write with a
+///     correct project signal without losing the compiled artifact.
+///   - [`AttemptOutcome::WriteFailed`]: project root resolved, but the
+///     atomic write failed (permission, disk full, racing overwrite refusal,
+///     etc.). Same partial-status contract as above.
+#[derive(Debug)]
+pub(crate) enum AttemptOutcome {
+    Written(WriteOutcome),
+    ResolveFailed { reason: String },
+    WriteFailed { path: PathBuf, reason: String },
+}
+
+impl AttemptOutcome {
+    /// Splice the outcome into a `payload` JSON object. The caller picks the
+    /// payload — typically the action's `compiled` / `dry_run` / `distilled`
+    /// envelope — and we extend it with the canonical file-first fields:
+    ///
+    ///   - `file_written`        : bool, true only for `Written`
+    ///   - `file_path`           : string display path (always set when known)
+    ///   - `file_sha256`         : hex digest of the written bytes
+    ///   - `file_bytes`          : number of bytes written
+    ///   - `file_created`        : bool, true on a fresh file
+    ///   - `file_overwritten`    : bool, true on a replaced file
+    ///   - `file_write_error`    : structured reason on resolve/write failure
+    ///   - `status`              : downgraded to `"partial"` on failure
+    ///
+    /// `status` rewrite is conservative: we only set `"partial"` when the
+    /// payload already carried a non-`"partial"` status (so a caller that
+    /// already declared `"partial"` for unrelated reasons keeps its label).
+    pub(crate) fn splice_into(&self, payload: &mut Value) {
+        let map = match payload.as_object_mut() {
+            Some(m) => m,
+            None => return,
+        };
+        match self {
+            AttemptOutcome::Written(w) => {
+                map.insert("file_written".to_string(), json!(true));
+                map.insert("file_path".to_string(), json!(w.path.display().to_string()));
+                map.insert("file_sha256".to_string(), json!(w.sha256));
+                map.insert("file_bytes".to_string(), json!(w.bytes));
+                map.insert("file_created".to_string(), json!(w.created));
+                map.insert("file_overwritten".to_string(), json!(w.overwritten));
+            }
+            AttemptOutcome::ResolveFailed { reason } => {
+                map.insert("file_written".to_string(), json!(false));
+                map.insert("file_write_error".to_string(), json!(reason));
+                downgrade_to_partial(map);
+            }
+            AttemptOutcome::WriteFailed { path, reason } => {
+                map.insert("file_written".to_string(), json!(false));
+                map.insert(
+                    "file_path".to_string(),
+                    json!(path.display().to_string()),
+                );
+                map.insert("file_write_error".to_string(), json!(reason));
+                downgrade_to_partial(map);
+            }
+        }
+    }
+}
+
+fn downgrade_to_partial(map: &mut serde_json::Map<String, Value>) {
+    let already_partial = map
+        .get("status")
+        .and_then(|v| v.as_str())
+        .map(|s| s == "partial")
+        .unwrap_or(false);
+    if !already_partial {
+        map.insert("status".to_string(), json!("partial"));
+    }
+}
+
+/// Resolve project_root + write the artifact file atomically.
+///
+/// The async signature lets us hold the registry's read lock briefly via
+/// [`resolve_target_project_root`] without blocking the runtime, while the
+/// actual fs write stays synchronous (POSIX rename is the only ordering
+/// point we need). Errors are returned as [`AttemptOutcome`] variants — we
+/// deliberately do NOT bubble them into `Result` so the calling action can
+/// keep its DB-then-file ordering: the row is already committed by the time
+/// this is called, and a write failure must not abort the response.
+///
+/// Lisp authority:
+///   - intent-flow.lisp :: F-intent-alignment-plan-execution-loop ::
+///       :file-vs-db-contract (file write is best-effort post-DB; never
+///       roll back the row on file failure).
+///   - intent-worker.lisp :: project-root-spawn-cwd (single canonical
+///       resolver, no process-cwd fallback).
+///   - intent-memory.lisp :: directive-layer :: file-first-artifacts
+///       (per-kind layout authority — kept here in [`artifact_path`]).
+pub(crate) async fn attempt_artifact_write(
+    registry: &SharedProjectRegistry,
+    ctx: WriterContext<'_>,
+    content: &str,
+) -> AttemptOutcome {
+    let project_root = match resolve_writer_project_root(
+        registry,
+        ctx.project,
+        ctx.cwd,
+        ctx.target_project,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(reason) => return AttemptOutcome::ResolveFailed { reason },
+    };
+    let target = artifact_path(&project_root, ctx.kind, ctx.topic);
+    match atomic_write_artifact(&target, content, ctx.overwrite) {
+        Ok(outcome) => AttemptOutcome::Written(outcome),
+        Err(e) => AttemptOutcome::WriteFailed {
+            path: target,
+            reason: format!("{:#}", e),
+        },
+    }
+}
+
+/// Registry-bound thin layer that mirrors the canonical resolver contract
+/// shared with `slot_orchestrator::spawner` / `compute::flow_run` /
+/// `knowledge::plan` / `knowledge::workflow`. Pulled out of the async fn so
+/// unit tests can drive the resolution policy without writing files.
+pub(crate) async fn resolve_writer_project_root(
+    registry: &SharedProjectRegistry,
+    project: Option<&str>,
+    cwd: Option<&str>,
+    target_project: Option<&str>,
+) -> std::result::Result<PathBuf, String> {
+    // Empty-string fields must be treated as "absent", not as
+    // explicit-empty-id — otherwise we'd hand the registry "" and produce a
+    // confusing "project '' is not registered" error. Mirrors the same
+    // pre-filter `workflow.rs` already applies for compile_methodology.
+    let project = project.map(str::trim).filter(|s| !s.is_empty());
+    let target_project = target_project.map(str::trim).filter(|s| !s.is_empty());
+    let cwd_raw = cwd.map(str::trim);
+    let cwd_path: Option<PathBuf> = cwd_raw
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .filter(|p| p.is_absolute());
+    if let Some(raw) = cwd_raw.filter(|s| !s.is_empty()) {
+        if cwd_path.is_none() {
+            return Err(format!(
+                "cwd `{}` is not absolute; file-first writer refuses to fall back to process cwd \
+                 (intent-worker.lisp :: project-root-spawn-cwd). Pass an absolute cwd or supply project / target_project.",
+                raw
+            ));
+        }
+    }
+    match resolve_target_project_root(project, cwd_path.as_deref(), target_project, registry).await
+    {
+        Ok(r) => Ok(r.project_root),
+        Err(ResolutionError::NoSignal) => Err(
+            "no project_id, absolute cwd, or fallback target_project supplied; \
+             file-first writer refuses process-cwd fallback".to_string(),
+        ),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -767,5 +984,393 @@ mod tests {
         assert_eq!(ArtifactKind::Plan.label(), "plan");
         assert_eq!(ArtifactKind::Workflow.label(), "workflow");
         assert_eq!(format!("{}", ArtifactKind::Plan), "plan");
+    }
+
+    // ── attempt_artifact_write / WriterContext ───────────────────────────
+    //
+    // wave-14 :: writer integration. Pin the resolver contract,
+    // overwrite policy, and the JSON splice shape so directive / plan /
+    // workflow callers all see the same `file_*` keys + partial-status
+    // semantics. We exercise the resolver branch via a real
+    // `SharedProjectRegistry` (no AppState graph required) and the write
+    // branch through `tempfile`.
+
+    use missiond_core::types::{ProjectConfig, ProjectRegistry};
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+
+    fn registry_with(projects: Vec<ProjectConfig>) -> SharedProjectRegistry {
+        Arc::new(RwLock::new(ProjectRegistry::new(projects)))
+    }
+
+    fn project(id: &str, path: &str) -> ProjectConfig {
+        ProjectConfig {
+            id: id.to_string(),
+            path: path.to_string(),
+            intent_path: None,
+            active: true,
+            slots: vec![],
+            github_url: None,
+            kind: "managed".to_string(),
+            vault_path: None,
+            parent_id: None,
+            created_at: None,
+            updated_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_writes_alignment_under_registered_project_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+
+        let outcome = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::IntentAlignment,
+                topic: "wave14-task-01",
+                project: Some("missiond"),
+                cwd: None,
+                target_project: None,
+                overwrite: false,
+            },
+            "(intent-alignment :id wave14-task-01)\n",
+        )
+        .await;
+
+        match outcome {
+            AttemptOutcome::Written(w) => {
+                assert!(w.created);
+                assert!(!w.overwritten);
+                let expected = root
+                    .join(".missiond")
+                    .join("alignment")
+                    .join("wave14-task-01")
+                    .join("intent-alignment.lisp");
+                assert_eq!(w.path, expected);
+                assert!(expected.exists());
+            }
+            other => panic!("expected Written, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_refuses_overwrite_by_default_and_surfaces_partial() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+
+        let _seed = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Plan,
+                topic: "wave14-foo",
+                project: Some("missiond"),
+                cwd: None,
+                target_project: None,
+                overwrite: false,
+            },
+            "v1",
+        )
+        .await;
+
+        let second = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Plan,
+                topic: "wave14-foo",
+                project: Some("missiond"),
+                cwd: None,
+                target_project: None,
+                overwrite: false,
+            },
+            "v2",
+        )
+        .await;
+
+        match second {
+            AttemptOutcome::WriteFailed { reason, path } => {
+                assert!(
+                    reason.contains("already exists"),
+                    "expected overwrite refusal, got {}",
+                    reason
+                );
+                // Splicing into a fresh `compiled` payload should downgrade to
+                // partial and stamp file_path / file_write_error.
+                let mut payload = json!({"status": "compiled", "plan_id": "abc"});
+                AttemptOutcome::WriteFailed {
+                    path: path.clone(),
+                    reason: reason.clone(),
+                }
+                .splice_into(&mut payload);
+                assert_eq!(payload["status"], "partial");
+                assert_eq!(payload["plan_id"], "abc", "DB-row fields preserved");
+                assert_eq!(payload["file_written"], false);
+                assert_eq!(payload["file_path"], path.display().to_string());
+                assert!(payload["file_write_error"]
+                    .as_str()
+                    .unwrap()
+                    .contains("already exists"));
+            }
+            other => panic!("expected WriteFailed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_replaces_when_overwrite_true() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+
+        let _seed = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Workflow,
+                topic: "wave14-foo",
+                project: Some("missiond"),
+                cwd: None,
+                target_project: None,
+                overwrite: false,
+            },
+            "v1",
+        )
+        .await;
+        let second = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Workflow,
+                topic: "wave14-foo",
+                project: Some("missiond"),
+                cwd: None,
+                target_project: None,
+                overwrite: true,
+            },
+            "v2",
+        )
+        .await;
+        match second {
+            AttemptOutcome::Written(w) => {
+                assert!(!w.created);
+                assert!(w.overwritten);
+                let expected = root
+                    .join(".missiond")
+                    .join("workflows")
+                    .join("wave14-foo.lisp");
+                assert_eq!(std::fs::read_to_string(&expected).unwrap(), "v2");
+            }
+            other => panic!("expected Written, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_rejects_relative_cwd_no_process_cwd_fallback() {
+        let reg = registry_with(vec![project("missiond", "/tmp/missiond")]);
+        let outcome = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Plan,
+                topic: "wave14-foo",
+                project: None,
+                cwd: Some("relative/path"),
+                target_project: None,
+                overwrite: false,
+            },
+            "data",
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::ResolveFailed { reason } => {
+                assert!(
+                    reason.contains("not absolute"),
+                    "expected absolute-cwd refusal, got {}",
+                    reason
+                );
+                assert!(
+                    reason.contains("project-root-spawn-cwd"),
+                    "expected lisp contract reference, got {}",
+                    reason
+                );
+            }
+            other => panic!("expected ResolveFailed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_rejects_no_signal_no_process_cwd_fallback() {
+        let reg = registry_with(vec![project("missiond", "/tmp/missiond")]);
+        let outcome = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Plan,
+                topic: "wave14-foo",
+                project: None,
+                cwd: None,
+                target_project: None,
+                overwrite: false,
+            },
+            "data",
+        )
+        .await;
+        match outcome {
+            AttemptOutcome::ResolveFailed { reason } => {
+                assert!(
+                    reason.contains("no project_id")
+                        || reason.contains("no signal")
+                        || reason.contains("absolute cwd"),
+                    "expected fail-fast on missing signal, got {}",
+                    reason
+                );
+            }
+            other => panic!("expected ResolveFailed, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn attempt_uses_target_project_fallback() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+
+        let outcome = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Plan,
+                topic: "wave14-foo",
+                project: None,
+                cwd: None,
+                target_project: Some("missiond"),
+                overwrite: false,
+            },
+            "(plan)\n",
+        )
+        .await;
+        let written = match outcome {
+            AttemptOutcome::Written(w) => w,
+            other => panic!("expected Written, got {:?}", other),
+        };
+        let expected = root
+            .join(".missiond")
+            .join("plans")
+            .join("wave14-foo")
+            .join("PLAN.lisp");
+        assert_eq!(written.path, expected);
+    }
+
+    #[tokio::test]
+    async fn attempt_explicit_project_wins_over_target_project_fallback() {
+        let tmp_a = tempfile::tempdir().expect("tempdir");
+        let tmp_b = tempfile::tempdir().expect("tempdir");
+        let root_a = tmp_a.path().canonicalize().unwrap();
+        let root_b = tmp_b.path().canonicalize().unwrap();
+        let reg = registry_with(vec![
+            project("alpha", &root_a.display().to_string()),
+            project("beta", &root_b.display().to_string()),
+        ]);
+        let outcome = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::IntentAlignment,
+                topic: "shared",
+                project: Some("alpha"),
+                cwd: None,
+                target_project: Some("beta"),
+                overwrite: false,
+            },
+            "(intent-alignment :id shared)",
+        )
+        .await;
+        let w = match outcome {
+            AttemptOutcome::Written(w) => w,
+            other => panic!("expected Written, got {:?}", other),
+        };
+        assert!(
+            w.path.starts_with(&root_a),
+            "explicit project=alpha must win, but wrote to {:?}",
+            w.path
+        );
+    }
+
+    #[tokio::test]
+    async fn attempt_resolves_via_absolute_cwd_under_project_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().canonicalize().unwrap();
+        let subdir = root.join("crates").join("missiond-daemon");
+        std::fs::create_dir_all(&subdir).unwrap();
+        let reg = registry_with(vec![project("missiond", &root.display().to_string())]);
+
+        let outcome = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::IntentAlignment,
+                topic: "wave14-foo",
+                project: None,
+                cwd: Some(subdir.display().to_string().as_str()),
+                target_project: None,
+                overwrite: false,
+            },
+            "(intent-alignment)",
+        )
+        .await;
+        let w = match outcome {
+            AttemptOutcome::Written(w) => w,
+            other => panic!("expected Written, got {:?}", other),
+        };
+        // longest-prefix collapse — file lands under root, NOT subdir.
+        assert!(w.path.starts_with(&root));
+        assert!(!w.path.starts_with(&subdir));
+    }
+
+    // ── splice_into shape ────────────────────────────────────────────────
+
+    #[test]
+    fn splice_writes_emits_canonical_keys() {
+        let mut payload = json!({"status": "compiled", "directive_id": "abc"});
+        let outcome = AttemptOutcome::Written(WriteOutcome {
+            path: PathBuf::from("/tmp/x/intent-alignment.lisp"),
+            created: true,
+            overwritten: false,
+            sha256: "deadbeef".to_string(),
+            bytes: 12,
+        });
+        outcome.splice_into(&mut payload);
+        assert_eq!(payload["status"], "compiled", "Written must NOT downgrade status");
+        assert_eq!(payload["directive_id"], "abc");
+        assert_eq!(payload["file_written"], true);
+        assert_eq!(payload["file_path"], "/tmp/x/intent-alignment.lisp");
+        assert_eq!(payload["file_sha256"], "deadbeef");
+        assert_eq!(payload["file_bytes"], 12);
+        assert_eq!(payload["file_created"], true);
+        assert_eq!(payload["file_overwritten"], false);
+    }
+
+    #[test]
+    fn splice_resolve_failed_downgrades_status_and_includes_error() {
+        let mut payload = json!({"status": "compiled", "plan_id": "p1"});
+        let outcome = AttemptOutcome::ResolveFailed {
+            reason: "no project_id supplied".to_string(),
+        };
+        outcome.splice_into(&mut payload);
+        assert_eq!(payload["status"], "partial");
+        assert_eq!(payload["plan_id"], "p1");
+        assert_eq!(payload["file_written"], false);
+        assert!(payload.get("file_path").is_none());
+        assert_eq!(payload["file_write_error"], "no project_id supplied");
+    }
+
+    #[test]
+    fn splice_write_failed_keeps_already_partial_status() {
+        let mut payload = json!({"status": "partial", "note": "set earlier"});
+        let outcome = AttemptOutcome::WriteFailed {
+            path: PathBuf::from("/tmp/x/PLAN.lisp"),
+            reason: "permission denied".to_string(),
+        };
+        outcome.splice_into(&mut payload);
+        // Already partial; we don't double-stamp.
+        assert_eq!(payload["status"], "partial");
+        assert_eq!(payload["note"], "set earlier");
+        assert_eq!(payload["file_written"], false);
+        assert_eq!(payload["file_path"], "/tmp/x/PLAN.lisp");
+        assert_eq!(payload["file_write_error"], "permission denied");
     }
 }

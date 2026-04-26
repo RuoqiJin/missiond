@@ -17,9 +17,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
          (atomic, overwrite 控制) 并附 source_hash + lifted_form_count + lifted_form_breakdown；\
          run_methodology 解析 flow_id|flow_path|name 找 compiled YAML，dry_run=true 返 would_run，\
          dry_run=false 内部派发到 mission_flow_run 引擎；缺 YAML 时返结构化 MISSING_COMPILED_FLOW + 下一步指引。\
+         wave-14 file-first SSOT: distill / compile_methodology persist=true 时再传 write_file=true 即把 \
+         workflow_sexp (distill) 或 source content (compile_methodology) 镜像到 \
+         `<project_root>/.missiond/workflows/<topic>.lisp` (ArtifactKind::Workflow, atomic, 默认拒覆, \
+         overwrite_file=true 替换); topic 默认取 distill 的 `name` 或 compile_methodology 的源文件 stem; \
+         project root 解析强制走 resolve_target_project_root (project > absolute cwd > target_project, 禁止 process cwd fallback); \
+         DB / YAML 已写但 file 写失败 → status=\"partial\" + file_write_error, 不回滚已落的 row/yaml; \
+         成功响应附 file_written / file_path / file_sha256 / file_bytes / file_created / file_overwritten。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
          implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
-         role workflow-distiller。",
+         role workflow-distiller + intent-memory.lisp :: directive-layer :: file-first-artifacts :: workflow-methodology-file。",
         json!({
             "type": "object",
             "required": ["action"],
@@ -130,6 +137,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "workflow_path": {
                     "type": "string",
                     "description": "[compile_methodology|run_methodology] explicit path to a methodology .lisp file"
+                },
+                "write_file": {
+                    "type": "boolean",
+                    "description": "[distill persist=true | compile_methodology persist=true] (wave-14 file-first SSOT) mirror the workflow_sexp (distill) or methodology source (compile_methodology) to `<project_root>/.missiond/workflows/<topic>.lisp` after the DB row / YAML is committed. Default false. Topic precedence: explicit `topic` > distill's `name` / compile_methodology's source stem. DB / YAML stay committed even on file failure — response surfaces status=\"partial\" + file_write_error."
+                },
+                "overwrite_file": {
+                    "type": "boolean",
+                    "description": "[distill|compile_methodology persist=true write_file=true] allow replacing an existing workflow .lisp at the target path (default false → atomic refusal). Distinct from `overwrite` which controls the generated YAML instead."
+                },
+                "topic": {
+                    "type": "string",
+                    "description": "[distill|compile_methodology persist=true write_file=true] file-first SSOT topic segment used to derive `.missiond/workflows/<topic>.lisp`. Sanitized (alnum / `_` / `-`); blank inputs collapse to `anonymous`."
                 }
             }
         }),

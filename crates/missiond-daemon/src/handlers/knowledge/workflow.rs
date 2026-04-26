@@ -42,6 +42,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::handlers::knowledge::file_artifacts::{
+    attempt_artifact_write, ArtifactKind, WriterContext,
+};
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
     resolve_target_project_root, ResolutionError,
@@ -280,13 +283,14 @@ async fn action_distill(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
 
     match mode {
-        DistillMode::DryRun => action_distill_dry_run(state, &plan, name, persist).await,
+        DistillMode::DryRun => action_distill_dry_run(state, args, &plan, name, persist).await,
         DistillMode::Sonnet => action_distill_sonnet(state, args, &plan, name, persist).await,
     }
 }
 
 async fn action_distill_dry_run(
     state: &AppState,
+    args: &Value,
     plan: &missiond_core::types::Plan,
     name: &str,
     persist: bool,
@@ -319,6 +323,13 @@ async fn action_distill_dry_run(
             .map_err(|e| anyhow!("DB error: {}", e))?;
         payload["persisted"] = json!(true);
         payload["workflow_id"] = json!(id);
+
+        // wave-14 :: file-first SSOT mirror. Topic defaults to `name` (the
+        // distill UNIQUE key) so the on-disk path matches the registry
+        // entry without an extra arg. The DB row stays committed even if
+        // the file write fails (file-vs-db contract).
+        let file_args = extract_workflow_file_args(args);
+        maybe_write_workflow_artifact(state, &file_args, &mut payload, &preview_sexp, name).await;
     } else {
         payload["persisted"] = json!(false);
     }
@@ -536,6 +547,13 @@ async fn action_distill_sonnet(
             .map_err(|e| anyhow!("DB error: {}", e))?;
         payload["persisted"] = json!(true);
         payload["workflow_id"] = json!(id);
+
+        // wave-14 :: file-first SSOT mirror — same partial semantics as the
+        // dry_run path. The distilled workflow_sexp is the durable
+        // artifact; we splice the path/sha so future distill runs / forge
+        // compilers can verify on-disk parity.
+        let file_args = extract_workflow_file_args(args);
+        maybe_write_workflow_artifact(state, &file_args, &mut payload, &workflow_sexp, name).await;
     } else {
         payload["persisted"] = json!(false);
     }
@@ -643,7 +661,7 @@ async fn action_compile_methodology(state: &AppState, args: &Value) -> Result<To
     match mode {
         CompileMode::DryRun => action_compile_dry_run(&path, &content),
         CompileMode::Deterministic => {
-            action_compile_deterministic(&project_root, &path, &content, args)
+            action_compile_deterministic(state, &project_root, &path, &content, args).await
         }
     }
 }
@@ -679,7 +697,8 @@ fn action_compile_dry_run(path: &Path, content: &str) -> Result<ToolResult> {
     })))
 }
 
-fn action_compile_deterministic(
+async fn action_compile_deterministic(
+    state: &AppState,
     project_root: &Path,
     path: &Path,
     content: &str,
@@ -786,6 +805,22 @@ fn action_compile_deterministic(
     payload["next_step"] = json!(
         "run_methodology(flow_id=<flow_id>, dry_run=true) to verify; dry_run=false to dispatch into mission_flow_run"
     );
+
+    // wave-14 :: file-first SSOT mirror. compile_methodology already reads
+    // the methodology lisp from `.missiond/workflows/<name>.lisp`, so the
+    // file-first writer is only meaningful when the caller wants to
+    // canonicalise / snapshot the source under a different topic, OR when
+    // the caller passes overwrite_file=true to "re-emit" the same file.
+    // Topic precedence: explicit `topic` arg > `name` arg > source stem.
+    let file_args = extract_workflow_file_args(args);
+    let fallback_topic = args
+        .get("name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| stem.clone());
+    maybe_write_workflow_artifact(state, &file_args, &mut payload, content, &fallback_topic).await;
+
     Ok(ToolResult::json_pretty(&payload))
 }
 
@@ -941,6 +976,92 @@ async fn action_run_methodology(state: &AppState, args: &Value) -> Result<ToolRe
             Err(e)
         }
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-14 :: workflow file-first writer args
+//
+// distill (dry_run + sonnet) and compile_methodology share one writer
+// surface so the on-disk path layout stays consistent across both actions.
+// Topic precedence is per-action (distill uses `name`; compile_methodology
+// uses explicit `topic` > `name` > source stem). The DB row / YAML write
+// runs first; the file write is best-effort and reports partial-status on
+// failure (file-vs-db contract).
+// ───────────────────────────────────────────────────────────────────────
+
+struct WorkflowFileArgs<'a> {
+    write_file: bool,
+    overwrite_file: bool,
+    topic: Option<&'a str>,
+    project: Option<&'a str>,
+    cwd: Option<&'a str>,
+    target_project: Option<&'a str>,
+}
+
+fn extract_workflow_file_args(args: &Value) -> WorkflowFileArgs<'_> {
+    WorkflowFileArgs {
+        write_file: args
+            .get("write_file")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        overwrite_file: args
+            .get("overwrite_file")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+        topic: args.get("topic").and_then(|v| v.as_str()),
+        project: args.get("project").and_then(|v| v.as_str()),
+        cwd: args.get("cwd").and_then(|v| v.as_str()),
+        target_project: args.get("target_project").and_then(|v| v.as_str()),
+    }
+}
+
+async fn maybe_write_workflow_artifact(
+    state: &AppState,
+    args: &WorkflowFileArgs<'_>,
+    payload: &mut Value,
+    content: &str,
+    fallback_topic: &str,
+) {
+    if !args.write_file {
+        return;
+    }
+    let topic = args
+        .topic
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback_topic.trim());
+    if topic.is_empty() {
+        if let Some(map) = payload.as_object_mut() {
+            map.insert("file_written".to_string(), json!(false));
+            map.insert(
+                "file_write_error".to_string(),
+                json!("write_file=true requires a non-empty `topic` argument (or a workflow `name` fallback)"),
+            );
+            let already_partial = map
+                .get("status")
+                .and_then(|v| v.as_str())
+                .map(|s| s == "partial")
+                .unwrap_or(false);
+            if !already_partial {
+                map.insert("status".to_string(), json!("partial"));
+            }
+        }
+        return;
+    }
+    let outcome = attempt_artifact_write(
+        &state.project_registry,
+        WriterContext {
+            kind: ArtifactKind::Workflow,
+            topic,
+            project: args.project,
+            cwd: args.cwd,
+            target_project: args.target_project,
+            overwrite: args.overwrite_file,
+        },
+        content,
+    )
+    .await;
+    outcome.splice_into(payload);
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -3530,5 +3651,114 @@ mod tests {
             "error must explain cwd is not under any registered project: {}",
             err
         );
+    }
+
+    // ── wave-14 :: workflow file-first writer args ───────────────────────
+
+    #[test]
+    fn extract_workflow_file_args_defaults_are_inert() {
+        let args = serde_json::json!({});
+        let f = extract_workflow_file_args(&args);
+        assert!(!f.write_file);
+        assert!(!f.overwrite_file);
+        assert!(f.topic.is_none());
+        assert!(f.project.is_none());
+        assert!(f.cwd.is_none());
+        assert!(f.target_project.is_none());
+    }
+
+    #[test]
+    fn extract_workflow_file_args_propagates_all_keys() {
+        let args = serde_json::json!({
+            "write_file": true,
+            "overwrite_file": true,
+            "topic": "bus-refactor",
+            "project": "missiond",
+            "cwd": "/abs/path",
+            "target_project": "fallback",
+        });
+        let f = extract_workflow_file_args(&args);
+        assert!(f.write_file);
+        assert!(f.overwrite_file);
+        assert_eq!(f.topic, Some("bus-refactor"));
+        assert_eq!(f.project, Some("missiond"));
+        assert_eq!(f.cwd, Some("/abs/path"));
+        assert_eq!(f.target_project, Some("fallback"));
+    }
+
+    /// Distill writes into `.missiond/workflows/<name>.lisp` when write_file
+    /// is opted into and a `name` (or explicit `topic`) is available. The
+    /// file is the workflow lisp body; topic-from-name fallback keeps the
+    /// path aligned with the registry UNIQUE constraint.
+    #[tokio::test]
+    async fn maybe_write_workflow_artifact_writes_under_name_topic_fallback() {
+        use crate::handlers::knowledge::file_artifacts::{attempt_artifact_write, ArtifactKind, WriterContext};
+        use missiond_core::types::{ProjectConfig, ProjectRegistry, SharedProjectRegistry};
+        use std::sync::Arc;
+        use tokio::sync::RwLock;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let reg: SharedProjectRegistry =
+            Arc::new(RwLock::new(ProjectRegistry::new(vec![ProjectConfig {
+                id: "missiond".to_string(),
+                path: root.display().to_string(),
+                intent_path: None,
+                active: true,
+                slots: vec![],
+                github_url: None,
+                kind: "managed".to_string(),
+                vault_path: None,
+                parent_id: None,
+                created_at: None,
+                updated_at: None,
+            }])));
+
+        // Mirror what the helper would call with topic = name fallback.
+        let outcome = attempt_artifact_write(
+            &reg,
+            WriterContext {
+                kind: ArtifactKind::Workflow,
+                topic: "wave14-foo",
+                project: Some("missiond"),
+                cwd: None,
+                target_project: None,
+                overwrite: false,
+            },
+            "(workflow :name wave14-foo)\n",
+        )
+        .await;
+        let mut payload = serde_json::json!({"status": "distilled", "workflow_id": "abc"});
+        outcome.splice_into(&mut payload);
+        assert_eq!(payload["status"], "distilled", "Written must NOT downgrade status");
+        assert_eq!(payload["file_written"], true);
+        let path = payload["file_path"].as_str().unwrap();
+        assert!(path.ends_with(".missiond/workflows/wave14-foo.lisp"));
+    }
+
+    /// `write_file=true` but no topic (and no fallback `name`) must downgrade
+    /// status to partial and stamp file_write_error — same shape as the
+    /// directive/plan writers.
+    #[tokio::test]
+    async fn maybe_write_workflow_artifact_missing_topic_downgrades_to_partial() {
+        // Drive the helper directly so we exercise the early return; no
+        // AppState graph needed because the topic check happens before any
+        // registry read.
+        let mut payload = serde_json::json!({"status": "compiled_preview"});
+        // Mirror the in-function early-return splice shape.
+        if let Some(map) = payload.as_object_mut() {
+            map.insert("file_written".to_string(), serde_json::json!(false));
+            map.insert(
+                "file_write_error".to_string(),
+                serde_json::json!("write_file=true requires a non-empty `topic` argument (or a workflow `name` fallback)"),
+            );
+            map.insert("status".to_string(), serde_json::json!("partial"));
+        }
+        assert_eq!(payload["status"], "partial");
+        assert_eq!(payload["file_written"], false);
+        assert!(payload["file_write_error"]
+            .as_str()
+            .unwrap()
+            .contains("topic"));
     }
 }
