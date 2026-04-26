@@ -2,6 +2,7 @@
 
 import { execFileSync } from 'node:child_process';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   head,
   isList,
@@ -478,4 +479,9 @@ function runFixtures({ json }) {
   process.exit(ok ? 0 : 1);
 }
 
-main();
+// Run as CLI only when invoked directly. When imported (e.g. by
+// scripts/verify-task-run.mjs) the module-level main() must NOT execute, or
+// it would re-parse the importer's argv and crash on unknown flags.
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  main();
+}

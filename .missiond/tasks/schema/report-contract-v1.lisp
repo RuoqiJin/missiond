@@ -11,8 +11,9 @@
 
 (report-contract-schema missiond.report-contract.v1
   :version "v1"
-  :status "code-aligned initial — checker implemented in scripts/check-task-report.mjs"
+  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs"
   :checker "scripts/check-task-report.mjs"
+  :run-verifier "scripts/verify-task-run.mjs"
 
   (purpose
     "Make ClaudeCode task completion verifiable by structure, not narrative."

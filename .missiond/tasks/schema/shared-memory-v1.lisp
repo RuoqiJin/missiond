@@ -11,8 +11,9 @@
 
 (shared-memory-schema missiond.shared-memory.v1
   :version "v1"
-  :status "code-aligned initial — checker scripts/check-task-memory.mjs"
+  :status "code-aligned — checker scripts/check-task-memory.mjs; full-run verifier scripts/verify-task-run.mjs"
   :checker "scripts/check-task-memory.mjs"
+  :run-verifier "scripts/verify-task-run.mjs"
   :seed ".missiond/tasks/wave19/shared-memory.lisp"
 
   (purpose
