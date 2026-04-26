@@ -46,8 +46,11 @@ use crate::handlers::knowledge::file_artifacts::{
     attempt_artifact_write, ArtifactKind, WriterContext,
 };
 use crate::handlers::knowledge::review_gate::{
-    apply_compile_review_gates, parse_compile_review_gate, parse_review_gate_policy,
-    review_gate_policy_was_explicit,
+    apply_compile_review_gates, maybe_emit_review_question_resolved, parse_compile_review_gate,
+    parse_review_gate_policy, parse_review_question_id_struct, parse_review_resolution_input,
+    resolution_wire_string, review_gate_policy_was_explicit, stamp_needs_changes_next_step,
+    stamp_resolution_payload, validate_review_resolution_envelope, ResolutionOutcome,
+    ReviewResolutionInput,
 };
 use crate::minimax_client::ChatMessage;
 use crate::slot_orchestrator::project_root::{
@@ -76,7 +79,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     "mission_workflow requires `action`",
                 )
                 .with_suggestion(
-                    "actions: list|get|match|apply|distill|record_execution|compile_methodology|run_methodology",
+                    "actions: list|get|match|apply|distill|record_execution|compile_methodology|run_methodology|resolve_review",
                 ),
             ))
         }
@@ -91,13 +94,14 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "record_execution" => action_record_execution(state, &args).await,
         "compile_methodology" => action_compile_methodology(state, &args).await,
         "run_methodology" => action_run_methodology(state, &args).await,
+        "resolve_review" => action_resolve_review(state, &args).await,
         other => Ok(ToolResult::structured_error(
             ToolError::new(
                 error_codes::UNKNOWN_ACTION,
                 format!("unknown mission_workflow action `{}`", other),
             )
             .with_suggestion(
-                "valid: list|get|match|apply|distill|record_execution|compile_methodology|run_methodology",
+                "valid: list|get|match|apply|distill|record_execution|compile_methodology|run_methodology|resolve_review",
             ),
         )),
     }
@@ -1053,6 +1057,230 @@ async fn action_run_methodology(state: &AppState, args: &Value) -> Result<ToolRe
             Err(e)
         }
     }
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-16 :: explicit review-resolution surface
+//
+// Closes the Wave-15 gap: directive / plan already accept `review_question_id
+// + review_decision + review_actor + review_note` to flip an artifact from
+// the auto-emitted `QuestionEvent::Created` (wave-14) into an explicit
+// `QuestionEvent::Resolved` / `DecisionResolved`. Workflow auto-emits the
+// same Created envelopes (scope = `workflow`, see `apply_compile_review_gates`
+// calls in `action_distill_*` and `action_compile_deterministic`) but had
+// no resolution surface — Wave-16 adds it here.
+//
+// Two forms share one entry point because the auto-emitter uses the same
+// scope label (`workflow`) for both:
+//
+//   1. Persisted distill row — `artifact_id` parses as a UUID and the
+//      `workflow_get_by_id` lookup returns Some. The `Workflow` row has no
+//      version / status fields (unlike Directive / Plan), so the resolver
+//      neither needs nor performs an "approve transition"; on `approved`
+//      it stamps `status=review_approved` so the response is loud, on
+//      `rejected` / `needs_changes` it stamps the matching review status
+//      AND `next_step`. Bus emission is best-effort, mirroring directive /
+//      plan.
+//
+//   2. compile_methodology compiled YAML — `artifact_id` is the `flow_id`
+//      string (NOT a UUID; see `derive_flow_id` → `methodology-<stem>-v0`).
+//      No DB row exists, so the resolver returns a STRUCTURED RECEIPT and
+//      never fakes DB state. The receipt + Resolved bus event both carry
+//      the deterministic question id so an external archiver / audit
+//      pipeline can correlate.
+//
+// Action whitelist: only `compile`. The wave-14 auto-emitter always uses
+// action=`compile` for workflow ids (see `apply_compile_review_gates(...)`
+// → `auto_emit_review_question_after_artifact_write` default action). If
+// callers ever opt into a custom id with a different action, the envelope
+// validator will surface `REVIEW_ACTION_UNSUPPORTED` and force them to
+// reconsider.
+//
+// Scope label: `workflow` for BOTH persisted and methodology paths.
+// (Wave-16 task brief sketched a separate `methodology` scope; the actual
+// wave-14 derivation in `review_gate.rs` uses `workflow` for both — we
+// match the existing emitter to keep ids round-trippable. The methodology
+// path is distinguished by the artifact_id NOT being a UUID.)
+// ───────────────────────────────────────────────────────────────────────
+
+/// Action whitelist for the workflow surface. The wave-14 auto-emitter
+/// always uses `compile` (see `auto_emit_review_question_after_artifact_write`
+/// default), so this is the only action a workflow review id can carry.
+const WORKFLOW_REVIEW_ACTIONS: &[&str] = &["compile"];
+
+/// Workflow review version. The `Workflow` row has no `version` column;
+/// the auto-emitter pins all workflow ids to `v1` (see `apply_compile_review_gates`
+/// calls in `action_distill_*` / `action_compile_deterministic`). Resolution
+/// must validate against the same constant so a re-emit / retry stays
+/// deterministic.
+const WORKFLOW_REVIEW_VERSION: i32 = 1;
+
+async fn action_resolve_review(state: &AppState, args: &Value) -> Result<ToolResult> {
+    // Caller must supply both id + decision (with optional actor / note).
+    // Missing decision when id is present is fail-fast — same contract as
+    // directive / plan.
+    let resolution = match parse_review_resolution_input(args) {
+        Ok(Some(r)) => r,
+        Ok(None) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::MISSING_PARAM,
+                    "resolve_review requires `review_question_id` (and `review_decision`)",
+                )
+                .with_suggestion(
+                    "use the deterministic id wave-14 emitted on the workflow Created event",
+                ),
+            ))
+        }
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(e.code(), e.message()),
+            ))
+        }
+    };
+
+    let parsed = match parse_review_question_id_struct(&resolution.question_id) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new("REVIEW_ID_MALFORMED", e.message()),
+            ))
+        }
+    };
+
+    if let Err(e) = validate_review_resolution_envelope(
+        &parsed,
+        "workflow",
+        &parsed.artifact_id,
+        WORKFLOW_REVIEW_VERSION,
+        WORKFLOW_REVIEW_ACTIONS,
+    ) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(e.code(), e.message()),
+        ));
+    }
+
+    // Decide between persisted-row mode and methodology-receipt mode by
+    // attempting a UUID parse on the envelope's artifact_id. Methodology
+    // flow ids look like `methodology-<stem>-v0` and never parse as UUID.
+    match uuid::Uuid::parse_str(&parsed.artifact_id) {
+        Ok(workflow_id) => {
+            action_resolve_review_persisted(state, workflow_id, resolution).await
+        }
+        Err(_) => action_resolve_review_methodology(state, parsed.artifact_id.clone(), resolution).await,
+    }
+}
+
+/// Persisted distill resolution. The workflow row exists; the `Workflow`
+/// type has no version / status fields, so the resolver does not perform a
+/// DB transition — it stamps the decision into the response and emits the
+/// Resolved bus event. `approved` is loud (`status=review_approved`);
+/// `rejected` / `needs_changes` keep the artifact non-approved with the
+/// reason surfaced.
+async fn action_resolve_review_persisted(
+    state: &AppState,
+    workflow_id: uuid::Uuid,
+    input: ReviewResolutionInput,
+) -> Result<ToolResult> {
+    let row = state
+        .store
+        .workflow_get_by_id(workflow_id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    let row = match row {
+        Some(w) => w,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("workflow `{}` not found for resolution", workflow_id),
+                ),
+            ))
+        }
+    };
+
+    let mut payload = json!({
+        "scope": "workflow",
+        "mode": "persisted",
+        "workflow_id": row.id,
+        "workflow_name": row.name,
+        "version": WORKFLOW_REVIEW_VERSION,
+    });
+
+    match input.decision.outcome() {
+        ResolutionOutcome::PerformTransition => {
+            // The Workflow row has no status column to flip — record the
+            // approval loudly in the response so callers see the decision
+            // landed (the bus Resolved event carries the same).
+            payload["status"] = json!("review_approved");
+        }
+        ResolutionOutcome::KeepArtifact => {
+            payload["status"] = json!("review_rejected");
+        }
+        ResolutionOutcome::RequestChanges => {
+            payload["status"] = json!("review_needs_changes");
+            stamp_needs_changes_next_step(&mut payload, "workflow", "distill");
+        }
+    }
+
+    stamp_resolution_payload(&mut payload, &input);
+    let resolution_str = resolution_wire_string(input.decision);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        Some(&input.question_id),
+        resolution_str,
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
+}
+
+/// Methodology compiled-YAML resolution. NO DB workflow row exists —
+/// `compile_methodology` only writes a `.missiond/generated/flows/<flow_id>.yaml`
+/// (and optionally mirrors the source under `.missiond/workflows/<topic>.lisp`).
+/// The resolver returns a structured receipt so an external archiver /
+/// audit pipeline can correlate the decision with the source artifact,
+/// AND emits the Resolved bus event (best-effort). It NEVER fakes DB
+/// state — there is nothing to mutate.
+async fn action_resolve_review_methodology(
+    state: &AppState,
+    flow_id: String,
+    input: ReviewResolutionInput,
+) -> Result<ToolResult> {
+    let mut payload = json!({
+        "scope": "workflow",
+        "mode": "methodology",
+        "flow_id": flow_id,
+        "version": WORKFLOW_REVIEW_VERSION,
+        "db_transition": false,
+        "note": "compile_methodology has no workflow row; resolution returns a receipt and emits the Resolved bus event without DB mutation",
+    });
+
+    match input.decision.outcome() {
+        ResolutionOutcome::PerformTransition => {
+            payload["status"] = json!("review_approved");
+        }
+        ResolutionOutcome::KeepArtifact => {
+            payload["status"] = json!("review_rejected");
+        }
+        ResolutionOutcome::RequestChanges => {
+            payload["status"] = json!("review_needs_changes");
+            stamp_needs_changes_next_step(&mut payload, "workflow", "compile_methodology");
+        }
+    }
+
+    stamp_resolution_payload(&mut payload, &input);
+    let resolution_str = resolution_wire_string(input.decision);
+    maybe_emit_review_question_resolved(
+        &mut payload,
+        &state.bus,
+        Some(&input.question_id),
+        resolution_str,
+        None,
+    )
+    .await;
+    Ok(ToolResult::json_pretty(&payload))
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -3837,5 +4065,331 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("topic"));
+    }
+
+    // ── wave-16 :: workflow resolution bridge — pure handler-shape ──────
+    //
+    // Mirrors the directive / plan resolution test pattern: drive the
+    // pure validation + stamping helpers that the workflow handler
+    // composes, so a refactor that breaks the contract fails loud
+    // without needing a full daemon AppState graph.
+    use crate::handlers::knowledge::review_gate::{
+        derive_review_question_id_for_artifact as wave16_derive_qid,
+        parse_review_question_id_struct as wave16_parse_qid,
+        parse_review_resolution_input as wave16_parse_input,
+        stamp_needs_changes_next_step as wave16_stamp_next_step,
+        stamp_resolution_payload as wave16_stamp_payload,
+        validate_review_resolution_envelope as wave16_validate_envelope,
+        ResolutionInputError as Wave16ResolutionInputError,
+        ReviewDecision as Wave16ReviewDecision,
+        ReviewResolutionInput as Wave16ReviewResolutionInput,
+    };
+
+    #[test]
+    fn workflow_action_whitelist_pins_compile_only() {
+        // Workflow auto-emits action=compile (see review_gate
+        // `auto_emit_review_question_after_artifact_write` default). Pin
+        // the whitelist so a refactor that adds a new action without
+        // updating the resolver fails loud.
+        assert_eq!(WORKFLOW_REVIEW_ACTIONS, &["compile"]);
+        assert_eq!(WORKFLOW_REVIEW_VERSION, 1);
+    }
+
+    #[test]
+    fn workflow_resolution_input_missing_decision_rejected_at_handler_boundary() {
+        let args = serde_json::json!({
+            "review_question_id": "review:workflow:00000000-0000-0000-0000-000000000abc:v1:compile",
+        });
+        let err = wave16_parse_input(&args).unwrap_err();
+        assert_eq!(err, Wave16ResolutionInputError::MissingDecision);
+    }
+
+    #[test]
+    fn workflow_resolution_envelope_accepts_canonical_compile_for_persisted_uuid() {
+        // Persisted distill rows use the workflow UUID as the artifact_id.
+        let workflow_id = "00000000-0000-0000-0000-000000000abc";
+        let qid = format!("review:workflow:{}:v1:compile", workflow_id);
+        let parsed = wave16_parse_qid(&qid).unwrap();
+        wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            workflow_id,
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .expect("compile via valid review id must pass envelope validation");
+    }
+
+    #[test]
+    fn workflow_resolution_envelope_accepts_canonical_compile_for_methodology_flow_id() {
+        // compile_methodology uses `flow_id` (string, not UUID) as the
+        // artifact_id. Both forms share the workflow scope and v1.
+        let flow_id = "methodology-bus-refactor-v0";
+        let qid = format!("review:workflow:{}:v1:compile", flow_id);
+        let parsed = wave16_parse_qid(&qid).unwrap();
+        wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            flow_id,
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .expect("methodology flow id must pass envelope validation");
+        // And the artifact_id must NOT parse as a UUID — that's how the
+        // resolver picks the methodology-receipt branch.
+        assert!(uuid::Uuid::parse_str(&parsed.artifact_id).is_err());
+    }
+
+    #[test]
+    fn workflow_resolution_envelope_rejects_stale_version() {
+        // v2 with v1 source — wave-14 always pins workflow ids to v1.
+        let qid = "review:workflow:00000000-0000-0000-0000-000000000abc:v2:compile";
+        let parsed = wave16_parse_qid(qid).unwrap();
+        let err = wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            "00000000-0000-0000-0000-000000000abc",
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "STALE_REVIEW_VERSION");
+    }
+
+    #[test]
+    fn workflow_resolution_envelope_rejects_scope_mismatch() {
+        // qid says scope=plan but submitted to the workflow surface →
+        // REVIEW_SCOPE_MISMATCH.
+        let qid = "review:plan:00000000-0000-0000-0000-000000000abc:v1:compile";
+        let parsed = wave16_parse_qid(qid).unwrap();
+        let err = wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            "00000000-0000-0000-0000-000000000abc",
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_SCOPE_MISMATCH");
+    }
+
+    #[test]
+    fn workflow_resolution_envelope_rejects_unsupported_action() {
+        // approve isn't a valid workflow-surface action even though it's
+        // valid on directive / plan — workflow only accepts compile.
+        let qid = "review:workflow:00000000-0000-0000-0000-000000000abc:v1:approve";
+        let parsed = wave16_parse_qid(qid).unwrap();
+        let err = wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            "00000000-0000-0000-0000-000000000abc",
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_ACTION_UNSUPPORTED");
+    }
+
+    #[test]
+    fn workflow_resolution_envelope_rejects_artifact_id_mismatch() {
+        let qid = "review:workflow:00000000-0000-0000-0000-000000000aaa:v1:compile";
+        let parsed = wave16_parse_qid(qid).unwrap();
+        let err = wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            "00000000-0000-0000-0000-000000000bbb",
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .unwrap_err();
+        assert_eq!(err.code(), "REVIEW_ARTIFACT_MISMATCH");
+    }
+
+    #[test]
+    fn workflow_persisted_approved_records_review_approved_status_without_db_transition_field() {
+        // Replay the persisted-approved branch: no Workflow.status column to
+        // flip; resolver stamps `review_approved` so the response is loud.
+        let input = Wave16ReviewResolutionInput {
+            question_id: "review:workflow:00000000-0000-0000-0000-000000000abc:v1:compile"
+                .to_string(),
+            decision: Wave16ReviewDecision::Approved,
+            actor: Some("operator-1".to_string()),
+            note: Some("ship the workflow template".to_string()),
+        };
+        let mut payload = serde_json::json!({
+            "scope": "workflow",
+            "mode": "persisted",
+            "workflow_id": "00000000-0000-0000-0000-000000000abc",
+            "version": WORKFLOW_REVIEW_VERSION,
+        });
+        payload["status"] = serde_json::json!("review_approved");
+        wave16_stamp_payload(&mut payload, &input);
+        assert_eq!(payload["status"], "review_approved");
+        assert_eq!(payload["review_decision"], "approved");
+        assert_eq!(payload["review_decision_outcome"], "perform_transition");
+        assert_eq!(payload["review_actor"], "operator-1");
+        assert!(payload["review_note"]
+            .as_str()
+            .unwrap()
+            .contains("ship the workflow template"));
+    }
+
+    #[test]
+    fn workflow_rejected_decision_keeps_artifact_non_approved() {
+        let input = Wave16ReviewResolutionInput {
+            question_id: "review:workflow:00000000-0000-0000-0000-000000000abc:v1:compile"
+                .to_string(),
+            decision: Wave16ReviewDecision::Rejected,
+            actor: Some("reviewer".to_string()),
+            note: Some("workflow_sexp missing match_rules".to_string()),
+        };
+        let mut payload = serde_json::json!({
+            "scope": "workflow",
+            "mode": "persisted",
+            "workflow_id": "00000000-0000-0000-0000-000000000abc",
+            "version": WORKFLOW_REVIEW_VERSION,
+        });
+        payload["status"] = serde_json::json!("review_rejected");
+        wave16_stamp_payload(&mut payload, &input);
+        assert_eq!(payload["status"], "review_rejected");
+        assert_eq!(payload["review_decision"], "rejected");
+        assert_eq!(payload["review_decision_outcome"], "keep_artifact");
+    }
+
+    #[test]
+    fn workflow_needs_changes_decision_surfaces_distill_next_step_for_persisted() {
+        let input = Wave16ReviewResolutionInput {
+            question_id: "review:workflow:00000000-0000-0000-0000-000000000abc:v1:compile"
+                .to_string(),
+            decision: Wave16ReviewDecision::NeedsChanges,
+            actor: None,
+            note: Some("re-run distiller with extra evidence".to_string()),
+        };
+        let mut payload = serde_json::json!({
+            "scope": "workflow",
+            "mode": "persisted",
+            "workflow_id": "00000000-0000-0000-0000-000000000abc",
+            "version": WORKFLOW_REVIEW_VERSION,
+        });
+        payload["status"] = serde_json::json!("review_needs_changes");
+        wave16_stamp_next_step(&mut payload, "workflow", "distill");
+        wave16_stamp_payload(&mut payload, &input);
+        assert_eq!(payload["status"], "review_needs_changes");
+        assert_eq!(payload["review_decision"], "needs_changes");
+        assert_eq!(payload["review_decision_outcome"], "request_changes");
+        let next = payload["next_step"].as_str().unwrap();
+        assert!(next.contains("rework"));
+        assert!(next.contains("workflow"));
+        assert!(next.contains("distill"));
+    }
+
+    #[test]
+    fn workflow_needs_changes_decision_surfaces_compile_methodology_next_step_for_methodology() {
+        // The methodology-receipt branch points reviewers back to
+        // compile_methodology (not distill).
+        let input = Wave16ReviewResolutionInput {
+            question_id: "review:workflow:methodology-bus-refactor-v0:v1:compile".to_string(),
+            decision: Wave16ReviewDecision::NeedsChanges,
+            actor: None,
+            note: Some("steps missing".to_string()),
+        };
+        let mut payload = serde_json::json!({
+            "scope": "workflow",
+            "mode": "methodology",
+            "flow_id": "methodology-bus-refactor-v0",
+            "version": WORKFLOW_REVIEW_VERSION,
+            "db_transition": false,
+        });
+        payload["status"] = serde_json::json!("review_needs_changes");
+        wave16_stamp_next_step(&mut payload, "workflow", "compile_methodology");
+        wave16_stamp_payload(&mut payload, &input);
+        let next = payload["next_step"].as_str().unwrap();
+        assert!(next.contains("compile_methodology"));
+        assert!(next.contains("workflow"));
+    }
+
+    #[test]
+    fn workflow_methodology_receipt_does_not_fake_db_state() {
+        // The methodology branch must always carry `db_transition=false`
+        // and `mode=methodology` so audit consumers can distinguish it
+        // from the persisted path.
+        let input = Wave16ReviewResolutionInput {
+            question_id: "review:workflow:methodology-bus-refactor-v0:v1:compile".to_string(),
+            decision: Wave16ReviewDecision::Approved,
+            actor: Some("methodology-reviewer".to_string()),
+            note: None,
+        };
+        let mut payload = serde_json::json!({
+            "scope": "workflow",
+            "mode": "methodology",
+            "flow_id": "methodology-bus-refactor-v0",
+            "version": WORKFLOW_REVIEW_VERSION,
+            "db_transition": false,
+            "note": "compile_methodology has no workflow row; resolution returns a receipt and emits the Resolved bus event without DB mutation",
+        });
+        payload["status"] = serde_json::json!("review_approved");
+        wave16_stamp_payload(&mut payload, &input);
+        assert_eq!(payload["mode"], "methodology");
+        assert_eq!(payload["db_transition"], false);
+        assert_eq!(payload["status"], "review_approved");
+        assert_eq!(payload["review_decision"], "approved");
+        // No workflow_id field — methodology branch keys on flow_id only.
+        assert!(payload.get("workflow_id").is_none());
+    }
+
+    #[test]
+    fn workflow_resolution_legacy_quiet_path_returns_none_when_no_qid() {
+        let args = serde_json::json!({});
+        assert!(wave16_parse_input(&args).unwrap().is_none());
+    }
+
+    #[test]
+    fn workflow_resolution_id_round_trips_against_wave14_derivation_for_persisted() {
+        // Persisted distill emits ids via derive_review_question_id_for_artifact
+        // with scope="workflow", artifact_id=<workflow uuid>, version=1,
+        // action="compile", topic_or_path=<file path or topic>. Round-trip
+        // the canonical id and confirm the resolver's parser accepts it.
+        let workflow_id = "00000000-0000-0000-0000-000000000abc";
+        let qid = wave16_derive_qid(
+            "workflow",
+            workflow_id,
+            WORKFLOW_REVIEW_VERSION,
+            "compile",
+            Some("/abs/proj/.missiond/workflows/wave14-foo.lisp"),
+        );
+        let parsed = wave16_parse_qid(&qid).unwrap();
+        wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            workflow_id,
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .expect("round-tripped id must validate");
+        assert!(parsed.topic_hash.is_some(), "wave-14 id must carry topic hash");
+    }
+
+    #[test]
+    fn workflow_resolution_id_round_trips_against_wave14_derivation_for_methodology() {
+        // compile_methodology emits ids with artifact_id=<flow_id> (string,
+        // NOT UUID). Round-trip the canonical id.
+        let flow_id = "methodology-bus-refactor-v0";
+        let qid = wave16_derive_qid(
+            "workflow",
+            flow_id,
+            WORKFLOW_REVIEW_VERSION,
+            "compile",
+            Some("bus-refactor"),
+        );
+        let parsed = wave16_parse_qid(&qid).unwrap();
+        wave16_validate_envelope(
+            &parsed,
+            "workflow",
+            flow_id,
+            WORKFLOW_REVIEW_VERSION,
+            WORKFLOW_REVIEW_ACTIONS,
+        )
+        .expect("round-tripped methodology id must validate");
+        assert!(uuid::Uuid::parse_str(&parsed.artifact_id).is_err());
     }
 }

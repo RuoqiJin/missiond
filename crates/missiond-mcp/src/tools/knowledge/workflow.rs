@@ -4,7 +4,7 @@ use serde_json::json;
 pub fn definitions() -> Vec<ToolDefinition> {
     vec![ToolDefinition::new(
         "mission_workflow",
-        "workflow 表 manager — 8 actions (list/get/match/apply/distill/record_execution/compile_methodology/run_methodology)。\
+        "workflow 表 manager — 9 actions (list/get/match/apply/distill/record_execution/compile_methodology/run_methodology/resolve_review)。\
          list/get/match/apply/record_execution 为 store-backed full；\
          distill 默认 dry-run，传 distill_mode=\"sonnet\" 触发 workflow-distiller actor v0 \
          (从 plan + evidence sidecar 蒸馏 workflow_sexp + match_rules)，persist=true 写 workflow 行；\
@@ -32,6 +32,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
          bus 失败 surface review_question_warning + 确定性 id 供重试; \
          compile_methodology 因为暂无 workflow_id 行,确定性 id 锚定在 flow_id 上。\
          响应总附 review_gate_policy / review_question_emitted (+ review_question_id / review_question_warning when applicable)。\
+         wave-16 explicit review resolution (action=resolve_review): 接 review_question_id + review_decision \
+         (approved|rejected|needs_changes) + 可选 review_actor / review_note, 与 directive/plan 的 wave-15 \
+         resolution 路径同形 — fail-fast on missing decision / unsupported scope / stale version / \
+         artifact id mismatch / unsupported action; 用 scope=`workflow` (与 wave-14 auto-emit 同), \
+         action 白名单仅 `compile`, version pin 在 v1; persisted (distill) 路径用 workflow UUID, \
+         由于 Workflow 行无 status/version 字段不做 DB transition, approved 仅 stamp `status=review_approved` \
+         loud; methodology (compile_methodology) 路径用 flow_id 字符串(非 UUID), 完全无 DB 变更, 返结构化 \
+         receipt (`mode=methodology`, `db_transition=false`); needs_changes 返 next_step 指向 \
+         distill / compile_methodology; bus 失败 surface review_question_warning, 不回滚 receipt; \
+         publish QuestionEvent::Resolved/DecisionResolved best-effort 与 directive/plan 对齐。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
          implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
          role workflow-distiller + intent-memory.lisp :: directive-layer :: file-first-artifacts :: workflow-methodology-file。",
@@ -44,7 +54,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "enum": [
                         "list", "get", "match", "apply",
                         "distill", "record_execution",
-                        "compile_methodology", "run_methodology"
+                        "compile_methodology", "run_methodology",
+                        "resolve_review"
                     ],
                     "description": "manager action — see Lisp implemented-surface mission_workflow"
                 },
@@ -173,7 +184,20 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "review_question_id": {
                     "type": "string",
-                    "description": "[distill | compile_methodology persist=true] deterministic question-id override. Replaces the auto-derived id (`review:workflow:<id>:v<version>:compile[:<topic-hash>]`). Same fire-and-forget, bus-failure-warns semantics as the directive/plan surfaces."
+                    "description": "[distill | compile_methodology persist=true | resolve_review] On distill / compile_methodology: deterministic question-id override that replaces the auto-derived id (`review:workflow:<id|flow_id>:v<version>:compile[:<topic-hash>]`); same fire-and-forget, bus-failure-warns semantics as the directive/plan surfaces. On resolve_review (wave-16): REQUIRED — the deterministic id wave-14 emitted on the workflow Created event; resolver parses scope/artifact_id/version/action and validates against the workflow surface (scope=`workflow`, action whitelist `[compile]`, version pinned to v1)."
+                },
+                "review_decision": {
+                    "type": "string",
+                    "enum": ["approved", "rejected", "needs_changes"],
+                    "description": "[resolve_review] (wave-16 explicit resolution) caller's decision attached to `review_question_id`. `approved` stamps `status=review_approved` (no DB transition — Workflow row has no status column; methodology branch never had a row). `rejected` keeps the artifact non-approved. `needs_changes` keeps the artifact non-approved AND surfaces a `next_step` recommendation pointing back to `distill` (persisted) or `compile_methodology` (methodology). Required when `review_question_id` is supplied — fail-fast on missing."
+                },
+                "review_actor": {
+                    "type": "string",
+                    "description": "[resolve_review] (wave-16 explicit resolution) free-form identity of the resolver. Echoed into the response payload and the Resolved bus event metadata; never used for authentication."
+                },
+                "review_note": {
+                    "type": "string",
+                    "description": "[resolve_review] (wave-16 explicit resolution) free-form reason / next-step text. Echoed into the response payload so callers see the rejection / change request rationale."
                 }
             }
         }),
