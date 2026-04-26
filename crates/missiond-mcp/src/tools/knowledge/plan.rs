@@ -573,6 +573,30 @@ fn build_properties() -> Value {
         &["dry_run", "sonnet"],
     ));
 
+    // ── wave-18 / task 05 — cross-plan distill chain v0 ────────────────
+    //
+    // These knobs run AFTER the wave-17 finalize+distill pass and let
+    // the caller mark this plan as a contributor to a named chain that
+    // spans multiple successful plans. Conservative: nothing fires
+    // unless `finalize_plan=true` AND the inner finalization resolves
+    // to `final_plan_status="succeeded"`. Chain failures NEVER downgrade
+    // the underlying plan finalization — they only surface a warning.
+    p.insert("distill_chain_id".into(), prop(
+        "string",
+        "[execute scheduler_mode=dag_v1 finalize_plan=true] (wave-18 / task 05) opt into the cross-plan distill chain by tagging this plan's chain entry with the supplied id. Free-form caller-chosen string (e.g. `chain:wave18-finalize-loop`). Required to be non-blank when supplied; blank / whitespace collapses to absent. When omitted but other chain knobs are set, runner derives a deterministic fallback (`chain:auto:plan-<plan_id>`) so the audit row never carries an empty id. Echoed on response as `distill_chain_id` plus inside `finalization.distill_chain.chain_id`. Multiple plans pinning the same id form a chain — each contributes ONE evidence row to its OWN sidecar; readers correlate by id. Per CLAUDE.md fast-fail: any chain knob without `finalize_plan=true` returns INVALID_PARAM.",
+    ));
+
+    p.insert("distill_chain_mode".into(), prop_enum(
+        "string",
+        "[execute scheduler_mode=dag_v1 finalize_plan=true] (wave-18 / task 05) controls whether the chain orchestrator invokes `mission_workflow(action=distill)` after recording the chain entry. Default `record_only` (no workflow call — only the evidence sidecar entry is appended; the chain serves purely as a cross-plan audit ledger). `dry_run` forwards to `mission_workflow(action=distill, distill_mode=\"dry_run\")` after the chain row is appended (preview, no LLM, no persistence). `sonnet` forwards to `mission_workflow(action=distill, distill_mode=\"sonnet\")` and runs the workflow-distiller actor v0 — required to be set EXPLICITLY (the chain orchestrator never auto-promotes record_only to sonnet). Allowlist mirrors `workflow.rs::parse_distill_mode` plus the chain-only `record_only` literal. Validation runs eagerly so typos (`sonett`) fail fast even when no other chain knob was supplied. Distill failures (handler error, workflow-distiller refusal) surface a non-fatal `distill_chain_warning` on the response — the wave-17 finalization block is preserved verbatim per the brief: chain failure NEVER corrupts the plan final state.",
+        &["record_only", "dry_run", "sonnet"],
+    ));
+
+    p.insert("distill_chain_name".into(), prop(
+        "string",
+        "[execute scheduler_mode=dag_v1 finalize_plan=true] (wave-18 / task 05) optional human-readable label for the chain (e.g. `wave18-finalize-loop` or `release-rc1-distill`). Echoed back under `finalization.distill_chain.chain_name` and stamped onto the evidence row. When `distill_chain_mode=\"dry_run\"|\"sonnet\"` is also set, the chain runner forwards this value as `mission_workflow(action=distill).name` so a persisted distill row carries the chain label — caller can still pre-populate `name` separately to override. Blank / whitespace collapses to absent.",
+    ));
+
     Value::Object(p)
 }
 
@@ -725,6 +749,27 @@ pub fn definitions() -> Vec<ToolDefinition> {
          node_results[].rollback.cascade + evidence.rollback_cascade_* 字段 \
          (mode / cascade_root / compensations[] / reason)。绝不 arbitrary rollback code execution: \
          cascade 评估者只 dispatch wave-15 workstation substrate, 绝不直接 shell out 或 prompt fallback。\
+         wave-18 / task 05 cross-plan distill chain v0: scheduler_mode=dag_v1 finalize_plan=true 时再传 \
+         distill_chain_id (任意非空字符串, 缺省时按 plan id 派生 chain:auto:plan-<plan_id>) + \
+         distill_chain_mode (record_only [默认] / dry_run / sonnet) + 可选 distill_chain_name 即把当前 \
+         plan 标记为跨 plan 蒸馏链的一员。仅在 wave-17 finalization 决出 final_plan_status=succeeded \
+         时才执行链动作; failed/paused/no-finalize 一律 skip 并在响应里 surface skip reason \
+         (skipped_plan_not_succeeded / skipped_no_finalization)。record_only 仅向当前 plan 的 \
+         evidence sidecar append 一条 distill_chain_record 行 (kind=distill_chain_record, \
+         schema_version=v0, 不调 workflow distill); dry_run / sonnet 在 append 之前调用 \
+         mission_workflow(action=distill, distill_mode=...), 把 inner result 挂在 \
+         finalization.distill_chain.distill_result + 顶层 distill_result 短路。sonnet 必须显式传入, \
+         链 runner 永不自动从 record_only 升格 sonnet。Append 永远 additive (底层 writer 永不覆盖), \
+         不同 plan 的链条目分散在各自 sidecar 里, reader 通过 chain_id 串联; 当前 plan 内已存在的 \
+         同 chain_id 行被计入 chain_index_in_plan (UX 字段, 不影响判定)。任意 chain knob 但缺 \
+         finalize_plan=true 立即返 INVALID_PARAM (fast-fail, 与 wave-17 distill_on_success 同政策)。\
+         distill_chain_mode 严白名单 [record_only, dry_run, sonnet], 即使 chain knob 缺也校验, 防止 \
+         typo 漏到下一次实战; sonet/sonett 立即 INVALID_PARAM。链失败 (workflow handler 返 error / \
+         sidecar 写失败) 仅 surface distill_chain_warning + status=record_failed|recorded_with_distill_warning, \
+         绝不下调 plan finalization (与 wave-17 distill 失败同政策: 链失败永不污染 plan final state)。\
+         响应固定附 distill_chain_status / distill_chain_id / finalization.distill_chain {triggered, \
+         status, chain_id, chain_id_source, chain_mode, [chain_name], [chain_index_in_plan], \
+         [distill_result], [warning], [evidence_path], [evidence_error]}。\
          Lisp 源: intent-tools.lisp :: implemented-surface mission_plan :: :execute-contract / :dispatch-strategy-consumer \
          + intent-intent-layer.lisp :: section unified-entry-pipeline :: role plan-compiler / plan-runner \
          + intent-flow.lisp :: F-intent-alignment-plan-execution-loop :: s4 plan-authoring / s5 plan-review-gate / s6 execution-runner \

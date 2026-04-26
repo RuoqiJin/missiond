@@ -1986,4 +1986,151 @@ mod tests {
             "crates/missiond-daemon/src/handlers/knowledge"
         );
     }
+
+    // ── wave-18 / task 05 — cross-plan distill chain v0 ──────────────────
+    //
+    // The chain orchestrator (super::plan::apply_distill_chain) appends
+    // exactly ONE chain-record entry per plan finalization. Multiple
+    // plans pinning the same chain_id form a chain — each lands in its
+    // own sidecar; the writer is purely additive so prior chain entries
+    // (in this OR other plans' sidecars) are NEVER overwritten.
+    //
+    // These tests pin the on-disk shape contract from the
+    // evidence_collector side (the writer half) so the chain
+    // orchestrator's "append never overwrites" invariant is testable
+    // without standing up a full daemon.
+
+    /// Two appends with the same chain_id under the same plan id MUST
+    /// land as TWO entries in the bundle — the second never overwrites
+    /// the first. Exercises the wave-18 / task 05 brief invariant
+    /// `append new plan result; do not overwrite prior evidence`.
+    #[test]
+    fn distill_chain_records_are_strictly_additive_per_plan() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plan_id = uuid::Uuid::new_v4();
+
+        // Entry #1: chain-record from a first finalize pass.
+        let e1 = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, "distill_chain_record")
+            .with_state_transition("distill_chain_appended")
+            .with_extra("chain_id", json!("chain:wave18-loop"))
+            .with_extra("chain_index_in_plan", json!(1))
+            .with_extra("chain_mode", json!("record_only"))
+            .with_extra("plan_id", json!(plan_id));
+        let (path, count1) = append_entry_to_project_root(&root, plan_id, e1.into_json())
+            .expect("first chain append succeeds");
+        assert_eq!(count1, 1);
+
+        // Entry #2: a SECOND chain-record append against the SAME plan
+        // (e.g. caller re-ran action_execute against an already-
+        // finalized plan with the same chain id). Must NOT clobber the
+        // first row.
+        let e2 = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, "distill_chain_record")
+            .with_state_transition("distill_chain_appended")
+            .with_extra("chain_id", json!("chain:wave18-loop"))
+            .with_extra("chain_index_in_plan", json!(2))
+            .with_extra("chain_mode", json!("record_only"))
+            .with_extra("plan_id", json!(plan_id));
+        let (path2, count2) = append_entry_to_project_root(&root, plan_id, e2.into_json())
+            .expect("second chain append succeeds");
+        assert_eq!(count2, 2, "second chain append → two entries total");
+        assert_eq!(path, path2, "both chain entries land in the same sidecar");
+
+        // Read back: BOTH chain entries persisted, in append order.
+        let raw = std::fs::read_to_string(&path2).expect("sidecar exists");
+        let bundle: Value = serde_json::from_str(&raw).expect("valid json");
+        let entries = bundle["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2, "both chain entries persisted");
+        // Same chain id on both — they belong to the same chain bucket.
+        assert_eq!(entries[0]["chain_id"], "chain:wave18-loop");
+        assert_eq!(entries[1]["chain_id"], "chain:wave18-loop");
+        // Index field round-trips so the chain orchestrator can rebuild
+        // chronological order from a single sidecar read.
+        assert_eq!(entries[0]["chain_index_in_plan"], 1);
+        assert_eq!(entries[1]["chain_index_in_plan"], 2);
+        // Schema_version stamped on every entry so downstream consumers
+        // can route on it explicitly when the chain shape evolves.
+        assert_eq!(entries[0]["schema_version"], EVIDENCE_SCHEMA_VERSION);
+        assert_eq!(entries[1]["schema_version"], EVIDENCE_SCHEMA_VERSION);
+    }
+
+    /// A chain entry appended to a sidecar that ALREADY carries non-
+    /// chain entries (e.g. wave-17 dag_finalized rows, per-node
+    /// dispatch rows) must coexist with them — the wave-18 orchestrator
+    /// only adds rows, never rewrites the bundle. This pins the
+    /// invariant "do not overwrite prior evidence" from the brief at
+    /// the most aggressive interpretation: prior evidence of ANY kind.
+    #[test]
+    fn distill_chain_record_coexists_with_prior_non_chain_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plan_id = uuid::Uuid::new_v4();
+
+        // Pre-existing wave-17 dag_finalized row.
+        let prior = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, kind::NOTE)
+            .with_state_transition("dag_finalized")
+            .with_extra("aggregate_status", json!("dag_succeeded"))
+            .with_extra("final_plan_status", json!("succeeded"));
+        let (_p1, c1) = append_entry_to_project_root(&root, plan_id, prior.into_json())
+            .expect("prior dag_finalized append succeeds");
+        assert_eq!(c1, 1);
+
+        // Wave-18 chain entry appended after the wave-17 finalize row.
+        let chain = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, "distill_chain_record")
+            .with_state_transition("distill_chain_appended")
+            .with_extra("chain_id", json!("chain:wave18"))
+            .with_extra("chain_mode", json!("record_only"));
+        let (path, c2) = append_entry_to_project_root(&root, plan_id, chain.into_json())
+            .expect("chain append succeeds");
+        assert_eq!(c2, 2);
+
+        // Read back: prior wave-17 row preserved, chain row appended.
+        let raw = std::fs::read_to_string(&path).expect("sidecar exists");
+        let bundle: Value = serde_json::from_str(&raw).expect("valid json");
+        let entries = bundle["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["state_transition"], "dag_finalized");
+        assert_eq!(entries[0]["aggregate_status"], "dag_succeeded");
+        assert_eq!(entries[1]["state_transition"], "distill_chain_appended");
+        assert_eq!(entries[1]["chain_id"], "chain:wave18");
+        // Source tag round-trips on both rows so audit dashboards can
+        // pivot on `source` without re-deriving from the kind.
+        assert_eq!(entries[0]["source"], source::PLAN_DAG_NODE_DISPATCH);
+        assert_eq!(entries[1]["source"], source::PLAN_DAG_NODE_DISPATCH);
+    }
+
+    /// Two different chain ids under the same plan_id must coexist
+    /// without one overwriting the other. Exercises the case where a
+    /// caller participates in multiple chains from the same plan (e.g.
+    /// one chain for "release distillation", another for "weekly
+    /// rollup") — the writer treats each entry independently.
+    #[test]
+    fn distill_chain_records_from_different_chains_coexist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().canonicalize().unwrap();
+        let plan_id = uuid::Uuid::new_v4();
+
+        for (idx, chain_id) in ["chain:release-rc1", "chain:weekly-rollup"]
+            .iter()
+            .enumerate()
+        {
+            let e = EvidenceEntry::new(source::PLAN_DAG_NODE_DISPATCH, "distill_chain_record")
+                .with_state_transition("distill_chain_appended")
+                .with_extra("chain_id", json!(*chain_id))
+                .with_extra("chain_index_in_plan", json!(1));
+            let (_p, count) = append_entry_to_project_root(&root, plan_id, e.into_json())
+                .expect("chain append succeeds");
+            assert_eq!(count, idx + 1);
+        }
+
+        let path = root
+            .join(".missiond/v2/plans")
+            .join(format!("{}.evidence.json", plan_id));
+        let raw = std::fs::read_to_string(&path).expect("sidecar exists");
+        let bundle: Value = serde_json::from_str(&raw).expect("valid json");
+        let entries = bundle["entries"].as_array().expect("entries array");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["chain_id"], "chain:release-rc1");
+        assert_eq!(entries[1]["chain_id"], "chain:weekly-rollup");
+    }
 }

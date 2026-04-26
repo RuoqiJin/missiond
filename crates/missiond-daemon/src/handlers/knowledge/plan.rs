@@ -2077,7 +2077,20 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
                     ),
                 ));
             }
-            return super::plan_dag::action_execute_dag_v1(state, args, &plan).await;
+            // wave-18 / task 05 — pre-flight cross-plan distill chain knobs
+            // BEFORE the DAG runs so a typo (`distill_chain_mode="sonnett"`)
+            // or an invalid combo (chain knobs without `finalize_plan=true`)
+            // fails fast rather than after a long DAG execution. Validation
+            // is pure (no AppState reads) so we can short-circuit here.
+            if let Some(err) = validate_distill_chain_args(args) {
+                return Ok(err);
+            }
+            let dag_result = super::plan_dag::action_execute_dag_v1(state, args, &plan).await?;
+            // wave-18 / task 05 — augment the DAG result with the
+            // cross-plan distill chain block (and an evidence sidecar
+            // entry recording this plan's contribution to the chain).
+            // No-op when chain knobs were not supplied.
+            return Ok(apply_distill_chain(state, args, &plan, dag_result).await);
         }
         Ok(false) => {}
         Err(structured) => return Ok(structured),
@@ -2964,6 +2977,557 @@ pub(super) async fn append_plan_evidence_entry(
     std::fs::rename(&tmp, &path).map_err(|e| anyhow!("rename: {}", e))?;
 
     Ok((path, entry_count))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-18 / task 05 — cross-plan distill chain v0
+//
+// Conservative chain orchestrator that runs AFTER the wave-17 / task 05
+// `finalize_plan` + `distill_on_success` pass. The chain knobs let a
+// caller mark this plan as a contributor to a named workflow distillation
+// chain that spans multiple successful plans. We never overwrite prior
+// chain entries (they live in OTHER plans' sidecars; this plan's own
+// sidecar is purely additive); we never invoke workflow distill outside
+// the explicit `dry_run` / `sonnet` modes; and we never downgrade the
+// underlying plan finalization on chain failure (the finalization block
+// from `plan_dag::action_execute_dag_v1` is preserved verbatim — chain
+// failures only surface a non-fatal `warning` on the chain block).
+//
+// Lisp authority forward-reference (wave-18 / task 10 will backfill):
+//   - intent-flow.lisp :: F-intent-alignment-plan-execution-loop ::
+//                          s8 workflow-distillation (chain extension)
+//   - intent-intent-layer.lisp :: section unified-entry-pipeline ::
+//                                  role workflow-distiller (chain mode)
+// ───────────────────────────────────────────────────────────────────────
+
+/// Canonical chain mode strings. Mirror these in the MCP descriptor's
+/// enum so the two surfaces cannot drift on a typo.
+pub(super) const DISTILL_CHAIN_MODE_RECORD_ONLY: &str = "record_only";
+pub(super) const DISTILL_CHAIN_MODE_DRY_RUN: &str = "dry_run";
+pub(super) const DISTILL_CHAIN_MODE_SONNET: &str = "sonnet";
+
+/// Evidence `kind` tag for the chain-record sidecar entry. Distinct from
+/// the wave-17 / task 05 `dag_finalized` row so audit dashboards can
+/// pivot on chain participation without re-deriving it from the
+/// surrounding state_transition.
+pub(super) const CHAIN_RECORD_KIND: &str = "distill_chain_record";
+
+/// Status strings surfaced on the `distill_chain_status` response field.
+/// Kept as constants so callers can pin the wire form in tests / audit
+/// queries without scraping a string literal.
+pub(super) const CHAIN_STATUS_RECORDED: &str = "recorded";
+pub(super) const CHAIN_STATUS_RECORDED_WITH_DISTILL: &str = "recorded_with_distill";
+pub(super) const CHAIN_STATUS_RECORDED_DISTILL_WARNING: &str = "recorded_with_distill_warning";
+pub(super) const CHAIN_STATUS_SKIPPED_PLAN_NOT_SUCCEEDED: &str = "skipped_plan_not_succeeded";
+pub(super) const CHAIN_STATUS_SKIPPED_NO_FINALIZATION: &str = "skipped_no_finalization";
+pub(super) const CHAIN_STATUS_NOT_REQUESTED: &str = "not_requested";
+pub(super) const CHAIN_STATUS_RECORD_FAILED: &str = "record_failed";
+
+/// Parse the optional `distill_chain_id` arg. Returns `None` when absent
+/// or blank — the chain orchestrator generates a deterministic fallback
+/// (`chain:auto:plan-<plan_id>`) in that case so the audit row never
+/// carries an empty id.
+pub(super) fn parse_distill_chain_id(args: &Value) -> Option<String> {
+    args.get("distill_chain_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Parse the optional `distill_chain_name` arg (free-form human-readable
+/// label, e.g. "wave18-finalize-loop"). Blank collapses to `None`.
+pub(super) fn parse_distill_chain_name(args: &Value) -> Option<String> {
+    args.get("distill_chain_name")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Strict allowlist for the `distill_chain_mode` knob. Default is
+/// `record_only` (no workflow distill call — the chain entry is only
+/// recorded in the evidence sidecar). `dry_run` and `sonnet` forward to
+/// `mission_workflow(action=distill, distill_mode=…)` with the
+/// corresponding mode. Returns the canonical string or an error message.
+pub(super) fn parse_distill_chain_mode(args: &Value) -> std::result::Result<&'static str, String> {
+    match args.get("distill_chain_mode").and_then(|v| v.as_str()) {
+        None | Some("") | Some(DISTILL_CHAIN_MODE_RECORD_ONLY) => {
+            Ok(DISTILL_CHAIN_MODE_RECORD_ONLY)
+        }
+        Some(DISTILL_CHAIN_MODE_DRY_RUN) => Ok(DISTILL_CHAIN_MODE_DRY_RUN),
+        Some(DISTILL_CHAIN_MODE_SONNET) => Ok(DISTILL_CHAIN_MODE_SONNET),
+        Some(other) => Err(format!(
+            "distill_chain_mode must be one of [\"record_only\", \"dry_run\", \"sonnet\"]; got `{}`",
+            other
+        )),
+    }
+}
+
+/// Returns true when ANY of the chain knobs were supplied. Used to gate
+/// validation + the post-finalize chain run — callers that did not opt in
+/// see byte-identical wave-17 / task 05 responses.
+pub(super) fn distill_chain_requested(args: &Value) -> bool {
+    args.get("distill_chain_id").is_some()
+        || args.get("distill_chain_mode").is_some()
+        || args.get("distill_chain_name").is_some()
+}
+
+/// Pre-flight validation for the wave-18 / task 05 chain knobs. Returns
+/// `Some(error_result)` for the call site to early-return; `None` when
+/// the args pass.
+///
+/// Cross-field rules:
+///
+///   * Any chain knob requires `finalize_plan=true` — the chain is gated
+///     on a successful finalization, so silently dropping a chain
+///     request would mask the caller's intent.
+///   * `distill_chain_mode` must be on the strict allowlist — even when
+///     no other chain knob was passed, a typo on the mode alone surfaces
+///     immediately rather than on the next live caller's run.
+pub(super) fn validate_distill_chain_args(args: &Value) -> Option<ToolResult> {
+    if let Err(msg) = parse_distill_chain_mode(args) {
+        return Some(ToolResult::structured_error(ToolError::new(
+            error_codes::INVALID_PARAM,
+            msg,
+        )));
+    }
+    if distill_chain_requested(args)
+        && !super::plan_dag::parse_finalize_plan(args)
+    {
+        return Some(ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                "distill_chain_* knobs require finalize_plan=true",
+            )
+            .with_suggestion(
+                "the cross-plan distill chain only fires AFTER a successful finalization; \
+                 set finalize_plan=true or drop the distill_chain_* knobs",
+            ),
+        ));
+    }
+    None
+}
+
+/// Deterministic fallback chain id when the caller did not supply one.
+/// Anchored on the plan id so re-runs against the same plan land on the
+/// same chain bucket — auditors can correlate without rolling a UUID.
+fn derive_fallback_chain_id(plan_id: uuid::Uuid) -> String {
+    format!("chain:auto:plan-{}", plan_id)
+}
+
+/// Inspect the wave-17 / task 05 finalization block on the inner DAG
+/// payload to decide chain eligibility. Returns `Some("…")` reason when
+/// chain MUST be skipped (with the canonical `distill_chain_status`
+/// label), or `None` when the chain can proceed.
+fn chain_eligibility_skip_reason(payload: &Value) -> Option<&'static str> {
+    let finalization = match payload.get("finalization") {
+        Some(v) => v,
+        None => return Some(CHAIN_STATUS_SKIPPED_NO_FINALIZATION),
+    };
+    let final_plan_status = finalization
+        .get("final_plan_status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if final_plan_status != "succeeded" {
+        return Some(CHAIN_STATUS_SKIPPED_PLAN_NOT_SUCCEEDED);
+    }
+    None
+}
+
+/// Build the chain block surfaced under `finalization.distill_chain` on
+/// the response. Always carries `triggered` / `status` / `chain_id` /
+/// `chain_mode` so observers can pivot on a single shape; optional
+/// `chain_name` / `distill_result` / `warning` / `chain_index_in_plan` /
+/// `evidence_path` / `evidence_error` are only added when present.
+#[allow(clippy::too_many_arguments)]
+fn build_distill_chain_block(
+    triggered: bool,
+    status: &str,
+    chain_id: &str,
+    chain_id_source: &str,
+    chain_mode: &str,
+    chain_name: Option<&str>,
+    chain_index_in_plan: Option<usize>,
+    distill_result: Option<Value>,
+    warning: Option<&str>,
+    evidence_path: Option<&str>,
+    evidence_error: Option<&str>,
+) -> Value {
+    let mut block = json!({
+        "triggered": triggered,
+        "status": status,
+        "chain_id": chain_id,
+        "chain_id_source": chain_id_source,
+        "chain_mode": chain_mode,
+    });
+    if let Some(n) = chain_name {
+        block["chain_name"] = json!(n);
+    }
+    if let Some(idx) = chain_index_in_plan {
+        block["chain_index_in_plan"] = json!(idx);
+    }
+    if let Some(r) = distill_result {
+        block["distill_result"] = r;
+    }
+    if let Some(w) = warning {
+        block["warning"] = json!(w);
+    }
+    if let Some(p) = evidence_path {
+        block["evidence_path"] = json!(p);
+    }
+    if let Some(e) = evidence_error {
+        block["evidence_error"] = json!(e);
+    }
+    block
+}
+
+/// Read the existing evidence sidecar (if any) and count the prior
+/// chain-record entries with the matching `chain_id`. Returns 0 when
+/// the sidecar does not exist or carries no prior chain rows for this
+/// id. Pure read — never writes.
+///
+/// Failures (resolve / read / parse) collapse to 0 because the chain
+/// orchestrator's "do not overwrite prior evidence" invariant is
+/// satisfied by the writer (`append_plan_evidence_entry` only appends);
+/// the count is purely a UX hint surfaced as `chain_index_in_plan`.
+async fn count_prior_chain_entries_in_plan_sidecar(
+    state: &AppState,
+    plan_id: uuid::Uuid,
+    project_arg: Option<&str>,
+    cwd_arg: Option<&str>,
+    target_project_arg: Option<&str>,
+    chain_id: &str,
+) -> usize {
+    let project_root = match resolve_project_root(
+        &state.project_registry,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+    )
+    .await
+    {
+        Ok(p) => p,
+        Err(_) => return 0,
+    };
+    let path = project_root
+        .join(COMPANION_DIR)
+        .join(format!("{}.evidence.json", plan_id));
+    if !path.exists() {
+        return 0;
+    }
+    let raw = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    let bundle: Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return 0,
+    };
+    let entries = match bundle.get("entries").and_then(|v| v.as_array()) {
+        Some(a) => a,
+        None => return 0,
+    };
+    entries
+        .iter()
+        .filter(|e| {
+            e.get("kind").and_then(|v| v.as_str()) == Some(CHAIN_RECORD_KIND)
+                && e.get("chain_id").and_then(|v| v.as_str()) == Some(chain_id)
+        })
+        .count()
+}
+
+/// Drive the optional cross-plan distill chain. Pure orchestration:
+/// validation already ran in `validate_distill_chain_args` so here we
+/// only branch on the runtime payload + chain mode.
+///
+/// Returns the same `dag_result` byte-for-byte when no chain knob was
+/// supplied. Otherwise injects a `distill_chain` block under the
+/// existing `finalization` map (or under a new top-level
+/// `distill_chain` key when finalization was not requested — in that
+/// case the chain is also skipped, but we still surface the skip
+/// reason so callers can detect the missed opt-in).
+async fn apply_distill_chain(
+    state: &AppState,
+    args: &Value,
+    plan: &Plan,
+    dag_result: ToolResult,
+) -> ToolResult {
+    if !distill_chain_requested(args) {
+        return dag_result;
+    }
+    // Inner DAG result may itself be a structured error (e.g. validation
+    // rejected on the wave-17 path). Surface chain="not_requested" on
+    // the same envelope so the caller still sees a stable shape, but do
+    // NOT overwrite the error payload.
+    if dag_result.is_error.unwrap_or(false) {
+        return dag_result;
+    }
+
+    // Mode is already validated; unwrap is safe.
+    let chain_mode = parse_distill_chain_mode(args).unwrap_or(DISTILL_CHAIN_MODE_RECORD_ONLY);
+    let chain_name = parse_distill_chain_name(args);
+    let (chain_id, chain_id_source): (String, &'static str) = match parse_distill_chain_id(args) {
+        Some(id) => (id, "explicit_arg"),
+        None => (derive_fallback_chain_id(plan.id), "derived_from_plan_id"),
+    };
+
+    // Re-parse the inner payload so we can inspect the wave-17 / task 05
+    // `finalization` block and (when chain runs) augment it with our
+    // `distill_chain` sub-block.
+    let mut payload = tool_result_payload(&dag_result);
+
+    // Eligibility gate: chain only fires when the inner finalization
+    // block reports `final_plan_status="succeeded"`. Any other state
+    // (failed / paused / unchanged / no finalization) collapses to a
+    // skipped chain block — recorded on the response so the caller can
+    // see the skip reason but with NO sidecar write and NO distill call.
+    if let Some(skip_reason) = chain_eligibility_skip_reason(&payload) {
+        let block = build_distill_chain_block(
+            false,
+            skip_reason,
+            &chain_id,
+            chain_id_source,
+            chain_mode,
+            chain_name.as_deref(),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        attach_distill_chain_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // Eligibility passed → run the chain. Order:
+    //   1. Count prior chain entries in this plan's sidecar (UX hint).
+    //   2. Optionally invoke `mission_workflow(action=distill)` for
+    //      `dry_run` / `sonnet` modes.
+    //   3. Append exactly ONE chain-record evidence row tagged with
+    //      chain_id / chain_name / chain_mode / distill summary.
+    //   4. Return the augmented response.
+    let project_arg = args.get("project").and_then(|v| v.as_str());
+    let cwd_arg = args.get("cwd").and_then(|v| v.as_str());
+    let target_project_arg = args.get("target_project").and_then(|v| v.as_str());
+
+    let prior_count = count_prior_chain_entries_in_plan_sidecar(
+        state,
+        plan.id,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+        &chain_id,
+    )
+    .await;
+    let chain_index_in_plan = prior_count + 1;
+
+    // Step 2 — optional workflow distill call. `record_only` skips this
+    // entirely. The brief explicitly forbids invoking sonnet without an
+    // explicit mode, so we route on the canonical mode string.
+    let (distill_result, distill_warning, triggered_distill): (Option<Value>, Option<String>, bool) =
+        match chain_mode {
+            DISTILL_CHAIN_MODE_RECORD_ONLY => (None, None, false),
+            DISTILL_CHAIN_MODE_DRY_RUN | DISTILL_CHAIN_MODE_SONNET => {
+                let mut distill_args = serde_json::Map::new();
+                distill_args.insert("action".to_string(), json!("distill"));
+                distill_args.insert("plan_id".to_string(), json!(plan.id.to_string()));
+                distill_args.insert("distill_mode".to_string(), json!(chain_mode));
+                if let Some(p) = project_arg {
+                    distill_args.insert("project".to_string(), json!(p));
+                }
+                if let Some(c) = cwd_arg {
+                    distill_args.insert("cwd".to_string(), json!(c));
+                }
+                if let Some(tp) = target_project_arg {
+                    distill_args.insert("target_project".to_string(), json!(tp));
+                }
+                if let Some(name) = chain_name.as_deref() {
+                    // Forward the chain name as the workflow `name` so a
+                    // persisted distill row carries the chain label.
+                    // Caller can still override by passing an explicit
+                    // `name` arg (we do NOT overwrite an existing key).
+                    distill_args
+                        .entry("name".to_string())
+                        .or_insert_with(|| json!(name));
+                }
+                let call_args = Value::Object(distill_args);
+                match super::workflow::handle(state, "mission_workflow", call_args).await {
+                    Ok(tr) => {
+                        let inner_payload = tool_result_payload(&tr);
+                        let inner_is_error = tr.is_error.unwrap_or(false);
+                        let warning = if inner_is_error {
+                            Some(
+                                "distill chain workflow call returned an error; \
+                                 plan finalization preserved"
+                                    .to_string(),
+                            )
+                        } else {
+                            None
+                        };
+                        (Some(inner_payload), warning, true)
+                    }
+                    Err(e) => {
+                        // Handler-level Result::Err → treat as a warning,
+                        // never as a finalization downgrade. Mirrors
+                        // `plan_dag::maybe_run_distill_trigger`'s policy.
+                        tracing::warn!(
+                            plan_id = %plan.id,
+                            chain_id = %chain_id,
+                            error = %e,
+                            "distill_chain: workflow handler returned error"
+                        );
+                        (
+                            Some(json!({"error": e.to_string()})),
+                            Some(format!(
+                                "distill chain workflow handler error: {}; \
+                                 plan finalization preserved",
+                                e
+                            )),
+                            true,
+                        )
+                    }
+                }
+            }
+            // Defensive: validator already rejected anything else.
+            _ => (
+                None,
+                Some(format!(
+                    "distill_chain_mode `{}` reached chain runner unexpectedly",
+                    chain_mode
+                )),
+                false,
+            ),
+        };
+
+    // Step 3 — append the chain-record evidence row. Built via the
+    // typed evidence_collector so it carries the canonical
+    // schema_version / source / kind stamps the wave-17 finalize entry
+    // also uses. The append is purely additive (the underlying writer
+    // never overwrites) so prior chain entries (in this OR other plans'
+    // sidecars) are preserved by construction.
+    let mut entry = super::evidence_collector::EvidenceEntry::new(
+        super::evidence_collector::source::PLAN_DAG_NODE_DISPATCH,
+        CHAIN_RECORD_KIND,
+    )
+    .with_state_transition("distill_chain_appended")
+    .with_extra("event_kind", json!("plan_dag_distill_chain"))
+    .with_extra("plan_id", json!(plan.id))
+    .with_extra("plan_version", json!(plan.version))
+    .with_extra("chain_id", json!(chain_id))
+    .with_extra("chain_id_source", json!(chain_id_source))
+    .with_extra("chain_mode", json!(chain_mode))
+    .with_extra("chain_index_in_plan", json!(chain_index_in_plan))
+    .with_extra("triggered_workflow_distill", json!(triggered_distill));
+    if let Some(name) = chain_name.as_deref() {
+        entry = entry.with_extra("chain_name", json!(name));
+    }
+    if let Some(ref result) = distill_result {
+        entry = entry.with_extra("distill_result", result.clone());
+    }
+    if let Some(ref w) = distill_warning {
+        entry = entry.with_extra("distill_warning", json!(w));
+    }
+    let append_outcome = super::evidence_collector::append(
+        state,
+        plan.id,
+        project_arg,
+        cwd_arg,
+        target_project_arg,
+        entry,
+    )
+    .await;
+    let (evidence_path, evidence_error) = match append_outcome {
+        super::evidence_collector::AppendOutcome::Written { path, .. } => {
+            (Some(path.display().to_string()), None)
+        }
+        super::evidence_collector::AppendOutcome::Failed { error } => {
+            tracing::warn!(
+                plan_id = %plan.id,
+                chain_id = %chain_id,
+                error = %error,
+                "distill_chain: evidence sidecar append failed"
+            );
+            (None, Some(error))
+        }
+    };
+
+    // Step 4 — derive final status. Order of precedence:
+    //   * sidecar write failed       → `record_failed` (still keep plan
+    //                                    finalization durable; chain
+    //                                    just couldn't persist)
+    //   * triggered workflow distill that warned → `recorded_with_distill_warning`
+    //   * triggered workflow distill ok          → `recorded_with_distill`
+    //   * record-only                            → `recorded`
+    let status = if evidence_error.is_some() {
+        CHAIN_STATUS_RECORD_FAILED
+    } else if triggered_distill {
+        if distill_warning.is_some() {
+            CHAIN_STATUS_RECORDED_DISTILL_WARNING
+        } else {
+            CHAIN_STATUS_RECORDED_WITH_DISTILL
+        }
+    } else {
+        CHAIN_STATUS_RECORDED
+    };
+
+    let block = build_distill_chain_block(
+        triggered_distill || evidence_error.is_none(),
+        status,
+        &chain_id,
+        chain_id_source,
+        chain_mode,
+        chain_name.as_deref(),
+        Some(chain_index_in_plan),
+        distill_result,
+        distill_warning.as_deref(),
+        evidence_path.as_deref(),
+        evidence_error.as_deref(),
+    );
+    attach_distill_chain_to_payload(&mut payload, block);
+    ToolResult::json_pretty(&payload)
+}
+
+/// Insert the `distill_chain` block under `finalization.distill_chain`
+/// when the wave-17 finalization block exists; otherwise surface it at
+/// the top level under `distill_chain`. Either way the response also
+/// carries top-level `distill_chain_status` / `distill_chain_id`
+/// shortcuts so callers can grep one place.
+fn attach_distill_chain_to_payload(payload: &mut Value, block: Value) {
+    let status = block
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let chain_id = block
+        .get("chain_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(finalization) = obj.get_mut("finalization") {
+            if let Some(fobj) = finalization.as_object_mut() {
+                fobj.insert("distill_chain".to_string(), block.clone());
+            }
+        } else {
+            obj.insert("distill_chain".to_string(), block.clone());
+        }
+        // Top-level shortcuts so the caller can pivot without diving
+        // into the finalization block. `distill_chain_status` /
+        // `distill_chain_id` mirror what the brief lists under "response".
+        obj.insert("distill_chain_status".to_string(), json!(status));
+        obj.insert("distill_chain_id".to_string(), json!(chain_id));
+        // `distill_result` shortcut (the brief calls out `distill_result
+        // or warning` on the response). We only surface on success +
+        // dry_run/sonnet — record_only has nothing to show.
+        if let Some(result) = block.get("distill_result") {
+            obj.insert("distill_result".to_string(), result.clone());
+        }
+        if let Some(warning) = block.get("warning") {
+            obj.insert("distill_chain_warning".to_string(), warning.clone());
+        }
+    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -5234,5 +5798,428 @@ mod tests {
         assert!(parse_plan_node_resume_input(&args)
             .expect("ok")
             .is_none());
+    }
+
+    // ── wave-18 / task 05 — cross-plan distill chain v0 ─────────────────
+
+    #[test]
+    fn distill_chain_requested_detects_any_chain_knob() {
+        // No chain knobs → caller did not opt in. Backward-compat with
+        // wave-17 / task 05 byte-shape: the chain orchestrator never
+        // touches the response when the caller is silent.
+        assert!(!distill_chain_requested(&json!({})));
+        // Any single knob counts.
+        assert!(distill_chain_requested(&json!({"distill_chain_id": "chain-1"})));
+        assert!(distill_chain_requested(&json!({"distill_chain_mode": "record_only"})));
+        assert!(distill_chain_requested(&json!({"distill_chain_name": "loop"})));
+        // Combination still counts (canonical opt-in shape).
+        assert!(distill_chain_requested(
+            &json!({"distill_chain_id": "x", "distill_chain_mode": "dry_run"})
+        ));
+    }
+
+    #[test]
+    fn parse_distill_chain_id_blank_collapses_to_none() {
+        // Blank / whitespace-only must NOT poison the audit row with an
+        // empty id — collapses to absent so the runner falls back to
+        // the deterministic auto id (chain:auto:plan-<plan_id>).
+        assert_eq!(parse_distill_chain_id(&json!({})), None);
+        assert_eq!(parse_distill_chain_id(&json!({"distill_chain_id": ""})), None);
+        assert_eq!(parse_distill_chain_id(&json!({"distill_chain_id": "   "})), None);
+        assert_eq!(
+            parse_distill_chain_id(&json!({"distill_chain_id": "chain-42"})),
+            Some("chain-42".to_string())
+        );
+        // Trim leading / trailing whitespace so caller-side concat
+        // accidents don't shift the wire form silently.
+        assert_eq!(
+            parse_distill_chain_id(&json!({"distill_chain_id": "  chain-42  "})),
+            Some("chain-42".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_distill_chain_name_blank_collapses_to_none() {
+        assert_eq!(parse_distill_chain_name(&json!({})), None);
+        assert_eq!(parse_distill_chain_name(&json!({"distill_chain_name": ""})), None);
+        assert_eq!(
+            parse_distill_chain_name(&json!({"distill_chain_name": "  "})),
+            None
+        );
+        assert_eq!(
+            parse_distill_chain_name(&json!({"distill_chain_name": "wave18-loop"})),
+            Some("wave18-loop".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_distill_chain_mode_default_is_record_only() {
+        // Absent / blank / canonical literal all collapse onto record_only
+        // so the response always echoes a known mode. record_only is the
+        // most conservative choice (no LLM, no workflow call).
+        assert_eq!(parse_distill_chain_mode(&json!({})).unwrap(), "record_only");
+        assert_eq!(
+            parse_distill_chain_mode(&json!({"distill_chain_mode": ""})).unwrap(),
+            "record_only"
+        );
+        assert_eq!(
+            parse_distill_chain_mode(&json!({"distill_chain_mode": "record_only"})).unwrap(),
+            "record_only"
+        );
+        assert_eq!(
+            parse_distill_chain_mode(&json!({"distill_chain_mode": "dry_run"})).unwrap(),
+            "dry_run"
+        );
+        assert_eq!(
+            parse_distill_chain_mode(&json!({"distill_chain_mode": "sonnet"})).unwrap(),
+            "sonnet"
+        );
+    }
+
+    #[test]
+    fn parse_distill_chain_mode_rejects_typos() {
+        // Strict allowlist mirrors workflow.rs / wave-17 task 05. Sonnet
+        // typos are particularly important to catch — the brief forbids
+        // ever invoking sonnet without an explicit mode, and a silent
+        // collapse to record_only would mask the caller's intent.
+        let err =
+            parse_distill_chain_mode(&json!({"distill_chain_mode": "sonett"})).unwrap_err();
+        assert!(
+            err.contains("sonett"),
+            "error must echo the rejected value, got `{}`",
+            err
+        );
+        assert!(
+            err.contains("record_only"),
+            "error must spell out the allowlist, got `{}`",
+            err
+        );
+
+        let err2 =
+            parse_distill_chain_mode(&json!({"distill_chain_mode": "live"})).unwrap_err();
+        assert!(err2.contains("live"));
+    }
+
+    #[test]
+    fn validate_distill_chain_args_rejects_chain_without_finalize() {
+        // Any chain knob without finalize_plan=true must fail-fast — the
+        // chain only fires AFTER a successful finalization, so silently
+        // dropping the chain request would mask the caller's intent.
+        let result = validate_distill_chain_args(
+            &json!({"distill_chain_id": "chain-1"})
+        )
+        .expect("validator must reject");
+        assert_eq!(result.is_error, Some(true));
+        // Structured-error payload carries `error_code` + `reason`.
+        let payload = tool_result_payload(&result);
+        assert_eq!(
+            payload.get("error_code").and_then(|v| v.as_str()),
+            Some("INVALID_PARAM")
+        );
+        let reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("finalize_plan=true"),
+            "error must point at the missing finalize knob; got `{}`",
+            reason
+        );
+    }
+
+    #[test]
+    fn validate_distill_chain_args_rejects_unknown_mode_even_without_finalize() {
+        // Validation runs eagerly on the mode allowlist so a typo never
+        // survives until the next live caller. The mode check fires
+        // BEFORE the finalize cross-field rule so the error message
+        // points at the actual typo.
+        let result = validate_distill_chain_args(
+            &json!({"distill_chain_mode": "warp"})
+        )
+        .expect("validator must reject");
+        assert_eq!(result.is_error, Some(true));
+        let payload = tool_result_payload(&result);
+        let reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(reason.contains("warp"), "got `{}`", reason);
+    }
+
+    #[test]
+    fn validate_distill_chain_args_accepts_canonical_opt_in() {
+        // Canonical shape: finalize_plan=true + chain knobs.
+        assert!(validate_distill_chain_args(&json!({
+            "finalize_plan": true,
+            "distill_chain_id": "chain-1",
+            "distill_chain_mode": "record_only",
+            "distill_chain_name": "wave18-loop",
+        }))
+        .is_none());
+        // Bare chain mode + finalize_plan also fine (id auto-derived).
+        assert!(validate_distill_chain_args(&json!({
+            "finalize_plan": true,
+            "distill_chain_mode": "dry_run",
+        }))
+        .is_none());
+        // No chain knobs at all → backward-compat (wave-17 / task 04 byte-shape).
+        assert!(validate_distill_chain_args(&json!({})).is_none());
+    }
+
+    #[test]
+    fn derive_fallback_chain_id_anchors_on_plan_id() {
+        // Deterministic fallback so re-runs against the same plan land
+        // on the same chain bucket — auditors can correlate without
+        // rolling a UUID.
+        let plan_id =
+            uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000abc").unwrap();
+        let id = derive_fallback_chain_id(plan_id);
+        assert!(id.contains("chain:auto:plan-"));
+        assert!(id.contains("00000000-0000-0000-0000-000000000abc"));
+        // Stability: same plan id → same fallback (no time / random
+        // component sneaking in).
+        assert_eq!(id, derive_fallback_chain_id(plan_id));
+    }
+
+    #[test]
+    fn chain_eligibility_skips_when_finalization_block_missing() {
+        // Inner DAG payload without a `finalization` block means the
+        // caller did not opt into wave-17 finalize. Chain MUST skip
+        // (chain only fires AFTER a successful finalization).
+        let payload = json!({
+            "status": "dag_succeeded",
+            "scheduler_mode": "dag_v1",
+        });
+        assert_eq!(
+            chain_eligibility_skip_reason(&payload),
+            Some(CHAIN_STATUS_SKIPPED_NO_FINALIZATION)
+        );
+    }
+
+    #[test]
+    fn chain_eligibility_skips_when_plan_status_not_succeeded() {
+        // Even with a finalization block, anything other than
+        // `final_plan_status="succeeded"` MUST skip — failed / paused /
+        // unchanged all collapse to the same skip reason so the
+        // response carries one canonical label.
+        for not_succeeded in ["failed", "executing", "awaiting_review", "unchanged", ""] {
+            let payload = json!({
+                "finalization": {"final_plan_status": not_succeeded},
+            });
+            assert_eq!(
+                chain_eligibility_skip_reason(&payload),
+                Some(CHAIN_STATUS_SKIPPED_PLAN_NOT_SUCCEEDED),
+                "must skip when final_plan_status=`{}`",
+                not_succeeded
+            );
+        }
+    }
+
+    #[test]
+    fn chain_eligibility_passes_when_plan_status_succeeded() {
+        let payload = json!({
+            "finalization": {"final_plan_status": "succeeded"},
+        });
+        assert_eq!(chain_eligibility_skip_reason(&payload), None);
+    }
+
+    #[test]
+    fn build_distill_chain_block_carries_canonical_shape() {
+        // record_only path: no distill result, no warning, no triggered.
+        let block = build_distill_chain_block(
+            true,
+            CHAIN_STATUS_RECORDED,
+            "chain:wave18",
+            "explicit_arg",
+            "record_only",
+            Some("wave18-loop"),
+            Some(1),
+            None,
+            None,
+            Some("/tmp/.missiond/v2/plans/abc.evidence.json"),
+            None,
+        );
+        assert_eq!(block["triggered"], true);
+        assert_eq!(block["status"], "recorded");
+        assert_eq!(block["chain_id"], "chain:wave18");
+        assert_eq!(block["chain_id_source"], "explicit_arg");
+        assert_eq!(block["chain_mode"], "record_only");
+        assert_eq!(block["chain_name"], "wave18-loop");
+        assert_eq!(block["chain_index_in_plan"], 1);
+        assert_eq!(
+            block["evidence_path"],
+            "/tmp/.missiond/v2/plans/abc.evidence.json"
+        );
+        assert!(block.get("distill_result").is_none());
+        assert!(block.get("warning").is_none());
+        assert!(block.get("evidence_error").is_none());
+    }
+
+    #[test]
+    fn build_distill_chain_block_surfaces_distill_result_and_warning() {
+        // dry_run / sonnet path with a downstream warning: chain block
+        // MUST surface BOTH the inner result AND the warning so
+        // observers can detect partial success without scraping the
+        // payload.
+        let block = build_distill_chain_block(
+            true,
+            CHAIN_STATUS_RECORDED_DISTILL_WARNING,
+            "chain:42",
+            "derived_from_plan_id",
+            "sonnet",
+            None,
+            Some(2),
+            Some(json!({"error": "sonnet quota exhausted"})),
+            Some("distill chain workflow call returned an error; plan finalization preserved"),
+            Some("/tmp/.evidence.json"),
+            None,
+        );
+        assert_eq!(block["status"], "recorded_with_distill_warning");
+        assert_eq!(block["distill_result"]["error"], "sonnet quota exhausted");
+        assert!(block["warning"]
+            .as_str()
+            .unwrap()
+            .contains("plan finalization preserved"));
+        assert!(block.get("chain_name").is_none(), "chain_name only emitted when set");
+    }
+
+    #[test]
+    fn build_distill_chain_block_skip_path_keeps_triggered_false_no_evidence() {
+        // Skip branch: triggered=false + reason as status; evidence_path
+        // / chain_index_in_plan absent because nothing was written.
+        let block = build_distill_chain_block(
+            false,
+            CHAIN_STATUS_SKIPPED_PLAN_NOT_SUCCEEDED,
+            "chain:auto:plan-x",
+            "derived_from_plan_id",
+            "record_only",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(block["triggered"], false);
+        assert_eq!(block["status"], "skipped_plan_not_succeeded");
+        assert!(block.get("evidence_path").is_none());
+        assert!(block.get("chain_index_in_plan").is_none());
+    }
+
+    #[test]
+    fn attach_distill_chain_to_payload_nests_under_finalization_when_present() {
+        // Wave-17 finalization block exists → chain block lands under
+        // `finalization.distill_chain` so callers can grep one place.
+        let mut payload = json!({
+            "status": "dag_succeeded",
+            "finalization": {
+                "final_plan_status": "succeeded",
+                "rule": "all_terminal_no_failed_no_paused",
+            },
+        });
+        let block = build_distill_chain_block(
+            true,
+            CHAIN_STATUS_RECORDED,
+            "chain:42",
+            "explicit_arg",
+            "record_only",
+            None,
+            Some(1),
+            None,
+            None,
+            Some("/tmp/x.json"),
+            None,
+        );
+        attach_distill_chain_to_payload(&mut payload, block);
+        assert_eq!(
+            payload["finalization"]["distill_chain"]["chain_id"],
+            "chain:42"
+        );
+        // Top-level shortcuts mirror the brief's response contract.
+        assert_eq!(payload["distill_chain_status"], "recorded");
+        assert_eq!(payload["distill_chain_id"], "chain:42");
+    }
+
+    #[test]
+    fn attach_distill_chain_to_payload_falls_back_to_top_level_when_no_finalization() {
+        // No finalization block (skip branch) → chain block surfaces at
+        // the top level so the caller still sees the skip status.
+        let mut payload = json!({"status": "dag_succeeded"});
+        let block = build_distill_chain_block(
+            false,
+            CHAIN_STATUS_SKIPPED_NO_FINALIZATION,
+            "chain:auto:plan-x",
+            "derived_from_plan_id",
+            "record_only",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        attach_distill_chain_to_payload(&mut payload, block);
+        assert_eq!(
+            payload["distill_chain"]["status"],
+            "skipped_no_finalization"
+        );
+        assert_eq!(payload["distill_chain_status"], "skipped_no_finalization");
+    }
+
+    #[test]
+    fn attach_distill_chain_to_payload_surfaces_distill_result_shortcut() {
+        // dry_run / sonnet path: top-level `distill_result` shortcut so
+        // callers can grep the inner workflow payload without diving
+        // into finalization.distill_chain.distill_result.
+        let mut payload = json!({
+            "status": "dag_succeeded",
+            "finalization": {"final_plan_status": "succeeded"},
+        });
+        let block = build_distill_chain_block(
+            true,
+            CHAIN_STATUS_RECORDED_WITH_DISTILL,
+            "chain:42",
+            "explicit_arg",
+            "dry_run",
+            None,
+            Some(1),
+            Some(json!({"status": "dry_run", "persisted": false})),
+            None,
+            Some("/tmp/x.json"),
+            None,
+        );
+        attach_distill_chain_to_payload(&mut payload, block);
+        assert_eq!(payload["distill_result"]["status"], "dry_run");
+        assert_eq!(payload["distill_result"]["persisted"], false);
+        assert!(
+            payload.get("distill_chain_warning").is_none(),
+            "warning shortcut absent on the OK path"
+        );
+    }
+
+    #[test]
+    fn attach_distill_chain_to_payload_surfaces_warning_shortcut() {
+        let mut payload = json!({
+            "status": "dag_succeeded",
+            "finalization": {"final_plan_status": "succeeded"},
+        });
+        let block = build_distill_chain_block(
+            true,
+            CHAIN_STATUS_RECORDED_DISTILL_WARNING,
+            "chain:42",
+            "explicit_arg",
+            "sonnet",
+            None,
+            Some(1),
+            Some(json!({"error": "x"})),
+            Some("workflow distill failed; plan finalization preserved"),
+            Some("/tmp/x.json"),
+            None,
+        );
+        attach_distill_chain_to_payload(&mut payload, block);
+        assert_eq!(
+            payload["distill_chain_warning"],
+            "workflow distill failed; plan finalization preserved"
+        );
     }
 }
