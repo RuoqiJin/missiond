@@ -792,6 +792,336 @@ fn lisp_quote_string(s: &str) -> String {
     out
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// wave23-04: session-trace append (opt-in, best-effort).
+//
+// `mission_execution` callers can opt into structured factual telemetry by
+// supplying `session_trace_path`. When present, the daemon appends a
+// `(trace-event ...)` form to the named file directly via Rust I/O — no
+// Node spawn, no shell. Failures surface as a `trace_warning` field on the
+// action's response; the primary action result is never hidden behind a
+// trace error (per task contract requirement 3).
+//
+// Output passes `scripts/check-session-trace.mjs` validation:
+//   * required fields :id :seq :at :task :backend :kind :summary
+//   * :seq strictly monotonic (read existing max, append max+1)
+//   * :id stable + unique within file (`<task>-<kind>-<seq>`)
+//   * timestamps are ISO-8601 with timezone (now_iso() emits `Z`)
+//   * :task / :backend match `^[a-z0-9][a-z0-9._-]*$`
+//   * optional :files / :report_path / :command paths repo-relative
+// ───────────────────────────────────────────────────────────────────────
+
+const TRACE_ID_RE: &str = r"^[a-z0-9][a-z0-9._-]*$";
+
+/// Trace event kinds the daemon emits. Mirrors the `event-kinds` enum in
+/// `.missiond/tasks/schema/session-trace-v1.lisp` and the JS-side
+/// `KIND_VALUES` set in `scripts/check-session-trace.mjs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceKind {
+    Dispatch,
+    Observation,
+    Complete,
+    Failure,
+}
+
+impl TraceKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            TraceKind::Dispatch => "dispatch",
+            TraceKind::Observation => "observation",
+            TraceKind::Complete => "complete",
+            TraceKind::Failure => "failure",
+        }
+    }
+}
+
+/// Structured event the daemon constructs before formatting it as a
+/// `(trace-event ...)` Lisp form. Required fields stay non-optional so the
+/// type system enforces the schema's required set; optional fields are
+/// `Option<String>` and skip-emit when `None`.
+#[derive(Debug, Clone)]
+struct TraceEvent {
+    task: String,
+    backend: String,
+    kind: TraceKind,
+    summary: String,
+    agent: Option<String>,
+    files: Option<Vec<String>>,
+    commit_hash: Option<String>,
+    report_path: Option<String>,
+}
+
+/// Why a trace append could not happen. Surfaced verbatim on the action
+/// response as `trace_warning` so the writer agent can correlate the
+/// failure with its dispatch envelope. `Display` produces the user-facing
+/// string; the variant is preserved internally for tests / future
+/// structured logging.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TraceWarning {
+    MissingFile(String),
+    Io(String),
+    Malformed(String),
+    InvalidTaskId(String),
+    InvalidBackend(String),
+}
+
+impl std::fmt::Display for TraceWarning {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TraceWarning::MissingFile(p) => {
+                write!(f, "session_trace_path `{}` does not exist", p)
+            }
+            TraceWarning::Io(msg) => write!(f, "session_trace_path I/O error: {}", msg),
+            TraceWarning::Malformed(msg) => {
+                write!(f, "session_trace_path malformed: {}", msg)
+            }
+            TraceWarning::InvalidTaskId(s) => write!(
+                f,
+                "session_trace task id `{}` does not match {}; cannot append",
+                s, TRACE_ID_RE
+            ),
+            TraceWarning::InvalidBackend(s) => write!(
+                f,
+                "session_trace backend `{}` does not match {}; cannot append",
+                s, TRACE_ID_RE
+            ),
+        }
+    }
+}
+
+/// `^[a-z0-9][a-z0-9._-]*$` — same as the JS-side `ID_RE` so an event the
+/// daemon emits round-trips through `scripts/check-session-trace.mjs`
+/// without diagnostics.
+fn is_valid_trace_id(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
+        return false;
+    }
+    chars.all(|c| {
+        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-'
+    })
+}
+
+/// Slugify a free-form backend / agent name into something matching
+/// `TRACE_ID_RE`. Falls back to `"claudecode"` when the input has no usable
+/// characters — the daemon is the executor by default.
+fn sanitize_trace_backend(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "claudecode".to_string();
+    }
+    let mut out = String::with_capacity(trimmed.len());
+    for c in trimmed.chars() {
+        if c.is_ascii_uppercase() {
+            out.push(c.to_ascii_lowercase());
+        } else if c.is_ascii_lowercase()
+            || c.is_ascii_digit()
+            || c == '.'
+            || c == '_'
+            || c == '-'
+        {
+            out.push(c);
+        } else if c == ' ' || c == '/' || c == ':' {
+            out.push('-');
+        }
+        // other characters dropped silently
+    }
+    // First char must be alnum
+    while let Some(first) = out.chars().next() {
+        if first.is_ascii_lowercase() || first.is_ascii_digit() {
+            break;
+        }
+        out.remove(0);
+    }
+    if out.is_empty() {
+        "claudecode".to_string()
+    } else {
+        out
+    }
+}
+
+/// Render a `(trace-event ...)` form body. Uses bare atoms for `:id` /
+/// `:task` / `:backend` / `:kind` / `:seq` (matches the seed file shape +
+/// the JS checker's `nodeText` semantics) and quoted strings for free-form
+/// fields like `:summary`. `:files` / `:report_path` / `:commit_hash` skip
+/// when absent.
+fn render_trace_event(seq: u64, at: &str, ev: &TraceEvent) -> String {
+    let id = format!("{}-{}-{}", ev.task, ev.kind.as_str(), seq);
+    let mut out = String::new();
+    out.push_str("\n  (trace-event\n");
+    out.push_str(&format!("    :id {}\n", id));
+    out.push_str(&format!("    :seq {}\n", seq));
+    out.push_str(&format!("    :at {}\n", lisp_quote_string(at)));
+    out.push_str(&format!("    :task {}\n", ev.task));
+    out.push_str(&format!("    :backend {}\n", ev.backend));
+    out.push_str(&format!("    :kind {}\n", ev.kind.as_str()));
+    out.push_str(&format!("    :summary {}", lisp_quote_string(&ev.summary)));
+    if let Some(ref agent) = ev.agent {
+        out.push_str(&format!("\n    :agent {}", agent));
+    }
+    if let Some(ref files) = ev.files {
+        let rendered = files
+            .iter()
+            .map(|p| lisp_quote_string(p))
+            .collect::<Vec<_>>()
+            .join(" ");
+        out.push_str(&format!("\n    :files [{}]", rendered));
+    }
+    if let Some(ref hash) = ev.commit_hash {
+        out.push_str(&format!("\n    :commit_hash {}", lisp_quote_string(hash)));
+    }
+    if let Some(ref rp) = ev.report_path {
+        out.push_str(&format!("\n    :report_path {}", lisp_quote_string(rp)));
+    }
+    out.push(')');
+    out
+}
+
+/// Scan the parsed trace forms for the maximum `:seq` across every
+/// `(trace-event ...)` child of the `(session-trace ...)` root. Returns 0
+/// when the file has no events yet — the first append picks `seq=1`.
+fn scan_max_trace_seq(forms: &[sexp::Node]) -> u64 {
+    let Some(trace_form) = forms
+        .iter()
+        .find(|n| n.head_atom() == Some("session-trace"))
+    else {
+        return 0;
+    };
+    let mut max = 0u64;
+    for child in trace_form.children() {
+        if child.head_atom() != Some("trace-event") {
+            continue;
+        }
+        // `:seq <int>` — find the keyword and read the next sibling atom.
+        let kids = child.children();
+        let mut i = 0;
+        while i + 1 < kids.len() {
+            if let Some(atom) = kids[i].as_atom() {
+                if atom == ":seq" {
+                    if let Some(val) = kids[i + 1].as_atom() {
+                        if let Ok(n) = val.parse::<u64>() {
+                            if n > max {
+                                max = n;
+                            }
+                        }
+                    }
+                }
+            }
+            i += 1;
+        }
+    }
+    max
+}
+
+/// Append a single trace event to `path`. Best-effort: any failure
+/// returns `Err(TraceWarning)` and the caller MUST surface the warning
+/// without aborting the primary action result.
+fn append_session_trace_event(path: &Path, ev: &TraceEvent) -> std::result::Result<(), TraceWarning> {
+    if !is_valid_trace_id(&ev.task) {
+        return Err(TraceWarning::InvalidTaskId(ev.task.clone()));
+    }
+    if !is_valid_trace_id(&ev.backend) {
+        return Err(TraceWarning::InvalidBackend(ev.backend.clone()));
+    }
+    if !path.exists() {
+        return Err(TraceWarning::MissingFile(path.display().to_string()));
+    }
+    let src =
+        std::fs::read_to_string(path).map_err(|e| TraceWarning::Io(e.to_string()))?;
+    let forms = sexp::parse(&src).map_err(|e| TraceWarning::Malformed(e.to_string()))?;
+    let trace_form = forms
+        .iter()
+        .find(|n| n.head_atom() == Some("session-trace"))
+        .ok_or_else(|| {
+            TraceWarning::Malformed(
+                "no (session-trace ...) top-level form".to_string(),
+            )
+        })?;
+    let seq = scan_max_trace_seq(&forms) + 1;
+    let at = now_iso();
+    let entry = render_trace_event(seq, &at, ev);
+    // The closing `)` of the (session-trace ...) form sits at byte
+    // `trace_form.end - 1`. We splice the new entry in just before it so
+    // the file remains a single well-formed top-level form.
+    let close_byte = trace_form
+        .end
+        .checked_sub(1)
+        .ok_or_else(|| TraceWarning::Malformed("session-trace form has zero length".to_string()))?;
+    if close_byte > src.len() {
+        return Err(TraceWarning::Malformed(
+            "session-trace form end byte out of range".to_string(),
+        ));
+    }
+    let (head, tail) = src.split_at(close_byte);
+    let mut new_body = String::with_capacity(src.len() + entry.len() + 1);
+    new_body.push_str(head);
+    // Trim trailing whitespace before the close so the appended entry sits
+    // at a consistent indent (one entry per line block, mirrors the seed
+    // file shape).
+    let trimmed = new_body.trim_end_matches(|c: char| c == ' ' || c == '\t').to_string();
+    new_body = trimmed;
+    new_body.push_str(&entry);
+    new_body.push('\n');
+    new_body.push_str(tail);
+    // Validate balance + reparse before writing — we never want to leave a
+    // trace file in a broken state.
+    sexp::check_balance(&new_body)
+        .map_err(|e| TraceWarning::Malformed(format!("appended event broke balance: {}", e)))?;
+    std::fs::write(path, new_body.as_bytes()).map_err(|e| TraceWarning::Io(e.to_string()))?;
+    Ok(())
+}
+
+/// Resolve the optional `session_trace_path` argument to an absolute path
+/// under the project root. Returns `None` when the argument is absent or
+/// blank — the caller treats that as "trace integration disabled".
+fn resolve_session_trace_path(args: &Value, root: &Path) -> Option<PathBuf> {
+    let raw = args
+        .get("session_trace_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())?;
+    let candidate = PathBuf::from(raw);
+    Some(if candidate.is_absolute() {
+        candidate
+    } else {
+        root.join(candidate)
+    })
+}
+
+/// Prefer the task-contract id parsed from `task_contract_path` when the
+/// caller threads it through; otherwise fall back to `execution_id` if it
+/// matches the trace id regex. Returns `None` when neither yields a valid
+/// id — the caller surfaces the warning.
+fn resolve_trace_task_id(args: &Value, root: &Path, fallback: &str) -> Option<String> {
+    if let Some(tcp) = args
+        .get("task_contract_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        let abs = if Path::new(tcp).is_absolute() {
+            PathBuf::from(tcp)
+        } else {
+            root.join(tcp)
+        };
+        if let Ok(text) = std::fs::read_to_string(&abs) {
+            if let Some(id) = read_task_contract_id(&text) {
+                if is_valid_trace_id(&id) {
+                    return Some(id);
+                }
+            }
+        }
+    }
+    if is_valid_trace_id(fallback) {
+        Some(fallback.to_string())
+    } else {
+        None
+    }
+}
+
 fn render_canonical_template(
     execution_id: &str,
     parent_design: &str,
@@ -1577,6 +1907,41 @@ async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
     if let Some(cwd) = requested_cwd {
         response["requested_cwd"] = json!(cwd);
     }
+
+    // wave23-04 — opt-in session-trace append. When the caller threads
+    // `session_trace_path` we emit a `dispatch` event capturing this
+    // open as the first fact in the task's trace. Best-effort: failures
+    // surface as `trace_warning` without aborting the open result.
+    if let Some(trace_path) = resolve_session_trace_path(args, &root) {
+        match resolve_trace_task_id(args, &root, execution_id) {
+            Some(task_id) => {
+                let backend = sanitize_trace_backend(owner);
+                let ev = TraceEvent {
+                    task: task_id,
+                    backend,
+                    kind: TraceKind::Dispatch,
+                    summary: format!(
+                        "mission_execution(action=open) execution_id={} parent_design={} dispatch_strategy={}",
+                        execution_id, parent_design, dispatch_strategy
+                    ),
+                    agent: None,
+                    files: None,
+                    commit_hash: None,
+                    report_path: None,
+                };
+                if let Err(w) = append_session_trace_event(&trace_path, &ev) {
+                    response["trace_warning"] = json!(w.to_string());
+                }
+            }
+            None => {
+                response["trace_warning"] = json!(format!(
+                    "session_trace_path supplied but execution_id `{}` is not a valid trace task id and no task_contract_path was provided",
+                    execution_id
+                ));
+            }
+        }
+    }
+
     Ok(ToolResult::json_pretty(&response))
 }
 
@@ -2802,6 +3167,85 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         response["verified_scope_summary"] = scope_summary.clone();
         response["verified_validation"] = scope_summary;
     }
+
+    // wave23-04 — opt-in session-trace append. Records `complete` or
+    // `failure` depending on the verifier verdict resolved above. The
+    // entry mirrors the durable companion-log completion: it carries the
+    // commit hash, report path, and changed-file list so future
+    // analyzers can correlate completions with their durable artifacts
+    // without re-reading the .missiond/v2/<exec>.lisp companion.
+    if let Some(trace_path) = resolve_session_trace_path(args, &root) {
+        match resolve_trace_task_id(args, &root, execution_id) {
+            Some(task_id) => {
+                // Failure when caller-supplied OR daemon-computed verifier
+                // status resolved to "failed". Otherwise treat the
+                // completion as a success-shaped event.
+                let final_verifier_status = response
+                    .get("verifier_status")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let kind = match final_verifier_status.as_deref() {
+                    Some("failed") => TraceKind::Failure,
+                    _ => TraceKind::Complete,
+                };
+                let backend = sanitize_trace_backend(agent);
+                // Re-read the commit / report / file metadata from args
+                // since the local bindings above were consumed by the
+                // response builder.
+                let commit_hash_for_trace = args
+                    .get("commit_hash")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    // checker requires `[0-9a-f]{4,64}` — drop anything
+                    // shorter / non-hex so we don't fail validation.
+                    .filter(|s| {
+                        s.len() >= 4
+                            && s.len() <= 64
+                            && s.chars().all(|c| c.is_ascii_hexdigit())
+                    });
+                let report_path_for_trace = args
+                    .get("task_report_path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    // checker rejects absolute report paths.
+                    .filter(|s| !Path::new(s).is_absolute());
+                let files_for_trace = collect_string_list(args, "changed_files")
+                    .or_else(|| collect_string_list(args, "staged_files"))
+                    .map(|v| {
+                        v.into_iter()
+                            // strip absolute paths — checker rejects them
+                            .filter(|p| !Path::new(p).is_absolute())
+                            .collect::<Vec<_>>()
+                    })
+                    .filter(|v: &Vec<String>| !v.is_empty());
+                let ev = TraceEvent {
+                    task: task_id,
+                    backend,
+                    kind,
+                    summary: format!(
+                        "mission_execution(action=complete) phase={} agent={} completion_id={}",
+                        phase, agent, id
+                    ),
+                    agent: None,
+                    files: files_for_trace,
+                    commit_hash: commit_hash_for_trace,
+                    report_path: report_path_for_trace,
+                };
+                if let Err(w) = append_session_trace_event(&trace_path, &ev) {
+                    response["trace_warning"] = json!(w.to_string());
+                }
+            }
+            None => {
+                response["trace_warning"] = json!(format!(
+                    "session_trace_path supplied but execution_id `{}` is not a valid trace task id and no task_contract_path was provided",
+                    execution_id
+                ));
+            }
+        }
+    }
+
     Ok(ToolResult::json_pretty(&response))
 }
 
@@ -4084,7 +4528,12 @@ fn auto_run_task_run_verifier(
     } else {
         project_root.join(contract_raw)
     };
-    let contract = match super::workstation_dispatch::load_task_contract(&contract_resolved) {
+    // The loaded contract value itself is unused — `read_task_contract_id`
+    // below re-parses the head id from raw text — but the load call is
+    // intentional: it surfaces TASK_CONTRACT_REQUIRED / TASK_CONTRACT_MALFORMED
+    // before the cheaper text-side projector runs, keeping the wave22-02
+    // auto-verifier's error vocabulary aligned with the wave19-08 verifier.
+    let _contract = match super::workstation_dispatch::load_task_contract(&contract_resolved) {
         Ok(c) => c,
         Err(e) => {
             use super::workstation_dispatch::TaskContractParseError as Tce;
@@ -5530,6 +5979,53 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
         .filter(|s| !s.is_empty())
     {
         summary["shared_memory_path"] = json!(smp);
+    }
+
+    // wave23-04 — opt-in session-trace append. Preflight is informational
+    // (no commit happens here) so we record it as `observation` carrying
+    // the staged + ok flag in the summary text. Best-effort: failures
+    // surface as `trace_warning` without flipping the preflight verdict.
+    if let Some(trace_path) = resolve_session_trace_path(args, &root) {
+        match resolve_trace_task_id(args, &root, execution_id) {
+            Some(task_id) => {
+                let ok_flag = summary
+                    .get("ok")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(true);
+                let staged_count = summary
+                    .get("staged_files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let changed_count = summary
+                    .get("changed_files")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                let ev = TraceEvent {
+                    task: task_id,
+                    backend: "claudecode".to_string(),
+                    kind: TraceKind::Observation,
+                    summary: format!(
+                        "mission_execution(action=preflight_commit) execution_id={} ok={} staged={} changed={}",
+                        execution_id, ok_flag, staged_count, changed_count
+                    ),
+                    agent: None,
+                    files: None,
+                    commit_hash: None,
+                    report_path: None,
+                };
+                if let Err(w) = append_session_trace_event(&trace_path, &ev) {
+                    summary["trace_warning"] = json!(w.to_string());
+                }
+            }
+            None => {
+                summary["trace_warning"] = json!(format!(
+                    "session_trace_path supplied but execution_id `{}` is not a valid trace task id and no task_contract_path was provided",
+                    execution_id
+                ));
+            }
+        }
     }
 
     Ok(ToolResult::json_pretty(&summary))
@@ -9083,5 +9579,347 @@ mod tests {
             "wave22-07 v4 invariant: hash mismatch MUST hit the dedicated wave21-03 \
              TASK_REPORT_COMMIT_HASH_MISMATCH code so the verifier vocabulary stays unified"
         );
+    }
+
+    // ── wave23-04 — session-trace append unit tests ───────────────────
+    //
+    // Cover the three append surfaces (open / preflight / complete) plus
+    // the helper invariants the JS-side checker enforces:
+    // schema-valid event shape, seq monotonicity, id format, repo-relative
+    // paths. Failure paths return `TraceWarning` instead of panicking so
+    // the caller can surface `trace_warning` without aborting.
+
+    const TRACE_SEED: &str = "(session-trace wave23\n  :schema \"missiond.session-trace.v1\"\n  :wave wave23\n  :created-at \"2026-04-28T00:00:00+08:00\"\n  :sequence 1\n\n  (trace-event\n    :id wave23-trace-bootstrap-001\n    :seq 1\n    :at \"2026-04-28T00:00:00+08:00\"\n    :task wave23-04-execution-session-trace-integration-v0\n    :backend codex-orchestrator\n    :kind observation\n    :summary \"seed event\"))\n";
+
+    fn write_trace_seed(dir: &Path, name: &str) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, TRACE_SEED.as_bytes()).expect("seed write");
+        path
+    }
+
+    #[test]
+    fn is_valid_trace_id_matches_checker_regex() {
+        assert!(is_valid_trace_id("wave23-04-foo"));
+        assert!(is_valid_trace_id("a"));
+        assert!(is_valid_trace_id("9abc"));
+        assert!(is_valid_trace_id("wave.23_04-x"));
+        assert!(!is_valid_trace_id(""));
+        assert!(!is_valid_trace_id("-leading-dash"));
+        assert!(!is_valid_trace_id("Upper"));
+        assert!(!is_valid_trace_id("has space"));
+        assert!(!is_valid_trace_id("has/slash"));
+    }
+
+    #[test]
+    fn sanitize_trace_backend_falls_back_to_claudecode() {
+        assert_eq!(sanitize_trace_backend(""), "claudecode");
+        assert_eq!(sanitize_trace_backend("   "), "claudecode");
+        assert_eq!(sanitize_trace_backend("ClaudeCode"), "claudecode");
+        assert_eq!(sanitize_trace_backend("claudecode"), "claudecode");
+        assert_eq!(sanitize_trace_backend("agent team"), "agent-team");
+        // leading non-alnum stripped
+        assert_eq!(sanitize_trace_backend("---abc"), "abc");
+        // entirely punctuation / whitespace -> fallback
+        assert_eq!(sanitize_trace_backend("!!!"), "claudecode");
+    }
+
+    #[test]
+    fn render_trace_event_emits_required_and_optional_fields() {
+        let ev = TraceEvent {
+            task: "wave23-04-execution-session-trace-integration-v0".to_string(),
+            backend: "claudecode".to_string(),
+            kind: TraceKind::Complete,
+            summary: "trace round-trip".to_string(),
+            agent: None,
+            files: Some(vec![
+                "crates/foo/src/lib.rs".to_string(),
+                "crates/bar/src/lib.rs".to_string(),
+            ]),
+            commit_hash: Some("cafef00d".to_string()),
+            report_path: Some(".missiond/tasks/wave23/reports/x.report.lisp".to_string()),
+        };
+        let rendered = render_trace_event(42, "2026-04-28T01:00:00Z", &ev);
+        assert!(rendered.contains(":id wave23-04-execution-session-trace-integration-v0-complete-42"));
+        assert!(rendered.contains(":seq 42"));
+        assert!(rendered.contains(":at \"2026-04-28T01:00:00Z\""));
+        assert!(rendered.contains(":task wave23-04-execution-session-trace-integration-v0"));
+        assert!(rendered.contains(":backend claudecode"));
+        assert!(rendered.contains(":kind complete"));
+        assert!(rendered.contains(":summary \"trace round-trip\""));
+        assert!(rendered.contains(":files [\"crates/foo/src/lib.rs\" \"crates/bar/src/lib.rs\"]"));
+        assert!(rendered.contains(":commit_hash \"cafef00d\""));
+        assert!(rendered.contains(":report_path \".missiond/tasks/wave23/reports/x.report.lisp\""));
+    }
+
+    #[test]
+    fn append_session_trace_event_round_trips_minimal_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_trace_seed(dir.path(), "session-trace.lisp");
+        let ev = TraceEvent {
+            task: "wave23-04-execution-session-trace-integration-v0".to_string(),
+            backend: "claudecode".to_string(),
+            kind: TraceKind::Dispatch,
+            summary: "open dispatched".to_string(),
+            agent: None,
+            files: None,
+            commit_hash: None,
+            report_path: None,
+        };
+        append_session_trace_event(&path, &ev).expect("append ok");
+        let after = std::fs::read_to_string(&path).expect("read");
+        // Parser must accept the new file shape.
+        let forms = sexp::parse(&after).expect("parse");
+        assert_eq!(scan_max_trace_seq(&forms), 2);
+        // The new entry's id reflects the seq.
+        assert!(after.contains(
+            ":id wave23-04-execution-session-trace-integration-v0-dispatch-2"
+        ));
+        // Required fields the checker enforces are all present.
+        assert!(after.contains(":kind dispatch"));
+        assert!(after.contains(":backend claudecode"));
+        assert!(after.contains(":task wave23-04-execution-session-trace-integration-v0"));
+    }
+
+    #[test]
+    fn append_session_trace_event_seq_monotonic_across_appends() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_trace_seed(dir.path(), "session-trace.lisp");
+        let task = "wave23-04-execution-session-trace-integration-v0".to_string();
+        let backend = "claudecode".to_string();
+        for (i, kind) in [TraceKind::Dispatch, TraceKind::Observation, TraceKind::Complete]
+            .iter()
+            .enumerate()
+        {
+            let ev = TraceEvent {
+                task: task.clone(),
+                backend: backend.clone(),
+                kind: *kind,
+                summary: format!("event {}", i),
+                agent: None,
+                files: None,
+                commit_hash: None,
+                report_path: None,
+            };
+            append_session_trace_event(&path, &ev).unwrap_or_else(|w| {
+                panic!("append #{} failed: {}", i, w);
+            });
+        }
+        let text = std::fs::read_to_string(&path).expect("read");
+        let forms = sexp::parse(&text).expect("parse");
+        let max = scan_max_trace_seq(&forms);
+        assert_eq!(max, 4, "seed seq=1 + three appends => max seq must be 4");
+        // ids must be unique — seq is in the id so this is implicit, but
+        // exercise the parser to confirm no entries collide.
+        let trace_form = forms
+            .iter()
+            .find(|n| n.head_atom() == Some("session-trace"))
+            .expect("trace form");
+        let mut ids = Vec::new();
+        for child in trace_form.children() {
+            if child.head_atom() != Some("trace-event") {
+                continue;
+            }
+            let kids = child.children();
+            let mut i = 0;
+            while i + 1 < kids.len() {
+                if kids[i].as_atom() == Some(":id") {
+                    if let Some(v) = kids[i + 1].as_atom() {
+                        ids.push(v.to_string());
+                    }
+                }
+                i += 1;
+            }
+        }
+        assert_eq!(ids.len(), 4);
+        let mut sorted = ids.clone();
+        sorted.sort();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 4, "ids must be unique across appends: {:?}", ids);
+    }
+
+    #[test]
+    fn append_session_trace_event_missing_file_returns_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("does-not-exist.lisp");
+        let ev = TraceEvent {
+            task: "wave23-04-execution-session-trace-integration-v0".to_string(),
+            backend: "claudecode".to_string(),
+            kind: TraceKind::Dispatch,
+            summary: "open".to_string(),
+            agent: None,
+            files: None,
+            commit_hash: None,
+            report_path: None,
+        };
+        let warn = append_session_trace_event(&path, &ev)
+            .expect_err("missing file must surface as warning");
+        assert!(matches!(warn, TraceWarning::MissingFile(_)));
+        // Display must mention the path so the writer can correlate.
+        assert!(warn.to_string().contains("does-not-exist.lisp"));
+    }
+
+    #[test]
+    fn append_session_trace_event_malformed_returns_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("session-trace.lisp");
+        // Unbalanced parens — sexp::parse will fail.
+        std::fs::write(&path, b"(session-trace wave23\n  :schema \"x\"\n").unwrap();
+        let ev = TraceEvent {
+            task: "wave23-04-execution-session-trace-integration-v0".to_string(),
+            backend: "claudecode".to_string(),
+            kind: TraceKind::Dispatch,
+            summary: "open".to_string(),
+            agent: None,
+            files: None,
+            commit_hash: None,
+            report_path: None,
+        };
+        let warn = append_session_trace_event(&path, &ev)
+            .expect_err("malformed trace must surface as warning");
+        assert!(matches!(warn, TraceWarning::Malformed(_)));
+    }
+
+    #[test]
+    fn append_session_trace_event_invalid_task_id_returns_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_trace_seed(dir.path(), "session-trace.lisp");
+        let ev = TraceEvent {
+            task: "BadTask Id!".to_string(),
+            backend: "claudecode".to_string(),
+            kind: TraceKind::Dispatch,
+            summary: "open".to_string(),
+            agent: None,
+            files: None,
+            commit_hash: None,
+            report_path: None,
+        };
+        let warn = append_session_trace_event(&path, &ev)
+            .expect_err("invalid task id must surface as warning");
+        assert!(matches!(warn, TraceWarning::InvalidTaskId(_)));
+    }
+
+    #[test]
+    fn append_session_trace_event_invalid_backend_returns_warning() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_trace_seed(dir.path(), "session-trace.lisp");
+        let ev = TraceEvent {
+            task: "wave23-04-execution-session-trace-integration-v0".to_string(),
+            backend: "Has Upper".to_string(),
+            kind: TraceKind::Dispatch,
+            summary: "open".to_string(),
+            agent: None,
+            files: None,
+            commit_hash: None,
+            report_path: None,
+        };
+        let warn = append_session_trace_event(&path, &ev)
+            .expect_err("invalid backend id must surface as warning");
+        assert!(matches!(warn, TraceWarning::InvalidBackend(_)));
+    }
+
+    #[test]
+    fn resolve_session_trace_path_handles_relative_and_absolute() {
+        let root = std::path::PathBuf::from("/tmp/missiond-fake-root");
+        // Relative path joins under the root.
+        let args_rel = json!({"session_trace_path": ".missiond/tasks/wave23/session-trace.lisp"});
+        let resolved = resolve_session_trace_path(&args_rel, &root).expect("relative resolves");
+        assert!(resolved.starts_with(&root));
+        assert!(resolved.ends_with(".missiond/tasks/wave23/session-trace.lisp"));
+        // Absolute path passes through verbatim.
+        let abs = "/var/lib/missiond/trace.lisp";
+        let args_abs = json!({"session_trace_path": abs});
+        let resolved = resolve_session_trace_path(&args_abs, &root).expect("absolute resolves");
+        assert_eq!(resolved, std::path::PathBuf::from(abs));
+        // Empty / blank string -> None (legacy behaviour disabled).
+        let args_empty = json!({"session_trace_path": "   "});
+        assert!(resolve_session_trace_path(&args_empty, &root).is_none());
+        // Absent -> None.
+        let args_none = json!({});
+        assert!(resolve_session_trace_path(&args_none, &root).is_none());
+    }
+
+    #[test]
+    fn append_session_trace_event_preserves_existing_entries() {
+        // Append must NEVER rewrite prior entries — read length, append
+        // after the last (trace-event ...) form, atomic enough to survive
+        // concurrent execution. The seed bootstrap entry must survive the
+        // append unchanged.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = write_trace_seed(dir.path(), "session-trace.lisp");
+        let before = std::fs::read_to_string(&path).expect("read seed");
+        assert!(before.contains(":id wave23-trace-bootstrap-001"));
+        let ev = TraceEvent {
+            task: "wave23-04-execution-session-trace-integration-v0".to_string(),
+            backend: "claudecode".to_string(),
+            kind: TraceKind::Complete,
+            summary: "complete recorded".to_string(),
+            agent: None,
+            files: Some(vec!["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string()]),
+            commit_hash: Some("deadbeef".to_string()),
+            report_path: Some(".missiond/tasks/wave23/reports/wave23-04.report.lisp".to_string()),
+        };
+        append_session_trace_event(&path, &ev).expect("append ok");
+        let after = std::fs::read_to_string(&path).expect("read after");
+        // Bootstrap entry must still be present and untouched.
+        assert!(after.contains(":id wave23-trace-bootstrap-001"));
+        assert!(after.contains(":summary \"seed event\""));
+        // New entry sits at end, before the closing paren of session-trace.
+        assert!(after.contains(":kind complete"));
+        assert!(after.contains(":commit_hash \"deadbeef\""));
+        // The file remains a single well-formed top-level form.
+        let forms = sexp::parse(&after).expect("parse");
+        let trace_forms: Vec<_> = forms
+            .iter()
+            .filter(|f| f.head_atom() == Some("session-trace"))
+            .collect();
+        assert_eq!(trace_forms.len(), 1, "must remain a single session-trace form");
+        let event_count = trace_forms[0]
+            .children()
+            .iter()
+            .filter(|c| c.head_atom() == Some("trace-event"))
+            .count();
+        assert_eq!(event_count, 2, "seed + new = 2 events");
+    }
+
+    #[test]
+    fn resolve_trace_task_id_prefers_task_contract_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Write a minimal task contract whose head id matches the regex.
+        let contract_dir = dir.path().join(".missiond/tasks/wave23");
+        std::fs::create_dir_all(&contract_dir).expect("mkdir");
+        let contract_path = contract_dir.join("wave23-04-test.lisp");
+        std::fs::write(
+            &contract_path,
+            b"(task wave23-04-real-task-id\n  :schema \"missiond.task-contract.v1\")\n",
+        )
+        .expect("write");
+        let args = json!({
+            "task_contract_path": ".missiond/tasks/wave23/wave23-04-test.lisp"
+        });
+        let resolved =
+            resolve_trace_task_id(&args, dir.path(), "fallback-execution-id").expect("resolved");
+        assert_eq!(resolved, "wave23-04-real-task-id");
+    }
+
+    #[test]
+    fn resolve_trace_task_id_falls_back_to_execution_id() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No task_contract_path supplied -> fallback to execution_id.
+        let args = json!({});
+        let resolved = resolve_trace_task_id(
+            &args,
+            dir.path(),
+            "wave23-04-execution-session-trace-integration-v0",
+        )
+        .expect("resolved");
+        assert_eq!(resolved, "wave23-04-execution-session-trace-integration-v0");
+    }
+
+    #[test]
+    fn resolve_trace_task_id_rejects_non_regex_fallback() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Execution id with uppercase / spaces -> no valid id.
+        let args = json!({});
+        assert!(resolve_trace_task_id(&args, dir.path(), "Bad Exec ID").is_none());
     }
 }

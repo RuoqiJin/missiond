@@ -378,6 +378,24 @@ pub fn definitions() -> Vec<ToolDefinition> {
             "[complete] writer-asserted end-to-end verification flag. WAVE 22 / TASK 02 SHIFT: this flag is now a legacy-compat fallback only. The new contract: when the writer supplies all four of `task_contract_path`, `task_report_path`, `shared_memory_path`, and `commit_hash`, daemon runs the in-tree task-run auto-verifier ITSELF (read-only file inspection — no Node spawn, no shell, no mutating git) and computes the verdict on the response as `verifier_status` / `verified_scope_summary` plus `verification_source=\"daemon-auto-verifier\"`. Failure cases reject with structured `TASK_CONTRACT_REQUIRED` / `TASK_CONTRACT_MALFORMED` / `TASK_REPORT_REQUIRED` / `TASK_REPORT_MALFORMED` / `TASK_REPORT_TASK_ID_MISMATCH` / `TASK_REPORT_COMMIT_HASH_MISMATCH` / `SHARED_MEMORY_REQUIRED` / `SHARED_MEMORY_MALFORMED` / `SHARED_MEMORY_NO_COMPLETION_FOR_TASK` codes BEFORE any companion log mutation. When the writer instead sets `verified=true` WITHOUT supplying all four paths, daemon downgrades the assertion to a legacy claim (`verification_source=\"legacy-caller-claim\"`, `verifier_status=\"unknown\"`, `verifier_diagnostics` lists the missing paths) without rejecting — backward-compat for wave21-03 callers. `false` is recorded verbatim (writer explicitly opted out); absent → legacy completion shape with no extra surface. Daemon never spawns Node; the wave21-02 `scripts/verify-task-run.mjs` remains the out-of-process truth.",
         ),
     );
+    // ── wave-23 / task 04 — opt-in session-trace integration ──
+    //
+    // `session_trace_path` lets the writer ask MissionD to append a
+    // structured (trace-event ...) form to the named file when this
+    // action runs. The daemon writes via Rust I/O — no Node spawn, no
+    // shell — and emits `dispatch` for `action=open`, `observation` for
+    // `action=preflight_commit`, and `complete` (or `failure` when the
+    // verifier verdict resolved to "failed") for `action=complete`.
+    // Best-effort: append errors surface on the response as
+    // `trace_warning` but never abort the primary action result.
+    // Output passes `scripts/check-session-trace.mjs` validation.
+    properties.insert(
+        "session_trace_path".into(),
+        prop(
+            "string",
+            "[open|preflight_commit|complete] OPT-IN — relative-or-absolute path to the wave session-trace ledger (.missiond/tasks/<wave>/session-trace.lisp). When supplied, daemon appends a structured (trace-event ...) form recording this action's facts (kind=dispatch on open, observation on preflight_commit, complete or failure on complete). Daemon writes via Rust I/O only — no Node spawn, no shell, no mutating git. Best-effort: file missing / malformed / I/O errors surface on the response as `trace_warning` without aborting the primary action. The trace task id is derived from `task_contract_path` (preferred) or `execution_id` (fallback, must match `^[a-z0-9][a-z0-9._-]*$`). Output passes `scripts/check-session-trace.mjs` validation. Absent → legacy behavior (no trace I/O, no `trace_warning` on response).",
+        ),
+    );
 
     let schema = json!({
         "type": "object",
