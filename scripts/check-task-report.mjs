@@ -39,6 +39,18 @@ const REQUIRED_FIELDS = [
   ':acceptance_results',
 ];
 
+// wave25-02: router-recommendation enums. Must stay in lockstep with the
+// wave24-04 daemon dry-run block (router_policy_dry_run module) and the
+// wave24-03 Node CLI (scripts/recommend-task-backend.mjs).
+const ALLOWED_ROUTER_BACKENDS = new Set([
+  'claudecode',
+  'missiond-llm-router',
+  'deterministic-checker',
+  'patch-worker',
+  'verifier-worker',
+]);
+const ALLOWED_ROUTER_CONFIDENCE = new Set(['high', 'medium', 'low']);
+
 function main() {
   const args = process.argv.slice(2);
   let all = false;
@@ -259,6 +271,183 @@ function validateReport(file, report, diagnostics) {
     diagnostics,
   );
   validateTraceRefs(file, report, props[':trace_refs']?.value, diagnostics);
+
+  // wave25-02: optional router-recommendation fields. Mirror the wave24-04
+  // daemon dry-run block on the report side so completion reports can RECORD
+  // what the dry-run router recommended without that recommendation ever
+  // being treated as authoritative. All seven fields are optional; when
+  // present, each is validated structurally:
+  //   :recommended_backend   — enum (5 backend classes)
+  //   :router_confidence     — enum (high|medium|low)
+  //   :router_policy_path    — repo-relative string
+  //   :router_dry_run_only   — literal atom true (cross-wave invariant)
+  //   :router_applied        — literal atom false (cross-wave invariant)
+  //   :router_reasons        — vector of non-empty strings
+  //   :router_trace_index_path — repo-relative string
+  validateRouterEnumField(
+    file,
+    report,
+    props[':recommended_backend']?.value,
+    ':recommended_backend',
+    ALLOWED_ROUTER_BACKENDS,
+    diagnostics,
+  );
+  validateRouterEnumField(
+    file,
+    report,
+    props[':router_confidence']?.value,
+    ':router_confidence',
+    ALLOWED_ROUTER_CONFIDENCE,
+    diagnostics,
+  );
+  validateRouterRepoRelativePath(
+    file,
+    report,
+    props[':router_policy_path']?.value,
+    ':router_policy_path',
+    diagnostics,
+  );
+  validateRouterRepoRelativePath(
+    file,
+    report,
+    props[':router_trace_index_path']?.value,
+    ':router_trace_index_path',
+    diagnostics,
+  );
+  validateRouterLiteralBool(
+    file,
+    report,
+    props[':router_dry_run_only']?.value,
+    ':router_dry_run_only',
+    'true',
+    diagnostics,
+  );
+  validateRouterLiteralBool(
+    file,
+    report,
+    props[':router_applied']?.value,
+    ':router_applied',
+    'false',
+    diagnostics,
+  );
+  validateRouterReasons(file, report, props[':router_reasons']?.value, diagnostics);
+}
+
+// wave25-02 helper: enum validator for the router fields. The value must be
+// a single string/atom node whose text is one of the allowed members. Empty
+// strings and non-string node types (lists, missing) are rejected.
+function validateRouterEnumField(file, report, node, fieldName, allowed, diagnostics) {
+  if (node == null) return; // optional
+  const text = nodeText(node);
+  if (text == null || text.trim() === '') {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must be a non-empty string when present`,
+    );
+    return;
+  }
+  if (!allowed.has(text)) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must be one of {${[...allowed].join(', ')}}, got "${text}"`,
+    );
+  }
+}
+
+// wave25-02 helper: repo-relative path validator for :router_policy_path and
+// :router_trace_index_path. Mirrors the :files_changed / :trace_refs
+// conventions: rejects absolute paths, leading "~", and "../" traversal.
+function validateRouterRepoRelativePath(file, report, node, fieldName, diagnostics) {
+  if (node == null) return; // optional
+  const text = nodeText(node);
+  if (text == null || text.trim() === '') {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must be a non-empty string when present`,
+    );
+    return;
+  }
+  if (path.isAbsolute(text) || text.startsWith('~')) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must be repo-relative, got "${text}"`,
+    );
+    return;
+  }
+  // Reject any "../" traversal segment to mirror the strict trace-index
+  // path rule (the daemon never reads outside the repo).
+  const segments = text.split(/[\\/]/);
+  if (segments.some((seg) => seg === '..')) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must not contain ".." traversal, got "${text}"`,
+    );
+  }
+}
+
+// wave25-02 helper: STRICT literal-atom validator. Unlike keywordPropBool
+// (which coerces "true"/"yes"/"on" to true), this validator demands the
+// exact bareword atom — so :router_applied "false" (a string) and
+// :router_dry_run_only "yes" (string coercion) are both rejected. The
+// cross-wave invariant requires the exact daemon-emitted boolean shape.
+function validateRouterLiteralBool(file, report, node, fieldName, expectedAtom, diagnostics) {
+  if (node == null) return; // optional
+  if (node.type !== 'atom' || node.value !== expectedAtom) {
+    const got = node.type === 'atom' ? node.value : `<${node.type}>`;
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must be the literal atom ${expectedAtom} (cross-wave invariant), got ${got}`,
+    );
+  }
+}
+
+// wave25-02 helper: :router_reasons must be a vector of non-empty strings.
+// Mirrors the daemon block's reasons array (matched rule ids / fallback
+// notes / rejection messages). Property-list entries are not allowed —
+// the daemon emits plain strings.
+function validateRouterReasons(file, report, node, diagnostics) {
+  if (node == null) return; // optional
+  if (!isList(node)) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      ':router_reasons must be a vector/list when present',
+    );
+    return;
+  }
+  for (const entry of node.children) {
+    const text = nodeText(entry);
+    if (text == null) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':router_reasons entries must be strings',
+      );
+      continue;
+    }
+    if (text.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':router_reasons entries must be non-empty strings',
+      );
+    }
+  }
 }
 
 // Structural validator for prose-only worker-explanation fields. Each entry
@@ -709,6 +898,110 @@ function runFixtures() {
         :trace_refs ["/etc/passwd"])`,
       ok: false,
       expects: /:trace_refs paths must be repo-relative/,
+    },
+    // wave25-02: router-recommendation field fixtures (legacy + 5 negatives).
+    {
+      name: 'wave25-02 legacy report (no router fields) — backward compat',
+      source: `(report wave25-fix-router-legacy
+        :schema "missiond.report-contract.v1"
+        :task_id "wave25-fix-router-legacy"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)])`,
+      ok: true,
+    },
+    {
+      name: 'wave25-02 valid router-recommendation block (all fields)',
+      source: `(report wave25-fix-router-ok
+        :schema "missiond.report-contract.v1"
+        :task_id "wave25-fix-router-ok"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :recommended_backend "claudecode"
+        :router_confidence "medium"
+        :router_policy_path ".missiond/router/router-policy-v1.lisp"
+        :router_dry_run_only true
+        :router_applied false
+        :router_reasons ["matched-rule:claudecode-default" "priority:50"]
+        :router_trace_index_path ".missiond/v2/index/session-trace-index.json")`,
+      ok: true,
+    },
+    {
+      name: 'wave25-02 invalid backend rejected',
+      source: `(report wave25-fix-router-bad-backend
+        :schema "missiond.report-contract.v1"
+        :task_id "wave25-fix-router-bad-backend"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :recommended_backend "gpt-5"
+        :router_confidence "high"
+        :router_policy_path ".missiond/router/router-policy-v1.lisp"
+        :router_dry_run_only true
+        :router_applied false)`,
+      ok: false,
+      expects: /:recommended_backend must be one of/,
+    },
+    {
+      name: 'wave25-02 router_applied=true rejected (cross-wave invariant)',
+      source: `(report wave25-fix-router-applied-true
+        :schema "missiond.report-contract.v1"
+        :task_id "wave25-fix-router-applied-true"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :recommended_backend "claudecode"
+        :router_confidence "medium"
+        :router_policy_path ".missiond/router/router-policy-v1.lisp"
+        :router_dry_run_only true
+        :router_applied true)`,
+      ok: false,
+      expects: /:router_applied must be the literal atom false/,
+    },
+    {
+      name: 'wave25-02 router_dry_run_only=false rejected (cross-wave invariant)',
+      source: `(report wave25-fix-router-dry-run-false
+        :schema "missiond.report-contract.v1"
+        :task_id "wave25-fix-router-dry-run-false"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :recommended_backend "claudecode"
+        :router_confidence "low"
+        :router_policy_path ".missiond/router/router-policy-v1.lisp"
+        :router_dry_run_only false
+        :router_applied false)`,
+      ok: false,
+      expects: /:router_dry_run_only must be the literal atom true/,
+    },
+    {
+      name: 'wave25-02 absolute router_policy_path rejected',
+      source: `(report wave25-fix-router-abs-policy
+        :schema "missiond.report-contract.v1"
+        :task_id "wave25-fix-router-abs-policy"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :recommended_backend "claudecode"
+        :router_confidence "medium"
+        :router_policy_path "/etc/router-policy.lisp"
+        :router_dry_run_only true
+        :router_applied false)`,
+      ok: false,
+      expects: /:router_policy_path must be repo-relative/,
     },
   ];
 

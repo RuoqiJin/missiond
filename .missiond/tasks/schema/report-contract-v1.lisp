@@ -11,7 +11,7 @@
 
 (report-contract-schema missiond.report-contract.v1
   :version "v1"
-  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp)"
+  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp); wave25-02 added optional router-recommendation fields (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) — flat surface, mirrors the wave24-04 daemon dry-run block, additive-only, recommendation is NEVER authoritative"
   :checker "scripts/check-task-report.mjs"
   :run-verifier "scripts/verify-task-run.mjs"
 
@@ -27,7 +27,15 @@
     [:scope_deviations :notes
      ;; wave23-02: worker explanation fields. Prose-only — never the SSOT
      ;; for facts. Facts live in .missiond/tasks/<wave>/session-trace.lisp.
-     :time_sinks :major_decisions :unexpected_work :blockers :trace_refs])
+     :time_sinks :major_decisions :unexpected_work :blockers :trace_refs
+     ;; wave25-02: router-recommendation fields. Mirror the wave24-04 daemon
+     ;; dry-run block shape on the report side. Strictly observational —
+     ;; recording what the dry-run recommended, never overriding the actual
+     ;; backend that ran. Cross-wave invariants enforced structurally:
+     ;; applied MUST be literal false, dry_run_only MUST be literal true.
+     :recommended_backend :router_confidence :router_policy_path
+     :router_dry_run_only :router_applied :router_reasons
+     :router_trace_index_path])
 
   (field-contract
     (:schema "must equal missiond.report-contract.v1")
@@ -60,7 +68,29 @@
       "Each entry is a string OR a property list (:summary <string> [:resolved <bool>] [:trace_ref <string>]).")
     (:trace_refs
       "Optional. Vector of session-trace event ids OR repo-relative paths to trace files."
-      "Used to link prose explanation back to factual telemetry; absolute paths are rejected."))
+      "Used to link prose explanation back to factual telemetry; absolute paths are rejected.")
+    (:recommended_backend
+      "Optional. wave25-02 router-recommendation surface."
+      "String enum — one of: claudecode | missiond-llm-router | deterministic-checker | patch-worker | verifier-worker."
+      "Records the backend the dry-run router recommended; NEVER authoritative.")
+    (:router_confidence
+      "Optional. wave25-02 router-recommendation surface."
+      "String enum — one of: high | medium | low.")
+    (:router_policy_path
+      "Optional. wave25-02 router-recommendation surface."
+      "String; repo-relative path to the router-policy file consulted (no leading '/' or '~', no '..' traversal).")
+    (:router_dry_run_only
+      "Optional. wave25-02 router-recommendation surface."
+      "Cross-wave invariant: MUST be the literal atom true when present (string forms or any other value rejected).")
+    (:router_applied
+      "Optional. wave25-02 router-recommendation surface."
+      "Cross-wave invariant: MUST be the literal atom false when present. Reports declaring true are rejected — runtime replacement is out of scope for wave 25.")
+    (:router_reasons
+      "Optional. wave25-02 router-recommendation surface."
+      "Vector of non-empty strings; mirrors the daemon block's reasons array (matched rule ids / fallback notes / rejection messages).")
+    (:router_trace_index_path
+      "Optional. wave25-02 router-recommendation surface."
+      "String; repo-relative path to the trace-index file used to compute confidence (no leading '/' or '~', no '..' traversal)."))
 
   (status-contract
     :allowed [draft in-progress done blocked rejected]
@@ -84,6 +114,12 @@
        "malformed acceptance entry"
        ":time_sinks / :major_decisions / :unexpected_work / :blockers / :trace_refs not a vector when present"
        "absolute paths inside :trace_refs"
-       "structured worker-explanation entries missing their declared key (:label / :decision / :summary)"]
+       "structured worker-explanation entries missing their declared key (:label / :decision / :summary)"
+       ":recommended_backend not in {claudecode, missiond-llm-router, deterministic-checker, patch-worker, verifier-worker}"
+       ":router_confidence not in {high, medium, low}"
+       ":router_dry_run_only not the literal atom true"
+       ":router_applied not the literal atom false (cross-wave invariant — runtime replacement is rejected)"
+       "absolute or ~/.. paths inside :router_policy_path or :router_trace_index_path"
+       ":router_reasons not a vector of non-empty strings"]
     :non-goal
-      "checker does NOT execute the acceptance commands; it only validates structure. Worker-explanation fields are prose-only — they are validated structurally but their content is never treated as ground truth."))
+      "checker does NOT execute the acceptance commands; it only validates structure. Worker-explanation fields are prose-only — they are validated structurally but their content is never treated as ground truth. Router-recommendation fields are observational — the recorded recommendation is NEVER promoted to authoritative dispatch by the checker."))
