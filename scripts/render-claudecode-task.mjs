@@ -204,7 +204,7 @@ function renderTask(task, sourcePath) {
   if (sharedMemoryPath) renderSharedMemory(lines, sharedMemoryPath);
   if (reportContractPath) renderReportContract(lines, reportContractPath);
   if (sessionTracePath) renderSessionTrace(lines, task, sessionTracePath);
-  if (routerPolicyPath) renderRouterPolicy(lines, task, routerPolicyPath);
+  if (routerPolicyPath) renderRouterPolicy(lines, task, routerPolicyPath, relSource);
   lines.push('## Commit');
   lines.push('');
   if (task.commit.required) {
@@ -270,6 +270,14 @@ function renderReportContract(lines, reportContractPath) {
   lines.push('  - `:unexpected_work` — vector of strings or `(:summary <s> [:trace_ref <s>])` entries.');
   lines.push('  - `:blockers` — vector of strings or `(:summary <s> [:resolved <bool>] [:trace_ref <s>])` entries.');
   lines.push('  - `:trace_refs` — vector of session-trace event ids or repo-relative paths linking back to factual telemetry.');
+  lines.push('- Optional router-recommendation fields (wave25-02 — populate ONLY when you observe a dry-run recommendation; the recommendation is **advisory** and **dry-run only**, never authoritative for dispatch):');
+  lines.push('  - `:recommended_backend` — string enum: `claudecode | missiond-llm-router | deterministic-checker | patch-worker | verifier-worker`.');
+  lines.push('  - `:router_confidence` — string enum: `high | medium | low`.');
+  lines.push('  - `:router_policy_path` — repo-relative path to the policy consulted.');
+  lines.push('  - `:router_dry_run_only` — literal `true` (cross-wave invariant).');
+  lines.push('  - `:router_applied` — literal `false` (cross-wave invariant — runtime replacement is rejected).');
+  lines.push('  - `:router_reasons` — vector of non-empty strings.');
+  lines.push('  - `:router_trace_index_path` — repo-relative path to the trace index that scored confidence (when used).');
   lines.push('');
   lines.push('Validate with:');
   lines.push('');
@@ -310,7 +318,7 @@ function renderSessionTrace(lines, task, sessionTracePath) {
 // ClaudeCode (or any worker) to switch backend. The renderer never invokes
 // scripts/recommend-task-backend.mjs; recommendation remains an opt-in CLI
 // for humans and tooling, not a hidden side-effect of rendering a brief.
-function renderRouterPolicy(lines, task, routerPolicyPath) {
+function renderRouterPolicy(lines, task, routerPolicyPath, relSource) {
   const explicit = task.routerPolicyPath && task.routerPolicyPath === routerPolicyPath;
   lines.push('## Router Policy (advisory)');
   lines.push('');
@@ -328,6 +336,12 @@ function renderRouterPolicy(lines, task, routerPolicyPath) {
   lines.push('');
   lines.push('```bash');
   lines.push(`node scripts/check-router-policy.mjs ${routerPolicyPath}`);
+  lines.push('```');
+  lines.push('');
+  lines.push('You **may** also inspect the dry-run recommendation for THIS task by running the recommendation CLI directly. The renderer never executes it — the command below is rendered text only and stays **advisory** and **dry-run only**; the recommendation does not change dispatch and you MUST NOT switch backend on the strength of its output:');
+  lines.push('');
+  lines.push('```bash');
+  lines.push(`node scripts/recommend-task-backend.mjs --task ${relSource} --policy ${routerPolicyPath} --json`);
   lines.push('```');
   lines.push('');
 }
