@@ -90,6 +90,7 @@ function loadSingleTask(file) {
     requirements: nodeToStringArray(props[':requirements']?.value),
     acceptance: nodeToStringArray(props[':acceptance']?.value),
     report: nodeToStringArray(props[':report']?.value),
+    sessionTraceWritable: keywordPropBool(props, ':session-trace-writable') === true,
     commit: {
       required: keywordPropBool(commitProps, ':required'),
       message: keywordPropText(commitProps, ':message'),
@@ -128,10 +129,24 @@ function resolveReportContractPath(taskId) {
   return path.join('.missiond', 'tasks', wave, 'reports', `${taskId}.report.lisp`);
 }
 
+// wave23-02: auto-detect a sibling session-trace ledger in the same wave dir.
+// The renderer surfaces it without requiring a contract field — its presence
+// on disk is enough. The contract's :session-trace-writable flag (default
+// false) decides whether the rendered brief permits the worker to APPEND
+// trace events; otherwise the worker is told to read-only.
+function resolveSessionTracePath(taskId) {
+  const wave = deriveWaveId(taskId);
+  if (!wave) return null;
+  const rel = path.join('.missiond', 'tasks', wave, 'session-trace.lisp');
+  const abs = path.resolve(process.cwd(), rel);
+  return fs.existsSync(abs) ? rel : null;
+}
+
 function renderTask(task, sourcePath) {
   const relSource = path.relative(process.cwd(), sourcePath);
   const sharedMemoryPath = resolveSharedMemoryPath(task.id);
   const reportContractPath = resolveReportContractPath(task.id);
+  const sessionTracePath = resolveSessionTracePath(task.id);
   const lines = [];
   lines.push(`# ${task.id} — ${task.title}`);
   lines.push('');
@@ -147,6 +162,10 @@ function renderTask(task, sourcePath) {
   if (task.dependsOn.length > 0) lines.push(`- depends_on: ${task.dependsOn.map(code).join(', ')}`);
   if (sharedMemoryPath) lines.push(`- shared_memory: \`${sharedMemoryPath}\``);
   if (reportContractPath) lines.push(`- report_contract: \`${reportContractPath}\``);
+  if (sessionTracePath) {
+    lines.push(`- session_trace: \`${sessionTracePath}\``);
+    lines.push(`- session_trace_writable: \`${task.sessionTraceWritable ? 'true' : 'false'}\``);
+  }
   lines.push('');
   if (task.dispatchStrategy === 'agent-team') {
     lines.push('## Dispatch Note');
@@ -164,6 +183,7 @@ function renderTask(task, sourcePath) {
   renderCommands(lines, 'Acceptance Commands', task.acceptance);
   if (sharedMemoryPath) renderSharedMemory(lines, task, sharedMemoryPath);
   if (reportContractPath) renderReportContract(lines, task, reportContractPath);
+  if (sessionTracePath) renderSessionTrace(lines, task, sessionTracePath);
   lines.push('## Commit');
   lines.push('');
   if (task.commit.required) {
@@ -223,11 +243,39 @@ function renderReportContract(lines, task, reportContractPath) {
   lines.push('- Required fields: `:schema`, `:task_id`, `:status`, `:commit_hash`, `:files_changed`, `:acceptance_results`.');
   lines.push('- `:status` must be one of `draft | in-progress | done | blocked | rejected`; `done` requires non-empty `:acceptance_results`.');
   lines.push('- Free-form prose belongs in `:notes`; structural fields drive automated verification.');
+  lines.push('- Optional worker-explanation fields (prose only — facts live in `session-trace.lisp`):');
+  lines.push('  - `:time_sinks` — vector of strings or `(:label <s> [:duration_ms <int>] [:notes <s>])` entries.');
+  lines.push('  - `:major_decisions` — vector of strings or `(:decision <s> [:rationale <s>] [:trace_ref <s>])` entries.');
+  lines.push('  - `:unexpected_work` — vector of strings or `(:summary <s> [:trace_ref <s>])` entries.');
+  lines.push('  - `:blockers` — vector of strings or `(:summary <s> [:resolved <bool>] [:trace_ref <s>])` entries.');
+  lines.push('  - `:trace_refs` — vector of session-trace event ids or repo-relative paths linking back to factual telemetry.');
   lines.push('');
   lines.push('Validate with:');
   lines.push('');
   lines.push('```bash');
   lines.push(`node scripts/check-task-report.mjs ${reportContractPath}`);
+  lines.push('```');
+  lines.push('');
+}
+
+function renderSessionTrace(lines, task, sessionTracePath) {
+  lines.push('## Session Trace');
+  lines.push('');
+  lines.push(`Factual telemetry ledger: \`${sessionTracePath}\` (schema \`missiond.session-trace.v1\`).`);
+  lines.push('');
+  lines.push('- This file is the single source of truth for what happened: dispatch / start / read / edit / command / test / commit / complete / failure / retry / observation events.');
+  lines.push('- Worker prose explanations belong in the report contract\'s `:time_sinks` / `:major_decisions` / `:unexpected_work` / `:blockers` / `:trace_refs` fields, not here.');
+  if (task.sessionTraceWritable) {
+    lines.push('- This task is `:session-trace-writable true`: you MAY append `(trace-event ...)` entries to the ledger as factual coordination output, in addition to your declared `:write-scope`. Entries must follow the schema (required `:id` `:seq` `:at` `:task` `:backend` `:kind` `:summary`).');
+    lines.push('- Treat the trace ledger as an append-only journal: never edit prior events; record corrections as new events that reference the prior `:id` via `:trace_refs`.');
+  } else {
+    lines.push('- This task is **not** `:session-trace-writable` (default). You MUST NOT write to `session-trace.lisp` — read it for context only. Telemetry for this task is recorded by MissionD or by tasks explicitly opted in via `:session-trace-writable true`.');
+  }
+  lines.push('');
+  lines.push('Validate the ledger after any change with:');
+  lines.push('');
+  lines.push('```bash');
+  lines.push(`node scripts/check-session-trace.mjs ${sessionTracePath}`);
   lines.push('```');
   lines.push('');
 }

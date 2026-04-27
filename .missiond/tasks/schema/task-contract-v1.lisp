@@ -4,7 +4,7 @@
 
 (task-contract-schema missiond.task-contract.v1
   :version "v1"
-  :status "code-aligned — checker + renderer + verifier + scope-guard + hooks-installer scripts implemented; v2 default-on hooks doctor preflight surfaced in renderer + installer (wave22-01)"
+  :status "code-aligned — checker + renderer + verifier + scope-guard + hooks-installer scripts implemented; v2 default-on hooks doctor preflight surfaced in renderer + installer (wave22-01); wave23-02 adds optional :session-trace-writable opt-in for trace-ledger writers and renderer auto-detects sibling session-trace.lisp"
   :checker "scripts/check-task-contract.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :verifier "scripts/verify-task-contract.mjs"
@@ -33,7 +33,9 @@
     (:must-not-touch "vector of repo-relative paths or globs; may be empty but must be explicit")
     (:requirements "ordered vector of human-readable implementation requirements")
     (:acceptance "non-empty vector of shell commands or verifier commands")
-    (:commit "property list: :required boolean + :message + :scope-check"))
+    (:commit "property list: :required boolean + :message + :scope-check")
+    (:session-trace-writable
+      "OPTIONAL boolean (default false). When true, the rendered brief instructs the worker that this task is permitted to append factual (trace-event ...) entries to .missiond/tasks/<wave>/session-trace.lisp as a shared coordination output, in addition to its own :write-scope. Default behaviour: workers MUST NOT write to session-trace.lisp unless this flag is true. The session-trace ledger remains MissionD-owned factual telemetry — it never replaces the worker's per-task :write-scope, and prose explanations still belong in the report contract."))
 
   (commit-contract
     :required-fields [:required :scope-check]
@@ -55,7 +57,8 @@
        "MISSIOND_TASK_CONTRACT=<task.lisp> env-var prefix on the rendered git commit line when :commit :required is true (mirrors the .githooks/pre-commit activation contract)"
        "verify-task-contract command line in the Commit section when :commit :required is true"
        "literal '使用 agent-team提高效率' rendered exactly once in a 'Dispatch Note' section when :dispatch-strategy is agent-team"
-       "default-on hooks-doctor preflight block immediately before the staged-guard / git-add commands when :commit :required is true; emits the read-only `node scripts/check-missiond-hooks.mjs --json` line and the explicit `node scripts/install-missiond-hooks.mjs --install` opt-in line; the renderer never mutates git config and never substitutes for the operator running --install"]
+       "default-on hooks-doctor preflight block immediately before the staged-guard / git-add commands when :commit :required is true; emits the read-only `node scripts/check-missiond-hooks.mjs --json` line and the explicit `node scripts/install-missiond-hooks.mjs --install` opt-in line; the renderer never mutates git config and never substitutes for the operator running --install"
+       "session-trace section (wave23-02): when a sibling .missiond/tasks/<wave>/session-trace.lisp file exists on disk, the renderer emits a 'Session Trace' section pointing at the path and reminding workers that the trace ledger is the canonical fact log (schema missiond.session-trace.v1). When the task contract sets :session-trace-writable true, the section also tells the worker they MAY append (trace-event ...) entries; otherwise the section explicitly states the worker MUST NOT write to session-trace.lisp. Auto-detection only — no contract change required for tasks that merely co-exist with the trace ledger."]
     :backward-compatibility
       ["existing fields (kind/status/owner/dispatch_strategy/depends_on/Goal/Ownership/Must Not Touch/Requirements/Acceptance Commands/Commit/Report) keep their prior wording and ordering"
        "new sections (Dispatch Note, Shared Memory, Report Contract, verify-task-contract command) are additive and conditional"

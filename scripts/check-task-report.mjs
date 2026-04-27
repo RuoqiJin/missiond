@@ -220,6 +220,141 @@ function validateReport(file, report, diagnostics) {
 
   validateAcceptance(file, report, props[':acceptance_results']?.value, status, diagnostics);
   validateScopeDeviations(file, report, props[':scope_deviations']?.value, diagnostics);
+
+  // wave23-02: optional worker-explanation fields. Structural-only checks —
+  // prose content is never treated as ground truth (facts live in
+  // .missiond/tasks/<wave>/session-trace.lisp). Each field is optional; when
+  // present it must be a vector. Each entry is either a plain string OR a
+  // property list whose declared key is present and is a non-empty string.
+  validateExplanationField(
+    file,
+    report,
+    props[':time_sinks']?.value,
+    ':time_sinks',
+    ':label',
+    diagnostics,
+  );
+  validateExplanationField(
+    file,
+    report,
+    props[':major_decisions']?.value,
+    ':major_decisions',
+    ':decision',
+    diagnostics,
+  );
+  validateExplanationField(
+    file,
+    report,
+    props[':unexpected_work']?.value,
+    ':unexpected_work',
+    ':summary',
+    diagnostics,
+  );
+  validateExplanationField(
+    file,
+    report,
+    props[':blockers']?.value,
+    ':blockers',
+    ':summary',
+    diagnostics,
+  );
+  validateTraceRefs(file, report, props[':trace_refs']?.value, diagnostics);
+}
+
+// Structural validator for prose-only worker-explanation fields. Each entry
+// may be a plain string OR a property list. When it is a property list, the
+// caller-supplied requiredKey (e.g. :label, :decision, :summary) must be
+// present and non-empty. Empty strings are rejected because they carry no
+// information and almost always indicate a templating bug.
+function validateExplanationField(file, report, node, fieldName, requiredKey, diagnostics) {
+  if (node == null) return; // optional
+  if (!isList(node)) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must be a vector/list when present`,
+    );
+    return;
+  }
+  for (const entry of node.children) {
+    if (entry.type === 'string' || entry.type === 'atom') {
+      const text = nodeText(entry);
+      if (!text || text.trim() === '') {
+        addError(
+          diagnostics,
+          file,
+          entry.loc ?? node.loc,
+          `${fieldName} string entries must be non-empty`,
+        );
+      }
+      continue;
+    }
+    if (!isList(entry)) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        `${fieldName} entries must be strings or property lists`,
+      );
+      continue;
+    }
+    const ep = readKeywordProps(entry, { start: 0 });
+    const value = keywordPropText(ep, requiredKey);
+    if (!value || value.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        ep[requiredKey]?.value?.loc ?? entry.loc,
+        `${fieldName} property-list entry missing ${requiredKey}`,
+      );
+    }
+  }
+}
+
+// :trace_refs is a vector of strings: either session-trace event ids
+// (kebab-id) or repo-relative paths to trace files. Absolute paths are
+// rejected to mirror :files_changed / :scope_deviations conventions.
+function validateTraceRefs(file, report, node, diagnostics) {
+  if (node == null) return; // optional
+  if (!isList(node)) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      ':trace_refs must be a vector/list when present',
+    );
+    return;
+  }
+  for (const entry of node.children) {
+    const text = nodeText(entry);
+    if (text == null) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':trace_refs entries must be strings (event id or repo-relative path)',
+      );
+      continue;
+    }
+    if (text.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':trace_refs entries must be non-empty strings',
+      );
+      continue;
+    }
+    if (path.isAbsolute(text) || text.startsWith('~')) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        `:trace_refs paths must be repo-relative, got "${text}"`,
+      );
+    }
+  }
 }
 
 function validateAcceptance(file, report, node, status, diagnostics) {
@@ -473,6 +608,107 @@ function runFixtures() {
           [(:path "/tmp/leak" :reason "debug")])`,
       ok: false,
       expects: /scope_deviations :path must be repo-relative/,
+    },
+    {
+      name: 'valid done report with all worker-explanation fields',
+      source: `(report wave23-fix-explain-ok
+        :schema "missiond.report-contract.v1"
+        :task_id "wave23-fix-explain-ok"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)]
+        :time_sinks
+          ["debugging schema parser"
+           (:label "writing fixtures" :duration_ms 900000 :notes "edge cases")]
+        :major_decisions
+          ["chose contract-level opt-in symbol :session-trace-writable"
+           (:decision "validate explanation fields structurally only"
+            :rationale "facts live in session-trace; report stays prose-only"
+            :trace_ref "wave23-trace-bootstrap-001")]
+        :unexpected_work
+          ["had to re-render wave23-01 brief"
+           (:summary "discovered renderer needed sibling-file detection" :trace_ref "wave23-trace-render-001")]
+        :blockers
+          ["none"
+           (:summary "parallel agent claim conflict" :resolved true)]
+        :trace_refs
+          ["wave23-trace-bootstrap-001"
+           ".missiond/tasks/wave23/session-trace.lisp"])`,
+      ok: true,
+    },
+    {
+      name: 'time_sinks not a vector',
+      source: `(report wave23-fix-explain-bad-shape
+        :schema "missiond.report-contract.v1"
+        :task_id "wave23-fix-explain-bad-shape"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :time_sinks "should be a vector")`,
+      ok: false,
+      expects: /:time_sinks must be a vector\/list when present/,
+    },
+    {
+      name: 'major_decisions entry missing :decision key',
+      source: `(report wave23-fix-explain-missing-key
+        :schema "missiond.report-contract.v1"
+        :task_id "wave23-fix-explain-missing-key"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :major_decisions
+          [(:rationale "no decision atom")])`,
+      ok: false,
+      expects: /:major_decisions property-list entry missing :decision/,
+    },
+    {
+      name: 'unexpected_work property list missing :summary',
+      source: `(report wave23-fix-explain-unexpected
+        :schema "missiond.report-contract.v1"
+        :task_id "wave23-fix-explain-unexpected"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :unexpected_work
+          [(:trace_ref "wave23-trace-001")])`,
+      ok: false,
+      expects: /:unexpected_work property-list entry missing :summary/,
+    },
+    {
+      name: 'blockers empty string entry rejected',
+      source: `(report wave23-fix-explain-blockers
+        :schema "missiond.report-contract.v1"
+        :task_id "wave23-fix-explain-blockers"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :blockers [""])`,
+      ok: false,
+      expects: /:blockers string entries must be non-empty/,
+    },
+    {
+      name: 'trace_refs absolute path rejected',
+      source: `(report wave23-fix-trace-refs-abs
+        :schema "missiond.report-contract.v1"
+        :task_id "wave23-fix-trace-refs-abs"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :trace_refs ["/etc/passwd"])`,
+      ok: false,
+      expects: /:trace_refs paths must be repo-relative/,
     },
   ];
 
