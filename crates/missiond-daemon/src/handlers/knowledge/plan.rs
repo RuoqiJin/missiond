@@ -50,17 +50,18 @@ use crate::handlers::knowledge::file_artifacts::{
 };
 use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, build_llm_auto_approve_proposal_system_prompt,
-    build_llm_auto_approve_proposal_user_prompt, enforce_proposal_invariants,
-    evaluate_review_automation, llm_auto_approve_proposal_mode_was_explicit,
-    maybe_emit_review_question_resolved, parse_compile_review_gate,
-    parse_llm_auto_approve_proposal, parse_llm_auto_approve_proposal_mode,
-    parse_plan_node_resume_input, parse_resolution_review_question_id,
-    parse_review_automation_policy, parse_review_gate_policy, parse_review_question_id_struct,
-    parse_review_resolution_input, resolution_wire_string,
+    build_llm_auto_approve_proposal_user_prompt, enforce_apply_gate_preflight,
+    enforce_proposal_invariants, evaluate_llm_approve_apply_gate, evaluate_review_automation,
+    llm_auto_approve_proposal_mode_was_explicit, maybe_emit_review_question_resolved,
+    parse_compile_review_gate, parse_llm_approve_apply_gate_input, parse_llm_auto_approve_proposal,
+    parse_llm_auto_approve_proposal_mode, parse_plan_node_resume_input,
+    parse_resolution_review_question_id, parse_review_automation_policy, parse_review_gate_policy,
+    parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
     review_automation_policy_was_explicit, review_gate_policy_was_explicit,
-    stamp_llm_auto_approve_proposal_payload, stamp_needs_changes_next_step,
-    stamp_resolution_payload, stamp_review_automation_payload,
-    validate_review_resolution_envelope, AutomationStatus, LlmAutoApproveProposalBundle,
+    stamp_llm_approve_apply_gate_payload, stamp_llm_auto_approve_proposal_payload,
+    stamp_needs_changes_next_step, stamp_proposal_hash_payload, stamp_resolution_payload,
+    stamp_review_automation_payload, validate_review_resolution_envelope, AutomationStatus,
+    LlmApproveApplyGateInput, LlmAutoApproveProposalBundle,
     LlmAutoApproveProposalMode, LlmAutoApproveProposalStatus, ParsedReviewQuestionId,
     ResolutionOutcome, ReviewAutomationContext, ReviewAutomationPolicy, ReviewDecision,
     ReviewResolutionInput,
@@ -1109,6 +1110,35 @@ fn attach_plan_proposal_block(payload: &mut Value, bundle: &LlmAutoApprovePropos
     stamp_llm_auto_approve_proposal_payload(payload, bundle);
 }
 
+/// Wave-22 / task 03 :: stamp the proposal hash + apply-gate outcome
+/// onto the plan response payload. Pure / no DB mutation. Mirrors
+/// `attach_directive_apply_gate_block` from directive.rs — see that
+/// helper for the design rationale.
+fn attach_plan_apply_gate_block(
+    payload: &mut Value,
+    bundle: &LlmAutoApproveProposalBundle,
+    input: &LlmApproveApplyGateInput,
+    artifact_id: &uuid::Uuid,
+    version: i32,
+) -> crate::handlers::knowledge::review_gate::LlmApproveApplyGateOutcome {
+    stamp_proposal_hash_payload(
+        payload,
+        bundle,
+        &bundle.action,
+        &artifact_id.to_string(),
+        version,
+    );
+    let outcome = evaluate_llm_approve_apply_gate(
+        input,
+        bundle,
+        &bundle.action,
+        &artifact_id.to_string(),
+        version,
+    );
+    stamp_llm_approve_apply_gate_payload(payload, &outcome);
+    outcome
+}
+
 fn parse_plan_proposer_mode_or_error(
     args: &Value,
 ) -> std::result::Result<Option<LlmAutoApproveProposalMode>, ToolError> {
@@ -1162,6 +1192,15 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         Err(e) => return Ok(ToolResult::structured_error(e)),
     };
 
+    // wave-22 / task 03 :: parse the apply-gate input up-front. Strict
+    // shape errors fail-fast as INVALID_PARAM BEFORE any DB read.
+    let apply_gate_input = match parse_llm_approve_apply_gate_input(args) {
+        Ok(i) => i,
+        Err((code, msg)) => {
+            return Ok(ToolResult::structured_error(ToolError::new(code, msg)))
+        }
+    };
+
     // wave-15 :: explicit resolution bridge. When the caller supplies
     // `review_question_id` + `review_decision` we validate the envelope
     // BEFORE mutating plan state. `Rejected` / `NeedsChanges` skip the
@@ -1191,6 +1230,7 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
                 qid,
                 automation_policy,
                 proposer_mode,
+                apply_gate_input,
             )
             .await;
         }
@@ -1204,8 +1244,91 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
             automation_policy,
             automation_explicit,
             proposer_mode,
+            apply_gate_input,
         )
         .await;
+    }
+
+    // wave-22 / task 03 :: when caller opted into the apply gate, the
+    // legacy unconditional `plan_update_status(Approved)` is INVERTED —
+    // the DB transition is gated on the LLM proposal passing all 6
+    // strict gates. See directive.rs::action_approve for the full
+    // design rationale (mirrored here for the plan surface).
+    if apply_gate_input.apply {
+        // We need the current plan version so the proposal hash is
+        // computed against the head. Source it from the store.
+        let plan = match state
+            .store
+            .plan_get(id)
+            .await
+            .map_err(|e| anyhow!("DB error: {}", e))?
+        {
+            Some(p) => p,
+            None => {
+                return Ok(ToolResult::structured_error(ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("plan `{}` not found for apply gate", id),
+                )))
+            }
+        };
+        let resolved_mode = proposer_mode.unwrap_or(LlmAutoApproveProposalMode::Off);
+        let summary = plan_proposer_summary("legacy_quiet", "manual", false, None);
+        let bundle = request_plan_auto_approve_proposal(
+            state,
+            resolved_mode,
+            "approve",
+            &id,
+            plan.version,
+            &summary,
+            Some(&plan.sexp_text),
+        )
+        .await;
+        if let Err((code, msg)) = enforce_apply_gate_preflight(
+            &apply_gate_input,
+            &bundle,
+            "approve",
+            &id.to_string(),
+            plan.version,
+        ) {
+            return Ok(ToolResult::structured_error(ToolError::new(code, msg)));
+        }
+        let mut payload = json!({
+            "plan_id": id,
+            "version": plan.version,
+        });
+        attach_plan_proposal_block(&mut payload, &bundle);
+        let outcome = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            plan.version,
+        );
+        if outcome.status.should_apply() {
+            state
+                .store
+                .plan_update_status(id, PlanStatus::Approved)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            payload["status"] = json!("approved");
+            payload["resolution_source"] = json!("llm_approve_apply_gate");
+            let qid = parse_resolution_review_question_id(args);
+            maybe_emit_review_question_resolved(
+                &mut payload,
+                &state.bus,
+                qid.as_deref(),
+                "approved",
+                None,
+            )
+            .await;
+        } else {
+            payload["status"] = json!("llm_auto_apply_skipped");
+            payload["next_step"] = json!(format!(
+                "apply gate did not authorise (status={}); supply explicit `review_decision=approved` to flip the plan manually OR re-run with a matching proposal_hash + caller_approved=true",
+                outcome.status.as_str()
+            ));
+        }
+        return Ok(ToolResult::json_pretty(&payload));
     }
 
     state
@@ -1242,6 +1365,10 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: stamp the proposal hash so callers can
+        // echo it back via `proposal_hash` under
+        // `apply_llm_auto_approve=true` on a follow-up call.
+        stamp_proposal_hash_payload(&mut payload, &bundle, "approve", &id.to_string(), 0);
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1261,6 +1388,7 @@ async fn action_approve_with_resolution(
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1352,6 +1480,12 @@ async fn action_approve_with_resolution(
     // wave-21 / task 06 :: propose-only Sonnet pass for the explicit-
     // resolution path. Caller decision ALWAYS wins; proposal is
     // informational only.
+    //
+    // wave-22 / task 03 :: apply gate is INFORMATIONAL ONLY here. The
+    // explicit `review_decision` already drove (or refused) the DB
+    // transition above. We do NOT fail-fast on hash mismatch — that
+    // would lie about state. The gate block surfaces the verdict for
+    // audit symmetry.
     if let Some(mode) = proposer_mode {
         let summary = plan_proposer_summary(
             &automation_status_label,
@@ -1370,6 +1504,13 @@ async fn action_approve_with_resolution(
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            current_version,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1385,6 +1526,7 @@ async fn plan_action_approve_with_policy_only(
     qid: String,
     automation_policy: ReviewAutomationPolicy,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -1475,6 +1617,9 @@ async fn plan_action_approve_with_policy_only(
 
     // wave-21 / task 06 :: propose-only Sonnet pass on the policy-only
     // approve path.
+    //
+    // wave-22 / task 03 :: apply gate is INFORMATIONAL ONLY on this
+    // path — the deterministic policy already drove the DB transition.
     if let Some(mode) = proposer_mode {
         let summary = plan_proposer_summary(
             outcome.status.as_str(),
@@ -1493,6 +1638,13 @@ async fn plan_action_approve_with_policy_only(
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            current_version,
+        );
     }
 
     Ok(ToolResult::json_pretty(&payload))
@@ -1519,6 +1671,17 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         Err(e) => return Ok(ToolResult::structured_error(e)),
     };
 
+    // wave-22 / task 03 :: parse the apply-gate input up-front. mark is
+    // a general state-transition action; the gate only authorises
+    // mark-to-approved (mirrors the wave-18 policy posture). For other
+    // target statuses the gate falls through to a SKIP outcome.
+    let apply_gate_input = match parse_llm_approve_apply_gate_input(args) {
+        Ok(i) => i,
+        Err((code, msg)) => {
+            return Ok(ToolResult::structured_error(ToolError::new(code, msg)))
+        }
+    };
+
     // wave-15 :: explicit resolution bridge — same pattern as approve.
     // wave-18 / task 07 :: same MissingDecision-under-policy promotion.
     // mark is the most general state transition (caller picks the target
@@ -1543,6 +1706,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
                 qid,
                 automation_policy,
                 proposer_mode,
+                apply_gate_input,
             )
             .await;
         }
@@ -1557,6 +1721,7 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
             automation_policy,
             automation_explicit,
             proposer_mode,
+            apply_gate_input,
         )
         .await;
     }
@@ -1581,6 +1746,11 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
     .await;
     // wave-21 / task 06 :: propose-only Sonnet pass for the legacy mark
     // path. The requested target is surfaced to the prompt for context.
+    //
+    // wave-22 / task 03 :: apply gate is informational on this path —
+    // the legacy mark already ran the requested transition above. For
+    // a future wave that wants to gate mark-to-approved on the LLM
+    // proposal, the gate block is the audit anchor.
     if let Some(mode) = proposer_mode {
         let summary = plan_proposer_summary(
             "legacy_quiet",
@@ -1599,6 +1769,13 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            0,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1618,6 +1795,7 @@ async fn action_mark_with_resolution(
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1727,6 +1905,15 @@ async fn action_mark_with_resolution(
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: gate is informational — caller decision
+        // already drove the transition above.
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            current_version,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1742,6 +1929,7 @@ async fn plan_action_mark_with_policy_only(
     qid: String,
     automation_policy: ReviewAutomationPolicy,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -1854,6 +2042,15 @@ async fn plan_action_mark_with_policy_only(
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: gate is informational on policy path —
+        // deterministic policy already drove the transition.
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            current_version,
+        );
     }
 
     Ok(ToolResult::json_pretty(&payload))
@@ -1872,6 +2069,17 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
     let proposer_mode = match parse_plan_proposer_mode_or_error(args) {
         Ok(m) => m,
         Err(e) => return Ok(ToolResult::structured_error(e)),
+    };
+
+    // wave-22 / task 03 :: parse the apply-gate input up-front.
+    // supersede is destructive (invariant I2) — the gate ALWAYS skips
+    // with `SkippedDestructiveAction`. Strict shape errors still
+    // surface as INVALID_PARAM here.
+    let apply_gate_input = match parse_llm_approve_apply_gate_input(args) {
+        Ok(i) => i,
+        Err((code, msg)) => {
+            return Ok(ToolResult::structured_error(ToolError::new(code, msg)))
+        }
     };
 
     // wave-15 :: explicit resolution bridge. Supersede pivots two plan
@@ -1901,6 +2109,7 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
                 qid,
                 automation_policy,
                 proposer_mode,
+                apply_gate_input,
             )
             .await;
         }
@@ -1915,6 +2124,7 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
             automation_policy,
             automation_explicit,
             proposer_mode,
+            apply_gate_input,
         )
         .await;
     }
@@ -1956,6 +2166,15 @@ async fn action_supersede(state: &AppState, args: &Value) -> Result<ToolResult> 
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: supersede is destructive — gate ALWAYS
+        // surfaces `skipped_destructive_action` (invariant I2).
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &old_id,
+            0,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1975,6 +2194,7 @@ async fn action_supersede_with_resolution(
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -2084,6 +2304,15 @@ async fn action_supersede_with_resolution(
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: supersede is destructive — gate ALWAYS
+        // surfaces `skipped_destructive_action` (invariant I2).
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &old_id,
+            current_version,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -2098,6 +2327,7 @@ async fn plan_action_supersede_with_policy_only(
     qid: String,
     automation_policy: ReviewAutomationPolicy,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -2182,6 +2412,15 @@ async fn plan_action_supersede_with_policy_only(
         )
         .await;
         attach_plan_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: supersede is destructive — gate ALWAYS
+        // surfaces `skipped_destructive_action` (invariant I2).
+        let _ = attach_plan_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &old_id,
+            current_version,
+        );
     }
 
     Ok(ToolResult::json_pretty(&payload))

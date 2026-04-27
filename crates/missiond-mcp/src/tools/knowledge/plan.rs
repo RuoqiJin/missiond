@@ -358,8 +358,37 @@ fn build_properties() -> Value {
     //       never from the model.
     p.insert("auto_approve_mode".into(), prop_enum(
         "string",
-        "[approve | mark | supersede] (wave-21 / task 06 LLM auto-approve proposal v0) opt-in propose-only Sonnet-assisted review-action recommendation. ORTHOGONAL to the wave-18 / 07 `review_automation_policy` (deterministic safety inspector) AND the wave-20 / 08 `auto_answer_policy` (listener-side auto-answer); the three knobs co-exist on the response when supplied. `off` (default) preserves pre-wave-21 byte-shape — no LLM call, no proposal block. `sonnet_suggest` asks Sonnet to PROPOSE a structured review decision (decision + confidence + evidence + non_goal_check + destructive_check + requires_human) and surfaces it under `llm_auto_approve_proposal*` on the response. Hard invariants in v0: (I1) proposal NEVER carries `decision=rejected` — `rejected` from the model is demoted to `needs_changes` with a warning. (I2) destructive actions (supersede | archive | remove) ALWAYS short-circuit to `destructive_blocked` regardless of model output — proposal value preserved for audit but `requires_human=true` and `applied=false` are pinned. (I3) `applied=false` pinned on EVERY proposal regardless of confidence — v0 NEVER auto-applies. (I4) Sonnet unavailable → `llm_unavailable` status with no fallback proposal — invariant against silent degradation to deterministic. (I5) `destructive_check` ALWAYS sourced from the deterministic `is_destructive_review_action` outcome, never from the model. The proposal NEVER drives a DB transition or bus emission; caller still has to supply explicit `review_decision` to flip the plan. For `mark`, the requested target status is folded into the prompt context but the proposal stays informational regardless of target. For `supersede`, the proposer ALWAYS surfaces `destructive_blocked` (per I2).",
+        "[approve | mark | supersede] (wave-21 / task 06 LLM auto-approve proposal v0) opt-in propose-only Sonnet-assisted review-action recommendation. ORTHOGONAL to the wave-18 / 07 `review_automation_policy` (deterministic safety inspector) AND the wave-20 / 08 `auto_answer_policy` (listener-side auto-answer); the three knobs co-exist on the response when supplied. `off` (default) preserves pre-wave-21 byte-shape — no LLM call, no proposal block. `sonnet_suggest` asks Sonnet to PROPOSE a structured review decision (decision + confidence + evidence + non_goal_check + destructive_check + requires_human) and surfaces it under `llm_auto_approve_proposal*` on the response. Hard invariants in v0: (I1) proposal NEVER carries `decision=rejected` — `rejected` from the model is demoted to `needs_changes` with a warning. (I2) destructive actions (supersede | archive | remove) ALWAYS short-circuit to `destructive_blocked` regardless of model output — proposal value preserved for audit but `requires_human=true` and `applied=false` are pinned. (I3) `applied=false` pinned on EVERY proposal regardless of confidence — v0 NEVER auto-applies. (I4) Sonnet unavailable → `llm_unavailable` status with no fallback proposal — invariant against silent degradation to deterministic. (I5) `destructive_check` ALWAYS sourced from the deterministic `is_destructive_review_action` outcome, never from the model. The proposal NEVER drives a DB transition or bus emission; caller still has to supply explicit `review_decision` to flip the plan. For `mark`, the requested target status is folded into the prompt context but the proposal stays informational regardless of target. For `supersede`, the proposer ALWAYS surfaces `destructive_blocked` (per I2). wave-22 / task 03 LLM auto-approve apply gate v1: the proposal hash callers echo back via `proposal_hash` under `apply_llm_auto_approve=true` is surfaced on the response under `llm_auto_approve_proposal_hash` (32 hex chars, deterministic over action + artifact + version + decision + confidence + destructive prefix).",
         &["off", "sonnet_suggest"],
+    ));
+
+    // ── wave-22 / task 03 — LLM auto-approve apply gate v1 (3 args) ────
+    //
+    // The wave-21 / task 06 propose-only Sonnet pass surfaces a
+    // recommendation; this gate is the SEPARATE explicit caller-side
+    // opt-in (referenced in invariant I3) that promotes a proposal to
+    // authority. Default off keeps wave-21 byte-shape exactly. The gate
+    // applies (drives the existing `plan_update_status(Approved)`
+    // transition) ONLY when ALL 6 strict gate conditions pass:
+    //   G1 `apply_llm_auto_approve=true`
+    //   G2 `proposal_hash` matches the bundle's deterministic hash
+    //   G3 `caller_approved=true`
+    //   G4 action non-destructive (deterministic)
+    //   G5 proposal.decision == approved (invariant I1)
+    //   G6 proposal.confidence == high
+    p.insert("apply_llm_auto_approve".into(), prop(
+        "boolean",
+        "[approve | mark | supersede] (wave-22 / task 03 LLM auto-approve apply gate v1) opt-in to PROMOTE the wave-21 / task 06 propose-only Sonnet recommendation into the actual review transition. Default `false` preserves wave-21 / task 06 byte-shape exactly. When `true` AND every gate condition passes, the handler runs the existing `plan_update_status(Approved)` AS IF the caller had supplied an explicit `review_decision=approved` — but ONLY when ALL of the following hold: (G1) this flag is `true`, (G2) `proposal_hash` is supplied AND matches the bundle's deterministic hash (mismatch / missing ⇒ structured error `APPLY_GATE_PROPOSAL_HASH_MISMATCH` / `APPLY_GATE_MISSING_PROPOSAL_HASH` BEFORE any DB mutation per the contract), (G3) `caller_approved=true` (a SECOND opt-in confirming human intent — two flags so accidental config flips cannot fire the gate), (G4) the action is non-destructive per `is_destructive_review_action` (supersede / archive / remove ALWAYS skip with `skipped_destructive_action`, invariant I2), (G5) the proposal's `decision == approved` (never `needs_changes` — invariant I1), (G6) the proposal's `confidence == high` (medium / low SKIP). Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected with `APPLY_GATE_INVALID_PARAM`. Wave-21 / task 06 invariants STAY pinned — the proposal block itself still carries `applied=false` + `requires_human=true` (those are properties of the propose surface); the apply gate publishes its own SEPARATE `llm_approve_apply_gate` block with `apply_status` (applied | skipped_*), `applied_decision`, `proposal_hash_status`, `safety_rule_results[]`. When the caller ALSO supplies an explicit `review_decision` on the same call, the human decision wins (the gate is informational only on that path — no DB mutation driven by the gate). Conservative posture: when `apply_llm_auto_approve=true` AND no decision is supplied AND the gate skips, the plan STAYS at its current status (status=`llm_auto_apply_skipped`) — caller must re-run with a matching hash + caller_approved or supply an explicit `review_decision` to flip the artifact. For `mark` the gate only authorises mark-to-approved; other targets fall through to the deterministic SKIP outcome. For `supersede` the gate ALWAYS skips (destructive).",
+    ));
+
+    p.insert("proposal_hash".into(), prop(
+        "string",
+        "[approve | mark | supersede apply_llm_auto_approve=true] (wave-22 / task 03) deterministic hash echo of the wave-21 / task 06 proposal you intend to apply. Required when `apply_llm_auto_approve=true`. The handler computes the same hash from the freshly-built bundle (SHA-256 over action + artifact id + version + decision wire + confidence wire + destructive_check prefix, truncated to 32 hex chars) and refuses to mutate state on mismatch. Surfaced on the propose-only response under `llm_auto_approve_proposal_hash` so callers can capture-and-replay without re-deriving. Case-insensitive. Mismatch ⇒ `APPLY_GATE_PROPOSAL_HASH_MISMATCH`; absent under `apply_llm_auto_approve=true` ⇒ `APPLY_GATE_MISSING_PROPOSAL_HASH`. Both errors fail-fast BEFORE any DB mutation per the contract.",
+    ));
+
+    p.insert("caller_approved".into(), prop(
+        "boolean",
+        "[approve | mark | supersede apply_llm_auto_approve=true] (wave-22 / task 03) the SECOND opt-in flag confirming the caller's human intent to let the LLM proposal drive the review transition. Required-truthy under `apply_llm_auto_approve=true`. Splitting the opt-in across two flags makes the gate fire only when BOTH are present — accidental config-file flips cannot promote a proposal to authority. Default `false`. Strict shape: bool only; non-bool rejected with `APPLY_GATE_INVALID_PARAM`.",
     ));
 
     // ── wave-17 / task 01 — PLAN-DAG paused-node resume hook ────────────
@@ -1005,8 +1034,18 @@ pub fn definitions() -> Vec<ToolDefinition> {
          destructive_check 始终源自 is_destructive_review_action 不是模型 (invariant I5); \
          caller `review_decision` 永远胜过 proposal — 这层只是 informational hint 给 dashboard / UI; \
          与 wave-18 / 07 review_automation_policy + wave-20 / 08 auto_answer_policy ORTHOGONAL, 三者可同时存在共栖响应。\
+         wave-22 / task 03 LLM auto-approve apply gate v1: approve / mark / supersede 加 apply_llm_auto_approve=true (bool only; \
+         字符串 \"true\" 拒) + proposal_hash (echo `llm_auto_approve_proposal_hash`, 32 hex, 案 + decision + confidence + destructive 前缀 \
+         的 SHA-256 截 32) + caller_approved=true (双重显式 opt-in) 即把 wave-21/06 propose-only 提升为 review 转移授权; \
+         6 道严格 gate 全过才 apply (G1 apply 标志 G2 hash 匹 G3 caller_approved=true G4 非 destructive G5 decision==approved \
+         G6 confidence==high); 任一 fail 即 SKIP, 状态钉 `llm_auto_apply_skipped` 不 mutate plan; supersede 永远 destructive 永远 skip (I2 不破); \
+         hash mismatch / missing 在 mutate 前 fail-fast `APPLY_GATE_PROPOSAL_HASH_MISMATCH` / `APPLY_GATE_MISSING_PROPOSAL_HASH`; \
+         wave-21/06 5 invariants 完全 PINNED — proposal block 仍然 applied=false / requires_human=true (那是 propose 表面的属性), \
+         apply gate 单独发 `llm_approve_apply_gate` 块 {apply_status, applied_decision, proposal_hash_status, computed_proposal_hash, \
+         supplied_proposal_hash, caller_approved, safety_rule_results[]}; caller 同时给 review_decision 时人决定胜 (apply gate 退化为 informational)。\
          Lisp 源 (forward ref): .missiond/tasks/schema/task-contract-v1.lisp + intent-tools.lisp :: implemented-surface \
-         mission_plan :: :task-contract-emitter (wave-19/12 backfill) + :execute-contract :apply-inferred-fields-gate (wave-21/05 backfill)。",
+         mission_plan :: :task-contract-emitter (wave-19/12 backfill) + :execute-contract :apply-inferred-fields-gate (wave-21/05 backfill) + \
+         :execute-contract :apply-llm-auto-approve-gate (wave-22/03 backfill)。",
         schema,
     )]
 }

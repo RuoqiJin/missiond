@@ -31,16 +31,17 @@ use crate::handlers::knowledge::file_artifacts::{
 };
 use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, build_llm_auto_approve_proposal_system_prompt,
-    build_llm_auto_approve_proposal_user_prompt, enforce_proposal_invariants,
-    evaluate_review_automation, llm_auto_approve_proposal_mode_was_explicit,
-    maybe_emit_review_question_resolved, parse_compile_review_gate,
-    parse_llm_auto_approve_proposal, parse_llm_auto_approve_proposal_mode,
-    parse_resolution_review_question_id, parse_review_automation_policy, parse_review_gate_policy,
-    parse_review_question_id_struct, parse_review_resolution_input, resolution_wire_string,
-    review_automation_policy_was_explicit, review_gate_policy_was_explicit,
-    stamp_llm_auto_approve_proposal_payload, stamp_needs_changes_next_step,
-    stamp_resolution_payload, stamp_review_automation_payload,
-    validate_review_resolution_envelope, AutomationStatus, LlmAutoApproveProposalBundle,
+    build_llm_auto_approve_proposal_user_prompt, enforce_apply_gate_preflight,
+    enforce_proposal_invariants, evaluate_llm_approve_apply_gate, evaluate_review_automation,
+    llm_auto_approve_proposal_mode_was_explicit, maybe_emit_review_question_resolved,
+    parse_compile_review_gate, parse_llm_approve_apply_gate_input, parse_llm_auto_approve_proposal,
+    parse_llm_auto_approve_proposal_mode, parse_resolution_review_question_id,
+    parse_review_automation_policy, parse_review_gate_policy, parse_review_question_id_struct,
+    parse_review_resolution_input, resolution_wire_string, review_automation_policy_was_explicit,
+    review_gate_policy_was_explicit, stamp_llm_approve_apply_gate_payload,
+    stamp_llm_auto_approve_proposal_payload, stamp_needs_changes_next_step, stamp_proposal_hash_payload,
+    stamp_resolution_payload, stamp_review_automation_payload, validate_review_resolution_envelope,
+    AutomationStatus, LlmApproveApplyGateInput, LlmAutoApproveProposalBundle,
     LlmAutoApproveProposalMode, LlmAutoApproveProposalStatus, ParsedReviewQuestionId,
     ResolutionOutcome, ReviewAutomationContext, ReviewAutomationPolicy, ReviewDecision,
     ReviewResolutionInput,
@@ -998,6 +999,31 @@ fn attach_directive_proposal_block(
     stamp_llm_auto_approve_proposal_payload(payload, bundle);
 }
 
+/// Wave-22 / task 03 :: stamp the proposal hash + apply-gate outcome
+/// onto the response payload. Pure / no DB mutation. The hash is
+/// always stamped when the bundle carries a proposal (so callers can
+/// echo it back via `proposal_hash` under `apply_llm_auto_approve=true`
+/// without re-deriving it themselves). The apply-gate block is only
+/// stamped when the gate was requested (preserving wave-21 byte-shape).
+fn attach_directive_apply_gate_block(
+    payload: &mut Value,
+    bundle: &LlmAutoApproveProposalBundle,
+    input: &LlmApproveApplyGateInput,
+    artifact_id: &uuid::Uuid,
+    version: i32,
+) -> crate::handlers::knowledge::review_gate::LlmApproveApplyGateOutcome {
+    stamp_proposal_hash_payload(payload, bundle, &bundle.action, &artifact_id.to_string(), version);
+    let outcome = evaluate_llm_approve_apply_gate(
+        input,
+        bundle,
+        &bundle.action,
+        &artifact_id.to_string(),
+        version,
+    );
+    stamp_llm_approve_apply_gate_payload(payload, &outcome);
+    outcome
+}
+
 /// Read + validate the wave-21 / task 06 mode arg. Returns
 /// `Ok(None)` when the caller did not opt in (mode=off OR field absent),
 /// `Ok(Some(mode))` when sonnet_suggest is requested. Strict-enum: typo
@@ -1054,6 +1080,15 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         Err(e) => return Ok(ToolResult::structured_error(e)),
     };
 
+    // wave-22 / task 03 :: parse the apply-gate input up-front. Strict
+    // shape errors fail-fast as INVALID_PARAM BEFORE any DB read.
+    let apply_gate_input = match parse_llm_approve_apply_gate_input(args) {
+        Ok(i) => i,
+        Err((code, msg)) => {
+            return Ok(ToolResult::structured_error(ToolError::new(code, msg)))
+        }
+    };
+
     // wave-15 :: explicit resolution bridge. When the caller supplies
     // `review_question_id` + `review_decision` we validate the envelope
     // BEFORE mutating state. `Rejected` / `NeedsChanges` skip the DB
@@ -1089,6 +1124,7 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
                 qid,
                 automation_policy,
                 proposer_mode,
+                apply_gate_input,
             )
             .await;
         }
@@ -1103,8 +1139,98 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
             automation_policy,
             automation_explicit,
             proposer_mode,
+            apply_gate_input,
         )
         .await;
+    }
+
+    // wave-22 / task 03 :: when the caller opted into the apply gate,
+    // we INVERT the legacy unconditional approve. The DB transition is
+    // gated on the LLM proposal passing all 6 strict gates. If the gate
+    // skips for any reason, we leave the directive untouched and surface
+    // the structured `apply_gate` block explaining why. Caller did not
+    // supply a `review_decision` here (that branch was handled above);
+    // they delegated authority to the LLM gate.
+    //
+    // Hash mismatch / missing fail-fast as structured errors BEFORE any
+    // DB read or mutation per the contract. The proposer mode MUST also
+    // be supplied (otherwise no proposal exists to apply) — but we let
+    // the gate produce `skipped_no_proposal` rather than reject up-front
+    // so the audit trail explains the misconfiguration loudly.
+    if apply_gate_input.apply {
+        // Build the proposal first so the preflight has something to
+        // hash against. We honour the caller-supplied proposer_mode
+        // (typically `sonnet_suggest`); when the caller flipped the
+        // apply gate but forgot to supply the proposer mode, we still
+        // route through `request_directive_auto_approve_proposal` with
+        // `Off` so the bundle reports `not_invoked` and the gate
+        // surfaces `skipped_no_proposal`.
+        let resolved_mode = proposer_mode.unwrap_or(LlmAutoApproveProposalMode::Off);
+        let summary = directive_proposer_summary("legacy_quiet", "manual", false);
+        let bundle = request_directive_auto_approve_proposal(
+            state,
+            resolved_mode,
+            "approve",
+            &id,
+            version,
+            &summary,
+            None,
+        )
+        .await;
+        // Strict pre-flight (hash check). Structured-error path leaves
+        // the directive UNMUTATED (per contract: "On mismatch or missing
+        // proposal hash, return structured error and do not mutate
+        // directive/plan/review state.").
+        if let Err((code, msg)) = enforce_apply_gate_preflight(
+            &apply_gate_input,
+            &bundle,
+            "approve",
+            &id.to_string(),
+            version,
+        ) {
+            return Ok(ToolResult::structured_error(ToolError::new(code, msg)));
+        }
+        let mut payload = json!({
+            "directive_id": id,
+            "version": version,
+        });
+        // Always stamp the proposal block + hash for audit.
+        attach_directive_proposal_block(&mut payload, &bundle);
+        let outcome = attach_directive_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            version,
+        );
+        if outcome.status.should_apply() {
+            state
+                .store
+                .directive_approve(id, version)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            payload["status"] = json!("approved");
+            payload["resolution_source"] = json!("llm_approve_apply_gate");
+            let qid = parse_resolution_review_question_id(args);
+            maybe_emit_review_question_resolved(
+                &mut payload,
+                &state.bus,
+                qid.as_deref(),
+                "approved",
+                None,
+            )
+            .await;
+        } else {
+            // Gate skipped — directive STAYS at its current status. We
+            // surface the next_step so the caller can either tighten
+            // the gate args or fall back to an explicit decision.
+            payload["status"] = json!("llm_auto_apply_skipped");
+            payload["next_step"] = json!(format!(
+                "apply gate did not authorise (status={}); supply explicit `review_decision=approved` to flip the directive manually OR re-run with a matching proposal_hash + caller_approved=true",
+                outcome.status.as_str()
+            ));
+        }
+        return Ok(ToolResult::json_pretty(&payload));
     }
 
     state
@@ -1145,6 +1271,14 @@ async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
         )
         .await;
         attach_directive_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: stamp the proposal hash so callers can
+        // echo it back via `proposal_hash` under
+        // `apply_llm_auto_approve=true` on a follow-up call without
+        // re-deriving it. Apply gate is NOT requested here (we already
+        // confirmed that above), so `attach_directive_apply_gate_block`
+        // would be a no-op for the gate block — but the hash stamp is
+        // still useful so we call it inline.
+        stamp_proposal_hash_payload(&mut payload, &bundle, "approve", &id.to_string(), version);
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1166,6 +1300,7 @@ async fn action_approve_with_resolution(
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     // Parse the deterministic id envelope.
     let parsed = match parse_review_question_id_struct(&input.question_id) {
@@ -1284,6 +1419,14 @@ async fn action_approve_with_resolution(
     // resolution path. Caller-supplied `review_decision` ALWAYS wins
     // (the policy NEVER overrides explicit decisions) — this proposal
     // is informational only. Skipped under `mode=off` (default).
+    //
+    // wave-22 / task 03 :: when caller ALSO opted into the apply gate,
+    // we stamp the gate block as INFORMATIONAL ONLY on this path. The
+    // explicit `review_decision` already drove the DB transition above
+    // (or refused to). The gate's verdict is recorded for audit
+    // symmetry but NEVER overrides the human decision. The pre-flight
+    // hash check still fail-fasts so the caller can never fool the
+    // dashboard with a stale hash echo.
     if let Some(mode) = proposer_mode {
         let summary = directive_proposer_summary(
             &automation_status_label,
@@ -1301,6 +1444,21 @@ async fn action_approve_with_resolution(
         )
         .await;
         attach_directive_proposal_block(&mut payload, &bundle);
+        // Stamp the gate block as INFORMATIONAL on this path. Caller-
+        // supplied explicit `review_decision` is the authority that
+        // already drove (or refused) the DB transition above, so we do
+        // NOT fail-fast on hash mismatch here — that would lie about
+        // state. Instead the gate surfaces `proposal_hash_status` =
+        // mismatch / not_supplied so the caller sees the inconsistency
+        // without us pretending to have rolled back. The hash itself
+        // is still stamped so a follow-up call can echo it back.
+        let _ = attach_directive_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            version,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1321,6 +1479,7 @@ async fn action_approve_with_policy_only(
     qid: String,
     automation_policy: ReviewAutomationPolicy,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     // Parse + validate the envelope before invoking the policy. Same
     // rejection set as the wave-15 explicit path so a malformed id can
@@ -1439,6 +1598,15 @@ async fn action_approve_with_policy_only(
     // path. The deterministic policy outcome (auto_safe / suggest /
     // blocked) is informational input to the prompt; the proposal NEVER
     // overrides the deterministic decision — both surfaces co-exist.
+    //
+    // wave-22 / task 03 :: when caller ALSO opted into the apply gate
+    // on the policy-only path, the gate is INFORMATIONAL ONLY here. The
+    // deterministic policy already drove (or refused) the DB transition
+    // above. Caller-supplied apply_llm_auto_approve+caller_approved
+    // does NOT override the deterministic safety inspector — they are
+    // independent guards and BOTH must agree to mutate. The gate's
+    // verdict is recorded for audit symmetry; the policy's verdict
+    // already determined whether we ran `directive_approve`.
     if let Some(mode) = proposer_mode {
         let summary = directive_proposer_summary(
             outcome.status.as_str(),
@@ -1456,6 +1624,13 @@ async fn action_approve_with_policy_only(
         )
         .await;
         attach_directive_proposal_block(&mut payload, &bundle);
+        let _ = attach_directive_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            version,
+        );
     }
 
     Ok(ToolResult::json_pretty(&payload))
@@ -1473,6 +1648,17 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
     let proposer_mode = match parse_proposer_mode_or_error(args) {
         Ok(m) => m,
         Err(e) => return Ok(ToolResult::structured_error(e)),
+    };
+
+    // wave-22 / task 03 :: parse the apply-gate input up-front. archive
+    // is destructive — the gate will ALWAYS skip with
+    // `SkippedDestructiveAction` (invariant I2) — but we still parse
+    // strict shape so caller typos surface as INVALID_PARAM here too.
+    let apply_gate_input = match parse_llm_approve_apply_gate_input(args) {
+        Ok(i) => i,
+        Err((code, msg)) => {
+            return Ok(ToolResult::structured_error(ToolError::new(code, msg)))
+        }
     };
 
     // wave-15 :: explicit resolution bridge — see `action_approve` above.
@@ -1501,6 +1687,7 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
                 qid,
                 automation_policy,
                 proposer_mode,
+                apply_gate_input,
             )
             .await;
         }
@@ -1515,6 +1702,7 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
             automation_policy,
             automation_explicit,
             proposer_mode,
+            apply_gate_input,
         )
         .await;
     }
@@ -1553,6 +1741,16 @@ async fn action_archive(state: &AppState, args: &Value) -> Result<ToolResult> {
         )
         .await;
         attach_directive_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: archive is destructive — gate ALWAYS
+        // surfaces `skipped_destructive_action` (invariant I2). Stamp
+        // the gate block + hash for audit symmetry.
+        let _ = attach_directive_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            version,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1573,6 +1771,7 @@ async fn action_archive_with_resolution(
     automation_policy: ReviewAutomationPolicy,
     automation_explicit: bool,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&input.question_id) {
         Ok(p) => p,
@@ -1697,6 +1896,17 @@ async fn action_archive_with_resolution(
         )
         .await;
         attach_directive_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: archive is destructive — gate ALWAYS
+        // surfaces `skipped_destructive_action` regardless of any other
+        // gate field. Caller-supplied `review_decision` is the
+        // authority; the gate is informational on this path.
+        let _ = attach_directive_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            version,
+        );
     }
     Ok(ToolResult::json_pretty(&payload))
 }
@@ -1718,6 +1928,7 @@ async fn action_archive_with_policy_only(
     qid: String,
     automation_policy: ReviewAutomationPolicy,
     proposer_mode: Option<LlmAutoApproveProposalMode>,
+    apply_gate_input: LlmApproveApplyGateInput,
 ) -> Result<ToolResult> {
     let parsed = match parse_review_question_id_struct(&qid) {
         Ok(p) => p,
@@ -1820,6 +2031,15 @@ async fn action_archive_with_policy_only(
         )
         .await;
         attach_directive_proposal_block(&mut payload, &bundle);
+        // wave-22 / task 03 :: archive is destructive — gate ALWAYS
+        // surfaces `skipped_destructive_action` (invariant I2).
+        let _ = attach_directive_apply_gate_block(
+            &mut payload,
+            &bundle,
+            &apply_gate_input,
+            &id,
+            version,
+        );
     }
 
     Ok(ToolResult::json_pretty(&payload))
