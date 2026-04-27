@@ -714,7 +714,7 @@ function runFixtures(json = false) {
       name: 'edge: policy with :runtime-replacement true is rejected before matching',
       category: 'edge-runtime-replacement',
       run: () => {
-        const task = parseTaskFromString(taskDocs());
+        parseTaskFromString(taskDocs());
         const policy = parsePolicyFromString(badRuntimeReplacementPolicy());
         // The recommend() function trusts its inputs; the CLI guard runs
         // BEFORE calling recommend(). Simulate the guard here so the fixture
