@@ -13300,4 +13300,174 @@ mod tests {
         assert_eq!(preview["target"], "mission_task_delegate");
         assert_eq!(preview["apply_inferred_fields"], true);
     }
+
+    // ── Wave 21 / Task 08 — machine-contract autonomous loop smoke ──
+    //
+    // Pure-helper smoke proving the wave-19/20/21-07 distill chain
+    // receipts compose cleanly on a synthesised plan-execute payload
+    // without any AppState. The chain block is the wave21-07 SSOT for
+    // the auto-sonnet apply-gate's status taxonomy and we re-pin every
+    // wave21-07 invariant here in one assert block so a future refactor
+    // that drops a status / breaks the wire shape lands an explicit
+    // failure on the autonomous-loop smoke.
+    //
+    // Invariants pinned (cross-wave):
+    //   * I1-07  default-off byte-shape — no chain block surfaces
+    //            unless the gate explicitly fires.
+    //   * I3-07  the gate REUSES the wave-20 trigger outcomes — when the
+    //            trigger short-circuits to skip, the chain block surfaces
+    //            `triggered=false` + the dedicated skip status (NOT the
+    //            applied status).
+    //   * I7-07  wave-19 / wave-20 blocks remain unchanged — the chain
+    //            block is purely additive.
+
+    /// Wave21-08 smoke: when the wave21-07 auto-apply gate skips because
+    /// the plan never reached `succeeded`, the chain block surfaces
+    /// `triggered=false` + `status=skipped_plan_not_succeeded` and
+    /// suppresses every applied-side optional (evidence_path /
+    /// chain_index_in_plan / distill_result). This is the I3-07
+    /// invariant proof: the gate REUSES the trigger outcomes — it
+    /// never relaxes them by faking an evidence path.
+    #[test]
+    fn smoke_wave21_distill_chain_block_pins_skip_status_when_trigger_short_circuits() {
+        let block = build_distill_chain_block(
+            // triggered=false because the wave-20 trigger short-circuited
+            false,
+            CHAIN_STATUS_SKIPPED_PLAN_NOT_SUCCEEDED,
+            "chain:auto:wave21-08-smoke",
+            "derived_from_plan_id",
+            "record_only",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
+        assert_eq!(block["triggered"], false);
+        assert_eq!(block["status"], "skipped_plan_not_succeeded");
+        assert_eq!(block["chain_id"], "chain:auto:wave21-08-smoke");
+        assert_eq!(block["chain_id_source"], "derived_from_plan_id");
+        assert_eq!(block["chain_mode"], "record_only");
+        // I3-07: the skip path MUST NOT fabricate evidence / index /
+        // distill_result fields — those are reserved for the applied
+        // path. A future refactor that always emits them would defeat
+        // the gate's "REUSE the trigger outcomes" contract.
+        for key in [
+            "evidence_path",
+            "chain_index_in_plan",
+            "distill_result",
+            "warning",
+            "evidence_error",
+            "chain_name",
+        ] {
+            assert!(
+                block.get(key).is_none(),
+                "wave21-08 smoke: skip-path chain block MUST NOT fabricate `{}`",
+                key
+            );
+        }
+    }
+
+    /// Wave21-08 smoke: when the wave-20 trigger fires AND the inner
+    /// distill recorded a downstream warning, the chain block surfaces
+    /// BOTH the inner result AND the warning string under the dedicated
+    /// `recorded_with_distill_warning` status. This preserves observers'
+    /// ability to detect partial success without scraping the full
+    /// payload — wave21-07 invariant I5 (Sonnet failure preserves the
+    /// inner payload + surfaces a typed status) flows through this
+    /// block on the wave-20 distill side.
+    #[test]
+    fn smoke_wave21_distill_chain_block_surfaces_inner_distill_warning() {
+        let block = build_distill_chain_block(
+            true,
+            CHAIN_STATUS_RECORDED_DISTILL_WARNING,
+            "chain:wave21-08",
+            "explicit_arg",
+            "sonnet",
+            Some("wave21-08-loop"),
+            Some(2),
+            Some(json!({"error": "sonnet quota exhausted"})),
+            Some("distill chain workflow call returned an error; plan finalization preserved"),
+            Some("/tmp/missiond-wave21-08/.evidence.json"),
+            None,
+        );
+        assert_eq!(block["status"], "recorded_with_distill_warning");
+        assert_eq!(block["chain_name"], "wave21-08-loop");
+        assert_eq!(block["chain_index_in_plan"], 2);
+        assert_eq!(block["distill_result"]["error"], "sonnet quota exhausted");
+        assert!(block["warning"]
+            .as_str()
+            .unwrap_or("")
+            .contains("plan finalization preserved"));
+        // wave21-07 invariant I7: the chain block is additive — every
+        // optional surfaces verbatim when supplied, never silently
+        // dropped.
+        assert_eq!(
+            block["evidence_path"],
+            "/tmp/missiond-wave21-08/.evidence.json"
+        );
+        assert!(block.get("evidence_error").is_none());
+    }
+
+    /// Wave21-08 smoke: machine-contract dispatch response build pins the
+    /// wave-20/04 SSOT invariant (`task_contract_source_path` surfaces
+    /// the resolved on-disk path) AND carries the wave-19/07 source-
+    /// contract preamble in the brief preview. Pinning these here closes
+    /// the workstation-side autonomous loop on a single canonical
+    /// fixture without spinning AppState.
+    #[test]
+    fn smoke_wave21_machine_dispatch_response_pins_source_path_invariant() {
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "agent-team");
+        let contract_path =
+            "/tmp/missiond-wave21-08-smoke/.missiond/tasks/wave21/wave21-08-dispatch.lisp";
+        let outcome = wd::WorkstationDispatchOutcome::Dispatched {
+            task_brief: format!(
+                "## Source contract\n- task-contract v1: `{}`\n## Objective\nship the wave21-08 deterministic loop smoke\n",
+                contract_path
+            ),
+            task_brief_path: None,
+            task_contract_source_path: Some(contract_path.to_string()),
+            evidence_path: Some("/tmp/missiond-wave21-08-smoke/.evidence.json".to_string()),
+            evidence_error: None,
+            inner_payload: json!({"task_id": "btk-wave21-08-smoke"}),
+        };
+        let decision = fixture_decision(wd::WorkstationDispatchSource::ExplicitArg);
+        let result = build_workstation_dispatch_response(
+            &plan,
+            &resolved,
+            outcome,
+            &decision,
+            &TaskContractEmissionRecord::off(),
+            DispatchContractMode::Machine,
+        );
+        let v = parse_payload(&result);
+        // wave-20/04 SSOT invariant: the response MUST surface the
+        // resolved contract path so observers can prove the Lisp drove
+        // the brief.
+        assert_eq!(v["status"], "executing");
+        assert_eq!(v["workstation_dispatch_status"], "dispatched");
+        assert_eq!(v["dispatch_contract_mode"], "machine");
+        assert_eq!(v["task_contract_source_path"], contract_path);
+        // wave-19/07 invariant: the brief preview MUST carry the source-
+        // contract preamble naming the same on-disk path.
+        let preview = v["task_brief_preview"].as_str().unwrap_or("");
+        assert!(
+            preview.contains("## Source contract"),
+            "wave21-08 brief MUST carry the wave-19/07 source-contract preamble"
+        );
+        assert!(
+            preview.contains(contract_path),
+            "wave21-08 brief preamble MUST name the same on-disk path the response surfaced"
+        );
+        // wave-21/04 invariant: machine-mode dispatch is the autonomous
+        // loop SSOT — observers MUST see the dispatch_contract_mode
+        // marker so they can route on it.
+        assert_eq!(
+            v["dispatch_contract_mode"], "machine",
+            "wave21-08 invariant: machine-mode marker MUST be load-bearing"
+        );
+    }
 }

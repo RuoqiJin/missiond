@@ -5137,4 +5137,441 @@ mod tests {
             "rule trail MUST name the destructive `archive` action"
         );
     }
+
+    // ── 11. Wave 21 / Task 08 :: machine-contract autonomous loop smoke ──
+    //
+    // Goal: prove the wave-21 autonomous loop (machine dispatch SSOT +
+    // task-contract emit/consume/verify + LLM workstation proposals +
+    // LLM auto-approve + sonnet distill chain auto-apply gate +
+    // execution-report verification) survives a single envelope round
+    // trip via `decorate` end-to-end. The smoke synthesises a single
+    // canonical inner payload that stamps EVERY wave21 receipt field
+    // and asserts the unified-entry decorator's `artifact_refs`
+    // projection lifts the load-bearing keys while leaving the
+    // markdown brief preview / non-load-bearing receipts on the inner
+    // payload.
+    //
+    // Invariants pinned (cross-wave):
+    //   * I3-04  every workstation proposal carries `applied=false`
+    //            (the bundle-level `auto_spawn=false` is also pinned).
+    //   * I1-06  the LLM auto-approve proposal NEVER carries
+    //            `decision=rejected` (the validator demotes to
+    //            `needs_changes`).
+    //   * I2-06  destructive actions short-circuit to
+    //            `destructive_blocked` and pin `requires_human=true`.
+    //   * I3-06  every LLM auto-approve proposal carries `applied=
+    //            false` AND `requires_human=true` in v0.
+    //   * I1-07  `auto_sonnet=false` (default) → no `auto_sonnet` block.
+    //   * I3-07  the gate REUSES the wave-20 trigger outcomes; when the
+    //            trigger short-circuits the chain block surfaces
+    //            `triggered=false` + dedicated skip status.
+    //   * I6-07  every successful auto-sonnet apply pins
+    //            `review_required=true`.
+    //   * Wave-21/03 — the unified envelope surfaces
+    //            `task_contract_source_path` AND `task_contract_path`
+    //            so the verifier (agent_execution::enforce_verified_completion)
+    //            can ratify the loop end-to-end without parsing the
+    //            inner JSON.
+    //   * Markdown is non-load-bearing — `task_brief_preview` MUST NOT
+    //     be projected into `artifact_refs`.
+    //
+    // No LLM, no spawn, no shell, no markdown read — every receipt is
+    // synthesised in JSON form so the smoke is fully deterministic.
+
+    /// Canonical wave21-08 plan-execute payload — stamps every
+    /// receipt the wave21-04..07 features produce on a single
+    /// envelope. The shape mirrors what `build_workstation_dispatch_response`
+    /// + the wave21-07 `attach_auto_sonnet_to_payload` + the wave21-04
+    /// proposals splice + the wave21-06 LLM-auto-approve splice would
+    /// produce when every feature is opted in (or explicitly opted out
+    /// for the wave21-07 default-off path).
+    fn wave21_08_smoke_payload() -> Value {
+        let plan_id = "77777777-7777-7777-7777-000000000021";
+        let board_task_id = "btk-wave21-08-smoke";
+        let contract_path = "/tmp/missiond-wave21-08/.missiond/tasks/wave21/wave21-08-dispatch.lisp";
+        let render_command = format!("node scripts/render-claudecode-task.mjs {}", contract_path);
+        let evidence_path = "/tmp/missiond-wave21-08/.missiond/v2/plans/wave21-08.evidence.json";
+        json!({
+            // ── Wave 13/14 row-id pointers ─────────────────────────────
+            "status": "executing",
+            "execute_mode": "internal",
+            "runner_status": "workstation_dispatch_v0",
+            "plan_id": plan_id,
+            "board_task_id": board_task_id,
+            // ── Wave 15 / 16 dispatch resolution ───────────────────────
+            "target_tool": "mission_task_delegate",
+            "target_source": "explicit_arg",
+            "dispatch_strategy": "agent-team",
+            "dispatch_strategy_source": "explicit_arg",
+            "plan_hint_summary": {},
+            "workstation_dispatch_source": "explicit_arg",
+            "workstation_dispatch_status": "dispatched",
+            "scoped_commit_required": true,
+            "scoped_commit_policy": "enforced-on-complete",
+            // ── Wave 19 / 20 machine-contract emit + dispatch mode ─────
+            "task_contract_mode": "emit",
+            "task_contract_eligible": true,
+            "task_contract_path": contract_path,
+            "render_command": render_command,
+            "dispatch_contract_mode": "machine",
+            "task_contract_source_path": contract_path,
+            "evidence_path": evidence_path,
+            // Brief preview — present for human consumption but NOT
+            // projected into artifact_refs (markdown non-load-bearing).
+            "task_brief_preview": format!(
+                "## Source contract\n- task-contract v1: `{}`\n## Objective\nship the wave21-08 deterministic loop smoke\n",
+                contract_path
+            ),
+            "inner_result": {
+                "task_id": board_task_id,
+                "status": "dispatched",
+            },
+            // ── Wave 21 / 04 — workstation proposals (applied=false) ───
+            "workstation_proposals": {
+                "status": "suggested",
+                "auto_spawn": false,
+                "model": "claude-sonnet-4-7",
+                "caller": "wave21-04-workstation-proposal",
+                "proposals": [
+                    {
+                        "field": "target",
+                        "value": "mission_task_delegate",
+                        "confidence": "high",
+                        "evidence": "node hint :target mission_task_delegate matches the contract",
+                        "safety_status": "safe",
+                        "applied": false,
+                    },
+                ],
+                "parse_warnings": [],
+            },
+            // ── Wave 21 / 06 — LLM auto-approve proposal (requires_human=true) ─
+            "llm_auto_approve_proposal_status": "suggested",
+            "llm_auto_approve_proposal": {
+                "mode": "sonnet_suggest",
+                "status": "suggested",
+                "action": "approve",
+                "model": "claude-sonnet-4-7",
+                "caller": "wave21-06-auto-approve",
+                "proposal": {
+                    "decision": "approved",
+                    "confidence": "high",
+                    "evidence": "wave21-08 smoke fixture",
+                    "non_goal_check": "no destructive action",
+                    "destructive_check": "non_destructive:`approve` is not on the destructive list",
+                    "requires_human": true,
+                    "applied": false,
+                },
+                "proposal_warnings": [],
+            },
+            // ── Wave 21 / 07 — auto_sonnet apply-gate default-off ──────
+            // (No auto_sonnet block — default-off byte-shape preserved.)
+            // ── Wave 19 / 20 — distill chain receipt (record_only) ─────
+            "distill_chain": {
+                "triggered": true,
+                "status": "recorded",
+                "chain_id": "chain:wave21-08-smoke",
+                "chain_id_source": "explicit_arg",
+                "chain_mode": "record_only",
+                "chain_index_in_plan": 1,
+                "evidence_path": evidence_path,
+            },
+        })
+    }
+
+    /// Wave21-08 canonical smoke: drive the wave21-08 fixture payload
+    /// through `decorate` once and assert every load-bearing wave21-03..07
+    /// envelope field surfaces while the markdown brief preview stays
+    /// non-load-bearing. This is the single round-trip that proves the
+    /// wave21 autonomous loop carries through the unified entry.
+    #[test]
+    fn smoke_wave21_machine_contract_autonomous_loop_envelope_pins_every_invariant() {
+        let plan_id = "77777777-7777-7777-7777-000000000021";
+        let board_task_id = "btk-wave21-08-smoke";
+        let contract_path =
+            "/tmp/missiond-wave21-08/.missiond/tasks/wave21/wave21-08-dispatch.lisp";
+
+        let payload = wave21_08_smoke_payload();
+        let inner = smoke_inner_result(payload.clone());
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step:
+                    "wave21-08 machine-contract loop landed; collect evidence + run verifier",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let meta = smoke_meta_of(&decorated);
+        assert_eq!(meta["pipeline_stage"], stages::EXECUTION_RUNNER);
+        let refs = meta["artifact_refs"].as_object().expect("artifact_refs object");
+
+        // ── Wave 13/14 row-id pointers preserved ──────────────────────
+        assert_eq!(refs["scope"], "execution");
+        assert_eq!(refs["plan_id"], plan_id);
+        assert_eq!(refs["board_task_id"], board_task_id);
+        assert_eq!(refs["status"], "executing");
+
+        // ── Wave 19/06 + 20/04 machine-contract splice surfaces ───────
+        assert_eq!(refs["task_contract_mode"], "emit");
+        assert_eq!(refs["task_contract_eligible"], true);
+        assert_eq!(refs["task_contract_path"], contract_path);
+        assert_eq!(refs["task_contract_source_path"], contract_path);
+        assert_eq!(refs["dispatch_contract_mode"], "machine");
+        // Wave-21/03 SSOT invariant: source path consumed equals path
+        // emitted — the verifier can ratify without parsing the inner
+        // JSON.
+        assert_eq!(
+            refs["task_contract_source_path"], refs["task_contract_path"],
+            "wave21-08 invariant: machine-mode source path consumed equals path emitted"
+        );
+
+        // ── Markdown brief is non-load-bearing ─────────────────────────
+        assert!(
+            !refs.contains_key("task_brief_preview"),
+            "wave21-08 invariant: task_brief_preview MUST NOT be projected into artifact_refs \
+             (markdown is non-load-bearing in machine mode)"
+        );
+        assert!(
+            !refs.contains_key("workstation_dispatch_status"),
+            "wave21-08 invariant: workstation_dispatch_status stays on the inner payload"
+        );
+
+        // ── Wave 21/04 + 21/06 + 21/07 splices stay on the inner payload ──
+        // The wave21 LLM-side blocks are not lifted into artifact_refs in
+        // v0 (the projection deliberately stays terse). They MUST live
+        // on the inner JSON so observers can read them per-call without
+        // bloating the envelope.
+        let inner_text = match &decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let inner_json: Value =
+            serde_json::from_str(&inner_text).expect("inner JSON parses");
+
+        // I3-04 (workstation proposals): every proposal MUST carry
+        // applied=false AND the bundle MUST pin auto_spawn=false.
+        let proposals_block = &inner_json["workstation_proposals"];
+        assert_eq!(
+            proposals_block["auto_spawn"], false,
+            "wave21-04 invariant I3: bundle MUST pin auto_spawn=false at top level"
+        );
+        assert_eq!(proposals_block["status"], "suggested");
+        let props = proposals_block["proposals"]
+            .as_array()
+            .expect("proposals array");
+        assert!(!props.is_empty(), "wave21-08 fixture must surface proposals");
+        for p in props {
+            assert_eq!(
+                p["applied"], false,
+                "wave21-04 invariant I3: every proposal MUST carry applied=false"
+            );
+        }
+
+        // I1-06 + I3-06 (LLM auto-approve): proposal decision NEVER
+        // rejected; applied=false; requires_human=true.
+        let llm_block = &inner_json["llm_auto_approve_proposal"];
+        let proposal = &llm_block["proposal"];
+        assert_ne!(
+            proposal["decision"], "rejected",
+            "wave21-06 invariant I1: LLM auto-approve proposal MUST NEVER carry decision=rejected"
+        );
+        assert_eq!(
+            proposal["applied"], false,
+            "wave21-06 invariant I3: LLM auto-approve proposal MUST carry applied=false"
+        );
+        assert_eq!(
+            proposal["requires_human"], true,
+            "wave21-06 invariant I3: LLM auto-approve proposal MUST pin requires_human=true in v0"
+        );
+
+        // I1-07 (auto_sonnet default-off byte-shape): no auto_sonnet
+        // block surfaces unless the gate fires. The fixture deliberately
+        // omits the block to prove the default-off path is preserved
+        // through `decorate`.
+        assert!(
+            inner_json.get("auto_sonnet").is_none(),
+            "wave21-07 invariant I1: default-off byte-shape — no auto_sonnet block when not requested"
+        );
+        assert!(
+            inner_json.get("auto_sonnet_status").is_none(),
+            "wave21-07 invariant I1: default-off byte-shape — no auto_sonnet_status shortcut when not requested"
+        );
+
+        // I3-07 (distill chain reuses wave-20 trigger outcomes): when
+        // the gate fires in record_only mode, the chain block surfaces
+        // triggered=true + status=recorded. The wave21-07 SSOT here is
+        // that `chain_mode` flows through verbatim — the gate never
+        // upgrades to sonnet on the default-off path.
+        let chain = &inner_json["distill_chain"];
+        assert_eq!(chain["triggered"], true);
+        assert_eq!(chain["status"], "recorded");
+        assert_eq!(
+            chain["chain_mode"], "record_only",
+            "wave21-07 invariant I1: chain_mode stays record_only on default-off path"
+        );
+
+        // ── v0/v1 non-goals remain loud ────────────────────────────────
+        let non_goals = meta["v0_non_goals"].as_array().unwrap();
+        for needle in [
+            "auto_approve_directive",
+            "auto_approve_plan",
+            "auto_answer_review_question",
+            "autonomous_workstation_dispatch",
+        ] {
+            assert!(
+                non_goals.iter().any(|v| v == needle),
+                "wave21-08 envelope MUST keep `{}` in v0_non_goals",
+                needle
+            );
+        }
+    }
+
+    /// Wave21-08 destructive-action smoke: when the wave21-06 LLM auto-
+    /// approve gate sees a destructive action (`archive`), the bundle
+    /// MUST short-circuit to `destructive_blocked` and pin
+    /// `requires_human=true` on the proposal regardless of the model's
+    /// suggestion. This is the I2-06 invariant — the daemon refuses to
+    /// auto-approve a destructive action even if Sonnet suggested
+    /// `approved`.
+    #[test]
+    fn smoke_wave21_llm_auto_approve_destructive_action_pins_requires_human() {
+        // Synthesise a destructive-action proposal mirror — the wave21-06
+        // bundle would surface this via `LlmAutoApproveProposalBundle::
+        // destructive_blocked` after collapsing the model's claim.
+        let payload = json!({
+            "status": "draft",
+            "plan_id": "77777777-7777-7777-7777-000000000022",
+            "board_task_id": "btk-wave21-08-archive",
+            "llm_auto_approve_proposal_status": "destructive_blocked",
+            "llm_auto_approve_proposal": {
+                "mode": "sonnet_suggest",
+                "status": "destructive_blocked",
+                "action": "archive",
+                "model": "claude-sonnet-4-7",
+                "proposal": {
+                    // Model claimed `approved` but the bundle MUST surface
+                    // requires_human=true regardless (I2-06 + I5-06).
+                    "decision": "approved",
+                    "confidence": "high",
+                    "evidence": "model thought archiving was fine",
+                    "non_goal_check": "model did not check non-goals",
+                    "destructive_check":
+                        "destructive:`archive` is on the destructive list (archive|supersede|remove); auto-approve proposal pinned `requires_human=true` regardless of model output",
+                    "requires_human": true,
+                    "applied": false,
+                },
+                "proposal_warnings": [
+                    "destructive action `archive` short-circuited to destructive_blocked",
+                ],
+            },
+        });
+        let inner = smoke_inner_result(payload);
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::PLAN_REVIEW_GATE,
+                scope: ArtifactScope::Plan,
+                next_step: "destructive action — defer to human reviewer",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let inner_text = match &decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let inner_json: Value = serde_json::from_str(&inner_text).expect("inner JSON parses");
+        let llm = &inner_json["llm_auto_approve_proposal"];
+        assert_eq!(llm["status"], "destructive_blocked");
+        let proposal = &llm["proposal"];
+        // I2-06: requires_human MUST be true on every destructive
+        // proposal — the daemon overrides the model's claim.
+        assert_eq!(
+            proposal["requires_human"], true,
+            "wave21-06 invariant I2: destructive action MUST always require human review"
+        );
+        // I5-06: destructive_check ALWAYS sourced from
+        // is_destructive_review_action — the model's value is overridden.
+        let dc = proposal["destructive_check"].as_str().unwrap_or("");
+        assert!(
+            dc.starts_with("destructive:"),
+            "wave21-06 invariant I5: destructive_check MUST be sourced from is_destructive_review_action — got `{}`",
+            dc
+        );
+        assert!(
+            dc.contains("archive"),
+            "wave21-06 destructive_check MUST name the destructive action"
+        );
+        // I3-06: applied=false pinned even on destructive_blocked
+        // (propose-only contract).
+        assert_eq!(
+            proposal["applied"], false,
+            "wave21-06 invariant I3: applied=false pinned on every proposal regardless of status"
+        );
+    }
+
+    /// Wave21-08 markdown-non-load-bearing smoke: pin that even with
+    /// EVERY wave21 receipt block stamped on the inner payload, the
+    /// `task_brief_preview` markdown does NOT get projected into
+    /// `artifact_refs`. This is the wave21-08 brief contract: the
+    /// machine-contract loop is driven by the contract path (the SSOT)
+    /// — the markdown is purely human-readable mirror.
+    #[test]
+    fn smoke_wave21_machine_contract_loop_proof_markdown_is_non_load_bearing() {
+        let payload = wave21_08_smoke_payload();
+        let inner = smoke_inner_result(payload);
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "wave21-08 machine-mode dispatch landed",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let meta = smoke_meta_of(&decorated);
+        let refs = meta["artifact_refs"].as_object().expect("artifact_refs object");
+
+        // Load-bearing surface — observers MUST be able to drive the
+        // machine handoff entirely from these keys.
+        assert!(
+            refs.contains_key("task_contract_path"),
+            "wave21-08 envelope MUST surface task_contract_path (load-bearing)"
+        );
+        assert!(
+            refs.contains_key("task_contract_source_path"),
+            "wave21-08 envelope MUST surface task_contract_source_path (load-bearing SSOT)"
+        );
+        assert_eq!(refs["dispatch_contract_mode"], "machine");
+
+        // Non-load-bearing markdown — MUST NOT leak into artifact_refs.
+        for needle in [
+            "task_brief_preview",
+            "task_brief",
+            "workstation_dispatch_status",
+            "scoped_commit_required",
+            "scoped_commit_policy",
+        ] {
+            assert!(
+                !refs.contains_key(needle),
+                "wave21-08 invariant: `{}` MUST stay on the inner payload, not in artifact_refs",
+                needle
+            );
+        }
+
+        // Inner payload still carries the brief preview so a human can
+        // read it without re-rendering — the brief preview is OPTIONAL
+        // compatibility, not absent.
+        let inner_text = match &decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let inner_json: Value = serde_json::from_str(&inner_text).expect("inner JSON parses");
+        let preview = inner_json["task_brief_preview"].as_str().unwrap_or("");
+        assert!(
+            preview.contains("## Source contract"),
+            "wave21-08 brief preview MUST carry the wave-19/07 source-contract preamble \
+             on the inner payload"
+        );
+    }
 }

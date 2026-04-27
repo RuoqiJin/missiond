@@ -7710,4 +7710,316 @@ mod tests {
             "the single git Command::new site must use the wave18-08 status argv",
         );
     }
+
+    // ── Wave 21 / Task 08 — machine-contract autonomous loop smoke ──
+    //
+    // These tests deterministically exercise the daemon-side cross-checks
+    // that close the wave21 autonomous loop. They drive the wave21-03
+    // verifier helpers (`enforce_verified_completion` /
+    // `enforce_task_contract_completion` / `read_report_summary` /
+    // `read_task_contract_id`) end-to-end against fixture task-contract
+    // and report-contract Lisp text on disk. No LLM, no spawn, no shell,
+    // no markdown read — the smoke proves the daemon can ratify a fully
+    // machine-contract dispatch using only local file IO + structural
+    // parses.
+    //
+    // Invariants pinned (cross-wave):
+    //   * wave19-08 / wave21-03 — every malformed input maps to a
+    //     deterministic structured-error code (TASK_CONTRACT_REQUIRED /
+    //     TASK_CONTRACT_MALFORMED / TASK_REPORT_REQUIRED /
+    //     TASK_REPORT_MALFORMED / TASK_REPORT_TASK_ID_MISMATCH /
+    //     TASK_REPORT_COMMIT_HASH_MISMATCH).
+    //   * wave21-03 — the verified gate REUSES the wave19-08 contract
+    //     gate; the happy-path summary echoes both `task_contract_*` and
+    //     `task_report_*` resolved paths so observers can reconstruct the
+    //     handoff without reparsing the inputs.
+    //   * The daemon NEVER falls back to prompt mode / markdown when the
+    //     contract or report fails to parse — fail-fast over silent
+    //     salvage.
+
+    /// Fixture task contract that mirrors the byte-shape produced by
+    /// `plan::build_task_contract_lisp` for the wave21-08 smoke. The
+    /// `:write-scope` is empty so the wave19-08 claim-coverage rule is
+    /// satisfied vacuously; the smoke focuses on the wave21-03 verified
+    /// gate (schema + task_id + commit_hash) rather than the wave19-08
+    /// scope coverage rule (already covered above).
+    const WAVE21_08_SMOKE_CONTRACT_BODY: &str = r#"
+(task wave21-08-smoke-contract
+  :schema "missiond.task-contract.v1"
+  :goal "wave21-08 deterministic machine-contract loop smoke"
+  :write-scope []
+  :must-not-touch []
+  :acceptance ["cargo test -p missiond-daemon"]
+  :commit (:required true :message "test(intent): cover wave21 loop" :scope-check write-scope-only))
+"#;
+
+    /// Fixture report-contract aligned with the contract above. Both
+    /// `:task_id` and `:commit_hash` match what the smoke supplies via
+    /// `commit_hash`, so the wave21-03 cross-check passes end-to-end.
+    const WAVE21_08_SMOKE_REPORT_BODY: &str = r#"
+(report wave21-08-smoke-contract
+  :schema "missiond.report-contract.v1"
+  :task_id "wave21-08-smoke-contract"
+  :status done
+  :commit_hash "cafef00d1234"
+  :files_changed ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"]
+  :acceptance_results [(:command "cargo test -p missiond-daemon" :exit_code 0 :ok true)]
+  :notes "wave21-08 smoke fixture")
+"#;
+
+    /// Wave21-08 happy path: the verifier accepts an aligned (contract,
+    /// report, hash) triple and surfaces every cross-checked rule on the
+    /// validation summary. This is the SSOT proof that the wave21-03
+    /// gate can ratify a machine-contract autonomous loop end-to-end
+    /// without any external process.
+    #[test]
+    fn smoke_wave21_machine_contract_autonomous_loop_verifier_accepts_aligned_triple() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let contract_resolved = write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        let report_resolved = write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some(".missiond/tasks/wave21/wave21-08-smoke.lisp"),
+            Some(".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp"),
+            Some("cafef00d1234"),
+        );
+        let summary = res.expect("aligned wave21-08 fixture must pass verifier");
+
+        // Cross-check: every wave21-03 invariant lands on the summary so
+        // observers can grep without reparsing the inputs.
+        assert_eq!(
+            summary.get("task_id").and_then(|v| v.as_str()),
+            Some("wave21-08-smoke-contract"),
+            "verified summary must echo the contract head id"
+        );
+        assert_eq!(
+            summary
+                .get("task_contract_resolved_path")
+                .and_then(|v| v.as_str()),
+            Some(contract_resolved.display().to_string().as_str()),
+            "verified summary must echo the resolved contract path"
+        );
+        assert_eq!(
+            summary
+                .get("task_report_resolved_path")
+                .and_then(|v| v.as_str()),
+            Some(report_resolved.display().to_string().as_str()),
+            "verified summary must echo the resolved report path"
+        );
+        let checked = summary
+            .get("checked")
+            .and_then(|v| v.as_array())
+            .expect("checked list must exist");
+        for needle in [
+            "preconditions_present",
+            "task_report_loadable",
+            "task_report_schema",
+            "task_id_matches_contract",
+            "commit_hash_matches_report",
+        ] {
+            assert!(
+                checked.iter().any(|v| v.as_str() == Some(needle)),
+                "wave21-03 verifier must record `{}` in :checked",
+                needle
+            );
+        }
+    }
+
+    /// Wave21-08 fail-fast: a report with a mismatched `:task_id` MUST
+    /// surface `TASK_REPORT_TASK_ID_MISMATCH`. Pinning this here proves
+    /// the verifier never silently accepts a stale report glued onto a
+    /// fresh contract — the daemon refuses, and the operator must
+    /// regenerate the report.
+    #[test]
+    fn smoke_wave21_malformed_report_task_id_yields_structured_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        // Report carries a different head id + :task_id — the verifier
+        // MUST refuse the cross-check.
+        let body = r#"
+(report wave21-08-other-task
+  :schema "missiond.report-contract.v1"
+  :task_id "wave21-08-other-task"
+  :status done
+  :commit_hash "cafef00d1234"
+  :files_changed []
+  :acceptance_results [])
+"#;
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-wrong.report.lisp",
+            body,
+        );
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some(".missiond/tasks/wave21/wave21-08-smoke.lisp"),
+            Some(".missiond/tasks/wave21/reports/wave21-08-wrong.report.lisp"),
+            Some("cafef00d1234"),
+        );
+        let err = res.expect_err("mismatched :task_id MUST reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_TASK_ID_MISMATCH"),
+            "wave21-03 verifier must surface the dedicated mismatch code so dashboards can route on it"
+        );
+    }
+
+    /// Wave21-08 fail-fast: a malformed task-contract (schema mismatch)
+    /// MUST surface `TASK_CONTRACT_MALFORMED` even when the report
+    /// itself parses cleanly. The verifier MUST refuse rather than
+    /// silently downgrading to "report-only" mode.
+    #[test]
+    fn smoke_wave21_malformed_task_contract_yields_structured_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bad_contract = r#"(task wave21-08-bad
+  :schema "missiond.task-contract.v0"
+  :goal "wrong schema")"#;
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-bad.lisp",
+            bad_contract,
+        );
+        // The report parses cleanly so we prove the rejection comes from
+        // the contract side, not the report side.
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        // Drive the wave19-08 contract gate directly — that's the gate
+        // the daemon hits FIRST when `enforce_scoped_commit=true` is
+        // paired with `task_contract_path`.
+        let file = fresh_file_with_claim();
+        let res = enforce_task_contract_completion(
+            &file,
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-bad.lisp",
+            Some("cafef00d1234"),
+            Some(&[]),
+        );
+        let err = res.expect_err("schema mismatch MUST reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_CONTRACT_MALFORMED"),
+            "wave21-08 smoke: malformed contract MUST hit the dedicated TASK_CONTRACT_MALFORMED code"
+        );
+    }
+
+    /// Wave21-08 fail-fast: a missing report file MUST surface
+    /// `TASK_REPORT_REQUIRED` — distinct from `TASK_REPORT_MALFORMED` so
+    /// the writer can tell "wrong path" from "wrong content" without
+    /// rerunning anything.
+    #[test]
+    fn smoke_wave21_missing_report_yields_structured_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some(".missiond/tasks/wave21/wave21-08-smoke.lisp"),
+            // Path does not exist on disk.
+            Some(".missiond/tasks/wave21/reports/wave21-08-nope.report.lisp"),
+            Some("cafef00d1234"),
+        );
+        let err = res.expect_err("missing report MUST reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_REQUIRED"),
+            "wave21-08 smoke: missing report MUST hit TASK_REPORT_REQUIRED"
+        );
+    }
+
+    /// Wave21-08 fail-fast: a commit_hash that does not match the
+    /// report's `:commit_hash` (and is not a prefix-overlap) MUST
+    /// surface `TASK_REPORT_COMMIT_HASH_MISMATCH`. Pinning this with a
+    /// clearly-different hash proves the prefix-overlap rule does NOT
+    /// accidentally accept an unrelated SHA.
+    #[test]
+    fn smoke_wave21_mismatched_commit_hash_yields_structured_failure() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        let res = enforce_verified_completion(
+            dir.path(),
+            true,
+            Some(".missiond/tasks/wave21/wave21-08-smoke.lisp"),
+            Some(".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp"),
+            // Different hash, not a prefix of `cafef00d1234`.
+            Some("badc0ffee999"),
+        );
+        let err = res.expect_err("hash mismatch MUST reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_COMMIT_HASH_MISMATCH"),
+            "wave21-08 smoke: mismatched commit_hash MUST hit the dedicated mismatch code"
+        );
+    }
+
+    /// Wave21-08 structural projector smoke: the wave21-03 mini reader
+    /// (`read_report_summary` + `read_task_contract_id`) extracts the
+    /// three load-bearing fields from the fixture report and the head
+    /// id from the fixture contract. Pinning these directly proves the
+    /// daemon-side projection survives a future wave-21+ schema change
+    /// without leaning on the script-side checker.
+    #[test]
+    fn smoke_wave21_report_and_contract_projectors_extract_required_fields() {
+        let report = read_report_summary(WAVE21_08_SMOKE_REPORT_BODY)
+            .expect("wave21-08 smoke report must parse");
+        assert_eq!(
+            report.schema.as_deref(),
+            Some("missiond.report-contract.v1"),
+            "report :schema MUST be the wave21-03 v1 schema"
+        );
+        assert_eq!(
+            report.task_id.as_deref(),
+            Some("wave21-08-smoke-contract"),
+            "report :task_id MUST surface verbatim"
+        );
+        assert_eq!(
+            report.commit_hash.as_deref(),
+            Some("cafef00d1234"),
+            "report :commit_hash MUST surface verbatim"
+        );
+        let contract_id = read_task_contract_id(WAVE21_08_SMOKE_CONTRACT_BODY)
+            .expect("wave21-08 smoke contract head id must extract");
+        assert_eq!(
+            contract_id, "wave21-08-smoke-contract",
+            "contract head id MUST equal the report :task_id (cross-check anchor)"
+        );
+        // Anchor: the head id pulled out of the contract is exactly the
+        // value the wave21-03 verifier compares against the report's
+        // `:task_id`. Pinning the equality here in one place catches a
+        // future drift between the two readers.
+        assert_eq!(
+            Some(contract_id.as_str()),
+            report.task_id.as_deref(),
+            "wave21-08 cross-check anchor: contract head id must equal report :task_id"
+        );
+    }
 }

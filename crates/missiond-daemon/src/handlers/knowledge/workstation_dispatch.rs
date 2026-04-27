@@ -4211,4 +4211,286 @@ mod tests {
         assert!(reason.contains("no fallback"));
         assert!(reason.contains("claude -p") || reason.contains("prompt mode"));
     }
+
+    // ── Wave 21 / Task 08 — machine-contract autonomous loop smoke ──
+    //
+    // Pure-helper smoke proving the wave21-04 workstation-proposal
+    // pipeline (parse → classify → bundle → response JSON) preserves the
+    // propose-only invariants on the canonical fixture. Layered on top
+    // of the wave-15..20 fixtures already exercised above:
+    //   * I4-04  the `applied=false` invariant is pinned on EVERY
+    //            proposal regardless of safety_status (UI / observers
+    //            can `assert proposal.applied == false` without reading
+    //            the source).
+    //   * I4-04  every safety_status (`safe` / `unsupported_target` /
+    //            `invalid_strategy`) survives the round-trip — the
+    //            classifier never silently demotes a flagged proposal
+    //            to `safe`.
+    //   * I4-04  the `auto_spawn=false` invariant is pinned on the
+    //            bundle JSON (not just the proposal JSON) so a
+    //            top-level grep proves the bundle never auto-applies.
+
+    /// Canonical Sonnet response shape used by the wave21-04 propose-only
+    /// pipeline. Three proposals span distinct fields + the safety
+    /// spectrum (safe target, invalid strategy, ambiguous objective) so
+    /// the smoke can pin the applied=false invariant across every
+    /// safety_status branch without tripping the parser's per-field
+    /// dedup rule.
+    const WAVE21_08_SMOKE_PROPOSAL_JSON: &str = r#"
+{
+  "proposals": [
+    {
+      "field": "target",
+      "value": "mission_task_delegate",
+      "confidence": "high",
+      "evidence": "node hint :target mission_task_delegate matches the wave21-08 smoke contract"
+    },
+    {
+      "field": "dispatch_strategy",
+      "value": "vibes-based",
+      "confidence": "medium",
+      "evidence": "model invented a strategy not on the conservative subset"
+    },
+    {
+      "field": "objective",
+      "value": "ship the wave21-08 deterministic loop smoke",
+      "confidence": "low",
+      "evidence": "summarised from the contract :goal field"
+    }
+  ]
+}
+"#;
+
+    /// Wave21-08 propose-only smoke: every parsed wave21-04 proposal
+    /// MUST carry `applied=false` (invariant I3-04) on the wire shape,
+    /// the bundle MUST surface `auto_spawn=false`, and the safety
+    /// classifier MUST tag the unsupported / invalid values verbatim.
+    #[test]
+    fn smoke_wave21_workstation_proposals_pin_applied_false_invariant_across_safety_spectrum() {
+        let (proposals, warnings) = parse_workstation_proposals(WAVE21_08_SMOKE_PROPOSAL_JSON);
+        assert_eq!(
+            proposals.len(),
+            3,
+            "fixture must surface three proposals — got {} (warnings: {:?})",
+            proposals.len(),
+            warnings
+        );
+        // Pin the safety spectrum + applied=false invariant on every
+        // proposal in one pass so a future refactor that flips the wire
+        // contract (or silently demotes a flagged proposal) lands an
+        // explicit failure here.
+        let mut safety_seen: Vec<WorkstationProposalSafetyStatus> = Vec::new();
+        for p in &proposals {
+            let json = p.to_json();
+            assert_eq!(
+                json["applied"], false,
+                "wave21-04 invariant I3: every proposal MUST carry applied=false on the wire"
+            );
+            assert!(
+                !json["evidence"].as_str().unwrap_or("").is_empty(),
+                "wave21-04 propose-only contract: evidence MUST be non-empty"
+            );
+            safety_seen.push(p.safety_status);
+        }
+        assert!(
+            safety_seen.contains(&WorkstationProposalSafetyStatus::Safe),
+            "wave21-08 fixture must include at least one Safe proposal"
+        );
+        assert!(
+            safety_seen.contains(&WorkstationProposalSafetyStatus::InvalidStrategy),
+            "wave21-08 fixture must include the invalid-strategy case (vibes-based)"
+        );
+
+        // Cross-check the dedicated unsupported_target classifier branch
+        // independently of the bundle round-trip so a future refactor
+        // that demotes UnsupportedTarget to Safe lands an explicit
+        // failure here too. wave21-04 invariant: the classifier
+        // surfaces UnsupportedTarget verbatim — never silently demotes
+        // a flagged proposal.
+        assert_eq!(
+            classify_proposal_safety("target", "mission_unknown"),
+            WorkstationProposalSafetyStatus::UnsupportedTarget,
+            "wave21-04 invariant: unsupported target value MUST tag UnsupportedTarget"
+        );
+
+        // Bundle-level invariant: `auto_spawn=false` MUST appear on the
+        // top-level JSON so observers can grep one place.
+        let bundle = WorkstationProposalBundle {
+            status: WorkstationProposalStatus::Suggested,
+            proposals,
+            parse_warnings: warnings,
+            unavailable_reason: None,
+            model: Some("claude-sonnet-4-7".to_string()),
+            request_caller: Some("wave21-08-smoke".to_string()),
+        };
+        let block = bundle.to_response_json();
+        assert_eq!(
+            block["auto_spawn"], false,
+            "wave21-04 invariant: bundle MUST pin auto_spawn=false at the top level"
+        );
+        assert_eq!(
+            block["status"], "suggested",
+            "wave21-04 status mapping: Suggested → \"suggested\""
+        );
+        let inner = block["proposals"].as_array().expect("proposals array");
+        for p in inner {
+            assert_eq!(
+                p["applied"], false,
+                "wave21-04 invariant I3: bundle round-trip preserves applied=false"
+            );
+        }
+    }
+
+    /// Wave21-08 propose-only smoke: when the Sonnet gateway is
+    /// unreachable the bundle MUST surface status=`llm_unavailable` +
+    /// the explicit "no fallback" reason text. Pinned here so a future
+    /// refactor that adds a silent `claude -p` fallback fails the
+    /// machine-contract loop smoke immediately.
+    #[test]
+    fn smoke_wave21_workstation_proposal_unavailable_pins_no_silent_fallback() {
+        let bundle = WorkstationProposalBundle::unavailable(
+            "Sonnet gateway unavailable; wave21-04 propose-only contract refuses fallback to \
+             claude -p / prompt mode (autonomous workstation dispatch is opt-in)",
+        );
+        let block = bundle.to_response_json();
+        assert_eq!(block["status"], "llm_unavailable");
+        assert_eq!(
+            block["auto_spawn"], false,
+            "wave21-04 invariant: even llm_unavailable surfaces auto_spawn=false at the top level"
+        );
+        assert_eq!(
+            block["proposals"]
+                .as_array()
+                .expect("empty proposals array")
+                .len(),
+            0,
+            "llm_unavailable bundle must NOT carry a synthesised fallback proposal"
+        );
+        let reason = block["unavailable_reason"].as_str().unwrap_or("");
+        assert!(
+            reason.contains("no fallback")
+                || reason.contains("refuses fallback")
+                || reason.contains("claude -p")
+                || reason.contains("prompt mode"),
+            "wave21-04 invariant: unavailable reason MUST name the no-fallback contract"
+        );
+    }
+
+    /// Wave21-08 contract overlay smoke: the wave-19/07 narrow parser
+    /// projects the fixture task-contract Lisp text and the consumer
+    /// rule (contract wins on every non-empty field) reaches the brief
+    /// renderer. Pinning this here closes the wave21-08 loop on the
+    /// workstation-side: the same contract the verifier ratifies
+    /// (wave21-03) also drives the brief the worker reads.
+    #[test]
+    fn smoke_wave21_machine_contract_overlay_drives_brief_renderer() {
+        const WAVE21_08_SMOKE_DISPATCH_CONTRACT: &str = r#"
+(task wave21-08-dispatch-smoke
+  :schema "missiond.task-contract.v1"
+  :goal "wave21-08 machine-contract loop drives the brief from the contract"
+  :scope "wave 21 task 08 only"
+  :write-scope ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"]
+  :must-not-touch ["crates/missiond-daemon/src/handlers/knowledge/workflow.rs"]
+  :acceptance ["cargo test -p missiond-daemon"]
+  :commit (:required true :message "test(intent): cover wave21 loop" :scope-check write-scope-only :policy "scoped")
+  :dispatch-strategy "agent-team"
+  :target-project "missiond"
+  :target "mission_task_delegate")
+"#;
+        let parsed = parse_task_contract(WAVE21_08_SMOKE_DISPATCH_CONTRACT)
+            .expect("wave21-08 dispatch contract must parse");
+        assert_eq!(
+            parsed.goal,
+            "wave21-08 machine-contract loop drives the brief from the contract"
+        );
+        assert_eq!(parsed.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert_eq!(parsed.commit_policy.as_deref(), Some("scoped"));
+        assert_eq!(parsed.target.as_deref(), Some("mission_task_delegate"));
+
+        // Caller side starts with stale / placeholder hints so the
+        // overlay rule is exercised end-to-end.
+        let mut hints = WorkstationDispatchHints {
+            objective: Some("STALE caller objective".to_string()),
+            scope: Some("STALE caller scope".to_string()),
+            owned_files: vec!["stale.rs".to_string()],
+            forbidden_files: vec![],
+            acceptance_commands: vec!["stale-cmd".to_string()],
+            commit_policy: None,
+            target_project: None,
+            requested_cwd: None,
+            dispatch_strategy: Some("fresh-code-alignment".to_string()),
+        };
+        hints.overlay_contract(&parsed);
+
+        // wave21-08 invariant: the contract overlay wins on EVERY non-
+        // empty field — caller stale data MUST NOT leak into the brief.
+        assert_eq!(
+            hints.objective.as_deref(),
+            Some("wave21-08 machine-contract loop drives the brief from the contract"),
+            "contract :goal MUST replace caller stale objective"
+        );
+        assert_eq!(
+            hints.scope.as_deref(),
+            Some("wave 21 task 08 only"),
+            "contract :scope MUST replace caller stale scope"
+        );
+        assert_eq!(
+            hints.owned_files,
+            vec!["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs".to_string()],
+            "contract :write-scope MUST replace caller stale owned_files"
+        );
+        assert_eq!(
+            hints.forbidden_files,
+            vec!["crates/missiond-daemon/src/handlers/knowledge/workflow.rs".to_string()],
+            "contract :must-not-touch MUST surface verbatim"
+        );
+        assert_eq!(
+            hints.commit_policy.as_deref(),
+            Some("scoped"),
+            "contract :commit :policy MUST reach hints"
+        );
+        assert_eq!(
+            hints.dispatch_strategy.as_deref(),
+            Some("agent-team"),
+            "contract :dispatch-strategy MUST replace caller fresh-code-alignment"
+        );
+
+        // Brief renderer must carry the wave-19/07 source-contract
+        // preamble so the worker sees the SSOT pointer; the contract
+        // :goal MUST surface as the brief objective; the stale caller
+        // objective MUST NOT leak.
+        let plan = fixture_plan("(plan)");
+        let contract_path = std::path::Path::new(
+            "/tmp/missiond-wave21-08-smoke/.missiond/tasks/wave21/wave21-08-dispatch.lisp",
+        );
+        let brief = build_task_brief_with_source(
+            &plan,
+            &hints,
+            "agent-team",
+            Some(contract_path),
+        );
+        assert!(
+            brief.contains("## Source contract"),
+            "wave21-08 brief MUST carry the wave-19/07 source-contract preamble"
+        );
+        assert!(
+            brief.contains("/tmp/missiond-wave21-08-smoke/.missiond/tasks/wave21/wave21-08-dispatch.lisp"),
+            "wave21-08 brief preamble MUST name the on-disk contract path"
+        );
+        assert!(
+            brief.contains("wave21-08 machine-contract loop drives the brief from the contract"),
+            "wave21-08 brief MUST render the contract :goal as the objective"
+        );
+        assert!(
+            !brief.contains("STALE caller objective"),
+            "wave21-08 invariant: stale caller objective MUST NOT leak into the contract-driven brief"
+        );
+        // Pin the agent-team injection invariant survives the wave21-08
+        // path.
+        assert_eq!(
+            brief.matches(AGENT_TEAM_OBJECTIVE_HINT).count(),
+            1,
+            "wave21-08 brief: agent-team hint MUST appear exactly once on the contract-driven path"
+        );
+    }
 }
