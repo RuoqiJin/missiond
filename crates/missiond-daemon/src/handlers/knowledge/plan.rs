@@ -9839,12 +9839,23 @@ async fn resolve_project_root(
 //
 // Confidence policy: the wave24-03 CLI takes an optional `--trace-index`
 // JSON for `high` confidence based on event counts. wave24-04 deliberately
-// skips that input (no trace-index loader in the daemon — keep this surface
-// pure and additive). The mapping here:
-//   * matched -> `medium`
-//   * fallback / no-match -> `low` with reason `insufficient_trace_history`
-// This is option (a) from the brief; it keeps the daemon helper simple
-// without losing the explainability fields.
+// skipped that input (no trace-index loader in the daemon — keep this surface
+// pure and additive). wave25-03 adds OPTIONAL parity: when the caller passes
+// `router_policy_trace_index_path` AND `router_policy_mode=dry_run`, the
+// daemon reads the file via `std::fs::read_to_string` + `serde_json` and
+// mirrors the Node CLI's `scoreConfidence`:
+//   * matched + max(by_task[id].events, by_backend[backend].events) >= 5 -> `high`
+//   * matched + max(...) in 1..=4 -> `medium`
+//   * matched + max(...) == 0 -> `low`
+//   * no match (fallback) -> `low` with reason `insufficient_trace_history`
+// Failure modes (path missing / I/O error / malformed JSON) NEVER fail
+// dispatch — they degrade confidence to the matched/no-match fallback (medium
+// for matched, low for no-match) and surface `trace_index_status` +
+// `trace_index_warning` for explainability.
+//
+// Off/default mode is byte-identical with NO file I/O, even if a trace-index
+// path is supplied. This is enforced by the Off-path early-return in
+// `attach_router_recommendation_block`.
 // ---------------------------------------------------------------------------
 mod router_policy_dry_run {
     use super::ResolvedExec;
@@ -10032,25 +10043,39 @@ mod router_policy_dry_run {
     fn compute_recommendation(args: &Value, resolved: &ResolvedExec, plan: &Plan) -> Value {
         let policy_path_input = arg_string(args, "router_policy_path")
             .unwrap_or_else(|| DEFAULT_POLICY_PATH.to_string());
+        // wave25-03: trace-index is OPTIONAL and read ONLY here (i.e. inside
+        // dry_run). The Off branch in `attach_router_recommendation_block`
+        // never calls into `compute_recommendation`, so this preserves the
+        // "no file I/O when mode=off" invariant by construction.
+        let trace_index_path_input = arg_string(args, "router_policy_trace_index_path");
+        let trace_info = load_trace_index(trace_index_path_input.as_deref());
         let resolved_path = resolve_policy_path(&policy_path_input);
         let raw = match std::fs::read_to_string(&resolved_path) {
             Ok(s) => s,
-            Err(e) => return error_block(&policy_path_input, &format!("read failed: {}", e)),
+            Err(e) => {
+                return error_block(
+                    &policy_path_input,
+                    &format!("read failed: {}", e),
+                    &trace_info,
+                );
+            }
         };
         let policy = match parse_router_policy(&raw) {
             Ok(p) => p,
-            Err(msg) => return error_block(&policy_path_input, &msg),
+            Err(msg) => return error_block(&policy_path_input, &msg, &trace_info),
         };
         if !policy.dry_run_only {
             return rejected_block(
                 &policy_path_input,
                 "policy missing :dry-run-only true (cross-wave invariant: router output is advisory only)",
+                &trace_info,
             );
         }
         if policy.runtime_replacement {
             return rejected_block(
                 &policy_path_input,
                 "policy declares :runtime-replacement true (cross-wave invariant: router output is advisory only)",
+                &trace_info,
             );
         }
         let ctx = project_context(args, resolved, plan);
@@ -10067,11 +10092,14 @@ mod router_policy_dry_run {
         // Rules already sorted by priority ascending — the parser does
         // this once on construction.
         if matched.is_empty() {
+            // No-match: confidence is `low` regardless of trace-index
+            // (mirrors the Node CLI's `if matched.length === 0 -> low`).
             return computed_block(
                 &policy_path_input,
                 FALLBACK_BACKEND,
                 "low",
                 vec![format!("fallback (no rule matched): {}", FALLBACK_REASON)],
+                &trace_info,
             );
         }
         let winner = &matched[0];
@@ -10099,7 +10127,139 @@ mod router_policy_dry_run {
                 backend
             ));
         }
-        computed_block(&policy_path_input, &backend, "medium", reasons)
+        // wave25-03: confidence selection mirrors scripts/recommend-task-backend.mjs
+        //   * trace-index supplied AND parsed ("used") AND
+        //     max(by_task[plan.board_task_id].events, by_backend[backend].events) >= 5
+        //     -> high
+        //   * trace-index supplied AND parsed AND max in 1..=4 -> medium
+        //   * trace-index supplied AND parsed AND max == 0 -> low
+        //   * trace-index NOT supplied OR degraded (missing/unreadable/malformed) ->
+        //     `medium` (the legacy wave24-04 default for matched outcomes).
+        let confidence = match &trace_info {
+            TraceIndexInfo::Used { task_events, backend_events, .. } => {
+                let task_events = events_for_task(task_events, &plan.board_task_id);
+                let backend_events = events_for_backend(backend_events, &backend);
+                let max = task_events.max(backend_events);
+                if max >= RICH_TRACE_THRESHOLD {
+                    "high"
+                } else if max >= 1 {
+                    "medium"
+                } else {
+                    "low"
+                }
+            }
+            // Degraded / absent: keep wave24-04 default of `medium` for matched.
+            _ => "medium",
+        };
+        computed_block(&policy_path_input, &backend, confidence, reasons, &trace_info)
+    }
+
+    /// wave25-03: trace-index threshold mirrors scripts/recommend-task-backend.mjs
+    /// `RICH_TRACE_THRESHOLD = 5`. Keep this constant and the Node CLI in lock-
+    /// step. The threshold counts the MAX of per-task vs per-backend events.
+    const RICH_TRACE_THRESHOLD: u64 = 5;
+
+    /// wave25-03 trace-index status flavours surfaced on the recommendation
+    /// block. `Absent` is the default (no path supplied) and is observable on
+    /// the wire as the absence of `trace_index_*` fields.
+    #[derive(Debug, Clone)]
+    pub(super) enum TraceIndexInfo {
+        /// No trace-index path was supplied. Block does NOT carry any
+        /// `trace_index_*` fields (preserves wave24-04 byte-shape for
+        /// callers that opted out).
+        Absent,
+        /// Path was supplied; file read + parsed; `by_task` / `by_backend`
+        /// available for confidence scoring.
+        Used {
+            path: String,
+            task_events: serde_json::Map<String, Value>,
+            backend_events: serde_json::Map<String, Value>,
+        },
+        /// Path was supplied but the file does not exist on disk.
+        Missing { path: String, warning: String },
+        /// Path was supplied; std::fs::read_to_string returned an I/O error
+        /// other than NotFound.
+        Unreadable { path: String, warning: String },
+        /// Path was supplied; serde_json failed to parse OR the top-level
+        /// shape is not a JSON object.
+        Malformed { path: String, warning: String },
+    }
+
+    fn load_trace_index(input: Option<&str>) -> TraceIndexInfo {
+        let Some(path_str) = input else {
+            return TraceIndexInfo::Absent;
+        };
+        let path = path_str.to_string();
+        let resolved = resolve_policy_path(&path); // same resolution rule
+        let raw = match std::fs::read_to_string(&resolved) {
+            Ok(s) => s,
+            Err(e) => {
+                let warning = format!("trace-index read failed: {}", e);
+                return if e.kind() == std::io::ErrorKind::NotFound {
+                    TraceIndexInfo::Missing { path, warning }
+                } else {
+                    TraceIndexInfo::Unreadable { path, warning }
+                };
+            }
+        };
+        let value: Value = match serde_json::from_str(&raw) {
+            Ok(v) => v,
+            Err(e) => {
+                return TraceIndexInfo::Malformed {
+                    path,
+                    warning: format!("trace-index JSON parse failed: {}", e),
+                };
+            }
+        };
+        let map = match value.as_object() {
+            Some(m) => m,
+            None => {
+                return TraceIndexInfo::Malformed {
+                    path,
+                    warning: "trace-index top-level value is not a JSON object".to_string(),
+                };
+            }
+        };
+        let task_events = match map.get("by_task") {
+            Some(Value::Object(m)) => m.clone(),
+            Some(_) => {
+                return TraceIndexInfo::Malformed {
+                    path,
+                    warning: "trace-index `by_task` is not a JSON object".to_string(),
+                };
+            }
+            None => serde_json::Map::new(),
+        };
+        let backend_events = match map.get("by_backend") {
+            Some(Value::Object(m)) => m.clone(),
+            Some(_) => {
+                return TraceIndexInfo::Malformed {
+                    path,
+                    warning: "trace-index `by_backend` is not a JSON object".to_string(),
+                };
+            }
+            None => serde_json::Map::new(),
+        };
+        TraceIndexInfo::Used {
+            path,
+            task_events,
+            backend_events,
+        }
+    }
+
+    fn events_for_task(by_task: &serde_json::Map<String, Value>, task_id: &str) -> u64 {
+        bucket_events(by_task, task_id)
+    }
+
+    fn events_for_backend(by_backend: &serde_json::Map<String, Value>, backend: &str) -> u64 {
+        bucket_events(by_backend, backend)
+    }
+
+    fn bucket_events(map: &serde_json::Map<String, Value>, key: &str) -> u64 {
+        map.get(key)
+            .and_then(|v| v.get("events"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0)
     }
 
     fn resolve_policy_path(input: &str) -> PathBuf {
@@ -10116,8 +10276,8 @@ mod router_policy_dry_run {
         }
     }
 
-    fn error_block(policy_source: &str, message: &str) -> Value {
-        json!({
+    fn error_block(policy_source: &str, message: &str, trace: &TraceIndexInfo) -> Value {
+        let mut block = json!({
             "applied": false,
             "confidence": "low",
             "policy_source": policy_source,
@@ -10125,11 +10285,13 @@ mod router_policy_dry_run {
             "recommended_backend": FALLBACK_BACKEND,
             "schema": SCHEMA,
             "status": "error",
-        })
+        });
+        attach_trace_index_fields(&mut block, trace);
+        block
     }
 
-    fn rejected_block(policy_source: &str, message: &str) -> Value {
-        json!({
+    fn rejected_block(policy_source: &str, message: &str, trace: &TraceIndexInfo) -> Value {
+        let mut block = json!({
             "applied": false,
             "confidence": "low",
             "policy_source": policy_source,
@@ -10137,7 +10299,9 @@ mod router_policy_dry_run {
             "recommended_backend": FALLBACK_BACKEND,
             "schema": SCHEMA,
             "status": "rejected",
-        })
+        });
+        attach_trace_index_fields(&mut block, trace);
+        block
     }
 
     fn computed_block(
@@ -10145,8 +10309,9 @@ mod router_policy_dry_run {
         backend: &str,
         confidence: &str,
         reasons: Vec<String>,
+        trace: &TraceIndexInfo,
     ) -> Value {
-        json!({
+        let mut block = json!({
             "applied": false,
             "confidence": confidence,
             "policy_source": policy_source,
@@ -10154,7 +10319,52 @@ mod router_policy_dry_run {
             "recommended_backend": backend,
             "schema": SCHEMA,
             "status": "computed",
-        })
+        });
+        attach_trace_index_fields(&mut block, trace);
+        block
+    }
+
+    /// wave25-03: splice the optional `trace_index_path` / `trace_index_status`
+    /// / `trace_index_warning` fields onto a recommendation block. `Absent`
+    /// emits NO fields at all (preserves wave24-04 byte-shape for callers
+    /// that opted out). All other variants emit `trace_index_path` +
+    /// `trace_index_status`; degraded variants additionally emit
+    /// `trace_index_warning`.
+    fn attach_trace_index_fields(block: &mut Value, trace: &TraceIndexInfo) {
+        let Some(map) = block.as_object_mut() else {
+            return;
+        };
+        match trace {
+            TraceIndexInfo::Absent => {
+                // Intentionally emit NOTHING — keeps wave24-04 byte-shape
+                // for callers that did not opt in to wave25-03.
+            }
+            TraceIndexInfo::Used { path, .. } => {
+                map.insert("trace_index_path".to_string(), Value::String(path.clone()));
+                map.insert("trace_index_status".to_string(), Value::String("used".to_string()));
+            }
+            TraceIndexInfo::Missing { path, warning } => {
+                map.insert("trace_index_path".to_string(), Value::String(path.clone()));
+                map.insert("trace_index_status".to_string(), Value::String("missing".to_string()));
+                map.insert("trace_index_warning".to_string(), Value::String(warning.clone()));
+            }
+            TraceIndexInfo::Unreadable { path, warning } => {
+                map.insert("trace_index_path".to_string(), Value::String(path.clone()));
+                map.insert(
+                    "trace_index_status".to_string(),
+                    Value::String("unreadable".to_string()),
+                );
+                map.insert("trace_index_warning".to_string(), Value::String(warning.clone()));
+            }
+            TraceIndexInfo::Malformed { path, warning } => {
+                map.insert("trace_index_path".to_string(), Value::String(path.clone()));
+                map.insert(
+                    "trace_index_status".to_string(),
+                    Value::String("malformed".to_string()),
+                );
+                map.insert("trace_index_warning".to_string(), Value::String(warning.clone()));
+            }
+        }
     }
 
     // ---- predicate AST + evaluator -----------------------------------
@@ -18135,5 +18345,586 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&tmp);
+    }
+
+    // -----------------------------------------------------------------
+    // wave-25 / task 03 — router-policy trace-index confidence tests.
+    //
+    // These pin the OPTIONAL `router_policy_trace_index_path` arg and the
+    // additive `trace_index_path` / `trace_index_status` /
+    // `trace_index_warning` fields on the recommendation block. They also
+    // re-pin two cross-wave invariants under the new code path:
+    //   * `applied=false` stays a hard-coded literal even when the trace-
+    //     index is fully consumed.
+    //   * dispatch fields are byte-identical with vs without trace-index.
+    //
+    // Confidence rule mirrors `scripts/recommend-task-backend.mjs`:
+    //   matched + max(by_task[plan.board_task_id].events,
+    //                 by_backend[recommended_backend].events) >= 5  -> high
+    //   1..=4 -> medium
+    //   0 -> low (matched-but-zero) ; no-match always low.
+    // -----------------------------------------------------------------
+
+    /// Helper: build a temp policy file mirroring the wave24-01 seed shape
+    /// with a single docs->claudecode rule. Returns the path; the caller is
+    /// responsible for unlinking with `remove_file`.
+    fn write_temp_docs_policy(tag: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "wave25-03-{}-{}.lisp",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-wave25-03
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-docs
+    :priority 10
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "docs are interactive")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        tmp
+    }
+
+    /// Helper: build a temp trace-index JSON file. `task_events` and
+    /// `backend_events` populate `by_task["btk-1"].events` and
+    /// `by_backend["claudecode"].events` respectively (matching the
+    /// fixture_plan default board_task_id and the docs rule's backend).
+    fn write_temp_trace_index(tag: &str, task_events: u64, backend_events: u64) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "wave25-03-{}-trace-{}.json",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let body = json!({
+            "schema": "missiond.session-trace.v1",
+            "by_task": {
+                "btk-1": { "events": task_events }
+            },
+            "by_backend": {
+                "claudecode": { "events": backend_events }
+            },
+            "totals": { "events": task_events + backend_events }
+        });
+        std::fs::write(&tmp, serde_json::to_string_pretty(&body).unwrap()).unwrap();
+        tmp
+    }
+
+    #[test]
+    fn router_policy_mode_off_with_trace_index_supplied_does_no_file_io() {
+        // wave25-03 invariant: mode=off (or absent) means NO file I/O happens
+        // for the trace-index path EVEN IF a path is supplied. We assert this
+        // by supplying a path that does NOT exist and demanding the response
+        // be byte-identical to a baseline that supplies no trace-index field
+        // at all. If the daemon attempted to open the file under mode=off the
+        // attempt would fail-but-be-swallowed; the byte-identical assertion
+        // still holds because the response shape NEVER carries any trace_index_*
+        // field when mode=off (the recommendation block isn't even emitted).
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+
+        // Off + non-existent trace-index path.
+        let args = json!({
+            "router_policy_mode": "off",
+            "router_policy_trace_index_path":
+                "/this/path/does/not/exist/wave25-03/trace-index.json",
+        });
+        let mode = parse_router_policy_mode(&args).expect("explicit off");
+        assert!(matches!(mode, RouterPolicyMode::Off));
+        let after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let after_text = match after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after_text,
+            "wave25-03: mode=off must be byte-identical to baseline EVEN WHEN trace-index path is supplied (no file I/O may happen)"
+        );
+        let v: Value = serde_json::from_str(&after_text).unwrap();
+        assert!(
+            v.get("router_recommendation").is_none(),
+            "wave25-03: mode=off must NOT splice a recommendation block"
+        );
+
+        // Default (arg absent) + trace-index path supplied: same invariant.
+        let args2 = json!({
+            "router_policy_trace_index_path":
+                "/this/path/does/not/exist/wave25-03/other.json",
+        });
+        let mode2 = parse_router_policy_mode(&args2).expect("default off");
+        assert!(matches!(mode2, RouterPolicyMode::Off));
+        let after2 = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode2,
+            &args2,
+            &resolved,
+            &plan,
+        );
+        let after2_text = match after2.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after2_text,
+            "wave25-03: default mode (arg absent) must be byte-identical to baseline EVEN WHEN trace-index path is supplied"
+        );
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_trace_index_high_confidence() {
+        // wave25-03: trace-index supplied AND backend has >=5 events ⇒ high.
+        let policy = write_temp_docs_policy("high");
+        let trace = write_temp_trace_index("high", 0, 7);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["confidence"], "high");
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["trace_index_status"], "used");
+        assert_eq!(block["trace_index_path"], trace.to_str().unwrap());
+        assert!(
+            block.get("trace_index_warning").is_none(),
+            "wave25-03: status=used must NOT carry a warning"
+        );
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_trace_index_medium_confidence() {
+        // wave25-03: trace-index supplied AND max(events) in 1..=4 ⇒ medium.
+        let policy = write_temp_docs_policy("medium");
+        let trace = write_temp_trace_index("medium", 2, 3);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["confidence"], "medium");
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["trace_index_status"], "used");
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_trace_index_low_confidence_when_zero_events() {
+        // wave25-03: trace-index supplied AND max(events) == 0 ⇒ low. This
+        // is distinct from the no-match-fallback low because a rule DID
+        // match — the low confidence is due to evidence absence in the trace.
+        let policy = write_temp_docs_policy("zero");
+        let trace = write_temp_trace_index("zero", 0, 0);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["confidence"], "low");
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["trace_index_status"], "used");
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_missing_trace_index_emits_status_missing() {
+        // wave25-03: missing trace-index file ⇒ status=missing, dispatch
+        // continues, fallback confidence (`medium` for matched).
+        let policy = write_temp_docs_policy("missing");
+        let bogus_trace = std::env::temp_dir().join(format!(
+            "wave25-03-missing-{}-DOES-NOT-EXIST.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": bogus_trace.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed", "matched dispatch must still succeed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(
+            block["confidence"], "medium",
+            "wave25-03: missing trace-index ⇒ matched fallback confidence (medium)"
+        );
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["trace_index_status"], "missing");
+        assert_eq!(block["trace_index_path"], bogus_trace.to_str().unwrap());
+        assert!(
+            block.get("trace_index_warning").is_some(),
+            "wave25-03: missing must surface a one-line warning"
+        );
+        let _ = std::fs::remove_file(&policy);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_malformed_trace_index_emits_status_malformed() {
+        // wave25-03: malformed JSON ⇒ status=malformed, fallback confidence.
+        let policy = write_temp_docs_policy("malformed");
+        let bad_trace = std::env::temp_dir().join(format!(
+            "wave25-03-malformed-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&bad_trace, "{ this is not valid json").unwrap();
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": bad_trace.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["confidence"], "medium");
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["trace_index_status"], "malformed");
+        assert_eq!(block["trace_index_path"], bad_trace.to_str().unwrap());
+        let warning = block["trace_index_warning"]
+            .as_str()
+            .expect("malformed must carry a warning string");
+        assert!(
+            warning.contains("trace-index"),
+            "wave25-03: warning must mention trace-index (got `{}`)",
+            warning
+        );
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&bad_trace);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_no_trace_index_supplied_emits_status_absent() {
+        // wave25-03: arg absent ⇒ NO trace_index_* fields emitted at all
+        // (preserves wave24-04 byte-shape for callers that did not opt in).
+        // We document this as the "absent" status by checking that the
+        // fields are entirely OMITTED rather than surfacing a literal
+        // `"absent"` value — keeps wave24-04 callers byte-identically green.
+        let policy = write_temp_docs_policy("absent");
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        // Fallback (no trace-index) ⇒ matched default `medium`.
+        assert_eq!(block["confidence"], "medium");
+        assert_eq!(block["applied"], false);
+        // wave25-03 contract choice: when path is absent, OMIT all
+        // trace_index_* fields entirely (rather than emit a literal
+        // `"absent"` value) so wave24-04 callers are byte-identically green.
+        assert!(
+            block.get("trace_index_path").is_none(),
+            "wave25-03: trace_index_path must be OMITTED when path arg is absent"
+        );
+        assert!(
+            block.get("trace_index_status").is_none(),
+            "wave25-03: trace_index_status must be OMITTED when path arg is absent"
+        );
+        assert!(
+            block.get("trace_index_warning").is_none(),
+            "wave25-03: trace_index_warning must be OMITTED when path arg is absent"
+        );
+        let _ = std::fs::remove_file(&policy);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_trace_index_does_not_change_dispatch() {
+        // wave25-03: re-pin the wave24-04 invariant under the new code path.
+        // Dispatch fields (target_tool / dispatch_strategy / next_call /...)
+        // are byte-identical with vs without the trace-index arg.
+        let policy = write_temp_docs_policy("dispatch");
+        let trace = write_temp_trace_index("dispatch", 9, 9);
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        // Path A: dry_run + NO trace-index arg.
+        let args_no_trace = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_a = parse_router_policy_mode(&args_no_trace).unwrap();
+        let no_trace_result = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_a,
+            &args_no_trace,
+            &resolved,
+            &plan,
+        );
+        let no_trace_v = parse_payload(&no_trace_result);
+
+        // Path B: dry_run + trace-index arg.
+        let args_with_trace = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_b = parse_router_policy_mode(&args_with_trace).unwrap();
+        let with_trace_result = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_b,
+            &args_with_trace,
+            &resolved,
+            &plan,
+        );
+        let with_trace_v = parse_payload(&with_trace_result);
+
+        // Every dispatch-shaping field must be byte-identical.
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                no_trace_v[field], with_trace_v[field],
+                "wave25-03 invariant: dispatch field `{}` must be byte-identical with vs without trace-index arg",
+                field
+            );
+        }
+
+        // The recommendation block exists in both; confidence may differ
+        // (medium vs high) but `applied`, `recommended_backend`, `status`,
+        // and `policy_source` must match — only the additive trace_index_*
+        // fields and the `confidence` are allowed to differ.
+        let block_a = &no_trace_v["router_recommendation"];
+        let block_b = &with_trace_v["router_recommendation"];
+        assert_eq!(block_a["applied"], block_b["applied"]);
+        assert_eq!(block_a["recommended_backend"], block_b["recommended_backend"]);
+        assert_eq!(block_a["status"], block_b["status"]);
+        assert_eq!(block_a["policy_source"], block_b["policy_source"]);
+        assert_eq!(block_a["schema"], block_b["schema"]);
+
+        // And the additive delta is exactly what we expect.
+        assert!(block_a.get("trace_index_path").is_none());
+        assert_eq!(block_b["trace_index_path"], trace.to_str().unwrap());
+        assert_eq!(block_b["trace_index_status"], "used");
+
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+    }
+
+    #[test]
+    fn applied_remains_false_with_trace_index() {
+        // wave25-03: re-pin the wave24-04 / wave24-06 invariant under the
+        // new code path. `applied` must be the literal JSON bool `false` in
+        // EVERY emitted block, regardless of trace-index status. We exercise
+        // all five status flavours: used / missing / unreadable (simulated
+        // via missing) / malformed / absent.
+        let policy = write_temp_docs_policy("applied");
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        // used.
+        let trace_used = write_temp_trace_index("applied-used", 10, 10);
+        let args_used = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace_used.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_used = parse_router_policy_mode(&args_used).unwrap();
+        let r_used = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_used,
+            &args_used,
+            &resolved,
+            &plan,
+        );
+        let v_used = parse_payload(&r_used);
+        assert_eq!(
+            v_used["router_recommendation"]["applied"], Value::Bool(false),
+            "wave25-03 invariant: applied=false literal under trace_index_status=used"
+        );
+
+        // missing.
+        let args_missing = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": "/does/not/exist/wave25-03-applied.json",
+            "kind": "docs",
+        });
+        let mode_missing = parse_router_policy_mode(&args_missing).unwrap();
+        let r_missing = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_missing,
+            &args_missing,
+            &resolved,
+            &plan,
+        );
+        let v_missing = parse_payload(&r_missing);
+        assert_eq!(
+            v_missing["router_recommendation"]["applied"], Value::Bool(false),
+            "wave25-03 invariant: applied=false literal under trace_index_status=missing"
+        );
+
+        // malformed.
+        let bad = std::env::temp_dir().join(format!(
+            "wave25-03-applied-malformed-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&bad, "not json").unwrap();
+        let args_bad = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": bad.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_bad = parse_router_policy_mode(&args_bad).unwrap();
+        let r_bad = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_bad,
+            &args_bad,
+            &resolved,
+            &plan,
+        );
+        let v_bad = parse_payload(&r_bad);
+        assert_eq!(
+            v_bad["router_recommendation"]["applied"], Value::Bool(false),
+            "wave25-03 invariant: applied=false literal under trace_index_status=malformed"
+        );
+
+        // absent.
+        let args_absent = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_absent = parse_router_policy_mode(&args_absent).unwrap();
+        let r_absent = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_absent,
+            &args_absent,
+            &resolved,
+            &plan,
+        );
+        let v_absent = parse_payload(&r_absent);
+        assert_eq!(
+            v_absent["router_recommendation"]["applied"], Value::Bool(false),
+            "wave25-03 invariant: applied=false literal under trace_index absent"
+        );
+
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace_used);
+        let _ = std::fs::remove_file(&bad);
     }
 }

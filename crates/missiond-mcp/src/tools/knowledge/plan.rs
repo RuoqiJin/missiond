@@ -923,6 +923,20 @@ fn build_properties() -> Value {
         "[execute] (wave-24 / task 04) optional path to the router-policy v1 Lisp file consumed when `router_policy_mode=\"dry_run\"`. Absolute or repo-relative (resolved verbatim against the daemon's working directory). Default `.missiond/router/router-policy-v1.lisp` (the wave24-01 seed). Ignored when `router_policy_mode=\"off\"` (the default) — no file I/O happens in that path. Read failures, parse errors, and unknown predicate heads surface on the recommendation block with `status=\"error\"`; cross-wave-invariant violations (`:dry-run-only false` or `:runtime-replacement true`) surface with `status=\"rejected\"`. The runtime dispatch path is unaffected in every case.",
     ));
 
+    // wave-25 / task 03 — OPTIONAL trace-index path for confidence scoring.
+    // The daemon mirrors `scripts/recommend-task-backend.mjs`'s
+    // `scoreConfidence`: when `router_policy_mode=\"dry_run\"` AND this
+    // path is supplied, the trace-index JSON is read via `std::fs` +
+    // `serde_json` and `by_task[<plan.board_task_id>].events` /
+    // `by_backend[<recommended_backend>].events` are used to compute
+    // confidence (`matched + max(task, backend) >= 5` -> `high`; `1..=4`
+    // -> `medium`; `0` -> `low`). When the arg is absent OR mode=off, NO
+    // file I/O happens — preserves the wave24-04 byte-identical baseline.
+    p.insert("router_policy_trace_index_path".into(), prop(
+        "string",
+        "[execute] (wave-25 / task 03) OPTIONAL path to a session-trace-index JSON file (produced by `scripts/build-session-trace-index.mjs`) consumed ONLY when `router_policy_mode=\"dry_run\"`. When supplied, the daemon reads the file via `std::fs::read_to_string` + `serde_json` and uses `by_task[<plan.board_task_id>].events` and `by_backend[<recommended_backend>].events` to compute the recommendation block's `confidence` field, mirroring `scripts/recommend-task-backend.mjs`'s `scoreConfidence` (matched + max(task_events, backend_events) >= 5 -> `high`; 1..=4 -> `medium`; 0 -> `low`; no-match always `low`). When the arg is absent OR `router_policy_mode=\"off\"` (the default), NO file I/O happens — preserves the wave-15..23 byte-identical baseline. Failure handling is non-fatal: a missing path emits `trace_index_status=\"missing\"`; an I/O error other than NotFound emits `trace_index_status=\"unreadable\"`; malformed JSON or unexpected top-level shape emits `trace_index_status=\"malformed\"` plus a one-line `trace_index_warning`. Dispatch is NEVER altered by trace-index issues — confidence falls back to `medium` (matched) or `low` (no-match) and the operator sees the degradation loud. `applied=false` remains a hard-coded literal in every emitted block. The recommendation block additionally surfaces `trace_index_path` (echo of input) and `trace_index_status` (`used | missing | unreadable | malformed`) when this arg is supplied; the fields are OMITTED entirely when the arg is absent.",
+    ));
+
     Value::Object(p)
 }
 
