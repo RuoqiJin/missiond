@@ -4,7 +4,7 @@
 
 (task-contract-schema missiond.task-contract.v1
   :version "v1"
-  :status "code-aligned — checker + renderer + verifier + scope-guard + hooks-installer scripts implemented; v2 default-on hooks doctor preflight surfaced in renderer + installer (wave22-01); wave23-02 adds optional :session-trace-writable opt-in for trace-ledger writers and renderer auto-detects sibling session-trace.lisp"
+  :status "code-aligned — checker + renderer + verifier + scope-guard + hooks-installer scripts implemented; v2 default-on hooks doctor preflight surfaced in renderer + installer (wave22-01); wave23-02 adds optional :session-trace-writable opt-in for trace-ledger writers and renderer auto-detects sibling session-trace.lisp; wave24-05 adds optional :router-policy-path field and renderer surfaces a Router Policy (advisory) section, auto-detecting .missiond/router/router-policy-v1.lisp when the field is absent — runtime dispatch is unchanged"
   :checker "scripts/check-task-contract.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :verifier "scripts/verify-task-contract.mjs"
@@ -35,7 +35,9 @@
     (:acceptance "non-empty vector of shell commands or verifier commands")
     (:commit "property list: :required boolean + :message + :scope-check")
     (:session-trace-writable
-      "OPTIONAL boolean (default false). When true, the rendered brief instructs the worker that this task is permitted to append factual (trace-event ...) entries to .missiond/tasks/<wave>/session-trace.lisp as a shared coordination output, in addition to its own :write-scope. Default behaviour: workers MUST NOT write to session-trace.lisp unless this flag is true. The session-trace ledger remains MissionD-owned factual telemetry — it never replaces the worker's per-task :write-scope, and prose explanations still belong in the report contract."))
+      "OPTIONAL boolean (default false). When true, the rendered brief instructs the worker that this task is permitted to append factual (trace-event ...) entries to .missiond/tasks/<wave>/session-trace.lisp as a shared coordination output, in addition to its own :write-scope. Default behaviour: workers MUST NOT write to session-trace.lisp unless this flag is true. The session-trace ledger remains MissionD-owned factual telemetry — it never replaces the worker's per-task :write-scope, and prose explanations still belong in the report contract.")
+    (:router-policy-path
+      "OPTIONAL repo-relative path (default absent). When provided, the renderer emits a 'Router Policy (advisory)' section pointing at this router-policy-v1 Lisp file so human readers / ClaudeCode workers can consult the dry-run policy that distilled prior trace observations. When absent, the renderer auto-detects .missiond/router/router-policy-v1.lisp; if neither path resolves on disk, the section is omitted. The rendered section is strictly informational — it MUST contain the literal words 'advisory' and 'dry-run only', MUST NOT instruct workers to change backend, and the renderer never shells out to the recommendation CLI."))
 
   (commit-contract
     :required-fields [:required :scope-check]
@@ -58,12 +60,14 @@
        "verify-task-contract command line in the Commit section when :commit :required is true"
        "literal '使用 agent-team提高效率' rendered exactly once in a 'Dispatch Note' section when :dispatch-strategy is agent-team"
        "default-on hooks-doctor preflight block immediately before the staged-guard / git-add commands when :commit :required is true; emits the read-only `node scripts/check-missiond-hooks.mjs --json` line and the explicit `node scripts/install-missiond-hooks.mjs --install` opt-in line; the renderer never mutates git config and never substitutes for the operator running --install"
-       "session-trace section (wave23-02): when a sibling .missiond/tasks/<wave>/session-trace.lisp file exists on disk, the renderer emits a 'Session Trace' section pointing at the path and reminding workers that the trace ledger is the canonical fact log (schema missiond.session-trace.v1). When the task contract sets :session-trace-writable true, the section also tells the worker they MAY append (trace-event ...) entries; otherwise the section explicitly states the worker MUST NOT write to session-trace.lisp. Auto-detection only — no contract change required for tasks that merely co-exist with the trace ledger."]
+       "session-trace section (wave23-02): when a sibling .missiond/tasks/<wave>/session-trace.lisp file exists on disk, the renderer emits a 'Session Trace' section pointing at the path and reminding workers that the trace ledger is the canonical fact log (schema missiond.session-trace.v1). When the task contract sets :session-trace-writable true, the section also tells the worker they MAY append (trace-event ...) entries; otherwise the section explicitly states the worker MUST NOT write to session-trace.lisp. Auto-detection only — no contract change required for tasks that merely co-exist with the trace ledger."
+       "router-policy section (wave24-05): when the task contract carries :router-policy-path <path>, the renderer emits a 'Router Policy (advisory)' section pointing at that path; otherwise it auto-detects .missiond/router/router-policy-v1.lisp and renders the section if the file exists on disk. The section is rendered between Session Trace and Commit and MUST contain the literal words 'advisory' and 'dry-run only'; it MUST NOT instruct ClaudeCode to change backend. Renderer never shells out to scripts/recommend-task-backend.mjs — the recommendation CLI is opt-in for humans and tooling, not a renderer dependency."]
     :backward-compatibility
       ["existing fields (kind/status/owner/dispatch_strategy/depends_on/Goal/Ownership/Must Not Touch/Requirements/Acceptance Commands/Commit/Report) keep their prior wording and ordering"
        "new sections (Dispatch Note, Shared Memory, Report Contract, verify-task-contract command) are additive and conditional"
        "scoped commit guard v2 (task-scope-guard --mode staged + MISSIOND_TASK_CONTRACT prefix) extends the existing Commit section in place; renders only when :commit :required is true and never replaces the git add or git commit lines"
-       "default-on hooks-doctor preflight block (wave22-01) extends the Commit section in place above the existing git-add / staged-guard / git-commit fenced block; renders only when :commit :required is true; never mutates git config; only adds doctor + opt-in install lines"]
+       "default-on hooks-doctor preflight block (wave22-01) extends the Commit section in place above the existing git-add / staged-guard / git-commit fenced block; renders only when :commit :required is true; never mutates git config; only adds doctor + opt-in install lines"
+       "router-policy section (wave24-05) is additive and conditional: it sits between the Session Trace and Commit sections and only renders when :router-policy-path resolves or .missiond/router/router-policy-v1.lisp exists on disk; section text is purely informational (literal 'advisory' and 'dry-run only') and never prescribes a backend switch; renderer never shells out to recommend-task-backend.mjs"]
     :non-goal "renderer does not invent scope, acceptance, or commit policy; missing fields are checker errors")
 
   (verifier-contract

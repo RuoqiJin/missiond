@@ -91,6 +91,7 @@ function loadSingleTask(file) {
     acceptance: nodeToStringArray(props[':acceptance']?.value),
     report: nodeToStringArray(props[':report']?.value),
     sessionTraceWritable: keywordPropBool(props, ':session-trace-writable') === true,
+    routerPolicyPath: keywordPropText(props, ':router-policy-path') ?? null,
     commit: {
       required: keywordPropBool(commitProps, ':required'),
       message: keywordPropText(commitProps, ':message'),
@@ -142,11 +143,30 @@ function resolveSessionTracePath(taskId) {
   return fs.existsSync(abs) ? rel : null;
 }
 
+// wave24-05: resolve the router-policy file for the rendered "Router Policy
+// (advisory)" section. Precedence: an explicit :router-policy-path on the
+// task contract wins; otherwise the renderer auto-detects the wave24-01 seed
+// at .missiond/router/router-policy-v1.lisp. Returns null when neither path
+// resolves on disk so the section is omitted. The renderer never executes
+// the router-policy file — it only points at the path so human readers /
+// ClaudeCode workers can consult the dry-run policy themselves.
+function resolveRouterPolicyPath(task) {
+  const candidates = [];
+  if (task.routerPolicyPath) candidates.push(task.routerPolicyPath);
+  candidates.push(path.join('.missiond', 'router', 'router-policy-v1.lisp'));
+  for (const rel of candidates) {
+    const abs = path.resolve(process.cwd(), rel);
+    if (fs.existsSync(abs)) return rel;
+  }
+  return null;
+}
+
 function renderTask(task, sourcePath) {
   const relSource = path.relative(process.cwd(), sourcePath);
   const sharedMemoryPath = resolveSharedMemoryPath(task.id);
   const reportContractPath = resolveReportContractPath(task.id);
   const sessionTracePath = resolveSessionTracePath(task.id);
+  const routerPolicyPath = resolveRouterPolicyPath(task);
   const lines = [];
   lines.push(`# ${task.id} — ${task.title}`);
   lines.push('');
@@ -184,6 +204,7 @@ function renderTask(task, sourcePath) {
   if (sharedMemoryPath) renderSharedMemory(lines, sharedMemoryPath);
   if (reportContractPath) renderReportContract(lines, reportContractPath);
   if (sessionTracePath) renderSessionTrace(lines, task, sessionTracePath);
+  if (routerPolicyPath) renderRouterPolicy(lines, task, routerPolicyPath);
   lines.push('## Commit');
   lines.push('');
   if (task.commit.required) {
@@ -276,6 +297,37 @@ function renderSessionTrace(lines, task, sessionTracePath) {
   lines.push('');
   lines.push('```bash');
   lines.push(`node scripts/check-session-trace.mjs ${sessionTracePath}`);
+  lines.push('```');
+  lines.push('');
+}
+
+// wave24-05: emit a "Router Policy (advisory)" section between Session Trace
+// and Commit when a router-policy file resolves on disk (either via the
+// task contract's :router-policy-path or the auto-detected wave24-01 seed
+// at .missiond/router/router-policy-v1.lisp). The section is informational
+// only — it MUST contain the literal words "advisory" and "dry-run only" to
+// reinforce that runtime dispatch is unchanged, and it MUST NOT instruct
+// ClaudeCode (or any worker) to switch backend. The renderer never invokes
+// scripts/recommend-task-backend.mjs; recommendation remains an opt-in CLI
+// for humans and tooling, not a hidden side-effect of rendering a brief.
+function renderRouterPolicy(lines, task, routerPolicyPath) {
+  const explicit = task.routerPolicyPath && task.routerPolicyPath === routerPolicyPath;
+  lines.push('## Router Policy (advisory)');
+  lines.push('');
+  lines.push(`Dry-run router-policy ledger: \`${routerPolicyPath}\` (schema \`missiond.router-policy.v1\`).`);
+  lines.push('');
+  lines.push('- This section is **advisory** and **dry-run only**. The policy file is informational; it captures backend recommendations distilled from prior session-trace observations, but **runtime dispatch is unchanged** — ClaudeCode remains the live backend for this task.');
+  lines.push('- The brief surfaces the policy path so human readers and ClaudeCode workers can consult the recommendations; it does not instruct the worker to switch backend, alter the dispatch strategy, or run the recommendation CLI.');
+  if (explicit) {
+    lines.push('- Source: explicit `:router-policy-path` on the task contract.');
+  } else {
+    lines.push('- Source: auto-detected default seed (no `:router-policy-path` on the task contract).');
+  }
+  lines.push('');
+  lines.push('Inspect the policy with the read-only checker (the renderer itself does not execute the policy or shell out to the recommendation CLI):');
+  lines.push('');
+  lines.push('```bash');
+  lines.push(`node scripts/check-router-policy.mjs ${routerPolicyPath}`);
   lines.push('```');
   lines.push('');
 }
