@@ -375,7 +375,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         "verified".into(),
         prop(
             "boolean",
-            "[complete] writer-asserted end-to-end verification flag (wave21-03). When `true`, daemon enforces preconditions (`enforce_scoped_commit=true` + `task_contract_path` + `task_report_path` + `commit_hash` all present) and then loads the report file off disk for a read-only cross-check (`:schema` must equal `missiond.report-contract.v1`, `:task_id` must match the contract head id, `:commit_hash` must match the supplied `commit_hash`). Failures reject with structured `VERIFIED_REQUIRES_ENFORCEMENT` / `VERIFIED_REQUIRES_TASK_CONTRACT` / `VERIFIED_REQUIRES_TASK_REPORT` / `VERIFIED_REQUIRES_COMMIT_HASH` / `TASK_REPORT_REQUIRED` / `TASK_REPORT_MALFORMED` / `TASK_REPORT_TASK_ID_MISMATCH` / `TASK_REPORT_COMMIT_HASH_MISMATCH` codes BEFORE any companion log mutation. `false` is recorded verbatim (writer explicitly opted out of verification); absent → legacy completion shape with no extra check. Daemon never spawns Node; the wave21-02 `scripts/verify-task-run.mjs` is the out-of-process authority.",
+            "[complete] writer-asserted end-to-end verification flag. WAVE 22 / TASK 02 SHIFT: this flag is now a legacy-compat fallback only. The new contract: when the writer supplies all four of `task_contract_path`, `task_report_path`, `shared_memory_path`, and `commit_hash`, daemon runs the in-tree task-run auto-verifier ITSELF (read-only file inspection — no Node spawn, no shell, no mutating git) and computes the verdict on the response as `verifier_status` / `verified_scope_summary` plus `verification_source=\"daemon-auto-verifier\"`. Failure cases reject with structured `TASK_CONTRACT_REQUIRED` / `TASK_CONTRACT_MALFORMED` / `TASK_REPORT_REQUIRED` / `TASK_REPORT_MALFORMED` / `TASK_REPORT_TASK_ID_MISMATCH` / `TASK_REPORT_COMMIT_HASH_MISMATCH` / `SHARED_MEMORY_REQUIRED` / `SHARED_MEMORY_MALFORMED` / `SHARED_MEMORY_NO_COMPLETION_FOR_TASK` codes BEFORE any companion log mutation. When the writer instead sets `verified=true` WITHOUT supplying all four paths, daemon downgrades the assertion to a legacy claim (`verification_source=\"legacy-caller-claim\"`, `verifier_status=\"unknown\"`, `verifier_diagnostics` lists the missing paths) without rejecting — backward-compat for wave21-03 callers. `false` is recorded verbatim (writer explicitly opted out); absent → legacy completion shape with no extra surface. Daemon never spawns Node; the wave21-02 `scripts/verify-task-run.mjs` remains the out-of-process truth.",
         ),
     );
 
@@ -415,14 +415,21 @@ pub fn definitions() -> Vec<ToolDefinition> {
          itself — verifier_status is reported by the caller (e.g. via scripts/verify-task-contract.mjs). \
          Wave21-03: action=complete also accepts `task_run_verifier_status` / `shared_memory_path` / \
          `verifier_diagnostics` / `verified` as optional task-run verifier metadata (counterpart to the \
-         wave19-08 contract verifier slots — see wave21-02 scripts/verify-task-run.mjs). When \
-         `verified=true`, daemon enforces preconditions (`enforce_scoped_commit=true` + \
-         `task_contract_path` + `task_report_path` + `commit_hash` all present) and loads the report \
-         file off disk for a read-only cross-check (`:schema` = missiond.report-contract.v1, \
-         `:task_id` matches the contract head id, `:commit_hash` matches the supplied hash). Failures \
-         reject with VERIFIED_REQUIRES_* / TASK_REPORT_REQUIRED / TASK_REPORT_MALFORMED / \
-         TASK_REPORT_TASK_ID_MISMATCH / TASK_REPORT_COMMIT_HASH_MISMATCH BEFORE any companion log \
-         mutation. Daemon never spawns Node here either. action=preflight_commit also echoes \
+         wave19-08 contract verifier slots — see wave21-02 scripts/verify-task-run.mjs). \
+         Wave22-02 SHIFT: the wave21-03 `verified=true` escape hatch is now a legacy-compat fallback. \
+         When the writer supplies all four of `task_contract_path` / `task_report_path` / \
+         `shared_memory_path` / `commit_hash`, daemon runs the in-tree task-run auto-verifier ITSELF \
+         (read-only file inspection — no Node spawn, no shell, no mutating git) and computes the \
+         verdict as `verifier_status` (passed) plus `verification_source=\"daemon-auto-verifier\"` \
+         and `verified_scope_summary` (structured per-rule cross-check). Auto-verifier failures \
+         surface deterministic structured codes — TASK_CONTRACT_REQUIRED / TASK_CONTRACT_MALFORMED / \
+         TASK_REPORT_REQUIRED / TASK_REPORT_MALFORMED / TASK_REPORT_TASK_ID_MISMATCH / \
+         TASK_REPORT_COMMIT_HASH_MISMATCH / SHARED_MEMORY_REQUIRED / SHARED_MEMORY_MALFORMED / \
+         SHARED_MEMORY_NO_COMPLETION_FOR_TASK — BEFORE any companion log mutation. When the writer \
+         sets `verified=true` WITHOUT supplying all four paths, daemon downgrades to \
+         `verification_source=\"legacy-caller-claim\"` (no hard reject; `verifier_status=\"unknown\"` \
+         and `verifier_diagnostics` lists the missing paths so callers can migrate). Daemon never \
+         spawns Node here either. action=preflight_commit also echoes \
          `task_report_path` / `shared_memory_path` advisory hints when supplied. \
          Lisp 源: intent-memory.lisp :: agent-execution-coordination + \
          intent-worker.lisp :: agent-execution-manager-interface + intent-flow.lisp :: \

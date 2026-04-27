@@ -176,8 +176,11 @@ const VALID_VERIFIER_STATUSES: &[&str] = &["passed", "failed", "skipped", "unkno
 /// verification (verify-task-run.mjs from wave21-02 — task contract +
 /// report + shared-memory completion + commit scope all proven in one
 /// pass). The daemon never spawns Node here either; the writer reports
-/// the outcome verbatim and (when `verified=true`) the daemon re-loads
-/// the report file off disk for read-only cross-checks.
+/// the outcome verbatim and (under wave22-02) the daemon ALSO runs an
+/// in-process auto-verifier when all four of `task_contract_path`,
+/// `task_report_path`, `shared_memory_path`, and `commit_hash` are
+/// supplied — the daemon-computed verdict wins on the response while
+/// the caller-supplied label persists in the companion log.
 const VALID_TASK_RUN_VERIFIER_STATUSES: &[&str] =
     &["passed", "failed", "skipped", "unknown"];
 
@@ -2479,30 +2482,90 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
         None
     };
 
-    // wave-21 / task 03 — verified-completion gate. Runs only when the
-    // caller explicitly opted in with `verified=true`. The gate enforces
-    // that every input the daemon needs for an end-to-end cross-check
-    // is present (enforce_scoped_commit + task_contract_path +
-    // task_report_path + commit_hash) and then loads the report off
-    // disk to confirm `:schema`, `:task_id`, and `:commit_hash` line up
-    // with the task contract head id and supplied commit hash. Failures
-    // surface a structured `VERIFIED_*` / `TASK_REPORT_*` code BEFORE
-    // any companion-log mutation. `verified=false` records the explicit
-    // negative without running the gate; absent → no extra check.
-    let verified_validation = if verified_flag == Some(true) {
-        match enforce_verified_completion(
-            &root,
-            enforce_scoped_commit,
-            task_contract_path.as_deref(),
-            task_report_path.as_deref(),
-            commit_hash.as_deref(),
-        ) {
-            Ok(v) => Some(v),
+    // wave-22 / task 02 — auto task-run verifier dispatch.
+    //
+    // The wave21-03 caller-supplied `verified=true` escape hatch is now
+    // a legacy-compat fallback. The new contract: when the writer hands
+    // every path the daemon needs for an end-to-end proof
+    // (`task_contract_path`, `task_report_path`, `shared_memory_path`,
+    // `commit_hash`) the daemon runs the in-tree task-run verifier
+    // ITSELF and computes the verified status from the on-disk inputs
+    // — no Node spawn, no shell, no mutating git, no caller assertion
+    // accepted at face value. The wave21-02 script-side verifier
+    // remains the out-of-process truth; this in-process projection just
+    // closes the action-complete window so dashboards stop relying on
+    // a writer-asserted boolean.
+    //
+    // Three-state `verification_source` summarises what happened:
+    //   * `daemon-auto-verifier` — all four paths present, daemon ran
+    //     the in-tree verifier and produced the verdict in
+    //     `verifier_status` / `verified_scope_summary`.
+    //   * `legacy-caller-claim` — caller passed `verified=true` but at
+    //     least one of the four paths is absent. We honour the legacy
+    //     posture (no hard reject), record the claim into the companion
+    //     log verbatim, and surface `verifier_status="unknown"` plus a
+    //     diagnostic explaining which path was missing so reviewers can
+    //     migrate the caller off the escape hatch.
+    //   * `none` — no auto-verifier run AND no legacy claim; absent in
+    //     the response so legacy completions stay byte-identical.
+    //
+    // Backward compat: the wave21-03 helper `enforce_verified_completion`
+    // is preserved verbatim and still callable from tests, but
+    // `action_complete` no longer routes through it — the v2 dispatch
+    // either runs the auto-verifier or downgrades the legacy claim.
+    let auto_verifier_inputs_present = task_contract_path.is_some()
+        && task_report_path.is_some()
+        && shared_memory_path.is_some()
+        && commit_hash.is_some();
+
+    let mut verification_source: Option<&'static str> = None;
+    let mut auto_verifier_summary: Option<Value> = None;
+    let mut auto_verifier_status: Option<&'static str> = None;
+    let mut auto_verifier_diagnostics: Option<String> = None;
+
+    if auto_verifier_inputs_present {
+        // unwraps are safe — we just checked all four are Some.
+        let tcp = task_contract_path.as_deref().unwrap();
+        let trp = task_report_path.as_deref().unwrap();
+        let smp = shared_memory_path.as_deref().unwrap();
+        let hash = commit_hash.as_deref().unwrap();
+        match auto_run_task_run_verifier(&root, tcp, trp, smp, hash) {
+            Ok(summary) => {
+                auto_verifier_status = Some("passed");
+                auto_verifier_summary = Some(summary);
+                verification_source = Some("daemon-auto-verifier");
+            }
             Err(err) => return Ok(err),
         }
-    } else {
-        None
-    };
+    } else if verified_flag == Some(true) {
+        // Legacy caller-supplied claim. Record it but flag in the
+        // diagnostic which path was missing so the writer agent can
+        // upgrade the next dispatch.
+        let mut missing: Vec<&'static str> = Vec::new();
+        if task_contract_path.is_none() {
+            missing.push("task_contract_path");
+        }
+        if task_report_path.is_none() {
+            missing.push("task_report_path");
+        }
+        if shared_memory_path.is_none() {
+            missing.push("shared_memory_path");
+        }
+        if commit_hash.is_none() {
+            missing.push("commit_hash");
+        }
+        verification_source = Some("legacy-caller-claim");
+        auto_verifier_status = Some("unknown");
+        auto_verifier_diagnostics = Some(format!(
+            "verified=true accepted as legacy_verified_claim because the daemon-side auto-verifier requires all four of [task_contract_path, task_report_path, shared_memory_path, commit_hash]; missing: {:?}. Migrate the dispatch envelope to supply every path so the daemon can compute the verdict itself (wave22-02).",
+            missing,
+        ));
+    }
+    // Tri-state placeholder kept in sync with the wave21-03 response
+    // shape: when the auto-verifier ran the response surfaces the
+    // structured summary; when only the legacy claim was made it stays
+    // None and the diagnostic prose above carries the explanation.
+    let verified_validation: Option<Value> = auto_verifier_summary.clone();
 
     let id = allocate_id(&mut file, Counter::Completion)?;
     let date = now_iso();
@@ -2670,7 +2733,11 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     if let Some(trp) = task_report_path {
         response["task_report_path"] = json!(trp);
     }
-    if let Some(vs) = verifier_status {
+    // The wave19-08 caller-supplied `verifier_status` slot is preserved
+    // verbatim when the wave22-02 auto-verifier did NOT run; otherwise
+    // the daemon-computed status (set further below) wins so the
+    // response surface advertises a single authoritative verdict.
+    if let Some(ref vs) = verifier_status {
         response["verifier_status"] = json!(vs);
     }
     if let Some(vn) = verifier_notes {
@@ -2689,14 +2756,51 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     if let Some(smp) = shared_memory_path {
         response["shared_memory_path"] = json!(smp);
     }
-    if let Some(vd) = verifier_diagnostics {
+    // The wave21-03 caller-supplied `verifier_diagnostics` slot is
+    // preserved verbatim when the wave22-02 auto-verifier did NOT run;
+    // otherwise the daemon-computed diagnostic (set further below)
+    // wins so reviewers see one diagnostic per response.
+    if let Some(ref vd) = verifier_diagnostics {
         response["verifier_diagnostics"] = json!(vd);
     }
     if let Some(v) = verified_flag {
         response["verified"] = json!(v);
     }
-    if let Some(v) = verified_validation {
-        response["verified_validation"] = v;
+
+    // ── wave-22 / task 02 — auto task-run verifier surface ────────────
+    //
+    // `verification_source` flags how the verdict was reached:
+    //   * `daemon-auto-verifier` — daemon ran the in-tree verifier; the
+    //     daemon-computed `verifier_status="passed"` overrides any
+    //     caller-supplied wave19-08 / wave21-03 status. The structured
+    //     `verified_scope_summary` records every cross-checked rule.
+    //   * `legacy-caller-claim` — caller passed `verified=true` but at
+    //     least one path was missing; daemon-computed status is
+    //     `"unknown"` and `verifier_diagnostics` carries the migration
+    //     prose pointing at the missing path(s).
+    //
+    // Absent `verification_source` (legacy callers) keeps the response
+    // shape byte-identical to the wave21-03 surface.
+    if let Some(src) = verification_source {
+        response["verification_source"] = json!(src);
+    }
+    if let Some(status) = auto_verifier_status {
+        // Daemon-computed verdict wins over the caller-supplied
+        // wave19-08 / wave21-03 statuses. Reviewers can still see the
+        // caller-supplied values inside `task_run_verifier_status` /
+        // the companion log.
+        response["verifier_status"] = json!(status);
+    }
+    if let Some(diag) = auto_verifier_diagnostics {
+        response["verifier_diagnostics"] = json!(diag);
+    }
+    if let Some(scope_summary) = verified_validation {
+        // wave-22 contract: the summary is exposed as
+        // `verified_scope_summary`. We keep the wave21-03 shape under
+        // the legacy `verified_validation` key too so existing
+        // dashboards keep parsing while consumers migrate.
+        response["verified_scope_summary"] = scope_summary.clone();
+        response["verified_validation"] = scope_summary;
     }
     Ok(ToolResult::json_pretty(&response))
 }
@@ -3915,6 +4019,457 @@ fn enforce_verified_completion(
             "commit_hash_matches_report",
         ],
     }))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-22 / task 02 — auto task-run verifier (in-process, read-only)
+// ───────────────────────────────────────────────────────────────────────
+//
+// Lifts the wave21-03 caller-supplied `verified=true` claim into a
+// daemon-computed verdict. When `action_complete` sees all four of
+// `task_contract_path`, `task_report_path`, `shared_memory_path`, and
+// `commit_hash` the daemon runs the in-tree task-run verifier itself —
+// no Node spawn, no shell, no mutating git, no process boundary at all.
+// The script-side `scripts/verify-task-run.mjs` (wave21-02) remains the
+// out-of-process truth; this in-process projection delivers the same
+// verdict during the action-complete window so callers stop relying on
+// the caller-supplied `verified` flag as an escape hatch.
+//
+// Three fail-fast checks fold together:
+//   1. task contract loadable + commit_hash present (re-uses the
+//      wave19-08 helper internals so a future schema update tracks).
+//   2. report cross-check: schema = `missiond.report-contract.v1`,
+//      `:task_id` matches the contract head id, `:commit_hash` matches
+//      the supplied hash (full string equality OR prefix overlap, same
+//      rule as the wave21-03 gate so the two stay byte-identical).
+//   3. shared-memory ledger: schema = `missiond.shared-memory.v1` AND
+//      contains a `(completion :task <contract-id> ...)` entry — the
+//      wave21-02 verifier's "ledger references the task" rule rendered
+//      in pure Rust against the same on-disk file.
+//
+// Failures surface deterministic structured codes so dashboards can
+// route on them without re-parsing prose:
+//
+//   * `TASK_REPORT_REQUIRED` / `TASK_REPORT_MALFORMED` /
+//     `TASK_REPORT_TASK_ID_MISMATCH` / `TASK_REPORT_COMMIT_HASH_MISMATCH`
+//     — re-used from the wave21-03 vocabulary so consumers see one
+//     vocabulary across both gates.
+//   * `TASK_CONTRACT_REQUIRED` / `TASK_CONTRACT_MALFORMED` — re-used
+//     from the wave19-08 vocabulary for the same reason.
+//   * `SHARED_MEMORY_REQUIRED` — `shared_memory_path` does not resolve
+//     to a readable file under the project root.
+//   * `SHARED_MEMORY_MALFORMED` — file parses but `:schema` is missing
+//     / wrong, or there is no `(shared-memory ...)` form.
+//   * `SHARED_MEMORY_NO_COMPLETION_FOR_TASK` — file is well-formed but
+//     contains no `(completion :task <id> ...)` entry for the contract
+//     head id.
+//
+// Returns the structured `verified_scope_summary` payload on success;
+// `action_complete` folds it into the response under the same key.
+#[allow(clippy::too_many_arguments)]
+fn auto_run_task_run_verifier(
+    project_root: &Path,
+    task_contract_path: &str,
+    task_report_path: &str,
+    shared_memory_path: &str,
+    commit_hash: &str,
+) -> std::result::Result<Value, ToolResult> {
+    // (1) Resolve + load the task contract. Same path-resolution rule
+    // as the wave19-08 / wave21-03 gates: relative anchors at the
+    // project root, absolute flows verbatim. Reuses the workstation
+    // pillar's projector so daemon + workstation share one schema.
+    let contract_raw = std::path::Path::new(task_contract_path);
+    let contract_resolved: PathBuf = if contract_raw.is_absolute() {
+        contract_raw.to_path_buf()
+    } else {
+        project_root.join(contract_raw)
+    };
+    let contract = match super::workstation_dispatch::load_task_contract(&contract_resolved) {
+        Ok(c) => c,
+        Err(e) => {
+            use super::workstation_dispatch::TaskContractParseError as Tce;
+            let (code, message) = match &e {
+                Tce::Io(detail) => (
+                    "TASK_CONTRACT_REQUIRED",
+                    format!(
+                        "task_contract_path `{}` is not readable: {}",
+                        contract_resolved.display(),
+                        detail
+                    ),
+                ),
+                _ => (
+                    "TASK_CONTRACT_MALFORMED",
+                    format!(
+                        "task_contract_path `{}` failed schema parse: {}",
+                        contract_resolved.display(),
+                        e.reason()
+                    ),
+                ),
+            };
+            return Err(ToolResult::structured_error(
+                ToolError::new(code, message).with_suggestion(
+                    "ensure the path resolves under the project root and the file is a valid `missiond.task-contract.v1` Lisp form",
+                ),
+            ));
+        }
+    };
+    // Recover the head id via the local mini-reader so we depend on the
+    // same projector the wave21-03 gate uses (cross-check anchor).
+    let contract_text = match std::fs::read_to_string(&contract_resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_CONTRACT_REQUIRED",
+                    format!(
+                        "task_contract_path `{}` became unreadable mid-verification: {}",
+                        contract_resolved.display(),
+                        e
+                    ),
+                ),
+            ));
+        }
+    };
+    let contract_id = read_task_contract_id(&contract_text).ok_or_else(|| {
+        ToolResult::structured_error(
+            ToolError::new(
+                "TASK_CONTRACT_MALFORMED",
+                format!(
+                    "task_contract_path `{}` is not a `(task <id> ...)` form",
+                    contract_resolved.display()
+                ),
+            ),
+        )
+    })?;
+
+    // (2) Resolve + load the report-contract. Mirrors the wave21-03
+    // verified-gate's checks (schema, task_id, commit_hash) so the two
+    // gates stay semantically aligned — only the trigger differs.
+    let report_raw = std::path::Path::new(task_report_path);
+    let report_resolved: PathBuf = if report_raw.is_absolute() {
+        report_raw.to_path_buf()
+    } else {
+        project_root.join(report_raw)
+    };
+    let report_text = match std::fs::read_to_string(&report_resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_REQUIRED",
+                    format!(
+                        "task_report_path `{}` is not readable: {}",
+                        report_resolved.display(),
+                        e
+                    ),
+                )
+                .with_suggestion(
+                    "ensure the path resolves under the project root and the writer wrote the report-contract v1 file",
+                ),
+            ));
+        }
+    };
+    let report = match read_report_summary(&report_text) {
+        Ok(r) => r,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` failed structural parse: {}",
+                        report_resolved.display(),
+                        e
+                    ),
+                )
+                .with_suggestion(
+                    "run `node scripts/check-task-report.mjs <path>` to see the exact schema error",
+                ),
+            ));
+        }
+    };
+    match report.schema.as_deref() {
+        Some("missiond.report-contract.v1") => {}
+        Some(other) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` :schema must equal `missiond.report-contract.v1`, got `{}`",
+                        report_resolved.display(),
+                        other
+                    ),
+                ),
+            ));
+        }
+        None => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` has no `:schema` field",
+                        report_resolved.display()
+                    ),
+                ),
+            ));
+        }
+    }
+    match report.task_id.as_deref() {
+        Some(id) if id == contract_id => {}
+        Some(other) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_TASK_ID_MISMATCH",
+                    format!(
+                        "task_report :task_id `{}` does not match task contract head id `{}` (contract `{}`, report `{}`)",
+                        other,
+                        contract_id,
+                        contract_resolved.display(),
+                        report_resolved.display(),
+                    ),
+                )
+                .with_suggestion(
+                    "regenerate the report against the matching contract, or fix the report :task_id field",
+                ),
+            ));
+        }
+        None => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` is missing required `:task_id` field",
+                        report_resolved.display()
+                    ),
+                ),
+            ));
+        }
+    }
+    // commit_hash overlap: full equality OR either side a prefix of the
+    // other. Mirrors the wave21-03 short<->long sha tolerance so a
+    // 7-char `git log %h` value still matches a 40-char `git rev-parse`.
+    match report.commit_hash.as_deref() {
+        Some(report_hash) => {
+            let matches = report_hash == commit_hash
+                || report_hash.starts_with(commit_hash)
+                || commit_hash.starts_with(report_hash);
+            if !matches {
+                return Err(ToolResult::structured_error(
+                    ToolError::new(
+                        "TASK_REPORT_COMMIT_HASH_MISMATCH",
+                        format!(
+                            "task_report :commit_hash `{}` does not match completion commit_hash `{}` (report `{}`)",
+                            report_hash,
+                            commit_hash,
+                            report_resolved.display(),
+                        ),
+                    )
+                    .with_suggestion(
+                        "regenerate the report against the durable commit, or correct the completion commit_hash",
+                    ),
+                ));
+            }
+        }
+        None => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "TASK_REPORT_MALFORMED",
+                    format!(
+                        "task_report_path `{}` is missing required `:commit_hash` field",
+                        report_resolved.display()
+                    ),
+                ),
+            ));
+        }
+    }
+
+    // (3) Resolve + load the shared-memory ledger. The script-side
+    // verifier requires a `(completion :task <id> ...)` entry; the
+    // daemon mirrors that rule using the in-tree sexp parser so the two
+    // produce identical verdicts on the same files.
+    let memory_raw = std::path::Path::new(shared_memory_path);
+    let memory_resolved: PathBuf = if memory_raw.is_absolute() {
+        memory_raw.to_path_buf()
+    } else {
+        project_root.join(memory_raw)
+    };
+    let memory_text = match std::fs::read_to_string(&memory_resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "SHARED_MEMORY_REQUIRED",
+                    format!(
+                        "shared_memory_path `{}` is not readable: {}",
+                        memory_resolved.display(),
+                        e
+                    ),
+                )
+                .with_suggestion(
+                    "ensure the path resolves under the project root and the wave shared-memory ledger exists",
+                ),
+            ));
+        }
+    };
+    let ledger = match read_shared_memory_ledger(&memory_text) {
+        Ok(l) => l,
+        Err(e) => {
+            return Err(ToolResult::structured_error(
+                ToolError::new(
+                    "SHARED_MEMORY_MALFORMED",
+                    format!(
+                        "shared_memory_path `{}` failed structural parse: {}",
+                        memory_resolved.display(),
+                        e
+                    ),
+                )
+                .with_suggestion(
+                    "run `node scripts/check-task-memory.mjs <path>` to see the exact schema error",
+                ),
+            ));
+        }
+    };
+    if ledger.schema.as_deref() != Some("missiond.shared-memory.v1") {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "SHARED_MEMORY_MALFORMED",
+                format!(
+                    "shared_memory_path `{}` :schema must equal `missiond.shared-memory.v1`, got `{:?}`",
+                    memory_resolved.display(),
+                    ledger.schema,
+                ),
+            ),
+        ));
+    }
+    let matched = ledger
+        .completion_tasks
+        .iter()
+        .any(|task| task == &contract_id);
+    if !matched {
+        return Err(ToolResult::structured_error(
+            ToolError::new(
+                "SHARED_MEMORY_NO_COMPLETION_FOR_TASK",
+                format!(
+                    "shared_memory_path `{}` has no `(completion :task {} ...)` entry — the wave21-02 verifier requires the ledger to record the completion before the run can be ratified",
+                    memory_resolved.display(),
+                    contract_id
+                ),
+            )
+            .with_suggestion(
+                "append a `(completion :task ... :id ... :agent ... :seq ... :touched [...] :summary \"...\")` entry to the ledger before completing",
+            ),
+        ));
+    }
+
+    Ok(json!({
+        "verifier_status": "passed",
+        "task_id": contract_id,
+        "task_contract_path": task_contract_path,
+        "task_contract_resolved_path": contract_resolved.display().to_string(),
+        "task_report_path": task_report_path,
+        "task_report_resolved_path": report_resolved.display().to_string(),
+        "shared_memory_path": shared_memory_path,
+        "shared_memory_resolved_path": memory_resolved.display().to_string(),
+        "commit_hash": commit_hash,
+        "checks": [
+            "task_contract_loadable",
+            "task_report_loadable",
+            "task_report_schema",
+            "task_id_matches_contract",
+            "commit_hash_matches_report",
+            "shared_memory_loadable",
+            "shared_memory_schema",
+            "shared_memory_completion_for_task",
+        ],
+    }))
+}
+
+/// wave-22 / task 02 — minimal shared-memory ledger projector.
+///
+/// Pulls just the `:schema` field and the list of `:task` ids that
+/// appear inside `(completion ...)` children. Mirrors the wave21-02
+/// `loadLedger` projection in `scripts/verify-task-run.mjs` so the
+/// daemon-side auto-verifier hits the same rule:
+/// `ledger.completions.some(c => c.task === contract.id)`.
+struct SharedMemorySummary {
+    schema: Option<String>,
+    completion_tasks: Vec<String>,
+}
+
+fn read_shared_memory_ledger(text: &str) -> Result<SharedMemorySummary, anyhow::Error> {
+    let nodes = sexp::parse(text)?;
+    let top = nodes
+        .iter()
+        .find(|n| n.head_atom() == Some("shared-memory"))
+        .ok_or_else(|| anyhow!("no `(shared-memory ...)` form found"))?;
+    let kids = top.children();
+    let mut schema: Option<String> = None;
+    // children layout mirrors `(shared-memory <wave> :keyword value ... (claim ...) (completion ...))`
+    // We walk the children once: bare keyword/value pairs feed the
+    // metadata bag; nested lists matching `(completion :task <id> ...)`
+    // feed the completion tasks list.
+    let mut completion_tasks: Vec<String> = Vec::new();
+    let mut i = 2; // skip head atom + wave id
+    while i < kids.len() {
+        let node = &kids[i];
+        match &node.kind {
+            NodeKind::Atom(a) if a.starts_with(':') => {
+                if i + 1 < kids.len() {
+                    let key = &a[1..];
+                    let val = &kids[i + 1];
+                    let val_str = match &val.kind {
+                        NodeKind::Str(s) => Some(s.clone()),
+                        NodeKind::Atom(s) => Some(s.clone()),
+                        _ => None,
+                    };
+                    if key == "schema" {
+                        schema = val_str.filter(|s| !s.is_empty());
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            NodeKind::List(_) | NodeKind::Bracket(_) => {
+                if node.head_atom() == Some("completion") {
+                    let task_id = read_completion_task_id(node);
+                    if let Some(id) = task_id {
+                        completion_tasks.push(id);
+                    }
+                }
+                i += 1;
+            }
+            _ => {
+                i += 1;
+            }
+        }
+    }
+    Ok(SharedMemorySummary {
+        schema,
+        completion_tasks,
+    })
+}
+
+/// Pull the `:task` keyword value out of a `(completion :id ... :task <id> ...)` form.
+/// Returns `None` when the entry has no `:task` slot — the auto-verifier
+/// silently ignores such entries because the wave21-02 script-side
+/// verifier uses the same "must have :task" rule when matching.
+fn read_completion_task_id(node: &Node) -> Option<String> {
+    let kids = node.children();
+    let mut i = 1; // skip head atom `completion`
+    while i + 1 < kids.len() {
+        if let Some(atom) = kids[i].as_atom() {
+            if atom == ":task" {
+                let val = &kids[i + 1];
+                return match &val.kind {
+                    NodeKind::Str(s) => Some(s.clone()),
+                    NodeKind::Atom(s) => Some(s.clone()),
+                    _ => None,
+                };
+            }
+        }
+        i += 2;
+    }
+    None
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -8020,6 +8575,389 @@ mod tests {
             Some(contract_id.as_str()),
             report.task_id.as_deref(),
             "wave21-08 cross-check anchor: contract head id must equal report :task_id"
+        );
+    }
+
+    // ── Wave 22 / Task 02 — auto task-run verifier (in-process) ──
+    //
+    // These tests pin the wave22-02 contract on the daemon-side
+    // auto-verifier (`auto_run_task_run_verifier`) and the supporting
+    // shared-memory projector (`read_shared_memory_ledger` /
+    // `read_completion_task_id`). The auto-verifier removes the
+    // wave21-03 caller-supplied `verified=true` escape hatch by
+    // computing the verdict itself when all four paths
+    // (`task_contract_path`, `task_report_path`, `shared_memory_path`,
+    // `commit_hash`) are supplied. The verdict reuses the wave19-08 +
+    // wave21-03 error-code vocabulary plus three wave22-02 codes
+    // (`SHARED_MEMORY_REQUIRED`, `SHARED_MEMORY_MALFORMED`,
+    // `SHARED_MEMORY_NO_COMPLETION_FOR_TASK`) so dashboards see one
+    // consistent surface across the gates.
+
+    /// Aligned shared-memory ledger fixture mirroring the byte-shape of
+    /// `.missiond/tasks/<wave>/shared-memory.lisp`. The `(completion ...)`
+    /// child references the wave21-08 smoke contract head id so the
+    /// auto-verifier finds a matching entry.
+    const WAVE22_02_SMOKE_MEMORY_BODY: &str = r#"
+(shared-memory wave21
+  :schema "missiond.shared-memory.v1"
+  :wave wave21
+  :created-at "2026-04-26T00:00:00Z"
+  :sequence 1
+  (claim
+    :id wave21-08-claim-001
+    :task wave21-08-smoke-contract
+    :agent claudecode
+    :seq 1
+    :at "2026-04-26T00:01:00Z"
+    :touched ["src/x.rs"]
+    :summary "claim")
+  (completion
+    :id wave21-08-completion-001
+    :task wave21-08-smoke-contract
+    :agent claudecode
+    :seq 2
+    :at "2026-04-26T00:02:00Z"
+    :touched ["src/x.rs"]
+    :summary "done"))
+"#;
+
+    /// Wave22-02 happy path: every path supplied + every cross-check
+    /// passes → daemon-computed `verifier_status="passed"` and the
+    /// `verified_scope_summary` records every check name. This is the
+    /// SSOT proof that the daemon can ratify a task run end-to-end
+    /// without a Node spawn.
+    #[test]
+    fn auto_verifier_accepts_aligned_quartet() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let contract_resolved = write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        let report_resolved = write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        let memory_resolved = write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            WAVE22_02_SMOKE_MEMORY_BODY,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            "cafef00d1234",
+        );
+        let summary = res.expect("aligned quartet must pass auto-verifier");
+        assert_eq!(
+            summary.get("verifier_status").and_then(|v| v.as_str()),
+            Some("passed"),
+            "daemon-computed verdict MUST be `passed` for the aligned quartet"
+        );
+        assert_eq!(
+            summary.get("task_id").and_then(|v| v.as_str()),
+            Some("wave21-08-smoke-contract"),
+        );
+        assert_eq!(
+            summary
+                .get("task_contract_resolved_path")
+                .and_then(|v| v.as_str()),
+            Some(contract_resolved.display().to_string().as_str()),
+        );
+        assert_eq!(
+            summary
+                .get("task_report_resolved_path")
+                .and_then(|v| v.as_str()),
+            Some(report_resolved.display().to_string().as_str()),
+        );
+        assert_eq!(
+            summary
+                .get("shared_memory_resolved_path")
+                .and_then(|v| v.as_str()),
+            Some(memory_resolved.display().to_string().as_str()),
+        );
+        let checks = summary
+            .get("checks")
+            .and_then(|v| v.as_array())
+            .expect("checks list must exist");
+        for needle in [
+            "task_contract_loadable",
+            "task_report_loadable",
+            "task_report_schema",
+            "task_id_matches_contract",
+            "commit_hash_matches_report",
+            "shared_memory_loadable",
+            "shared_memory_schema",
+            "shared_memory_completion_for_task",
+        ] {
+            assert!(
+                checks.iter().any(|v| v.as_str() == Some(needle)),
+                "auto-verifier MUST record `{}` in :checks",
+                needle
+            );
+        }
+    }
+
+    /// Missing shared-memory file → `SHARED_MEMORY_REQUIRED`. Distinct
+    /// from `SHARED_MEMORY_MALFORMED` so the writer can tell "wrong
+    /// path" from "wrong content" without re-running anything.
+    #[test]
+    fn auto_verifier_rejects_missing_shared_memory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            ".missiond/tasks/wave21/does-not-exist.lisp",
+            "cafef00d1234",
+        );
+        let err = res.expect_err("missing shared-memory must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("SHARED_MEMORY_REQUIRED"),
+        );
+    }
+
+    /// Shared-memory ledger with the wrong `:schema` →
+    /// `SHARED_MEMORY_MALFORMED`. The structural parse succeeds but
+    /// the schema check refuses to ratify a non-v1 ledger so the
+    /// auto-verifier never silently accepts a stale shape.
+    #[test]
+    fn auto_verifier_rejects_shared_memory_schema_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        let bad_memory = r#"
+(shared-memory wave21
+  :schema "missiond.shared-memory.v0"
+  :wave wave21
+  (completion :id x :task wave21-08-smoke-contract :agent x :seq 1 :touched [] :summary "x"))
+"#;
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            bad_memory,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            "cafef00d1234",
+        );
+        let err = res.expect_err("schema mismatch must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("SHARED_MEMORY_MALFORMED"),
+        );
+    }
+
+    /// Shared-memory ledger has the right schema but no
+    /// `(completion :task <id> ...)` for the contract head id →
+    /// `SHARED_MEMORY_NO_COMPLETION_FOR_TASK`. Mirrors the wave21-02
+    /// script-side rule so the daemon and the script agree.
+    #[test]
+    fn auto_verifier_rejects_shared_memory_without_completion_for_task() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        // Ledger has only a claim and a completion for OTHER task — the
+        // daemon must refuse rather than silently passing.
+        let no_match_memory = r#"
+(shared-memory wave21
+  :schema "missiond.shared-memory.v1"
+  :wave wave21
+  (claim
+    :id wave21-99-claim-001
+    :task wave21-99-other
+    :agent claudecode
+    :seq 1
+    :touched []
+    :summary "claim")
+  (completion
+    :id wave21-99-completion-001
+    :task wave21-99-other
+    :agent claudecode
+    :seq 2
+    :touched []
+    :summary "done"))
+"#;
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            no_match_memory,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            ".missiond/tasks/wave21/reports/wave21-08-smoke.report.lisp",
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            "cafef00d1234",
+        );
+        let err = res.expect_err("missing completion entry must reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("SHARED_MEMORY_NO_COMPLETION_FOR_TASK"),
+        );
+    }
+
+    /// The shared-memory projector pulls `:schema` and every
+    /// `(completion :task <id> ...)` task id off the ledger. Pinning
+    /// this directly proves the wave22-02 auto-verifier's matching
+    /// rule survives a future ledger schema change without leaning on
+    /// the script-side checker.
+    #[test]
+    fn shared_memory_projector_extracts_required_fields() {
+        let summary =
+            read_shared_memory_ledger(WAVE22_02_SMOKE_MEMORY_BODY).expect("must parse");
+        assert_eq!(
+            summary.schema.as_deref(),
+            Some("missiond.shared-memory.v1"),
+        );
+        assert!(
+            summary
+                .completion_tasks
+                .iter()
+                .any(|t| t == "wave21-08-smoke-contract"),
+            "projector MUST surface every (completion :task <id> ...) entry"
+        );
+    }
+
+    /// `read_completion_task_id` ignores `(completion ...)` forms with
+    /// no `:task` slot — mirrors the script-side verifier which uses
+    /// the same "must have :task" rule when matching.
+    #[test]
+    fn completion_task_id_ignores_entry_without_task_slot() {
+        let body = r#"
+(shared-memory wave99
+  :schema "missiond.shared-memory.v1"
+  :wave wave99
+  (completion :id x :agent y :seq 1 :touched [] :summary "no task slot"))
+"#;
+        let summary = read_shared_memory_ledger(body).expect("must parse");
+        assert!(
+            summary.completion_tasks.is_empty(),
+            "entries without :task MUST be silently skipped to mirror the script-side rule"
+        );
+    }
+
+    /// Auto-verifier delegates the contract+report cross-checks to the
+    /// same projectors as the wave21-03 gate, so a report `:task_id`
+    /// mismatch still surfaces the dedicated `TASK_REPORT_TASK_ID_MISMATCH`
+    /// code rather than a generic auto-verifier failure. Pinning this
+    /// directly proves the vocabulary stays unified across the two gates.
+    #[test]
+    fn auto_verifier_reuses_wave21_03_codes_for_report_task_id_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        let mismatched_report = r#"
+(report wave21-08-other-task
+  :schema "missiond.report-contract.v1"
+  :task_id "wave21-08-other-task"
+  :status done
+  :commit_hash "cafef00d1234"
+  :files_changed []
+  :acceptance_results [])
+"#;
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-mismatch.report.lisp",
+            mismatched_report,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            WAVE22_02_SMOKE_MEMORY_BODY,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            ".missiond/tasks/wave21/reports/wave21-08-mismatch.report.lisp",
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            "cafef00d1234",
+        );
+        let err = res.expect_err("task_id mismatch MUST reject");
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_TASK_ID_MISMATCH"),
+            "wave22-02 auto-verifier MUST reuse wave21-03 vocabulary so consumers see one code"
+        );
+    }
+
+    /// Auto-verifier preserves the short<->long sha overlap rule from
+    /// the wave21-03 gate. A 7-char `git log %h` value MUST match a
+    /// 40-char `git rev-parse HEAD` value via prefix overlap.
+    #[test]
+    fn auto_verifier_accepts_short_long_sha_prefix_overlap() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        let short_hash_report = r#"
+(report wave21-08-smoke-contract
+  :schema "missiond.report-contract.v1"
+  :task_id "wave21-08-smoke-contract"
+  :status done
+  :commit_hash "cafef00"
+  :files_changed []
+  :acceptance_results [])
+"#;
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/reports/wave21-08-short.report.lisp",
+            short_hash_report,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            WAVE22_02_SMOKE_MEMORY_BODY,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave21/wave21-08-smoke.lisp",
+            ".missiond/tasks/wave21/reports/wave21-08-short.report.lisp",
+            ".missiond/tasks/wave21/shared-memory.lisp",
+            // Long sha; report has the 7-char prefix.
+            "cafef001234567890abcdef",
+        );
+        assert!(
+            res.is_ok(),
+            "short<->long sha prefix overlap MUST pass the auto-verifier",
         );
     }
 }
