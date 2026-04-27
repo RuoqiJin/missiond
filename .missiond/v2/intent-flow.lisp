@@ -20,6 +20,11 @@
      "flow 层新增的是 advisory stage, 不是 runtime dispatch stage; applied=false / runtime_replacement=false 是边界"
      "renderer 只给 ClaudeCode brief 增加 Router Policy (advisory) 上下文, 不指挥 backend 切换"
      "runtime router replacement / automatic backend selection 仍 pending, 需要后续显式 policy wave"]
+  :wave-25-status-summary
+    ["router dry-run chain 已变成 measurable loop: evaluate corpus → recommend backend → echo report fields → mission_plan trace-index confidence → smoke parity"
+     "trace-index 只提高 dry-run confidence, 不改变 flow dispatch; mode=off/default 仍保持旧 shape 且不读文件"
+     "report-contract router 字段是 completion evidence, 不是 routing command"
+     "runtime router replacement / automatic backend selection 仍 pending, 后续必须单独 policy wave"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"

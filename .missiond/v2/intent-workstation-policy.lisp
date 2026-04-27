@@ -310,7 +310,7 @@
   ;; ──────────────────────────────────────────────────────────
   (trace-derived-router-policy
     :desc "基于 session-trace 的后续 LLM router / backend selection 草案 — 用真实执行轨迹压缩 ClaudeCode 步数, 但本 wave 不替换 ClaudeCode"
-    :status "code-aligned partial — wave 24 已完成 advisory dry-run 链路 (router-policy schema/checker/seed + trace corpus index + recommendation CLI + mission_plan dry-run surface + renderer advisory + smoke); runtime router replacement 未 code-aligned"
+    :status "code-aligned partial — wave 24 已完成 advisory dry-run 链路; wave 25 已完成 measurable dry-run loop (corpus evaluator + report fields + mission_plan trace-index confidence + renderer command + smoke parity); runtime router replacement 未 code-aligned"
     :truth-sources ["session-trace.lisp (append-only factual telemetry)"
                     "task-report.lisp + shared-memory.lisp + scoped commit hash"
                     "mission_execution companion log / evidence sidecar"]
@@ -362,6 +362,29 @@
          :files ["scripts/render-claudecode-task.mjs"
                  ".missiond/tasks/schema/task-contract-v1.lisp"]
          :contract "brief section says advisory + dry-run only; no backend switching instruction")]
+    :wave-25-measurement-loop
+      [(corpus-evaluator-v0
+         :status code-aligned
+         :file "scripts/evaluate-router-policy-corpus.mjs"
+         :contract "evaluates accumulated task contracts; real corpus 67 tasks; backend counts claudecode=49 / deterministic-checker=14 / verifier-worker=4; confidence high=6 / medium=5 / low=56")
+       (report-router-fields-v0
+         :status code-aligned
+         :files [".missiond/tasks/schema/report-contract-v1.lisp"
+                 "scripts/check-task-report.mjs"]
+         :contract "seven optional router fields; atom-only booleans prevent string false/true bypass")
+       (plan-trace-index-confidence-v1
+         :status code-aligned-partial
+         :files ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                 "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+         :contract "router_policy_trace_index_path is optional; statuses used/missing/unreadable/malformed are non-fatal; mode=off performs no I/O")
+       (renderer-recommend-command-v1
+         :status code-aligned
+         :file "scripts/render-claudecode-task.mjs"
+         :contract "renders parameterized recommend-task-backend command and MAY report-field guidance; no shell execution")
+       (measurement-smoke-v1
+         :status code-aligned
+         :contract "pins CLI/Rust parity at rich trace threshold >=5 plus dry_run_only/applied/runtime_replacement invariants")]
     :runtime-boundary ["current MissionD still dispatches through existing workstation/plan substrates"
                        "recommendation block is advisory evidence for humans / future policy"
+                       "wave25 confidence can raise dry-run confidence from measured trace evidence, but cannot apply backend routing"
                        "runtime replacement of ClaudeCode or mission_task_delegate is pending explicit policy wave"]))

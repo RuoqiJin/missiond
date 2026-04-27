@@ -20,6 +20,11 @@
      "mission_plan execute 现在可用 router_policy_mode=dry_run 暴露 recommendation block, 但 applied=false 永远为字面量 false"
      "router_policy_mode=apply / auto / unknown 在 plan lookup 前 INVALID_PARAM, 防止 caller 误以为已可 runtime 替换"
      "frontend Lisp 仍 postpone; 本波只补 machine-contract / plan surface / renderer advisory"]
+  :wave-25-status-summary
+    ["machine-contract 新增 router-policy corpus evaluator / report fields / measurement smoke, 让 router dry-run 从 advisory 进入可统计可验收状态"
+     "mission_plan execute 新增 router_policy_trace_index_path, 只在 dry_run mode 读取; used/missing/unreadable/malformed 都是 non-fatal evidence surface"
+     "renderer 输出 recommend-task-backend 命令与 MAY report-field 指引, 但 Markdown 仍非 SSOT 且不切换 backend"
+     "frontend Lisp 仍 postpone; 本波只补 router measurement / report / plan surface / renderer advisory"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar intent-layer (v0.4.17+ 已有详细占位)"

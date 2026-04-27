@@ -23,6 +23,11 @@
      "router_policy_mode=dry_run 返回 router_recommendation advisory block; applied=false 字面量, 不切换 backend"
      "router_policy_mode=apply/auto/unknown 在 plan lookup 前 INVALID_PARAM; 防止误触 runtime replacement"
      "task-contract renderer 增 :router-policy-path + Router Policy (advisory) brief section; MCP tool count 仍 83 不变"]
+  :wave-25-status-summary
+    ["mission_plan execute 增加 router_policy_trace_index_path dry-run evidence input; absent/off 保持旧响应形状且不读文件"
+     "trace_index_status ∈ used/missing/unreadable/malformed; degraded trace-index 只给 warning + fallback confidence, 不打断 dry-run recommendation"
+     "report-contract 增七个 router 字段, checker 严格 atom bool / enum / repo-relative path; 不新增 MCP tool"
+     "renderer 增 recommend-task-backend 命令与 MAY report-field 文案; MCP tool count 仍 83 不变"]
 
   :actual-state-sources
     [".missiond/intent-mcp-defs.lisp (schema SSOT, 24 mcp-module, 详细 input/returns)"

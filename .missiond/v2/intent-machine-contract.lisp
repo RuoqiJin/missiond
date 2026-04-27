@@ -34,6 +34,12 @@
      "mission_plan router_policy_mode=dry_run surface code-aligned partial (wave 24 task 04); applied=false literal, apply/auto/unknown rejected before plan lookup"
      "renderer router policy context code-aligned (wave 24 task 05); advisory/dry-run only text, no backend switching instruction"
      "full-chain smoke code-aligned (wave 24 task 06); Node/Rust/renderer invariants pinned; runtime backend replacement remains pending"]
+  :wave-25-status-summary
+    ["router-policy corpus evaluator code-aligned (wave 25 task 01 commit 8dbe85f); real corpus 67 tasks, backend distribution claudecode=49 / deterministic-checker=14 / verifier-worker=4, confidence high=6 / medium=5 / low=56, schema missiond.router-policy-evaluation.v0"
+     "report-contract router recommendation fields code-aligned (wave 25 task 02 commit 7709031); seven optional flat fields plus strict atom-only booleans for router_applied/router_dry_run_only"
+     "mission_plan router trace-index confidence code-aligned-partial (wave 25 task 03 commit bd2b5a3); optional router_policy_trace_index_path, statuses used/missing/unreadable/malformed, absent path omitted, mode=off blocks I/O"
+     "renderer router recommendation command code-aligned (wave 25 task 04 commit e1fdbe4); brief renders parameterized recommend-task-backend command and MAY report-field guidance, still never shells out"
+     "router measurement smoke code-aligned (wave 25 task 05 commit 0f5d857); CLI/Rust parity when trace evidence >=5, dry_run_only/applied/runtime_replacement invariants pinned, no runtime backend replacement"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -98,8 +104,9 @@
       :input "task.lisp + router-policy-v1.lisp + optional trace corpus index"
       :output "router recommendation block / mission_plan router_recommendation response"
       :command "node scripts/build-session-trace-index.mjs <trace-root> && node scripts/recommend-task-backend.mjs --task <task.lisp> --policy .missiond/router/router-policy-v1.lisp --trace-index <index.json>"
-      :status "code-aligned partial (wave 24 task 01-06)"
-      :rule "advisory only: dry_run_only=true, applied=false, runtime_replacement=false; plan.rs dry-run surface never switches backend"))
+      :status "code-aligned partial (wave 24 task 01-06 + wave 25 task 01-05 measurement loop)"
+      :rule "advisory only: dry_run_only=true, applied=false, runtime_replacement=false; plan.rs dry-run surface never switches backend"
+      :measurement "wave 25 adds corpus evaluator + report fields + trace-index confidence scoring + CLI/Rust parity smoke; measurement may raise confidence, never applies routing"))
 
   (task-report-v1
     :required-fields [:task_id :status :commit_hash :files_changed :acceptance_results :scope_deviations :notes]
@@ -185,6 +192,64 @@
                     "apply/auto/unknown => INVALID_PARAM before plan lookup"]
     :boundary "daemon implementation is pure Rust and independent from Node CLI; it does not spawn scripts and does not load trace index")
 
+  (router-policy-corpus-evaluator-v0
+    :purpose "Evaluate router-policy recommendations over the accumulated task-contract corpus, so router work is measurable instead of anecdotal"
+    :cli "scripts/evaluate-router-policy-corpus.mjs"
+    :status "code-aligned — wave 25 task 01"
+    :schema "missiond.router-policy-evaluation.v0"
+    :top-level-keys [by_backend by_confidence fallback_count per_task policy_path rejected_count schema tasks_root totals trace_index_source]
+    :real-corpus "67 task contracts evaluated; claudecode=49, deterministic-checker=14, verifier-worker=4; confidence high=6, medium=5, low=56; fallback_count=43; rejected_count=0"
+    :guarantees ["read-only"
+                 "no shell, no git, no LLM, no HTTP"
+                 "builds trace index in-process when --trace-index is absent"
+                 "skips schema/reports/shared-memory/session-trace/parallel-dispatch-index artifacts"])
+
+  (router-recommendation-report-fields-v0
+    :purpose "Allow ClaudeCode reports to echo router dry-run recommendation evidence without making it load-bearing"
+    :schema ".missiond/tasks/schema/report-contract-v1.lisp"
+    :checker "scripts/check-task-report.mjs"
+    :status "code-aligned — wave 25 task 02"
+    :optional-fields [:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path]
+    :strictness ["backend enum: claudecode / missiond-llm-router / deterministic-checker / patch-worker / verifier-worker"
+                 "confidence enum: high / medium / low"
+                 "paths repo-relative only; no absolute path, no leading ~, no .."
+                 "router_dry_run_only and router_applied must be literal atoms true/false, not strings"
+                 "router_reasons must be a vector of non-empty strings"]
+    :boundary "fields are completion evidence only; they do not select or apply backend routing")
+
+  (mission-plan-router-trace-index-confidence-v1
+    :purpose "Score dry-run router recommendation confidence from aggregated trace evidence in mission_plan execute"
+    :handler "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+    :mcp-schema "crates/missiond-mcp/src/tools/knowledge/plan.rs"
+    :status "code-aligned partial — wave 25 task 03"
+    :arg :router_policy_trace_index_path
+    :trace-index-statuses [used missing unreadable malformed]
+    :confidence-rule "when recommendation matched and max(by_task[board_task_id].events, by_backend[recommended_backend].events) >= 5 => high; 1..4 => medium; 0 => low; no-match => low"
+    :compat ["path absent => trace_index_* fields omitted and wave24 byte-shape preserved"
+             "mode=off/default => early return; even supplied trace-index path performs no I/O"
+             "missing/unreadable/malformed trace-index is non-fatal and emits warning + fallback confidence"
+             "daemon keeps independent Rust parser; no Node CLI spawn"])
+
+  (renderer-router-recommendation-command-v1
+    :purpose "Render exact advisory commands for humans while keeping Lisp task contract as SSOT"
+    :renderer "scripts/render-claudecode-task.mjs"
+    :status "code-aligned — wave 25 task 04"
+    :command-template "node scripts/recommend-task-backend.mjs --task <relSource> --policy <routerPolicyPath> --json"
+    :report-guidance "Report Contract section lists seven router fields as MAY fields"
+    :boundary "renderer emits text only; it never shells out and never instructs backend switching")
+
+  (router-policy-measurement-smoke-v1
+    :purpose "Pin the measurable dry-run loop across Node CLI, Rust mission_plan surface, renderer/report contract, and static forbidden-pattern audit"
+    :status "code-aligned — wave 25 task 05"
+    :invariants ["policy runtime_replacement=false"
+                 "dry_run_only=true"
+                 "applied=false JSON bool literal"
+                 "renderer remains advisory/dry-run only"
+                 "report checker rejects router_applied=true and router_dry_run_only=false"
+                 "mission_plan off/default byte-shape unchanged"
+                 "CLI/Rust parity for rich trace evidence: claudecode/high at (5,5)"
+                 "no shell-out, LLM, git, network, or runtime backend replacement"])
+
   (task-contract-v1
     :required-fields [:schema :title :kind :status :owner :goal :write-scope :must-not-touch :acceptance :commit]
     :schema-value "missiond.task-contract.v1"
@@ -212,6 +277,7 @@
     (checker-router-policy "scripts/check-router-policy.mjs")
     (indexer-session-trace-corpus "scripts/build-session-trace-index.mjs")
     (cli-router-recommendation "scripts/recommend-task-backend.mjs")
+    (cli-router-policy-evaluator "scripts/evaluate-router-policy-corpus.mjs")
     (renderer "scripts/render-claudecode-task.mjs")
     (parser "scripts/lib/missiond_lisp.mjs")
     ;; wave 20 additions
@@ -229,7 +295,7 @@
      "Do not auto-dispatch from task.lisp until verifier/report loop exists (wave 19 closed + wave 20-04 machine-driven dispatch v0 + wave 21-02/03 task-run verifier + execution-side verified gate 已落 + **wave 22-02 (commit 02ac627) 加 daemon-internal auto_run_task_run_verifier 8 cross-checks in-process 当 task_contract_path + task_report_path + shared_memory_path + commit_hash 4 路径全提供时 daemon 自跑 (verification_source='daemon-auto-verifier'), legacy verified=true 降级 'legacy-caller-claim'**; remaining: 完全无 hint 的 autonomous spawn / report-contract checker auto-invoke (wave22-02 已大幅推进, 但 caller 必须仍提供 4 路径才触发 daemon-internal verifier)."
      "Do not auto-apply LLM/inference proposals without explicit gate — wave 22-03 (commit 4b55cb4) 加 review LLM approve apply gate v1 (apply_llm_auto_approve + proposal_hash + caller_approved 4 opt-in + 6 道 gate); wave 22-04 (commit fee6567) 加 persisted plan inference apply v2 (persist_inference + caller_approved + proposal_hash 4 opt-in + plan_insert(version=max+1) + plan_supersede(old) 真改 plan.sexp_text); wave 22-05 (commit 162a303) 加 autonomous workstation true spawn v1 (auto_spawn + workstation_caller_approved + preflight_acceptable 4 opt-in + 12-rule gate matrix + mission_task_delegate substrate **绝不 claude -p**); wave 22-06 (commit 2423d4b) 加 distill chain policy auto-sonnet v2 (auto_sonnet_policy=safe_after_rules **policy 选择即 attestation**, dual opt-in 移除); 4 路 LLM/inference 通道全部进入 'caller explicit opt-in + 6/12-rule gate + deterministic SHA-256 hash + structured fail-fast errors' 模式. 仍未实现: 完全 LLM 自主无任何 caller opt-in / Sonnet 真无任何 attestation."
      "Do not enable hooks default-on real install — wave 21-01 hooks installer 是 opt-in repo-local only; **wave 22-01 (commit 49555c4) 加 default-on doctor v2** (install-missiond-hooks.mjs default mode = --check 只读 doctor, --install 仍唯一 mutation; renderer renderHooksDoctorPreflight() 块在 commit section 上方提示 caller 跑 --install); 但 git config core.hooksPath .githooks 默认仍未启用 — caller 必须显式跑 --install 才生效; enforce-by-default real install 仍 future."
-     "Do not use router recommendation as runtime replacement — wave 24 router-policy / indexer / CLI / mission_plan surface are advisory dry-run only; runtime_replacement=false and applied=false are hard boundaries."
+     "Do not use router recommendation as runtime replacement — wave 24 router-policy / indexer / CLI / mission_plan surface and wave 25 evaluator/report/trace-index confidence loop are advisory dry-run only; runtime_replacement=false, dry_run_only=true, and applied=false are hard boundaries."
      "Do not start frontend Lisp in this wave (continue postpone)."
      "Do not interpret arbitrary Common Lisp; this is MissionD data Lisp only."])
 
@@ -275,5 +341,6 @@
      "git hooks default-on real install (wave22-01 仍 doctor only — caller 必须显式 git config core.hooksPath .githooks 才生效)."
      "Auto-seed shared-memory ledger claim entry on parallel workstation spawn (wave22-05 真 spawn 已落, ledger seed 仍 future)."
      "DONE wave24-01..06 — router-policy dry-run chain: schema/checker/seed + trace corpus indexer + recommendation CLI + mission_plan dry-run surface + renderer advisory block + full-chain smoke; no runtime backend replacement."
+     "DONE wave25-01..05 — router-policy measurement loop: corpus evaluator (67 real tasks), report-contract seven router fields, mission_plan trace-index confidence path, renderer recommend command, and CLI/Rust parity smoke; no runtime backend replacement."
      "After backend loop stabilizes, reuse the same contract style for timeline-edit operations."
      "Frontend Lisp 仍 postpone (本 wave 不开)."]))
