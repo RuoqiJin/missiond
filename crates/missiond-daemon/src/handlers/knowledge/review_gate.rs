@@ -7291,4 +7291,232 @@ mod tests {
         stamp_proposal_hash_payload(&mut payload, &bundle, "approve", "abc-123", 1);
         assert!(payload.get("llm_auto_approve_proposal_hash").is_none());
     }
+
+    // ── Wave 22 / Task 07 — autonomous loop apply smoke v4 ──
+    //
+    // Pin the wave22-03 review LLM auto-approve apply gate slice of the
+    // wave22-07 v4 smoke contract. The pure evaluator + preflight pair
+    // is the deterministic SSOT — no Sonnet call, no DB transition,
+    // pure in-process functions over synthesised proposal/bundle structs.
+    // The companion plan.rs / workstation_dispatch.rs / agent_execution.rs
+    // / unified_entry.rs smokes cover the persisted-apply, auto-spawn,
+    // failed-verification and markdown-non-load-bearing slices.
+
+    /// V4 smoke (Requirement 2 / review apply-gate slice): the apply
+    /// gate MUST reject `apply_llm_auto_approve=true` when the caller
+    /// does not supply `proposal_hash`, AND MUST accept the same call
+    /// when a hash matching `compute_proposal_hash(action, artifact_id,
+    /// version, proposal)` is supplied. This is the wave22-03 gate's
+    /// fail-fast preflight — the gate refuses to mutate state with no
+    /// correlator and accepts only the canonical fixture path.
+    #[test]
+    fn smoke_wave22_07_review_apply_gate_rejects_missing_hash_accepts_fixture_hash() {
+        let bundle = suggested_bundle(well_formed_high_confidence_proposal());
+        // Missing proposal_hash → APPLY_GATE_MISSING_PROPOSAL_HASH.
+        let missing_input = LlmApproveApplyGateInput {
+            apply: true,
+            proposal_hash: None,
+            caller_approved: true,
+            explicit: true,
+        };
+        let err = enforce_apply_gate_preflight(&missing_input, &bundle, "approve", "abc-123", 1)
+            .expect_err("wave22-07 v4: missing proposal_hash MUST fail-fast");
+        assert_eq!(
+            err.0, APPLY_GATE_MISSING_PROPOSAL_HASH,
+            "wave22-07 v4 invariant: missing proposal_hash MUST surface the dedicated code"
+        );
+        // Mismatched proposal_hash → APPLY_GATE_PROPOSAL_HASH_MISMATCH.
+        let mismatch_input = LlmApproveApplyGateInput {
+            apply: true,
+            proposal_hash: Some("0".repeat(32)),
+            caller_approved: true,
+            explicit: true,
+        };
+        let err = enforce_apply_gate_preflight(&mismatch_input, &bundle, "approve", "abc-123", 1)
+            .expect_err("wave22-07 v4: mismatched proposal_hash MUST fail-fast");
+        assert_eq!(err.0, APPLY_GATE_PROPOSAL_HASH_MISMATCH);
+        // Matching fixture hash → preflight OK + gate Applied.
+        let canonical = compute_proposal_hash(
+            "approve",
+            "abc-123",
+            1,
+            bundle.proposal.as_ref().unwrap(),
+        );
+        let valid_input = LlmApproveApplyGateInput {
+            apply: true,
+            proposal_hash: Some(canonical.clone()),
+            caller_approved: true,
+            explicit: true,
+        };
+        assert!(
+            enforce_apply_gate_preflight(&valid_input, &bundle, "approve", "abc-123", 1).is_ok(),
+            "wave22-07 v4: matching proposal_hash MUST pass preflight"
+        );
+        let outcome = evaluate_llm_approve_apply_gate(
+            &valid_input,
+            &bundle,
+            "approve",
+            "abc-123",
+            1,
+        );
+        assert_eq!(
+            outcome.status,
+            LlmApproveApplyStatus::Applied,
+            "wave22-07 v4 invariant: matching fixture proposal_hash MUST drive the gate to Applied"
+        );
+        assert_eq!(outcome.proposal_hash_status, ProposalHashStatus::Matches);
+    }
+
+    /// V4 smoke (cross-wave invariants / wave21-06 5 invariants pinned):
+    /// the wave22-03 apply gate MUST preserve every wave-21 / task 06
+    /// propose-only invariant when stamped onto the same call.
+    ///   * I1 never auto-reject — the gate MUST refuse to apply a
+    ///     `decision=NeedsChanges` proposal.
+    ///   * I2 destructive never promote — destructive actions
+    ///     (archive / supersede / remove) MUST skip even when every
+    ///     other gate is green.
+    ///   * I3 proposal block applied=false / requires_human=true —
+    ///     the propose-only proposal serialisation MUST stay
+    ///     unchanged even after the apply gate has run.
+    ///   * I4 Sonnet unavailable no fallback — the gate MUST short-
+    ///     circuit on `Unavailable` bundles without falling back.
+    ///   * I5 destructive_check ALWAYS deterministic — a model that
+    ///     claimed `non_destructive` MUST be overridden by the
+    ///     deterministic destructive verdict.
+    #[test]
+    fn smoke_wave22_07_review_apply_gate_pins_wave21_06_five_invariants() {
+        // I1 — never auto-reject (NeedsChanges).
+        let mut needs_changes = well_formed_high_confidence_proposal();
+        needs_changes.decision = ReviewDecision::NeedsChanges;
+        let nc_bundle = suggested_bundle(needs_changes);
+        let nc_hash = compute_proposal_hash(
+            "approve",
+            "abc-123",
+            1,
+            nc_bundle.proposal.as_ref().unwrap(),
+        );
+        let nc_input = LlmApproveApplyGateInput {
+            apply: true,
+            proposal_hash: Some(nc_hash),
+            caller_approved: true,
+            explicit: true,
+        };
+        let outcome =
+            evaluate_llm_approve_apply_gate(&nc_input, &nc_bundle, "approve", "abc-123", 1);
+        assert_eq!(
+            outcome.status,
+            LlmApproveApplyStatus::SkippedNonApprovedDecision,
+            "wave21-06 I1: never auto-anything-non-approve"
+        );
+        // I2 — destructive never promote (archive / supersede / remove).
+        for destructive in ["archive", "supersede", "remove"] {
+            let bundle = suggested_bundle(well_formed_high_confidence_proposal());
+            let hash = compute_proposal_hash(
+                destructive,
+                "abc-123",
+                1,
+                bundle.proposal.as_ref().unwrap(),
+            );
+            let input = LlmApproveApplyGateInput {
+                apply: true,
+                proposal_hash: Some(hash),
+                caller_approved: true,
+                explicit: true,
+            };
+            let outcome = evaluate_llm_approve_apply_gate(
+                &input,
+                &bundle,
+                destructive,
+                "abc-123",
+                1,
+            );
+            assert_eq!(
+                outcome.status,
+                LlmApproveApplyStatus::SkippedDestructiveAction,
+                "wave21-06 I2: destructive `{}` MUST never auto-promote",
+                destructive
+            );
+        }
+        // I3 — proposal block applied=false / requires_human=true even
+        //      after the apply gate has driven Applied.
+        let bundle = suggested_bundle(well_formed_high_confidence_proposal());
+        let hash = compute_proposal_hash(
+            "approve",
+            "abc-123",
+            1,
+            bundle.proposal.as_ref().unwrap(),
+        );
+        let input = LlmApproveApplyGateInput {
+            apply: true,
+            proposal_hash: Some(hash),
+            caller_approved: true,
+            explicit: true,
+        };
+        let outcome = evaluate_llm_approve_apply_gate(&input, &bundle, "approve", "abc-123", 1);
+        assert_eq!(outcome.status, LlmApproveApplyStatus::Applied);
+        let proposal_json = bundle.proposal.as_ref().unwrap().to_json();
+        assert_eq!(
+            proposal_json["applied"], false,
+            "wave21-06 I3: proposal serialisation MUST keep applied=false even when gate Applied"
+        );
+        assert_eq!(
+            proposal_json["requires_human"], true,
+            "wave21-06 I3: proposal serialisation MUST keep requires_human=true"
+        );
+        // I4 — Sonnet unavailable no fallback.
+        let unavailable = LlmAutoApproveProposalBundle::unavailable(
+            LlmAutoApproveProposalMode::SonnetSuggest,
+            "approve",
+            "wave22-07-v4-smoke",
+            "Sonnet gateway not initialized",
+        );
+        let unavail_input = LlmApproveApplyGateInput {
+            apply: true,
+            proposal_hash: Some("anything".to_string()),
+            caller_approved: true,
+            explicit: true,
+        };
+        let outcome = evaluate_llm_approve_apply_gate(
+            &unavail_input,
+            &unavailable,
+            "approve",
+            "abc-123",
+            1,
+        );
+        assert_eq!(
+            outcome.status,
+            LlmApproveApplyStatus::SkippedUnavailable,
+            "wave21-06 I4: Sonnet unavailable MUST never fall back"
+        );
+        // I5 — destructive_check ALWAYS deterministic; a model-supplied
+        //      `non_destructive:` string is overridden by the deterministic
+        //      destructive verdict for `archive`.
+        let mut model_lied = well_formed_high_confidence_proposal();
+        model_lied.destructive_check = "non_destructive:model_lied_here".to_string();
+        let lied_bundle = suggested_bundle(model_lied);
+        let lied_hash = compute_proposal_hash(
+            "archive",
+            "abc-123",
+            1,
+            lied_bundle.proposal.as_ref().unwrap(),
+        );
+        let lied_input = LlmApproveApplyGateInput {
+            apply: true,
+            proposal_hash: Some(lied_hash),
+            caller_approved: true,
+            explicit: true,
+        };
+        let outcome = evaluate_llm_approve_apply_gate(
+            &lied_input,
+            &lied_bundle,
+            "archive",
+            "abc-123",
+            1,
+        );
+        assert_eq!(
+            outcome.status,
+            LlmApproveApplyStatus::SkippedDestructiveAction,
+            "wave21-06 I5: deterministic destructive verdict overrides model claim"
+        );
+    }
 }

@@ -8960,4 +8960,128 @@ mod tests {
             "short<->long sha prefix overlap MUST pass the auto-verifier",
         );
     }
+
+    // ── Wave 22 / Task 07 — autonomous loop apply smoke v4 ──
+    //
+    // Deterministic smoke tests covering the wave22-02 auto task-run
+    // verifier slice of the apply-gate cluster. Every test pinned here is
+    // a `no real LLM / no real spawn / no real git mutation` proof: the
+    // verifier helpers do read-only file inspection on tempfile fixtures
+    // and never invoke `Command::new`. Companion tests in the other four
+    // write-scope files (review_gate.rs / plan.rs / workstation_dispatch.rs
+    // / unified_entry.rs) cover the matching apply-gate pure evaluators
+    // and the envelope-side markdown-non-load-bearing invariant.
+
+    /// V4 smoke: when `enforce_scoped_commit=true` is paired with a
+    /// task_contract_path + report_path + shared_memory_path quartet, a
+    /// completion entry that does NOT match the contract head id MUST
+    /// block the completion via `SHARED_MEMORY_NO_COMPLETION_FOR_TASK`.
+    /// This is the wave22-07 Requirement 4 anchor: failed verification
+    /// blocks completion. The smoke deliberately routes through the
+    /// `auto_run_task_run_verifier` helper because that is the daemon-
+    /// side gate `action_complete` will dispatch to when the caller
+    /// supplies the full quartet (per wave22-02 contract).
+    #[test]
+    fn smoke_wave22_07_failed_verification_blocks_completion_when_enforce_scoped_commit_true() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave22/wave22-07-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave22/reports/wave22-07-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        // Ledger has only completion entries for OTHER tasks — the
+        // verifier MUST refuse rather than silently passing. This
+        // models the wave22-07 v4 brief Requirement 4: the verifier
+        // blocks completion on the failed-verification path.
+        let no_match_memory = r#"
+(shared-memory wave22
+  :schema "missiond.shared-memory.v1"
+  :wave wave22
+  (claim
+    :id wave22-99-claim-001
+    :task wave22-99-other
+    :agent claudecode
+    :seq 1
+    :touched []
+    :summary "claim")
+  (completion
+    :id wave22-99-completion-001
+    :task wave22-99-other
+    :agent claudecode
+    :seq 2
+    :touched []
+    :summary "done"))
+"#;
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave22/shared-memory.lisp",
+            no_match_memory,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave22/wave22-07-smoke.lisp",
+            ".missiond/tasks/wave22/reports/wave22-07-smoke.report.lisp",
+            ".missiond/tasks/wave22/shared-memory.lisp",
+            "cafef00d1234",
+        );
+        let err = res.expect_err(
+            "wave22-07 v4 invariant: when enforce_scoped_commit=true paths align but no \
+             completion entry exists for the contract head id, completion MUST be blocked",
+        );
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("SHARED_MEMORY_NO_COMPLETION_FOR_TASK"),
+            "wave22-07 v4 invariant: failed verification MUST surface the dedicated \
+             SHARED_MEMORY_NO_COMPLETION_FOR_TASK code so dashboards can route on it"
+        );
+    }
+
+    /// V4 smoke (companion): a mismatched commit_hash on the same
+    /// quartet MUST also block completion. Pinning both rejection
+    /// surfaces here proves the gate is symmetric — neither a missing
+    /// completion entry nor a stale commit hash can sneak past
+    /// `enforce_scoped_commit=true`.
+    #[test]
+    fn smoke_wave22_07_failed_verification_blocks_on_commit_hash_mismatch() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        write_task_contract(
+            dir.path(),
+            ".missiond/tasks/wave22/wave22-07-smoke.lisp",
+            WAVE21_08_SMOKE_CONTRACT_BODY,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave22/reports/wave22-07-smoke.report.lisp",
+            WAVE21_08_SMOKE_REPORT_BODY,
+        );
+        write_task_report(
+            dir.path(),
+            ".missiond/tasks/wave22/shared-memory.lisp",
+            WAVE22_02_SMOKE_MEMORY_BODY,
+        );
+        let res = auto_run_task_run_verifier(
+            dir.path(),
+            ".missiond/tasks/wave22/wave22-07-smoke.lisp",
+            ".missiond/tasks/wave22/reports/wave22-07-smoke.report.lisp",
+            ".missiond/tasks/wave22/shared-memory.lisp",
+            // Different hash, not a prefix overlap of the report's
+            // `cafef00d1234` value.
+            "badc0ffee999",
+        );
+        let err = res.expect_err(
+            "wave22-07 v4 invariant: a commit_hash that does not match the report's \
+             `:commit_hash` MUST block completion even when the rest of the quartet aligns",
+        );
+        assert_eq!(
+            extract_error_code(&err).as_deref(),
+            Some("TASK_REPORT_COMMIT_HASH_MISMATCH"),
+            "wave22-07 v4 invariant: hash mismatch MUST hit the dedicated wave21-03 \
+             TASK_REPORT_COMMIT_HASH_MISMATCH code so the verifier vocabulary stays unified"
+        );
+    }
 }

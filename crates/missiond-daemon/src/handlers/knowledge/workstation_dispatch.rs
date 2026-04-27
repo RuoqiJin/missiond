@@ -6126,4 +6126,154 @@ mod tests {
             "no bundle ⇒ SkippedNoProposals (the DAG-mode invariant flows through here)"
         );
     }
+
+    // ── Wave 22 / Task 07 — autonomous loop apply smoke v4 ──
+    //
+    // Pin the wave22-05 autonomous workstation true-spawn gate slice
+    // of the wave22-07 v4 smoke contract. The pure preflight + 12-rule
+    // evaluator pair is the deterministic SSOT — no Sonnet call, no
+    // substrate dispatch, pure in-process functions over synthesised
+    // bundle / contract / input fixtures. The companion review_gate.rs
+    // / plan.rs / agent_execution.rs / unified_entry.rs smokes cover
+    // the review-apply-gate, persisted-apply, failed-verification, and
+    // markdown-non-load-bearing slices.
+
+    /// V4 smoke (Requirement 2 / workstation auto-spawn slice): the
+    /// wave22-05 gate MUST reject `auto_spawn=true` when the caller
+    /// does not supply `proposal_hash`, MUST reject a mismatched hash,
+    /// AND MUST accept the canonical `compute_workstation_proposal_hash`
+    /// value. This is the wave22-05 fail-fast preflight — the gate
+    /// refuses to dispatch the substrate with no correlator and
+    /// accepts only the canonical fixture path, where the 12-rule
+    /// evaluator then drives Spawned without ever calling the
+    /// substrate (the test never exercises run_workstation_dispatch).
+    #[test]
+    fn smoke_wave22_07_workstation_auto_spawn_gate_rejects_missing_hash_accepts_fixture_hash() {
+        let bundle = fixture_spawnable_bundle();
+        let canonical = compute_workstation_proposal_hash(&bundle);
+        // Missing proposal_hash → AUTO_SPAWN_MISSING_PROPOSAL_HASH.
+        let mut missing_input = fixture_input_all_green();
+        missing_input.proposal_hash = None;
+        let err = enforce_auto_spawn_preflight(&missing_input, Some(&bundle))
+            .expect_err("wave22-07 v4: missing proposal_hash MUST fail-fast on auto-spawn path");
+        assert_eq!(
+            err.0, AUTO_SPAWN_MISSING_PROPOSAL_HASH,
+            "wave22-07 v4 invariant: missing proposal_hash MUST surface the dedicated code"
+        );
+        // Mismatched proposal_hash → AUTO_SPAWN_PROPOSAL_HASH_MISMATCH.
+        let mut mismatch_input = fixture_input_all_green();
+        mismatch_input.proposal_hash = Some("0".repeat(32));
+        let err = enforce_auto_spawn_preflight(&mismatch_input, Some(&bundle))
+            .expect_err("wave22-07 v4: mismatched proposal_hash MUST fail-fast");
+        assert_eq!(err.0, AUTO_SPAWN_PROPOSAL_HASH_MISMATCH);
+        // Matching fixture hash → preflight OK + 12-rule gate Spawned
+        // (substrate is NOT invoked — the gate evaluator is a pure
+        // function ending at WorkstationAutoSpawnStatus::Spawned).
+        let mut valid_input = fixture_input_all_green();
+        valid_input.proposal_hash = Some(canonical.clone());
+        assert!(
+            enforce_auto_spawn_preflight(&valid_input, Some(&bundle)).is_ok(),
+            "wave22-07 v4: matching proposal_hash MUST pass auto-spawn preflight"
+        );
+        let contract = fixture_spawnable_contract();
+        let outcome = evaluate_workstation_auto_spawn_gate(
+            &valid_input,
+            Some(&bundle),
+            Some(&contract),
+            None,
+        );
+        assert_eq!(
+            outcome.status,
+            WorkstationAutoSpawnStatus::Spawned,
+            "wave22-07 v4 invariant: matching fixture hash + all 12 rules green \
+             MUST drive the auto-spawn gate to Spawned (no real substrate dispatch \
+             happens in this smoke — the evaluator is pure)"
+        );
+        assert_eq!(
+            outcome.proposal_hash_status,
+            WorkstationProposalHashStatus::Matches
+        );
+    }
+
+    /// V4 smoke (cross-wave invariants / wave21-04 4 invariants
+    /// pinned): the wave22-05 true-spawn gate MUST preserve every
+    /// wave-21 / task 04 propose-only invariant when stamped onto the
+    /// same call.
+    ///   * I1 default off — `auto_spawn=false` (or absent) keeps the
+    ///     wave-21 / task 04 byte-shape exactly: no
+    ///     `workstation_auto_spawn_gate` block on the response.
+    ///   * I2 Sonnet unavailable no fallback — the gate MUST short-
+    ///     circuit on `Unavailable` bundles with the no-fallback
+    ///     marker text in `gate_results`.
+    ///   * I3 DAG mode rejects (flows through `Some(bundle)=None` for
+    ///     the propose-only path) — the gate skips with
+    ///     `SkippedNoProposals` when no bundle is supplied.
+    ///   * I4 propose-only fields preserved — the bundle's
+    ///     `auto_spawn=false` + every proposal's `applied=false`
+    ///     wire shape stays unchanged on the propose-only surface;
+    ///     the wave-22 / task 05 gate publishes spawn status on a
+    ///     SEPARATE block.
+    #[test]
+    fn smoke_wave22_07_workstation_auto_spawn_gate_pins_wave21_04_four_invariants() {
+        // I1 — default off: gate omitted when auto_spawn=false / absent.
+        let off_input = WorkstationAutoSpawnInput::default();
+        let off_outcome = evaluate_workstation_auto_spawn_gate(&off_input, None, None, None);
+        assert_eq!(
+            off_outcome.status,
+            WorkstationAutoSpawnStatus::NotRequested,
+            "wave21-04 I1: default off ⇒ NotRequested (byte-shape preserved)"
+        );
+        assert!(
+            !off_outcome.requested,
+            "wave21-04 I1: requested MUST stay false on the default-off path"
+        );
+        // I2 — Sonnet unavailable no fallback (the gate text pins the
+        // no-fallback marker so dashboards can grep the response).
+        let unavail_input = fixture_input_all_green();
+        let unavail_bundle = WorkstationProposalBundle::unavailable("Sonnet down");
+        let unavail_contract = fixture_spawnable_contract();
+        let unavail_outcome = evaluate_workstation_auto_spawn_gate(
+            &unavail_input,
+            Some(&unavail_bundle),
+            Some(&unavail_contract),
+            None,
+        );
+        assert_eq!(
+            unavail_outcome.status,
+            WorkstationAutoSpawnStatus::SkippedUnavailable,
+            "wave21-04 I2: Sonnet unavailable ⇒ SkippedUnavailable (never fall back)"
+        );
+        assert!(
+            unavail_outcome
+                .gate_results
+                .iter()
+                .any(|s| s.contains("claude -p")),
+            "wave21-04 I2: gate text MUST pin the no-fallback invariant in gate_results"
+        );
+        // I3 — DAG-mode-style rejection (no bundle ⇒ SkippedNoProposals).
+        // The wave-21 / task 04 DAG-mode-rejects invariant flows into
+        // the gate via the `bundle=None` branch (the wave-22 / task 05
+        // splice site refuses to compute a bundle in DAG mode).
+        let dag_outcome =
+            evaluate_workstation_auto_spawn_gate(&fixture_input_all_green(), None, None, None);
+        assert_eq!(
+            dag_outcome.status,
+            WorkstationAutoSpawnStatus::SkippedNoProposals,
+            "wave21-04 I3: DAG-mode-style (no bundle) MUST skip without dispatching"
+        );
+        // I4 — propose-only bundle's auto_spawn=false and every
+        // proposal's applied=false stay unchanged on the wire.
+        let bundle = fixture_spawnable_bundle();
+        let v = bundle.to_response_json();
+        assert_eq!(
+            v["auto_spawn"], false,
+            "wave21-04 I4: bundle auto_spawn MUST stay false on the propose-only surface"
+        );
+        for p in v["proposals"].as_array().expect("proposals array") {
+            assert_eq!(
+                p["applied"], false,
+                "wave21-04 I4: every proposal MUST keep applied=false on the propose-only wire"
+            );
+        }
+    }
 }

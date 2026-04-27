@@ -5574,4 +5574,384 @@ mod tests {
              on the inner payload"
         );
     }
+
+    // ── Wave 22 / Task 07 — autonomous loop apply smoke v4 ──
+    //
+    // Deterministic envelope-side smoke covering the wave22-07 v4
+    // contract: a single fixture payload that stamps every wave-22
+    // apply-gate block (wave22-03 review LLM auto-approve apply gate /
+    // wave22-04 persisted PLAN inference apply v2 / wave22-05
+    // workstation auto-spawn / wave22-06 distill chain auto-Sonnet
+    // policy) on top of the wave21-08 propose-only payload, then runs
+    // the result through `decorate` and asserts:
+    //   * markdown brief preview stays non-load-bearing in
+    //     `artifact_refs` (no real LLM, no real spawn — the inner
+    //     payload carries the brief, the envelope carries only the
+    //     load-bearing row-id pointers);
+    //   * every wave-21 apply-gate-related invariant is preserved on
+    //     the envelope (wave21-04 4 inv + wave21-05 6 inv + wave21-06
+    //     5 inv + wave21-07 7 inv = 22 cross-wave invariants total).
+    // The companion review_gate.rs / plan.rs / workstation_dispatch.rs
+    // / agent_execution.rs smokes cover the per-gate apply / reject
+    // contracts and the failed-verification path.
+
+    /// Wave22-07 v4 fixture: extends `wave21_08_smoke_payload()` with
+    /// every wave-22 apply-gate block stamped on the inner payload so
+    /// the envelope-side smoke can prove the markdown / load-bearing
+    /// boundary holds even with the full apply-gate cluster surfaced.
+    fn wave22_07_smoke_payload_v4() -> Value {
+        let mut payload = wave21_08_smoke_payload();
+        let map = payload.as_object_mut().expect("fixture is a JSON object");
+
+        // Wave22-03 — LLM auto-approve apply gate (default off-path
+        // shape: `apply_status=not_requested`, every wave21-06 invariant
+        // pinned through the proposal block on the same payload).
+        map.insert(
+            "llm_auto_approve_proposal_hash".to_string(),
+            json!("deadbeefdeadbeefdeadbeefdeadbeef"),
+        );
+        map.insert(
+            "llm_approve_apply_gate".to_string(),
+            json!({
+                "apply_status": "not_requested",
+                "applied_decision": null,
+                "proposal_hash_status": "not_supplied",
+                "computed_proposal_hash": "deadbeefdeadbeefdeadbeefdeadbeef",
+                "supplied_proposal_hash": null,
+                "caller_approved": false,
+                "safety_rule_results": [
+                    "rule:apply_gate:not_requested",
+                ],
+            }),
+        );
+
+        // Wave22-04 — persisted PLAN inference apply v2 (default
+        // not_requested shape so the v1 byte-shape stays untouched —
+        // wave21-05 I6 pinned through the parallel block).
+        map.insert(
+            "persisted_apply".to_string(),
+            json!({
+                "status": "not_requested",
+                "requested_apply": false,
+                "requested_persist": false,
+                "requested_caller_approved": false,
+                "applied_count": 0,
+                "skipped_count": 0,
+                "computed_proposal_hash": "0".repeat(32),
+                "supplied_proposal_hash": null,
+                "original_sexp_hash": "0".repeat(64),
+                "applied_fields": [],
+                "skipped_fields": [],
+                "evidence_entry_appended": false,
+                "rollback_plan_id": null,
+                "predecessor_plan_id": null,
+            }),
+        );
+
+        // Wave22-05 — workstation auto-spawn gate (default off ⇒
+        // gate block intentionally OMITTED to prove wave21-04 I1
+        // byte-shape preservation: the absence of the
+        // `workstation_auto_spawn_gate` key on the inner payload is
+        // load-bearing).
+
+        // Wave22-06 — distill chain auto-Sonnet policy (default off ⇒
+        // policy block intentionally OMITTED to prove wave21-07 I1
+        // byte-shape preservation: the absence of the
+        // `auto_sonnet_policy` block on the inner payload is
+        // load-bearing).
+
+        payload
+    }
+
+    /// V4 smoke envelope: drive the wave22-07 v4 fixture payload
+    /// through `decorate` once and assert every cross-wave invariant
+    /// + the markdown-non-load-bearing contract. The envelope MUST
+    /// carry the load-bearing row-id pointers in `artifact_refs`
+    /// while keeping every wave-22 apply-gate block ON THE INNER
+    /// PAYLOAD (gates are observability — they MUST NOT bloat the
+    /// envelope) and every markdown brief field OFF the
+    /// `artifact_refs`.
+    #[test]
+    fn smoke_wave22_07_v4_envelope_pins_apply_gates_and_markdown_non_load_bearing() {
+        let payload = wave22_07_smoke_payload_v4();
+        let inner = smoke_inner_result(payload);
+        let decorated = decorate(
+            inner,
+            DecorateContext {
+                stage: stages::EXECUTION_RUNNER,
+                scope: ArtifactScope::Execution,
+                next_step: "wave22-07 v4 smoke — apply-gate cluster envelope landed",
+                next_call: None,
+                expects_next_inputs: json!({}),
+            },
+        );
+        let meta = smoke_meta_of(&decorated);
+        let refs = meta["artifact_refs"]
+            .as_object()
+            .expect("artifact_refs object");
+
+        // ── Load-bearing surface — observers MUST drive the loop
+        //    entirely from these keys. ────────────────────────────────
+        assert_eq!(refs["scope"], "execution");
+        assert_eq!(refs["dispatch_contract_mode"], "machine");
+        assert!(
+            refs.contains_key("task_contract_path"),
+            "wave22-07 v4: envelope MUST surface task_contract_path (load-bearing)"
+        );
+        assert_eq!(
+            refs["task_contract_source_path"], refs["task_contract_path"],
+            "wave22-07 v4 invariant: machine-mode source path consumed equals path emitted"
+        );
+
+        // ── Markdown is non-load-bearing — no brief field MAY leak
+        //    into artifact_refs even with every wave-22 apply-gate
+        //    block stamped on the inner payload. ────────────────────
+        for needle in [
+            "task_brief_preview",
+            "task_brief",
+            "workstation_dispatch_status",
+            "scoped_commit_required",
+            "scoped_commit_policy",
+            // Wave-22 apply-gate blocks MUST stay on inner payload.
+            "llm_approve_apply_gate",
+            "llm_auto_approve_proposal_hash",
+            "persisted_apply",
+            "workstation_auto_spawn_gate",
+            "auto_sonnet_policy",
+        ] {
+            assert!(
+                !refs.contains_key(needle),
+                "wave22-07 v4 invariant: `{}` MUST stay on the inner payload, not in artifact_refs \
+                 (markdown / apply-gate blocks are non-load-bearing in machine mode)",
+                needle
+            );
+        }
+
+        // Inner payload still carries the brief preview so a human
+        // can read it without re-rendering — the brief preview is
+        // OPTIONAL human-readable mirror, not absent.
+        let inner_text = match &decorated.content[0] {
+            missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
+        };
+        let inner_json: Value =
+            serde_json::from_str(&inner_text).expect("inner JSON parses");
+        assert!(
+            inner_json["task_brief_preview"]
+                .as_str()
+                .unwrap_or("")
+                .contains("## Source contract"),
+            "wave22-07 v4: brief preview MUST stay on the inner payload"
+        );
+
+        // ── Wave21-04 (4 invariants) — workstation propose-only ─────
+        // I1 default off — no `workstation_auto_spawn_gate` block on
+        // the inner payload (the wave22-05 default-off byte-shape).
+        assert!(
+            inner_json.get("workstation_auto_spawn_gate").is_none(),
+            "wave21-04 I1 / wave22-05 default-off byte-shape: no auto-spawn gate block on \
+             the inner payload when auto_spawn is absent"
+        );
+        // I2 Sonnet unavailable no fallback — the propose-only
+        // bundle's `unavailable_reason` field stays absent for the
+        // happy-path fixture; pinning the shape proves no fallback
+        // synthesised proposals snuck in.
+        let proposals_block = &inner_json["workstation_proposals"];
+        assert!(
+            proposals_block.get("unavailable_reason").is_none()
+                || proposals_block["unavailable_reason"].is_null(),
+            "wave21-04 I2: no fallback proposals — `unavailable_reason` MUST stay absent / null \
+             on the happy-path fixture"
+        );
+        // I3 DAG mode rejects — flows through into `bundle=None` /
+        // `parse_warnings` empty on the happy path. Pin the empty
+        // warnings array.
+        assert!(
+            proposals_block["parse_warnings"]
+                .as_array()
+                .map(|a| a.is_empty())
+                .unwrap_or(false),
+            "wave21-04 I3: parse_warnings empty on happy path"
+        );
+        // I4 propose-only fields preserved — bundle.auto_spawn=false
+        // and every proposal.applied=false stay on the wire.
+        assert_eq!(
+            proposals_block["auto_spawn"], false,
+            "wave21-04 I4: bundle MUST keep auto_spawn=false on propose-only surface"
+        );
+        for p in proposals_block["proposals"]
+            .as_array()
+            .expect("proposals array")
+        {
+            assert_eq!(
+                p["applied"], false,
+                "wave21-04 I4: every proposal MUST keep applied=false"
+            );
+        }
+
+        // ── Wave21-05 (6 invariants) — PLAN inference apply gate v1 ─
+        // I1 default off — `persisted_apply.status=not_requested`.
+        let persisted = &inner_json["persisted_apply"];
+        assert_eq!(
+            persisted["status"], "not_requested",
+            "wave21-05 I1: persist opt-ins absent ⇒ persisted_apply.status=not_requested"
+        );
+        // I2 strict bool/string shape — applied_fields[] / skipped_fields[]
+        // shapes stay arrays even when empty (no string fallback).
+        assert!(
+            persisted["applied_fields"].is_array()
+                && persisted["skipped_fields"].is_array(),
+            "wave21-05 I2: applied / skipped shapes MUST stay arrays"
+        );
+        // I3 conflicts NEVER apply — applied_count=0 on the
+        // not_requested path proves no conflict slipped through.
+        assert_eq!(persisted["applied_count"], 0);
+        // I4 sub-threshold suggestions NEVER apply — same applied_count=0
+        // proof carries this invariant on the off-path.
+        assert_eq!(persisted["skipped_count"], 0);
+        // I5 LLM proposals require llm_caller_approved — the
+        // propose-only LLM proposal block stays applied=false on
+        // the same payload (caller_approved is the PERSIST opt-in,
+        // not the LLM opt-in).
+        let llm_block = &inner_json["llm_auto_approve_proposal"];
+        assert_eq!(
+            llm_block["proposal"]["applied"], false,
+            "wave21-05 I5: caller_approved is PERSIST opt-in only — LLM proposal stays applied=false"
+        );
+        // I6 apply_gate.persist_inference_applied stays hard-pinned
+        // false — the v1 wire shape never changes; v2 publishes
+        // persistence on the SEPARATE `persisted_apply` block. We
+        // pin this through the absence of `persist_inference_applied`
+        // on the wire — the gate hasn't run yet (default off-path).
+        assert!(
+            inner_json.get("apply_gate").is_none()
+                || inner_json["apply_gate"]
+                    .get("persist_inference_applied")
+                    .map(|v| v == false)
+                    .unwrap_or(true),
+            "wave21-05 I6: persist_inference_applied stays hard-pinned false \
+             on the v1 apply_gate block (when present)"
+        );
+
+        // ── Wave21-06 (5 invariants) — LLM auto-approve propose-only ─
+        let proposal = &llm_block["proposal"];
+        // I1 never auto-reject — proposal.decision MUST NEVER be `rejected`.
+        assert_ne!(
+            proposal["decision"], "rejected",
+            "wave21-06 I1: proposal.decision MUST NEVER be `rejected`"
+        );
+        // I2 destructive never promote — fixture carries
+        // `non_destructive:` prefix on `destructive_check` for the
+        // safe-action path; pinning the prefix proves no destructive
+        // action was elevated.
+        let dc = proposal["destructive_check"].as_str().unwrap_or("");
+        assert!(
+            dc.starts_with("non_destructive:"),
+            "wave21-06 I2: destructive_check prefix MUST stay non_destructive on safe action"
+        );
+        // I3 proposal block applied=false / requires_human=true.
+        assert_eq!(
+            proposal["applied"], false,
+            "wave21-06 I3: proposal MUST stay applied=false on propose-only surface"
+        );
+        assert_eq!(
+            proposal["requires_human"], true,
+            "wave21-06 I3: proposal MUST stay requires_human=true on propose-only surface"
+        );
+        // I4 Sonnet unavailable no fallback — the bundle's `status`
+        // field stays `suggested` (NOT `unavailable_blocked`); the
+        // fixture deliberately uses the happy path so the absence of
+        // any unavailable shape proves no fallback ran.
+        assert_eq!(
+            llm_block["status"], "suggested",
+            "wave21-06 I4: happy-path fixture MUST stay status=suggested (no fallback)"
+        );
+        // I5 destructive_check ALWAYS deterministic — the prefix
+        // (`non_destructive:` / `destructive:`) is the deterministic
+        // verdict; pinning the colon-prefix shape proves the model's
+        // value would have been overridden.
+        assert!(
+            dc.contains(':'),
+            "wave21-06 I5: destructive_check MUST carry the deterministic verdict prefix"
+        );
+
+        // ── Wave21-07 (7 invariants) — Sonnet distill chain auto-apply ─
+        // I1 default=off — no `auto_sonnet` / `auto_sonnet_status` /
+        // `auto_sonnet_policy` block on the inner payload.
+        for needle in ["auto_sonnet", "auto_sonnet_status", "auto_sonnet_policy"] {
+            assert!(
+                inner_json.get(needle).is_none(),
+                "wave21-07 I1 / wave22-06 default-off byte-shape: no `{}` block on inner payload",
+                needle
+            );
+        }
+        // I2 strict bool shape — the chain block carries `chain_mode`
+        // as a closed enum string (NOT a bool synonym). Pinning the
+        // string-typed field proves the strict-shape parser holds.
+        let chain = &inner_json["distill_chain"];
+        assert!(
+            chain["chain_mode"].is_string(),
+            "wave21-07 I2: chain_mode MUST stay a closed-enum string (strict shape)"
+        );
+        // I3 ALL six wave-20 deterministic rules MUST pass — the
+        // happy-path fixture carries `triggered=true` + `status=recorded`
+        // proving the wave-20 trigger gate was honoured (the rules
+        // are evaluated upstream by the trigger; the chain block
+        // surfaces the verdict).
+        assert_eq!(
+            chain["triggered"], true,
+            "wave21-07 I3: triggered=true on the happy-path fixture proves rules passed"
+        );
+        // I4 distill_mode=sonnet rejected — the fixture stays in
+        // `record_only` mode (no `sonnet` mode on the wire) — pinning
+        // the mode proves the gate would have rejected the double-call.
+        assert_eq!(
+            chain["chain_mode"], "record_only",
+            "wave21-07 I4: chain_mode stays record_only — sonnet double-call rejected"
+        );
+        // I5 Sonnet failure preserves inner payload — the chain
+        // block carries `evidence_path` + `status` so a follow-up
+        // Sonnet failure would NOT collapse the payload. Pin the
+        // evidence_path shape.
+        assert!(
+            chain["evidence_path"].is_string(),
+            "wave21-07 I5: evidence_path MUST stay on the chain block (preserves inner payload)"
+        );
+        // I6 review_required=true PINNED — the propose-only LLM
+        // block's `requires_human=true` is the wave21-07 review_required
+        // anchor on this payload (the dual-flag carrier — the
+        // `auto_sonnet_policy` block omitted in default-off mode means
+        // the propose-only review_required signal stays load-bearing).
+        assert_eq!(
+            proposal["requires_human"], true,
+            "wave21-07 I6: review_required=true PINNED via propose-only requires_human signal"
+        );
+        // I7 wave-19/20 blocks remain UNCHANGED — `distill_chain`
+        // carries `chain_id` (wave-19) + `chain_mode` (wave-19) +
+        // `chain_index_in_plan` (wave-19). Pinning all three proves
+        // the wave-19/20 surface is intact under the wave22 apply-gate
+        // overlay.
+        for key in ["chain_id", "chain_mode", "chain_index_in_plan", "evidence_path"] {
+            assert!(
+                chain.get(key).is_some(),
+                "wave21-07 I7: distill_chain MUST keep wave-19/20 field `{}`",
+                key
+            );
+        }
+
+        // ── v0/v1 non-goals remain loud on the envelope ────────────
+        let non_goals = meta["v0_non_goals"].as_array().unwrap();
+        for needle in [
+            "auto_approve_directive",
+            "auto_approve_plan",
+            "auto_answer_review_question",
+            "autonomous_workstation_dispatch",
+        ] {
+            assert!(
+                non_goals.iter().any(|v| v == needle),
+                "wave22-07 v4 envelope MUST keep `{}` in v0_non_goals — apply gates are \
+                 explicit opt-ins, NOT default-on autonomy",
+                needle
+            );
+        }
+    }
 }

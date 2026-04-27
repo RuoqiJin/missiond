@@ -15670,4 +15670,225 @@ mod tests {
             "AUTO_SPAWN_PROPOSAL_HASH_MISMATCH"
         );
     }
+
+    // ── Wave 22 / Task 07 — autonomous loop apply smoke v4 ──
+    //
+    // Pin the wave22-04 persisted PLAN inference apply v2 gate slice
+    // of the wave22-07 v4 smoke contract. The pure preflight + soft-
+    // skip evaluator pair is the deterministic SSOT — no DB mutation,
+    // no Sonnet call, pure in-process functions over synthesised
+    // `ApplyGateOutcome` fixtures. The companion review_gate.rs /
+    // workstation_dispatch.rs / agent_execution.rs / unified_entry.rs
+    // smokes cover the review-apply-gate / auto-spawn / failed-
+    // verification / markdown-non-load-bearing slices.
+
+    /// V4 smoke (Requirement 2 / persisted apply-gate slice): the
+    /// wave22-04 v2 persist gate MUST reject the four-opt-in path
+    /// (`apply_inferred_fields=true` + `persist_inference=true` +
+    /// `caller_approved=true` + non-empty applied[]) when the caller
+    /// does not supply `proposal_hash`, AND MUST accept the same call
+    /// when the canonical `compute_inference_proposal_hash` value is
+    /// supplied. This is the wave22-04 fail-fast preflight — the gate
+    /// refuses to mutate the persisted plan with no correlator and
+    /// accepts only the canonical fixture path.
+    #[test]
+    fn smoke_wave22_07_persisted_apply_gate_rejects_missing_hash_accepts_fixture_hash() {
+        let plan_id = uuid::Uuid::nil();
+        let original_hash = sha256_hex("(plan :id 1)");
+        let af = AppliedField {
+            field: "target",
+            value: serde_json::json!("mission_execution"),
+            source: "plan_sexp",
+            origin: ApplyOrigin::DeterministicInferred,
+        };
+        let canonical = compute_inference_proposal_hash(plan_id, &original_hash, &[af.clone()]);
+        // Missing proposal_hash → PERSIST_APPLY_MISSING_PROPOSAL_HASH.
+        let missing_args = serde_json::json!({
+            "apply_inferred_fields": true,
+            "persist_inference": true,
+            "caller_approved": true,
+        });
+        let err = enforce_persisted_apply_preflight(&missing_args, &canonical)
+            .expect_err("wave22-07 v4: missing proposal_hash MUST fail-fast on persist path");
+        assert_eq!(err.0, error_codes::INVALID_PARAM);
+        assert!(
+            err.1.contains("PERSIST_APPLY_MISSING_PROPOSAL_HASH"),
+            "wave22-07 v4 invariant: missing hash MUST surface PERSIST_APPLY_MISSING_PROPOSAL_HASH"
+        );
+        // Mismatched proposal_hash → PERSIST_APPLY_PROPOSAL_HASH_MISMATCH.
+        let mismatch_args = serde_json::json!({
+            "apply_inferred_fields": true,
+            "persist_inference": true,
+            "caller_approved": true,
+            "proposal_hash": "0".repeat(32),
+        });
+        let err = enforce_persisted_apply_preflight(&mismatch_args, &canonical)
+            .expect_err("wave22-07 v4: mismatched proposal_hash MUST fail-fast on persist path");
+        assert!(err.1.contains("PERSIST_APPLY_PROPOSAL_HASH_MISMATCH"));
+        // Matching fixture hash → preflight OK + evaluator returns
+        // Applied (non-empty applied[] from the four-opt-in path).
+        let valid_args = serde_json::json!({
+            "apply_inferred_fields": true,
+            "persist_inference": true,
+            "caller_approved": true,
+            "proposal_hash": canonical.clone(),
+        });
+        assert!(
+            enforce_persisted_apply_preflight(&valid_args, &canonical).is_ok(),
+            "wave22-07 v4: matching proposal_hash MUST pass the persist preflight"
+        );
+        let outcome = fixture_apply_outcome_with_one_high_inferred(&valid_args);
+        let status = evaluate_persisted_apply_gate(&valid_args, &outcome);
+        assert_eq!(
+            status,
+            PersistedApplyStatus::Applied,
+            "wave22-07 v4 invariant: matching fixture hash + four-opt-in path \
+             MUST drive the persist gate to Applied"
+        );
+    }
+
+    /// V4 smoke (cross-wave invariants / wave21-05 6 invariants
+    /// pinned): the wave22-04 persisted apply gate MUST preserve every
+    /// wave-21 / task 05 v1 in-memory apply gate invariant when the v2
+    /// persist flags are layered on the same call.
+    ///   * I1 default off — the v1 byte-shape stays preserved when
+    ///     the persist opt-ins are absent (SkippedPersistNotRequested).
+    ///   * I2 strict bool/string shape — `validate_apply_gate_args`
+    ///     fail-fasts on literal-string `"true"` for every opt-in flag.
+    ///   * I3 conflicts NEVER apply — caller-vs-inferred conflicts
+    ///     route to `conflict_fields[]` and the persist gate downgrades
+    ///     to `SkippedNothingToApply`.
+    ///   * I4 sub-threshold suggestions NEVER apply — medium / low
+    ///     confidence suggestions stay below the apply threshold and
+    ///     the persist gate downgrades to `SkippedNothingToApply`.
+    ///   * I5 LLM proposals require `llm_caller_approved` —
+    ///     `caller_approved=true` is the PERSIST opt-in (not the LLM
+    ///     opt-in); an un-approved LLM proposal MUST NOT persist.
+    ///   * I6 `apply_gate.persist_inference_applied` stays hard-pinned
+    ///     to `false` — the v1 wire shape never changes; v2 publishes
+    ///     persistence on a SEPARATE `persisted_apply` block.
+    #[test]
+    fn smoke_wave22_07_persisted_apply_gate_pins_wave21_05_six_invariants() {
+        // I1 — default off: persist opt-ins absent ⇒ v2 reports the
+        // soft-skip without any DB mutation, v1 byte-shape preserved.
+        let off_args = serde_json::json!({"apply_inferred_fields": true});
+        let outcome = fixture_apply_outcome_with_one_high_inferred(&off_args);
+        let v1_block = outcome.to_response_json();
+        assert_eq!(v1_block["requested"], true);
+        assert_eq!(
+            v1_block["persist_inference_applied"], false,
+            "wave21-05 I6: v1 block's persist_inference_applied MUST stay hard-pinned false"
+        );
+        let status = evaluate_persisted_apply_gate(&off_args, &outcome);
+        assert_eq!(
+            status,
+            PersistedApplyStatus::SkippedPersistNotRequested,
+            "wave21-05 I1: default off — persist opt-ins absent MUST stay v1-shaped"
+        );
+        // I2 — strict bool shape: the validator fail-fasts on literal-
+        // string "true" before the gate is reached.
+        for arg in [
+            serde_json::json!({"persist_inference": "true"}),
+            serde_json::json!({"caller_approved": "true"}),
+            serde_json::json!({"apply_inferred_fields": "true"}),
+        ] {
+            let err = validate_apply_gate_args(&arg).expect_err("string MUST be rejected");
+            assert!(
+                err.contains("must be a boolean"),
+                "wave21-05 I2: literal-string `\"true\"` MUST fail-fast: got {}",
+                err
+            );
+        }
+        // I3 — conflicts NEVER apply.
+        let mut inf_conflict = PlanFieldInference::default();
+        inf_conflict.conflicts.push(InferenceConflict {
+            field: "target",
+            caller_value: serde_json::json!("mission_task_delegate"),
+            inferred_value: serde_json::json!("mission_execution"),
+            confidence: InferenceConfidence::High,
+            source: "plan_sexp",
+        });
+        let conflict_args = serde_json::json!({
+            "target": "mission_task_delegate",
+            "apply_inferred_fields": true,
+            "persist_inference": true,
+            "caller_approved": true,
+        });
+        let conflict_outcome = compute_apply_gate(&conflict_args, &inf_conflict);
+        assert!(
+            conflict_outcome.applied.is_empty(),
+            "wave21-05 I3: conflicts MUST never reach applied[]"
+        );
+        let status = evaluate_persisted_apply_gate(&conflict_args, &conflict_outcome);
+        assert_eq!(
+            status,
+            PersistedApplyStatus::SkippedNothingToApply,
+            "wave21-05 I3: conflict-only outcome MUST persist nothing"
+        );
+        // I4 — sub-threshold suggestions NEVER apply.
+        let mut inf_sugg = PlanFieldInference::default();
+        inf_sugg.suggested.push(InferredField {
+            field: "target",
+            value: serde_json::json!("mission_execution"),
+            confidence: InferenceConfidence::Medium,
+            source: "plan_sexp",
+            detail: None,
+        });
+        let sugg_args = serde_json::json!({
+            "apply_inferred_fields": true,
+            "persist_inference": true,
+            "caller_approved": true,
+        });
+        let sugg_outcome = compute_apply_gate(&sugg_args, &inf_sugg);
+        assert!(
+            sugg_outcome.applied.is_empty(),
+            "wave21-05 I4: medium-confidence suggestions MUST stay sub-threshold"
+        );
+        let status = evaluate_persisted_apply_gate(&sugg_args, &sugg_outcome);
+        assert_eq!(status, PersistedApplyStatus::SkippedNothingToApply);
+        // I5 — LLM proposals require `llm_caller_approved` (caller_approved
+        // is the PERSIST opt-in, not the LLM opt-in).
+        let mut inf_llm = PlanFieldInference::default();
+        inf_llm.llm = Some(LlmProposalBundle {
+            status: LlmProposalStatus::Suggested,
+            proposals: vec![LlmProposal {
+                field: "target",
+                value: serde_json::json!("mission_execution"),
+                confidence: InferenceConfidence::High,
+                evidence: "fixture".into(),
+                conflict_status: LlmConflictStatus::None,
+            }],
+            parse_warnings: Vec::new(),
+            unavailable_reason: None,
+            model: None,
+            request_caller: None,
+        });
+        // caller_approved=true is the PERSIST opt-in; llm_caller_approved
+        // is absent ⇒ LLM proposal MUST NOT apply.
+        let llm_args = serde_json::json!({
+            "apply_inferred_fields": true,
+            "persist_inference": true,
+            "caller_approved": true,
+        });
+        let llm_outcome = compute_apply_gate(&llm_args, &inf_llm);
+        assert!(
+            llm_outcome.applied.is_empty(),
+            "wave21-05 I5: LLM proposal MUST NOT apply without `llm_caller_approved`"
+        );
+        let status = evaluate_persisted_apply_gate(&llm_args, &llm_outcome);
+        assert_eq!(status, PersistedApplyStatus::SkippedNothingToApply);
+        // I6 — apply_gate.persist_inference_applied stays hard-pinned
+        // false even when persist path is fully armed and applied.
+        let armed_args = serde_json::json!({
+            "apply_inferred_fields": true,
+            "persist_inference": true,
+            "caller_approved": true,
+        });
+        let armed_outcome = fixture_apply_outcome_with_one_high_inferred(&armed_args);
+        let armed_v1_block = armed_outcome.to_response_json();
+        assert_eq!(
+            armed_v1_block["persist_inference_applied"], false,
+            "wave21-05 I6: v1 `persist_inference_applied` field MUST stay hard-pinned false"
+        );
+    }
 }
