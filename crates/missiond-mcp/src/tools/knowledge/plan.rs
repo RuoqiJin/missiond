@@ -825,6 +825,52 @@ fn build_properties() -> Value {
         "[execute] (wave-22 / task 04) deterministic 32-hex SHA-256 prefix correlator for the v2 persisted apply path. The handler computes `compute_inference_proposal_hash(plan_id, original_sexp_hash, sorted apply_gate.applied_fields[])` and surfaces the value under `persisted_apply.computed_proposal_hash` on every response carrying an `apply_gate` block (even when the persist flags are absent — preview callers can capture the hash and replay against the persist path on a follow-up call). When ALL THREE persist opt-ins (`apply_inferred_fields=true` + `persist_inference=true` + `caller_approved=true`) are supplied, the handler MATCHES `proposal_hash` against the freshly computed value BEFORE any DB mutation per the v2 contract: missing supply ⇒ structured error `PERSIST_APPLY_MISSING_PROPOSAL_HASH`; mismatch ⇒ `PERSIST_APPLY_PROPOSAL_HASH_MISMATCH` (both with `INVALID_PARAM` code). The hash compares case-insensitively so observers may upper-case the hex defensively. Strict shape: only the string form is accepted; numbers / arrays / objects are rejected with `INVALID_PARAM`. The hash is field-order independent (the underlying compute sorts applied_fields lexicographically) so the same applied set always derives the same correlator regardless of the gate's traversal order.",
     ));
 
+    // ── wave-22 / task 05 — Autonomous workstation TRUE spawn v1 ────────
+    //
+    // Layered on top of wave-21 / task 04 propose-only autonomous
+    // workstation LLM proposal. The wave-21 / task 04 surface was
+    // SURFACE-only (every proposal carried `applied=false`, the bundle
+    // carried `auto_spawn=false`); wave-22 / task 05 promotes that to
+    // a CONDITIONAL real spawn under a strict 12-rule gate (G1..G12),
+    // mirroring the wave-22 / task 03 / 04 apply-gate pattern.
+    //
+    // Conservative invariants (NEVER violated):
+    //   * Default `auto_spawn=false` ⇒ byte-compatible with wave-21 / task 04
+    //     (no `workstation_auto_spawn_gate` block on the response, no
+    //     spawn). The wave-21 propose-only `workstation_proposals` block
+    //     STILL carries `auto_spawn=false` and every proposal STILL
+    //     carries `applied=false` — the wave-22 gate publishes its own
+    //     status on the SEPARATE `workstation_auto_spawn_gate` block.
+    //   * Sonnet unavailable ⇒ gate refuses to spawn (`SkippedUnavailable`);
+    //     NEVER falls back to `claude -p` / prompt mode.
+    //   * DAG mode rejects auto_spawn at preflight (single-node-execute-
+    //     only in v1; the existing wave-21 DAG preflight rejects the
+    //     bundle creation, which fails G2 with SkippedNoProposals).
+    //   * The spawn substrate is ALWAYS `mission_task_delegate` (wave-15
+    //     `run_workstation_dispatch_with_contract`); the gate refuses
+    //     when the proposed `target` is anything else.
+    //   * Hash mismatch / missing fail-fast as `AUTO_SPAWN_*` structured
+    //     errors BEFORE any substrate dispatch runs.
+    p.insert("auto_spawn".into(), prop(
+        "boolean",
+        "[execute] (wave-22 / task 05) opt-in TRUE spawn promotion gate for the wave-21 / task 04 autonomous workstation LLM proposal v0 surface. Default `false` (suggest-only) preserves the wave-21 / task 04 byte-shape EXACTLY — proposals stay surfaced under `workstation_proposals` with `applied=false` per proposal and `auto_spawn=false` on the bundle, and the wave-22 `workstation_auto_spawn_gate` block is OMITTED from the response. When `auto_spawn=true` AND ALL the additional opt-ins below pass (`workstation_proposal_hash` matches the bundle's deterministic SHA-256, `workstation_caller_approved=true`, `task_contract_path` supplied + parses + non-empty `:write-scope` + no `:write-scope`/`:must-not-touch` overlap, `preflight_status_acceptable=true`, every proposal carries `safety_status=safe` AND `confidence=high`, and the proposed `target` is `mission_task_delegate`), the daemon dispatches the spawn through the wave-15 `run_workstation_dispatch_with_contract` substrate (NEVER `claude -p`). Any gate failure ⇒ structured SafeDescriptor-style outcome on `workstation_auto_spawn_gate.auto_spawn_status` (one of `not_requested|spawned|skipped_unavailable|skipped_no_proposals|skipped_unsafe_proposal|skipped_confidence_too_low|skipped_caller_not_approved|skipped_missing_task_contract_path|skipped_malformed_task_contract|skipped_empty_write_scope|skipped_forbidden_scope_overlap|skipped_preflight_unacceptable|skipped_unsupported_target|skipped_substrate_refused|skipped_substrate_inner_error`), NO spawn happens, NO mutation. Hash mismatch / missing fail-fast as `AUTO_SPAWN_PROPOSAL_HASH_MISMATCH` / `AUTO_SPAWN_MISSING_PROPOSAL_HASH` (both with `AUTO_SPAWN_INVALID_PARAM` code) BEFORE any substrate dispatch runs. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected with `AUTO_SPAWN_INVALID_PARAM` so a typo cannot silently flip the gate. Conservative posture: this is the THIRD layer of opt-in (mode `sonnet_suggest` first, then `auto_spawn=true`, then `workstation_caller_approved=true` + `preflight_status_acceptable=true`), so a single accidental flag flip cannot fire a real spawn.",
+    ));
+
+    p.insert("workstation_proposal_hash".into(), prop(
+        "string",
+        "[execute] (wave-22 / task 05) deterministic 32-hex SHA-256 prefix correlator for the wave-21 / task 04 workstation proposal bundle. The daemon computes `compute_workstation_proposal_hash(bundle)` over the LOAD-BEARING fields (bundle status wire + each proposal's `field|value|confidence|safety_status` joined by `;`) and surfaces the value under `workstation_auto_spawn_gate.computed_proposal_hash` whenever the gate runs. When `auto_spawn=true` AND a workstation proposal bundle exists, the daemon MATCHES `workstation_proposal_hash` against the freshly computed value BEFORE the substrate dispatch runs: missing supply ⇒ `AUTO_SPAWN_MISSING_PROPOSAL_HASH`; mismatch ⇒ `AUTO_SPAWN_PROPOSAL_HASH_MISMATCH` (both with `AUTO_SPAWN_INVALID_PARAM` code). The hash compares case-insensitively. Strict shape: only the string form is accepted; numbers / arrays / objects are rejected with `AUTO_SPAWN_INVALID_PARAM`. Superficial proposal text (e.g. `evidence`) is INTENTIONALLY excluded from the hash so the correlator stays stable across rewording — only fields that influence the spawn decision (target, value, confidence, safety_status, bundle status) are folded in.",
+    ));
+
+    p.insert("workstation_caller_approved".into(), prop(
+        "boolean",
+        "[execute] (wave-22 / task 05) second human opt-in for the auto-spawn gate. Default `false`. Required-truthy when `auto_spawn=true` for the gate to fire; supplying `auto_spawn=true` without this flag lands on `workstation_auto_spawn_gate.auto_spawn_status=skipped_caller_not_approved` with NO spawn. The double opt-in is required precisely so the gate cannot fire by a single accidental flag flip — mirrors the wave-22 / task 03 (`caller_approved` for review apply gate) and wave-22 / task 04 (`caller_approved` for persisted PLAN inference apply) patterns. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected with `AUTO_SPAWN_INVALID_PARAM`.",
+    ));
+
+    p.insert("preflight_status_acceptable".into(), prop(
+        "boolean",
+        "[execute] (wave-22 / task 05) explicit operator acknowledgement that hooks / preflight state is acceptable for the auto-spawn gate. Default `false`. The daemon does NOT run hooks itself; this flag is the surface where the operator (or the orchestrator on the operator's behalf) confirms `core.hooksPath` is wired and the pre-commit guard is in place. Required-truthy when `auto_spawn=true` for the gate to fire; supplying `auto_spawn=true` without this flag lands on `workstation_auto_spawn_gate.auto_spawn_status=skipped_preflight_unacceptable` with NO spawn. Pair with the wave-22 / task 01 `scripts/check-missiond-hooks.mjs --json` doctor output to derive the value programmatically. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected with `AUTO_SPAWN_INVALID_PARAM`.",
+    ));
+
     Value::Object(p)
 }
 
@@ -1076,10 +1122,28 @@ pub fn definitions() -> Vec<ToolDefinition> {
          wave-21/06 5 invariants 完全 PINNED — proposal block 仍然 applied=false / requires_human=true (那是 propose 表面的属性), \
          apply gate 单独发 `llm_approve_apply_gate` 块 {apply_status, applied_decision, proposal_hash_status, computed_proposal_hash, \
          supplied_proposal_hash, caller_approved, safety_rule_results[]}; caller 同时给 review_decision 时人决定胜 (apply gate 退化为 informational)。\
+         wave-22 / task 05 autonomous workstation TRUE spawn v1: execute (单节点) 加 auto_spawn=true (bool only; \
+         字符串 \"true\" 拒) + workstation_proposal_hash (32 hex SHA-256 截 32, 案 bundle.status + 每条 proposal 的 \
+         field|value|confidence|safety_status 拼接) + workstation_caller_approved=true + preflight_status_acceptable=true + \
+         task_contract_path 五个 opt-in 全打开后, 把 wave-21/04 propose-only 提升为 真正 spawn — 走 wave-15 \
+         run_workstation_dispatch_with_contract substrate (mission_task_delegate, 永不 claude -p)。\
+         12 道严格 gate 全过才 spawn (G1 auto_spawn opt-in G2 bundle Suggested G3 hash 匹 G4 所有 proposal safety_status=safe \
+         G5 所有 proposal confidence=high G6 caller_approved=true G7 preflight_status_acceptable=true G8 task_contract_path 给 \
+         G9 contract 解析成功 G10 :write-scope 非空 G11 :write-scope 与 :must-not-touch 不重叠 G12 提案 target=mission_task_delegate); \
+         任一 fail 即 SKIP, 状态钉 `workstation_auto_spawn_gate.auto_spawn_status` (15 wire 之一) 不 spawn 不 mutate; \
+         hash mismatch / missing 在 substrate dispatch 前 fail-fast `AUTO_SPAWN_PROPOSAL_HASH_MISMATCH` / `AUTO_SPAWN_MISSING_PROPOSAL_HASH` \
+         (AUTO_SPAWN_INVALID_PARAM 码)。响应固定附 `workstation_auto_spawn_gate` 块 \
+         {requested, auto_spawn_status, spawn_target, task_contract_path, proposal_hash_status, computed_proposal_hash, \
+         supplied_proposal_hash, caller_approved, preflight_status_acceptable, gate_results[], substrate_reason}; \
+         wave-21/04 4 invariants 完全 PINNED — propose-only `workstation_proposals.auto_spawn` 仍硬钉 false, \
+         每条 proposal 仍硬钉 applied=false (wave-22 spawn 在独立 `workstation_auto_spawn_gate` 块发布), \
+         Sonnet 不可用 invariant 文案钉 'no fallback to claude -p / prompt mode' 同步生效到 G2, \
+         DAG 模式继承 wave-21/04 preflight reject (single-node-execute-only)。\
          Lisp 源 (forward ref): .missiond/tasks/schema/task-contract-v1.lisp + intent-tools.lisp :: implemented-surface \
          mission_plan :: :task-contract-emitter (wave-19/12 backfill) + :execute-contract :apply-inferred-fields-gate (wave-21/05 backfill) + \
          :execute-contract :apply-llm-auto-approve-gate (wave-22/03 backfill) + \
-         :execute-contract :persisted-inference-apply (wave-22/04 backfill)。",
+         :execute-contract :persisted-inference-apply (wave-22/04 backfill) + \
+         :execute-contract :workstation-auto-spawn-gate (wave-22/05 backfill)。",
         schema,
     )]
 }

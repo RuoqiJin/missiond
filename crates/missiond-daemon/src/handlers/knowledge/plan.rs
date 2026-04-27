@@ -6657,6 +6657,54 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
     )
     .await;
 
+    // wave-22 / task 05 — autonomous workstation TRUE spawn v1. Layered
+    // on top of wave-21 / task 04 propose-only. Default `auto_spawn=false`
+    // ⇒ byte-compatible with wave-21 / task 04 (no gate block on the
+    // response, no spawn). When `auto_spawn=true` the gate runs a strict
+    // 12-rule matrix (G1..G12) and either:
+    //   * spawns through the wave-15 substrate
+    //     (`run_workstation_dispatch_with_contract`) when ALL gates pass, OR
+    //   * skips with a structured SafeDescriptor-style outcome on the
+    //     `workstation_auto_spawn_gate` block (NO spawn, NO mutation).
+    //
+    // Order of operations (mirrors wave-22 / task 03 / 04):
+    //   1. Parse input — fail-fast on shape errors
+    //      (`AUTO_SPAWN_INVALID_PARAM`).
+    //   2. Hash preflight — fail-fast on missing / mismatch
+    //      (`AUTO_SPAWN_MISSING_PROPOSAL_HASH` /
+    //      `AUTO_SPAWN_PROPOSAL_HASH_MISMATCH`) BEFORE any substrate
+    //      dispatch can run.
+    //   3. Compute the gate decision (pure evaluator) and, when all 12
+    //      gates pass, run the wave-15 substrate dispatch through
+    //      `mission_task_delegate`. NEVER `claude -p`.
+    let auto_spawn_input =
+        match super::workstation_dispatch::parse_workstation_auto_spawn_input(args) {
+            Ok(i) => i,
+            Err((code, msg)) => {
+                return Ok(ToolResult::structured_error(
+                    ToolError::new(code.as_str(), msg),
+                ));
+            }
+        };
+    if let Err((code, msg)) =
+        super::workstation_dispatch::enforce_auto_spawn_preflight(
+            &auto_spawn_input,
+            workstation_proposal_bundle.as_ref(),
+        )
+    {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(code.as_str(), msg),
+        ));
+    }
+    let auto_spawn_gate_outcome = compute_workstation_auto_spawn_gate(
+        state,
+        &auto_spawn_input,
+        &plan,
+        &hints,
+        workstation_proposal_bundle.as_ref(),
+    )
+    .await;
+
     let final_result = if execute_mode == "bridge" {
         action_execute_bridge(&plan, &resolved)
     } else {
@@ -6666,6 +6714,14 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
     let final_result = attach_workstation_proposals_block(
         final_result,
         workstation_proposal_bundle.as_ref(),
+    );
+
+    // wave-22 / task 05 — splice the auto-spawn gate block onto the
+    // response. No-op when the caller did not opt in (status=NotRequested
+    // ⇒ block omitted so wave-21 / task 04 byte-shape is preserved).
+    let final_result = attach_workstation_auto_spawn_gate_block(
+        final_result,
+        auto_spawn_gate_outcome.as_ref(),
     );
 
     let final_result = attach_inference_block(final_result, inference_block);
@@ -6798,6 +6854,187 @@ fn attach_workstation_proposals_block(
         // re-deriving it from the bundle status.
         map.entry("workstation_inference_mode".to_string())
             .or_insert_with(|| json!(WORKSTATION_INFER_MODE_SONNET_SUGGEST));
+    }
+    result.content = vec![ToolContent::Text {
+        text: serde_json::to_string_pretty(&payload).unwrap_or(text),
+    }];
+    result
+}
+
+/// wave-22 / task 05 — compute the auto-spawn gate outcome for this
+/// execute call. Returns `None` when the caller did not opt in
+/// (`auto_spawn=false` / absent) so observers see byte-identical
+/// wave-21 / task 04 behaviour. Returns `Some(outcome)` when the
+/// gate ran (whether it spawned or skipped) so the response can
+/// surface the structured decision.
+///
+/// When the gate would have spawned (G1..G12 all green), this helper
+/// ALSO calls the wave-15 substrate
+/// (`run_workstation_dispatch_with_contract`) to perform the actual
+/// dispatch — there is NEVER a `claude -p` shell-out. The substrate's
+/// outcome (Dispatched / SafeDescriptor / DryRun / InnerError) is
+/// folded back into the gate outcome's status:
+///   * Dispatched ⇒ status=Spawned (load-bearing success)
+///   * SafeDescriptor ⇒ status=SkippedSubstrateRefused + reason
+///   * InnerError ⇒ status=SkippedSubstrateInnerError + reason
+///   * DryRun ⇒ status=Spawned (no real dispatch happened, but the
+///     gate decision was load-bearing — we treat dry runs as the
+///     spawn decision having been made; the brief preview is
+///     surfaced through the substrate's standard response fields).
+async fn compute_workstation_auto_spawn_gate(
+    state: &AppState,
+    input: &super::workstation_dispatch::WorkstationAutoSpawnInput,
+    plan: &Plan,
+    hints: &ParsedPlanHints,
+    bundle: Option<&super::workstation_dispatch::WorkstationProposalBundle>,
+) -> Option<super::workstation_dispatch::WorkstationAutoSpawnGateOutcome> {
+    if !input.auto_spawn {
+        // Caller did not opt in; gate block omitted from response so
+        // wave-21 / task 04 byte-shape is preserved exactly.
+        return None;
+    }
+
+    // Pre-load the contract so the gate evaluator can check
+    // `:write-scope` / `:must-not-touch` BEFORE any spawn substrate
+    // runs. We resolve relative paths against the same project anchor
+    // the substrate would use; the substrate re-resolves on its own
+    // path so this is purely defensive (the gate refuses early if
+    // the file is malformed, instead of letting the substrate get
+    // partway through dispatch).
+    let (parsed_contract, contract_load_error): (
+        Option<super::workstation_dispatch::ParsedTaskContract>,
+        Option<String>,
+    ) = if let Some(raw) = input.task_contract_path.as_deref() {
+        let raw_path = std::path::Path::new(raw);
+        // Use the daemon's process cwd as the anchor for relative
+        // paths in the gate; the substrate re-anchors against the
+        // resolved project root, which may differ — but for the
+        // gate's purposes (checking write_scope shape + non-overlap)
+        // the resolution does not matter, because the contract file
+        // itself is the SSOT and parses identically regardless.
+        let cwd = std::env::current_dir()
+            .unwrap_or_else(|_| std::path::PathBuf::from("/"));
+        let resolved = super::workstation_dispatch::resolve_contract_path_public(
+            raw_path, &cwd,
+        );
+        match super::workstation_dispatch::load_task_contract(&resolved) {
+            Ok(c) => (Some(c), None),
+            Err(e) => (None, Some(e.reason())),
+        }
+    } else {
+        (None, None)
+    };
+
+    // Pure evaluator — no substrate dispatch yet.
+    let mut outcome = super::workstation_dispatch::evaluate_workstation_auto_spawn_gate(
+        &input,
+        bundle,
+        parsed_contract.as_ref(),
+        contract_load_error.as_deref(),
+    );
+
+    // If the pure gate decided to spawn, run the substrate dispatch
+    // through the wave-15 path. The gate's contract is the SSOT for
+    // the spawn — we use ONLY the PLAN-derived hints (no caller-arg
+    // overlay) so the spawn surface matches what the gate evaluated
+    // (caller args are intentionally NOT load-bearing on the auto-
+    // spawn path: the gate's authority comes from the validated
+    // contract, not from any caller-supplied workstation knob).
+    if outcome.status.was_spawned() {
+        let merged_hints = hints.to_workstation_hints();
+        // The gate already pinned spawn_target = mission_task_delegate.
+        // dispatch_strategy is taken from the contract / merged hints
+        // (the wave-15 substrate honours both).
+        let dispatch_strategy = merged_hints
+            .dispatch_strategy
+            .clone()
+            .unwrap_or_else(|| "agent-team".to_string());
+        let raw_path = input
+            .task_contract_path
+            .as_deref()
+            .map(std::path::PathBuf::from);
+        let substrate_outcome =
+            super::workstation_dispatch::run_workstation_dispatch_with_contract(
+                state,
+                plan,
+                "mission_task_delegate",
+                &dispatch_strategy,
+                merged_hints,
+                false, // dry_run=false: this is the real spawn surface
+                raw_path.as_deref(),
+            )
+            .await;
+        match substrate_outcome {
+            super::workstation_dispatch::WorkstationDispatchOutcome::Dispatched { .. }
+            | super::workstation_dispatch::WorkstationDispatchOutcome::DryRun { .. } => {
+                // Spawn decision was load-bearing — keep status=Spawned.
+                outcome.gate_results.push(
+                    "rule:substrate_dispatch:ok (mission_task_delegate substrate accepted the spawn)"
+                        .to_string(),
+                );
+            }
+            super::workstation_dispatch::WorkstationDispatchOutcome::SafeDescriptor {
+                reason,
+                ..
+            } => {
+                let detail = format!(
+                    "substrate refused: {} (status={})",
+                    reason.detail(),
+                    reason.status(),
+                );
+                outcome.gate_results.push(format!("rule:substrate_dispatch:safe_descriptor:{}", detail));
+                outcome.status =
+                    super::workstation_dispatch::WorkstationAutoSpawnStatus::SkippedSubstrateRefused;
+                outcome.substrate_reason = Some(detail);
+            }
+            super::workstation_dispatch::WorkstationDispatchOutcome::InnerError {
+                inner_payload,
+                ..
+            } => {
+                let detail = format!(
+                    "mission_task_delegate inner handler returned an error result: {}",
+                    inner_payload
+                );
+                outcome.gate_results.push(format!("rule:substrate_dispatch:inner_error:{}", detail));
+                outcome.status =
+                    super::workstation_dispatch::WorkstationAutoSpawnStatus::SkippedSubstrateInnerError;
+                outcome.substrate_reason = Some(detail);
+            }
+        }
+    }
+
+    Some(outcome)
+}
+
+/// wave-22 / task 05 — splice the `workstation_auto_spawn_gate` bundle
+/// onto a successful response. Mirrors `attach_workstation_proposals_block`:
+/// errors and pre-existing keys are preserved untouched. The block is
+/// response-only metadata; nothing reads it on the daemon side.
+fn attach_workstation_auto_spawn_gate_block(
+    mut result: ToolResult,
+    outcome: Option<&super::workstation_dispatch::WorkstationAutoSpawnGateOutcome>,
+) -> ToolResult {
+    let Some(outcome) = outcome else {
+        return result;
+    };
+    if result.is_error.unwrap_or(false) {
+        // Don't decorate structured errors with the gate block — the
+        // caller needs the error path uncluttered.
+        return result;
+    }
+    let text = match result.content.first() {
+        Some(ToolContent::Text { text }) => text.clone(),
+        _ => return result,
+    };
+    let mut payload: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return result,
+    };
+    if let Some(map) = payload.as_object_mut() {
+        // Preserve any pre-existing block by NEVER overwriting (future
+        // DAG / resume paths may carry their own).
+        map.entry("workstation_auto_spawn_gate".to_string())
+            .or_insert_with(|| outcome.to_response_json());
     }
     result.content = vec![ToolContent::Text {
         text: serde_json::to_string_pretty(&payload).unwrap_or(text),
@@ -15143,5 +15380,171 @@ mod tests {
         ] {
             assert!(!status.was_applied(), "{:?} must NOT report applied", status);
         }
+    }
+
+    // ── wave-22 / task 05 — autonomous workstation true spawn v1 wiring ──
+    //
+    // These tests cover the plan.rs splice + helper integration. The
+    // workstation_dispatch.rs gate evaluator already has its own
+    // exhaustive unit tests; here we focus on the plan.rs surface:
+    //   * `attach_workstation_auto_spawn_gate_block` no-op when the
+    //     gate outcome is absent (default ⇒ wave-21/04 byte-shape).
+    //   * `attach_workstation_auto_spawn_gate_block` splices the
+    //     block into a successful response.
+    //   * `attach_workstation_auto_spawn_gate_block` skips error
+    //     responses (matches the wave-21/04 attachers).
+    //   * `attach_workstation_auto_spawn_gate_block` preserves
+    //     pre-existing blocks (DAG / resume forward-compat).
+
+    #[test]
+    fn wave22_05_attach_auto_spawn_gate_block_no_op_when_outcome_absent() {
+        let original = ToolResult::json_pretty(&json!({"status": "executing"}));
+        let r = attach_workstation_auto_spawn_gate_block(original, None);
+        let v = parse_payload(&r);
+        assert!(
+            v.get("workstation_auto_spawn_gate").is_none(),
+            "wave-21 / task 04 byte-shape: gate block MUST be omitted when outcome is None"
+        );
+    }
+
+    #[test]
+    fn wave22_05_attach_auto_spawn_gate_block_splices_block_into_payload() {
+        use super::super::workstation_dispatch::{
+            WorkstationAutoSpawnGateOutcome, WorkstationAutoSpawnStatus,
+            WorkstationProposalHashStatus,
+        };
+        let outcome = WorkstationAutoSpawnGateOutcome {
+            requested: true,
+            status: WorkstationAutoSpawnStatus::Spawned,
+            spawn_target: Some("mission_task_delegate".to_string()),
+            task_contract_path: Some(".missiond/tasks/foo.lisp".to_string()),
+            proposal_hash_status: WorkstationProposalHashStatus::Matches,
+            computed_proposal_hash: Some("0".repeat(32)),
+            supplied_proposal_hash: Some("0".repeat(32)),
+            caller_approved: true,
+            preflight_status_acceptable: true,
+            gate_results: vec!["rule:auto_spawn_gate_satisfied".to_string()],
+            substrate_reason: None,
+        };
+        let original = ToolResult::json_pretty(&json!({"status": "executing"}));
+        let r = attach_workstation_auto_spawn_gate_block(original, Some(&outcome));
+        let v = parse_payload(&r);
+        let block = v.get("workstation_auto_spawn_gate").expect("gate block present");
+        assert_eq!(block["auto_spawn_status"], "spawned");
+        assert_eq!(block["spawn_target"], "mission_task_delegate");
+        assert_eq!(block["proposal_hash_status"], "matches");
+        assert_eq!(block["caller_approved"], true);
+        assert_eq!(block["preflight_status_acceptable"], true);
+        assert!(block["gate_results"].as_array().unwrap().len() >= 1);
+    }
+
+    #[test]
+    fn wave22_05_attach_auto_spawn_gate_block_skips_error_results() {
+        use super::super::workstation_dispatch::{
+            WorkstationAutoSpawnGateOutcome, WorkstationAutoSpawnStatus,
+            WorkstationProposalHashStatus,
+        };
+        let outcome = WorkstationAutoSpawnGateOutcome {
+            requested: true,
+            status: WorkstationAutoSpawnStatus::Spawned,
+            spawn_target: None,
+            task_contract_path: None,
+            proposal_hash_status: WorkstationProposalHashStatus::NotSupplied,
+            computed_proposal_hash: None,
+            supplied_proposal_hash: None,
+            caller_approved: false,
+            preflight_status_acceptable: false,
+            gate_results: vec![],
+            substrate_reason: None,
+        };
+        let mut original = ToolResult::json_pretty(&json!({"error": "broke"}));
+        original.is_error = Some(true);
+        let r = attach_workstation_auto_spawn_gate_block(original, Some(&outcome));
+        let v = parse_payload(&r);
+        assert!(
+            v.get("workstation_auto_spawn_gate").is_none(),
+            "structured-error responses MUST stay uncluttered"
+        );
+    }
+
+    #[test]
+    fn wave22_05_attach_auto_spawn_gate_block_preserves_pre_existing_block() {
+        use super::super::workstation_dispatch::{
+            WorkstationAutoSpawnGateOutcome, WorkstationAutoSpawnStatus,
+            WorkstationProposalHashStatus,
+        };
+        let outcome = WorkstationAutoSpawnGateOutcome {
+            requested: true,
+            status: WorkstationAutoSpawnStatus::Spawned,
+            spawn_target: Some("mission_task_delegate".to_string()),
+            task_contract_path: None,
+            proposal_hash_status: WorkstationProposalHashStatus::Matches,
+            computed_proposal_hash: None,
+            supplied_proposal_hash: None,
+            caller_approved: true,
+            preflight_status_acceptable: true,
+            gate_results: vec![],
+            substrate_reason: None,
+        };
+        let original = ToolResult::json_pretty(&json!({
+            "status": "executing",
+            "workstation_auto_spawn_gate": {"auto_spawn_status": "preexisting_marker"},
+        }));
+        let r = attach_workstation_auto_spawn_gate_block(original, Some(&outcome));
+        let v = parse_payload(&r);
+        let block = v.get("workstation_auto_spawn_gate").expect("gate block present");
+        assert_eq!(
+            block["auto_spawn_status"], "preexisting_marker",
+            "wave-22 / task 05 invariant: pre-existing gate blocks MUST NOT be overwritten"
+        );
+    }
+
+    /// Wave-21 / task 04 invariant carryover: when the caller does NOT
+    /// opt into wave-22 / task 05 auto-spawn (the `auto_spawn` flag is
+    /// absent or false), the response MUST stay byte-identical with
+    /// the wave-21 / task 04 propose-only path. That means:
+    ///   * the wave-21 propose-only `workstation_proposals` block STILL
+    ///     carries `auto_spawn=false` and every proposal STILL carries
+    ///     `applied=false` (this invariant lives in workstation_dispatch.rs
+    ///     and is independently tested there);
+    ///   * the wave-22 `workstation_auto_spawn_gate` block is OMITTED
+    ///     from the response (no new key on the wire).
+    /// We assert the second invariant on the splice helper directly.
+    #[test]
+    fn wave22_05_default_off_preserves_wave21_04_byte_shape() {
+        let original = ToolResult::json_pretty(&json!({
+            "status": "executing",
+            "workstation_proposals": {"auto_spawn": false, "proposals": []},
+        }));
+        // outcome=None mirrors the auto_spawn=false caller path
+        // (compute_workstation_auto_spawn_gate returns None for that case).
+        let r = attach_workstation_auto_spawn_gate_block(original, None);
+        let v = parse_payload(&r);
+        assert!(
+            v.get("workstation_auto_spawn_gate").is_none(),
+            "wave-21 / task 04 byte-shape: auto_spawn=false / absent ⇒ NO new key on the wire"
+        );
+        // wave-21 / task 04 propose-only key untouched.
+        assert_eq!(v["workstation_proposals"]["auto_spawn"], false);
+    }
+
+    /// Wave-22 / task 05 invariant: `parse_workstation_auto_spawn_input`
+    /// rejects literal-string `"true"` for the bool fields with the
+    /// `AUTO_SPAWN_INVALID_PARAM` code (mirrors wave-22 / task 03 / 04
+    /// strict-shape rule). Tested at the workstation_dispatch.rs unit
+    /// level; here we just assert the symbol export so plan.rs callers
+    /// can rely on it.
+    #[test]
+    fn wave22_05_invariant_strict_bool_shape_codes_exported() {
+        use super::super::workstation_dispatch::{
+            AUTO_SPAWN_INVALID_PARAM, AUTO_SPAWN_MISSING_PROPOSAL_HASH,
+            AUTO_SPAWN_PROPOSAL_HASH_MISMATCH,
+        };
+        assert_eq!(AUTO_SPAWN_INVALID_PARAM, "AUTO_SPAWN_INVALID_PARAM");
+        assert_eq!(AUTO_SPAWN_MISSING_PROPOSAL_HASH, "AUTO_SPAWN_MISSING_PROPOSAL_HASH");
+        assert_eq!(
+            AUTO_SPAWN_PROPOSAL_HASH_MISMATCH,
+            "AUTO_SPAWN_PROPOSAL_HASH_MISMATCH"
+        );
     }
 }
