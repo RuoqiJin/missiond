@@ -29,15 +29,15 @@ Checks MissionD session-trace v1 Lisp files:
 Use --dry-fixture to run self-contained pass/fail fixtures.
 `;
 
-const SCHEMA = 'missiond.session-trace.v1';
+export const SCHEMA = 'missiond.session-trace.v1';
 
 const ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
 const ISO8601_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
-const ENTRY_HEAD = 'trace-event';
+export const ENTRY_HEAD = 'trace-event';
 
-const KIND_VALUES = new Set([
+export const KIND_VALUES = new Set([
   'dispatch',
   'start',
   'read',
@@ -68,6 +68,71 @@ const OPTIONAL_FIELDS = [
 const ALLOWED_FIELDS = new Set([...REQUIRED_FIELDS, ...OPTIONAL_FIELDS]);
 
 const HEADER_REQUIRED = [':schema', ':wave', ':created-at', ':sequence'];
+
+// Read-only helper used by analyzers and other tooling. Parses a trace-file
+// path and yields the structured events it contains, without applying the
+// strict checker rules (the caller is responsible for tolerating partial data
+// when the file is mid-validation). Returns an array of one entry per
+// (session-trace ...) form found, each with `wave`, `header`, and `events`.
+//
+// `events` is a flat array of plain objects mirroring trace-event fields:
+//   { id, seq, at, task, backend, kind, summary,
+//     agent?, files: string[], command?, exit_code?: number,
+//     duration_ms?: number, commit_hash?, report_path?,
+//     memory_refs: string[], trace_refs: string[],
+//     loc: { line, column } }
+// Unknown / missing scalar fields become null; vector fields default to [].
+export function parseTraceEvents(file) {
+  const forms = readLispFile(file);
+  const traces = [];
+  for (const form of forms) {
+    if (!isList(form) || head(form) !== 'session-trace') continue;
+    const wave = nodeText(form.children[1]);
+    const headerProps = readKeywordProps(form, { start: 2 });
+    const header = {
+      schema: keywordPropText(headerProps, ':schema'),
+      wave: keywordPropText(headerProps, ':wave'),
+      createdAt: keywordPropText(headerProps, ':created-at'),
+      sequence: parseIntOrNull(keywordPropText(headerProps, ':sequence')),
+    };
+    const events = [];
+    for (const child of form.children) {
+      if (!isList(child) || head(child) !== ENTRY_HEAD) continue;
+      const props = readKeywordProps(child, { start: 1 });
+      events.push({
+        id: keywordPropText(props, ':id'),
+        seq: parseIntOrNull(keywordPropText(props, ':seq')),
+        at: keywordPropText(props, ':at'),
+        task: keywordPropText(props, ':task'),
+        backend: keywordPropText(props, ':backend'),
+        kind: keywordPropText(props, ':kind'),
+        summary: keywordPropText(props, ':summary'),
+        agent: keywordPropText(props, ':agent'),
+        files: props[':files'] ? nodeToStringArray(props[':files'].value) : [],
+        command: keywordPropText(props, ':command'),
+        exit_code: parseIntOrNull(keywordPropText(props, ':exit_code')),
+        duration_ms: parseIntOrNull(keywordPropText(props, ':duration_ms')),
+        commit_hash: keywordPropText(props, ':commit_hash'),
+        report_path: keywordPropText(props, ':report_path'),
+        memory_refs: props[':memory_refs']
+          ? nodeToStringArray(props[':memory_refs'].value)
+          : [],
+        trace_refs: props[':trace_refs']
+          ? nodeToStringArray(props[':trace_refs'].value)
+          : [],
+        loc: child.loc ?? { line: 1, column: 1 },
+      });
+    }
+    traces.push({ file, wave, header, events });
+  }
+  return traces;
+}
+
+function parseIntOrNull(text) {
+  if (text == null) return null;
+  if (!/^-?\d+$/.test(text)) return null;
+  return Number.parseInt(text, 10);
+}
 
 function main() {
   const args = process.argv.slice(2);
@@ -1057,4 +1122,9 @@ function buildAllKindsTrace() {
         ${events})`;
 }
 
-main();
+// Only run the CLI when invoked directly (preserves the existing
+// `node scripts/check-session-trace.mjs ...` behavior); skips main() when
+// the module is imported by analyzer/tooling so named exports stay pure.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}
