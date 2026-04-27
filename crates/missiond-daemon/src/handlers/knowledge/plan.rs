@@ -8955,6 +8955,48 @@ pub(super) fn validate_distill_chain_args(args: &Value) -> Option<ToolResult> {
             ));
         }
     }
+    // wave-22 / task 06 — closed-enum strict-shape validation of the
+    // policy v2 knob. Workflow.rs validates again as a defense-in-depth
+    // layer, but failing fast at the plan entry keeps the diagnostic
+    // close to the caller's invocation site (mirrors wave-21/07 dual
+    // opt-in validation).
+    if let Some(v) = args.get("auto_sonnet_policy") {
+        if !v.is_null() {
+            let s = match v.as_str() {
+                Some(s) => s,
+                None => {
+                    return Some(ToolResult::structured_error(
+                        ToolError::new(
+                            error_codes::INVALID_PARAM,
+                            format!(
+                                "auto_sonnet_policy must be a string (one of [\"off\",\"safe_after_rules\",\"dry_run\"]); got {}",
+                                json_shape_label(v)
+                            ),
+                        )
+                        .with_suggestion(
+                            "auto_sonnet_policy is the wave-22 / task 06 v2 closed-enum policy; \
+                             pass one of [\"off\",\"safe_after_rules\",\"dry_run\"] (no boolean / number).",
+                        ),
+                    ));
+                }
+            };
+            if !matches!(s, "" | "off" | "safe_after_rules" | "dry_run") {
+                return Some(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!(
+                            "auto_sonnet_policy must be one of [\"off\",\"safe_after_rules\",\"dry_run\"]; got `{}`",
+                            s
+                        ),
+                    )
+                    .with_suggestion(
+                        "auto_sonnet_policy is the wave-22 / task 06 v2 closed-enum policy; \
+                         pass one of [\"off\",\"safe_after_rules\",\"dry_run\"].",
+                    ),
+                ));
+            }
+        }
+    }
     None
 }
 
@@ -9225,9 +9267,18 @@ async fn apply_distill_chain(
                 // `auto_trigger_min_evidence` because the auto-sonnet
                 // gate is layered on top of the wave-20 trigger and
                 // refuses to operate without it (`skipped_no_trigger`).
+                //
+                // wave-22 / task 06 — forward the v2 closed-enum
+                // `auto_sonnet_policy` knob alongside the v1 dual
+                // opt-in flags so plan-side callers can opt into
+                // either surface (or both — the workflow layer
+                // attaches an `auto_sonnet_policy` block in addition
+                // to the legacy `auto_sonnet` block when both are
+                // requested).
                 for key in [
                     "auto_sonnet",
                     "auto_sonnet_approved",
+                    "auto_sonnet_policy",
                     "auto_chain_trigger",
                     "auto_trigger_min_evidence",
                 ] {
@@ -12375,6 +12426,78 @@ mod tests {
             "reason: {}",
             reason
         );
+    }
+
+    #[test]
+    fn validate_distill_chain_args_accepts_auto_sonnet_policy_canonical_strings() {
+        // wave-22 / task 06 — the closed-enum policy validator accepts
+        // the three canonical strings (off | safe_after_rules | dry_run)
+        // plus null / missing (which collapse to off).
+        for v in [
+            json!("off"),
+            json!("safe_after_rules"),
+            json!("dry_run"),
+            json!(""),
+            json!(null),
+        ] {
+            assert!(
+                validate_distill_chain_args(&json!({"auto_sonnet_policy": v}))
+                    .is_none(),
+                "policy={:?} must validate",
+                v
+            );
+        }
+        // Missing also fine.
+        assert!(validate_distill_chain_args(&json!({})).is_none());
+    }
+
+    #[test]
+    fn validate_distill_chain_args_rejects_auto_sonnet_policy_unknown_string() {
+        // wave-22 / task 06 — typo / camelCase / case mismatch all
+        // fail-fast as INVALID_PARAM. A single typo cannot escalate
+        // the daemon (I2 carryover from wave-21/07).
+        let result = validate_distill_chain_args(
+            &json!({"auto_sonnet_policy": "safeAfterRules"}),
+        )
+        .expect("validator must reject unknown policy string");
+        assert_eq!(result.is_error, Some(true));
+        let payload = tool_result_payload(&result);
+        let reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("auto_sonnet_policy must be one of"),
+            "reason: {}",
+            reason
+        );
+        assert!(reason.contains("safeAfterRules"), "echoed bad value: {}", reason);
+    }
+
+    #[test]
+    fn validate_distill_chain_args_rejects_auto_sonnet_policy_non_string_shapes() {
+        // wave-22 / task 06 — bool / number / array / object all fail.
+        for bad in [
+            json!({"auto_sonnet_policy": true}),
+            json!({"auto_sonnet_policy": 1}),
+            json!({"auto_sonnet_policy": ["safe_after_rules"]}),
+            json!({"auto_sonnet_policy": {"value": "safe_after_rules"}}),
+        ] {
+            let result = validate_distill_chain_args(&bad)
+                .expect("validator must reject non-string policy shape");
+            assert_eq!(result.is_error, Some(true), "input: {:?}", bad);
+            let payload = tool_result_payload(&result);
+            let reason = payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            assert!(
+                reason.contains("auto_sonnet_policy must be a string"),
+                "reason: {} (input: {:?})",
+                reason,
+                bad
+            );
+        }
     }
 
     #[test]

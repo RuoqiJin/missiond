@@ -255,6 +255,12 @@ fn build_properties() -> Value {
         "[distill auto_sonnet=true] (wave-21 / task 07) explicit caller-attestation flag the apply-gate requires before invoking Sonnet automatically. ORTHOGONAL to `auto_sonnet` so a single typo cannot escalate the daemon: BOTH `auto_sonnet=true` AND `auto_sonnet_approved=true` must be set. Defaults to false. Strict shape: `auto_sonnet_approved=\"true\"` (string) fails fast INVALID_PARAM. Echoed verbatim into the `auto_sonnet.caller_approval` block field.",
     ));
 
+    p.insert("auto_sonnet_policy".into(), prop_enum(
+        "string",
+        "[distill] (wave-22 / task 06 distill chain POLICY auto-Sonnet v2) closed-enum policy gate that REPLACES the wave-21 / task 07 dual opt-in (`auto_sonnet=true` AND `auto_sonnet_approved=true`) with a SINGLE explicit policy. Default `\"off\"` → response is byte-identical with the wave-21/07 surface (no `auto_sonnet_policy` block emitted). `\"safe_after_rules\"` auto-promotes the inner distill from `dry_run` to `sonnet` ONLY when ALL six wave-20 deterministic safety rules pass AND wave-20 trigger=auto_safe AND caller's `distill_mode!=sonnet`; no second opt-in flag required (the policy choice IS the explicit operator attestation). `\"dry_run\"` evaluates the gate fully but surfaces what WOULD happen (no Sonnet call) — used for testing the policy path end-to-end without burning model tokens. The wave-21/07 7 invariants STAY pinned on the policy path: I1 default off (no policy block emitted); I2 strict closed-enum parse rejects string typos / unknown values + non-string shapes loud as INVALID_PARAM (a single typo cannot escalate the daemon — invalid policy fails fast, missing policy stays off); I3 ALL six wave-20 deterministic rules MUST pass (gate REUSES trigger outcomes verbatim, never relaxes); I4 distill_mode=sonnet still rejected (no double-call); I5 Sonnet failure preserves inner payload + surfaces model_call_status=failed|invalid_output; I6 review_required=true PINNED on every successful safe_after_rules_applied outcome (auto-applied sonnet stays receipt-only — no DB transition flips); I7 wave-19 auto_chain + wave-20 auto_trigger blocks remain UNCHANGED + wave-21/07 auto_sonnet block (when caller also opted in via dual flags) remains UNCHANGED (auto_sonnet_policy is purely additive). policy_status taxonomy: `not_requested` | `safe_after_rules_applied` | `safe_after_rules_dry_run` | `skipped_no_trigger` (wave-20 trigger not enabled) | `skipped_rules_failed` (any wave-20 rule failed) | `skipped_already_sonnet` (caller's distill_mode already sonnet) | `skipped_inner_error` (inner distill returned error envelope). model_call_status taxonomy: `not_invoked` | `invoked` | `failed` | `invalid_output`. Block shape: {requested, policy, policy_status, applied, review_required, model_call_status, safety_rule_results, sidecar?, chain_id?, model_call_error?, caller_distill_mode?} + top-level shortcut `auto_sonnet_policy_status`. Strict shape: `auto_sonnet_policy=true` (boolean) / `auto_sonnet_policy=1` (number) / `auto_sonnet_policy=\"safeAfterRules\"` (typo) all fail-fast INVALID_PARAM at action entry.",
+        &["off", "safe_after_rules", "dry_run"],
+    ));
+
     Value::Object(p)
 }
 
@@ -344,6 +350,23 @@ pub fn definitions() -> Vec<ToolDefinition> {
          {requested, status, applied, review_required, model_call_status, safety_rule_results, caller_approval, \
          caller_distill_mode?, model_call_error?, sidecar?, chain_id?} + top-level shortcut auto_sonnet_status。\
          Strict shape: auto_sonnet=\"true\" (string) / auto_sonnet_approved=1 (number) → INVALID_PARAM fail-fast。\
+         wave-22 / task 06 distill chain POLICY auto-Sonnet v2: distill 接 auto_sonnet_policy ∈ \
+         {off (默认), safe_after_rules, dry_run} 即 REPLACE wave-21/07 双 opt-in 为单一 closed-enum 政策门; \
+         policy=safe_after_rules 在 wave-20 trigger=auto_safe + 6 规则全过 + caller distill_mode!=sonnet 时 \
+         无需 auto_sonnet_approved 自动 promote sonnet (政策本身即显式 attestation); policy=dry_run 评估 \
+         全部门控但不 invoke Sonnet (用于 e2e 测试政策路径); policy=off 与 wave-21/07 byte-shape 一致 \
+         (legacy auto_sonnet+auto_sonnet_approved 双 opt-in 路径不变)。wave-21/07 7 不变量在政策路径 \
+         全部保持: I1 默认 off 不 emit 块; I2 closed-enum 严格解析拒 typo (单 typo 不能升级); I3 必须 \
+         6 规则全过 (复用 trigger outcomes 不 relax); I4 caller distill_mode=sonnet 仍拒 (no double-call); \
+         I5 Sonnet 失败 PRESERVE inner + surface model_call_status=failed|invalid_output; I6 \
+         review_required=true PINNED 在 safe_after_rules_applied (auto-applied sonnet 永远 receipt-only); \
+         I7 wave-19 auto_chain + wave-20 auto_trigger + wave-21/07 auto_sonnet 块全部 UNCHANGED \
+         (政策块纯加性)。policy_status: not_requested | safe_after_rules_applied | safe_after_rules_dry_run | \
+         skipped_no_trigger | skipped_rules_failed | skipped_already_sonnet | skipped_inner_error。\
+         Block shape: {requested, policy, policy_status, applied, review_required, model_call_status, \
+         safety_rule_results, sidecar?, chain_id?, model_call_error?, caller_distill_mode?} + top-level \
+         shortcut auto_sonnet_policy_status。Strict shape: auto_sonnet_policy=true (boolean) / 1 (number) / \
+         \"safeAfterRules\" (typo) 全部 INVALID_PARAM fail-fast at action entry。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
          implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
          role workflow-distiller + intent-memory.lisp :: directive-layer :: file-first-artifacts :: workflow-methodology-file。",

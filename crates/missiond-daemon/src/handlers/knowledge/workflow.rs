@@ -272,6 +272,18 @@ async fn action_distill(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
+    // wave-22 / task 06 — pre-flight strict closed-enum validation for
+    // the `auto_sonnet_policy` knob v2. Runs BEFORE the plan lookup so
+    // unknown values / non-string shapes surface loud as INVALID_PARAM
+    // (a single typo cannot escalate the daemon — I2 carryover).
+    if let Err(msg) = parse_auto_sonnet_policy(args) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(error_codes::INVALID_PARAM, msg).with_suggestion(
+                "auto_sonnet_policy valid values: \"off\" (default) | \"safe_after_rules\" | \"dry_run\"",
+            ),
+        ));
+    }
+
     let plan_id = parse_id_arg(args, "plan_id")?;
     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let persist = args
@@ -1445,6 +1457,13 @@ async fn maybe_apply_distill_chain_layers(
 
     let explicit_auto_chain = auto_chain_requested(args);
     let explicit_auto_sonnet = auto_sonnet_requested(args);
+    // wave-22 / task 06 — closed-enum policy parser. Validation already
+    // ran inside `action_distill`, so any non-Ok here is defensive only;
+    // we collapse to Off on the unlikely fail-path so the chain still
+    // runs.
+    let auto_sonnet_policy =
+        parse_auto_sonnet_policy(args).unwrap_or(AutoSonnetPolicy::Off);
+    let policy_active = auto_sonnet_policy.is_active();
 
     // Fast path: nothing to do — return inner unchanged.
     //
@@ -1453,22 +1472,64 @@ async fn maybe_apply_distill_chain_layers(
     // refuses the auto-apply (I3 — rules never ran) but still surfaces
     // a `skipped_no_trigger` block so the caller sees the missed
     // pre-condition.
+    //
+    // wave-22 / task 06: same pre-condition for the policy path —
+    // `auto_sonnet_policy=safe_after_rules|dry_run` without the wave-20
+    // trigger surfaces `skipped_no_trigger` on the policy block (I3).
     if trigger_mode == AutoChainTrigger::Never && !explicit_auto_chain {
+        let mut result = inner;
         if explicit_auto_sonnet {
-            return maybe_apply_auto_sonnet_no_trigger(state, args, plan, name, inner).await;
+            result =
+                maybe_apply_auto_sonnet_no_trigger(state, args, plan, name, result).await;
         }
-        return inner;
+        if policy_active {
+            result = maybe_apply_auto_sonnet_policy(
+                state,
+                args,
+                plan,
+                name,
+                result,
+                auto_sonnet_policy,
+                AutoSonnetTriggerContext {
+                    trigger_mode,
+                    rules_passed: false,
+                    rules_value: Value::Array(Vec::new()),
+                    sidecar: None,
+                },
+            )
+            .await;
+        }
+        return result;
     }
 
     // Explicit wave-19 opt-in (no wave-20 trigger): preserve byte-compat
     // by delegating directly to the existing recorder. Wave-21 / task 07:
     // if `auto_sonnet=true` accompanies the wave-19 path, the gate
     // refuses (no trigger ran the safety rules) but layers a
-    // `skipped_no_trigger` block on top.
+    // `skipped_no_trigger` block on top. Wave-22 / task 06 mirrors the
+    // refusal on the policy path.
     if trigger_mode == AutoChainTrigger::Never && explicit_auto_chain {
-        let recorded = maybe_apply_auto_chain(state, args, plan, name, inner).await;
+        let mut recorded = maybe_apply_auto_chain(state, args, plan, name, inner).await;
         if explicit_auto_sonnet {
-            return maybe_apply_auto_sonnet_no_trigger(state, args, plan, name, recorded).await;
+            recorded =
+                maybe_apply_auto_sonnet_no_trigger(state, args, plan, name, recorded).await;
+        }
+        if policy_active {
+            recorded = maybe_apply_auto_sonnet_policy(
+                state,
+                args,
+                plan,
+                name,
+                recorded,
+                auto_sonnet_policy,
+                AutoSonnetTriggerContext {
+                    trigger_mode,
+                    rules_passed: false,
+                    rules_value: Value::Array(Vec::new()),
+                    sidecar: None,
+                },
+            )
+            .await;
         }
         return recorded;
     }
@@ -1561,18 +1622,38 @@ async fn maybe_apply_distill_chain_layers(
         // wave-21 / task 07: even on rules failure, if `auto_sonnet=true`
         // was opted in we surface a `skipped_rules_failed` auto-sonnet
         // block (mirrors the trigger's status) so the caller sees the
-        // pre-condition that blocked Sonnet.
+        // pre-condition that blocked Sonnet. wave-22 / task 06 layers
+        // the policy block on top with the same `skipped_rules_failed`
+        // status — I3 carryover proof.
+        let mut result = ToolResult::json_pretty(&payload);
         if explicit_auto_sonnet {
-            let inner_after_trigger = ToolResult::json_pretty(&payload);
+            let ctx = AutoSonnetTriggerContext {
+                trigger_mode,
+                rules_passed: false,
+                rules_value: rules_value.clone(),
+                sidecar: sidecar_str.as_deref(),
+            };
+            result = maybe_apply_auto_sonnet(state, args, plan, name, result, ctx).await;
+        }
+        if policy_active {
             let ctx = AutoSonnetTriggerContext {
                 trigger_mode,
                 rules_passed: false,
                 rules_value,
                 sidecar: sidecar_str.as_deref(),
             };
-            return maybe_apply_auto_sonnet(state, args, plan, name, inner_after_trigger, ctx).await;
+            result = maybe_apply_auto_sonnet_policy(
+                state,
+                args,
+                plan,
+                name,
+                result,
+                auto_sonnet_policy,
+                ctx,
+            )
+            .await;
         }
-        return ToolResult::json_pretty(&payload);
+        return result;
     }
 
     // Rules passed: route the inner result through the wave-19 recorder
@@ -1642,8 +1723,13 @@ async fn maybe_apply_distill_chain_layers(
     // is invoked and the inner `dry_run` payload is replaced with the
     // sonnet payload; on Sonnet failure (model error / invalid output)
     // the existing payload is preserved verbatim.
+    //
+    // wave-22 / task 06 — POLICY auto-sonnet apply-gate v2. Layered
+    // AFTER the wave-21/07 layer so a caller can opt into either
+    // surface (or both, in which case the policy block records the v2
+    // verdict alongside the legacy v1 block — I7 additive).
     let recorded_inner = ToolResult::json_pretty(&recorded_payload);
-    maybe_apply_auto_sonnet(
+    let mut after_legacy = maybe_apply_auto_sonnet(
         state,
         args,
         plan,
@@ -1652,11 +1738,29 @@ async fn maybe_apply_distill_chain_layers(
         AutoSonnetTriggerContext {
             trigger_mode,
             rules_passed: true,
-            rules_value,
+            rules_value: rules_value.clone(),
             sidecar: sidecar_str.as_deref(),
         },
     )
-    .await
+    .await;
+    if policy_active {
+        after_legacy = maybe_apply_auto_sonnet_policy(
+            state,
+            args,
+            plan,
+            name,
+            after_legacy,
+            auto_sonnet_policy,
+            AutoSonnetTriggerContext {
+                trigger_mode,
+                rules_passed: true,
+                rules_value,
+                sidecar: sidecar_str.as_deref(),
+            },
+        )
+        .await;
+    }
+    after_legacy
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -2174,6 +2278,471 @@ async fn maybe_apply_auto_sonnet_no_trigger(
         sidecar: None,
     };
     maybe_apply_auto_sonnet(state, args, plan, name, inner, ctx).await
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-22 / task 06 :: distill chain POLICY auto-Sonnet v2
+//
+// Replaces the wave-21 / task 07 dual opt-in (`auto_sonnet=true` AND
+// `auto_sonnet_approved=true`) with a single explicit policy gate
+// `auto_sonnet_policy ∈ {off, safe_after_rules, dry_run}`. The legacy
+// dual opt-in path stays available for byte-shape back-compat (off →
+// wave-21/07 unchanged); supplying any non-off policy promotes the
+// daemon to the policy path which surfaces a `auto_sonnet_policy`
+// block instead of (or in addition to, when both opt-ins land on the
+// same call) the legacy `auto_sonnet` block.
+//
+// All seven wave-21/07 invariants STAY pinned on the policy path:
+//   I1: DEFAULT `auto_sonnet_policy=off`. No `auto_sonnet_policy`
+//       block emitted; existing callers see byte-identical
+//       wave-21/07 + wave-20 responses.
+//   I2: closed-enum strict-shape parser; string typo / unknown values
+//       fail-fast as INVALID_PARAM. A single typo cannot escalate the
+//       daemon — a malformed policy is rejected at action entry, a
+//       missing policy stays `off`. The policy itself is the single
+//       opt-in; supplying `safe_after_rules` IS the explicit operator
+//       attestation (it is documented as the "auto-promote inner
+//       distill from dry_run to sonnet" choice).
+//   I3: `safe_after_rules` REUSES the wave-20 trigger's rule outcomes
+//       verbatim — never relaxes them. The trigger MUST be
+//       `auto_safe` AND ALL six deterministic rules MUST have passed
+//       before the policy fires. Any rule failure surfaces
+//       `skipped_rules_failed` with the full safety_rule_results.
+//   I4: caller's `distill_mode=sonnet` still rejected (no double
+//       Sonnet call). Surfaces `skipped_already_sonnet`.
+//   I5: on Sonnet failure (model error / invalid output) PRESERVE
+//       the existing inner payload. Policy block surfaces
+//       `model_call_status="failed"|"invalid_output"` and
+//       `applied=false`; the dry_run distill artifact stays durable.
+//   I6: `review_required=true` PINNED on every successful
+//       `safe_after_rules_applied` outcome — the auto-applied sonnet
+//       output is always receipt-only; no DB transition flips, the
+//       operator still reviews the distilled workflow.
+//   I7: wave-19 `auto_chain` + wave-20 `auto_trigger` blocks remain
+//       UNCHANGED. The `auto_sonnet_policy` block is purely additive.
+//
+// Block shape (always carried when policy != off):
+//   {requested, policy, policy_status, applied, review_required,
+//    model_call_status, safety_rule_results, sidecar?, chain_id?,
+//    model_call_error?, caller_distill_mode?}
+//   plus top-level shortcut `auto_sonnet_policy_status`.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Closed-enum policy value surfaced in `auto_sonnet_policy.policy`.
+/// Wire strings are pinned by `auto_sonnet_policy_value_strings_pin`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AutoSonnetPolicy {
+    Off,
+    SafeAfterRules,
+    DryRun,
+}
+
+const AUTO_SONNET_POLICY_OFF_STR: &str = "off";
+const AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR: &str = "safe_after_rules";
+const AUTO_SONNET_POLICY_DRY_RUN_STR: &str = "dry_run";
+
+impl AutoSonnetPolicy {
+    fn as_wire(self) -> &'static str {
+        match self {
+            AutoSonnetPolicy::Off => AUTO_SONNET_POLICY_OFF_STR,
+            AutoSonnetPolicy::SafeAfterRules => AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR,
+            AutoSonnetPolicy::DryRun => AUTO_SONNET_POLICY_DRY_RUN_STR,
+        }
+    }
+
+    fn is_active(self) -> bool {
+        !matches!(self, AutoSonnetPolicy::Off)
+    }
+}
+
+/// `auto_sonnet_policy.policy_status` taxonomy. Pinned by
+/// `auto_sonnet_policy_status_constants_pin_the_wire_form`.
+const AUTO_SONNET_POLICY_STATUS_NOT_REQUESTED: &str = "not_requested";
+const AUTO_SONNET_POLICY_STATUS_OFF: &str = "off";
+const AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED: &str = "safe_after_rules_applied";
+const AUTO_SONNET_POLICY_STATUS_SAFE_DRY_RUN: &str = "safe_after_rules_dry_run";
+const AUTO_SONNET_POLICY_STATUS_SKIPPED_NO_TRIGGER: &str = "skipped_no_trigger";
+const AUTO_SONNET_POLICY_STATUS_SKIPPED_RULES_FAILED: &str = "skipped_rules_failed";
+const AUTO_SONNET_POLICY_STATUS_SKIPPED_ALREADY_SONNET: &str = "skipped_already_sonnet";
+const AUTO_SONNET_POLICY_STATUS_SKIPPED_INNER_ERROR: &str = "skipped_inner_error";
+
+/// Strict closed-enum parser for the wave-22 / task 06 policy knob.
+/// Returns Ok(Off) for missing / null / empty string (back-compat with
+/// wave-21/07 callers). Rejects unknown values + non-string shapes
+/// loudly so a typo (`"safe-after-rules"`, `"safeAfterRules"`, `1`)
+/// surfaces as INVALID_PARAM at action entry — a single typo can NEVER
+/// silently escalate the daemon (I2 carryover from wave-21/07).
+fn parse_auto_sonnet_policy(args: &Value) -> std::result::Result<AutoSonnetPolicy, String> {
+    let raw = match args.get("auto_sonnet_policy") {
+        None => return Ok(AutoSonnetPolicy::Off),
+        Some(Value::Null) => return Ok(AutoSonnetPolicy::Off),
+        Some(v) => v,
+    };
+    let s = match raw.as_str() {
+        Some(s) => s,
+        None => {
+            return Err(format!(
+                "auto_sonnet_policy must be a string (one of [\"off\",\"safe_after_rules\",\"dry_run\"]); got {}",
+                shape_label(raw)
+            ));
+        }
+    };
+    match s {
+        "" | AUTO_SONNET_POLICY_OFF_STR => Ok(AutoSonnetPolicy::Off),
+        AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR => Ok(AutoSonnetPolicy::SafeAfterRules),
+        AUTO_SONNET_POLICY_DRY_RUN_STR => Ok(AutoSonnetPolicy::DryRun),
+        other => Err(format!(
+            "auto_sonnet_policy must be one of [\"off\",\"safe_after_rules\",\"dry_run\"]; got `{}`",
+            other
+        )),
+    }
+}
+
+/// Build the `auto_sonnet_policy` block. Mirrors `build_auto_sonnet_block`
+/// but anchored on the policy enum so the wire surface stays decoupled
+/// from the wave-21/07 dual opt-in vocabulary.
+#[allow(clippy::too_many_arguments)]
+fn build_auto_sonnet_policy_block(
+    requested: bool,
+    policy: AutoSonnetPolicy,
+    policy_status: &str,
+    applied: bool,
+    review_required: bool,
+    model_call_status: &str,
+    safety_rule_results: Value,
+    caller_distill_mode: Option<&str>,
+    model_call_error: Option<&str>,
+    sidecar: Option<&str>,
+    chain_id: Option<&str>,
+) -> Value {
+    let mut block = json!({
+        "requested": requested,
+        "policy": policy.as_wire(),
+        "policy_status": policy_status,
+        "applied": applied,
+        "review_required": review_required,
+        "model_call_status": model_call_status,
+        "safety_rule_results": safety_rule_results,
+    });
+    if let Some(m) = caller_distill_mode {
+        block["caller_distill_mode"] = json!(m);
+    }
+    if let Some(e) = model_call_error {
+        block["model_call_error"] = json!(e);
+    }
+    if let Some(p) = sidecar {
+        block["sidecar"] = json!(p);
+    }
+    if let Some(id) = chain_id {
+        block["chain_id"] = json!(id);
+    }
+    block
+}
+
+/// Splice the `auto_sonnet_policy` block + top-level shortcut onto the
+/// response payload. Mirrors the wave-19 / wave-20 / wave-21 attach
+/// helpers — preserves any pre-existing payload fields.
+fn attach_auto_sonnet_policy_to_payload(payload: &mut Value, block: Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(status) = block.get("policy_status").and_then(|v| v.as_str()) {
+            obj.insert("auto_sonnet_policy_status".to_string(), json!(status));
+        }
+        obj.insert("auto_sonnet_policy".to_string(), block);
+    }
+}
+
+/// Top-level orchestrator for the wave-22 / task 06 policy gate.
+///
+/// Order of operations (executed AFTER the wave-21/07 layer, so the
+/// inner payload may already carry `auto_sonnet*` keys from the legacy
+/// dual opt-in path — those are preserved verbatim):
+///   0. Policy=Off → return inner unchanged (default-off byte-compat
+///      with wave-21/07).
+///   1. Inner payload is a structured error → splice
+///      `skipped_inner_error` block; do NOT call Sonnet.
+///   2. Wave-20 trigger is `Never` → splice `skipped_no_trigger`
+///      block; the policy refuses to operate without the deterministic
+///      trigger context (I3 — rules never ran).
+///   3. Wave-20 rules failed → splice `skipped_rules_failed` block
+///      (REUSES the trigger's rule outcomes verbatim — I3).
+///   4. Caller's `distill_mode` was already `sonnet` → splice
+///      `skipped_already_sonnet` block (I4 — no double-call).
+///   5. Policy=DryRun → splice `safe_after_rules_dry_run` block; do
+///      NOT call Sonnet. Used for testing the gate path without
+///      burning model tokens.
+///   6. Policy=SafeAfterRules + all gates pass → invoke
+///      `mission_workflow(action=distill, distill_mode="sonnet", …)`
+///      internally. On success, replace the inner payload with the
+///      sonnet payload + splice the policy block. On model failure /
+///      invalid output, PRESERVE the inner payload + splice the
+///      failure block (I5).
+async fn maybe_apply_auto_sonnet_policy<'a>(
+    state: &AppState,
+    args: &Value,
+    plan: &missiond_core::types::Plan,
+    name: &str,
+    inner: ToolResult,
+    policy: AutoSonnetPolicy,
+    ctx: AutoSonnetTriggerContext<'a>,
+) -> ToolResult {
+    if !policy.is_active() {
+        return inner;
+    }
+
+    let inner_is_error = inner_result_is_error(&inner);
+    let mut payload = super::plan::tool_result_payload(&inner);
+    if !payload.is_object() {
+        // Defensive — wave-19/20/21 always emit objects.
+        return inner;
+    }
+
+    let caller_already_sonnet = caller_already_chose_sonnet(args);
+    let caller_mode = args
+        .get("distill_mode")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let chain_id = payload
+        .get("auto_chain_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // I5 short-circuit: inner error envelope. Never call Sonnet on top
+    // of an error and never overwrite the error envelope.
+    if inner_is_error {
+        let block = build_auto_sonnet_policy_block(
+            true,
+            policy,
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_INNER_ERROR,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // I3 pre-condition: trigger context required. Without the wave-20
+    // auto_safe trigger the deterministic rules never ran, so the
+    // policy refuses to operate.
+    if ctx.trigger_mode == AutoChainTrigger::Never {
+        let block = build_auto_sonnet_policy_block(
+            true,
+            policy,
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_NO_TRIGGER,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // I3: ALL six wave-20 safety rules MUST have passed. Reuses the
+    // trigger's outcomes verbatim — never re-evaluates or relaxes.
+    if !ctx.rules_passed {
+        let block = build_auto_sonnet_policy_block(
+            true,
+            policy,
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_RULES_FAILED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // I4: caller's distill_mode must NOT already be sonnet.
+    if caller_already_sonnet {
+        let block = build_auto_sonnet_policy_block(
+            true,
+            policy,
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_ALREADY_SONNET,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // Policy=DryRun: surface the gate verdict but do NOT invoke
+    // Sonnet. Used for testing the policy path end-to-end without
+    // burning model tokens. `applied=false`, `model_call_status=
+    // not_invoked`, `review_required=true` PINNED.
+    if matches!(policy, AutoSonnetPolicy::DryRun) {
+        let block = build_auto_sonnet_policy_block(
+            true,
+            policy,
+            AUTO_SONNET_POLICY_STATUS_SAFE_DRY_RUN,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // Policy=SafeAfterRules + all gates passed → invoke the sonnet
+    // distiller internally. Synthesise an args view with
+    // `distill_mode="sonnet"` flipped on, `auto_sonnet_policy="off"`
+    // (anti-recursion) AND clear the wave-21/07 dual opt-in flags +
+    // wave-19/20 chain knobs so the sonnet sub-call only runs the
+    // distiller and does NOT re-record a chain entry (the parent
+    // already did via the wave-19 + wave-20 path).
+    let mut sonnet_args = args.clone();
+    if let Some(obj) = sonnet_args.as_object_mut() {
+        obj.insert("distill_mode".to_string(), json!("sonnet"));
+        obj.insert("auto_sonnet_policy".to_string(), json!("off"));
+        obj.insert("auto_sonnet".to_string(), json!(false));
+        obj.insert("auto_sonnet_approved".to_string(), json!(false));
+        obj.insert("auto_chain".to_string(), json!(false));
+        obj.insert("auto_chain_trigger".to_string(), json!("never"));
+    }
+
+    let persist = args
+        .get("persist")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let sonnet_outcome = action_distill_sonnet(state, &sonnet_args, plan, name, persist).await;
+
+    let sonnet_result = match sonnet_outcome {
+        Ok(tr) => tr,
+        Err(e) => {
+            // I5: handler-level error → preserve inner payload, surface
+            // `model_call_status="failed"`. The dry_run / record-only
+            // distill artifact stays durable.
+            let block = build_auto_sonnet_policy_block(
+                true,
+                policy,
+                AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+                false,
+                true,
+                AUTO_SONNET_MODEL_FAILED,
+                ctx.rules_value.clone(),
+                caller_mode,
+                Some(&format!("sonnet handler error: {}", e)),
+                ctx.sidecar,
+                chain_id.as_deref(),
+            );
+            attach_auto_sonnet_policy_to_payload(&mut payload, block);
+            return ToolResult::json_pretty(&payload);
+        }
+    };
+
+    // I5: structured error envelope from the sonnet path → preserve
+    // inner payload; surface `model_call_status="invalid_output"`.
+    if sonnet_result.is_error.unwrap_or(false) {
+        let err_payload = super::plan::tool_result_payload(&sonnet_result);
+        let err_text = err_payload
+            .get("error")
+            .and_then(|e| e.get("message").or_else(|| e.get("code")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("sonnet returned a structured error envelope")
+            .to_string();
+        let block = build_auto_sonnet_policy_block(
+            true,
+            policy,
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_INVALID_OUTPUT,
+            ctx.rules_value.clone(),
+            caller_mode,
+            Some(&err_text),
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // Sonnet succeeded — promote the sonnet payload as the new outer
+    // payload. Carry forward the wave-19/20/21 receipt blocks from the
+    // original inner payload so chain recorder + trigger receipts +
+    // legacy auto_sonnet block (if any) remain visible.
+    let mut sonnet_payload = super::plan::tool_result_payload(&sonnet_result);
+    if !sonnet_payload.is_object() {
+        let block = build_auto_sonnet_policy_block(
+            true,
+            policy,
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_INVALID_OUTPUT,
+            ctx.rules_value.clone(),
+            caller_mode,
+            Some("sonnet payload was not a JSON object"),
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // I7: carry forward wave-19 + wave-20 + wave-21/07 receipt fields
+    // from the original dry_run payload so observers do not lose the
+    // chain recording / trigger receipts / legacy auto_sonnet block.
+    if let Some(obj) = sonnet_payload.as_object_mut() {
+        for key in [
+            "auto_chain",
+            "auto_chain_status",
+            "auto_chain_id",
+            "auto_trigger",
+            "auto_trigger_status",
+            "auto_trigger_chain_id",
+            "auto_sonnet",
+            "auto_sonnet_status",
+        ] {
+            if let Some(v) = payload.get(key).cloned() {
+                obj.entry(key.to_string()).or_insert(v);
+            }
+        }
+    }
+
+    // I6: review_required PINNED true on every successful auto-sonnet
+    // policy outcome.
+    let block = build_auto_sonnet_policy_block(
+        true,
+        policy,
+        AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+        true,
+        true,
+        AUTO_SONNET_MODEL_INVOKED,
+        ctx.rules_value.clone(),
+        caller_mode,
+        None,
+        ctx.sidecar,
+        chain_id.as_deref(),
+    );
+    attach_auto_sonnet_policy_to_payload(&mut sonnet_payload, block);
+    ToolResult::json_pretty(&sonnet_payload)
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -7216,5 +7785,487 @@ mod tests {
         assert_eq!(shape_label(&serde_json::json!("x")), "string");
         assert_eq!(shape_label(&serde_json::json!([1, 2])), "array");
         assert_eq!(shape_label(&serde_json::json!({"k": "v"})), "object");
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // wave-22 / task 06 — distill chain POLICY auto-Sonnet v2 tests.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn auto_sonnet_policy_value_strings_pin() {
+        // Wire strings — never rename in-place. Audit consumers pin
+        // these via the `policy` field on `auto_sonnet_policy`.
+        assert_eq!(AUTO_SONNET_POLICY_OFF_STR, "off");
+        assert_eq!(AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR, "safe_after_rules");
+        assert_eq!(AUTO_SONNET_POLICY_DRY_RUN_STR, "dry_run");
+        assert_eq!(AutoSonnetPolicy::Off.as_wire(), "off");
+        assert_eq!(
+            AutoSonnetPolicy::SafeAfterRules.as_wire(),
+            "safe_after_rules"
+        );
+        assert_eq!(AutoSonnetPolicy::DryRun.as_wire(), "dry_run");
+    }
+
+    #[test]
+    fn auto_sonnet_policy_status_constants_pin_the_wire_form() {
+        // policy_status taxonomy — never rename in-place.
+        assert_eq!(AUTO_SONNET_POLICY_STATUS_NOT_REQUESTED, "not_requested");
+        assert_eq!(AUTO_SONNET_POLICY_STATUS_OFF, "off");
+        assert_eq!(
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+            "safe_after_rules_applied"
+        );
+        assert_eq!(
+            AUTO_SONNET_POLICY_STATUS_SAFE_DRY_RUN,
+            "safe_after_rules_dry_run"
+        );
+        assert_eq!(
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_NO_TRIGGER,
+            "skipped_no_trigger"
+        );
+        assert_eq!(
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_RULES_FAILED,
+            "skipped_rules_failed"
+        );
+        assert_eq!(
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_ALREADY_SONNET,
+            "skipped_already_sonnet"
+        );
+        assert_eq!(
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_INNER_ERROR,
+            "skipped_inner_error"
+        );
+    }
+
+    #[test]
+    fn parse_auto_sonnet_policy_default_off_on_missing_or_null_or_blank() {
+        // Missing key → off (back-compat with wave-21/07 callers).
+        let p = parse_auto_sonnet_policy(&serde_json::json!({})).unwrap();
+        assert_eq!(p, AutoSonnetPolicy::Off);
+        assert!(!p.is_active());
+        // null → off.
+        let p =
+            parse_auto_sonnet_policy(&serde_json::json!({"auto_sonnet_policy": null}))
+                .unwrap();
+        assert_eq!(p, AutoSonnetPolicy::Off);
+        // empty string → off (lenient on intentional reset).
+        let p =
+            parse_auto_sonnet_policy(&serde_json::json!({"auto_sonnet_policy": ""}))
+                .unwrap();
+        assert_eq!(p, AutoSonnetPolicy::Off);
+        // explicit "off" → off.
+        let p = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": "off"}),
+        )
+        .unwrap();
+        assert_eq!(p, AutoSonnetPolicy::Off);
+    }
+
+    #[test]
+    fn parse_auto_sonnet_policy_accepts_safe_after_rules_and_dry_run() {
+        let p = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": "safe_after_rules"}),
+        )
+        .unwrap();
+        assert_eq!(p, AutoSonnetPolicy::SafeAfterRules);
+        assert!(p.is_active());
+        let p = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": "dry_run"}),
+        )
+        .unwrap();
+        assert_eq!(p, AutoSonnetPolicy::DryRun);
+        assert!(p.is_active());
+    }
+
+    #[test]
+    fn parse_auto_sonnet_policy_rejects_unknown_string() {
+        // I2: typo cannot escalate the daemon — fails fast.
+        let err = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": "safeAfterRules"}),
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("auto_sonnet_policy must be one of"),
+            "diagnostic: {}",
+            err
+        );
+        assert!(err.contains("safeAfterRules"), "echoed bad value: {}", err);
+    }
+
+    #[test]
+    fn parse_auto_sonnet_policy_rejects_non_string_shapes() {
+        // I2: bool / number / array / object all rejected.
+        let err = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": true}),
+        )
+        .unwrap_err();
+        assert!(err.contains("auto_sonnet_policy must be a string"));
+        assert!(err.contains("boolean"));
+        let err = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": 1}),
+        )
+        .unwrap_err();
+        assert!(err.contains("number"));
+        let err = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": ["safe_after_rules"]}),
+        )
+        .unwrap_err();
+        assert!(err.contains("array"));
+    }
+
+    #[test]
+    fn build_auto_sonnet_policy_block_minimum_shape_has_all_required_fields() {
+        let rules =
+            render_safety_rule_results(&[SafetyRuleResult::pass(SAFETY_RULE_INNER_DISTILL_OK)]);
+        let block = build_auto_sonnet_policy_block(
+            true,
+            AutoSonnetPolicy::SafeAfterRules,
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+            true,
+            true,
+            AUTO_SONNET_MODEL_INVOKED,
+            rules.clone(),
+            Some("dry_run"),
+            None,
+            Some("/abs/p.evidence.json"),
+            Some("chain:auto:wf-aaa"),
+        );
+        assert_eq!(block["requested"], true);
+        assert_eq!(block["policy"], "safe_after_rules");
+        assert_eq!(block["policy_status"], AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED);
+        assert_eq!(block["applied"], true);
+        assert_eq!(block["review_required"], true);
+        assert_eq!(block["model_call_status"], AUTO_SONNET_MODEL_INVOKED);
+        assert_eq!(block["safety_rule_results"], rules);
+        assert_eq!(block["caller_distill_mode"], "dry_run");
+        assert_eq!(block["sidecar"], "/abs/p.evidence.json");
+        assert_eq!(block["chain_id"], "chain:auto:wf-aaa");
+        // Optional fields omitted when None.
+        assert!(block.get("model_call_error").is_none());
+        // The dual opt-in `caller_approval` field does NOT live on the
+        // policy block — it is a wave-21/07-only field. Absence here is
+        // load-bearing: the policy path replaces dual opt-in with
+        // single-knob attestation.
+        assert!(block.get("caller_approval").is_none());
+    }
+
+    #[test]
+    fn build_auto_sonnet_policy_block_failure_shape_carries_error_text() {
+        let block = build_auto_sonnet_policy_block(
+            true,
+            AutoSonnetPolicy::SafeAfterRules,
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+            false, // applied=false on failure (I5)
+            true,  // review_required=true PINNED (I6)
+            AUTO_SONNET_MODEL_FAILED,
+            serde_json::json!([]),
+            Some("dry_run"),
+            Some("sonnet handler error: gateway timeout"),
+            None,
+            None,
+        );
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["review_required"], true);
+        assert_eq!(block["model_call_status"], AUTO_SONNET_MODEL_FAILED);
+        assert_eq!(
+            block["model_call_error"],
+            "sonnet handler error: gateway timeout"
+        );
+        assert!(block.get("sidecar").is_none());
+        assert!(block.get("chain_id").is_none());
+    }
+
+    #[test]
+    fn attach_auto_sonnet_policy_splices_block_and_top_level_shortcut() {
+        let mut payload = serde_json::json!({"status": "distilled"});
+        let block = build_auto_sonnet_policy_block(
+            true,
+            AutoSonnetPolicy::SafeAfterRules,
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+            true,
+            true,
+            AUTO_SONNET_MODEL_INVOKED,
+            serde_json::json!([]),
+            None,
+            None,
+            None,
+            None,
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        assert_eq!(payload["status"], "distilled");
+        assert_eq!(payload["auto_sonnet_policy"]["applied"], true);
+        assert_eq!(
+            payload["auto_sonnet_policy_status"],
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED
+        );
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // wave-22 / task 06 — 7 dedicated invariant-preservation tests.
+    // Each test pins ONE wave-21/07 invariant on the wave-22/06 policy
+    // path so future edits cannot silently regress the contract.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn wave22_06_preserves_wave21_07_i1_default_off_byte_shape() {
+        // I1: default `auto_sonnet_policy=off` ⇒ NO policy block emitted
+        // anywhere. The default-shape parser never returns Active.
+        let p = parse_auto_sonnet_policy(&serde_json::json!({})).unwrap();
+        assert_eq!(p, AutoSonnetPolicy::Off);
+        assert!(!p.is_active());
+        // Explicit "off" also stays off (no wire surface change).
+        let p = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet_policy": "off"}),
+        )
+        .unwrap();
+        assert!(!p.is_active());
+        // Unrelated noise (auto_sonnet=true alone, no policy knob) stays
+        // off ⇒ legacy wave-21/07 path runs untouched.
+        let p = parse_auto_sonnet_policy(
+            &serde_json::json!({"auto_sonnet": true, "auto_sonnet_approved": true}),
+        )
+        .unwrap();
+        assert!(!p.is_active());
+    }
+
+    #[test]
+    fn wave22_06_preserves_wave21_07_i2_strict_shape_no_typo_escalation() {
+        // I2: a single typo cannot escalate the daemon. Closed-enum
+        // strict parser rejects EVERY non-canonical shape. `policy=true`
+        // (boolean), `policy=1` (number), `policy="safeAfterRules"`
+        // (camelCase), `policy="SAFE_AFTER_RULES"` (case mismatch),
+        // `policy=" safe_after_rules "` (whitespace) — all fail-fast.
+        for bad in [
+            serde_json::json!({"auto_sonnet_policy": true}),
+            serde_json::json!({"auto_sonnet_policy": false}),
+            serde_json::json!({"auto_sonnet_policy": 1}),
+            serde_json::json!({"auto_sonnet_policy": 0}),
+            serde_json::json!({"auto_sonnet_policy": "safeAfterRules"}),
+            serde_json::json!({"auto_sonnet_policy": "SAFE_AFTER_RULES"}),
+            serde_json::json!({"auto_sonnet_policy": " safe_after_rules "}),
+            serde_json::json!({"auto_sonnet_policy": "safe-after-rules"}),
+            serde_json::json!({"auto_sonnet_policy": ["safe_after_rules"]}),
+            serde_json::json!({"auto_sonnet_policy": {"value": "safe_after_rules"}}),
+        ] {
+            let r = parse_auto_sonnet_policy(&bad);
+            assert!(
+                r.is_err(),
+                "expected {:?} to be rejected, got {:?}",
+                bad,
+                r
+            );
+        }
+    }
+
+    #[test]
+    fn wave22_06_preserves_wave21_07_i3_rules_must_pass_no_relax() {
+        // I3: when rules are NOT all passed, the policy block surfaces
+        // `skipped_rules_failed` and `applied=false`, regardless of
+        // policy=safe_after_rules vs dry_run. The rule outcomes are
+        // forwarded verbatim (REUSE, never re-evaluate or relax).
+        let rules = serde_json::json!([
+            {"rule": "inner_distill_succeeded", "passed": false, "reason": "synthetic fail"},
+        ]);
+        let block = build_auto_sonnet_policy_block(
+            true,
+            AutoSonnetPolicy::SafeAfterRules,
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_RULES_FAILED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            rules.clone(),
+            Some("dry_run"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(block["policy_status"], "skipped_rules_failed");
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["model_call_status"], "not_invoked");
+        assert_eq!(block["safety_rule_results"], rules);
+        // I6 — review_required PINNED true even on rule-failure path.
+        assert_eq!(block["review_required"], true);
+    }
+
+    #[test]
+    fn wave22_06_preserves_wave21_07_i4_already_sonnet_refuses_double_call() {
+        // I4: caller's `distill_mode` already `sonnet` ⇒ policy refuses
+        // (no double-call). Surfaces `skipped_already_sonnet`.
+        // The pure helper `caller_already_chose_sonnet` is REUSED from
+        // wave-21/07 so the detection logic is identical.
+        assert!(caller_already_chose_sonnet(
+            &serde_json::json!({"distill_mode": "sonnet"})
+        ));
+        assert!(!caller_already_chose_sonnet(
+            &serde_json::json!({"distill_mode": "dry_run"})
+        ));
+        // Build a `skipped_already_sonnet` block to pin the wire shape.
+        let block = build_auto_sonnet_policy_block(
+            true,
+            AutoSonnetPolicy::SafeAfterRules,
+            AUTO_SONNET_POLICY_STATUS_SKIPPED_ALREADY_SONNET,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            serde_json::json!([]),
+            Some("sonnet"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(block["policy_status"], "skipped_already_sonnet");
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["caller_distill_mode"], "sonnet");
+    }
+
+    #[test]
+    fn wave22_06_preserves_wave21_07_i5_sonnet_failure_preserves_inner() {
+        // I5: on Sonnet failure (`failed` / `invalid_output`), the
+        // policy block still surfaces but `applied=false` AND
+        // `model_call_status` carries the canonical failure label.
+        // Inner payload preservation is enforced by the orchestrator —
+        // here we pin the BLOCK SHAPE: failures NEVER claim applied=true.
+        for status_label in [AUTO_SONNET_MODEL_FAILED, AUTO_SONNET_MODEL_INVALID_OUTPUT] {
+            let block = build_auto_sonnet_policy_block(
+                true,
+                AutoSonnetPolicy::SafeAfterRules,
+                AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+                false, // applied=false on failure
+                true,  // review_required PINNED
+                status_label,
+                serde_json::json!([]),
+                Some("dry_run"),
+                Some("synthetic failure for I5"),
+                None,
+                None,
+            );
+            assert_eq!(block["applied"], false);
+            assert_eq!(block["review_required"], true);
+            assert_eq!(block["model_call_status"], status_label);
+            assert_eq!(block["model_call_error"], "synthetic failure for I5");
+        }
+    }
+
+    #[test]
+    fn wave22_06_preserves_wave21_07_i6_review_required_pinned_true() {
+        // I6: `review_required=true` PINNED on EVERY policy outcome —
+        // success, failure, skip — receipt-only contract preserved.
+        for (status, applied, model_call) in [
+            (AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED, true, AUTO_SONNET_MODEL_INVOKED),
+            (AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED, false, AUTO_SONNET_MODEL_FAILED),
+            (
+                AUTO_SONNET_POLICY_STATUS_SAFE_DRY_RUN,
+                false,
+                AUTO_SONNET_MODEL_NOT_INVOKED,
+            ),
+            (
+                AUTO_SONNET_POLICY_STATUS_SKIPPED_NO_TRIGGER,
+                false,
+                AUTO_SONNET_MODEL_NOT_INVOKED,
+            ),
+            (
+                AUTO_SONNET_POLICY_STATUS_SKIPPED_RULES_FAILED,
+                false,
+                AUTO_SONNET_MODEL_NOT_INVOKED,
+            ),
+            (
+                AUTO_SONNET_POLICY_STATUS_SKIPPED_ALREADY_SONNET,
+                false,
+                AUTO_SONNET_MODEL_NOT_INVOKED,
+            ),
+            (
+                AUTO_SONNET_POLICY_STATUS_SKIPPED_INNER_ERROR,
+                false,
+                AUTO_SONNET_MODEL_NOT_INVOKED,
+            ),
+        ] {
+            let block = build_auto_sonnet_policy_block(
+                true,
+                AutoSonnetPolicy::SafeAfterRules,
+                status,
+                applied,
+                true, // review_required PINNED — never flip to false
+                model_call,
+                serde_json::json!([]),
+                Some("dry_run"),
+                None,
+                None,
+                None,
+            );
+            assert_eq!(
+                block["review_required"], true,
+                "review_required must stay PINNED true on policy_status={}",
+                status
+            );
+        }
+    }
+
+    #[test]
+    fn wave22_06_preserves_wave21_07_i7_wave19_20_21_blocks_unchanged() {
+        // I7: wave-19 `auto_chain` + wave-20 `auto_trigger` + wave-21/07
+        // `auto_sonnet` blocks remain UNCHANGED when the policy block
+        // splices on top. Pin this by attaching the policy block onto a
+        // payload that ALREADY carries the three predecessor blocks
+        // (legacy v1 dual opt-in already applied) and asserting all
+        // four blocks survive verbatim.
+        let mut payload = serde_json::json!({
+            "status": "distilled",
+            "distill_mode": "dry_run",
+            "auto_chain": {"status": "recorded", "chain_id": "chain:auto:wf-x"},
+            "auto_chain_status": "recorded",
+            "auto_chain_id": "chain:auto:wf-x",
+            "auto_trigger": {"trigger_status": "triggered", "chain_id": "chain:auto:wf-x"},
+            "auto_trigger_status": "triggered",
+            "auto_trigger_chain_id": "chain:auto:wf-x",
+            "auto_sonnet": {
+                "requested": true,
+                "status": AUTO_SONNET_STATUS_APPLIED_SONNET,
+                "applied": true,
+                "review_required": true,
+                "model_call_status": AUTO_SONNET_MODEL_INVOKED,
+                "caller_approval": true,
+            },
+            "auto_sonnet_status": AUTO_SONNET_STATUS_APPLIED_SONNET,
+        });
+        let block = build_auto_sonnet_policy_block(
+            true,
+            AutoSonnetPolicy::SafeAfterRules,
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED,
+            true,
+            true,
+            AUTO_SONNET_MODEL_INVOKED,
+            serde_json::json!([]),
+            Some("dry_run"),
+            None,
+            Some("/abs/p.evidence.json"),
+            Some("chain:auto:wf-x"),
+        );
+        attach_auto_sonnet_policy_to_payload(&mut payload, block);
+        // Wave-19 block UNCHANGED.
+        assert_eq!(payload["auto_chain"]["status"], "recorded");
+        assert_eq!(payload["auto_chain_status"], "recorded");
+        assert_eq!(payload["auto_chain_id"], "chain:auto:wf-x");
+        // Wave-20 block UNCHANGED.
+        assert_eq!(payload["auto_trigger"]["trigger_status"], "triggered");
+        assert_eq!(payload["auto_trigger_status"], "triggered");
+        // Wave-21/07 block UNCHANGED — every field preserved verbatim.
+        assert_eq!(payload["auto_sonnet"]["requested"], true);
+        assert_eq!(
+            payload["auto_sonnet"]["status"],
+            AUTO_SONNET_STATUS_APPLIED_SONNET
+        );
+        assert_eq!(payload["auto_sonnet"]["applied"], true);
+        assert_eq!(payload["auto_sonnet"]["caller_approval"], true);
+        assert_eq!(
+            payload["auto_sonnet_status"],
+            AUTO_SONNET_STATUS_APPLIED_SONNET
+        );
+        // Wave-22/06 policy block ADDED — purely additive.
+        assert_eq!(payload["auto_sonnet_policy"]["applied"], true);
+        assert_eq!(payload["auto_sonnet_policy"]["policy"], "safe_after_rules");
+        assert_eq!(
+            payload["auto_sonnet_policy_status"],
+            AUTO_SONNET_POLICY_STATUS_SAFE_APPLIED
+        );
     }
 }
