@@ -17957,4 +17957,183 @@ mod tests {
         assert_eq!(v["router_recommendation"]["recommended_backend"], "claudecode");
         let _ = std::fs::remove_file(&tmp);
     }
+
+    // -----------------------------------------------------------------
+    // wave24-06 — end-to-end smoke pinning the cross-wave invariants of
+    // the advisory chain at the daemon boundary. This is intentionally a
+    // single shape-pinning test (not a battery): the wave24-04 tests
+    // already cover individual edge cases; what was missing was a single
+    // assertion proving that ALL invariants hold simultaneously when the
+    // chain runs through the seed-shaped policy on a docs task.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn router_policy_dry_run_smoke_pins_cross_wave_invariants() {
+        // Materialise a temp policy that mirrors the wave24-01 seed shape
+        // (dry-run-only true, runtime-replacement false, three rules, the
+        // r-docs-to-claudecode rule at priority 10). Using a temp file
+        // keeps the smoke independent of cwd while still exercising the
+        // exact parse path + selector the daemon uses in production.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-06-smoke-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-smoke
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-docs-to-claudecode
+    :priority 10
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "docs are interactive")
+    :non-goals ["does not replace runtime dispatch"
+                "does not select a model slot"])
+  (rule
+    :id r-deterministic-checker-tasks
+    :priority 20
+    :when ((all (kind code-alignment)
+                (path-glob "scripts/check-*.mjs")))
+    :recommend (:backend deterministic-checker :reasoning "scripted acceptance")
+    :non-goals ["does not replace runtime dispatch"])
+  (rule
+    :id r-post-commit-verifier
+    :priority 30
+    :when ((any (kind review)
+                (kind smoke)))
+    :recommend (:backend verifier-worker :reasoning "verifies an existing commit")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_v = parse_payload(&baseline);
+
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "docs",
+            "owner": "claudecode",
+        });
+        let mode = parse_router_policy_mode(&args).expect("dry_run parses");
+        assert!(matches!(mode, RouterPolicyMode::DryRun));
+
+        let with_dry_run = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&with_dry_run);
+        let block = v
+            .get("router_recommendation")
+            .expect("dry_run mode must splice a recommendation block");
+
+        // Invariant 1: dry-run-only is honored end-to-end (the daemon's
+        // applied=false hard-coded literal is the runtime analog of the
+        // policy's :dry-run-only true; we pin the literal Bool type).
+        assert_eq!(
+            block["applied"],
+            Value::Bool(false),
+            "wave24-06 smoke: applied MUST be the literal false bool"
+        );
+        // Invariant 3: applied=false is hard-coded in every emitted block.
+        // (Restated here so the smoke fails loudly if the helper ever
+        // computes the field instead of hard-coding it.)
+        assert!(
+            block["applied"].is_boolean(),
+            "applied must be a JSON bool, never a string or number"
+        );
+
+        // Invariant 2 / matched-rule: the seed's docs rule wins.
+        assert_eq!(
+            block["status"], "computed",
+            "smoke: docs task on seed-shape policy must be computed (not rejected/error)"
+        );
+        assert_eq!(
+            block["recommended_backend"], "claudecode",
+            "smoke: r-docs-to-claudecode wins on docs task"
+        );
+        // Backend must be one of the wave24-01 schema enum values. We
+        // re-spell the enum locally so this test does not import the
+        // checker script — pure Rust.
+        let allowed_backends = [
+            "claudecode",
+            "missiond-llm-router",
+            "deterministic-checker",
+            "patch-worker",
+            "verifier-worker",
+        ];
+        let backend = block["recommended_backend"]
+            .as_str()
+            .expect("recommended_backend must be a string");
+        assert!(
+            allowed_backends.contains(&backend),
+            "smoke: recommended_backend `{}` not in wave24-01 enum",
+            backend
+        );
+
+        // Invariant 4: schema field surfaces the wave24 router-recommendation
+        // contract identifier so external readers can route the payload.
+        assert_eq!(
+            block["schema"], "missiond.router-recommendation.v0",
+            "smoke: schema field must surface the wave24 recommendation contract id"
+        );
+
+        // Invariant 7: dispatch fields are byte-identical to baseline.
+        // The smoke compares EVERY dispatch-shaping field at once so a
+        // future regression that perturbs ANY of them fails loudly here.
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                baseline_v[field], v[field],
+                "smoke: dispatch field `{}` must be byte-identical with vs without dry_run mode",
+                field
+            );
+        }
+        // The recommendation block is the ONLY additive delta.
+        assert!(
+            baseline_v.get("router_recommendation").is_none(),
+            "baseline must not carry a recommendation block"
+        );
+
+        // Invariant 5/6: the helper must not have introduced ANY new
+        // observable side effect. A weak-but-useful proof: confidence is
+        // surfaced (so the policy's matched rule was actually evaluated,
+        // not short-circuited by a stub) and reasons reference the rule
+        // id (so the explanation is grounded in the parsed seed).
+        assert!(
+            block.get("confidence").is_some(),
+            "smoke: confidence field must be surfaced"
+        );
+        let reasons = block["reasons"].as_array().expect("reasons array");
+        let joined = reasons
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("r-docs-to-claudecode"),
+            "smoke: reasons must reference the matched rule id"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

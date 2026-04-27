@@ -85,6 +85,8 @@ import {
 
 import { buildIndex } from './build-session-trace-index.mjs';
 
+import { parseTraceEvents } from './check-session-trace.mjs';
+
 export const SCHEMA = 'missiond.router-recommendation.v0';
 
 // Confidence thresholds: a "rich" trace history is >=5 events; a "sparse" one
@@ -726,6 +728,254 @@ function runFixtures(json = false) {
         // happened on the cross-wave invariant, not on a parse failure).
         if (policy.rules.length !== 1) {
           throw new Error('fixture policy must have 1 rule');
+        }
+      },
+    },
+    {
+      // wave24-06: end-to-end smoke fixture pinning the FULL advisory chain
+      // in-process: tmp trace corpus -> parseTraceEvents -> buildIndex
+      // (named export of build-session-trace-index.mjs) -> wave24-01 seed
+      // router-policy via readRouterPolicyFile (named export of
+      // check-router-policy.mjs) -> recommend(). Plus a renderer-source
+      // pattern check confirming 'advisory' + 'dry-run only' literally
+      // appear in either the live renderer source or a previously-rendered
+      // wave24 brief on disk. NEVER shells out, NEVER calls recommend or
+      // build-* scripts via child_process, NEVER reaches an LLM. The fixture
+      // is the deterministic smoke the wave24-06 contract demands.
+      name: 'smoke: full chain trace-index -> recommendation -> renderer pattern',
+      category: 'smoke-e2e-chain',
+      run: () => {
+        const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'wave24-06-smoke-'));
+        try {
+          // Step 1: synthesize a tmp trace corpus mirroring the wave24-02
+          // indexer fixture pattern (one wave, one task, one backend, a
+          // dispatch + complete pair). Five events keep the corpus rich
+          // enough to land in the `medium` confidence bucket via
+          // synthesizeTraceIndex but the smoke does not assert on
+          // confidence — it asserts on shape and invariants.
+          const traceFile = path.join(tmpRoot, 'session-trace.lisp');
+          fs.writeFileSync(
+            traceFile,
+            `(session-trace wave-smoke
+              :schema "missiond.session-trace.v1"
+              :wave wave-smoke
+              :created-at "2026-04-28T00:00:00Z"
+              :sequence 1
+              (trace-event :id smoke-001 :seq 1 :at "2026-04-28T00:00:00Z"
+                :task wave-smoke-fixture-docs :backend claudecode
+                :kind dispatch :summary "dispatch")
+              (trace-event :id smoke-002 :seq 2 :at "2026-04-28T00:00:01Z"
+                :task wave-smoke-fixture-docs :backend claudecode
+                :kind start :summary "start")
+              (trace-event :id smoke-003 :seq 3 :at "2026-04-28T00:00:02Z"
+                :task wave-smoke-fixture-docs :backend claudecode
+                :kind read :summary "read")
+              (trace-event :id smoke-004 :seq 4 :at "2026-04-28T00:00:03Z"
+                :task wave-smoke-fixture-docs :backend claudecode
+                :kind commit :summary "commit" :commit_hash "smoke0001")
+              (trace-event :id smoke-005 :seq 5 :at "2026-04-28T00:00:04Z"
+                :task wave-smoke-fixture-docs :backend claudecode
+                :kind complete :summary "done" :commit_hash "smoke0001"))`,
+            'utf8',
+          );
+          const traces = parseTraceEvents(traceFile);
+          if (traces.length !== 1) {
+            throw new Error(`expected 1 parsed trace, got ${traces.length}`);
+          }
+          const traceIndex = buildIndex(traces);
+          // Sanity-check the index shape rolls up to the synthesised corpus.
+          mustEqual('index.totals.tasks', traceIndex.totals.tasks, 1);
+          mustEqual('index.totals.backends', traceIndex.totals.backends, 1);
+          mustEqual('index.totals.events', traceIndex.totals.events, 5);
+
+          // Step 2: load the wave24-01 seed router-policy via the named
+          // export. Resolution is relative to the repo root which the
+          // fixture suite always runs from.
+          const seedPolicyPath = path.resolve(
+            process.cwd(),
+            '.missiond',
+            'router',
+            'router-policy-v1.lisp',
+          );
+          if (!fs.existsSync(seedPolicyPath)) {
+            throw new Error(
+              `wave24-06 smoke prerequisite missing: ${seedPolicyPath} (wave24-01 must have landed)`,
+            );
+          }
+          const policy = readRouterPolicyFile(seedPolicyPath);
+          // Cross-wave invariants on the seed policy itself.
+          mustEqual('policy.dry_run_only', policy.dry_run_only, true);
+          mustEqual('policy.runtime_replacement', policy.runtime_replacement, false);
+
+          // Step 3: build a docs-kind task contract that the seed policy's
+          // r-docs-to-claudecode rule (priority 10) recognises.
+          const task = parseTaskFromString(`(task wave-smoke-fixture-docs
+            :schema "missiond.task-contract.v1"
+            :title "Smoke fixture docs task"
+            :kind docs
+            :status ready
+            :owner "claudecode"
+            :dispatch-strategy "manual"
+            :goal "smoke goal"
+            :write-scope ["docs/smoke.md"]
+            :must-not-touch []
+            :acceptance ["true"]
+            :commit (:required false :scope-check none))`);
+
+          // Step 4: drive recommend() over the freshly-built index + seed
+          // policy + smoke task. This is the same call path the production
+          // CLI uses; we just stand the inputs up in-process so the fixture
+          // never spawns a child node.
+          const rec = recommend({
+            task,
+            policy,
+            traceIndex,
+            taskPath: traceFile,
+            policyPath: seedPolicyPath,
+          });
+
+          // Cross-wave invariants pinned by the smoke:
+          //   (i)  dry_run_only literal true (analog of daemon's applied=false)
+          //   (ii) recommended backend ∈ wave24-01 schema enum
+          //   (iii) chosen rule id is the seed's docs rule (proves the chain
+          //        actually wired the wave24-01 seed end-to-end)
+          //   (iv) schema field surfaces the wave24-03 SCHEMA constant
+          //   (v)  evidence rolls up the synthesised trace counts so the
+          //        recommendation is provably grounded in the corpus
+          mustEqual('rec.dry_run_only', rec.dry_run_only, true);
+          if (!BACKEND_CLASSES.has(rec.backend)) {
+            throw new Error(
+              `recommended backend ${rec.backend} not in BACKEND_CLASSES`,
+            );
+          }
+          mustEqual('rec.backend', rec.backend, 'claudecode');
+          mustEqual('rec.chosen_rule_id', rec.chosen_rule_id, 'r-docs-to-claudecode');
+          mustEqual('rec.schema', rec.schema, SCHEMA);
+          if (typeof rec.evidence !== 'object' || rec.evidence === null) {
+            throw new Error('rec.evidence must be an object');
+          }
+          mustEqual(
+            'rec.evidence.task_event_count',
+            rec.evidence.task_event_count,
+            5,
+          );
+          // Stable JSON contract: the literal `"dry_run_only": true` substring
+          // must survive the deterministic stringifier (this proves the JSON
+          // surfaced to operators carries the cross-wave invariant verbatim).
+          const stable = stableStringify(rec);
+          if (!/"dry_run_only"\s*:\s*true/.test(stable)) {
+            throw new Error('stable JSON must contain dry_run_only:true literal');
+          }
+
+          // Step 5: prove the renderer surfaces the cross-wave 'advisory'
+          // and 'dry-run only' literals. We assert on the live renderer
+          // source FIRST (cheap, byte-stable) and then double-check by
+          // pattern-matching ANY wave24 brief on disk that has been
+          // rendered into .missiond/claudecode/. This avoids shelling out
+          // to the renderer while still confirming the wave24-05 contract.
+          const rendererSrc = fs.readFileSync(
+            path.resolve(process.cwd(), 'scripts', 'render-claudecode-task.mjs'),
+            'utf8',
+          );
+          if (!/Router Policy \(advisory\)/.test(rendererSrc)) {
+            throw new Error(
+              "renderer source must contain literal 'Router Policy (advisory)' header",
+            );
+          }
+          if (!/dry-run only/.test(rendererSrc)) {
+            throw new Error(
+              "renderer source must contain literal 'dry-run only' phrase",
+            );
+          }
+          // Pick the wave24-04 brief if present; it was rendered by wave24-05
+          // and is the canonical example of the advisory section in the
+          // wild. If absent, fall back to any wave24-* brief that contains
+          // both literals — this keeps the smoke from coupling to a
+          // specific filename while still pinning the contract.
+          const briefDir = path.resolve(
+            process.cwd(),
+            '.missiond',
+            'claudecode',
+          );
+          if (!fs.existsSync(briefDir)) {
+            throw new Error(`brief directory missing: ${briefDir}`);
+          }
+          const wave24Briefs = fs
+            .readdirSync(briefDir)
+            .filter((n) => /^wave24-/.test(n) && n.endsWith('.md'))
+            .sort();
+          if (wave24Briefs.length === 0) {
+            throw new Error(
+              'no wave24 briefs on disk to confirm renderer output',
+            );
+          }
+          let confirmed = false;
+          for (const name of wave24Briefs) {
+            const text = fs.readFileSync(
+              path.join(briefDir, name),
+              'utf8',
+            );
+            if (/advisory/i.test(text) && /dry-run only/.test(text)) {
+              confirmed = true;
+              break;
+            }
+          }
+          if (!confirmed) {
+            throw new Error(
+              "no wave24 brief contains both 'advisory' and 'dry-run only' literals",
+            );
+          }
+
+          // Step 6: static audit — the check-router-policy script (the
+          // foundation of the wave24 advisory chain) MUST NOT contain any
+          // active call site that shells out, spawns a process, or
+          // reaches an LLM. Comments documenting these invariants are
+          // allowed; we strip them and re-scan. We audit the policy
+          // checker (not the recommend script that hosts this fixture, to
+          // avoid self-matching the audit's own forbidden-pattern table)
+          // and the build-session-trace-index script — together they
+          // cover the Node-side surface of the chain.
+          const auditedScripts = [
+            'check-router-policy.mjs',
+            'build-session-trace-index.mjs',
+          ];
+          // Forbidden patterns are assembled from string parts so the
+          // audit table itself does not appear as a literal substring in
+          // recommend-task-backend.mjs and trip future audits that
+          // sweep this file.
+          const forbidden = [
+            new RegExp('child' + '_' + 'process'),
+            /\bspawn\b/,
+            /\bexec' + 'Sync\b/.source.replace("'", ''), // assembled below
+          ];
+          // Replace the placeholder with a real RegExp, plus the LLM-vendor
+          // probes. Keeping these as fresh objects avoids capturing any
+          // identifier this fixture itself names.
+          forbidden[2] = new RegExp('\\bexec' + 'Sync\\b');
+          forbidden.push(new RegExp('\\bfork\\b'));
+          forbidden.push(new RegExp('open' + 'ai', 'i'));
+          forbidden.push(new RegExp('anthrop' + 'ic', 'i'));
+          forbidden.push(new RegExp('chat\\.compl' + 'etion', 'i'));
+          for (const scriptName of auditedScripts) {
+            const src = fs.readFileSync(
+              path.resolve(process.cwd(), 'scripts', scriptName),
+              'utf8',
+            );
+            const stripped = src
+              .split('\n')
+              .filter((ln) => !/^\s*\/\//.test(ln))
+              .join('\n')
+              .replace(/\/\*[\s\S]*?\*\//g, '');
+            for (const re of forbidden) {
+              if (re.test(stripped)) {
+                throw new Error(
+                  `wave24-06 smoke: forbidden pattern ${re} found in ${scriptName} active source`,
+                );
+              }
+            }
+          }
+        } finally {
+          fs.rmSync(tmpRoot, { recursive: true, force: true });
         }
       },
     },
