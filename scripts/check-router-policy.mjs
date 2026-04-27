@@ -917,8 +917,170 @@ function buildAllBackendsPolicy() {
         ${rules})`;
 }
 
+// ---------------------------------------------------------------------------
+// Named exports for downstream tooling (wave24-03 recommendation CLI).
+//
+// These helpers expose the already-validated structure of a router-policy
+// file as plain JavaScript objects, so a recommendation CLI can reason over
+// rules without re-implementing the Lisp reader. The functions are READ-ONLY:
+// they parse, project, and return — they do not mutate input nodes and they
+// never write files. The CLI surface (main / runFixtures / dry-fixture) is
+// intentionally untouched.
+// ---------------------------------------------------------------------------
+
+// Project a single (rule ...) form into a structured object suitable for the
+// recommendation CLI. The :when tree is preserved as a nested predicate-clause
+// shape so callers can evaluate it without re-walking Lisp nodes.
+//
+// Returned rule shape:
+//   { id, priority, when: clause, recommend: { backend, reasoning },
+//     non_goals: string[], notes: string|null, loc: { line, column } }
+// where `clause` is one of:
+//   { head: 'kind'|'dispatch_strategy'|'dispatch-strategy'|'owner'|'status',
+//     value: string }
+//   { head: 'path-glob', pattern: string }
+//   { head: 'any'|'all', children: clause[] }
+// or `null` if :when is missing/malformed (the validator already rejects this
+// upstream; the projector simply returns null so callers can skip the rule).
+export function projectRule(rule) {
+  if (!isList(rule) || head(rule) !== RULE_HEAD) return null;
+  const props = readKeywordProps(rule, { start: 1 });
+  const id = keywordPropText(props, ':id');
+  const priorityText = keywordPropText(props, ':priority');
+  const priority =
+    priorityText != null && /^\d+$/.test(priorityText)
+      ? Number.parseInt(priorityText, 10)
+      : null;
+
+  const whenNode = props[':when']?.value ?? null;
+  const whenClause = whenNode && isList(whenNode) ? projectWhenList(whenNode) : null;
+
+  const recommendNode = props[':recommend']?.value ?? null;
+  let recommend = null;
+  if (recommendNode && isList(recommendNode)) {
+    const recProps = readKeywordProps(recommendNode, { start: 0 });
+    recommend = {
+      backend: keywordPropText(recProps, ':backend'),
+      reasoning: keywordPropText(recProps, ':reasoning'),
+    };
+  }
+
+  const nonGoalsNode = props[':non-goals']?.value ?? null;
+  const nonGoals = nonGoalsNode ? nodeToStringArray(nonGoalsNode) : [];
+
+  const notes = keywordPropText(props, ':notes');
+
+  return {
+    id,
+    priority,
+    when: whenClause,
+    recommend,
+    non_goals: nonGoals,
+    notes: notes ?? null,
+    loc: rule.loc ?? null,
+  };
+}
+
+// Project the top-level :when list (which is implicit-`all` over its children)
+// into a single composite clause. Each direct child is a predicate clause; the
+// projector wraps them in `{ head: 'all', children: [...] }` so evaluators have
+// a uniform tree shape regardless of whether the policy author wrote multiple
+// top-level clauses or a single (all ...) clause.
+function projectWhenList(node) {
+  const children = node.children
+    .map((child) => projectClause(child))
+    .filter((clause) => clause !== null);
+  if (children.length === 1) return children[0];
+  return { head: 'all', children };
+}
+
+function projectClause(node) {
+  if (!isList(node) || node.children.length === 0) return null;
+  const h = head(node);
+  if (h == null) return null;
+  if (h === 'any' || h === 'all') {
+    const children = [];
+    for (let i = 1; i < node.children.length; i++) {
+      const projected = projectClause(node.children[i]);
+      if (projected !== null) children.push(projected);
+    }
+    return { head: h, children };
+  }
+  if (h === 'path-glob') {
+    const payload = node.children[1];
+    return { head: 'path-glob', pattern: nodeText(payload) ?? '' };
+  }
+  if (
+    h === 'kind' ||
+    h === 'dispatch_strategy' ||
+    h === 'dispatch-strategy' ||
+    h === 'owner' ||
+    h === 'status'
+  ) {
+    const payload = node.children[1];
+    return { head: h, value: nodeText(payload) ?? '' };
+  }
+  // Unknown head — surface as a clause that always evaluates false in the
+  // evaluator; the validator already rejects this upstream so we never get here
+  // for files that have passed the checker.
+  return { head: h, value: nodeText(node.children[1]) ?? '' };
+}
+
+// Project an entire router-policy form into a structured object:
+//   { id, schema, version, dry_run_only, runtime_replacement, description,
+//     rules: Rule[] (sorted by priority ascending), source_path }
+// `dry_run_only` and `runtime_replacement` are booleans projected from the
+// literal Lisp atoms. The validator enforces dry_run_only===true and
+// runtime_replacement===false; this projector simply reflects what the file
+// declares so callers can re-check the cross-wave invariant before consuming.
+export function projectPolicy(form, sourcePath = null) {
+  if (!isList(form) || head(form) !== POLICY_HEAD) return null;
+  const id = nodeText(form.children[1]);
+  const props = readKeywordProps(form, { start: 2 });
+  const schema = keywordPropText(props, ':schema');
+  const version = keywordPropText(props, ':version');
+  const dryRunText = nodeText(props[':dry-run-only']?.value);
+  const runtimeReplacementText = nodeText(props[':runtime-replacement']?.value);
+  const description = keywordPropText(props, ':description');
+  const rules = form.children
+    .filter((c) => isList(c) && head(c) === RULE_HEAD)
+    .map((rule) => projectRule(rule))
+    .filter((rule) => rule !== null);
+  rules.sort((a, b) => {
+    const ap = a.priority ?? Number.MAX_SAFE_INTEGER;
+    const bp = b.priority ?? Number.MAX_SAFE_INTEGER;
+    return ap - bp;
+  });
+  return {
+    id,
+    schema,
+    version,
+    dry_run_only: dryRunText === 'true',
+    runtime_replacement: runtimeReplacementText === 'true',
+    description: description ?? null,
+    rules,
+    source_path: sourcePath,
+  };
+}
+
+// Read a router-policy Lisp file from disk and return the FIRST projected
+// policy form. Throws (with file context) when the reader fails or no
+// router-policy form is present. This helper is the simplest entry point for
+// the recommendation CLI: it doesn't validate, only projects — callers that
+// need validation should run main() / runFixtures() separately.
+export function readRouterPolicyFile(file) {
+  const forms = readLispFile(file);
+  for (const form of forms) {
+    if (isList(form) && head(form) === POLICY_HEAD) {
+      return projectPolicy(form, file);
+    }
+  }
+  throw new Error(`router-policy: no (router-policy ...) form found in ${file}`);
+}
+
 // Only run the CLI when invoked directly. Keeps named exports clean for
-// future tooling that wants to reuse SCHEMA / BACKEND_CLASSES / PREDICATE_HEADS.
+// future tooling that wants to reuse SCHEMA / BACKEND_CLASSES / PREDICATE_HEADS
+// and the projectPolicy / projectRule / readRouterPolicyFile helpers.
 if (import.meta.url === `file://${process.argv[1]}`) {
   main();
 }
