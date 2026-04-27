@@ -166,7 +166,7 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v1.4 — wave 23 session-trace + trace-derived router-policy backfill layered on wave 22 explicit-gate-promotion baseline"
+    :version "v1.5 — wave 24 router-policy dry-run recommendation chain layered on wave 23 session-trace baseline"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
     :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
@@ -3424,13 +3424,131 @@
         :title "machine-contract trace-derived router policy — analyzer descriptors feed future policy, not runtime routing"
         :source-file ".missiond/v2/intent-machine-contract.lisp"
         :local-path "pillar intent-layer :: section machine-contract-layer :: trace-derived-router-policy"
-        :status architecture-designed
+        :status code-aligned-partial
         :compression-safe? false
-        :implements []
+        :implements
+          [".missiond/tasks/schema/router-policy-v1.lisp"
+           ".missiond/router/router-policy-v1.lisp"
+           "scripts/check-router-policy.mjs"
+           "scripts/build-session-trace-index.mjs"
+           "scripts/recommend-task-backend.mjs"]
         :cross-ref ["intent-layer.machine-contract.session-trace-v1"
+                    "worker.section.trace-derived-router-policy"
+                    "intent-layer.machine-contract.router-policy-v1"
+                    "intent-layer.machine-contract.router-recommendation-cli-v0"]
+        :wave "23 task 07 (Codex architecture draft) + 24 tasks 01/02/03 (commits 988f7d8 / e61088b / d6d8e10+ef8fc5f)"
+        :note "machine-contract 侧声明 trace 是 router policy 的事实输入: analyzer 输出 bottleneck tags / durations / retries / tool-counts。wave24 加 policy schema/checker/seed + trace corpus indexer + recommendation CLI, 把 architecture draft 推到 advisory dry-run code-aligned partial; runtime backend replacement 仍禁止。")
+
+      ;; ── 区域 87 · router-policy dry-run chain (wave 24 tasks 01-06) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-policy-v1"
+        :title "router-policy v1 schema/checker/seed — dry-run-only backend policy"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-policy-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/router-policy-v1.lisp"
+           ".missiond/router/router-policy-v1.lisp"
+           "scripts/check-router-policy.mjs"]
+        :cross-ref ["intent-layer.machine-contract.trace-derived-router-policy"
                     "worker.section.trace-derived-router-policy"]
-        :wave "23 task 07 (Codex architecture draft)"
-        :note "machine-contract 侧声明 trace 是 router policy 的事实输入: analyzer 输出 bottleneck tags / durations / retries / tool-counts, 但 router 决策必须由后续显式 policy wave 产生解释性记录。")
+        :wave "24 task 01 (commit 988f7d8)"
+        :note "schema missiond.router-policy.v1 + checker + seed policy 3 rule. Valid policy must set :dry-run-only true and :runtime-replacement false; runtime-replacement=true is rejected. Seed maps docs→claudecode, code-alignment+scripts/check-*.mjs→deterministic-checker, review/smoke→verifier-worker.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.trace-corpus-index-v0"
+        :title "trace corpus index v0 — deterministic aggregate over session-trace ledgers"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: trace-corpus-index-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/build-session-trace-index.mjs"
+           ".missiond/tasks/schema/session-trace-v1.lisp"]
+        :cross-ref ["intent-layer.machine-contract.session-trace-v1"
+                    "intent-layer.machine-contract.router-policy-v1"]
+        :wave "24 task 02 (commit e61088b)"
+        :note "read-only indexer over .missiond/tasks/**/session-trace.lisp. Output top-level keys are bottleneck_tags / by_backend / by_task / by_wave / schema / source_files / thresholds / totals. It reuses wave23 analyzer thresholds and does not recommend backend.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-recommendation-cli-v0"
+        :title "router recommendation CLI v0 — deterministic advisory backend recommendation"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-recommendation-cli-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/recommend-task-backend.mjs"
+           "scripts/build-session-trace-index.mjs"
+           "scripts/check-router-policy.mjs"
+           "scripts/lib/missiond_lisp.mjs"]
+        :cross-ref ["intent-layer.machine-contract.router-policy-v1"
+                    "intent-layer.machine-contract.trace-corpus-index-v0"]
+        :wave "24 task 03 (commits d6d8e10 + ef8fc5f)"
+        :note "CLI emits schema missiond.router-recommendation.v0. Guarantees: dry_run_only=true, read-only deterministic, no LLM/spawn/git/HTTP; no match falls back to claudecode confidence=low reason insufficient_trace_history; policies with runtime_replacement=true or dry_run_only!=true are rejected.")
+
+      (section-entry
+        :section-id "tools.surface.plan-router-policy-dry-run-v0"
+        :title "mission_plan execute router_policy_mode=dry_run surface"
+        :source-file ".missiond/v2/intent-tools.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_plan :: router-policy dry-run args"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.machine-contract.router-recommendation-cli-v0"
+                    "intent-layer.plan-dag-runtime-v2"
+                    "worker.section.trace-derived-router-policy"]
+        :wave "24 task 04 (commit b8721ab)"
+        :note "mission_plan execute adds optional router_policy_mode/router_policy_path. absent/off preserves legacy shape; dry_run returns router_recommendation with applied=false literal Value::Bool(false); apply/auto/unknown reject INVALID_PARAM before plan lookup. Daemon implementation is independent Rust parser/glob logic and does not spawn Node CLI.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.renderer-router-context-v0"
+        :title "renderer Router Policy (advisory) block + :router-policy-path task field"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: renderer-router-context-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/render-claudecode-task.mjs"
+           ".missiond/tasks/schema/task-contract-v1.lisp"]
+        :cross-ref ["intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.machine-contract.router-policy-v1"]
+        :wave "24 task 05 (commit 294a92a)"
+        :note "task contract gains optional :router-policy-path. Renderer auto-detects .missiond/router/router-policy-v1.lisp and renders a Router Policy (advisory) section containing literal 'advisory' + 'dry-run only'; it never shells out to recommendation CLI and never instructs backend switching. Wave23 Session Trace section byte-identical.")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.router-dry-run-smoke-v0"
+        :title "router dry-run full-chain smoke — Node/Rust/renderer cross-check"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: router-dry-run-smoke-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/check-router-policy.mjs"
+           "scripts/build-session-trace-index.mjs"
+           "scripts/recommend-task-backend.mjs"
+           "scripts/render-claudecode-task.mjs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.machine-contract.router-policy-v1"
+                    "tools.surface.plan-router-policy-dry-run-v0"
+                    "intent-layer.machine-contract.renderer-router-context-v0"]
+        :wave "24 task 06 (commit 6afe541)"
+        :note "full-chain smoke pins the Node policy/recommendation path, independent Rust dry-run surface, renderer advisory block, applied=false literal, no backend replacement, no LLM/spawn/mutating git, and no loss of Wave23 Session Trace rendering.")
+
+      (status-upgrade
+        :section-id "worker.section.trace-derived-router-policy"
+        :prev-status architecture-designed
+        :new-status code-aligned-partial
+        :note-extension "wave 24 tasks 01-06 turn the wave23 router draft into an advisory dry-run chain: router-policy v1 schema/checker/seed, trace corpus index, recommendation CLI, mission_plan dry-run surface, renderer advisory block, and full-chain smoke. Runtime backend replacement remains pending; :runtime-replacement false / applied=false are hard boundaries.")
+
+      (status-upgrade
+        :section-id "intent-layer.machine-contract.task-contract-v1"
+        :prev-status code-aligned
+        :new-status code-aligned
+        :note-extension "wave 24 task 05 adds optional :router-policy-path to task-contract-v1 and renderer support for Router Policy (advisory). This is context for dry-run recommendation only; Markdown remains a view and backend choice is not controlled by rendered text.")
 
       ;; ── 区域 90 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
       ;; 注: section-id 已存在 (区域 36 / wave-19-backfill / wave-20-backfill / wave-21-backfill), 本 entry 不新增 anchor; 仅在 wave-22-backfill 块内
@@ -3443,7 +3561,7 @@
 
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 / ExecutionEvent dispatch metadata v1 / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade; v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade; v1.2 (wave 21 task 09) 回填 hooks-path installer v1 / task-run verifier v1 / execution report-verifier integration v1 / autonomous workstation LLM proposal v0 / plan inference apply gate v1 / LLM auto-approve proposal v0 / sonnet distill chain auto-apply v1 / machine-contract autonomous loop smoke v3 共 +8 entry + 2 status-upgrade (review-automation-policy-v0 note 扩 加 第三 review knob auto_approve_mode / task-contract-v1 note 扩 加 真正 6 段闭环 brief→preflight→staged guard→commit→verifier→execution complete verify); **v1.3 (wave 22 task 08) 回填 hooks default-on doctor v2 / execution auto-run-verifier v2 / review LLM approve apply gate v1 / persisted plan inference apply v2 / autonomous workstation true spawn v1 / distill chain policy auto-sonnet v2 / autonomous loop apply smoke v4 共 +7 entry + 1 status-upgrade (task-contract-v1 note 扩 加 hooks default-on doctor v2 + daemon-internal auto-run-verifier 8 cross-checks; brief→preflight→staged guard→commit→verifier→execution complete 6 段闭环 升级到 daemon 自跑 verifier)** + 1 navigation-asset additions cluster (wave 22 explicit-gate-promotion). 仍有以下未细化项, 等后续 wave 再补"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 / ExecutionEvent dispatch metadata v1 / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade; v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade; v1.2 (wave 21 task 09) 回填 hooks-path installer v1 / task-run verifier v1 / execution report-verifier integration v1 / autonomous workstation LLM proposal v0 / plan inference apply gate v1 / LLM auto-approve proposal v0 / sonnet distill chain auto-apply v1 / machine-contract autonomous loop smoke v3 共 +8 entry + 2 status-upgrade; v1.3 (wave 22 task 08) 回填 explicit-gate-promotion + auto-verifier + smoke v4 共 +7 entry + 1 status-upgrade; v1.4 (wave 23 Codex) 回填 session-trace / trace analyzer / router draft 共 +4 entry; **v1.5 (wave 24 Codex) 回填 router-policy dry-run chain 共 +6 entry + 2 status-upgrade**. 仍有以下未细化项, 等后续 wave 再补"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"
@@ -3637,6 +3755,14 @@
        "trace analyzer → code-aligned-partial (wave 23 task 06; descriptive bottleneck rules only, no routing/model policy)"
        "trace-derived router policy → architecture-designed (wave 23 task 07; backend classes drafted, no runtime router replacement)"
        "lisp backfill wave23 status → in-progress by Codex; frontend Lisp still postponed"]
+    :wave-24-status-summary
+      ["router-policy v1 → code-aligned (wave 24 task 01 commit 988f7d8; schema/checker/seed + 3 advisory rules; dry-run-only=true and runtime-replacement=false required)"
+       "trace corpus index v0 → code-aligned (wave 24 task 02 commit e61088b; 8 top-level JSON keys; reuses wave23 bottleneck thresholds; no backend recommendation)"
+       "router recommendation CLI v0 → code-aligned (wave 24 task 03 commits d6d8e10+ef8fc5f; read-only deterministic; dry_run_only=true; no LLM/spawn/git; fallback claudecode low confidence when no rule matches)"
+       "mission_plan router dry-run surface → code-aligned-partial (wave 24 task 04 commit b8721ab; router_policy_mode=dry_run returns applied=false literal; apply/auto/unknown INVALID_PARAM before plan lookup; Rust and Node algorithms independent)"
+       "renderer router advisory context → code-aligned (wave 24 task 05 commit 294a92a; :router-policy-path + Router Policy (advisory) / dry-run only block; Session Trace section byte-identical)"
+       "router dry-run full-chain smoke → code-aligned (wave 24 task 06 commit 6afe541; pins Node/Rust/renderer invariants, no runtime backend replacement)"
+       "trace-derived router policy status upgrade → code-aligned-partial for advisory dry-run chain; runtime replacement remains pending"]
     :next-step
       ["条件全满足后 (11 条件全 code-aligned; 完整 11-stage PLAN DAG scheduler 已 close 主线; wave 19 加 machine-contract task SSOT 全闭环; wave 20 加 machine-driven dispatch + scoped-commit 全 5 段闭环 + ExecutionEvent metadata 11 variants 闭环 + review auto-answer deterministic_safe; wave 21 加 propose+apply-gate 范式覆盖 4 路 LLM/inference 通道 + execution 端 daemon-internal verified gate 6 段闭环 + hooks-path installer + 三合一 run verifier; **wave 22 加 explicit-gate-promotion 范式 — wave-21 propose-only 通道全部升级到 explicit-apply-gate (review LLM approve apply gate v1 6 道 gate / persisted plan inference apply v2 plan_supersede rollback handle / autonomous workstation true spawn v1 12-rule gate matrix mission_task_delegate substrate 绝不 claude -p / distill chain policy auto-sonnet v2 dual opt-in 移除 policy 即 attestation) + execution auto-run-verifier v2 daemon-internal 8 cross-checks (verification_source taxonomy) + hooks default-on doctor v2 (--check 只读 doctor + 4 reason codes + renderer renderHooksDoctorPreflight() 块) + autonomous loop apply smoke v4 22 cross-wave invariants pinned** — 留 完全 LLM 自主无任何 caller opt-in (wave22-03/04/05/06 仍 require explicit caller_approval/proposal_hash/policy/auto_spawn opt-in) / Sonnet 真无任何 attestation (wave22-06 policy=safe_after_rules 仍是 explicit policy 选择即 attestation) / git hooks default-on real install (wave22-01 仍 doctor only — caller 必须显式 git config core.hooksPath .githooks 才生效) / Auto-seed shared-memory ledger claim entry on parallel workstation spawn (wave22-05 真 spawn 已落, ledger seed 仍 future) / report-contract checker auto-invoke without caller-supplied 4 paths (wave22-02 仍要求 caller 提供 4 路径才触发 daemon-internal verifier) / frontend Lisp 仍 future), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
        "wave 22 explicit-gate-promotion 范式 — 后续可推: (a) wave22-05 workstation true spawn 升级到 完全 LLM 自主 (无 caller_approved opt-in, plan-runner 全局推断 + 真 spawn — 尚需 ledger auto-seed claim entry); (b) wave22-04 persisted plan inference apply 升级到 自主 persist (无 caller_approved opt-in, 自动判断 deterministic high-confidence 即 persist + 自动 rollback policy); (c) wave22-03 review LLM approve apply gate 升级到 完全自主 (无 caller_approved opt-in, 自动 6 gate pass 即 apply); (d) wave22-06 distill chain policy 升级到 真无任何 attestation (plan-runner 全局推断 + auto-promote sonnet 而无需 policy 选择); (e) wave22-01 hooks default-on doctor 升级到 default-on real install (default-mode = --install 自动跑 git config core.hooksPath .githooks); (f) wave22-02 daemon-internal auto-verifier 升级到 自动 spawn (verifier 路径无需 caller 提供 4 路径, daemon 从 task contract / report cache 自动 resolve)"

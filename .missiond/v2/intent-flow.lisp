@@ -15,6 +15,11 @@
     ["session-trace v1 已把长跑任务的 dispatch / observation / completion 事实纳入 machine-contract flow; trace 写入仍 explicit opt-in"
      "trace analyzer 已能描述耗时/重试/阻塞, 但不做模型选择; router policy 仍 architecture-designed"
      "下一步 flow 层只在 router 真接 runtime 前新增 explicit policy stage, 不把 ClaudeCode 替换写成已实现"]
+  :wave-24-status-summary
+    ["router dry-run chain 已 code-aligned partial: session-trace corpus → router-policy v1 → recommendation CLI → mission_plan dry-run response"
+     "flow 层新增的是 advisory stage, 不是 runtime dispatch stage; applied=false / runtime_replacement=false 是边界"
+     "renderer 只给 ClaudeCode brief 增加 Router Policy (advisory) 上下文, 不指挥 backend 切换"
+     "runtime router replacement / automatic backend selection 仍 pending, 需要后续显式 policy wave"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"

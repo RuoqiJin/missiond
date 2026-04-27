@@ -18,6 +18,11 @@
     ["mission_execution surface 已接 session_trace_path best-effort append, trace_warning 不打断主 action"
      "mission_plan / workstation_dispatch 透传 session_trace_path, task contract :session-trace-path 可覆盖到 workstation brief"
      "MCP tool count 仍 83; wave 23 trace/router upgrades 全在既有 action/schema/script 上扩展, 不新增 tool"]
+  :wave-24-status-summary
+    ["mission_plan execute 增加 router_policy_mode/router_policy_path dry-run surface; absent/off 保持旧响应形状"
+     "router_policy_mode=dry_run 返回 router_recommendation advisory block; applied=false 字面量, 不切换 backend"
+     "router_policy_mode=apply/auto/unknown 在 plan lookup 前 INVALID_PARAM; 防止误触 runtime replacement"
+     "task-contract renderer 增 :router-policy-path + Router Policy (advisory) brief section; MCP tool count 仍 83 不变"]
 
   :actual-state-sources
     [".missiond/intent-mcp-defs.lisp (schema SSOT, 24 mcp-module, 详细 input/returns)"

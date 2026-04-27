@@ -15,6 +15,11 @@
     ["machine-contract 新增 session-trace v1: schema/checker/analyzer + daemon append + plan/workstation trace propagation"
      "report-contract 新增五个解释字段, 但事实仍以 session-trace.lisp 为准"
      "trace-derived router policy 仅是 architecture-designed; runtime LLM router / ClaudeCode replacement 不在 wave 23 code-aligned 范围"]
+  :wave-24-status-summary
+    ["machine-contract 新增 router-policy v1 / trace corpus index / router recommendation CLI 三件套, 把 Wave23 router 草案推进到 code-aligned dry-run advisory"
+     "mission_plan execute 现在可用 router_policy_mode=dry_run 暴露 recommendation block, 但 applied=false 永远为字面量 false"
+     "router_policy_mode=apply / auto / unknown 在 plan lookup 前 INVALID_PARAM, 防止 caller 误以为已可 runtime 替换"
+     "frontend Lisp 仍 postpone; 本波只补 machine-contract / plan surface / renderer advisory"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar intent-layer (v0.4.17+ 已有详细占位)"

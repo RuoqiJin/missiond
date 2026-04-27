@@ -310,7 +310,7 @@
   ;; ──────────────────────────────────────────────────────────
   (trace-derived-router-policy
     :desc "基于 session-trace 的后续 LLM router / backend selection 草案 — 用真实执行轨迹压缩 ClaudeCode 步数, 但本 wave 不替换 ClaudeCode"
-    :status "architecture-designed — wave 23 只完成 trace collection / propagation / descriptive analyzer; runtime router replacement 未 code-aligned"
+    :status "code-aligned partial — wave 24 已完成 advisory dry-run 链路 (router-policy schema/checker/seed + trace corpus index + recommendation CLI + mission_plan dry-run surface + renderer advisory + smoke); runtime router replacement 未 code-aligned"
     :truth-sources ["session-trace.lisp (append-only factual telemetry)"
                     "task-report.lisp + shared-memory.lisp + scoped commit hash"
                     "mission_execution companion log / evidence sidecar"]
@@ -336,4 +336,32 @@
     :must-preserve ["Lisp task-contract remains dispatch SSOT"
                     "scoped commit / report / shared-memory / session-trace stay separate artifacts"
                     "No `claude -p` fallback for workstation write tasks"
-                    "Router decisions require explainable policy record, not opaque prompt intuition"]))
+                    "Router decisions require explainable policy record, not opaque prompt intuition"]
+    :wave-24-code-alignment
+      [(router-policy-v1
+         :status code-aligned
+         :files [".missiond/tasks/schema/router-policy-v1.lisp"
+                 ".missiond/router/router-policy-v1.lisp"
+                 "scripts/check-router-policy.mjs"]
+         :contract "valid policy must be :dry-run-only true and :runtime-replacement false")
+       (trace-corpus-index-v0
+         :status code-aligned
+         :file "scripts/build-session-trace-index.mjs"
+         :contract "aggregates trace corpus; no backend recommendation")
+       (recommendation-cli-v0
+         :status code-aligned
+         :file "scripts/recommend-task-backend.mjs"
+         :contract "read-only deterministic recommendation; dry_run_only=true; no LLM/spawn/git")
+       (mission-plan-dry-run-surface-v0
+         :status code-aligned-partial
+         :files ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                 "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+         :contract "router_policy_mode=dry_run returns applied=false; apply/auto/unknown rejected before plan lookup")
+       (renderer-advisory-context-v0
+         :status code-aligned
+         :files ["scripts/render-claudecode-task.mjs"
+                 ".missiond/tasks/schema/task-contract-v1.lisp"]
+         :contract "brief section says advisory + dry-run only; no backend switching instruction")]
+    :runtime-boundary ["current MissionD still dispatches through existing workstation/plan substrates"
+                       "recommendation block is advisory evidence for humans / future policy"
+                       "runtime replacement of ClaudeCode or mission_task_delegate is pending explicit policy wave"]))

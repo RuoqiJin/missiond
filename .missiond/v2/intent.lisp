@@ -20,7 +20,7 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — pillar code-truth registry; v1.4 (wave 23) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-23 全部 task (含 wave 23 session-trace v1 schema/checker/analyzer + daemon append + plan/workstation trace propagation + trace-derived router-policy architecture draft); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
+      :desc "判真索引 — pillar code-truth registry; v1.5 (wave 24) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-24 全部 task (含 wave 23 session-trace v1 与 wave 24 router-policy dry-run recommendation chain); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
     (session-trace-v1
       :desc "wave 23 — .missiond/tasks/**/session-trace.lisp append-only factual telemetry; schema/checker/analyzer code-aligned; :session-trace-writable default false opt-in"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.session-trace-v1"
@@ -29,9 +29,24 @@
       :analyzer "scripts/analyze-session-trace.mjs"
       :status code-aligned-partial)
     (trace-derived-router-policy
-      :desc "wave 23 Codex architecture draft — use aggregated traces to design future backend selection (claudecode / missiond-llm-router / deterministic-checker / patch-worker / verifier-worker); no runtime router replacement yet"
+      :desc "wave 23 Codex architecture draft → wave 24 advisory dry-run implementation — aggregated traces feed router-policy v1 / recommendation CLI / mission_plan dry-run surface; no runtime router replacement yet"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry worker.section.trace-derived-router-policy"
-      :status architecture-designed)
+      :status code-aligned-partial)
+    (router-policy-v1
+      :desc "wave 24 task 01 — router-policy schema/checker/seed; policy must be dry-run-only and runtime-replacement=false"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.router-policy-v1"
+      :schema ".missiond/tasks/schema/router-policy-v1.lisp"
+      :seed ".missiond/router/router-policy-v1.lisp"
+      :checker "scripts/check-router-policy.mjs"
+      :status code-aligned)
+    (router-recommendation-dry-run
+      :desc "wave 24 tasks 02-06 — trace corpus index + deterministic recommendation CLI + mission_plan router_policy_mode=dry_run surface + renderer advisory block + full-chain smoke; applied=false and no backend replacement"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.router-recommendation-cli-v0 / tools.surface.plan-router-policy-dry-run-v0"
+      :indexer "scripts/build-session-trace-index.mjs"
+      :cli "scripts/recommend-task-backend.mjs"
+      :plan-handler "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+      :mcp-schema "crates/missiond-mcp/src/tools/knowledge/plan.rs"
+      :status code-aligned-partial)
     (drift-audit "drift-audit-2026-04-21.md"
       :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")
     (refactor-methodology ".missiond/workflows/pillar-refactor.lisp"
