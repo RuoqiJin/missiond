@@ -32,11 +32,18 @@ import {
   readCommit,
   verifyContract,
 } from './verify-task-contract.mjs';
+import {
+  ENTRY_HEAD as TRACE_ENTRY_HEAD,
+  KIND_VALUES as TRACE_KIND_VALUES,
+  SCHEMA as TRACE_SCHEMA,
+  parseTraceEvents,
+} from './check-session-trace.mjs';
 
 const usage = `Usage:
   node scripts/verify-task-run.mjs \\
        --task <task.lisp> --report <report.lisp> \\
-       --memory <shared-memory.lisp> --commit <hash> [--json]
+       --memory <shared-memory.lisp> --commit <hash> \\
+       [--trace <session-trace.lisp>] [--require-trace] [--json]
   node scripts/verify-task-run.mjs --dry-fixture [--json]
 
 Verifies a complete MissionD task run as a single post-run proof:
@@ -46,6 +53,11 @@ Verifies a complete MissionD task run as a single post-run proof:
   3. report :commit_hash matches the resolved commit (full or short prefix)
   4. shared-memory ledger contains a (completion ... :task <id>) entry that
      references the task
+  5. (optional) session-trace contains at least one completion event for the
+     task (kind=complete; failure events are NOT counted because this verifier
+     confirms successful runs) and, when both report and trace carry a
+     :commit_hash, they refer to the same commit (full sha or shared prefix
+     of >=7 hex chars)
 
 Flags:
   --task <task.lisp>            MissionD task-contract v1 file (required)
@@ -53,6 +65,15 @@ Flags:
   --memory <shared-memory.lisp> MissionD shared-memory v1 ledger (required
                                 unless --allow-missing-memory is set)
   --commit <hash>               git ref to verify against; defaults to HEAD
+  --trace <session-trace.lisp>  optional session-trace v1 ledger; when
+                                supplied, the trace must contain at least
+                                one (trace-event :task <id> :kind complete)
+                                entry, and any commit_hash there must match
+                                the report's commit_hash if both are present
+  --require-trace               make absence of --trace (or absence of a
+                                completion event for the task) a hard
+                                failure; without this flag a missing trace
+                                is silently allowed (no warning, no error)
   --allow-missing-memory        allow --memory to be omitted/missing; the
                                 ledger check is skipped with a structured
                                 warning instead of a hard failure
@@ -78,6 +99,8 @@ function parseArgs(argv) {
     report: null,
     memory: null,
     commit: null,
+    trace: null,
+    requireTrace: false,
     json: false,
     dryFixture: false,
     allowMissingMemory: false,
@@ -93,6 +116,8 @@ function parseArgs(argv) {
       opts.dryFixture = true;
     } else if (arg === '--allow-missing-memory') {
       opts.allowMissingMemory = true;
+    } else if (arg === '--require-trace') {
+      opts.requireTrace = true;
     } else if (arg === '--task') {
       opts.task = argv[++i] ?? failUsage('--task requires a value');
     } else if (arg.startsWith('--task=')) {
@@ -109,6 +134,10 @@ function parseArgs(argv) {
       opts.commit = argv[++i] ?? failUsage('--commit requires a value');
     } else if (arg.startsWith('--commit=')) {
       opts.commit = arg.slice('--commit='.length);
+    } else if (arg === '--trace') {
+      opts.trace = argv[++i] ?? failUsage('--trace requires a value');
+    } else if (arg.startsWith('--trace=')) {
+      opts.trace = arg.slice('--trace='.length);
     } else if (arg.startsWith('--')) {
       failUsage(`unknown flag: ${arg}`);
     } else {
@@ -192,6 +221,96 @@ function ledgerFromForms(forms, file) {
   return { file, wave, completions };
 }
 
+// --- Session-trace loading ------------------------------------------------
+//
+// We import `parseTraceEvents` from scripts/check-session-trace.mjs (the
+// shared parser exported in wave23-06) for file-based loading. For fixtures
+// and tests we also need to parse a trace from an in-memory source string;
+// `loadTraceFromSource` mirrors parseTraceEvents' return shape so both
+// production and fixture paths feed the same `verifyRun` core.
+//
+// Invariant: this loader only extracts the trace-event entries and their
+// scalar fields. Schema/seq/timestamp validation belong to
+// scripts/check-session-trace.mjs; verify-task-run only consumes the parsed
+// events and answers two questions:
+//   1. Is there at least one (trace-event :task <id> :kind complete) entry?
+//   2. If both report and that completion event carry :commit_hash, do they
+//      reference the same commit?
+//
+// Kind decision: we accept ONLY :kind=complete as proof of a successful run.
+// A `failure` event is itself a fact recorded in the trace, but it is the
+// opposite of a completion proof — accepting it would make the verifier
+// rubber-stamp aborted runs. The full kind enumeration (dispatch / start /
+// read / edit / command / test / commit / complete / failure / retry /
+// observation) is owned by check-session-trace.mjs (TRACE_KIND_VALUES) and
+// we re-import it here so a typo in this file would surface as a stale
+// reference rather than silently mismatching.
+void TRACE_KIND_VALUES; // sanity import — kept live for future kind checks
+
+export function loadTrace(file) {
+  // parseTraceEvents returns an array of trace blocks (one per
+  // (session-trace ...) form found). A single repo-relative trace file
+  // typically has exactly one block, but we preserve the array shape.
+  const traces = parseTraceEvents(file);
+  return tracesToBundle(traces, file);
+}
+
+export function loadTraceFromSource(source, file = '<memory>') {
+  const forms = parseLisp(source, file);
+  const traces = [];
+  for (const form of forms) {
+    if (!isList(form) || head(form) !== 'session-trace') continue;
+    const wave = nodeText(form.children[1]);
+    const headerProps = readKeywordProps(form, { start: 2 });
+    const header = {
+      schema: keywordPropText(headerProps, ':schema'),
+      wave: keywordPropText(headerProps, ':wave'),
+      createdAt: keywordPropText(headerProps, ':created-at'),
+      sequence: parseTraceInt(keywordPropText(headerProps, ':sequence')),
+    };
+    const events = [];
+    for (const child of form.children) {
+      if (!isList(child) || head(child) !== TRACE_ENTRY_HEAD) continue;
+      const props = readKeywordProps(child, { start: 1 });
+      events.push({
+        id: keywordPropText(props, ':id'),
+        seq: parseTraceInt(keywordPropText(props, ':seq')),
+        at: keywordPropText(props, ':at'),
+        task: keywordPropText(props, ':task'),
+        backend: keywordPropText(props, ':backend'),
+        kind: keywordPropText(props, ':kind'),
+        summary: keywordPropText(props, ':summary'),
+        agent: keywordPropText(props, ':agent'),
+        files: props[':files'] ? nodeToStringArray(props[':files'].value) : [],
+        command: keywordPropText(props, ':command'),
+        exit_code: parseTraceInt(keywordPropText(props, ':exit_code')),
+        duration_ms: parseTraceInt(keywordPropText(props, ':duration_ms')),
+        commit_hash: keywordPropText(props, ':commit_hash'),
+        report_path: keywordPropText(props, ':report_path'),
+        memory_refs: props[':memory_refs']
+          ? nodeToStringArray(props[':memory_refs'].value)
+          : [],
+        trace_refs: props[':trace_refs']
+          ? nodeToStringArray(props[':trace_refs'].value)
+          : [],
+      });
+    }
+    traces.push({ file, wave, header, events });
+  }
+  return tracesToBundle(traces, file);
+}
+
+function tracesToBundle(traces, file) {
+  const events = traces.flatMap((t) => t.events);
+  return { file, traces, events };
+}
+
+function parseTraceInt(text) {
+  if (text == null) return null;
+  if (!/^-?\d+$/.test(text)) return null;
+  return Number.parseInt(text, 10);
+}
+
 // --- Pure verification core ----------------------------------------------
 
 export function verifyRun({
@@ -203,6 +322,11 @@ export function verifyRun({
   ledgerFile,
   ledgerStatus, // 'present' | 'missing-allowed' | 'missing-blocked'
   commitInfo,
+  trace = null,
+  traceFile = null,
+  traceStatus = 'absent', // 'present' | 'absent' | 'absent-required' | 'malformed'
+  traceLoadError = null,
+  requireTrace = false,
 }) {
   const errors = [];
   const warnings = [];
@@ -294,6 +418,102 @@ export function verifyRun({
     );
   }
 
+  // Check 6: session-trace completion event for the task (and commit_hash
+  // cross-check). The trace check is opt-in: by default a missing trace is
+  // silently allowed (traceStatus='absent'). When --require-trace is set,
+  // an absent or malformed trace becomes a hard failure
+  // (traceStatus='absent-required' or 'malformed').
+  if (traceStatus === 'present') {
+    const taskEvents = trace.events.filter((e) => e.task === contract.id);
+    // Only :kind=complete proves a successful run. :kind=failure is the
+    // opposite of a completion proof and is intentionally rejected here —
+    // see the kind-decision comment near loadTrace.
+    const completion = taskEvents.find((e) => e.kind === 'complete');
+    checks.session_trace_completion = {
+      ok: Boolean(completion),
+      task: contract.id,
+      trace_file: traceFile,
+      task_event_count: taskEvents.length,
+      matched_event_id: completion?.id ?? null,
+      matched_event_seq: completion?.seq ?? null,
+    };
+    if (!completion) {
+      const failureCount = taskEvents.filter((e) => e.kind === 'failure').length;
+      const sample = failureCount > 0 ? ` (${failureCount} failure event(s) present)` : '';
+      const message =
+        `session-trace ${traceFile} has no (trace-event :task ${contract.id} :kind complete) entry${sample}`;
+      // If --trace was passed explicitly we always treat absence of a
+      // completion event for this task as an error: the operator opted in
+      // to the trace check, so a missing completion is a real defect, not
+      // silent telemetry. --require-trace is the orthogonal "trace must be
+      // supplied" gate; the present-but-no-completion case is already a
+      // hard signal from the operator.
+      errors.push(message);
+      // Mark the check explicitly per requireTrace so the JSON output
+      // distinguishes the two failure modes for tooling.
+      checks.session_trace_completion.required = requireTrace;
+    } else {
+      // Check 7: commit_hash cross-check. Only fail when BOTH sides have a
+      // hash and they disagree. If only one side carries a hash, that's a
+      // soft warning (allowed) — the report-vs-git commit_hash check above
+      // already enforces the report side, and the trace's commit_hash is
+      // optional per the schema.
+      const traceHash = completion.commit_hash;
+      const reportHash = report.commitHash;
+      if (traceHash && reportHash) {
+        const matches = commitHashesAgree(traceHash, reportHash);
+        checks.session_trace_commit_hash = {
+          ok: matches,
+          report_hash: reportHash,
+          trace_hash: traceHash,
+        };
+        if (!matches) {
+          errors.push(
+            `session-trace commit_hash mismatch — trace event ${completion.id} has ` +
+            `${JSON.stringify(traceHash)}, report has ${JSON.stringify(reportHash)}`,
+          );
+        }
+      } else if (traceHash || reportHash) {
+        checks.session_trace_commit_hash = {
+          ok: true,
+          skipped: true,
+          report_hash: reportHash ?? null,
+          trace_hash: traceHash ?? null,
+          reason: 'only one side carries :commit_hash; cross-check skipped',
+        };
+        warnings.push(
+          'session-trace and report commit_hash cross-check skipped — only ' +
+          (traceHash ? 'trace' : 'report') + ' carries :commit_hash',
+        );
+      }
+      // else: neither side has a hash. The report-vs-git check (above) is
+      // the source of truth; nothing to assert here.
+    }
+  } else if (traceStatus === 'absent') {
+    checks.session_trace_completion = {
+      ok: true,
+      skipped: true,
+      reason: '--trace not provided and --require-trace not set',
+    };
+  } else if (traceStatus === 'absent-required') {
+    checks.session_trace_completion = {
+      ok: false,
+      missing: true,
+      reason: '--require-trace set but --trace not provided',
+    };
+    errors.push(
+      'session-trace required but not provided; pass --trace <session-trace.lisp> ' +
+      'or drop --require-trace',
+    );
+  } else if (traceStatus === 'malformed') {
+    checks.session_trace_completion = {
+      ok: false,
+      malformed: true,
+      reason: traceLoadError ?? 'session-trace failed to parse',
+    };
+    errors.push(`session-trace failed to load: ${traceLoadError ?? 'unknown error'}`);
+  }
+
   return {
     ok: errors.length === 0,
     contract_file: contractFile,
@@ -303,6 +523,21 @@ export function verifyRun({
     errors,
     warnings,
   };
+}
+
+function commitHashesAgree(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ax = a.trim().toLowerCase();
+  const bx = b.trim().toLowerCase();
+  if (ax.length === 0 || bx.length === 0) return false;
+  if (!/^[0-9a-f]+$/.test(ax) || !/^[0-9a-f]+$/.test(bx)) return false;
+  if (ax === bx) return true;
+  // Allow either side to be a >=7-hex prefix of the other (e.g. report has
+  // short SHA and trace has full SHA, or vice versa).
+  const longer = ax.length >= bx.length ? ax : bx;
+  const shorter = ax.length >= bx.length ? bx : ax;
+  if (shorter.length >= 7 && longer.startsWith(shorter)) return true;
+  return false;
 }
 
 function commitHashMatches(reported, full) {
@@ -483,6 +718,29 @@ function runCli(opts) {
     process.exit(1);
   }
 
+  // Trace: optional input. --require-trace promotes any absence (or load
+  // failure) to an error; without it an absent --trace is silently OK.
+  let trace = null;
+  let traceFile = opts.trace ? path.resolve(cwd, opts.trace) : null;
+  let traceStatus = 'absent';
+  let traceLoadError = null;
+  if (traceFile) {
+    if (!fs.existsSync(traceFile)) {
+      traceStatus = 'malformed';
+      traceLoadError = `session-trace not found at ${traceFile}`;
+    } else {
+      try {
+        trace = loadTrace(traceFile);
+        traceStatus = 'present';
+      } catch (err) {
+        traceStatus = 'malformed';
+        traceLoadError = err?.message ?? String(err);
+      }
+    }
+  } else if (opts.requireTrace) {
+    traceStatus = 'absent-required';
+  }
+
   const result = verifyRun({
     contract,
     contractFile: taskFile,
@@ -492,6 +750,11 @@ function runCli(opts) {
     ledgerFile,
     ledgerStatus,
     commitInfo,
+    trace,
+    traceFile,
+    traceStatus,
+    traceLoadError,
+    requireTrace: opts.requireTrace,
   });
 
   emit(result, { json: opts.json });
@@ -499,6 +762,37 @@ function runCli(opts) {
 }
 
 // --- Fixtures -------------------------------------------------------------
+
+// Builds a minimal session-trace source for fixture use. `kind` selects the
+// :kind of the single (trace-event ...). When `commitHash` is supplied it is
+// emitted as :commit_hash. Other optional fields are intentionally omitted
+// to keep fixture diffs scoped to the behavior under test.
+function buildTraceSource({
+  task,
+  kind = 'complete',
+  commitHash = null,
+  wave = 'wave21',
+  eventId = 'wave21-trace-001',
+  seq = 1,
+  at = '2026-04-28T00:00:00Z',
+  backend = 'claudecode',
+  summary = 'fixture',
+} = {}) {
+  const commitLine = commitHash ? `\n      :commit_hash "${commitHash}"` : '';
+  return `(session-trace ${wave}
+    :schema "missiond.session-trace.v1"
+    :wave ${wave}
+    :created-at "2026-04-28T00:00:00Z"
+    :sequence 1
+    (trace-event
+      :id ${eventId}
+      :seq ${seq}
+      :at "${at}"
+      :task ${task}
+      :backend ${backend}
+      :kind ${kind}
+      :summary "${summary}"${commitLine}))`;
+}
 
 function runFixtures({ json }) {
   const baseTaskSource = `(task wave21-99-fixture
@@ -753,6 +1047,145 @@ function runFixtures({ json }) {
       expectOk: true,
       expectWarning: /report :status is "in-progress"/,
     },
+
+    // ---------- session-trace fixtures (wave23-03) ----------
+    {
+      name: 'trace pass: contract+report+memory+commit+trace with matching completion + matching commit_hash',
+      contract: loadContractFromSource(baseTaskSource, '<fx-tr-pass-task>'),
+      contractFile: '<fx-tr-pass-task>',
+      report: loadReportFromSource(baseReportSource, '<fx-tr-pass-report>'),
+      reportFile: '<fx-tr-pass-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-tr-pass-ledger>'),
+      ledgerFile: '<fx-tr-pass-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      trace: loadTraceFromSource(
+        buildTraceSource({ task: 'wave21-99-fixture', kind: 'complete', commitHash: 'abc1234' }),
+        '<fx-tr-pass-trace>',
+      ),
+      traceFile: '<fx-tr-pass-trace>',
+      traceStatus: 'present',
+      requireTrace: true,
+      expectOk: true,
+    },
+    {
+      name: 'trace fail: trace supplied but no completion event for this task',
+      contract: loadContractFromSource(baseTaskSource, '<fx-tr-noc-task>'),
+      contractFile: '<fx-tr-noc-task>',
+      report: loadReportFromSource(baseReportSource, '<fx-tr-noc-report>'),
+      reportFile: '<fx-tr-noc-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-tr-noc-ledger>'),
+      ledgerFile: '<fx-tr-noc-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      // Trace has only a `failure` event for this task; verifier rejects.
+      trace: loadTraceFromSource(
+        buildTraceSource({ task: 'wave21-99-fixture', kind: 'failure' }),
+        '<fx-tr-noc-trace>',
+      ),
+      traceFile: '<fx-tr-noc-trace>',
+      traceStatus: 'present',
+      requireTrace: false,
+      expectOk: false,
+      expectError: /no \(trace-event :task wave21-99-fixture :kind complete\) entry/,
+    },
+    {
+      name: 'trace fail: report and trace both have commit_hash but they mismatch',
+      contract: loadContractFromSource(baseTaskSource, '<fx-tr-cm-task>'),
+      contractFile: '<fx-tr-cm-task>',
+      report: loadReportFromSource(baseReportSource, '<fx-tr-cm-report>'),
+      reportFile: '<fx-tr-cm-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-tr-cm-ledger>'),
+      ledgerFile: '<fx-tr-cm-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      trace: loadTraceFromSource(
+        // trace says deadbee, report says abc1234 → cross-check fires.
+        buildTraceSource({ task: 'wave21-99-fixture', kind: 'complete', commitHash: 'deadbee' }),
+        '<fx-tr-cm-trace>',
+      ),
+      traceFile: '<fx-tr-cm-trace>',
+      traceStatus: 'present',
+      requireTrace: false,
+      expectOk: false,
+      expectError: /session-trace commit_hash mismatch/,
+    },
+    {
+      name: 'trace fail: malformed trace (parser error)',
+      contract: loadContractFromSource(baseTaskSource, '<fx-tr-mal-task>'),
+      contractFile: '<fx-tr-mal-task>',
+      report: loadReportFromSource(baseReportSource, '<fx-tr-mal-report>'),
+      reportFile: '<fx-tr-mal-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-tr-mal-ledger>'),
+      ledgerFile: '<fx-tr-mal-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      trace: null,
+      traceFile: '<fx-tr-mal-trace>',
+      traceStatus: 'malformed',
+      traceLoadError: 'unmatched paren at line 12',
+      requireTrace: false,
+      expectOk: false,
+      expectError: /session-trace failed to load/,
+    },
+    {
+      name: 'trace pass: trace absent and --require-trace not set',
+      contract: loadContractFromSource(baseTaskSource, '<fx-tr-abs-task>'),
+      contractFile: '<fx-tr-abs-task>',
+      report: loadReportFromSource(baseReportSource, '<fx-tr-abs-report>'),
+      reportFile: '<fx-tr-abs-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-tr-abs-ledger>'),
+      ledgerFile: '<fx-tr-abs-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      trace: null,
+      traceFile: null,
+      traceStatus: 'absent',
+      requireTrace: false,
+      expectOk: true,
+    },
+    {
+      name: 'trace fail: trace absent and --require-trace set',
+      contract: loadContractFromSource(baseTaskSource, '<fx-tr-req-task>'),
+      contractFile: '<fx-tr-req-task>',
+      report: loadReportFromSource(baseReportSource, '<fx-tr-req-report>'),
+      reportFile: '<fx-tr-req-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-tr-req-ledger>'),
+      ledgerFile: '<fx-tr-req-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      trace: null,
+      traceFile: null,
+      traceStatus: 'absent-required',
+      requireTrace: true,
+      expectOk: false,
+      expectError: /session-trace required but not provided/,
+    },
+    {
+      name: 'trace pass with warning: only trace has commit_hash (report side empty)',
+      contract: loadContractFromSource(baseTaskSource, '<fx-tr-only-task>'),
+      contractFile: '<fx-tr-only-task>',
+      // Report has commit_hash matching the actual commit, but we strip
+      // the trace's commit_hash claim to exercise the asymmetric branch in
+      // reverse: only report-side has a hash.
+      report: loadReportFromSource(baseReportSource, '<fx-tr-only-report>'),
+      reportFile: '<fx-tr-only-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-tr-only-ledger>'),
+      ledgerFile: '<fx-tr-only-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      trace: loadTraceFromSource(
+        // No :commit_hash on the completion event — only one side carries
+        // a hash, cross-check is skipped with a warning.
+        buildTraceSource({ task: 'wave21-99-fixture', kind: 'complete' }),
+        '<fx-tr-only-trace>',
+      ),
+      traceFile: '<fx-tr-only-trace>',
+      traceStatus: 'present',
+      requireTrace: false,
+      expectOk: true,
+      expectWarning: /commit_hash cross-check skipped/,
+    },
   ];
 
   // Helper-level sanity check on commitHashMatches.
@@ -766,11 +1199,29 @@ function runFixtures({ json }) {
     ['abc1234x', 'abc1234567890abcdef1234567890abcdef12345', false], // non-hex
   ];
 
+  // Helper-level sanity check on commitHashesAgree (symmetric prefix match).
+  const agreeCases = [
+    ['abc1234', 'abc1234', true],
+    ['abc1234', 'abc1234567890', true], // short is prefix of long
+    ['abc1234567890', 'abc1234', true], // long contains short prefix
+    ['abc1234', 'deadbee', false],
+    ['abc123', 'abc1234567890', false], // shorter than 7 hex
+    ['', 'abc1234567890', false],
+    ['abc1234', '', false],
+    ['notHex!', 'abc1234567890', false],
+  ];
+
   const failures = [];
   for (const [reported, full, expected] of helperCases) {
     const got = commitHashMatches(reported, full);
     if (got !== expected) {
       failures.push({ kind: 'helper', case: `${reported} ~ ${full}`, expected, got });
+    }
+  }
+  for (const [a, b, expected] of agreeCases) {
+    const got = commitHashesAgree(a, b);
+    if (got !== expected) {
+      failures.push({ kind: 'helper-agree', case: `${a} ~ ${b}`, expected, got });
     }
   }
 
@@ -784,6 +1235,11 @@ function runFixtures({ json }) {
       ledgerFile: fx.ledgerFile,
       ledgerStatus: fx.ledgerStatus,
       commitInfo: fx.commitInfo,
+      trace: fx.trace ?? null,
+      traceFile: fx.traceFile ?? null,
+      traceStatus: fx.traceStatus ?? 'absent',
+      traceLoadError: fx.traceLoadError ?? null,
+      requireTrace: fx.requireTrace ?? false,
     });
     const okMatch = result.ok === fx.expectOk;
     let errMatch = true;
@@ -809,6 +1265,7 @@ function runFixtures({ json }) {
   }
 
   const ok = failures.length === 0;
+  const totalHelpers = helperCases.length + agreeCases.length;
   if (json) {
     console.log(
       JSON.stringify(
@@ -816,6 +1273,7 @@ function runFixtures({ json }) {
           ok,
           fixtures: fixtures.map((fx) => fx.name),
           helperCases: helperCases.length,
+          agreeCases: agreeCases.length,
           failures,
         },
         null,
@@ -826,7 +1284,7 @@ function runFixtures({ json }) {
     console.log(
       `task-run verify fixtures OK ` +
       `(${fixtures.length} fixture${fixtures.length === 1 ? '' : 's'}, ` +
-      `${helperCases.length} helper case${helperCases.length === 1 ? '' : 's'})`,
+      `${totalHelpers} helper case${totalHelpers === 1 ? '' : 's'})`,
     );
   } else {
     console.error(`task-run verify fixtures FAILED — ${failures.length} failure(s)`);
@@ -881,4 +1339,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
 }
 
-export { commitHashMatches };
+export { commitHashMatches, commitHashesAgree };
