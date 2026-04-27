@@ -805,7 +805,24 @@ fn build_properties() -> Value {
 
     p.insert("persist_inference".into(), prop(
         "boolean",
-        "[execute] (wave-21 / task 05) explicit persistence opt-in for the apply gate. Default `false`. The v1 gate NEVER mutates persisted `plan.sexp_text` regardless of this flag — `apply_gate.persist_inference_applied` is hard-pinned to `false` so observers can `assert apply_gate.persist_inference_applied == false` directly. The flag is echoed on the response under `apply_gate.persist_inference_requested` so a future wave (when the persisted plan write lands) can pivot on the same wire string without breaking back-compat callers. Per the goal contract: persisted plan text is mutated only when an existing action already has `persist=true` (compile path) or this explicit `persist_inference=true` flag is supplied (execute path); the v1 gate audit-records the request without acting on it. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected.",
+        "[execute] (wave-21 / task 05 + wave-22 / task 04) explicit persistence opt-in for the apply gate. Default `false`. In the v1 (wave-21 / task 05) shape this flag was an audit-only echo and `apply_gate.persist_inference_applied` was hard-pinned `false`. The wave-22 / task 04 v2 promotion makes this flag LOAD-BEARING on the new `persisted_apply` block: when ALL FOUR opt-ins (`apply_inferred_fields=true` + `persist_inference=true` + `caller_approved=true` + matching `proposal_hash`) are supplied AND the v1 gate promoted at least one field, the handler INSERTS a new plan version (next `version`) carrying the original sexp body verbatim plus an appended `(plan-inference-applied :inference-version \"v2\" ...)` annotation, then runs `plan_supersede(<old_id>)` so the previous row is visibly retired with `status=superseded` (rollback handle). The original `apply_gate.persist_inference_applied` field STAYS hard-pinned `false` — v2 surfaces persistence on the SEPARATE `persisted_apply` block to preserve the v1 byte-shape exactly. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected.",
+    ));
+
+    // ── wave-22 / task 04 — Persisted PLAN inference apply v2 ────────────
+    //
+    // Layered on top of wave-21 / task 05 v1 apply gate. v2 promotes the
+    // `persist_inference` audit flag into a real DB write, gated by two
+    // additional caller opt-ins (`caller_approved` + `proposal_hash`)
+    // and a fail-fast hash preflight. The four opt-ins together arm
+    // the persist path; any one missing keeps the v1 byte-shape intact.
+    p.insert("caller_approved".into(), prop(
+        "boolean",
+        "[execute] (wave-22 / task 04) second human opt-in for the v2 persisted PLAN inference apply path. Default `false` preserves the wave-21 / task 05 v1 byte-shape exactly — caller must STILL set `persist_inference=true` AND supply a matching `proposal_hash` to arm the persistence write. When this flag is `true` AND `apply_inferred_fields=true` AND `persist_inference=true` AND a matching `proposal_hash` is supplied AND the v1 apply gate promoted at least one field, the handler writes a NEW plan version (next `version`) preserving the original sexp body verbatim with an appended `(plan-inference-applied ...)` annotation, then runs `plan_supersede(<old_id>)` so the previous row stays queryable as the rollback pointer. On the persist path: original_sexp_hash + resulting_sexp_hash + applied_fields[] + skipped_fields[] + proposal_hash + new_plan_id + rollback_plan_id are stamped on `persisted_apply` AND appended as a typed `plan_inference_persisted_apply` evidence entry to the predecessor's `<plan_id>.evidence.json` sidecar. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected with `INVALID_PARAM` so a typo never silently arms the persist gate. Conservative posture: this is the SECOND human opt-in (in addition to `apply_inferred_fields`) so a single accidental config flip cannot fire the persist path on its own.",
+    ));
+
+    p.insert("proposal_hash".into(), prop(
+        "string",
+        "[execute] (wave-22 / task 04) deterministic 32-hex SHA-256 prefix correlator for the v2 persisted apply path. The handler computes `compute_inference_proposal_hash(plan_id, original_sexp_hash, sorted apply_gate.applied_fields[])` and surfaces the value under `persisted_apply.computed_proposal_hash` on every response carrying an `apply_gate` block (even when the persist flags are absent — preview callers can capture the hash and replay against the persist path on a follow-up call). When ALL THREE persist opt-ins (`apply_inferred_fields=true` + `persist_inference=true` + `caller_approved=true`) are supplied, the handler MATCHES `proposal_hash` against the freshly computed value BEFORE any DB mutation per the v2 contract: missing supply ⇒ structured error `PERSIST_APPLY_MISSING_PROPOSAL_HASH`; mismatch ⇒ `PERSIST_APPLY_PROPOSAL_HASH_MISMATCH` (both with `INVALID_PARAM` code). The hash compares case-insensitively so observers may upper-case the hex defensively. Strict shape: only the string form is accepted; numbers / arrays / objects are rejected with `INVALID_PARAM`. The hash is field-order independent (the underlying compute sorts applied_fields lexicographically) so the same applied set always derives the same correlator regardless of the gate's traversal order.",
     ));
 
     Value::Object(p)
@@ -1025,6 +1042,22 @@ pub fn definitions() -> Vec<ToolDefinition> {
          conflict_fields[], resulting_plan_preview (caller args ∪ applied)}。Persistence boundary: v1 gate 永不 mutate 持久化 plan.sexp_text \
          (persist_inference_applied 钉死 false); persist_inference=true 仅 echo 进 audit 行,等下一个 wave 接 persisted plan write。\
          默认 apply_inferred_fields=false ⇒ 与 wave-18..20 byte-shape 完全一致 (suggest-only)。\
+         wave-22 / task 04 persisted PLAN inference apply v2: execute 加 caller_approved=true (bool only; \
+         字符串 \"true\" 拒) + proposal_hash (32 hex SHA-256 截 32, 案 plan_id + original_sexp_hash + 排序 applied_fields) \
+         + persist_inference=true + apply_inferred_fields=true 四个 opt-in 全打开后, 把 wave-21/05 in-memory apply \
+         提升为 真正落库 — plan_insert 写新 version (原 sexp 完整 + 追加 (plan-inference-applied :inference-version \"v2\" ...) \
+         注解形式), plan_supersede(old) 把前任标 superseded 留 rollback 锚, 追加 plan_inference_persisted_apply \
+         typed evidence 到 sidecar (含 applied_fields/skipped_fields/proposal_hash/original_sexp_hash/resulting_sexp_hash/\
+         rollback_plan_id)。Hash 不匹/缺失在任何 DB 写之前 fail-fast `PERSIST_APPLY_PROPOSAL_HASH_MISMATCH`/\
+         `PERSIST_APPLY_MISSING_PROPOSAL_HASH` (INVALID_PARAM 码)。响应固定附 `persisted_apply` 块 \
+         {status (not_requested|applied|skipped_apply_gate_not_requested|skipped_persist_not_requested|\
+         skipped_caller_not_approved|skipped_nothing_to_apply), apply_inferred_fields_requested, persist_inference_requested, \
+         caller_approved, original_sexp_hash, resulting_sexp_hash, computed_proposal_hash, supplied_proposal_hash, \
+         applied_fields[], skipped_fields[], new_plan_id, new_plan_version, rollback_plan_id}; \
+         wave-21/05 v1 byte-shape 钉死 — `apply_gate.persist_inference_applied` 仍硬钉 false (v2 持久化在独立 \
+         `persisted_apply` 块发布), 6 大 invariants 全部继承 (默认 off / strict bool / conflicts 永不 apply / \
+         suggestions 永不 apply / LLM 提案需 llm_caller_approved / persist_inference_applied 钉 false)。\
+         保守姿态: 双 opt-in (apply_inferred_fields + caller_approved) 加 hash 匹配; 任一缺失 ⇒ 软 skip 不 mutate DB。\
          wave-21 / task 06 LLM auto-approve proposal v0: approve / mark / supersede 接受 auto_approve_mode=\"sonnet_suggest\" \
          (默认 \"off\" 保持 byte-shape) 让 Sonnet PROPOSE 结构化 review 决定 (decision + confidence + evidence + non_goal_check + destructive_check + requires_human); \
          结果挂在 llm_auto_approve_proposal*; v0 propose-only — 永不 auto-apply, applied=false / requires_human=true 强制 pin (invariant I3); \
@@ -1045,7 +1078,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          supplied_proposal_hash, caller_approved, safety_rule_results[]}; caller 同时给 review_decision 时人决定胜 (apply gate 退化为 informational)。\
          Lisp 源 (forward ref): .missiond/tasks/schema/task-contract-v1.lisp + intent-tools.lisp :: implemented-surface \
          mission_plan :: :task-contract-emitter (wave-19/12 backfill) + :execute-contract :apply-inferred-fields-gate (wave-21/05 backfill) + \
-         :execute-contract :apply-llm-auto-approve-gate (wave-22/03 backfill)。",
+         :execute-contract :apply-llm-auto-approve-gate (wave-22/03 backfill) + \
+         :execute-contract :persisted-inference-apply (wave-22/04 backfill)。",
         schema,
     )]
 }
