@@ -5,33 +5,49 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-// MissionD hooksPath installer v1.
+// MissionD hooksPath installer v2 (default-on doctor).
 //
 // Repo-local doctor + installer for core.hooksPath = .githooks. Two side-by-side
 // concerns:
-//   1) Read git config core.hooksPath and report whether the .githooks/
-//      pre-commit hook is the active one for this clone.
-//   2) Optionally run `git config core.hooksPath .githooks` (LOCAL repo config
-//      only) so the next commit picks up the MissionD task-scope-guard.
+//   1) Default-on doctor: `--check` (the implicit default mode) reads git config
+//      core.hooksPath and reports whether the .githooks/ pre-commit hook is the
+//      active one for this clone. Drift is treated as a *preflight problem* —
+//      the JSON payload carries severity/advice with a concrete install command
+//      so callers (renderer, agents, CI) can surface it without mutating git
+//      config themselves. Exit code is 0 by default; `--strict` makes drift a
+//      hard non-zero exit. The doctor never mutates anything.
+//   2) Explicit installer: `--install` runs `git config --local
+//      core.hooksPath .githooks` exactly once and never touches --global or
+//      --system. This is the ONLY surface in this script that mutates state.
+//
+// Default-on note: invoking the script without a mode is equivalent to
+// `--check`. This makes the doctor the default-on preflight expectation while
+// keeping all mutation explicit and opt-in (an unattended invocation will
+// never silently flip git config). The renderer surfaces the doctor commands
+// as preflight steps in commit-required task briefs so dispatched agents see
+// the expectation up front.
 //
 // The installer is intentionally repo-local. It never touches --global /
 // --system git config. It never enables hooks for any other clone. It never
 // writes any file outside the repo's .git/config (via `git config`).
 //
 // Modes:
-//   --check          read-only doctor; prints state + exits non-zero on drift
-//                    when --strict is also passed (default exit 0 with
-//                    state in stdout so the caller decides).
-//   --install        runs `git config core.hooksPath .githooks` exactly once.
-//                    no-op + exit 0 if already set to the expected value.
+//   --check          read-only doctor (DEFAULT when no mode flag is given);
+//                    prints state + advice. Exits 0 by default even on drift
+//                    so callers decide how to react; pair with --strict to
+//                    make drift a hard non-zero exit.
+//   --install        runs `git config --local core.hooksPath .githooks`
+//                    exactly once. no-op + exit 0 if already set to the
+//                    expected value.
 //   --json           machine-readable output for either mode.
 //   --dry-fixture    self-contained fixture run; no git invoked, no disk
 //                    writes; exits non-zero on any fixture failure.
 //   --strict         only meaningful with --check: makes drift a hard error.
 //
 // This script is read-only in --check mode and write-once in --install mode
-// (the single mutation is `git config core.hooksPath .githooks`). It NEVER
-// runs git add / commit / reset / checkout / stash / push / merge / rebase.
+// (the single mutation is `git config --local core.hooksPath .githooks`). It
+// NEVER runs git add / commit / reset / checkout / stash / push / merge /
+// rebase, and NEVER touches --global or --system git config.
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
@@ -40,24 +56,32 @@ const EXPECTED_HOOKS_PATH = '.githooks';
 const EXPECTED_HOOK_FILE = path.join(REPO_ROOT, EXPECTED_HOOKS_PATH, 'pre-commit');
 
 const usage = `Usage:
-  node scripts/install-missiond-hooks.mjs --check [--json] [--strict]
+  node scripts/install-missiond-hooks.mjs [--check] [--json] [--strict]
   node scripts/install-missiond-hooks.mjs --install [--json]
   node scripts/install-missiond-hooks.mjs --dry-fixture [--json]
 
 Repo-local installer + doctor for git core.hooksPath = .githooks.
 
+Default mode (no flag) is --check: a read-only preflight doctor that surfaces
+unset / wrong core.hooksPath as a preflight problem with a concrete install
+command, but never mutates git config on its own.
+
 Modes:
   --check        Read git config --get core.hooksPath and report whether it
                  equals "${EXPECTED_HOOKS_PATH}". Also reports whether the
-                 expected ${EXPECTED_HOOKS_PATH}/pre-commit file exists. By
-                 default exits 0 even on drift; pair with --strict to make
-                 drift a hard non-zero exit (useful for CI).
-  --install      Run \`git config core.hooksPath ${EXPECTED_HOOKS_PATH}\`.
+                 expected ${EXPECTED_HOOKS_PATH}/pre-commit file exists. The
+                 JSON payload includes a severity tag (ok | preflight-drift)
+                 and a concrete advice command. By default exits 0 even on
+                 drift; pair with --strict to make drift a hard non-zero exit
+                 (useful for CI). DEFAULT mode when no flag is supplied.
+  --install      Run \`git config --local core.hooksPath ${EXPECTED_HOOKS_PATH}\`.
                  No-op when the value is already set. Local repo config only;
                  never touches --global or --system. Performs no other
                  mutations.
-  --dry-fixture  Self-contained fixtures (no git invoked, no disk writes).
-                 Exits non-zero on any fixture failure.
+  --dry-fixture  Self-contained fixtures (no git invoked, no disk writes)
+                 covering installed / unset / wrong-path / missing-hook-file
+                 states plus the install state machine. Exits non-zero on
+                 any fixture failure.
 
 Flags:
   --json         Machine-readable JSON output.
@@ -65,7 +89,8 @@ Flags:
                  or the hook file is missing.
 
 The installer is repo-local. It never enables hooks globally and never runs
-mutating git commands beyond the single \`git config core.hooksPath\` write.
+mutating git commands beyond the single \`git config --local core.hooksPath\`
+write. The doctor (default mode) NEVER mutates git config; only --install does.
 `;
 
 function failUsage(message) {
@@ -100,7 +125,10 @@ function main() {
     }
   }
 
-  if (!mode) failUsage('one of --check | --install | --dry-fixture is required');
+  // Default-on doctor: invoking the script with no mode flag falls through to
+  // --check. This makes the doctor the implicit preflight expectation while
+  // keeping every mutation explicit (--install must be opted into).
+  if (!mode) mode = '--check';
 
   if (mode === '--dry-fixture') {
     runFixtures({ json });
@@ -117,6 +145,30 @@ function main() {
 
 // --- check (read-only doctor) ---------------------------------------------
 
+// Doctor severity tags surface in the JSON payload so callers (renderer,
+// agents, CI) can react to the preflight state without parsing prose.
+//   ok                 — core.hooksPath aligned + hook file present
+//   preflight-drift    — alignment problem the user can resolve with --install
+//                        (covers unset, wrong path, and missing hook file
+//                        states; the advice command differs per state)
+export const DOCTOR_SEVERITY = Object.freeze({
+  OK: 'ok',
+  PREFLIGHT_DRIFT: 'preflight-drift',
+});
+
+// Classify the doctor state into a discrete reason code so machine consumers
+// (renderer, planners, CI) can branch without re-implementing the matrix.
+//   aligned            — core.hooksPath==expected AND hook file present
+//   hooks-path-unset   — git config core.hooksPath returned no value
+//   hooks-path-wrong   — git config core.hooksPath != expected (set elsewhere)
+//   hook-file-missing  — expected hook file absent from working tree
+function classifyDoctorState(info) {
+  if (!info.hook_file_exists) return 'hook-file-missing';
+  if (info.current_hooks_path == null) return 'hooks-path-unset';
+  if (!info.matches) return 'hooks-path-wrong';
+  return 'aligned';
+}
+
 export function inspectHooksPath({ git = realGit } = {}) {
   const repoRoot = git.repoRoot();
   const expectedHooksDir = path.join(repoRoot, EXPECTED_HOOKS_PATH);
@@ -125,7 +177,7 @@ export function inspectHooksPath({ git = realGit } = {}) {
   const matches = current === EXPECTED_HOOKS_PATH;
   const hookFileExists = fs.existsSync(expectedHookFile);
   const hookFileExecutable = hookFileExists ? isExecutable(expectedHookFile) : false;
-  return {
+  const info = {
     repo_root: repoRoot,
     expected_hooks_path: EXPECTED_HOOKS_PATH,
     current_hooks_path: current,
@@ -134,6 +186,8 @@ export function inspectHooksPath({ git = realGit } = {}) {
     hook_file_exists: hookFileExists,
     hook_file_executable: hookFileExecutable,
   };
+  info.reason = classifyDoctorState(info);
+  return info;
 }
 
 function runCheck({ json, strict }) {
@@ -146,6 +200,7 @@ function runCheck({ json, strict }) {
       payload: {
         mode: 'check',
         ok: false,
+        severity: DOCTOR_SEVERITY.PREFLIGHT_DRIFT,
         error: `failed to read git state: ${err.message ?? err}`,
       },
       humanFail: (p) => `install-missiond-hooks check FAILED: ${p.error}`,
@@ -154,14 +209,16 @@ function runCheck({ json, strict }) {
   }
 
   const ok = info.matches && info.hook_file_exists;
+  const severity = ok ? DOCTOR_SEVERITY.OK : DOCTOR_SEVERITY.PREFLIGHT_DRIFT;
   const payload = {
     mode: 'check',
     ok,
+    severity,
+    preflight: 'core.hooksPath',
     strict,
     ...info,
-    advice: ok
-      ? null
-      : adviceFor(info),
+    advice: ok ? null : adviceFor(info),
+    install_command: ok ? null : 'node scripts/install-missiond-hooks.mjs --install',
   };
 
   emit({
@@ -172,7 +229,8 @@ function runCheck({ json, strict }) {
       `hook file ${p.expected_hook_file} present` +
       (p.hook_file_executable ? '' : ' (not marked executable; git still runs it via /bin/sh)'),
     humanFail: (p) =>
-      `install-missiond-hooks check DRIFT: core.hooksPath=${p.current_hooks_path ?? '<unset>'} ` +
+      `install-missiond-hooks check PREFLIGHT-DRIFT [${p.reason}]: ` +
+      `core.hooksPath=${p.current_hooks_path ?? '<unset>'} ` +
       `(expected ${p.expected_hooks_path}); ` +
       `hook file ${p.expected_hook_file} ${p.hook_file_exists ? 'present' : 'MISSING'}\n  ${p.advice}`,
   });
@@ -183,10 +241,13 @@ function runCheck({ json, strict }) {
 
 function adviceFor(info) {
   if (!info.hook_file_exists) {
-    return `Hook file ${info.expected_hook_file} is missing — restore it before enabling core.hooksPath.`;
+    return `Hook file ${info.expected_hook_file} is missing — restore it before enabling core.hooksPath. Do not run --install while the hook file is absent; the installer refuses in that state.`;
+  }
+  if (info.current_hooks_path == null) {
+    return `core.hooksPath is unset for this clone. Run \`node scripts/install-missiond-hooks.mjs --install\` (repo-local mutation only) to opt this clone in.`;
   }
   if (!info.matches) {
-    return `Run \`node scripts/install-missiond-hooks.mjs --install\` (or \`git config core.hooksPath ${info.expected_hooks_path}\`) to opt this clone in.`;
+    return `core.hooksPath is set to ${info.current_hooks_path}, expected ${info.expected_hooks_path}. Run \`node scripts/install-missiond-hooks.mjs --install\` to switch this clone over (writes --local config only).`;
   }
   return null;
 }
@@ -322,11 +383,11 @@ function emit({ json, payload, humanOk, humanFail }) {
 
 // --- fixtures -------------------------------------------------------------
 
-function makeFakeGit({ hooksPath, hookFileExists = true }) {
+function makeFakeGit({ hooksPath, repoRoot = REPO_ROOT }) {
   let stored = hooksPath;
   return {
     repoRoot() {
-      return REPO_ROOT;
+      return repoRoot;
     },
     getCoreHooksPath() {
       return stored;
@@ -337,53 +398,100 @@ function makeFakeGit({ hooksPath, hookFileExists = true }) {
     _peek() {
       return stored;
     },
-    _hookFileExists: hookFileExists,
   };
+}
+
+// Build a fake git adapter rooted at a temp directory so we can simulate the
+// "missing hook file" doctor state without touching the real working tree.
+// No disk writes: we simply point the adapter at a path where .githooks/
+// does not exist. fs.existsSync returns false there, exercising the
+// hook-file-missing branch deterministically.
+function makeFakeGitWithMissingHookFile({ hooksPath = EXPECTED_HOOKS_PATH } = {}) {
+  // Choose a path that is virtually guaranteed to be absent so the test
+  // remains hermetic. We never create or write to it.
+  const fakeRoot = path.join(REPO_ROOT, '__missiond_dry_fixture_root_does_not_exist__');
+  return makeFakeGit({ hooksPath, repoRoot: fakeRoot });
 }
 
 function runFixtures({ json }) {
   const failures = [];
 
-  // 1. inspect: matches + hook file exists -> ok
+  // The four required dry-fixture doctor states. Each fixture exercises
+  // inspectHooksPath against a fake git adapter and asserts the resulting
+  // reason code + matches flag, so the doctor surface stays mechanically
+  // verifiable without invoking real git.
+
+  // 1. doctor state: installed (matches + hook file present) -> reason 'aligned'
   {
     const git = makeFakeGit({ hooksPath: EXPECTED_HOOKS_PATH });
     const info = inspectHooksPath({ git });
-    if (!(info.matches && info.hook_file_exists)) {
+    if (!(info.matches && info.hook_file_exists && info.reason === 'aligned')) {
       failures.push({
-        name: 'inspect: matches + hook file present',
-        expected: { matches: true, hook_file_exists: true },
-        got: { matches: info.matches, hook_file_exists: info.hook_file_exists },
+        name: 'doctor state: installed (aligned)',
+        expected: { matches: true, hook_file_exists: true, reason: 'aligned' },
+        got: { matches: info.matches, hook_file_exists: info.hook_file_exists, reason: info.reason },
       });
     }
   }
 
-  // 2. inspect: unset core.hooksPath -> drift
+  // 2. doctor state: unset core.hooksPath -> reason 'hooks-path-unset'
   {
     const git = makeFakeGit({ hooksPath: null });
     const info = inspectHooksPath({ git });
-    if (info.matches !== false || info.current_hooks_path !== null) {
+    if (
+      info.matches !== false ||
+      info.current_hooks_path !== null ||
+      info.reason !== 'hooks-path-unset'
+    ) {
       failures.push({
-        name: 'inspect: unset core.hooksPath reports drift',
-        expected: { matches: false, current_hooks_path: null },
-        got: { matches: info.matches, current_hooks_path: info.current_hooks_path },
+        name: 'doctor state: unset core.hooksPath',
+        expected: { matches: false, current_hooks_path: null, reason: 'hooks-path-unset' },
+        got: {
+          matches: info.matches,
+          current_hooks_path: info.current_hooks_path,
+          reason: info.reason,
+        },
       });
     }
   }
 
-  // 3. inspect: wrong value reports drift with current value preserved
+  // 3. doctor state: wrong path (set elsewhere) -> reason 'hooks-path-wrong'
   {
     const git = makeFakeGit({ hooksPath: '.git/hooks' });
     const info = inspectHooksPath({ git });
-    if (info.matches !== false || info.current_hooks_path !== '.git/hooks') {
+    if (
+      info.matches !== false ||
+      info.current_hooks_path !== '.git/hooks' ||
+      info.reason !== 'hooks-path-wrong'
+    ) {
       failures.push({
-        name: 'inspect: wrong core.hooksPath reports drift',
-        expected: { matches: false, current_hooks_path: '.git/hooks' },
-        got: { matches: info.matches, current_hooks_path: info.current_hooks_path },
+        name: 'doctor state: wrong core.hooksPath',
+        expected: { matches: false, current_hooks_path: '.git/hooks', reason: 'hooks-path-wrong' },
+        got: {
+          matches: info.matches,
+          current_hooks_path: info.current_hooks_path,
+          reason: info.reason,
+        },
       });
     }
   }
 
-  // 4. install: from drift -> mutates exactly once and reports change
+  // 4. doctor state: missing hook file -> reason 'hook-file-missing' (takes
+  //    priority over hooks-path alignment because fixing the path while the
+  //    hook file is absent would just silently disable hooks)
+  {
+    const git = makeFakeGitWithMissingHookFile({ hooksPath: EXPECTED_HOOKS_PATH });
+    const info = inspectHooksPath({ git });
+    if (info.hook_file_exists !== false || info.reason !== 'hook-file-missing') {
+      failures.push({
+        name: 'doctor state: missing hook file',
+        expected: { hook_file_exists: false, reason: 'hook-file-missing' },
+        got: { hook_file_exists: info.hook_file_exists, reason: info.reason },
+      });
+    }
+  }
+
+  // 5. install: from drift -> mutates exactly once and reports change
   {
     const git = makeFakeGit({ hooksPath: '.git/hooks' });
     const result = performInstall({ git });
@@ -396,7 +504,7 @@ function runFixtures({ json }) {
     }
   }
 
-  // 5. install: from already-aligned -> no-op, ok=true changed=false
+  // 6. install: from already-aligned -> no-op, ok=true changed=false
   {
     const git = makeFakeGit({ hooksPath: EXPECTED_HOOKS_PATH });
     const result = performInstall({ git });
@@ -409,7 +517,7 @@ function runFixtures({ json }) {
     }
   }
 
-  // 6. install: from unset -> sets to .githooks
+  // 7. install: from unset -> sets to .githooks
   {
     const git = makeFakeGit({ hooksPath: null });
     const result = performInstall({ git });
@@ -422,7 +530,21 @@ function runFixtures({ json }) {
     }
   }
 
-  // 7. install: never touches global/system. The fake git has no
+  // 8. install: refuses when hook file is missing (must not silently arm a
+  //    no-op hooksPath; doctor advice already says so).
+  {
+    const git = makeFakeGitWithMissingHookFile({ hooksPath: null });
+    const result = performInstall({ git });
+    if (result.ok !== false || result.changed !== false || git._peek() !== null) {
+      failures.push({
+        name: 'install: refuses when hook file missing',
+        expected: { ok: false, changed: false, finalValue: null },
+        got: { ok: result.ok, changed: result.changed, finalValue: git._peek() },
+      });
+    }
+  }
+
+  // 9. install: never touches global/system. The fake git has no
   //    global/system surface; the real adapter passes --local explicitly.
   //    Here we assert the adapter signature: realGit.setCoreHooksPath uses
   //    --local form. Read the source string for the constant we control.
@@ -437,7 +559,49 @@ function runFixtures({ json }) {
     }
   }
 
-  // 8. fixture sanity: the real .githooks/pre-commit file ships in the repo
+  // 10. doctor adviceFor() emits the expected install-command shape for each
+  //     non-ok reason so the renderer / agents can rely on the surface text.
+  {
+    const adviceUnset = adviceFor({
+      hook_file_exists: true,
+      current_hooks_path: null,
+      matches: false,
+      expected_hooks_path: EXPECTED_HOOKS_PATH,
+      expected_hook_file: '.githooks/pre-commit',
+    });
+    const adviceWrong = adviceFor({
+      hook_file_exists: true,
+      current_hooks_path: '.git/hooks',
+      matches: false,
+      expected_hooks_path: EXPECTED_HOOKS_PATH,
+      expected_hook_file: '.githooks/pre-commit',
+    });
+    const adviceMissing = adviceFor({
+      hook_file_exists: false,
+      current_hooks_path: EXPECTED_HOOKS_PATH,
+      matches: true,
+      expected_hooks_path: EXPECTED_HOOKS_PATH,
+      expected_hook_file: '.githooks/pre-commit',
+    });
+    const wantInstallSnippet = 'node scripts/install-missiond-hooks.mjs --install';
+    const adviceOk =
+      typeof adviceUnset === 'string' && adviceUnset.includes(wantInstallSnippet) &&
+      typeof adviceWrong === 'string' && adviceWrong.includes(wantInstallSnippet) &&
+      typeof adviceMissing === 'string' && adviceMissing.includes('Hook file');
+    if (!adviceOk) {
+      failures.push({
+        name: 'doctor advice surfaces install command for each drift state',
+        expected: {
+          unset_includes: wantInstallSnippet,
+          wrong_includes: wantInstallSnippet,
+          missing_mentions_hook_file: true,
+        },
+        got: { adviceUnset, adviceWrong, adviceMissing },
+      });
+    }
+  }
+
+  // 11. fixture sanity: the real .githooks/pre-commit file ships in the repo
   {
     if (!fs.existsSync(EXPECTED_HOOK_FILE)) {
       failures.push({
@@ -448,18 +612,22 @@ function runFixtures({ json }) {
     }
   }
 
+  const FIXTURES_RUN = 11;
   const ok = failures.length === 0;
   const summary = {
     mode: 'dry-fixture',
     ok,
-    fixtures_run: 8,
+    fixtures_run: FIXTURES_RUN,
+    doctor_states_covered: ['installed', 'unset', 'wrong-path', 'missing-hook-file'],
     failures,
   };
 
   if (json) {
     console.log(JSON.stringify(summary, null, 2));
   } else if (ok) {
-    console.log('install-missiond-hooks fixtures OK (8/8)');
+    console.log(
+      `install-missiond-hooks fixtures OK (${FIXTURES_RUN}/${FIXTURES_RUN}) — doctor states: installed, unset, wrong-path, missing-hook-file`,
+    );
   } else {
     console.error(`install-missiond-hooks fixtures FAILED — ${failures.length} failure(s)`);
     for (const f of failures) console.error(JSON.stringify(f, null, 2));

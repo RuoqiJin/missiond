@@ -4,7 +4,7 @@
 
 (task-contract-schema missiond.task-contract.v1
   :version "v1"
-  :status "code-aligned initial — checker + renderer + verifier + scope-guard + hooks-installer scripts implemented"
+  :status "code-aligned — checker + renderer + verifier + scope-guard + hooks-installer scripts implemented; v2 default-on hooks doctor preflight surfaced in renderer + installer (wave22-01)"
   :checker "scripts/check-task-contract.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :verifier "scripts/verify-task-contract.mjs"
@@ -54,11 +54,13 @@
        "pre-commit scoped-index guard line `node scripts/task-scope-guard.mjs --task <task.lisp> --mode staged` immediately after the git-add step when :commit :required is true"
        "MISSIOND_TASK_CONTRACT=<task.lisp> env-var prefix on the rendered git commit line when :commit :required is true (mirrors the .githooks/pre-commit activation contract)"
        "verify-task-contract command line in the Commit section when :commit :required is true"
-       "literal '使用 agent-team提高效率' rendered exactly once in a 'Dispatch Note' section when :dispatch-strategy is agent-team"]
+       "literal '使用 agent-team提高效率' rendered exactly once in a 'Dispatch Note' section when :dispatch-strategy is agent-team"
+       "default-on hooks-doctor preflight block immediately before the staged-guard / git-add commands when :commit :required is true; emits the read-only `node scripts/check-missiond-hooks.mjs --json` line and the explicit `node scripts/install-missiond-hooks.mjs --install` opt-in line; the renderer never mutates git config and never substitutes for the operator running --install"]
     :backward-compatibility
       ["existing fields (kind/status/owner/dispatch_strategy/depends_on/Goal/Ownership/Must Not Touch/Requirements/Acceptance Commands/Commit/Report) keep their prior wording and ordering"
        "new sections (Dispatch Note, Shared Memory, Report Contract, verify-task-contract command) are additive and conditional"
-       "scoped commit guard v2 (task-scope-guard --mode staged + MISSIOND_TASK_CONTRACT prefix) extends the existing Commit section in place; renders only when :commit :required is true and never replaces the git add or git commit lines"]
+       "scoped commit guard v2 (task-scope-guard --mode staged + MISSIOND_TASK_CONTRACT prefix) extends the existing Commit section in place; renders only when :commit :required is true and never replaces the git add or git commit lines"
+       "default-on hooks-doctor preflight block (wave22-01) extends the Commit section in place above the existing git-add / staged-guard / git-commit fenced block; renders only when :commit :required is true; never mutates git config; only adds doctor + opt-in install lines"]
     :non-goal "renderer does not invent scope, acceptance, or commit policy; missing fields are checker errors")
 
   (verifier-contract
@@ -100,30 +102,50 @@
        :read-only true))
 
   (hooks-installer-contract
-    :purpose "Replace tribal-knowledge `git config core.hooksPath .githooks` with an explicit, repo-local installer + doctor flow so every clone can opt into the task-scope-guard pre-commit deterministically."
+    :purpose "Replace tribal-knowledge `git config core.hooksPath .githooks` with an explicit, repo-local installer + default-on read-only doctor flow so every clone can opt into the task-scope-guard pre-commit deterministically. v2 (wave22-01) promotes the doctor to a default-on preflight: drift is reported as a `preflight-drift` problem with a concrete install command, but git config is NEVER mutated by the doctor or the renderer; only `--install` flips it."
     :scripts
       (:installer "scripts/install-missiond-hooks.mjs"
        :doctor "scripts/check-missiond-hooks.mjs")
     :flags [--check --install --json --dry-fixture --strict]
+    :default-mode "--check (default-on doctor when no mode flag is supplied to the installer; check-missiond-hooks.mjs always runs --check)"
     :modes
       [(check
          "read-only doctor: prints whether git core.hooksPath equals .githooks and whether .githooks/pre-commit exists"
-         "exits 0 by default even on drift; pair with --strict to make drift a hard non-zero exit")
+         "JSON payload includes :severity (ok | preflight-drift), :reason (aligned | hooks-path-unset | hooks-path-wrong | hook-file-missing), :advice, and :install_command for non-ok states"
+         "exits 0 by default even on drift; pair with --strict to make drift a hard non-zero exit"
+         "DEFAULT mode when install-missiond-hooks.mjs is invoked with no mode flag (default-on doctor v2)")
        (install
          "performs exactly one mutation: `git config --local core.hooksPath .githooks`"
+         "refuses (ok=false changed=false) when .githooks/pre-commit is missing — does not silently arm a no-op hooksPath"
          "no-op + exit 0 when already aligned; never touches --global or --system git config")
        (dry-fixture
-         "self-contained fixtures (no git invoked, no disk writes) covering inspect + install state machine + adapter --local enforcement")]
+         "self-contained fixtures (no git invoked, no disk writes) covering the four required doctor states (installed / unset / wrong-path / missing-hook-file) plus the install state machine, the install-refuses-on-missing-hook-file guard, the adapter --local enforcement, and the adviceFor() install-command surface")]
+    :doctor-states
+      [(aligned "core.hooksPath==.githooks AND .githooks/pre-commit present")
+       (hooks-path-unset "git config core.hooksPath returned no value (severity preflight-drift)")
+       (hooks-path-wrong "git config core.hooksPath != .githooks (severity preflight-drift)")
+       (hook-file-missing ".githooks/pre-commit absent in working tree (severity preflight-drift; install refuses until restored)")]
     :doctor-alias
       (:script "scripts/check-missiond-hooks.mjs"
        :delegates-to "scripts/install-missiond-hooks.mjs --check"
        :rejects-mutating-flags ["--install" "--dry-fixture"]
-       :reason "Keeps the agent-facing doctor predictable: doctor never mutates, ever.")
+       :default-on true
+       :reason "Keeps the agent-facing doctor predictable and default-on: doctor never mutates, ever, and is the canonical preflight surface rendered into commit-required task briefs.")
+    :renderer-integration
+      (:section "Commit"
+       :placement "above the existing git-add / staged-guard / git-commit fenced block, only when :commit :required is true"
+       :emits ["node scripts/check-missiond-hooks.mjs --json"
+               "node scripts/install-missiond-hooks.mjs --install"]
+       :mutating-boundary "renderer never invokes git config; the install line is rendered as an explicit operator/agent action gated on doctor drift"
+       :rationale "Surfaces core.hooksPath as a default preflight expectation in every commit-required brief; agents see the doctor command up front and decide whether to opt this clone in.")
     :scope
       ["repo-local only: never enables hooks globally"
        "single mutation in --install mode: `git config --local core.hooksPath .githooks`"
-       "no other writes: never touches files outside .git/config; never runs git add/commit/reset/checkout/stash/push/merge/rebase"]
+       "no other writes: never touches files outside .git/config; never runs git add/commit/reset/checkout/stash/push/merge/rebase"
+       "doctor + renderer never mutate git config under any circumstance"]
     :acceptance
-      ["node scripts/install-missiond-hooks.mjs --dry-fixture exits 0 with all 8 fixtures green"
-       "node scripts/install-missiond-hooks.mjs --check --json prints the current core.hooksPath + hook-file presence"
-       "node scripts/check-missiond-hooks.mjs --json equals --check delegation output"]))
+      ["node scripts/install-missiond-hooks.mjs --dry-fixture exits 0 with all 11 fixtures green and reports doctor_states_covered = [installed unset wrong-path missing-hook-file]"
+       "node scripts/install-missiond-hooks.mjs (no mode flag) is equivalent to --check (default-on doctor v2)"
+       "node scripts/install-missiond-hooks.mjs --check --json prints the current core.hooksPath + hook-file presence + severity + reason + install_command"
+       "node scripts/check-missiond-hooks.mjs --json equals --check delegation output and includes the v2 severity + reason fields"
+       "rendered commit-required briefs include the hooks-doctor preflight block above the staged-guard fenced block"]))

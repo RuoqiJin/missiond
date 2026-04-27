@@ -169,6 +169,7 @@ function renderTask(task, sourcePath) {
   if (task.commit.required) {
     lines.push('After acceptance, commit only files inside the declared write scope.');
     lines.push('');
+    renderHooksDoctorPreflight(lines);
     lines.push('Stage just the declared scope, run the pre-commit scoped-index guard, then commit:');
     lines.push('');
     lines.push('```bash');
@@ -181,7 +182,7 @@ function renderTask(task, sourcePath) {
     lines.push(`Scope check: \`${task.commit.scopeCheck ?? 'write-scope-only'}\`.`);
     lines.push('');
     lines.push(
-      'The `task-scope-guard --mode staged` step blocks the commit before the index is locked in if any staged path falls outside `:write-scope` or matches `:must-not-touch`. The `MISSIOND_TASK_CONTRACT` env var activates the same check from the shared `.githooks/pre-commit` hook (enable per clone with `git config core.hooksPath .githooks`).',
+      'The `task-scope-guard --mode staged` step blocks the commit before the index is locked in if any staged path falls outside `:write-scope` or matches `:must-not-touch`. The `MISSIOND_TASK_CONTRACT` env var activates the same check from the shared `.githooks/pre-commit` hook (enable per clone with `node scripts/install-missiond-hooks.mjs --install`, equivalent to `git config core.hooksPath .githooks`).',
     );
     lines.push('');
     renderVerifyTaskContract(lines, task, relSource);
@@ -236,6 +237,23 @@ function renderVerifyTaskContract(lines, task, relSource) {
   lines.push('');
   lines.push('```bash');
   lines.push(`node scripts/verify-task-contract.mjs ${relSource}`);
+  lines.push('```');
+  lines.push('');
+}
+
+// Default-on hooks doctor preflight v2: surface the read-only doctor and the
+// explicit (opt-in) installer command BEFORE the staged guard / commit
+// commands so dispatched agents see core.hooksPath as a first-class
+// preflight expectation. The renderer never mutates git config; it just
+// emits the doctor command. Only `install-missiond-hooks.mjs --install` may
+// flip core.hooksPath, and that is left to the operator/agent to run
+// explicitly.
+function renderHooksDoctorPreflight(lines) {
+  lines.push('Preflight: confirm the repo-local `core.hooksPath` doctor is green so the shared `.githooks/pre-commit` hook also enforces the staged guard. Drift here is a preflight problem, not a hard error — the doctor is read-only; only `--install` mutates git config.');
+  lines.push('');
+  lines.push('```bash');
+  lines.push('node scripts/check-missiond-hooks.mjs --json   # read-only doctor; reports preflight-drift on unset/wrong path');
+  lines.push('node scripts/install-missiond-hooks.mjs --install   # only run when the doctor reports drift; writes --local config only');
   lines.push('```');
   lines.push('');
 }
