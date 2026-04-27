@@ -181,8 +181,8 @@ function renderTask(task, sourcePath) {
   renderList(lines, 'Must Not Touch', task.mustNotTouch, 'Forbidden files');
   renderNumbered(lines, 'Requirements', task.requirements);
   renderCommands(lines, 'Acceptance Commands', task.acceptance);
-  if (sharedMemoryPath) renderSharedMemory(lines, task, sharedMemoryPath);
-  if (reportContractPath) renderReportContract(lines, task, reportContractPath);
+  if (sharedMemoryPath) renderSharedMemory(lines, sharedMemoryPath);
+  if (reportContractPath) renderReportContract(lines, reportContractPath);
   if (sessionTracePath) renderSessionTrace(lines, task, sessionTracePath);
   lines.push('## Commit');
   lines.push('');
@@ -205,7 +205,7 @@ function renderTask(task, sourcePath) {
       'The `task-scope-guard --mode staged` step blocks the commit before the index is locked in if any staged path falls outside `:write-scope` or matches `:must-not-touch`. The `MISSIOND_TASK_CONTRACT` env var activates the same check from the shared `.githooks/pre-commit` hook (enable per clone with `node scripts/install-missiond-hooks.mjs --install`, equivalent to `git config core.hooksPath .githooks`).',
     );
     lines.push('');
-    renderVerifyTaskContract(lines, task, relSource);
+    renderVerifyTaskContract(lines, relSource);
   } else {
     lines.push('No commit required by contract.');
     lines.push('');
@@ -218,7 +218,7 @@ function renderTask(task, sourcePath) {
   return `${lines.join('\n')}\n`;
 }
 
-function renderSharedMemory(lines, task, sharedMemoryPath) {
+function renderSharedMemory(lines, sharedMemoryPath) {
   lines.push('## Shared Memory');
   lines.push('');
   lines.push(`Coordination ledger: \`${sharedMemoryPath}\` (schema \`missiond.shared-memory.v1\`).`);
@@ -235,7 +235,7 @@ function renderSharedMemory(lines, task, sharedMemoryPath) {
   lines.push('');
 }
 
-function renderReportContract(lines, task, reportContractPath) {
+function renderReportContract(lines, reportContractPath) {
   lines.push('## Report Contract');
   lines.push('');
   lines.push(`Expected machine-readable report: \`${reportContractPath}\` (schema \`missiond.report-contract.v1\`).`);
@@ -280,7 +280,7 @@ function renderSessionTrace(lines, task, sessionTracePath) {
   lines.push('');
 }
 
-function renderVerifyTaskContract(lines, task, relSource) {
+function renderVerifyTaskContract(lines, relSource) {
   lines.push('Verify the commit against this contract (read-only, post-commit):');
   lines.push('');
   lines.push('```bash');
