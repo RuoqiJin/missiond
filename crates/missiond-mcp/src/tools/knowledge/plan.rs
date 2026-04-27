@@ -904,6 +904,25 @@ fn build_properties() -> Value {
         "[execute] (wave-23 / task 05) when `true`, malformed `session_trace_path` shapes (empty, NUL byte, ASCII control chars) fail BEFORE dispatch with a structured `INVALID_PARAM` error so a typo cannot silently shadow the trace ledger. Default `false` preserves the conservative wave-15..22 posture: malformed paths surface a non-fatal `trace_path_warning` field on the response and dispatch proceeds. Independent of the wave-23 / task 04 `trace_warning` field which the consumer (`mission_execution`) emits when an APPEND I/O fails — this preflight only validates the shape of the propagated path. Strict shape: only the bool form is accepted; literal string `\"true\"` is ignored.",
     ));
 
+    // wave-24 / task 04 — dry-run-only router recommendation surface.
+    // The recommendation block is INFORMATIONAL: the runtime dispatch
+    // path is unchanged regardless of mode. `applied=false` is hard-
+    // coded on every emitted block. This task ships ONLY `off` (default,
+    // no block emitted) and `dry_run` (compute + emit block); any
+    // future `apply` / `auto` mode is intentionally rejected with
+    // structured `INVALID_PARAM` so a typo cannot silently route a
+    // recommendation through an unimplemented surface.
+    p.insert("router_policy_mode".into(), prop_enum(
+        "string",
+        "[execute] (wave-24 / task 04) router-policy advisory recommendation mode. `off` (default) emits NO recommendation block — response is byte-identical to wave-15..23. `dry_run` parses the router-policy v1 file (`router_policy_path`, default `.missiond/router/router-policy-v1.lisp`), evaluates each rule's `:when` predicates against the live execute context (kind / dispatch_strategy / owner / status / path-glob over `owned_files`), and emits a `router_recommendation` block on the response with `status` ∈ {computed, rejected, error}, `recommended_backend`, `confidence` ∈ {high, medium, low}, `reasons[]`, `policy_source`, and `applied=false` (hard-coded literal — the runtime dispatch path is NEVER altered). `apply` / `auto` / any other value returns a structured `INVALID_PARAM` error BEFORE plan lookup so a typo cannot silently route through an unimplemented surface. Cross-wave invariant: a policy missing `:dry-run-only true` or declaring `:runtime-replacement true` emits `status=\"rejected\"` (the recommendation block is still surfaced, with the fallback backend `claudecode`). The daemon NEVER shells out to scripts/recommend-task-backend.mjs — this is a pure Rust deterministic mirror of that algorithm.",
+        &["off", "dry_run"],
+    ));
+
+    p.insert("router_policy_path".into(), prop(
+        "string",
+        "[execute] (wave-24 / task 04) optional path to the router-policy v1 Lisp file consumed when `router_policy_mode=\"dry_run\"`. Absolute or repo-relative (resolved verbatim against the daemon's working directory). Default `.missiond/router/router-policy-v1.lisp` (the wave24-01 seed). Ignored when `router_policy_mode=\"off\"` (the default) — no file I/O happens in that path. Read failures, parse errors, and unknown predicate heads surface on the recommendation block with `status=\"error\"`; cross-wave-invariant violations (`:dry-run-only false` or `:runtime-replacement true`) surface with `status=\"rejected\"`. The runtime dispatch path is unaffected in every case.",
+    ));
+
     Value::Object(p)
 }
 

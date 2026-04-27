@@ -6217,6 +6217,20 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
+    // wave-24 / task 04 — pre-flight `router_policy_mode` validation.
+    // Default `off` ⇒ byte-compatible with wave-15..23 (no recommendation
+    // block emitted). `dry_run` ⇒ compute an advisory router recommendation
+    // block AFTER the dispatch path resolves; the recommendation NEVER
+    // alters target / dispatch_strategy / workstation_dispatch /
+    // auto_spawn / evidence — `applied` is hard-coded `false`. Any other
+    // value (including `apply` / `auto`) returns INVALID_PARAM here, BEFORE
+    // any plan lookup, so a typo cannot silently route a recommendation
+    // through a runtime path that doesn't exist.
+    let router_policy_mode = match router_policy_dry_run::parse_router_policy_mode(args) {
+        Ok(m) => m,
+        Err(err) => return Ok(err),
+    };
+
     // wave-18 / task 06 — pre-flight `infer_plan_fields` validation. Runs
     // BEFORE the plan lookup so a typo (`infer_plan_fields="aply"`) fails
     // fast instead of after a DB read.
@@ -6726,7 +6740,22 @@ async fn action_execute(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let final_result = attach_inference_block(final_result, inference_block);
     let final_result = attach_apply_gate_block(final_result, apply_gate_block);
-    Ok(attach_persisted_apply_block(final_result, persisted_apply_block))
+    let final_result = attach_persisted_apply_block(final_result, persisted_apply_block);
+
+    // wave-24 / task 04 — splice the dry-run-only router recommendation
+    // block onto the response. No-op when `router_policy_mode=off` (the
+    // default) so wave-15..23 callers observe byte-identical behaviour.
+    // The recommendation is INFORMATIONAL only — `applied` is hard-coded
+    // `false` and the block sits alongside the existing dispatch fields
+    // without altering them.
+    let final_result = router_policy_dry_run::attach_router_recommendation_block(
+        final_result,
+        router_policy_mode,
+        args,
+        &resolved,
+        &plan,
+    );
+    Ok(final_result)
 }
 
 /// wave-21 / task 04 — compute the workstation proposal bundle for this
@@ -9786,6 +9815,944 @@ async fn resolve_project_root(
              or absolute `cwd=<abs path>`); plan resolver does not fall back to process cwd"
         )),
         Err(e) => Err(anyhow!(e.to_string())),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// wave-24 / task 04 — router-policy dry-run surface.
+//
+// Adds an OPTIONAL, INFORMATIONAL recommendation block to
+// `mission_plan(action=execute)` responses. The block mirrors the wave24-03
+// Node CLI (`scripts/recommend-task-backend.mjs`) algorithm: parse the
+// router-policy v1 Lisp file, evaluate each rule's `:when` predicates against
+// the live execute context (kind / dispatch_strategy / owner / status /
+// path-glob over `owned_files`), pick the lowest-priority matching rule, and
+// emit a structured recommendation. `applied` is hard-coded `false` —
+// router output is advisory only and the runtime dispatch path stays
+// unchanged. Any policy that fails the cross-wave invariants
+// (`:dry-run-only true` AND `:runtime-replacement false`) is reported with
+// `status="rejected"` so the operator is loud about the misconfiguration.
+//
+// Implemented as a pure Rust deterministic helper — no shell-out, no Node
+// spawn, no `scripts/` invocation. The Lisp parser is purpose-built for the
+// tight schema (small, exhaustive, fail-closed on unknown predicate heads).
+//
+// Confidence policy: the wave24-03 CLI takes an optional `--trace-index`
+// JSON for `high` confidence based on event counts. wave24-04 deliberately
+// skips that input (no trace-index loader in the daemon — keep this surface
+// pure and additive). The mapping here:
+//   * matched -> `medium`
+//   * fallback / no-match -> `low` with reason `insufficient_trace_history`
+// This is option (a) from the brief; it keeps the daemon helper simple
+// without losing the explainability fields.
+// ---------------------------------------------------------------------------
+mod router_policy_dry_run {
+    use super::ResolvedExec;
+    use missiond_core::types::Plan;
+    use missiond_mcp::tools::{error_codes, ToolContent, ToolError, ToolResult};
+    use serde_json::{json, Value};
+    use std::path::{Path, PathBuf};
+
+    /// Default policy file. Mirrors the wave24-01 seed location and the
+    /// wave24-03 CLI's documented default. Resolved relative to the
+    /// process CWD when the caller passes only `router_policy_mode=dry_run`
+    /// without `router_policy_path`.
+    pub(super) const DEFAULT_POLICY_PATH: &str = ".missiond/router/router-policy-v1.lisp";
+
+    /// Schema label embedded in every emitted recommendation block. Mirrors
+    /// the wave24-03 CLI so downstream consumers can verify the wire shape.
+    pub(super) const SCHEMA: &str = "missiond.router-recommendation.v0";
+
+    /// Fallback backend used when no rule matches. The wave24-03 CLI
+    /// surfaces the exact same value + reason — keeping these literals in
+    /// sync is part of the cross-wave contract.
+    pub(super) const FALLBACK_BACKEND: &str = "claudecode";
+    pub(super) const FALLBACK_REASON: &str = "insufficient_trace_history";
+
+    /// Backend enum (mirrors wave24-01 schema). Anything outside this set
+    /// is surfaced verbatim in the recommendation block but flagged as
+    /// `status="rejected"` (the wave24-01 checker rejects unknown backends
+    /// at validation time; the daemon re-checks defensively).
+    const KNOWN_BACKENDS: &[&str] = &[
+        "claudecode",
+        "missiond-llm-router",
+        "deterministic-checker",
+        "patch-worker",
+        "verifier-worker",
+    ];
+
+    /// Recognised top-level `router_policy_mode` values.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub(super) enum RouterPolicyMode {
+        /// Default. The recommendation block is NOT emitted; the response
+        /// is byte-identical to the wave-15..23 baseline.
+        Off,
+        /// Compute the recommendation and emit `applied=false`. Never
+        /// changes target / dispatch_strategy / workstation_dispatch.
+        DryRun,
+    }
+
+    /// Parse the optional `router_policy_mode` arg. Returns `Off` when the
+    /// arg is absent or the literal string `"off"`. Returns a structured
+    /// `INVALID_PARAM` error for any other value (including `apply`,
+    /// `auto`, and unknown strings) so a typo cannot silently route the
+    /// recommendation through an unimplemented surface.
+    pub(super) fn parse_router_policy_mode(
+        args: &Value,
+    ) -> Result<RouterPolicyMode, ToolResult> {
+        let raw = match args.get("router_policy_mode") {
+            None | Some(Value::Null) => return Ok(RouterPolicyMode::Off),
+            Some(v) => v,
+        };
+        let s = match raw.as_str() {
+            Some(s) => s.trim(),
+            None => {
+                return Err(ToolResult::structured_error(
+                    ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        "router_policy_mode must be a string",
+                    )
+                    .with_suggestion("expected one of: \"off\", \"dry_run\""),
+                ));
+            }
+        };
+        match s {
+            "" | "off" => Ok(RouterPolicyMode::Off),
+            "dry_run" => Ok(RouterPolicyMode::DryRun),
+            other => Err(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!(
+                        "router_policy_mode `{}` is not supported in this surface (wave24-04 only ships `off` and `dry_run`)",
+                        other
+                    ),
+                )
+                .with_suggestion(
+                    "expected one of: \"off\" (default; no recommendation block) or \"dry_run\" (informational block, applied=false)",
+                ),
+            )),
+        }
+    }
+
+    /// Splice the recommendation block onto a successful response. No-op
+    /// when `mode=Off` so callers that never opted in observe the
+    /// wave-15..23 byte-shape. Errors are also passed through unchanged
+    /// — we never decorate a structured error with the recommendation
+    /// (the operator needs the error path uncluttered).
+    pub(super) fn attach_router_recommendation_block(
+        mut result: ToolResult,
+        mode: RouterPolicyMode,
+        args: &Value,
+        resolved: &ResolvedExec,
+        plan: &Plan,
+    ) -> ToolResult {
+        if matches!(mode, RouterPolicyMode::Off) {
+            return result;
+        }
+        if result.is_error.unwrap_or(false) {
+            return result;
+        }
+        let block = compute_recommendation(args, resolved, plan);
+        let Some(ToolContent::Text { text }) = result.content.first_mut() else {
+            return result;
+        };
+        let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+            return result;
+        };
+        if let Some(map) = value.as_object_mut() {
+            // Never overwrite a pre-existing block — preserves any forward-
+            // compatible attachment a downstream layer may add.
+            map.entry("router_recommendation".to_string()).or_insert(block);
+        }
+        *text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.clone());
+        result
+    }
+
+    /// Pure projection of the execute context into the predicate input.
+    /// Mirrors the wave24-03 CLI's task-projection: the live execute
+    /// `args` + resolved dispatch + plan status are treated like a
+    /// task-contract for predicate matching.
+    #[derive(Debug, Clone, Default)]
+    struct PredicateContext {
+        kind: String,
+        dispatch_strategy: String,
+        owner: String,
+        status: String,
+        write_scope: Vec<String>,
+    }
+
+    fn project_context(args: &Value, resolved: &ResolvedExec, plan: &Plan) -> PredicateContext {
+        let kind = arg_string(args, "kind").unwrap_or_default();
+        // dispatch_strategy: prefer the resolved value (which already
+        // reflects explicit_arg > plan_hint > parallelism > default
+        // precedence). The wave24-03 CLI projects from the task contract
+        // value; here the resolved value IS the live equivalent.
+        let dispatch_strategy = resolved.dispatch_strategy.to_string();
+        let owner = arg_string(args, "owner").unwrap_or_default();
+        let status = arg_string(args, "status")
+            .unwrap_or_else(|| plan.status.as_str().to_string());
+        let write_scope = arg_string_array(args, "owned_files");
+        PredicateContext {
+            kind,
+            dispatch_strategy,
+            owner,
+            status,
+            write_scope,
+        }
+    }
+
+    fn arg_string(args: &Value, key: &str) -> Option<String> {
+        args.get(key)
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    fn arg_string_array(args: &Value, key: &str) -> Vec<String> {
+        match args.get(key) {
+            Some(Value::Array(arr)) => arr
+                .iter()
+                .filter_map(|v| v.as_str())
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            Some(Value::String(s)) if !s.trim().is_empty() => {
+                // Tolerate single-string-as-array (mirrors many of the
+                // wave-15+ workstation-dispatch knobs).
+                vec![s.trim().to_string()]
+            }
+            _ => Vec::new(),
+        }
+    }
+
+    /// Top-level entry: read + parse the policy, evaluate, and project
+    /// the response block. Always returns a serializable JSON object;
+    /// never panics; surfaces I/O / parse / invariant failures via the
+    /// `status` field (`computed` / `rejected` / `error`).
+    fn compute_recommendation(args: &Value, resolved: &ResolvedExec, plan: &Plan) -> Value {
+        let policy_path_input = arg_string(args, "router_policy_path")
+            .unwrap_or_else(|| DEFAULT_POLICY_PATH.to_string());
+        let resolved_path = resolve_policy_path(&policy_path_input);
+        let raw = match std::fs::read_to_string(&resolved_path) {
+            Ok(s) => s,
+            Err(e) => return error_block(&policy_path_input, &format!("read failed: {}", e)),
+        };
+        let policy = match parse_router_policy(&raw) {
+            Ok(p) => p,
+            Err(msg) => return error_block(&policy_path_input, &msg),
+        };
+        if !policy.dry_run_only {
+            return rejected_block(
+                &policy_path_input,
+                "policy missing :dry-run-only true (cross-wave invariant: router output is advisory only)",
+            );
+        }
+        if policy.runtime_replacement {
+            return rejected_block(
+                &policy_path_input,
+                "policy declares :runtime-replacement true (cross-wave invariant: router output is advisory only)",
+            );
+        }
+        let ctx = project_context(args, resolved, plan);
+        let mut matched: Vec<MatchedRule> = Vec::new();
+        for rule in &policy.rules {
+            if evaluate_clause(&rule.when, &ctx).is_ok() {
+                matched.push(MatchedRule {
+                    id: rule.id.clone(),
+                    priority: rule.priority,
+                    reasoning: rule.reasoning.clone(),
+                });
+            }
+        }
+        // Rules already sorted by priority ascending — the parser does
+        // this once on construction.
+        if matched.is_empty() {
+            return computed_block(
+                &policy_path_input,
+                FALLBACK_BACKEND,
+                "low",
+                vec![format!("fallback (no rule matched): {}", FALLBACK_REASON)],
+            );
+        }
+        let winner = &matched[0];
+        let winner_rule = policy
+            .rules
+            .iter()
+            .find(|r| r.id == winner.id)
+            .expect("winner id must be present in policy.rules");
+        let backend = winner_rule.backend.clone();
+        let mut reasons: Vec<String> = matched
+            .iter()
+            .map(|m| {
+                format!(
+                    "matched rule {} (priority {}): {}",
+                    m.id, m.priority, m.reasoning
+                )
+            })
+            .collect();
+        // Surface unknown backend defensively even though the wave24-01
+        // checker already rejects this — the operator should see the
+        // mismatch loud.
+        if !KNOWN_BACKENDS.iter().any(|b| *b == backend) {
+            reasons.push(format!(
+                "warning: matched backend `{}` is not in the known v1 enum",
+                backend
+            ));
+        }
+        computed_block(&policy_path_input, &backend, "medium", reasons)
+    }
+
+    fn resolve_policy_path(input: &str) -> PathBuf {
+        let p = Path::new(input);
+        if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            // The daemon runs out of the repo root in production; in
+            // tests CWD points at the crate dir which still resolves
+            // correctly because the policy path includes `.missiond/`.
+            // Falling back to verbatim `input` here keeps the helper
+            // free of repo-root-detection logic.
+            PathBuf::from(input)
+        }
+    }
+
+    fn error_block(policy_source: &str, message: &str) -> Value {
+        json!({
+            "applied": false,
+            "confidence": "low",
+            "policy_source": policy_source,
+            "reasons": [format!("error: {}", message)],
+            "recommended_backend": FALLBACK_BACKEND,
+            "schema": SCHEMA,
+            "status": "error",
+        })
+    }
+
+    fn rejected_block(policy_source: &str, message: &str) -> Value {
+        json!({
+            "applied": false,
+            "confidence": "low",
+            "policy_source": policy_source,
+            "reasons": [format!("rejected: {}", message)],
+            "recommended_backend": FALLBACK_BACKEND,
+            "schema": SCHEMA,
+            "status": "rejected",
+        })
+    }
+
+    fn computed_block(
+        policy_source: &str,
+        backend: &str,
+        confidence: &str,
+        reasons: Vec<String>,
+    ) -> Value {
+        json!({
+            "applied": false,
+            "confidence": confidence,
+            "policy_source": policy_source,
+            "reasons": reasons,
+            "recommended_backend": backend,
+            "schema": SCHEMA,
+            "status": "computed",
+        })
+    }
+
+    // ---- predicate AST + evaluator -----------------------------------
+
+    #[derive(Debug, Clone)]
+    pub(super) enum Clause {
+        Kind(String),
+        DispatchStrategy(String),
+        Owner(String),
+        Status(String),
+        PathGlob(String),
+        Any(Vec<Clause>),
+        All(Vec<Clause>),
+    }
+
+    fn evaluate_clause(clause: &Clause, ctx: &PredicateContext) -> Result<(), &'static str> {
+        match clause {
+            Clause::Kind(v) => {
+                if &ctx.kind == v {
+                    Ok(())
+                } else {
+                    Err("kind mismatch")
+                }
+            }
+            Clause::DispatchStrategy(v) => {
+                if &ctx.dispatch_strategy == v {
+                    Ok(())
+                } else {
+                    Err("dispatch_strategy mismatch")
+                }
+            }
+            Clause::Owner(v) => {
+                if &ctx.owner == v {
+                    Ok(())
+                } else {
+                    Err("owner mismatch")
+                }
+            }
+            Clause::Status(v) => {
+                if &ctx.status == v {
+                    Ok(())
+                } else {
+                    Err("status mismatch")
+                }
+            }
+            Clause::PathGlob(pat) => {
+                let re = glob_to_regex(pat);
+                let any = ctx.write_scope.iter().any(|p| re.is_match(p));
+                if any {
+                    Ok(())
+                } else {
+                    Err("path-glob no match")
+                }
+            }
+            Clause::All(children) => {
+                if children.is_empty() {
+                    return Err("empty all");
+                }
+                for c in children {
+                    evaluate_clause(c, ctx)?;
+                }
+                Ok(())
+            }
+            Clause::Any(children) => {
+                if children.is_empty() {
+                    return Err("empty any");
+                }
+                let mut last: Result<(), &'static str> = Err("any: no child matched");
+                for c in children {
+                    if evaluate_clause(c, ctx).is_ok() {
+                        return Ok(());
+                    }
+                    last = Err("any: no child matched");
+                }
+                last
+            }
+        }
+    }
+
+    /// Minimal glob-to-regex shim. Mirrors the wave24-03 CLI / scripts/lib
+    /// shape: `**` matches any sequence including `/`; `*` matches any
+    /// non-`/` sequence; `?` matches a single non-`/` char. Other regex
+    /// metacharacters are escaped. Inputs and candidates are normalised
+    /// to forward slashes and stripped of leading `./` / `/`.
+    pub(super) struct GlobRegex {
+        pattern: String,
+    }
+
+    impl GlobRegex {
+        fn is_match(&self, candidate: &str) -> bool {
+            let candidate = normalize_path(candidate);
+            // Tiny custom matcher (no regex crate dependency added). We
+            // implement the predicate via a recursive descent over the
+            // pattern. The pattern shape is small and exhaustive; this is
+            // enough for path-glob predicates.
+            glob_match(&self.pattern, &candidate)
+        }
+    }
+
+    fn glob_to_regex(pattern: &str) -> GlobRegex {
+        GlobRegex {
+            pattern: normalize_path(pattern),
+        }
+    }
+
+    fn normalize_path(p: &str) -> String {
+        let mut s = p.replace('\\', "/");
+        if let Some(stripped) = s.strip_prefix("./") {
+            s = stripped.to_string();
+        }
+        while let Some(stripped) = s.strip_prefix('/') {
+            s = stripped.to_string();
+        }
+        s
+    }
+
+    /// Recursive matcher: returns true iff `pattern` matches all of
+    /// `candidate` from start to end. Supports `**`, `*`, `?` per the
+    /// shared glob shape. Iterative-style with explicit indices to keep
+    /// the complexity bounded (no backtracking blowup on pathological
+    /// inputs because the patterns we accept are small and well-formed).
+    fn glob_match(pattern: &str, candidate: &str) -> bool {
+        let p: Vec<char> = pattern.chars().collect();
+        let c: Vec<char> = candidate.chars().collect();
+        glob_match_inner(&p, 0, &c, 0)
+    }
+
+    fn glob_match_inner(p: &[char], pi: usize, c: &[char], ci: usize) -> bool {
+        let mut pi = pi;
+        let mut ci = ci;
+        loop {
+            if pi >= p.len() {
+                return ci >= c.len();
+            }
+            let pc = p[pi];
+            if pc == '*' {
+                if pi + 1 < p.len() && p[pi + 1] == '*' {
+                    // `**` matches any sequence including `/`. Try every
+                    // possible split. Skip a following `/` so `**/foo`
+                    // matches both `foo` and `a/foo`.
+                    let mut next_pi = pi + 2;
+                    if next_pi < p.len() && p[next_pi] == '/' {
+                        next_pi += 1;
+                    }
+                    // Try matching zero characters first, then progressively
+                    // more from the candidate.
+                    if glob_match_inner(p, next_pi, c, ci) {
+                        return true;
+                    }
+                    let mut k = ci;
+                    while k < c.len() {
+                        k += 1;
+                        if glob_match_inner(p, next_pi, c, k) {
+                            return true;
+                        }
+                    }
+                    return false;
+                } else {
+                    // `*` matches any non-`/` sequence.
+                    if glob_match_inner(p, pi + 1, c, ci) {
+                        return true;
+                    }
+                    let mut k = ci;
+                    while k < c.len() && c[k] != '/' {
+                        k += 1;
+                        if glob_match_inner(p, pi + 1, c, k) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+            if pc == '?' {
+                if ci >= c.len() || c[ci] == '/' {
+                    return false;
+                }
+                pi += 1;
+                ci += 1;
+                continue;
+            }
+            // Literal char.
+            if ci >= c.len() || c[ci] != pc {
+                return false;
+            }
+            pi += 1;
+            ci += 1;
+        }
+    }
+
+    // ---- minimal Lisp parser for the wave24-01 router-policy schema ---
+
+    #[derive(Debug, Clone)]
+    pub(super) struct PolicyDoc {
+        pub(super) dry_run_only: bool,
+        pub(super) runtime_replacement: bool,
+        pub(super) rules: Vec<RuleDoc>,
+    }
+
+    #[derive(Debug, Clone)]
+    pub(super) struct RuleDoc {
+        pub(super) id: String,
+        pub(super) priority: u32,
+        pub(super) when: Clause,
+        pub(super) backend: String,
+        pub(super) reasoning: String,
+    }
+
+    #[derive(Debug, Clone)]
+    struct MatchedRule {
+        id: String,
+        priority: u32,
+        reasoning: String,
+    }
+
+    /// Parse a router-policy v1 Lisp file. Returns a structured `PolicyDoc`
+    /// or a human-readable error message. The parser is purpose-built for
+    /// this schema and does NOT attempt to be a general Lisp reader: it
+    /// handles atoms, strings, lists, brackets-as-lists, and line comments.
+    /// The wave24-01 checker already rejects malformed policies upstream;
+    /// this parser is conservative and surfaces unknown shapes as errors.
+    pub(super) fn parse_router_policy(input: &str) -> Result<PolicyDoc, String> {
+        let tokens = tokenize(input)?;
+        let mut cursor = TokenCursor::new(&tokens);
+        // Top-level form must be `(router-policy <id> ...)`.
+        let form = cursor.read_form().ok_or_else(|| "no form found".to_string())?;
+        if cursor.peek().is_some() {
+            // We tolerate trailing whitespace / comments (already stripped
+            // by tokenize) but not multiple top-level forms.
+            return Err("multiple top-level forms".to_string());
+        }
+        let list = match form {
+            Sexp::List(items) => items,
+            _ => return Err("expected (router-policy ...) at top level".to_string()),
+        };
+        let mut iter = list.into_iter();
+        let head = iter.next().ok_or_else(|| "empty top-level list".to_string())?;
+        match head {
+            Sexp::Atom(s) if s == "router-policy" => {}
+            _ => return Err("expected (router-policy ...) at top level".to_string()),
+        }
+        // Skip the policy id atom (next item).
+        let _id = iter.next();
+        // Walk the remaining items: keyword/value pairs OR (rule ...) lists.
+        let mut dry_run_only: Option<bool> = None;
+        let mut runtime_replacement: Option<bool> = None;
+        let mut rules: Vec<RuleDoc> = Vec::new();
+        let mut pending_keyword: Option<String> = None;
+        for item in iter {
+            if let Some(key) = pending_keyword.take() {
+                let value = item;
+                match key.as_str() {
+                    ":dry-run-only" => dry_run_only = Some(sexp_as_bool(&value)),
+                    ":runtime-replacement" => runtime_replacement = Some(sexp_as_bool(&value)),
+                    // Other keys (`:schema`, `:version`, `:description`)
+                    // are tolerated but not consumed — wave24-01 checker
+                    // owns header validation.
+                    _ => {}
+                }
+                continue;
+            }
+            match &item {
+                Sexp::Keyword(k) => pending_keyword = Some(k.clone()),
+                Sexp::List(inner) => {
+                    if matches!(inner.first(), Some(Sexp::Atom(h)) if h == "rule") {
+                        let rule = parse_rule(inner)?;
+                        rules.push(rule);
+                    }
+                }
+                _ => {}
+            }
+        }
+        // Sort rules by priority ascending (matches wave24-03 selection order).
+        rules.sort_by_key(|r| r.priority);
+        Ok(PolicyDoc {
+            dry_run_only: dry_run_only.unwrap_or(false),
+            runtime_replacement: runtime_replacement.unwrap_or(false),
+            rules,
+        })
+    }
+
+    fn parse_rule(items: &[Sexp]) -> Result<RuleDoc, String> {
+        // items[0] is the `rule` atom.
+        let mut id: Option<String> = None;
+        let mut priority: Option<u32> = None;
+        let mut when_clause: Option<Clause> = None;
+        let mut backend: Option<String> = None;
+        let mut reasoning: Option<String> = None;
+        let mut idx = 1usize;
+        while idx < items.len() {
+            let key = match &items[idx] {
+                Sexp::Keyword(k) => k.clone(),
+                _ => {
+                    idx += 1;
+                    continue;
+                }
+            };
+            idx += 1;
+            if idx >= items.len() {
+                break;
+            }
+            let value = &items[idx];
+            idx += 1;
+            match key.as_str() {
+                ":id" => id = Some(sexp_as_text(value)),
+                ":priority" => {
+                    let raw = sexp_as_text(value);
+                    priority = raw.parse::<u32>().ok();
+                }
+                ":when" => {
+                    if let Sexp::List(children) = value {
+                        when_clause = Some(parse_when_list(children)?);
+                    }
+                }
+                ":recommend" => {
+                    if let Sexp::List(children) = value {
+                        let mut bk: Option<String> = None;
+                        let mut rs: Option<String> = None;
+                        let mut j = 0usize;
+                        while j < children.len() {
+                            if let Sexp::Keyword(k) = &children[j] {
+                                if j + 1 < children.len() {
+                                    let v = &children[j + 1];
+                                    match k.as_str() {
+                                        ":backend" => bk = Some(sexp_as_text(v)),
+                                        ":reasoning" => rs = Some(sexp_as_text(v)),
+                                        _ => {}
+                                    }
+                                }
+                                j += 2;
+                            } else {
+                                j += 1;
+                            }
+                        }
+                        backend = bk;
+                        reasoning = rs;
+                    }
+                }
+                // `:non-goals`, `:notes` are tolerated but not consumed.
+                _ => {}
+            }
+        }
+        Ok(RuleDoc {
+            id: id.ok_or_else(|| "rule missing :id".to_string())?,
+            priority: priority.ok_or_else(|| "rule missing :priority".to_string())?,
+            when: when_clause.ok_or_else(|| "rule missing :when".to_string())?,
+            backend: backend.ok_or_else(|| "rule missing :recommend :backend".to_string())?,
+            reasoning: reasoning.unwrap_or_default(),
+        })
+    }
+
+    fn parse_when_list(children: &[Sexp]) -> Result<Clause, String> {
+        // The top-level `:when` is implicit-`all` over its direct children.
+        let mut clauses: Vec<Clause> = Vec::new();
+        for child in children {
+            if let Sexp::List(inner) = child {
+                if let Some(c) = parse_clause(inner)? {
+                    clauses.push(c);
+                }
+            }
+        }
+        if clauses.len() == 1 {
+            Ok(clauses.into_iter().next().unwrap())
+        } else {
+            Ok(Clause::All(clauses))
+        }
+    }
+
+    fn parse_clause(items: &[Sexp]) -> Result<Option<Clause>, String> {
+        let head_atom = match items.first() {
+            Some(Sexp::Atom(s)) => s.clone(),
+            _ => return Ok(None),
+        };
+        match head_atom.as_str() {
+            "kind" => Ok(Some(Clause::Kind(arg_value(items)))),
+            "dispatch_strategy" | "dispatch-strategy" => {
+                Ok(Some(Clause::DispatchStrategy(arg_value(items))))
+            }
+            "owner" => Ok(Some(Clause::Owner(arg_value(items)))),
+            "status" => Ok(Some(Clause::Status(arg_value(items)))),
+            "path-glob" => Ok(Some(Clause::PathGlob(arg_value(items)))),
+            "any" => {
+                let mut children = Vec::new();
+                for it in &items[1..] {
+                    if let Sexp::List(inner) = it {
+                        if let Some(c) = parse_clause(inner)? {
+                            children.push(c);
+                        }
+                    }
+                }
+                Ok(Some(Clause::Any(children)))
+            }
+            "all" => {
+                let mut children = Vec::new();
+                for it in &items[1..] {
+                    if let Sexp::List(inner) = it {
+                        if let Some(c) = parse_clause(inner)? {
+                            children.push(c);
+                        }
+                    }
+                }
+                Ok(Some(Clause::All(children)))
+            }
+            // Unknown predicate head — fail closed to mirror wave24-03.
+            _ => Err(format!("unknown predicate head `{}`", head_atom)),
+        }
+    }
+
+    fn arg_value(items: &[Sexp]) -> String {
+        items
+            .get(1)
+            .map(|v| sexp_as_text(v))
+            .unwrap_or_default()
+    }
+
+    fn sexp_as_text(value: &Sexp) -> String {
+        match value {
+            Sexp::Atom(s) | Sexp::Str(s) | Sexp::Keyword(s) => s.clone(),
+            Sexp::List(_) => String::new(),
+        }
+    }
+
+    fn sexp_as_bool(value: &Sexp) -> bool {
+        match value {
+            Sexp::Atom(s) => s == "true",
+            Sexp::Str(s) => s == "true",
+            _ => false,
+        }
+    }
+
+    // ---- tiny tokenizer / cursor ------------------------------------
+
+    #[derive(Debug, Clone)]
+    pub(super) enum Sexp {
+        Atom(String),
+        Str(String),
+        Keyword(String),
+        List(Vec<Sexp>),
+    }
+
+    #[derive(Debug, Clone)]
+    enum Token {
+        LParen,
+        RParen,
+        LBracket,
+        RBracket,
+        Atom(String),
+        Str(String),
+        Keyword(String),
+    }
+
+    fn tokenize(input: &str) -> Result<Vec<Token>, String> {
+        let chars: Vec<char> = input.chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < chars.len() {
+            let c = chars[i];
+            if c.is_whitespace() {
+                i += 1;
+                continue;
+            }
+            if c == ';' {
+                while i < chars.len() && chars[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            if c == '(' {
+                out.push(Token::LParen);
+                i += 1;
+                continue;
+            }
+            if c == ')' {
+                out.push(Token::RParen);
+                i += 1;
+                continue;
+            }
+            if c == '[' {
+                out.push(Token::LBracket);
+                i += 1;
+                continue;
+            }
+            if c == ']' {
+                out.push(Token::RBracket);
+                i += 1;
+                continue;
+            }
+            if c == '"' {
+                let mut s = String::new();
+                i += 1;
+                while i < chars.len() {
+                    let ch = chars[i];
+                    if ch == '\\' {
+                        i += 1;
+                        if i < chars.len() {
+                            s.push(chars[i]);
+                            i += 1;
+                        }
+                        continue;
+                    }
+                    if ch == '"' {
+                        i += 1;
+                        break;
+                    }
+                    s.push(ch);
+                    i += 1;
+                }
+                out.push(Token::Str(s));
+                continue;
+            }
+            if c == ':' {
+                let mut s = String::from(":");
+                i += 1;
+                while i < chars.len() && !is_atom_terminator(chars[i]) {
+                    s.push(chars[i]);
+                    i += 1;
+                }
+                out.push(Token::Keyword(s));
+                continue;
+            }
+            // Atom.
+            let mut s = String::new();
+            while i < chars.len() && !is_atom_terminator(chars[i]) {
+                s.push(chars[i]);
+                i += 1;
+            }
+            if !s.is_empty() {
+                out.push(Token::Atom(s));
+            }
+        }
+        Ok(out)
+    }
+
+    fn is_atom_terminator(c: char) -> bool {
+        c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '"' | ';')
+    }
+
+    struct TokenCursor<'a> {
+        tokens: &'a [Token],
+        pos: usize,
+    }
+
+    impl<'a> TokenCursor<'a> {
+        fn new(tokens: &'a [Token]) -> Self {
+            Self { tokens, pos: 0 }
+        }
+        fn peek(&self) -> Option<&Token> {
+            self.tokens.get(self.pos)
+        }
+        fn read_form(&mut self) -> Option<Sexp> {
+            let tok = self.tokens.get(self.pos)?;
+            match tok {
+                Token::LParen => {
+                    self.pos += 1;
+                    let mut items = Vec::new();
+                    while let Some(t) = self.tokens.get(self.pos) {
+                        if matches!(t, Token::RParen) {
+                            self.pos += 1;
+                            return Some(Sexp::List(items));
+                        }
+                        if let Some(form) = self.read_form() {
+                            items.push(form);
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(Sexp::List(items))
+                }
+                Token::LBracket => {
+                    self.pos += 1;
+                    let mut items = Vec::new();
+                    while let Some(t) = self.tokens.get(self.pos) {
+                        if matches!(t, Token::RBracket) {
+                            self.pos += 1;
+                            return Some(Sexp::List(items));
+                        }
+                        if let Some(form) = self.read_form() {
+                            items.push(form);
+                        } else {
+                            break;
+                        }
+                    }
+                    Some(Sexp::List(items))
+                }
+                Token::RParen | Token::RBracket => None,
+                Token::Atom(s) => {
+                    self.pos += 1;
+                    Some(Sexp::Atom(s.clone()))
+                }
+                Token::Str(s) => {
+                    self.pos += 1;
+                    Some(Sexp::Str(s.clone()))
+                }
+                Token::Keyword(s) => {
+                    self.pos += 1;
+                    Some(Sexp::Keyword(s.clone()))
+                }
+            }
+        }
     }
 }
 
@@ -16314,5 +17281,680 @@ mod tests {
             v["trace_path_warning"], "malformed: NUL byte at offset 4",
             "wave23-05: helper must surface the trace_path_warning when supplied"
         );
+    }
+
+    // -----------------------------------------------------------------
+    // wave-24 / task 04 — router-policy dry-run surface tests.
+    // -----------------------------------------------------------------
+
+    use super::router_policy_dry_run::{
+        attach_router_recommendation_block, parse_router_policy_mode, RouterPolicyMode,
+        DEFAULT_POLICY_PATH,
+    };
+
+    /// Minimal helper: make a fixture ToolResult mirroring the bridge
+    /// response shape so we can splice the recommendation block on top.
+    fn fixture_bridge_result() -> ToolResult {
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        action_execute_bridge(&plan, &resolved)
+    }
+
+    #[test]
+    fn router_policy_mode_default_off_emits_no_block() {
+        // wave24-04 invariant: absent arg ⇒ Off.
+        let args = json!({});
+        let mode = parse_router_policy_mode(&args).expect("default off");
+        assert!(matches!(mode, RouterPolicyMode::Off));
+        // attach with Off must leave the response byte-identical.
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let after_text = match after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after_text,
+            "wave24-04: mode=off must not alter the response envelope"
+        );
+    }
+
+    #[test]
+    fn router_policy_mode_off_returns_legacy_response_byte_identical() {
+        // wave24-04: explicit "off" ⇒ Off (same as default).
+        let args = json!({"router_policy_mode": "off"});
+        let mode = parse_router_policy_mode(&args).expect("explicit off");
+        assert!(matches!(mode, RouterPolicyMode::Off));
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let after_text = match after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after_text,
+            "wave24-04: explicit mode=off must be byte-identical to baseline"
+        );
+        let v: Value = serde_json::from_str(&after_text).unwrap();
+        assert!(
+            v.get("router_recommendation").is_none(),
+            "wave24-04: mode=off must NOT splice a recommendation block"
+        );
+    }
+
+    #[test]
+    fn router_policy_mode_apply_returns_invalid_param() {
+        // wave24-04 contract: `apply` is intentionally rejected — wave24-04
+        // ships only the dry-run surface.
+        let args = json!({"router_policy_mode": "apply"});
+        let err = parse_router_policy_mode(&args).expect_err("apply must reject");
+        assert_eq!(err.is_error, Some(true));
+        let text = match err.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert!(
+            text.contains("INVALID_PARAM") || text.contains("invalid"),
+            "wave24-04: apply must surface INVALID_PARAM (got `{}`)",
+            text
+        );
+        assert!(
+            text.contains("apply"),
+            "wave24-04: error must echo the offending value"
+        );
+    }
+
+    #[test]
+    fn router_policy_mode_auto_returns_invalid_param() {
+        // wave24-04 contract: `auto` is intentionally rejected.
+        let args = json!({"router_policy_mode": "auto"});
+        let err = parse_router_policy_mode(&args).expect_err("auto must reject");
+        assert_eq!(err.is_error, Some(true));
+        let text = match err.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert!(text.contains("INVALID_PARAM") || text.contains("invalid"));
+        assert!(text.contains("auto"));
+    }
+
+    #[test]
+    fn router_policy_mode_unknown_returns_invalid_param() {
+        // wave24-04 contract: typo / unknown values reject.
+        let args = json!({"router_policy_mode": "dryrun"});
+        assert!(parse_router_policy_mode(&args).is_err());
+        let args = json!({"router_policy_mode": "DRY_RUN"});
+        assert!(parse_router_policy_mode(&args).is_err());
+        // Non-string types also reject (e.g. caller passes a bool).
+        let args = json!({"router_policy_mode": true});
+        assert!(parse_router_policy_mode(&args).is_err());
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_emits_block_with_applied_false() {
+        // Cross-wave invariant: applied=false is hard-coded literal in
+        // EVERY emitted block, regardless of match outcome. Use a temp
+        // policy so the test is independent of the daemon's working
+        // directory.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-shape-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-shape
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-docs
+    :priority 10
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "docs are interactive")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            // Force a no-match path (off-policy ops kind) so the block is
+            // a deterministic fallback shape.
+            "kind": "ops",
+        });
+        let mode = parse_router_policy_mode(&args).expect("dry_run parses");
+        assert!(matches!(mode, RouterPolicyMode::DryRun));
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &fixture_resolved("mission_task_delegate", "fresh-code-alignment"),
+            &fixture_plan("(plan)"),
+        );
+        let v = parse_payload(&result);
+        let block = v
+            .get("router_recommendation")
+            .expect("dry_run must emit router_recommendation block");
+        assert_eq!(
+            block["applied"], false,
+            "wave24-04 invariant: applied=false hard-coded literal"
+        );
+        assert!(
+            block.get("status").is_some(),
+            "block must surface status field"
+        );
+        assert!(
+            block.get("recommended_backend").is_some(),
+            "block must surface recommended_backend"
+        );
+        assert!(block.get("confidence").is_some());
+        assert!(block.get("reasons").is_some());
+        assert!(block.get("policy_source").is_some());
+        assert_eq!(block["schema"], "missiond.router-recommendation.v0");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_does_not_change_dispatch() {
+        // Cross-wave invariant: the dispatch fields (target_tool /
+        // dispatch_strategy / next_call) are byte-identical with vs
+        // without the dry_run mode. Only the recommendation block is
+        // additive.
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        // Baseline: no router knob.
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_v = parse_payload(&baseline);
+
+        // With dry_run: same dispatch fields, plus a recommendation block.
+        // Materialise a temp policy so this test is independent of cwd.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-dispatch-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-dispatch
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-docs
+    :priority 10
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "docs are interactive")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let with_dry_run = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let dry_v = parse_payload(&with_dry_run);
+
+        // Every dispatch-shaping field must be byte-identical.
+        assert_eq!(baseline_v["target_tool"], dry_v["target_tool"]);
+        assert_eq!(baseline_v["target_source"], dry_v["target_source"]);
+        assert_eq!(baseline_v["dispatch_strategy"], dry_v["dispatch_strategy"]);
+        assert_eq!(
+            baseline_v["dispatch_strategy_source"],
+            dry_v["dispatch_strategy_source"]
+        );
+        assert_eq!(baseline_v["next_call"], dry_v["next_call"]);
+        assert_eq!(baseline_v["execute_mode"], dry_v["execute_mode"]);
+        assert_eq!(baseline_v["runner_status"], dry_v["runner_status"]);
+
+        // The only delta is the additive recommendation block.
+        assert!(baseline_v.get("router_recommendation").is_none());
+        assert!(dry_v.get("router_recommendation").is_some());
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_no_match_falls_back_to_claudecode_low() {
+        // Off-policy combo (kind=ops) ⇒ no rule matches in the temp seed
+        // policy ⇒ recommendation falls back to claudecode/low with the
+        // documented `insufficient_trace_history` reason. We materialise
+        // a temp policy mirroring the wave24-01 seed shape so the test
+        // is independent of the daemon's working directory.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-fallback-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-fallback
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-docs-only
+    :priority 10
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "docs only")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        // wave24-04: assert the documented default policy path constant
+        // is wired into the helper (mirrors the wave24-03 CLI default).
+        assert_eq!(DEFAULT_POLICY_PATH, ".missiond/router/router-policy-v1.lisp");
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "agent-team");
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "ops",
+            "owner": "operator",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["confidence"], "low");
+        assert_eq!(block["applied"], false);
+        let reasons = block["reasons"].as_array().expect("reasons array");
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.as_str().unwrap_or("").contains("insufficient_trace_history")),
+            "fallback must surface insufficient_trace_history"
+        );
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_first_priority_match_wins() {
+        // Build a temp policy with two matching rules at distinct
+        // priorities and verify the lower priority wins.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-multi-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-multi
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-low-prio-wins
+    :priority 5
+    :when ((kind code-alignment))
+    :recommend (:backend deterministic-checker :reasoning "lower priority wins")
+    :non-goals ["does not replace runtime dispatch"])
+  (rule
+    :id r-loses-on-prio
+    :priority 50
+    :when ((kind code-alignment))
+    :recommend (:backend patch-worker :reasoning "matches but loses")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "code-alignment",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        // Lowest priority wins ⇒ deterministic-checker (priority 5).
+        assert_eq!(block["recommended_backend"], "deterministic-checker");
+        assert_eq!(block["applied"], false);
+        let reasons = block["reasons"].as_array().expect("reasons array");
+        // Both matched rules are recorded for explainability.
+        let joined = reasons
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("r-low-prio-wins"));
+        assert!(joined.contains("r-loses-on-prio"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_runtime_replacement_policy_rejected() {
+        // Cross-wave invariant: a policy declaring :runtime-replacement
+        // true is REJECTED, with status="rejected", regardless of match.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-rr-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-bad-rr
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement true
+  (rule
+    :id r-rr
+    :priority 1
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "should never apply")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(
+            block["status"], "rejected",
+            "runtime-replacement=true must be rejected even when a rule would match"
+        );
+        assert_eq!(
+            block["applied"], false,
+            "applied=false must hold even on rejection"
+        );
+        assert_eq!(block["recommended_backend"], "claudecode");
+        let reasons = block["reasons"].as_array().expect("reasons array");
+        let joined = reasons
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("runtime-replacement"));
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_missing_dry_run_only_rejected() {
+        // Cross-wave invariant: a policy missing :dry-run-only true is
+        // REJECTED with status="rejected".
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-not-dro-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-bad-dro
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only false
+  :runtime-replacement false
+  (rule
+    :id r-x
+    :priority 1
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "should reject")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &fixture_resolved("mission_task_delegate", "fresh-code-alignment"),
+            &fixture_plan("(plan)"),
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "rejected");
+        assert_eq!(block["applied"], false);
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_unreadable_policy_emits_error_status() {
+        // I/O failures surface as status="error" with applied=false.
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": "/this/path/does/not/exist/policy.lisp",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &fixture_resolved("mission_task_delegate", "fresh-code-alignment"),
+            &fixture_plan("(plan)"),
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "error");
+        assert_eq!(block["applied"], false);
+        // Fallback backend is surfaced even on error so reviewers see a
+        // safe default rather than a missing field.
+        assert_eq!(block["recommended_backend"], "claudecode");
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_predicate_path_glob_matches_owned_files() {
+        // Exercise the path-glob predicate via a temp policy that demands
+        // owned_files include `scripts/check-*.mjs`.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-glob-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-glob
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-glob
+    :priority 10
+    :when ((all (kind code-alignment)
+                (path-glob "scripts/check-*.mjs")))
+    :recommend (:backend deterministic-checker :reasoning "scripted acceptance")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        // Match: owned_files contains a matching path.
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "code-alignment",
+            "owned_files": ["scripts/check-foo.mjs"],
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &fixture_resolved("mission_task_delegate", "fresh-code-alignment"),
+            &fixture_plan("(plan)"),
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "deterministic-checker");
+
+        // No match: owned_files contains a non-matching path.
+        let args2 = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "code-alignment",
+            "owned_files": ["src/lib.rs"],
+        });
+        let mode2 = parse_router_policy_mode(&args2).unwrap();
+        let result2 = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode2,
+            &args2,
+            &fixture_resolved("mission_task_delegate", "fresh-code-alignment"),
+            &fixture_plan("(plan)"),
+        );
+        let v2 = parse_payload(&result2);
+        let block2 = &v2["router_recommendation"];
+        // Falls through to fallback.
+        assert_eq!(block2["recommended_backend"], "claudecode");
+        assert_eq!(block2["confidence"], "low");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_predicate_any_or_clause() {
+        // Exercise the `any` (logical OR) predicate.
+        let tmp = std::env::temp_dir().join(format!(
+            "wave24-04-any-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &tmp,
+            r#"(router-policy fixture-any
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-any
+    :priority 1
+    :when ((any (kind review)
+                (kind smoke)))
+    :recommend (:backend verifier-worker :reasoning "post-commit verify")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        for kind in &["review", "smoke"] {
+            let args = json!({
+                "router_policy_mode": "dry_run",
+                "router_policy_path": tmp.to_str().unwrap(),
+                "kind": kind,
+            });
+            let mode = parse_router_policy_mode(&args).unwrap();
+            let result = attach_router_recommendation_block(
+                fixture_bridge_result(),
+                mode,
+                &args,
+                &fixture_resolved("mission_task_delegate", "fresh-code-alignment"),
+                &fixture_plan("(plan)"),
+            );
+            let v = parse_payload(&result);
+            let block = &v["router_recommendation"];
+            assert_eq!(block["status"], "computed");
+            assert_eq!(
+                block["recommended_backend"], "verifier-worker",
+                "any-clause must match for kind={}",
+                kind
+            );
+        }
+        // Non-matching kind ⇒ fallback.
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": tmp.to_str().unwrap(),
+            "kind": "ops",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &fixture_resolved("mission_task_delegate", "fresh-code-alignment"),
+            &fixture_plan("(plan)"),
+        );
+        let v = parse_payload(&result);
+        assert_eq!(v["router_recommendation"]["recommended_backend"], "claudecode");
+        let _ = std::fs::remove_file(&tmp);
     }
 }
