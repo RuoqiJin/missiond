@@ -1003,6 +1003,38 @@ function runFixtures() {
       ok: false,
       expects: /:router_policy_path must be repo-relative/,
     },
+    // wave25-05: cross-layer measurement smoke positive fixture. Cross-pins
+    // the deterministic-checker bucket the wave25-05 recommend-task-backend
+    // parity fixture also drives (Layer A): a code-alignment task that
+    // matches a deterministic-checker rule with a rich trace history (>=5
+    // events) lands `:router_confidence high` + `:recommended_backend
+    // deterministic-checker`. The :router_applied false / :router_dry_run_only
+    // true literals are the cross-wave invariants the daemon's
+    // applied_remains_false_with_trace_index test re-pins for every status
+    // flavour. This fixture proves the report contract STILL ACCEPTS a
+    // valid wave25 router-recommendation block end-to-end (the earlier
+    // wave25-02 valid fixture used claudecode + medium; this one widens
+    // coverage to the second backend in the wave25-05 parity grid).
+    {
+      name: 'wave25-05 valid router-recommendation block (deterministic-checker + high)',
+      source: `(report wave25-fix-router-deterministic-high
+        :schema "missiond.report-contract.v1"
+        :task_id "wave25-fix-router-deterministic-high"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)]
+        :recommended_backend "deterministic-checker"
+        :router_confidence "high"
+        :router_policy_path ".missiond/router/router-policy-v1.lisp"
+        :router_dry_run_only true
+        :router_applied false
+        :router_reasons ["matched-rule:r-deterministic-checker-tasks"
+                         "trace-events:7"]
+        :router_trace_index_path ".missiond/v2/index/session-trace-index.json")`,
+      ok: true,
+    },
   ];
 
   let failed = 0;

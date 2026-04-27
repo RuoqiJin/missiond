@@ -18927,4 +18927,438 @@ mod tests {
         let _ = std::fs::remove_file(&trace_used);
         let _ = std::fs::remove_file(&bad);
     }
+
+    // -----------------------------------------------------------------
+    // wave25-05 — cross-layer measurement smoke pinning the FULL Wave 25
+    // measurable router loop is still ADVISORY at the daemon boundary.
+    //
+    // The wave25-05 brief calls out 8 cross-wave invariants that must all
+    // hold simultaneously across the evaluator + report fields + renderer
+    // commands + mission_plan trace-index confidence engines. The Layer A
+    // Node-side smoke (recommend-task-backend.mjs --dry-fixture wave25-05
+    // case + evaluate-router-policy-corpus.mjs --dry-fixture wave25-05
+    // case) pins the Node-side; the Layer C report-checker fixture pins
+    // the report-contract surface. This test pins the daemon side AND
+    // documents the CLI/Rust parity for the (5,5)-event fixture inline.
+    //
+    // The parity assertion does NOT shell out — that is forbidden by the
+    // wave25-05 contract. Instead, the daemon's selected backend +
+    // confidence are asserted against the EXPECTED values that the Node
+    // CLI also asserts in its own --dry-fixture run for the same
+    // synthetic shape. Inline documentation makes the expected agreement
+    // surface-readable so a future regression in either engine surfaces
+    // here AND in the corresponding Node fixture.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn router_policy_dry_run_smoke_pins_wave25_invariants() {
+        // Materialise the wave25-05 parity fixture: the SAME two-rule policy
+        // shape the Node Layer A fixture builds (docs->claudecode at
+        // priority 10; code-alignment+scripts/check-* -> deterministic-
+        // checker at priority 20). Using a temp file keeps the smoke
+        // independent of cwd while still exercising the exact parse path
+        // the daemon uses in production.
+        let policy_path = std::env::temp_dir().join(format!(
+            "wave25-05-smoke-policy-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &policy_path,
+            r#"(router-policy fixture-wave25-05-smoke
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-docs-to-claudecode
+    :priority 10
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "docs are interactive")
+    :non-goals ["does not replace runtime dispatch"])
+  (rule
+    :id r-deterministic-checker-tasks
+    :priority 20
+    :when ((all (kind code-alignment)
+                (path-glob "scripts/check-*.mjs")))
+    :recommend (:backend deterministic-checker :reasoning "scripted acceptance")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+
+        // Materialise the (5,5)-event trace-index — same shape the Node
+        // CLI parity fixture drives. The daemon's bucket_events helper
+        // reads by_task["btk-1"].events (fixture_plan default) AND
+        // by_backend["claudecode"].events; here we plant 5 in BOTH to
+        // make the parity unambiguous.
+        let trace_path = std::env::temp_dir().join(format!(
+            "wave25-05-smoke-trace-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let trace_body = json!({
+            "schema": "missiond.session-trace.v1",
+            "by_task": { "btk-1": { "events": 5 } },
+            "by_backend": { "claudecode": { "events": 5 } },
+            "totals": { "events": 10 }
+        });
+        std::fs::write(&trace_path, serde_json::to_string_pretty(&trace_body).unwrap())
+            .unwrap();
+
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        // -----------------------------------------------------------------
+        // Invariant 6: dispatch byte-shape unchanged when mode=off-with-
+        // trace-supplied. Re-pin the wave24-04 + wave25-03 invariants under
+        // the wave25-05 shape: even with both router_policy_path AND
+        // router_policy_trace_index_path supplied, mode=off MUST NOT
+        // perturb the dispatch envelope.
+        // -----------------------------------------------------------------
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let off_args = json!({
+            "router_policy_mode": "off",
+            "router_policy_path": policy_path.to_str().unwrap(),
+            "router_policy_trace_index_path": trace_path.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let off_mode = parse_router_policy_mode(&off_args).expect("explicit off");
+        assert!(matches!(off_mode, RouterPolicyMode::Off));
+        let off_after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            off_mode,
+            &off_args,
+            &resolved,
+            &plan,
+        );
+        let off_text = match off_after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, off_text,
+            "wave25-05 invariant 6: mode=off must be byte-identical even with trace-index supplied"
+        );
+
+        // -----------------------------------------------------------------
+        // Invariant 7: CLI/Rust parity for the (5,5) high-confidence
+        // fixture. The Node Layer A fixture asserts:
+        //   recommend({ task: docs, policy: <wave25-05 shape>,
+        //               traceIndex: { backend:claudecode events:5 } }).confidence
+        //     === 'high'
+        //   recommend(...).backend === 'claudecode'
+        //   recommend(...).chosen_rule_id === 'r-docs-to-claudecode'
+        // The daemon must agree on backend + confidence for the same shape.
+        // -----------------------------------------------------------------
+        let dry_args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy_path.to_str().unwrap(),
+            "router_policy_trace_index_path": trace_path.to_str().unwrap(),
+            "kind": "docs",
+            "owner": "claudecode",
+        });
+        let dry_mode = parse_router_policy_mode(&dry_args).expect("dry_run parses");
+        assert!(matches!(dry_mode, RouterPolicyMode::DryRun));
+        let dry_result = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            dry_mode,
+            &dry_args,
+            &resolved,
+            &plan,
+        );
+        let dry_v = parse_payload(&dry_result);
+        let block = dry_v
+            .get("router_recommendation")
+            .expect("dry_run mode must splice a recommendation block");
+
+        // Invariant 1: policy.runtime_replacement=false (re-checked on the
+        // parsed temp policy via the daemon's reject-runtime-replacement
+        // branch — if the policy declared runtime_replacement true, the
+        // status would be "rejected" and recommended_backend would fall
+        // back. The wave24-01 schema rejects this at validation time; the
+        // daemon re-checks defensively. We pin the absence of rejection
+        // here as the positive signal.)
+        assert_eq!(
+            block["status"], "computed",
+            "wave25-05 invariant 1: policy with runtime_replacement=false must be accepted (status=computed)"
+        );
+        // Invariant 2: policy.dry_run_only=true (same logic — if the
+        // policy lacked dry-run-only, the daemon's
+        // router_policy_mode_dry_run_missing_dry_run_only_rejected branch
+        // would surface status=rejected. status=computed proves the
+        // dry-run-only invariant held end-to-end.)
+
+        // Invariant 3: applied=false JSON Bool literal in EVERY emitted
+        // recommendation. Type-checked, not just value-equality, so a
+        // future regression that switches the field to a string "false"
+        // or to an integer 0 fails loudly here.
+        assert_eq!(
+            block["applied"],
+            Value::Bool(false),
+            "wave25-05 invariant 3: applied MUST be the literal JSON Bool false"
+        );
+        assert!(
+            block["applied"].is_boolean(),
+            "wave25-05 invariant 3: applied must be a JSON bool, never a string or number"
+        );
+
+        // Invariant 7 (cont.): CLI/Rust parity. With (5,5) trace-index
+        // events ON BOTH task and backend buckets, both engines must
+        // select 'high' confidence + 'claudecode' backend.
+        assert_eq!(
+            block["confidence"], "high",
+            "wave25-05 invariant 7: daemon confidence must agree with Node CLI for (5,5) trace-index parity fixture"
+        );
+        assert_eq!(
+            block["recommended_backend"], "claudecode",
+            "wave25-05 invariant 7: daemon backend must agree with Node CLI for docs->claudecode rule"
+        );
+        // Recommended backend ∈ wave24-01 enum (re-spelled locally to keep
+        // the test pure-Rust per wave24-06 lesson — no script imports).
+        let allowed_backends = [
+            "claudecode",
+            "missiond-llm-router",
+            "deterministic-checker",
+            "patch-worker",
+            "verifier-worker",
+        ];
+        let backend = block["recommended_backend"]
+            .as_str()
+            .expect("recommended_backend must be a string");
+        assert!(
+            allowed_backends.contains(&backend),
+            "wave25-05 invariant: recommended_backend `{}` not in wave24-01 enum",
+            backend
+        );
+
+        // Invariant: schema field surfaces the wave24 router-recommendation
+        // contract identifier so external readers can route the payload.
+        assert_eq!(
+            block["schema"], "missiond.router-recommendation.v0",
+            "wave25-05 invariant: schema field must surface the wave24 recommendation contract id"
+        );
+
+        // Invariant: trace_index_status=used proves the wave25-03 trace-
+        // index code path was exercised (not the legacy wave24-04 fallback
+        // that would emit no trace_index_* fields).
+        assert_eq!(
+            block["trace_index_status"], "used",
+            "wave25-05 invariant: trace_index_status must be `used` for a well-formed parity fixture"
+        );
+        assert_eq!(
+            block["trace_index_path"],
+            trace_path.to_str().unwrap(),
+            "wave25-05 invariant: trace_index_path must echo the input path verbatim"
+        );
+
+        // Invariant 6 (cont.): every dispatch-shaping field must be byte-
+        // identical between baseline and dry-run. Re-pin every dispatch
+        // field at once so any future regression that perturbs ANY of
+        // them fails loudly here.
+        let baseline_v = parse_payload(&baseline);
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                baseline_v[field], dry_v[field],
+                "wave25-05 invariant 6: dispatch field `{}` must be byte-identical with vs without dry_run mode",
+                field
+            );
+        }
+        assert!(
+            baseline_v.get("router_recommendation").is_none(),
+            "wave25-05 invariant 6: baseline must not carry a recommendation block"
+        );
+
+        // Invariant: reasons reference the matched rule id so explanation
+        // is grounded in the parsed seed (mirrors wave24-06 smoke).
+        let reasons = block["reasons"].as_array().expect("reasons array");
+        let joined = reasons
+            .iter()
+            .filter_map(|r| r.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            joined.contains("r-docs-to-claudecode"),
+            "wave25-05: reasons must reference the matched rule id"
+        );
+
+        // Invariant 8 (audit): zero shell-out / LLM / git mutation in the
+        // router code path. We audit the wave25-03 daemon module's source
+        // for forbidden Rust patterns: `std::process::Command`, `tokio::
+        // process`, network types from `reqwest` / `hyper`, git invocation,
+        // any LLM vendor probe. Forbidden patterns are assembled from
+        // string parts so the audit table itself does not appear as a
+        // literal substring (wave24-06 / wave25-01 self-audit lesson).
+        let plan_rs = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/handlers/knowledge/plan.rs"),
+        )
+        .expect("plan.rs must be readable for self-audit");
+        // Strip line comments before scanning so prose that names the
+        // forbidden patterns does not self-trip the audit. We keep block
+        // comments and string literals in scope on purpose: a real string
+        // literal inviting `reqwest` would be evidence the module is about
+        // to grow a network dep; the audit catches it early.
+        let stripped: String = plan_rs
+            .lines()
+            .filter(|ln| !ln.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let forbidden_router_patterns: Vec<String> = vec![
+            // std::process::Command — process spawn from std.
+            String::from("std::") + "process::" + "Command",
+            // tokio::process — async process spawn.
+            String::from("tokio::") + "process",
+            // reqwest — HTTP client crate often pulled in for LLM calls.
+            String::from("req") + "west::",
+            // hyper — lower-level HTTP crate.
+            String::from("hyper::") + "Client",
+            // openai / anthropic LLM vendor probes.
+            String::from("open") + "ai_api",
+            String::from("anthrop") + "ic_api",
+        ];
+        for pat in &forbidden_router_patterns {
+            assert!(
+                !stripped.contains(pat.as_str()),
+                "wave25-05 invariant 8: forbidden router-side pattern `{}` found in plan.rs active source",
+                pat
+            );
+        }
+
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&trace_path);
+    }
+
+    #[test]
+    fn router_policy_cli_rust_parity_for_high_confidence_match() {
+        // wave25-05 Layer B parity test. Documents inline that the Node
+        // CLI's `recommend({ ..., traceIndex: { by_task:{<id>:{events:5}},
+        //   by_backend:{claudecode:{events:5}} } }).confidence === 'high'`
+        // for a docs task on the wave25-05 parity policy. Verifying this
+        // in Rust requires shelling out (which is forbidden); instead
+        // this test asserts the daemon's selection matches a hard-coded
+        // expected backend + confidence that the Node Layer A fixture
+        // ALSO expects. A regression in either engine surfaces here AND
+        // in the corresponding Node fixture so the parity is bidirectional.
+        //
+        // Documented expected agreement (Node CLI side):
+        //   policy:        wave25-05 parity policy (docs->claudecode prio 10)
+        //   task.kind:     docs
+        //   trace_index:   by_task[task.id].events=5, by_backend[claudecode].events=5
+        //   recommend()  -> { backend: 'claudecode',
+        //                     confidence: 'high',
+        //                     chosen_rule_id: 'r-docs-to-claudecode',
+        //                     dry_run_only: true }
+        //
+        // Daemon expected agreement (this test):
+        //   args.kind=docs, mode=dry_run, trace_index path -> (5,5)
+        //   block.recommended_backend === 'claudecode'  (parity)
+        //   block.confidence          === 'high'        (parity)
+        //   block.applied             === Bool(false)   (cross-wave invariant)
+        //   block.trace_index_status  === 'used'        (wave25-03 surface)
+        let policy_path = std::env::temp_dir().join(format!(
+            "wave25-05-parity-policy-{}.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &policy_path,
+            r#"(router-policy fixture-wave25-05-parity
+  :schema "missiond.router-policy.v1"
+  :version "v1"
+  :dry-run-only true
+  :runtime-replacement false
+  (rule
+    :id r-docs-to-claudecode
+    :priority 10
+    :when ((kind docs))
+    :recommend (:backend claudecode :reasoning "docs are interactive")
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+        )
+        .unwrap();
+        let trace_path = std::env::temp_dir().join(format!(
+            "wave25-05-parity-trace-{}.json",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(
+            &trace_path,
+            serde_json::to_string_pretty(&json!({
+                "schema": "missiond.session-trace.v1",
+                "by_task": { "btk-1": { "events": 5 } },
+                "by_backend": { "claudecode": { "events": 5 } },
+                "totals": { "events": 10 }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy_path.to_str().unwrap(),
+            "router_policy_trace_index_path": trace_path.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).expect("dry_run parses");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+
+        // Hard-coded expected values that Node Layer A also asserts for
+        // the SAME shape. A divergence on either side fails this test
+        // AND the Node fixture so the parity is bidirectional.
+        assert_eq!(
+            block["recommended_backend"], "claudecode",
+            "wave25-05 parity: Node CLI emits backend='claudecode' for docs task on wave25-05 parity policy"
+        );
+        assert_eq!(
+            block["confidence"], "high",
+            "wave25-05 parity: Node CLI emits confidence='high' for (5,5)-event trace-index"
+        );
+        assert_eq!(
+            block["applied"],
+            Value::Bool(false),
+            "wave25-05 parity: cross-wave invariant — applied=false literal under any trace-index status"
+        );
+        assert_eq!(
+            block["status"], "computed",
+            "wave25-05 parity: matched rule on well-formed policy must surface status=computed"
+        );
+        assert_eq!(
+            block["trace_index_status"], "used",
+            "wave25-05 parity: well-formed (5,5) trace-index must surface trace_index_status=used"
+        );
+
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&trace_path);
+    }
 }

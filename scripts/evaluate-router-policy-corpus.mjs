@@ -764,6 +764,106 @@ function runFixtures(json = false) {
       },
     },
     {
+      // wave25-05: cross-layer measurement smoke. The corpus evaluator is one
+      // of the three engines that consume the wave24-01 router-policy. The
+      // smoke pins:
+      //   * the evaluator surfaces dry_run_only=true / runtime_replacement=
+      //     false from the parsed policy projection (Layer A invariants 1+2);
+      //   * every per_task row carries a confidence in {high, medium, low}
+      //     and a backend in BACKEND_CLASSES (Layer A invariant: enum closed);
+      //   * by_backend totals are the EXACT set of backends emitted across
+      //     per_task rows (no silent backend leak);
+      //   * the evaluator itself never declares an `applied` field — that
+      //     concept lives ONLY on the recommend-task-backend.mjs / mission_plan
+      //     emit surface and the wave25-02 report contract; the evaluator
+      //     deliberately does NOT carry the dry_run_only / applied invariant
+      //     because aggregation is shape-orthogonal to advisory status.
+      name: 'wave25-05: cross-layer invariants pinned on evaluator output',
+      category: 'wave25-05-cross-layer',
+      run: () => {
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wave25-05-xlayer-'));
+        try {
+          const tasksRoot = path.join(tmp, 'tasks');
+          fs.mkdirSync(tasksRoot, { recursive: true });
+          // Mirror the wave25-05 Layer A parity policy: docs->claudecode +
+          // code-alignment->deterministic-checker so the corpus exercises 2
+          // backends. Add a review task so verifier-worker also lights up.
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-docs.lisp'),
+            taskDocsText('fx-docs'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-checker.lisp'),
+            taskCheckerText('fx-checker'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-review.lisp'),
+            taskReviewText('fx-review'),
+            'utf8',
+          );
+          const policyPath = writePolicyFile(tmp, seedPolicyText());
+
+          // Re-pin policy invariants the evaluator's Lisp projector parses.
+          const policy = readRouterPolicyFile(policyPath);
+          mustEqual('policy.dry_run_only', policy.dry_run_only, true);
+          mustEqual('policy.runtime_replacement', policy.runtime_replacement, false);
+
+          const evalResult = runOnTmp({ tmp, policyPath, tasksRoot });
+          mustEqual('totals.tasks', evalResult.totals.tasks, 3);
+
+          // Every per_task row's confidence ∈ {high, medium, low}.
+          const allowedConf = new Set(['high', 'medium', 'low']);
+          for (const row of evalResult.per_task) {
+            if (!allowedConf.has(row.confidence)) {
+              throw new Error(
+                `wave25-05: per_task row confidence ${row.confidence} not in {high,medium,low}`,
+              );
+            }
+            if (!BACKEND_CLASSES.has(row.backend)) {
+              throw new Error(
+                `wave25-05: per_task row backend ${row.backend} not in BACKEND_CLASSES`,
+              );
+            }
+          }
+          // by_backend totals match the union of per_task backends.
+          const emittedBackends = new Set(
+            evalResult.per_task.map((r) => r.backend),
+          );
+          for (const backend of emittedBackends) {
+            const count = evalResult.per_task.filter(
+              (r) => r.backend === backend,
+            ).length;
+            mustEqual(
+              `by_backend[${backend}]`,
+              evalResult.by_backend[backend],
+              count,
+            );
+          }
+
+          // Re-pin: the rejected-runtime-replacement policy is rejected by
+          // the evaluator's main() guard. We assert this on the projector
+          // because the evaluator main() exits non-zero before aggregation
+          // (mirrors the recommend-task-backend.mjs guard); the projector
+          // surface is what the guard reads from.
+          fs.mkdirSync(path.join(tmp, 'rr'), { recursive: true });
+          const rrPath = writePolicyFile(
+            path.join(tmp, 'rr'),
+            badRuntimeReplacementText(),
+          );
+          const rrPolicy = readRouterPolicyFile(rrPath);
+          mustEqual(
+            'rr.runtime_replacement',
+            rrPolicy.runtime_replacement,
+            true,
+          );
+        } finally {
+          fs.rmSync(tmp, { recursive: true, force: true });
+        }
+      },
+    },
+    {
       name: 'audit: no shell / git / LLM / HTTP call sites in active source',
       category: 'self-audit',
       run: () => {

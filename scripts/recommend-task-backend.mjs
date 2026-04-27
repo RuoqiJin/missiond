@@ -979,6 +979,139 @@ function runFixtures(json = false) {
         }
       },
     },
+    {
+      // wave25-05: cross-layer measurement smoke. The wave25 measurable router
+      // loop spans three engines (this CLI, the corpus evaluator, and the
+      // mission_plan daemon handler). All three must agree on confidence for
+      // the SAME synthetic trace-index shape at all three buckets (high /
+      // medium / low) AND must keep the cross-wave advisory invariants
+      // (dry_run_only=true on policy, applied=false on output, recommended
+      // backend within the wave24-01 enum). Layer A of the wave25-05 smoke
+      // pins this CLI side of the parity. Layer B (Rust) pins the daemon
+      // side using the SAME shape; the wave25-05 brief documents the
+      // expected backend for the (5,5) parity fixture.
+      name: 'wave25-05: CLI confidence parity matches daemon for high/medium/low',
+      category: 'wave25-05-parity',
+      run: () => {
+        // Synthetic two-rule policy: a docs->claudecode rule (priority 10)
+        // and a code-alignment+scripts/check-* -> deterministic-checker rule
+        // (priority 20). The (kind=docs) case is the parity anchor — the
+        // Rust daemon test in handlers::knowledge::plan::tests uses the
+        // same predicate shape (kind=docs against a single docs rule).
+        const policy = parsePolicyFromString(`(router-policy fixture-wave25-05
+          :schema "missiond.router-policy.v1"
+          :version "v1"
+          :dry-run-only true
+          :runtime-replacement false
+          (rule
+            :id r-docs-to-claudecode
+            :priority 10
+            :when ((kind docs))
+            :recommend (:backend claudecode :reasoning "docs are interactive")
+            :non-goals ["does not replace runtime dispatch"])
+          (rule
+            :id r-deterministic-checker-tasks
+            :priority 20
+            :when ((all (kind code-alignment)
+                        (path-glob "scripts/check-*.mjs")))
+            :recommend (:backend deterministic-checker :reasoning "scripted acceptance")
+            :non-goals ["does not replace runtime dispatch"]))`);
+
+        // Re-pin top-level policy invariants: this is invariant 1 (runtime-
+        // replacement false) and invariant 2 (dry-run-only true). The Rust
+        // daemon re-checks these on every call; the corpus evaluator
+        // surfaces them in `rejected_count`.
+        mustEqual('policy.dry_run_only', policy.dry_run_only, true);
+        mustEqual('policy.runtime_replacement', policy.runtime_replacement, false);
+
+        const task = parseTaskFromString(taskDocs());
+        // The Rust daemon's fixture_plan default board_task_id is "btk-1"
+        // (see crates/missiond-daemon/src/handlers/knowledge/plan.rs ::
+        // fixture_plan). The CLI's confidence scorer reads
+        // by_task[task.id].events; we drive the parity using task.id ==
+        // fixture-docs (the CLI fixture default) but the SHAPE of the
+        // trace-index is what the Rust side mirrors: by_backend[backend]
+        // .events also feeds max(). So the parity hinges on the MAX of
+        // those two buckets, regardless of which key contributed it.
+
+        // Bucket 1: high — backend has 5 events, task has 0. max=5 ⇒ high.
+        // The Rust daemon test write_temp_trace_index("high", 0, 7) drives
+        // the SAME (max>=5) branch. Both engines must select 'high'.
+        const highIdx = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 0,
+          backendEvents: 5,
+        });
+        const recHigh = recommend({ task, policy, traceIndex: highIdx });
+        mustEqual('high.confidence', recHigh.confidence, 'high');
+        mustEqual('high.backend', recHigh.backend, 'claudecode');
+        mustEqual('high.applied', recHigh.dry_run_only, true);
+        mustEqual('high.chosen_rule_id', recHigh.chosen_rule_id, 'r-docs-to-claudecode');
+
+        // Bucket 2: medium — max in [1..4]. Drives the daemon's
+        // 1..=RICH_TRACE_THRESHOLD-1 branch.
+        const medIdx = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 2,
+          backendEvents: 3,
+        });
+        const recMed = recommend({ task, policy, traceIndex: medIdx });
+        mustEqual('med.confidence', recMed.confidence, 'medium');
+        mustEqual('med.backend', recMed.backend, 'claudecode');
+
+        // Bucket 3: low — max == 0 with a matched rule. Drives the
+        // daemon's matched-but-zero branch.
+        const lowIdx = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 0,
+          backendEvents: 0,
+        });
+        const recLow = recommend({ task, policy, traceIndex: lowIdx });
+        mustEqual('low.confidence', recLow.confidence, 'low');
+        mustEqual('low.backend', recLow.backend, 'claudecode');
+
+        // Invariant 3: applied=false / dry_run_only=true is literal in
+        // every bucket (the JSON surface uses dry_run_only because this
+        // is the CLI; the daemon uses applied — both pin the same idea).
+        for (const r of [recHigh, recMed, recLow]) {
+          mustEqual('dry_run_only literal', r.dry_run_only, true);
+          // Recommended backend ∈ wave24-01 enum.
+          if (!BACKEND_CLASSES.has(r.backend)) {
+            throw new Error(
+              `wave25-05 parity: backend ${r.backend} not in BACKEND_CLASSES`,
+            );
+          }
+          // Stable JSON surfaces dry_run_only:true literally.
+          const stable = stableStringify(r);
+          if (!/"dry_run_only"\s*:\s*true/.test(stable)) {
+            throw new Error('wave25-05 parity: stable JSON missing dry_run_only:true');
+          }
+        }
+
+        // Invariant pin: the deterministic-checker bucket the wave25-05
+        // report-checker fixture (Layer C) declares — drive a code-alignment
+        // task through the same policy and confirm the recommended backend
+        // is deterministic-checker (matches the Layer C positive fixture's
+        // :recommended_backend value).
+        const ckTask = parseTaskFromString(taskCheckerScript());
+        const ckRec = recommend({
+          task: ckTask,
+          policy,
+          traceIndex: synthesizeTraceIndex({
+            task: ckTask.id,
+            backend: 'deterministic-checker',
+            taskEvents: 8,
+            backendEvents: 8,
+          }),
+        });
+        mustEqual('checker.backend', ckRec.backend, 'deterministic-checker');
+        mustEqual('checker.confidence', ckRec.confidence, 'high');
+        mustEqual('checker.dry_run_only', ckRec.dry_run_only, true);
+      },
+    },
   ];
 
   let failed = 0;
