@@ -7141,6 +7141,29 @@ async fn action_execute_internal(
         Err(err_result) => return Ok(err_result),
     };
 
+    // wave-23 / task 05 — pre-flight validate the optional session-trace
+    // ledger path. Default absent ⇒ byte-compatible with wave-15..22 (no
+    // forward, no warning, no response field). When supplied, the
+    // daemon checks only basic shape (non-empty after trim, no NUL or
+    // ASCII control chars except space). Malformed shape with
+    // `session_trace_required=true` ⇒ structured INVALID_PARAM error
+    // BEFORE any dispatch side effect; without `session_trace_required`
+    // ⇒ surface a non-fatal `trace_path_warning` field on the response
+    // and continue with the trace forward suppressed.
+    let trace_required = args
+        .get("session_trace_required")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let trace_input = args
+        .get("session_trace_path")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let (resolved_trace_path, trace_path_warning) =
+        match validate_session_trace_path_arg(trace_input.as_deref(), trace_required) {
+            Ok(pair) => pair,
+            Err(err_result) => return Ok(err_result),
+        };
+
     // wave-15 / task 05 + wave-16 / task 03 — workstation-dispatch routing.
     // Wave-15 honours explicit opt-in (caller arg `workstation_dispatch=true`
     // or PLAN.lisp `:workstation-dispatch true`). Wave-16 layers conservative
@@ -7184,10 +7207,11 @@ async fn action_execute_internal(
     // additionally skips substrate / inner dispatch once the contract
     // has been written. Default mode (`Off`) returns an empty record
     // and the response payload omits the task-contract fields entirely.
-    let task_contract_inputs = task_contract_inputs_from_hints(
+    let task_contract_inputs = task_contract_inputs_from_hints_with_trace(
         &merged_hints,
         resolved.target,
         resolved.dispatch_strategy,
+        resolved_trace_path.as_deref(),
     );
     let project_arg_for_emit = args.get("project").and_then(|v| v.as_str());
     let cwd_arg_for_emit = args.get("cwd").and_then(|v| v.as_str());
@@ -7212,24 +7236,36 @@ async fn action_execute_internal(
         // Refuse dispatch — surface the IO failure plus the
         // resolved plan/target so the caller can fix permissions
         // or registry config and retry. Plan FSM untouched.
-        return Ok(build_task_contract_failure_response(
+        let mut response = build_task_contract_failure_response(
             plan,
             resolved,
             &dispatch_decision,
             &emission,
-        ));
+        );
+        attach_session_trace_response_fields(
+            &mut response,
+            resolved_trace_path.as_deref(),
+            trace_path_warning.as_deref(),
+        );
+        return Ok(response);
     }
 
     if task_contract_mode.is_dry_run() {
         // Skip substrate / inner dispatch — surface the contract path
         // so the caller can render the markdown brief without touching
         // the inner tool. Plan FSM untouched.
-        return Ok(build_task_contract_dry_run_response(
+        let mut response = build_task_contract_dry_run_response(
             plan,
             resolved,
             &dispatch_decision,
             &emission,
-        ));
+        );
+        attach_session_trace_response_fields(
+            &mut response,
+            resolved_trace_path.as_deref(),
+            trace_path_warning.as_deref(),
+        );
+        return Ok(response);
     }
 
     if dispatch_decision.is_enabled() {
@@ -7253,7 +7289,7 @@ async fn action_execute_internal(
         } else {
             None
         };
-        let outcome = super::workstation_dispatch::run_workstation_dispatch_with_contract(
+        let outcome = super::workstation_dispatch::run_workstation_dispatch_with_contract_and_trace(
             state,
             plan,
             resolved.target,
@@ -7261,6 +7297,7 @@ async fn action_execute_internal(
             merged_hints,
             dry_run,
             task_contract_path_for_machine.as_deref(),
+            resolved_trace_path.as_deref(),
         )
         .await;
         // Only transition the plan FSM on the Dispatched branch — every
@@ -7283,17 +7320,23 @@ async fn action_execute_internal(
                 );
             }
         }
-        return Ok(build_workstation_dispatch_response(
+        let mut response = build_workstation_dispatch_response(
             plan,
             resolved,
             outcome,
             &dispatch_decision,
             &emission,
             dispatch_contract_mode,
-        ));
+        );
+        attach_session_trace_response_fields(
+            &mut response,
+            resolved_trace_path.as_deref(),
+            trace_path_warning.as_deref(),
+        );
+        return Ok(response);
     }
 
-    let inner_args = match build_internal_dispatch_args(
+    let mut inner_args = match build_internal_dispatch_args(
         args,
         plan,
         resolved.target,
@@ -7303,6 +7346,14 @@ async fn action_execute_internal(
         Ok(v) => v,
         Err(err_result) => return Ok(err_result),
     };
+    // wave-23 / task 05 — forward the resolved trace path into the
+    // inner-handler args. Only `mission_execution` consumes the field
+    // today (wave-23 / task 04); other targets ignore the unknown key.
+    if let Some(stp) = resolved_trace_path.as_deref() {
+        if let Some(map) = inner_args.as_object_mut() {
+            map.insert("session_trace_path".to_string(), json!(stp));
+        }
+    }
 
     if dry_run {
         let mut payload = json!({
@@ -7323,7 +7374,13 @@ async fn action_execute_internal(
             payload["workstation_dispatch_inference_reason"] = json!(reason);
         }
         merge_task_contract_block(&mut payload, &emission);
-        return Ok(ToolResult::json_pretty(&payload));
+        let mut response = ToolResult::json_pretty(&payload);
+        attach_session_trace_response_fields(
+            &mut response,
+            resolved_trace_path.as_deref(),
+            trace_path_warning.as_deref(),
+        );
+        return Ok(response);
     }
 
     let inner_result = match resolved.target {
@@ -7369,7 +7426,13 @@ async fn action_execute_internal(
             payload["workstation_dispatch_inference_reason"] = json!(reason);
         }
         merge_task_contract_block(&mut payload, &emission);
-        return Ok(ToolResult::json_pretty(&payload));
+        let mut response = ToolResult::json_pretty(&payload);
+        attach_session_trace_response_fields(
+            &mut response,
+            resolved_trace_path.as_deref(),
+            trace_path_warning.as_deref(),
+        );
+        return Ok(response);
     }
 
     // Successful dispatch — append evidence then transition plan to executing.
@@ -7462,7 +7525,7 @@ async fn action_execute_internal(
         }
     };
 
-    Ok(build_internal_dispatch_success_response(
+    let mut response = build_internal_dispatch_success_response(
         plan,
         resolved,
         inner_payload,
@@ -7471,7 +7534,135 @@ async fn action_execute_internal(
         status_update_error,
         &dispatch_decision,
         &emission,
-    ))
+    );
+    attach_session_trace_response_fields(
+        &mut response,
+        resolved_trace_path.as_deref(),
+        trace_path_warning.as_deref(),
+    );
+    Ok(response)
+}
+
+// ── wave-23 / task 05 — session-trace propagation helpers ──────────────
+//
+// `mission_plan(action=execute)` callers can opt into the wave-23 / task 04
+// session-trace ledger by supplying `session_trace_path`. The plan-runner
+// validates basic shape up-front (so a typo cannot silently shadow the
+// ledger) and then forwards the path through three surfaces:
+//   * `mission_execution(action=*)` inner args (when target=mission_execution)
+//   * the workstation-dispatch task brief (a `## Session trace` block)
+//   * the wave-19 / task 06 emitted task-contract v1 file
+//     (`:session-trace-path "..."`)
+// On the response, every return path surfaces `session_trace_path` so
+// observers can pin which ledger this dispatch was wired to (or
+// `trace_path_warning` when shape validation degraded silently because
+// the caller did not opt into hard-fail via `session_trace_required`).
+
+/// Validate the optional `session_trace_path` arg shape. Returns
+/// `(resolved_path, warning)`:
+///   * Both `None` ⇒ caller did not opt in; propagation is suppressed.
+///   * `(Some(path), None)` ⇒ path passed shape validation; forward it
+///     verbatim through the dispatch and surface it on the response.
+///   * `(None, Some(warning))` ⇒ shape failed AND `required=false`; no
+///     forward, surface a non-fatal warning so the caller can fix and
+///     retry without aborting the dispatch.
+///   * `Err(structured_error)` ⇒ shape failed AND `required=true`; the
+///     caller asked the daemon to refuse the dispatch on a malformed
+///     path so a typo cannot silently shadow the ledger.
+///
+/// Validation is intentionally NARROW — we only check the input shape,
+/// never the on-disk file existence. The wave-23 / task 04 consumer
+/// surfaces `trace_warning` for I/O / parse / append failures; the two
+/// surfaces are distinct so observers can tell shape errors (caller
+/// typo) from append errors (target file removed mid-flight).
+pub(super) fn validate_session_trace_path_arg(
+    raw: Option<&str>,
+    required: bool,
+) -> std::result::Result<(Option<String>, Option<String>), ToolResult> {
+    let Some(value) = raw else {
+        return Ok((None, None));
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        let detail = "session_trace_path is empty after trim".to_string();
+        return reject_or_warn_trace_path(detail, required);
+    }
+    // NUL byte and ASCII control char rejection. Tab is allowed since
+    // some build systems tolerate path components with whitespace; we
+    // only reject characters that would fail filesystem normalization
+    // or render the path unreadable.
+    for (idx, ch) in trimmed.char_indices() {
+        if ch == '\0' {
+            let detail = format!(
+                "session_trace_path contains a NUL byte at offset {} (filesystem-invalid)",
+                idx
+            );
+            return reject_or_warn_trace_path(detail, required);
+        }
+        if ch.is_ascii_control() && ch != ' ' && ch != '\t' {
+            let detail = format!(
+                "session_trace_path contains ASCII control char `{:#04x}` at offset {} (filesystem-invalid)",
+                ch as u32, idx
+            );
+            return reject_or_warn_trace_path(detail, required);
+        }
+    }
+    Ok((Some(trimmed.to_string()), None))
+}
+
+/// `validate_session_trace_path_arg` companion that branches between
+/// hard-fail (when `required=true`) and warn-only (the conservative
+/// default).
+fn reject_or_warn_trace_path(
+    detail: String,
+    required: bool,
+) -> std::result::Result<(Option<String>, Option<String>), ToolResult> {
+    if required {
+        Err(ToolResult::structured_error(
+            ToolError::new(error_codes::INVALID_PARAM, detail.clone())
+                .with_suggestion(
+                    "session_trace_required=true forbids malformed `session_trace_path` shapes — \
+                     supply a non-empty filesystem-valid path (relative or absolute) or drop \
+                     `session_trace_required` to fall back to a non-fatal warning.",
+                ),
+        ))
+    } else {
+        Ok((None, Some(detail)))
+    }
+}
+
+/// Splice `session_trace_path` and / or `trace_path_warning` into the
+/// JSON envelope of a `ToolResult` produced by an `action_execute_internal`
+/// return path. When both inputs are `None` the response is left
+/// byte-identical to the wave-15..22 baseline — preserves backward
+/// compatibility for callers that never supplied the trace knob.
+pub(super) fn attach_session_trace_response_fields(
+    result: &mut ToolResult,
+    session_trace_path: Option<&str>,
+    trace_path_warning: Option<&str>,
+) {
+    if session_trace_path.is_none() && trace_path_warning.is_none() {
+        return;
+    }
+    // The inner JSON lives under the first ToolContent::Text frame
+    // (json_pretty / structured-error patterns). We splice in place so
+    // the rest of the envelope (is_error, structured_content) stays
+    // unchanged.
+    let Some(ToolContent::Text { text }) = result.content.first_mut() else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    if let Some(map) = value.as_object_mut() {
+        if let Some(stp) = session_trace_path {
+            map.insert("session_trace_path".to_string(), json!(stp));
+        }
+        if let Some(w) = trace_path_warning {
+            map.insert("trace_path_warning".to_string(), json!(w));
+        }
+    }
+    *text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| text.clone());
 }
 
 /// Merge the wave-19 / task 06 task-contract emission record into a
@@ -8328,6 +8519,11 @@ pub(super) struct TaskContractInputs {
     pub target: String,
     pub target_project: Option<String>,
     pub requested_cwd: Option<String>,
+    /// wave-23 / task 05 — optional session-trace ledger path emitted
+    /// onto the contract as `:session-trace-path "..."`. Default
+    /// (None) preserves the wave-15..22 contract byte shape: the field
+    /// is only rendered when the caller explicitly opted in.
+    pub session_trace_path: Option<String>,
 }
 
 /// Escape a string for inclusion inside a Lisp double-quoted literal.
@@ -8488,6 +8684,22 @@ pub(super) fn build_task_contract_lisp(
         out.push_str(&format!(
             "  :requested-cwd \"{}\"\n",
             lisp_escape_string(cwd)
+        ));
+    }
+    // wave-23 / task 05 — emit `:session-trace-path` when the plan-runner
+    // opted into trace forwarding. The field is read back by
+    // `workstation_dispatch::ParsedTaskContract` so a downstream caller
+    // that loads the contract (machine mode) can re-derive the path
+    // without re-supplying the arg.
+    if let Some(stp) = inputs
+        .session_trace_path
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str(&format!(
+            "  :session-trace-path \"{}\"\n",
+            lisp_escape_string(stp)
         ));
     }
     out.push_str(&format!(
@@ -8787,7 +8999,32 @@ pub(super) fn task_contract_inputs_from_hints(
         target: target.to_string(),
         target_project: hints.target_project.clone(),
         requested_cwd: hints.requested_cwd.clone(),
+        session_trace_path: None,
     }
+}
+
+/// wave-23 / task 05 — variant of `task_contract_inputs_from_hints` that
+/// also stamps an optional session-trace ledger path onto the projection
+/// so the contract emitter writes `:session-trace-path "..."` into the
+/// generated Lisp.
+///
+/// Why a separate function rather than extending the existing one's
+/// signature: out-of-scope callers (`plan_dag.rs`) bind to the existing
+/// 3-arg form and cannot be edited under this wave's contract. A wrapper
+/// keeps the legacy surface stable and lets the in-scope plan.rs
+/// surface forward the trace path cleanly.
+pub(super) fn task_contract_inputs_from_hints_with_trace(
+    hints: &super::workstation_dispatch::WorkstationDispatchHints,
+    target: &str,
+    dispatch_strategy: &str,
+    session_trace_path: Option<&str>,
+) -> TaskContractInputs {
+    let mut out = task_contract_inputs_from_hints(hints, target, dispatch_strategy);
+    out.session_trace_path = session_trace_path
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+    out
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -10912,6 +11149,7 @@ mod tests {
             target: "mission_task_delegate".to_string(),
             target_project: Some("missiond".to_string()),
             requested_cwd: None,
+            session_trace_path: None,
         };
         let body = build_task_contract_lisp(plan_id, "node-1", "btk-7", &inputs);
         // Must declare schema, kind, status, owner, write-scope, must-not-touch,
@@ -15889,6 +16127,192 @@ mod tests {
         assert_eq!(
             armed_v1_block["persist_inference_applied"], false,
             "wave21-05 I6: v1 `persist_inference_applied` field MUST stay hard-pinned false"
+        );
+    }
+
+    // ── wave-23 / task 05 — session-trace propagation tests ─────────────
+    //
+    // The four cases from the task contract:
+    //   (1) legacy: no trace arg ⇒ no forward, no warning, no response
+    //       field surfaces (byte-shape compatible with wave-15..22)
+    //   (2) happy path: well-formed path forwarded into the contract
+    //       emitter inputs and the response surface
+    //   (3) malformed + required ⇒ structured INVALID_PARAM error BEFORE
+    //       any dispatch side effect (fail-fast)
+    //   (4) malformed + NOT required ⇒ non-fatal `trace_path_warning`
+    //       on the response, no forward (conservative posture)
+    //
+    // The dispatch path itself is exercised in the workstation_dispatch
+    // test module (brief / contract round-trip); these tests pin the
+    // pure-helper validation surface and the contract emitter wiring.
+
+    #[test]
+    fn validate_session_trace_path_arg_returns_none_pair_when_arg_absent() {
+        let (resolved, warning) = validate_session_trace_path_arg(None, false)
+            .expect("absent path is always Ok");
+        assert!(resolved.is_none(), "wave23-05 case 1: legacy callers see no resolved path");
+        assert!(warning.is_none(), "wave23-05 case 1: legacy callers see no warning");
+    }
+
+    #[test]
+    fn validate_session_trace_path_arg_passes_well_formed_paths_through() {
+        let (resolved, warning) = validate_session_trace_path_arg(
+            Some(".missiond/tasks/wave23/session-trace.lisp"),
+            false,
+        )
+        .expect("well-formed path is always Ok");
+        assert_eq!(
+            resolved.as_deref(),
+            Some(".missiond/tasks/wave23/session-trace.lisp"),
+            "wave23-05 case 2: happy path forwards verbatim"
+        );
+        assert!(warning.is_none(), "wave23-05 case 2: happy path emits no warning");
+    }
+
+    #[test]
+    fn validate_session_trace_path_arg_required_rejects_empty_with_invalid_param() {
+        let result = validate_session_trace_path_arg(Some("   "), true);
+        let err = result.expect_err("required + empty must hard-fail");
+        let payload = parse_payload(&err);
+        // Structured-error envelope carries the error in `error.code` /
+        // `error.message`. The exact envelope shape is owned by
+        // `ToolResult::structured_error`; we just assert the wire form
+        // names INVALID_PARAM and the trim violation.
+        let txt = serde_json::to_string(&payload).expect("serialize");
+        assert!(
+            txt.contains("INVALID_PARAM"),
+            "wave23-05 case 3: required + malformed must fail with INVALID_PARAM, got: {}",
+            txt
+        );
+        assert!(
+            txt.contains("session_trace_path is empty after trim"),
+            "wave23-05 case 3: error must name the shape failure"
+        );
+    }
+
+    #[test]
+    fn validate_session_trace_path_arg_warns_on_nul_byte_when_not_required() {
+        // NUL byte is a hard filesystem invariant the daemon must catch;
+        // without `required`, surface a warning so the caller can fix
+        // the typo without aborting the dispatch.
+        let trace = "good\0bad";
+        let (resolved, warning) = validate_session_trace_path_arg(Some(trace), false)
+            .expect("malformed + not-required must NOT hard-fail");
+        assert!(
+            resolved.is_none(),
+            "wave23-05 case 4: malformed path must not be forwarded"
+        );
+        let warning = warning.expect("wave23-05 case 4: malformed path must surface a warning");
+        assert!(
+            warning.contains("NUL byte"),
+            "wave23-05 case 4: warning must explain the shape failure — got: {}",
+            warning
+        );
+    }
+
+    #[test]
+    fn task_contract_inputs_from_hints_with_trace_emits_session_trace_path_in_lisp() {
+        // The contract emitter must include `:session-trace-path "..."`
+        // when the trace knob is set so a downstream consumer
+        // (machine-mode dispatch loading the contract directly) can
+        // re-derive the path without re-supplying the arg.
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let hints = wd::WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let inputs = task_contract_inputs_from_hints_with_trace(
+            &hints,
+            "mission_task_delegate",
+            "fresh-code-alignment",
+            Some(".missiond/tasks/wave23/session-trace.lisp"),
+        );
+        assert_eq!(
+            inputs.session_trace_path.as_deref(),
+            Some(".missiond/tasks/wave23/session-trace.lisp"),
+            "wave23-05: trace path must land on TaskContractInputs.session_trace_path"
+        );
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-0000feedbabe").unwrap();
+        let body = build_task_contract_lisp(plan_id, "node-trace", "btk-trace", &inputs);
+        assert!(
+            body.contains(":session-trace-path \".missiond/tasks/wave23/session-trace.lisp\""),
+            "wave23-05: emitted contract must carry `:session-trace-path` verbatim — got:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn task_contract_inputs_from_hints_omits_session_trace_when_path_absent() {
+        // Legacy callers (the existing 3-arg helper) must NOT emit the
+        // `:session-trace-path` field — preserves wave-19..22 contract
+        // byte-shape exactly so DAG / unified-entry consumers (which
+        // bind to the legacy helper) keep round-tripping.
+        use crate::handlers::knowledge::workstation_dispatch as wd;
+        let hints = wd::WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let inputs = task_contract_inputs_from_hints(
+            &hints,
+            "mission_task_delegate",
+            "fresh-code-alignment",
+        );
+        assert!(
+            inputs.session_trace_path.is_none(),
+            "wave23-05: legacy 3-arg helper must keep session_trace_path=None"
+        );
+        let plan_id = Uuid::parse_str("00000000-0000-0000-0000-00000000c0de").unwrap();
+        let body = build_task_contract_lisp(plan_id, "node-legacy", "btk-legacy", &inputs);
+        assert!(
+            !body.contains(":session-trace-path"),
+            "wave23-05: legacy contract must NOT carry session-trace-path — got:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn attach_session_trace_response_fields_is_a_noop_when_both_inputs_are_none() {
+        // Byte-shape pin for legacy callers: when neither field is
+        // supplied, the JSON envelope must be byte-identical to the
+        // wave-15..22 baseline (no extra keys).
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let mut result = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match result.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        attach_session_trace_response_fields(&mut result, None, None);
+        let after_text = match result.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after_text,
+            "wave23-05: noop attach must leave the JSON envelope byte-identical"
+        );
+    }
+
+    #[test]
+    fn attach_session_trace_response_fields_splices_path_and_warning_into_envelope() {
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let mut result = action_execute_bridge(&plan, &resolved);
+        attach_session_trace_response_fields(
+            &mut result,
+            Some(".missiond/tasks/wave23/session-trace.lisp"),
+            Some("malformed: NUL byte at offset 4"),
+        );
+        let v = parse_payload(&result);
+        assert_eq!(
+            v["session_trace_path"], ".missiond/tasks/wave23/session-trace.lisp",
+            "wave23-05: helper must surface the resolved trace path"
+        );
+        assert_eq!(
+            v["trace_path_warning"], "malformed: NUL byte at offset 4",
+            "wave23-05: helper must surface the trace_path_warning when supplied"
         );
     }
 }

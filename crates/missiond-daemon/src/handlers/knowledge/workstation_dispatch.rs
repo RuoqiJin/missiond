@@ -273,6 +273,12 @@ pub(crate) struct ParsedTaskContract {
     pub target_project: Option<String>,
     pub requested_cwd: Option<String>,
     pub target: Option<String>,
+    /// wave-23 / task 05 — optional session-trace ledger path. Mirrors
+    /// the `:session-trace-path` field emitted by
+    /// `plan::build_task_contract_lisp` so the dispatch overlay can
+    /// re-derive the path when only the contract is supplied (caller
+    /// dropped the explicit arg).
+    pub session_trace_path: Option<String>,
 }
 
 /// Typed parser/loader failure. Each variant maps deterministically to a
@@ -580,6 +586,14 @@ fn project_contract(form: &SExp) -> Result<ParsedTaskContract, TaskContractParse
             }
             "requested-cwd" => out.requested_cwd = Some(require_string(val, "requested-cwd")?),
             "target" => out.target = Some(require_string(val, "target")?),
+            // wave-23 / task 05 — accept-and-store the optional session-trace
+            // ledger path so a contract-driven dispatch (machine mode) can
+            // re-derive the path even when the caller dropped the explicit
+            // arg. The kebab-case `:session-trace-path` keyword matches the
+            // emitter (`plan::build_task_contract_lisp`).
+            "session-trace-path" => {
+                out.session_trace_path = Some(require_string(val, "session-trace-path")?)
+            }
             // Other v1 fields (kind / status / owner / depends-on / title /
             // plan-id / node-id / report / requirements) are not consumed
             // by workstation_dispatch — accept-and-ignore so the parser
@@ -1134,11 +1148,32 @@ pub(crate) fn build_task_brief(
 /// gives the worker a stable reference if it needs to re-read the
 /// machine contract while iterating. When `None`, the brief is
 /// byte-identical to the wave-15/16/17 baseline.
+///
+/// wave-23 / task 05 — added `session_trace_path` parameter (kept as a
+/// separate parameter rather than a field on `WorkstationDispatchHints`
+/// so out-of-scope callers in `plan_dag.rs` / `unified_entry.rs` keep
+/// working without struct-literal modifications). When `Some`, the
+/// brief gains a `## Session trace` block before the parallelism hint.
 pub(crate) fn build_task_brief_with_source(
     plan: &Plan,
     hints: &WorkstationDispatchHints,
     dispatch_strategy: &str,
     contract_source: Option<&Path>,
+) -> String {
+    build_task_brief_with_source_and_trace(plan, hints, dispatch_strategy, contract_source, None)
+}
+
+/// wave-23 / task 05 — variant of `build_task_brief_with_source` that
+/// also accepts an optional session-trace ledger path. The path is
+/// surfaced as a `## Session trace` block in the brief so the worker
+/// knows which ledger to record `mission_execution(action=*)` events
+/// against. `None` preserves the wave-15..22 byte shape exactly.
+pub(crate) fn build_task_brief_with_source_and_trace(
+    plan: &Plan,
+    hints: &WorkstationDispatchHints,
+    dispatch_strategy: &str,
+    contract_source: Option<&Path>,
+    session_trace_path: Option<&str>,
 ) -> String {
     let mut out = String::new();
 
@@ -1275,6 +1310,29 @@ pub(crate) fn build_task_brief_with_source(
     );
     out.push('\n');
 
+    // 7.5 wave-23 / task 05 — Session trace. Optional pointer at the
+    //     wave-23 / task 04 ledger. Surfaced before the parallelism hint
+    //     so the worker sees the bookkeeping target close to the
+    //     completion-handoff section that pins how it should report back.
+    //     When absent, this section is omitted entirely so legacy briefs
+    //     stay byte-identical.
+    if let Some(stp) = session_trace_path
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str("## Session trace\n");
+        out.push_str(&format!("- ledger path: `{}`\n", stp));
+        out.push_str(
+            "- forward this path verbatim as `session_trace_path` when calling \
+             `mission_execution(action=open|preflight_commit|complete)`\n",
+        );
+        out.push_str(
+            "- the daemon (wave-23 / task 04) appends a `(trace-event ...)` form per call \
+             — best-effort, never blocks the primary action result\n",
+        );
+        out.push('\n');
+    }
+
     // 8. Agent-team hint (exactly once, literal Chinese).
     if dispatch_strategy == "agent-team" {
         out.push_str("## Parallelism hint\n");
@@ -1355,6 +1413,44 @@ pub(crate) async fn run_workstation_dispatch_with_contract(
     dry_run: bool,
     task_contract_path: Option<&Path>,
 ) -> WorkstationDispatchOutcome {
+    run_workstation_dispatch_with_contract_and_trace(
+        state,
+        plan,
+        target,
+        dispatch_strategy,
+        hints,
+        dry_run,
+        task_contract_path,
+        None,
+    )
+    .await
+}
+
+/// wave-23 / task 05 — variant of `run_workstation_dispatch_with_contract`
+/// that also forwards a session-trace ledger path. The path is rendered
+/// into the brief (under a `## Session trace` block) AND threaded into
+/// the inner `mission_task_delegate` args under `session_trace_path` so
+/// the worker can echo it back when calling
+/// `mission_execution(action=open|preflight_commit|complete)`. Evidence
+/// sidecar carries the same string under `session_trace_path` for audit.
+///
+/// Why a sibling function rather than a struct field on
+/// `WorkstationDispatchHints`: extending the hint struct or the outcome
+/// variants would break struct-literal initializers in plan_dag.rs and
+/// unified_entry.rs (out-of-scope under this wave's contract).
+/// Threading the path as a function parameter keeps the existing call
+/// surface stable for those callers while letting the in-scope plan.rs
+/// surface forward the field cleanly.
+pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
+    state: &AppState,
+    plan: &Plan,
+    target: &str,
+    dispatch_strategy: &str,
+    hints: WorkstationDispatchHints,
+    dry_run: bool,
+    task_contract_path: Option<&Path>,
+    session_trace_path: Option<&str>,
+) -> WorkstationDispatchOutcome {
     // 1. Refuse non-task_delegate targets up front (architecture rule).
     if target != "mission_task_delegate" {
         return WorkstationDispatchOutcome::SafeDescriptor {
@@ -1432,10 +1528,17 @@ pub(crate) async fn run_workstation_dispatch_with_contract(
     let mut hints = hints;
     let mut contract_source_path: Option<PathBuf> = None;
     let mut contract_dispatch_strategy: Option<String> = None;
+    let mut contract_session_trace_path: Option<String> = None;
     if let Some(raw_path) = task_contract_path {
         let resolved_path = resolve_contract_path(raw_path, &resolution.project_root);
         match load_task_contract(&resolved_path) {
             Ok(contract) => {
+                contract_session_trace_path = contract
+                    .session_trace_path
+                    .as_deref()
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
                 hints.overlay_contract(&contract);
                 contract_dispatch_strategy = contract.dispatch_strategy.clone();
                 contract_source_path = Some(resolved_path);
@@ -1468,6 +1571,17 @@ pub(crate) async fn run_workstation_dispatch_with_contract(
         }
     }
 
+    // wave-23 / task 05 — resolve the session-trace path priority:
+    //   caller param > contract `:session-trace-path` overlay
+    // (the contract is the SSOT only when no explicit caller param was
+    //  supplied; explicit caller wins because the caller may legitimately
+    //  redirect a contract-default ledger to a wave-specific override).
+    let resolved_trace_path: Option<String> = session_trace_path
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or(contract_session_trace_path);
+
     // 4. Build the brief. Hints have already been arg-merged + (when a
     //    contract was supplied) overlaid with the contract; cap lists
     //    here so the brief stays under the 16K objective limit.
@@ -1480,11 +1594,12 @@ pub(crate) async fn run_workstation_dispatch_with_contract(
     let brief_dispatch_strategy: &str = contract_dispatch_strategy
         .as_deref()
         .unwrap_or(dispatch_strategy);
-    let brief = build_task_brief_with_source(
+    let brief = build_task_brief_with_source_and_trace(
         plan,
         &hints,
         brief_dispatch_strategy,
         contract_source_path.as_deref(),
+        resolved_trace_path.as_deref(),
     );
 
     // 5. dry_run: stop here, no dispatch, no evidence.
@@ -1513,6 +1628,18 @@ pub(crate) async fn run_workstation_dispatch_with_contract(
         inner_args["dispatch_strategy"] = json!(ds);
     } else {
         inner_args["dispatch_strategy"] = json!(dispatch_strategy);
+    }
+    // wave-23 / task 05 — forward the resolved session-trace ledger path
+    // into the inner substrate so the worker can echo it back when
+    // calling `mission_execution(action=*)`. The brief already nudges the
+    // worker to do so; passing it here gives downstream substrates that
+    // honour `session_trace_path` (today only the brief; tomorrow any
+    // task_delegate substrate that proxies to mission_execution) an
+    // implicit signal. Path priority: caller-supplied param > contract
+    // `:session-trace-path` overlay (resolved earlier into
+    // `resolved_trace_path`).
+    if let Some(stp) = resolved_trace_path.as_deref() {
+        inner_args["session_trace_path"] = json!(stp);
     }
 
     let inner_result =
@@ -1573,6 +1700,12 @@ pub(crate) async fn run_workstation_dispatch_with_contract(
     }
     if let Some(eds) = contract_dispatch_strategy.as_deref() {
         entry = entry.with_extra("contract_dispatch_strategy", json!(eds));
+    }
+    // wave-23 / task 05 — when the dispatch carried a session-trace
+    // ledger path, surface it on the evidence ledger so observers can
+    // pivot on the same string the brief and inner args carry.
+    if let Some(stp) = resolved_trace_path.as_deref() {
+        entry = entry.with_extra("session_trace_path", json!(stp));
     }
     let outcome = evidence_collector::append(
         state,
@@ -5541,6 +5674,7 @@ mod tests {
             target_project: None,
             requested_cwd: None,
             target: Some("mission_task_delegate".to_string()),
+            session_trace_path: None,
         }
     }
 
@@ -6275,5 +6409,90 @@ mod tests {
                 "wave21-04 I4: every proposal MUST keep applied=false on the propose-only wire"
             );
         }
+    }
+
+    // ── wave-23 / task 05 — session-trace propagation tests ─────────────
+    //
+    // These tests pin the brief / contract / response surfaces against
+    // the four cases the task contract enumerates: legacy (no trace),
+    // happy path (trace forwarded), and contract-side overlay (the
+    // pure-parser variant). Plan-level integration (validation +
+    // response surface) lives in plan.rs::tests; this module exercises
+    // the workstation-dispatch substrate alone.
+
+    #[test]
+    fn build_task_brief_with_source_and_trace_omits_session_trace_block_when_path_absent() {
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let brief = build_task_brief_with_source_and_trace(
+            &plan,
+            &hints,
+            "fresh-code-alignment",
+            None,
+            None,
+        );
+        assert!(
+            !brief.contains("## Session trace"),
+            "wave23-05: legacy brief (no trace path supplied) must NOT carry the Session trace section — got:\n{}",
+            brief
+        );
+    }
+
+    #[test]
+    fn build_task_brief_with_source_and_trace_renders_session_trace_block_when_path_supplied() {
+        let plan = fixture_plan("(plan)");
+        let hints = WorkstationDispatchHints {
+            objective: Some("ship".to_string()),
+            owned_files: vec!["a.rs".to_string()],
+            ..Default::default()
+        };
+        let trace = ".missiond/tasks/wave23/session-trace.lisp";
+        let brief = build_task_brief_with_source_and_trace(
+            &plan,
+            &hints,
+            "fresh-code-alignment",
+            None,
+            Some(trace),
+        );
+        assert!(
+            brief.contains("## Session trace\n"),
+            "wave23-05: brief with trace path must render the Session trace heading — got:\n{}",
+            brief
+        );
+        assert!(
+            brief.contains(trace),
+            "wave23-05: brief must echo the trace path verbatim so the worker reads it"
+        );
+        assert!(
+            brief.contains("forward this path verbatim as `session_trace_path`"),
+            "wave23-05: brief must instruct the worker to forward the path on completion calls"
+        );
+    }
+
+    #[test]
+    fn parse_task_contract_extracts_session_trace_path_from_contract_lisp() {
+        // Pure-parser test: a contract that emits :session-trace-path
+        // must round-trip through the workstation_dispatch parser into
+        // ParsedTaskContract.session_trace_path. This is the SSOT path
+        // for machine-mode dispatches that load the contract directly
+        // (caller may have dropped the explicit arg).
+        let src = r#"(task plan-trace
+  :schema "missiond.task-contract.v1"
+  :goal "ship the wave"
+  :write-scope ["a.rs"]
+  :must-not-touch []
+  :acceptance ["cargo test"]
+  :session-trace-path ".missiond/tasks/wave23/session-trace.lisp"
+)"#;
+        let parsed = parse_task_contract(src).expect("parse ok");
+        assert_eq!(
+            parsed.session_trace_path.as_deref(),
+            Some(".missiond/tasks/wave23/session-trace.lisp"),
+            "wave23-05: contract :session-trace-path must round-trip through the parser"
+        );
     }
 }

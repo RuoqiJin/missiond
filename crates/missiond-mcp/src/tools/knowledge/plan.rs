@@ -871,6 +871,39 @@ fn build_properties() -> Value {
         "[execute] (wave-22 / task 05) explicit operator acknowledgement that hooks / preflight state is acceptable for the auto-spawn gate. Default `false`. The daemon does NOT run hooks itself; this flag is the surface where the operator (or the orchestrator on the operator's behalf) confirms `core.hooksPath` is wired and the pre-commit guard is in place. Required-truthy when `auto_spawn=true` for the gate to fire; supplying `auto_spawn=true` without this flag lands on `workstation_auto_spawn_gate.auto_spawn_status=skipped_preflight_unacceptable` with NO spawn. Pair with the wave-22 / task 01 `scripts/check-missiond-hooks.mjs --json` doctor output to derive the value programmatically. Strict shape: only the bool form is accepted; literal string `\"true\"` is rejected with `AUTO_SPAWN_INVALID_PARAM`.",
     ));
 
+    // ── wave-23 / task 05 — plan/workstation session-trace propagation ──
+    //
+    // Optional opt-in handles for forwarding the wave-23 / task 04
+    // session-trace ledger path through `mission_plan(action=execute)` and
+    // the workstation-dispatch substrate. Default absent ⇒ byte-compatible
+    // with wave-15..22 (no trace forward, no descriptor / brief surfacing,
+    // no extra response field). When present, the path is repo-relative
+    // (relative paths join the resolved project root) or absolute; the
+    // daemon validates basic shape (non-empty, no NUL bytes) up front and
+    // then forwards the value into:
+    //   * `mission_execution(action=open|preflight_commit|complete)` inner args
+    //     (wave-23 / task 04 consumer surface)
+    //   * the workstation-dispatch task brief (a `## Session Trace` line)
+    //     so the worker knows which ledger to record against
+    //   * the emitted task-contract v1 (`:session-trace-path "..."`) so
+    //     downstream completion can re-derive the path from the contract
+    //
+    // Required validation: when `session_trace_required=true` and the
+    // supplied `session_trace_path` is malformed (empty after trim, NUL
+    // byte, control chars), the daemon fails before dispatch with a
+    // structured `INVALID_PARAM` error. Otherwise — malformed path or
+    // simply absent file — surfaces as a `trace_path_warning` field on
+    // the response and the dispatch proceeds (legacy posture).
+    p.insert("session_trace_path".into(), prop(
+        "string",
+        "[execute] (wave-23 / task 05) opt-in session-trace ledger path forwarded through `mission_plan(action=execute)` to (a) `mission_execution(action=open|preflight_commit|complete)` inner args (wave-23 / task 04 consumer surface), (b) the workstation-dispatch task brief (`## Session Trace` line), and (c) the wave-19 / task 06 emitted task-contract v1 file (`:session-trace-path \"...\"`). Default absent ⇒ byte-compatible with wave-15..22 — no trace forward, no descriptor / brief surfacing, no response field. Path may be absolute OR repo-relative (relative paths join the resolved project root downstream); the daemon validates only basic shape (non-empty after trim, no NUL bytes, no ASCII control chars except space) up front. Malformed shape with `session_trace_required=true` ⇒ structured `INVALID_PARAM` error BEFORE dispatch; malformed shape WITHOUT `session_trace_required` ⇒ `trace_path_warning` field on the response and dispatch proceeds (conservative). Missing / unwritable target file is NOT a malformed-shape error: that surfaces only at the wave-23 / task 04 consumer's `trace_warning` slot when `mission_execution` actually tries to append. The forwarded path passes through verbatim — kebab `:session-trace-path` lands in the task contract, snake `session_trace_path` lands in inner args / response.",
+    ));
+
+    p.insert("session_trace_required".into(), prop(
+        "boolean",
+        "[execute] (wave-23 / task 05) when `true`, malformed `session_trace_path` shapes (empty, NUL byte, ASCII control chars) fail BEFORE dispatch with a structured `INVALID_PARAM` error so a typo cannot silently shadow the trace ledger. Default `false` preserves the conservative wave-15..22 posture: malformed paths surface a non-fatal `trace_path_warning` field on the response and dispatch proceeds. Independent of the wave-23 / task 04 `trace_warning` field which the consumer (`mission_execution`) emits when an APPEND I/O fails — this preflight only validates the shape of the propagated path. Strict shape: only the bool form is accepted; literal string `\"true\"` is ignored.",
+    ));
+
     Value::Object(p)
 }
 
