@@ -302,4 +302,38 @@
     (principle project-root-cwd-contract
       :rule "fresh code-alignment 工位 cwd 必须 = target_project_root; 常驻 Lisp 会话 cwd = missiond 仓库根 (本仓 .missiond/v2/*.lisp 是工作面)"
       :enforcement "spawner::spawn_tracked_slot 已强制 cwd 校验; reuse slot 必须 slot.project_root == target_project_root"
-      :status "code-aligned for spawn cwd enforcement; 任务 .md 中 :target_project 字段 plan-runner 消费 pending")))
+      :status "code-aligned for spawn cwd enforcement; 任务 .md 中 :target_project 字段 plan-runner 消费 pending"))
+
+  ;; ──────────────────────────────────────────────────────────
+  ;; D · trace-derived router policy (wave 23 architecture draft)
+  ;; section-id root: worker.section.trace-derived-router-policy
+  ;; ──────────────────────────────────────────────────────────
+  (trace-derived-router-policy
+    :desc "基于 session-trace 的后续 LLM router / backend selection 草案 — 用真实执行轨迹压缩 ClaudeCode 步数, 但本 wave 不替换 ClaudeCode"
+    :status "architecture-designed — wave 23 只完成 trace collection / propagation / descriptive analyzer; runtime router replacement 未 code-aligned"
+    :truth-sources ["session-trace.lisp (append-only factual telemetry)"
+                    "task-report.lisp + shared-memory.lisp + scoped commit hash"
+                    "mission_execution companion log / evidence sidecar"]
+    :router-non-goal "单次 trace 不能直接决定 backend; analyzer only describes bottlenecks and anti-patterns"
+    :backend-classes
+      [(claudecode
+         :role "default broad coding/workstation backend"
+         :use-when "任务需要交互式 codebase exploration, file edits, tests, and scoped commit handoff"
+         :avoid-when "trace shows repeated deterministic checker failures or pure mechanical edits")
+       (missiond-llm-router
+         :role "future policy engine selecting model/backend from contract shape + trace history"
+         :status "future-code-alignment; no runtime in wave 23")
+       (deterministic-checker
+         :role "schema/checker/verifier-only lane"
+         :use-when "task contract asks only to validate Lisp/report/memory/trace artifacts")
+       (patch-worker
+         :role "small bounded edit backend"
+         :use-when "write-scope is tiny, acceptance is deterministic, and trace history says ClaudeCode setup dominates runtime")
+       (verifier-worker
+         :role "post-run proof and regression lane"
+         :use-when "task is read-only verification after commit")]
+    :policy-inputs [:contract-kind :write-scope-size :must-not-touch-risk :acceptance-command-class :historical-tool-count :historical-stall-seconds :trace-bottleneck-tags]
+    :must-preserve ["Lisp task-contract remains dispatch SSOT"
+                    "scoped commit / report / shared-memory / session-trace stay separate artifacts"
+                    "No `claude -p` fallback for workstation write tasks"
+                    "Router decisions require explainable policy record, not opaque prompt intuition"]))

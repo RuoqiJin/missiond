@@ -5,7 +5,7 @@
 ;; ══════════════════════════════════════════════════════
 
 (machine-contract-layer missiond
-  :version "v0.5"
+  :version "v0.6"
   :status "code-aligned full (wave 19 task 02-08 全 close + wave 20 task 01-09 + wave 21 task 01-08 propose+apply-gate + wave 22 task 01-07 explicit-gate-promotion + auto-verifier + smoke v4 闭环) — task-contract v1 schema + checker + verifier + report-contract v1 + shared-memory v1 + renderer dispatch brief v1 + plan task-contract emitter v0 + workstation task-contract consumer v0 + execution task-contract completion verification v0 (wave19-02..08). wave 20 进一步闭环: task-scope-index-guard v1 + renderer scoped-commit guard v2 + execution preflight task-contract scope v1 + machine-driven dispatch v0 (Lisp 真成 dispatch SSOT) + unified-entry machine-loop smoke v2 + review auto-answer policy v0 + ExecutionEvent legacy metadata sweep v0 (11 variants 全闭环). wave 21 task 01-08 全闭环 propose+apply-gate: hooks-path installer v1 (opt-in repo-local only) + task-run verifier v1 + execution report-verifier integration v1 + autonomous workstation LLM proposal v0 (propose only, applied=false / auto_spawn=false 永钉死) + plan inference apply gate v1 (persisted plan.sexp_text 永不 mutate / persist_inference_applied=false 永钉死) + LLM auto-approve proposal v0 (propose only, applied=false / requires_human=true 永钉死) + sonnet distill chain auto-apply v1 (双 opt-in required) + machine-contract autonomous loop smoke v3 (15 cross-wave invariants pinned). **wave 22 task 01-07 全闭环 explicit-gate-promotion + auto-verifier (commits 49555c4/02ac627/4b55cb4/fee6567/162a303/2423d4b/6b2125c)**: hooks default-on doctor v2 (install-missiond-hooks.mjs default mode = --check 只读 doctor / 唯一 mutation 仍是 --install / 4 reason codes aligned|hooks-path-unset|hooks-path-wrong|hook-file-missing / renderer renderHooksDoctorPreflight() 块在每 :commit :required brief commit section 上方 / 11 dry-fixtures 8→11 / 仍未 default-on real install — caller 必须显式 git config 才生效, wave22-01 commit 49555c4) + execution auto-run-verifier v2 (daemon-internal `auto_run_task_run_verifier` 8 cross-checks in-process / 当 task_contract_path + task_report_path + shared_memory_path + commit_hash 4 路径全提供时 daemon 自跑 cross-check / verification_source='daemon-auto-verifier' / 3 新错误码 SHARED_MEMORY_REQUIRED / SHARED_MEMORY_MALFORMED / SHARED_MEMORY_NO_COMPLETION_FOR_TASK / legacy verified=true with missing paths 降级 verification_source='legacy-caller-claim' 不硬拒 / 8 new tests / 绝不 spawn Node-shell-mutating-git, wave22-02 commit 02ac627) + review LLM approve apply gate v1 (apply_llm_auto_approve=true + proposal_hash + caller_approved=true 4 opt-in **6 道严格 gate**: G1 apply flag G2 deterministic SHA-256 hash matches G3 caller_approved=true G4 deterministic non-destructive G5 decision=approved G6 confidence=high / 3 新错误码 APPLY_GATE_MISSING_PROPOSAL_HASH / APPLY_GATE_PROPOSAL_HASH_MISMATCH / APPLY_GATE_INVALID_PARAM / hash mismatch fail-fast BEFORE DB mutation / 只 legacy quiet `action=approve` 路径触发 DB transition / wave21-06 5 invariants 全 preserved 5 dedicated tests / explicit review_decision 路径 gate 仍仅 informational, wave22-03 commit 4b55cb4) + persisted plan inference apply v2 (persist_inference=true + caller_approved=true + proposal_hash 4 opt-in apply gate / compute_inference_proposal_hash 32-hex SHA-256 / `plan_insert(version=max+1)` 加 (plan-inference-applied :inference-version v2 ...) annotation + `plan_supersede(old_id)` 真改 plan.sexp_text rollback 通过 predecessor 重 supersede / 2 新错误码 PERSIST_APPLY_MISSING_PROPOSAL_HASH / PERSIST_APPLY_PROPOSAL_HASH_MISMATCH / wave21-05 6 invariants 全 preserved 7 dedicated tests / I6 v1 `apply_gate.persist_inference_applied=false` 仍硬钉死, v2 用 SEPARATE `persisted_apply` block surface 状态, wave22-04 commit fee6567) + autonomous workstation true spawn v1 (auto_spawn=true + workstation_caller_approved + preflight_acceptable 4 opt-in apply gate / **12-rule gate matrix**: G1 auto_spawn opt-in / G2 bundle Suggested / G3 hash matches / G4 all proposals safety_status=safe / G5 all proposals confidence=high / G6 caller_approved=true / G7 preflight_acceptable=true / G8 task_contract_path supplied / G9 contract loads ok / G10 :write-scope non-empty / G11 :write-scope non-overlap with :must-not-touch / G12 proposed target=mission_task_delegate / 走 `mission_task_delegate` substrate **绝不 `claude -p`** / 3 新错误码 AUTO_SPAWN_INVALID_PARAM / AUTO_SPAWN_MISSING_PROPOSAL_HASH / AUTO_SPAWN_PROPOSAL_HASH_MISMATCH / 15 status taxonomy / wave21-04 4 invariants 全 preserved 4 dedicated tests, wave22-05 commit 162a303) + distill chain policy auto-sonnet v2 (auto_sonnet_policy ∈ {off, safe_after_rules, dry_run} 单一 policy 选择即 attestation / **dual opt-in 移除** — policy 选择即 explicit operator attestation / legacy auto_sonnet=true + auto_sonnet_approved=true 双 opt-in 仍 back-compat coexists / safe_after_rules 触发要 ALL 6 wave-20 rule pass + trigger=auto_safe + distill_mode != sonnet / dry_run 完整 evaluate 仅 surface 不 spawn / wave21-07 7 invariants 全 preserved 7 dedicated tests (I7 验证 4 块 coexistence), wave22-06 commit 2423d4b) + autonomous loop apply smoke v4 (9 new deterministic smoke tests 覆盖 wave22-02/03/04/05/06 / **22 cross-wave invariants pinned** wave21-04 4 + wave21-05 6 + wave21-06 5 + wave21-07 7 / no real LLM (synthesised proposal/bundle structs) / no real spawn (gate evaluators 终止于 Spawned 不调 substrate) / no mutating git (tempfile fixtures), wave22-07 commit 6b2125c). **7 wave-22 commits 全闭环了 explicit-gate-promotion 范式** — wave-21 propose-only 通道 (review LLM approve / persisted plan inference / autonomous workstation spawn / sonnet distill chain) 全部升级到 explicit-apply-gate; review framework 升 4 knob orthogonal (automation policy + auto-answer + auto-approve proposal + apply gate v1); plan inference 升 propose + v1 apply gate + **v2 persisted apply (plan_supersede rollback handle)**; workstation dispatch 升 propose + true spawn v1 (12-rule matrix); distill chain 升 policy-driven (deterministic 触发, 无 dual opt-in); execution verifier 升 daemon-internal auto-verifier 8 cross-checks; hooks 升 default-on doctor (read-only doctor 默认跑, mutation 仍 opt-in). 完整 LLM 自主全闭环 / Sonnet 真无任何 opt-in / git hooks default-on real install / frontend Lisp 仍 future"
   :schema ".missiond/tasks/schema/task-contract-v1.lisp"
   :checker "scripts/check-task-contract.mjs"
@@ -14,7 +14,15 @@
   :report-checker "scripts/check-task-report.mjs"
   :shared-memory-schema ".missiond/tasks/schema/shared-memory-v1.lisp"
   :shared-memory-checker "scripts/check-task-memory.mjs"
+  :session-trace-schema ".missiond/tasks/schema/session-trace-v1.lisp"
+  :session-trace-checker "scripts/check-session-trace.mjs"
+  :session-trace-analyzer "scripts/analyze-session-trace.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
+  :wave-23-status-summary
+    ["session-trace v1 schema/checker/analyzer code-aligned (wave 23 task 01/06); trace writable remains explicit opt-in via :session-trace-writable, default false"
+     "renderer/report contract surface trace paths and five explanation fields (wave 23 task 02); Markdown remains view, Lisp trace remains machine artifact"
+     "mission_execution + plan/workstation paths can append/propagate trace in Rust (wave 23 task 04/05); daemon does not shell out for trace"
+     "trace-derived router policy is architecture-designed only; trace analyzer describes bottlenecks, it does not choose models or replace ClaudeCode yet"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -34,6 +42,9 @@
     (shared-memory-lisp
       :role "runtime ledger"
       :machine-contract "records claims, decisions, issues, evidence, commit handoff, resume pointers")
+    (session-trace-lisp
+      :role "factual telemetry"
+      :machine-contract "records dispatch / observation / completion events with elapsed time, token/tool counts, blockers, retries, and artifacts; append-only; never used as model-routing authority by itself")
     (task-lisp
       :role "dispatch contract"
       :machine-contract "records write-scope, must-not-touch, dependencies, acceptance commands, commit scope-check, report fields"))
@@ -62,7 +73,13 @@
       :report-checker "node scripts/check-task-report.mjs <report.lisp> [--dry-fixture]"
       :shared-memory-checker "node scripts/check-task-memory.mjs <shared-memory.lisp> [--dry-fixture]"
       :status "code-aligned (wave 19 task 02 commit 77f1f2b + task 03 commit ba58f20 + task 04 吸入 commit 77f1f2b)"
-      :future "auto-invoke verifier inside mission_execution(complete) when task_contract_path supplied (wave 19 task 08 已加 metadata 钩子, daemon 仍由 caller 触发 verifier)"))
+      :future "auto-invoke verifier inside mission_execution(complete) when task_contract_path supplied (wave 19 task 08 已加 metadata 钩子, daemon 仍由 caller 触发 verifier)")
+    (s6-trace
+      :input "task.lisp + execution/report metadata + optional runtime observation"
+      :output ".missiond/tasks/<wave>/session-trace.lisp"
+      :command "node scripts/check-session-trace.mjs <session-trace.lisp> && node scripts/analyze-session-trace.mjs <session-trace.lisp>"
+      :status "code-aligned partial (wave 23 task 01/04/05/06)"
+      :rule "trace is telemetry and analysis input; router policy consumes aggregated trace later, never a single trace event directly"))
 
   (task-report-v1
     :required-fields [:task_id :status :commit_hash :files_changed :acceptance_results :scope_deviations :notes]
@@ -79,6 +96,33 @@
     :write-rule "agents append entries only inside their claimed write-scope; ledger 本身是 sole shared write target for coordination"
     :checker "scripts/check-task-memory.mjs (13 fixtures, --dry-fixture)"
     :seed ".missiond/tasks/wave19/shared-memory.lisp")
+
+  (session-trace-v1
+    :purpose "把长跑 ClaudeCode / workstation / verifier 会话的真实步骤变成 append-only S-expression telemetry, 用于后续步数优化与 router policy 设计"
+    :schema ".missiond/tasks/schema/session-trace-v1.lisp"
+    :checker "scripts/check-session-trace.mjs"
+    :analyzer "scripts/analyze-session-trace.mjs"
+    :status "code-aligned partial — wave 23 task 01 schema/checker + task 04 daemon append + task 05 plan/workstation propagate + task 06 descriptive analyzer"
+    :writable-opt-in ":session-trace-writable true; default false"
+    :event-types [dispatch observation completion failure]
+    :minimum-facts [:event-id :task-id :phase :timestamp-or-seq :actor :elapsed-ms]
+    :analysis-facts [:tool-call-count :token-estimate :stall-seconds :retry-count :write-method :blocked-reason]
+    :non-goals ["do not infer model replacement from one run"
+                "do not mutate task/report/shared-memory"
+                "do not store chain-of-thought"
+                "do not make router decisions in analyzer"])
+
+  (trace-derived-router-policy
+    :purpose "把 session traces 聚合成后续 LLM router / worker backend selection 的策略输入"
+    :status "architecture-designed — no runtime router replacement in wave 23"
+    :truth-source "many verified session traces + reports + scoped commits; single trace is anecdote"
+    :decision-boundary "analyzer produces bottleneck descriptors; router policy chooses backend only after explicit policy wave"
+    :backend-classes [claudecode missiond-llm-router deterministic-checker patch-worker verifier-worker]
+    :rule "backend selection must be explainable by contract shape, required tools, write-scope, risk, historical trace cost, and acceptance/verifier needs; never by natural-language vibes alone"
+    :future-code-targets ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+                          "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                          "crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"
+                          "scripts/analyze-session-trace.mjs"])
 
   (task-contract-v1
     :required-fields [:schema :title :kind :status :owner :goal :write-scope :must-not-touch :acceptance :commit]
@@ -99,6 +143,9 @@
     (verifier-task "scripts/verify-task-contract.mjs")
     (checker-report "scripts/check-task-report.mjs")
     (checker-shared-memory "scripts/check-task-memory.mjs")
+    (schema-session-trace ".missiond/tasks/schema/session-trace-v1.lisp")
+    (checker-session-trace "scripts/check-session-trace.mjs")
+    (analyzer-session-trace "scripts/analyze-session-trace.mjs")
     (renderer "scripts/render-claudecode-task.mjs")
     (parser "scripts/lib/missiond_lisp.mjs")
     ;; wave 20 additions

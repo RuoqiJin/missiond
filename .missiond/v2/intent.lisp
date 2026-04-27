@@ -20,7 +20,18 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — pillar code-truth registry; v1.3 (wave 22 task 08) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13/14/15/16/17/18/19/20/21/22 全部 task (含 wave 19 machine-contract task SSOT 全闭环 + wave 20 machine-driven dispatch + scoped-commit 全 5 段闭环 + ExecutionEvent metadata 11 variants 闭环 + review auto-answer policy + LLM-augmented sonnet_suggest + wave 21 hooks installer + run verifier + execution-report integration + autonomous workstation propose + plan inference apply gate + LLM auto-approve propose + sonnet distill chain auto-apply + machine-contract autonomous loop smoke v3 + wave 22 hooks default-on doctor v2 + execution auto-run-verifier v2 + review LLM approve apply gate v1 + persisted plan inference apply v2 + autonomous workstation true spawn v1 + distill chain policy auto-sonnet v2 + autonomous loop apply smoke v4) 共 ~153 entry; 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
+      :desc "判真索引 — pillar code-truth registry; v1.4 (wave 23) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-23 全部 task (含 wave 23 session-trace v1 schema/checker/analyzer + daemon append + plan/workstation trace propagation + trace-derived router-policy architecture draft); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
+    (session-trace-v1
+      :desc "wave 23 — .missiond/tasks/**/session-trace.lisp append-only factual telemetry; schema/checker/analyzer code-aligned; :session-trace-writable default false opt-in"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.session-trace-v1"
+      :schema ".missiond/tasks/schema/session-trace-v1.lisp"
+      :checker "scripts/check-session-trace.mjs"
+      :analyzer "scripts/analyze-session-trace.mjs"
+      :status code-aligned-partial)
+    (trace-derived-router-policy
+      :desc "wave 23 Codex architecture draft — use aggregated traces to design future backend selection (claudecode / missiond-llm-router / deterministic-checker / patch-worker / verifier-worker); no runtime router replacement yet"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry worker.section.trace-derived-router-policy"
+      :status architecture-designed)
     (drift-audit "drift-audit-2026-04-21.md"
       :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")
     (refactor-methodology ".missiond/workflows/pillar-refactor.lisp"

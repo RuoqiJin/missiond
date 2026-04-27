@@ -166,7 +166,7 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v0.7 — wave 16 execution status backfill (workflow review-resolution / review-gate QuestionEvent::Resolved subscriber listener / workstation dispatch auto-inference v1 / PLAN DAG paused 7th lifecycle + review-gate question-event trigger / PLAN DAG per-node retry policy / scoped commit handoff daemon enforcement / evidence live event ref subscriber 3-tier live/log/unavailable / unified-entry e2e smoke deterministic 4 hand-off) layered on v0.6 baseline 2026-04-26"
+    :version "v1.4 — wave 23 session-trace + trace-derived router-policy backfill layered on wave 22 explicit-gate-promotion baseline"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
     :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
@@ -3368,7 +3368,71 @@
         :wave "22 task 07 (commit 6b2125c)"
         :note "wave 16-08 落 deterministic 4 hand-off no-LLM smoke; wave 17-08 加 paused-resume e2e smoke; wave 18-09 加 autonomous loop smoke v1; wave 20-05 加 machine-loop smoke v2 (Markdown non-load-bearing 一度钉死); wave 21-08 加 machine-contract autonomous loop smoke v3 (15 deterministic e2e tests + 二度钉死 Markdown). wave22-07 加 v4 deterministic end-to-end smoke covering wave22-02/03/04/05/06 apply-gate paradigm: **9 new deterministic smoke tests across 5 in-scope handler files**: unified_entry +1 envelope smoke pinning all 22 cross-wave invariants + Markdown task_brief_preview NEVER 进 artifact_refs 三度钉死 (across 10 forbidden artifact_refs keys 全部 audit); agent_execution +2 verifier failure paths SHARED_MEMORY_NO_COMPLETION_FOR_TASK + TASK_REPORT_COMMIT_HASH_MISMATCH (wave22-02 daemon-internal verifier 失败路径 fixture); plan +2 persisted apply gate fixture hash accept + missing hash reject + wave-21/05 6 invariants pinned + wave-22/04 v2 persisted_apply block separate from v1 apply_gate field (I6 v1 `apply_gate.persist_inference_applied=false` 仍硬钉死 跨 v2 path); workstation_dispatch +2 auto-spawn gate fixture hash accept + missing hash reject + wave-21/04 4 invariants pinned + wave-22/05 12-rule gate matrix; review_gate +2 review apply gate fixture hash accept + missing hash reject + wave-21/06 5 invariants pinned + wave-22/03 6 道 gate. **22 cross-wave invariants pinned** (wave21-04 4 + wave21-05 6 + wave21-06 5 + wave21-07 7 = 22). no real LLM (synthesised LlmAutoApproveProposalBundle / WorkstationProposalBundle / PlanFieldInference / AppliedField fixtures, NO Sonnet gateway initialized). no real spawn (workstation evaluator is PURE function ending at WorkstationAutoSpawnStatus::Spawned without calling substrate). no mutating git (verifier helpers do read-only file inspection on tempfile-backed paths only). cargo test unified_entry::tests / agent_execution::tests / plan::tests / workstation_dispatch::tests / review_gate::tests pass; daemon build clean. **Cross-wave apply-gate paradigm 钉死**: wave22-02 daemon-internal verifier / wave22-03 review apply gate / wave22-04 persisted apply v2 / wave22-05 workstation true spawn / wave22-06 distill policy 全 fixture-tested without real LLM/spawn/mutating-git")
 
-      ;; ── 区域 86 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
+      ;; ── 区域 86 · session-trace v1 (wave 23 tasks 01/04/05/06) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.session-trace-v1"
+        :title "session-trace v1 — append-only factual telemetry schema/checker + daemon append + plan/workstation propagation + descriptive analyzer"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: session-trace-v1"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/session-trace-v1.lisp"
+           "scripts/check-session-trace.mjs"
+           "scripts/analyze-session-trace.mjs"
+           "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+           "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"]
+        :cross-ref ["intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.machine-contract.shared-memory-v1"
+                    "worker.section.trace-derived-router-policy"]
+        :wave "23 tasks 01/04/05/06 (commits 2f173ee / 9096085 / 0c81611 / e7ab99d)"
+        :note "session-trace.lisp 是事实遥测, 不是报告解释也不是 conversation log. wave23-01 加 schema + checker; wave23-04 mission_execution(open/preflight/complete) 直接 Rust append trace-event, 不 spawn Node/shell; wave23-05 plan/workstation 透传 session_trace_path / :session-trace-path overlay; wave23-06 analyzer 只产 bottleneck descriptors, 不做模型选择。:session-trace-writable default false, 只有任务 contract 显式 opt-in 才允许 worker 写 trace ledger。")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.report-trace-explanation-fields-v1"
+        :title "report-contract trace explanation fields — time_sinks / major_decisions / unexpected_work / blockers / trace_refs"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: report-contract-v1 :: trace explanation fields"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/report-contract-v1.lisp"
+           "scripts/check-task-report.mjs"
+           "scripts/render-claudecode-task.mjs"]
+        :cross-ref ["intent-layer.machine-contract.session-trace-v1"
+                    "intent-layer.machine-contract.task-contract-v1"]
+        :wave "23 task 02 (commits 7c6ea9a + a005a45)"
+        :note "report-contract 增加五个 explanation 字段用于人工解释耗时/决策/意外工作/阻塞/trace refs; facts 仍以 session-trace.lisp 为准, report 字段不成为 telemetry SSOT。renderer 会在 sibling session-trace.lisp 存在时渲染 Session Trace section, 并根据 :session-trace-writable 明确 worker 是否可写。")
+
+      (section-entry
+        :section-id "worker.section.trace-derived-router-policy"
+        :title "trace-derived router policy — backend selection draft for ClaudeCode / missiond-llm-router / checker / patch / verifier workers"
+        :source-file ".missiond/v2/intent-workstation-policy.lisp"
+        :local-path "pillar worker :: section trace-derived-router-policy"
+        :status architecture-designed
+        :compression-safe? false
+        :implements []
+        :cross-ref ["intent-layer.machine-contract.session-trace-v1"
+                    "intent-layer.machine-contract.trace-derived-router-policy"
+                    "worker.section.claudecode-workstation-orchestration"
+                    "intent-layer.workstation.autonomous-workstation-true-spawn-v1"]
+        :wave "23 task 07 (Codex architecture draft)"
+        :note "router policy 只完成蓝图: backend classes = claudecode / missiond-llm-router / deterministic-checker / patch-worker / verifier-worker; selection inputs = contract shape + trace history + scope/risk + acceptance/verifier needs。wave23 不替换 ClaudeCode, 不从单次 trace 推断模型, 不自动 spawn 新 router。")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.trace-derived-router-policy"
+        :title "machine-contract trace-derived router policy — analyzer descriptors feed future policy, not runtime routing"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: trace-derived-router-policy"
+        :status architecture-designed
+        :compression-safe? false
+        :implements []
+        :cross-ref ["intent-layer.machine-contract.session-trace-v1"
+                    "worker.section.trace-derived-router-policy"]
+        :wave "23 task 07 (Codex architecture draft)"
+        :note "machine-contract 侧声明 trace 是 router policy 的事实输入: analyzer 输出 bottleneck tags / durations / retries / tool-counts, 但 router 决策必须由后续显式 policy wave 产生解释性记录。")
+
+      ;; ── 区域 90 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
       ;; 注: section-id 已存在 (区域 36 / wave-19-backfill / wave-20-backfill / wave-21-backfill), 本 entry 不新增 anchor; 仅在 wave-22-backfill 块内
       ;;     声明 note 扩展 (hooks default-on doctor v2 + daemon-internal auto-run-verifier 8 cross-checks)
       (status-upgrade
@@ -3566,6 +3630,13 @@
        "distill chain policy auto-sonnet v2 → code-aligned (wave 22 task 06 commit 2423d4b; auto_sonnet_policy ∈ {off, safe_after_rules, dry_run} 单一 policy 选择即 attestation; **dual opt-in 移除** — policy 选择即 explicit operator attestation; legacy auto_sonnet=true + auto_sonnet_approved=true 双 opt-in 路径仍 back-compat coexists; safe_after_rules 触发要 ALL 6 wave-20 rule pass + trigger=auto_safe + distill_mode != sonnet; dry_run 完整 evaluate 仅 surface 不 spawn; 8 AUTO_SONNET_POLICY_STATUS_* wire-string constants; strict closed-enum parse rejects 10 typo / camelCase / case-mismatch / shape-mismatch inputs; **wave-21/07 7 invariants 全 preserved 7 dedicated tests** (I7 验证 4 块 coexistence wave-19 auto_chain + wave-20 auto_chain_trigger + wave-21/07 dual opt-in path + wave-22/06 policy path))"
        "autonomous loop apply smoke v4 → code-aligned (wave 22 task 07 commit 6b2125c; 9 new deterministic smoke tests across 5 in-scope handler files 覆盖 wave22-02/03/04/05/06; unified_entry +1 envelope smoke pinning all 22 cross-wave invariants + Markdown task_brief_preview NEVER 进 artifact_refs 三度钉死; agent_execution +2 verifier failure paths SHARED_MEMORY_NO_COMPLETION_FOR_TASK + TASK_REPORT_COMMIT_HASH_MISMATCH; plan +2 persisted apply gate fixture hash accept + missing hash reject + wave-21/05 6 invariants pinned; workstation_dispatch +2 auto-spawn gate fixture hash accept + missing hash reject + wave-21/04 4 invariants pinned; review_gate +2 review apply gate fixture hash accept + missing hash reject + wave-21/06 5 invariants pinned; **22 cross-wave invariants pinned** (wave21-04 4 + wave21-05 6 + wave21-06 5 + wave21-07 7 = 22); no real LLM (synthesised proposal/bundle structs); no real spawn (gate evaluators 终止于 Spawned 不调 substrate); no mutating git (tempfile fixtures))"
        "machine-contract task-contract-v1 status note 扩 → code-aligned (wave 22 task 01 加 hooks default-on doctor v2 + wave 22 task 02 加 daemon-internal auto-run-verifier 8 cross-checks; **brief→preflight→staged guard→commit→out-of-process verifier (wave21-02)→execution complete + daemon-internal auto-verifier (wave22-02) 真正 6 段闭环 升级到 daemon 自跑 verifier**)"]
+    :wave-23-status-summary
+      ["session-trace v1 → code-aligned-partial (wave 23 tasks 01/04/05/06; schema/checker + daemon append + plan/workstation propagation + analyzer; :session-trace-writable default false opt-in)"
+       "report-contract trace explanation fields → code-aligned (wave 23 task 02; five optional prose fields + trace_refs; facts remain in session-trace.lisp)"
+       "verify-task-run --trace / --require-trace → code-aligned (wave 23 task 03; checker can require trace proof)"
+       "trace analyzer → code-aligned-partial (wave 23 task 06; descriptive bottleneck rules only, no routing/model policy)"
+       "trace-derived router policy → architecture-designed (wave 23 task 07; backend classes drafted, no runtime router replacement)"
+       "lisp backfill wave23 status → in-progress by Codex; frontend Lisp still postponed"]
     :next-step
       ["条件全满足后 (11 条件全 code-aligned; 完整 11-stage PLAN DAG scheduler 已 close 主线; wave 19 加 machine-contract task SSOT 全闭环; wave 20 加 machine-driven dispatch + scoped-commit 全 5 段闭环 + ExecutionEvent metadata 11 variants 闭环 + review auto-answer deterministic_safe; wave 21 加 propose+apply-gate 范式覆盖 4 路 LLM/inference 通道 + execution 端 daemon-internal verified gate 6 段闭环 + hooks-path installer + 三合一 run verifier; **wave 22 加 explicit-gate-promotion 范式 — wave-21 propose-only 通道全部升级到 explicit-apply-gate (review LLM approve apply gate v1 6 道 gate / persisted plan inference apply v2 plan_supersede rollback handle / autonomous workstation true spawn v1 12-rule gate matrix mission_task_delegate substrate 绝不 claude -p / distill chain policy auto-sonnet v2 dual opt-in 移除 policy 即 attestation) + execution auto-run-verifier v2 daemon-internal 8 cross-checks (verification_source taxonomy) + hooks default-on doctor v2 (--check 只读 doctor + 4 reason codes + renderer renderHooksDoctorPreflight() 块) + autonomous loop apply smoke v4 22 cross-wave invariants pinned** — 留 完全 LLM 自主无任何 caller opt-in (wave22-03/04/05/06 仍 require explicit caller_approval/proposal_hash/policy/auto_spawn opt-in) / Sonnet 真无任何 attestation (wave22-06 policy=safe_after_rules 仍是 explicit policy 选择即 attestation) / git hooks default-on real install (wave22-01 仍 doctor only — caller 必须显式 git config core.hooksPath .githooks 才生效) / Auto-seed shared-memory ledger claim entry on parallel workstation spawn (wave22-05 真 spawn 已落, ledger seed 仍 future) / report-contract checker auto-invoke without caller-supplied 4 paths (wave22-02 仍要求 caller 提供 4 路径才触发 daemon-internal verifier) / frontend Lisp 仍 future), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
        "wave 22 explicit-gate-promotion 范式 — 后续可推: (a) wave22-05 workstation true spawn 升级到 完全 LLM 自主 (无 caller_approved opt-in, plan-runner 全局推断 + 真 spawn — 尚需 ledger auto-seed claim entry); (b) wave22-04 persisted plan inference apply 升级到 自主 persist (无 caller_approved opt-in, 自动判断 deterministic high-confidence 即 persist + 自动 rollback policy); (c) wave22-03 review LLM approve apply gate 升级到 完全自主 (无 caller_approved opt-in, 自动 6 gate pass 即 apply); (d) wave22-06 distill chain policy 升级到 真无任何 attestation (plan-runner 全局推断 + auto-promote sonnet 而无需 policy 选择); (e) wave22-01 hooks default-on doctor 升级到 default-on real install (default-mode = --install 自动跑 git config core.hooksPath .githooks); (f) wave22-02 daemon-internal auto-verifier 升级到 自动 spawn (verifier 路径无需 caller 提供 4 路径, daemon 从 task contract / report cache 自动 resolve)"
