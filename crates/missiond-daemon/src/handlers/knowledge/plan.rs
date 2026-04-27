@@ -7704,7 +7704,59 @@ pub(super) fn validate_distill_chain_args(args: &Value) -> Option<ToolResult> {
             ),
         ));
     }
+    // wave-21 / task 07 — strict-shape validation of the auto-sonnet
+    // apply-gate knobs. Workflow.rs validates again as a defense-in-depth
+    // layer, but failing fast at the plan entry keeps the diagnostic
+    // close to the caller's invocation site.
+    if let Some(v) = args.get("auto_sonnet") {
+        if !v.is_boolean() {
+            return Some(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!(
+                        "auto_sonnet must be a boolean (true|false); got {}",
+                        json_shape_label(v)
+                    ),
+                )
+                .with_suggestion(
+                    "auto_sonnet is the wave-21 / task 07 apply-gate opt-in; \
+                     pass true or false (no string).",
+                ),
+            ));
+        }
+    }
+    if let Some(v) = args.get("auto_sonnet_approved") {
+        if !v.is_boolean() {
+            return Some(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!(
+                        "auto_sonnet_approved must be a boolean (true|false); got {}",
+                        json_shape_label(v)
+                    ),
+                )
+                .with_suggestion(
+                    "auto_sonnet_approved is the wave-21 / task 07 caller-approval flag; \
+                     pass true or false (no string).",
+                ),
+            ));
+        }
+    }
     None
+}
+
+/// Render the JSON shape of a value as a stable label for diagnostic
+/// messages. Mirrors `workflow::shape_label` so the two surfaces emit
+/// identical wording on shape rejections.
+fn json_shape_label(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
 }
 
 /// Deterministic fallback chain id when the caller did not supply one.
@@ -7948,6 +8000,27 @@ async fn apply_distill_chain(
                     distill_args
                         .entry("name".to_string())
                         .or_insert_with(|| json!(name));
+                }
+                // wave-21 / task 07 — forward the auto-sonnet apply-gate
+                // knobs into the workflow.distill sub-call so plan-side
+                // callers can opt into the gate without re-shaping the
+                // arg envelope. The gate is strictly opt-in (default
+                // off); the workflow surface validates shape +
+                // enforces all six wave-20 safety rules + caller
+                // approval before invoking Sonnet. We forward both
+                // `auto_sonnet*` knobs AND `auto_chain_trigger` /
+                // `auto_trigger_min_evidence` because the auto-sonnet
+                // gate is layered on top of the wave-20 trigger and
+                // refuses to operate without it (`skipped_no_trigger`).
+                for key in [
+                    "auto_sonnet",
+                    "auto_sonnet_approved",
+                    "auto_chain_trigger",
+                    "auto_trigger_min_evidence",
+                ] {
+                    if let Some(v) = args.get(key).cloned() {
+                        distill_args.insert(key.to_string(), v);
+                    }
                 }
                 let call_args = Value::Object(distill_args);
                 match super::workflow::handle(state, "mission_workflow", call_args).await {
@@ -11029,6 +11102,78 @@ mod tests {
         .is_none());
         // No chain knobs at all → backward-compat (wave-17 / task 04 byte-shape).
         assert!(validate_distill_chain_args(&json!({})).is_none());
+    }
+
+    #[test]
+    fn validate_distill_chain_args_accepts_auto_sonnet_bool_shapes() {
+        // wave-21 / task 07 — both auto_sonnet knobs accept the
+        // canonical bool shape. Pairing them does not require
+        // finalize_plan because the validator scopes the cross-field
+        // rule to wave-18 chain knobs (auto_sonnet is forwarded by
+        // workflow.rs, not gated here).
+        assert!(validate_distill_chain_args(&json!({
+            "auto_sonnet": true,
+            "auto_sonnet_approved": true,
+        }))
+        .is_none());
+        assert!(validate_distill_chain_args(&json!({
+            "auto_sonnet": false,
+            "auto_sonnet_approved": false,
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn validate_distill_chain_args_rejects_auto_sonnet_string_typo() {
+        // wave-21 / task 07 — the apply-gate strict-shape validator
+        // refuses string `"true"` and routes through INVALID_PARAM.
+        let result = validate_distill_chain_args(&json!({"auto_sonnet": "true"}))
+            .expect("validator must reject string-shape auto_sonnet");
+        assert_eq!(result.is_error, Some(true));
+        let payload = tool_result_payload(&result);
+        let reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("auto_sonnet must be a boolean"),
+            "reason: {}",
+            reason
+        );
+        assert!(reason.contains("string"), "shape label leaked: {}", reason);
+    }
+
+    #[test]
+    fn validate_distill_chain_args_rejects_auto_sonnet_approved_number_typo() {
+        // wave-21 / task 07 — the caller-attestation flag is also
+        // strict-bool. Numbers fail loud.
+        let result = validate_distill_chain_args(
+            &json!({"auto_sonnet_approved": 1}),
+        )
+        .expect("validator must reject number-shape auto_sonnet_approved");
+        assert_eq!(result.is_error, Some(true));
+        let payload = tool_result_payload(&result);
+        let reason = payload
+            .get("reason")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        assert!(
+            reason.contains("auto_sonnet_approved must be a boolean"),
+            "reason: {}",
+            reason
+        );
+    }
+
+    #[test]
+    fn json_shape_label_returns_canonical_json_type_name() {
+        // Plan-side label helper mirrors workflow::shape_label so the
+        // two surfaces emit identical wording on shape rejections.
+        assert_eq!(json_shape_label(&json!(null)), "null");
+        assert_eq!(json_shape_label(&json!(true)), "boolean");
+        assert_eq!(json_shape_label(&json!(42)), "number");
+        assert_eq!(json_shape_label(&json!("x")), "string");
+        assert_eq!(json_shape_label(&json!([1, 2])), "array");
+        assert_eq!(json_shape_label(&json!({"k": "v"})), "object");
     }
 
     #[test]

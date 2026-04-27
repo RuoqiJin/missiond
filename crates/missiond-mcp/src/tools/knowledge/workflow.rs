@@ -245,6 +245,16 @@ fn build_properties() -> Value {
         "description": "[distill auto_chain_trigger=auto_safe] (wave-20 / task 06) minimum sidecar entry count required by the `evidence_min_entries` safety rule (default 1). Mirrors the upstream sonnet distill `min_evidence` gate so the trigger's notion of 'real evidence' matches the distiller's; raise to require richer sidecars before auto-recording.",
     }));
 
+    p.insert("auto_sonnet".into(), prop(
+        "boolean",
+        "[distill] (wave-21 / task 07 sonnet distill chain auto-apply v1) opt-in apply-gate that auto-promotes the inner distill from `dry_run` to `sonnet` ONLY when ALL six wave-20 deterministic safety rules pass AND the caller explicitly attests `auto_sonnet_approved=true`. Default false → response is byte-identical with the wave-20 trigger payload (no `auto_sonnet` block). Conservative invariants: I1 default-off byte-shape preserved; I2 NEVER auto-invokes Sonnet without BOTH `auto_sonnet=true` AND `auto_sonnet_approved=true` (single-typo escalation impossible); I3 NEVER without all six wave-20 safety rules passing (gate REUSES trigger outcomes, never relaxes); I4 NEVER when caller's `distill_mode` was already `sonnet` (no double-call); I5 on Sonnet failure (model error / invalid output) PRESERVES inner payload + surfaces `model_call_status=failed|invalid_output`; I6 `review_required=true` PINNED on every successful auto-sonnet outcome (auto-applied sonnet stays receipt-only — no DB transition flips); I7 wave-19 `auto_chain` + wave-20 `auto_trigger` blocks remain UNCHANGED (auto_sonnet is purely additive). Status taxonomy: `not_requested` | `disabled` | `skipped_no_trigger` (wave-20 trigger not enabled) | `skipped_rules_failed` (any wave-20 rule failed) | `skipped_caller_approval_missing` (auto_sonnet_approved=false) | `skipped_already_sonnet` (caller's distill_mode already sonnet) | `skipped_inner_error` (inner distill returned error envelope) | `applied_sonnet` (model invoked, payload promoted). model_call_status taxonomy: `not_invoked` | `invoked` | `failed` | `invalid_output`. Block shape: {requested, status, applied, review_required, model_call_status, safety_rule_results, caller_approval, caller_distill_mode?, model_call_error?, sidecar?, chain_id?} + top-level shortcut `auto_sonnet_status`. Strict shape: `auto_sonnet=\"true\"` (string) and `auto_sonnet_approved=1` (number) fail-fast INVALID_PARAM at action entry.",
+    ));
+
+    p.insert("auto_sonnet_approved".into(), prop(
+        "boolean",
+        "[distill auto_sonnet=true] (wave-21 / task 07) explicit caller-attestation flag the apply-gate requires before invoking Sonnet automatically. ORTHOGONAL to `auto_sonnet` so a single typo cannot escalate the daemon: BOTH `auto_sonnet=true` AND `auto_sonnet_approved=true` must be set. Defaults to false. Strict shape: `auto_sonnet_approved=\"true\"` (string) fails fast INVALID_PARAM. Echoed verbatim into the `auto_sonnet.caller_approval` block field.",
+    ));
+
     Value::Object(p)
 }
 
@@ -318,6 +328,22 @@ pub fn definitions() -> Vec<ToolDefinition> {
          shortcuts auto_trigger_status / auto_trigger_chain_id。永不 implicit sonnet (trigger 只放行 record-only \
          hook, 不触发 distiller actor); auto_chain_trigger 与 wave-19 auto_chain 正交 (两者皆 default off, \
          任一 opt-in 都走同一条 wave-19 record 路径)。\
+         wave-21 / task 07 sonnet distill chain auto-apply v1: distill 接 auto_sonnet=true + auto_sonnet_approved=true \
+         (默认皆 false 保 byte-identical), 在 wave-20 trigger=auto_safe 且全部 6 条 deterministic 规则通过 \
+         且 caller 显式 approval 且 distill_mode 不是已经 sonnet 的前提下, 自动把 inner distill 从 \
+         dry_run 提升到 sonnet (mission_workflow.action_distill_sonnet 内部直调) 并把 sonnet payload 作为 \
+         outer payload 返回 (carry forward wave-19 auto_chain + wave-20 auto_trigger 两个 block 不丢 receipt)。\
+         保守不变量 I1-I7: I1 default-off 完全保 byte-shape; I2 auto_sonnet 与 auto_sonnet_approved 必须双 \
+         opt-in (单 typo 不会升级); I3 必须 6 规则全过, gate 复用 trigger 的 outcomes 不 relax; I4 caller \
+         distill_mode 已是 sonnet 时拒绝 (no double-call); I5 sonnet 失败时 PRESERVE inner payload + surface \
+         model_call_status=failed|invalid_output, 不破坏现有 dry_run 工件; I6 review_required=true PINNED \
+         (auto-applied sonnet 永远是 receipt-only, 无 DB transition); I7 wave-19/20 blocks 保持不变 \
+         (auto_sonnet 是 purely additive)。Status: not_requested | disabled | skipped_no_trigger | \
+         skipped_rules_failed | skipped_caller_approval_missing | skipped_already_sonnet | skipped_inner_error | \
+         applied_sonnet。model_call_status: not_invoked | invoked | failed | invalid_output。Block shape: \
+         {requested, status, applied, review_required, model_call_status, safety_rule_results, caller_approval, \
+         caller_distill_mode?, model_call_error?, sidecar?, chain_id?} + top-level shortcut auto_sonnet_status。\
+         Strict shape: auto_sonnet=\"true\" (string) / auto_sonnet_approved=1 (number) → INVALID_PARAM fail-fast。\
          Lisp 源: intent-flow.lisp :: F-methodology-to-executable-compile + intent-tools.lisp :: \
          implemented-surface mission_workflow + intent-intent-layer.lisp :: section unified-entry-pipeline :: \
          role workflow-distiller + intent-memory.lisp :: directive-layer :: file-first-artifacts :: workflow-methodology-file。",

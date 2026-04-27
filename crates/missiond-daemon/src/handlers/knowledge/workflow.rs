@@ -260,6 +260,18 @@ async fn action_distill(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
 
+    // wave-21 / task 07 — pre-flight strict-shape validation for the
+    // `auto_sonnet` apply-gate v1 knobs. Runs BEFORE the plan lookup so
+    // a typo (`auto_sonnet="true"`, `auto_sonnet_approved=1`) surfaces
+    // loud as INVALID_PARAM, never silently demotes to default-off.
+    if let Err(msg) = validate_auto_sonnet_args(args) {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(error_codes::INVALID_PARAM, msg).with_suggestion(
+                "auto_sonnet must be a boolean (true|false); auto_sonnet_approved must be a boolean (true|false)",
+            ),
+        ));
+    }
+
     let plan_id = parse_id_arg(args, "plan_id")?;
     let name = args.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let persist = args
@@ -1432,16 +1444,33 @@ async fn maybe_apply_distill_chain_layers(
     };
 
     let explicit_auto_chain = auto_chain_requested(args);
+    let explicit_auto_sonnet = auto_sonnet_requested(args);
 
     // Fast path: nothing to do — return inner unchanged.
+    //
+    // wave-21 / task 07: when `auto_sonnet=true` is opted in WITHOUT the
+    // wave-20 trigger AND without the wave-19 explicit chain, the gate
+    // refuses the auto-apply (I3 — rules never ran) but still surfaces
+    // a `skipped_no_trigger` block so the caller sees the missed
+    // pre-condition.
     if trigger_mode == AutoChainTrigger::Never && !explicit_auto_chain {
+        if explicit_auto_sonnet {
+            return maybe_apply_auto_sonnet_no_trigger(state, args, plan, name, inner).await;
+        }
         return inner;
     }
 
     // Explicit wave-19 opt-in (no wave-20 trigger): preserve byte-compat
-    // by delegating directly to the existing recorder.
+    // by delegating directly to the existing recorder. Wave-21 / task 07:
+    // if `auto_sonnet=true` accompanies the wave-19 path, the gate
+    // refuses (no trigger ran the safety rules) but layers a
+    // `skipped_no_trigger` block on top.
     if trigger_mode == AutoChainTrigger::Never && explicit_auto_chain {
-        return maybe_apply_auto_chain(state, args, plan, name, inner).await;
+        let recorded = maybe_apply_auto_chain(state, args, plan, name, inner).await;
+        if explicit_auto_sonnet {
+            return maybe_apply_auto_sonnet_no_trigger(state, args, plan, name, recorded).await;
+        }
+        return recorded;
     }
 
     // Wave-20 auto-trigger path. Inner errors short-circuit with a
@@ -1523,11 +1552,26 @@ async fn maybe_apply_distill_chain_layers(
             true,
             trigger_mode,
             AUTO_TRIGGER_STATUS_RULES_FAILED,
-            rules_value,
+            rules_value.clone(),
             None,
             sidecar_str.as_deref(),
         );
         attach_auto_trigger_to_payload(&mut payload, block);
+
+        // wave-21 / task 07: even on rules failure, if `auto_sonnet=true`
+        // was opted in we surface a `skipped_rules_failed` auto-sonnet
+        // block (mirrors the trigger's status) so the caller sees the
+        // pre-condition that blocked Sonnet.
+        if explicit_auto_sonnet {
+            let inner_after_trigger = ToolResult::json_pretty(&payload);
+            let ctx = AutoSonnetTriggerContext {
+                trigger_mode,
+                rules_passed: false,
+                rules_value,
+                sidecar: sidecar_str.as_deref(),
+            };
+            return maybe_apply_auto_sonnet(state, args, plan, name, inner_after_trigger, ctx).await;
+        }
         return ToolResult::json_pretty(&payload);
     }
 
@@ -1582,12 +1626,554 @@ async fn maybe_apply_distill_chain_layers(
         true,
         trigger_mode,
         trigger_status,
-        rules_value,
+        rules_value.clone(),
         recorded_chain_id.as_deref(),
         sidecar_str.as_deref(),
     );
     attach_auto_trigger_to_payload(&mut recorded_payload, block);
-    ToolResult::json_pretty(&recorded_payload)
+
+    // wave-21 / task 07 — auto-sonnet apply-gate v1. Only reachable from
+    // the wave-20 `auto_chain_trigger="auto_safe"` path AFTER all 6
+    // safety rules already passed (we are inside the rules-passed
+    // branch). The gate then layers an EXPLICIT caller-approval check
+    // (`auto_sonnet=true` AND `auto_sonnet_approved=true`) and refuses
+    // to auto-invoke Sonnet when the caller's `distill_mode` was
+    // already `sonnet` (no double call). When all gates pass, Sonnet
+    // is invoked and the inner `dry_run` payload is replaced with the
+    // sonnet payload; on Sonnet failure (model error / invalid output)
+    // the existing payload is preserved verbatim.
+    let recorded_inner = ToolResult::json_pretty(&recorded_payload);
+    maybe_apply_auto_sonnet(
+        state,
+        args,
+        plan,
+        name,
+        recorded_inner,
+        AutoSonnetTriggerContext {
+            trigger_mode,
+            rules_passed: true,
+            rules_value,
+            sidecar: sidecar_str.as_deref(),
+        },
+    )
+    .await
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// wave-21 / task 07 :: sonnet distill chain auto-apply v1
+//
+// Layered ON TOP of the wave-20 `auto_chain_trigger="auto_safe"` path.
+// Only when ALL six wave-20 deterministic safety rules pass AND the
+// caller explicitly opts in via `auto_sonnet=true` AND attests
+// `auto_sonnet_approved=true` does the daemon promote the inner distill
+// from `dry_run` to `sonnet` automatically.
+//
+// Conservative invariants (mirror wave-21 / task 04..06 patterns):
+//   I1: DEFAULT `auto_sonnet=false`. Existing callers see byte-identical
+//       wave-20 responses (no `auto_sonnet` block).
+//   I2: NEVER auto-invoke Sonnet without BOTH `auto_sonnet=true` AND
+//       explicit `auto_sonnet_approved=true`. The latter is a separate
+//       caller-attestation flag — a single typo cannot escalate the
+//       daemon into invoking Sonnet.
+//   I3: NEVER auto-invoke Sonnet unless ALL six wave-20 safety rules
+//       passed. The auto-sonnet gate REUSES the same rule outcomes the
+//       trigger evaluated; it does not relax them.
+//   I4: NEVER auto-invoke Sonnet when the caller's `distill_mode` was
+//       already `sonnet` — the call already chose its mode; we refuse
+//       to re-call.
+//   I5: On Sonnet failure (model error / invalid output) PRESERVE the
+//       existing inner payload. The auto-sonnet block surfaces
+//       `model_call_status="failed"` / `"invalid_output"` and
+//       `applied=false`; the dry_run distill artifact stays durable.
+//   I6: `review_required=true` PINNED on every successful auto-sonnet
+//       outcome in v1 — the auto-applied sonnet output is always
+//       receipt-only; no DB transition flips, the operator still
+//       reviews the distilled workflow before promoting.
+//   I7: The wave-20 `auto_trigger.trigger_status="triggered"` and
+//       wave-19 `auto_chain.status="recorded"` blocks remain
+//       UNCHANGED. The auto-sonnet block is purely additive.
+// ───────────────────────────────────────────────────────────────────────
+
+/// Status surfaced under `auto_sonnet.status`. Audit consumers pin these
+/// strings — never rename in-place.
+const AUTO_SONNET_STATUS_NOT_REQUESTED: &str = "not_requested";
+const AUTO_SONNET_STATUS_DISABLED: &str = "disabled";
+const AUTO_SONNET_STATUS_SKIPPED_NO_TRIGGER: &str = "skipped_no_trigger";
+const AUTO_SONNET_STATUS_SKIPPED_RULES_FAILED: &str = "skipped_rules_failed";
+const AUTO_SONNET_STATUS_SKIPPED_NOT_APPROVED: &str = "skipped_caller_approval_missing";
+const AUTO_SONNET_STATUS_SKIPPED_ALREADY_SONNET: &str = "skipped_already_sonnet";
+const AUTO_SONNET_STATUS_SKIPPED_INNER_ERROR: &str = "skipped_inner_error";
+const AUTO_SONNET_STATUS_APPLIED_SONNET: &str = "applied_sonnet";
+
+/// Status surfaced under `auto_sonnet.model_call_status`. Pinned so the
+/// audit shape stays stable across runs.
+const AUTO_SONNET_MODEL_NOT_INVOKED: &str = "not_invoked";
+const AUTO_SONNET_MODEL_INVOKED: &str = "invoked";
+const AUTO_SONNET_MODEL_FAILED: &str = "failed";
+const AUTO_SONNET_MODEL_INVALID_OUTPUT: &str = "invalid_output";
+
+/// Strict pre-flight shape validator for the wave-21 / task 07 knobs.
+/// Both `auto_sonnet` and `auto_sonnet_approved` MUST be booleans when
+/// supplied — string `"true"` is rejected with INVALID_PARAM (mirrors
+/// wave-21 / task 05's `validate_apply_gate_args`).
+fn validate_auto_sonnet_args(args: &Value) -> std::result::Result<(), String> {
+    if let Some(v) = args.get("auto_sonnet") {
+        if !v.is_boolean() {
+            return Err(format!(
+                "auto_sonnet must be a boolean (true|false); got {}",
+                shape_label(v)
+            ));
+        }
+    }
+    if let Some(v) = args.get("auto_sonnet_approved") {
+        if !v.is_boolean() {
+            return Err(format!(
+                "auto_sonnet_approved must be a boolean (true|false); got {}",
+                shape_label(v)
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Tiny helper to render the JSON shape label for INVALID_PARAM
+/// diagnostics. Keeps the validator messages stable across upgrades.
+fn shape_label(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Pure check: caller opted into auto-sonnet via `auto_sonnet=true`.
+/// Defaults to false on missing / non-bool / null shapes (validator
+/// already rejected non-bool above; this guard preserves byte-compat
+/// for callers that omit the key).
+fn auto_sonnet_requested(args: &Value) -> bool {
+    args.get("auto_sonnet")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Pure check: caller attested `auto_sonnet_approved=true`. Same
+/// strict-bool semantics as `auto_sonnet_requested`. Both flags must
+/// flip true independently — a single typo cannot escalate the daemon.
+fn auto_sonnet_caller_approved(args: &Value) -> bool {
+    args.get("auto_sonnet_approved")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+/// Pure check: caller's original `distill_mode` was already `sonnet`.
+/// The auto-apply gate refuses to double-invoke Sonnet on the same
+/// call (it would land a duplicate sidecar entry + waste tokens).
+fn caller_already_chose_sonnet(args: &Value) -> bool {
+    matches!(
+        args.get("distill_mode").and_then(|v| v.as_str()),
+        Some("sonnet")
+    )
+}
+
+/// Context passed into `maybe_apply_auto_sonnet` from the wave-20
+/// trigger orchestrator. The trigger has already paid for project
+/// resolution + sidecar load + rule evaluation — we forward the
+/// outcomes verbatim so the auto-sonnet gate doesn't re-do the work.
+struct AutoSonnetTriggerContext<'a> {
+    trigger_mode: AutoChainTrigger,
+    rules_passed: bool,
+    rules_value: Value,
+    sidecar: Option<&'a str>,
+}
+
+/// Build the `auto_sonnet` block surfaced under the response payload.
+/// Always carries `requested`, `status`, `applied`, `review_required`,
+/// `model_call_status`, and `safety_rule_results`. Optional fields
+/// (`model_call_error`, `sidecar`, `chain_id`, `caller_approval`,
+/// `caller_distill_mode`) are surfaced when known.
+#[allow(clippy::too_many_arguments)]
+fn build_auto_sonnet_block(
+    requested: bool,
+    status: &str,
+    applied: bool,
+    review_required: bool,
+    model_call_status: &str,
+    safety_rule_results: Value,
+    caller_approval: bool,
+    caller_distill_mode: Option<&str>,
+    model_call_error: Option<&str>,
+    sidecar: Option<&str>,
+    chain_id: Option<&str>,
+) -> Value {
+    let mut block = json!({
+        "requested": requested,
+        "status": status,
+        "applied": applied,
+        "review_required": review_required,
+        "model_call_status": model_call_status,
+        "safety_rule_results": safety_rule_results,
+        "caller_approval": caller_approval,
+    });
+    if let Some(m) = caller_distill_mode {
+        block["caller_distill_mode"] = json!(m);
+    }
+    if let Some(e) = model_call_error {
+        block["model_call_error"] = json!(e);
+    }
+    if let Some(p) = sidecar {
+        block["sidecar"] = json!(p);
+    }
+    if let Some(id) = chain_id {
+        block["chain_id"] = json!(id);
+    }
+    block
+}
+
+/// Splice the `auto_sonnet` block + top-level shortcut onto the
+/// response payload. Mirrors the wave-19 / wave-20 attach helpers.
+fn attach_auto_sonnet_to_payload(payload: &mut Value, block: Value) {
+    if let Some(obj) = payload.as_object_mut() {
+        if let Some(status) = block.get("status").and_then(|v| v.as_str()) {
+            obj.insert("auto_sonnet_status".to_string(), json!(status));
+        }
+        obj.insert("auto_sonnet".to_string(), block);
+    }
+}
+
+/// Top-level orchestrator for the wave-21 / task 07 auto-apply gate.
+///
+/// Order of operations:
+///   1. If `auto_sonnet` was not requested → return inner unchanged
+///      (default-off byte-compat path).
+///   2. If inner payload is a structured error → splice
+///      `skipped_inner_error` block; do NOT call Sonnet.
+///   3. If wave-20 trigger mode is `Never` → splice `skipped_no_trigger`
+///      block; the gate refuses to operate without the deterministic
+///      trigger context.
+///   4. If wave-20 rules failed → splice `skipped_rules_failed` block;
+///      the gate REUSES the trigger's rule outcomes — it does not
+///      relax them.
+///   5. If `auto_sonnet_approved` was not set → splice
+///      `skipped_caller_approval_missing` block.
+///   6. If caller's `distill_mode` was already `sonnet` → splice
+///      `skipped_already_sonnet` block.
+///   7. All gates pass → invoke `mission_workflow(action=distill,
+///      distill_mode="sonnet", …)` internally. On success, replace the
+///      inner payload with the sonnet payload + splice the
+///      `auto_sonnet` block. On model failure / invalid output,
+///      PRESERVE the inner payload + splice the failure block.
+async fn maybe_apply_auto_sonnet<'a>(
+    state: &AppState,
+    args: &Value,
+    plan: &missiond_core::types::Plan,
+    name: &str,
+    inner: ToolResult,
+    ctx: AutoSonnetTriggerContext<'a>,
+) -> ToolResult {
+    if !auto_sonnet_requested(args) {
+        // I1: default-off byte-compat — return inner verbatim.
+        return inner;
+    }
+
+    // From here on the caller opted in; surface a block on every branch.
+    let inner_is_error = inner_result_is_error(&inner);
+    let mut payload = super::plan::tool_result_payload(&inner);
+    if !payload.is_object() {
+        // Non-object payload (defensive — wave-19/20 always emit
+        // objects). Surrender without splicing.
+        return inner;
+    }
+
+    let caller_approval = auto_sonnet_caller_approved(args);
+    let caller_already_sonnet = caller_already_chose_sonnet(args);
+    let caller_mode = args
+        .get("distill_mode")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+
+    let chain_id = payload
+        .get("auto_chain_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    // I5 short-circuit: inner error envelope. We never call Sonnet on
+    // top of an error and we never overwrite the error envelope.
+    if inner_is_error {
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_SKIPPED_INNER_ERROR,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_approval,
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // Trigger context check. We only operate inside the wave-20
+    // auto_safe path so the deterministic safety rules already ran.
+    if ctx.trigger_mode == AutoChainTrigger::Never {
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_SKIPPED_NO_TRIGGER,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_approval,
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // I3: rules MUST have all passed. The auto-sonnet gate REUSES the
+    // trigger's rule outcomes; it does not re-evaluate or relax them.
+    if !ctx.rules_passed {
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_SKIPPED_RULES_FAILED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_approval,
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // I2: caller approval MUST be explicit. A single typo on
+    // `auto_sonnet_approved` cannot escalate the daemon into invoking
+    // Sonnet — it stays at `disabled` even when `auto_sonnet=true`.
+    if !caller_approval {
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_SKIPPED_NOT_APPROVED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_approval,
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // I4: caller's `distill_mode` must NOT already be sonnet. We refuse
+    // to double-invoke (would land a duplicate sidecar entry + burn
+    // tokens). The caller's existing sonnet payload is already in the
+    // response; we just surface a `skipped_already_sonnet` status.
+    if caller_already_sonnet {
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_SKIPPED_ALREADY_SONNET,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            ctx.rules_value.clone(),
+            caller_approval,
+            caller_mode,
+            None,
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // All gates passed — invoke the sonnet distiller internally. We
+    // synthesise an args view with `distill_mode="sonnet"` flipped on,
+    // and `auto_sonnet=false` to prevent infinite recursion. The
+    // wave-19 `auto_chain` + wave-20 `auto_trigger` blocks already
+    // landed on the parent payload — we strip them from the synthesised
+    // args (`auto_chain_trigger=never`, `auto_chain=false`) so the
+    // sonnet sub-call only runs the distiller and does NOT re-record a
+    // chain entry (the parent already did).
+    let mut sonnet_args = args.clone();
+    if let Some(obj) = sonnet_args.as_object_mut() {
+        obj.insert("distill_mode".to_string(), json!("sonnet"));
+        obj.insert("auto_sonnet".to_string(), json!(false));
+        obj.insert("auto_sonnet_approved".to_string(), json!(false));
+        obj.insert("auto_chain".to_string(), json!(false));
+        obj.insert("auto_chain_trigger".to_string(), json!("never"));
+    }
+
+    // Re-run the inner sonnet path directly. We bypass the top-level
+    // `action_distill` dispatcher because we already validated args and
+    // already ran the auto-chain layer; calling `action_distill_sonnet`
+    // gives us the bare sonnet payload without re-entering the chain
+    // orchestrator.
+    let persist = args
+        .get("persist")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let sonnet_outcome = action_distill_sonnet(state, &sonnet_args, plan, name, persist).await;
+
+    let sonnet_result = match sonnet_outcome {
+        Ok(tr) => tr,
+        Err(e) => {
+            // Handler-level error → preserve inner payload, surface
+            // `model_call_status="failed"` with the error text. The
+            // dry_run / record-only distill artifact stays durable
+            // (I5).
+            let block = build_auto_sonnet_block(
+                true,
+                AUTO_SONNET_STATUS_APPLIED_SONNET,
+                false,
+                true,
+                AUTO_SONNET_MODEL_FAILED,
+                ctx.rules_value.clone(),
+                caller_approval,
+                caller_mode,
+                Some(&format!("sonnet handler error: {}", e)),
+                ctx.sidecar,
+                chain_id.as_deref(),
+            );
+            attach_auto_sonnet_to_payload(&mut payload, block);
+            return ToolResult::json_pretty(&payload);
+        }
+    };
+
+    // I5: structured error envelope from the sonnet path → preserve
+    // inner payload; surface `model_call_status="invalid_output"` (the
+    // gateway returned, but the distiller refused — model returned bad
+    // JSON / missing fields / unbalanced sexp).
+    if sonnet_result.is_error.unwrap_or(false) {
+        let err_payload = super::plan::tool_result_payload(&sonnet_result);
+        let err_text = err_payload
+            .get("error")
+            .and_then(|e| e.get("message").or_else(|| e.get("code")))
+            .and_then(|v| v.as_str())
+            .unwrap_or("sonnet returned a structured error envelope")
+            .to_string();
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_APPLIED_SONNET,
+            false,
+            true,
+            AUTO_SONNET_MODEL_INVALID_OUTPUT,
+            ctx.rules_value.clone(),
+            caller_approval,
+            caller_mode,
+            Some(&err_text),
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // Sonnet succeeded — promote the sonnet payload as the new outer
+    // payload (it carries `distill_mode="sonnet"`, `compiler_model`,
+    // `workflow_sexp`, `match_rules`, etc.). We carry forward the
+    // wave-19 / wave-20 blocks from the original inner payload so the
+    // chain recorder + trigger receipts remain visible.
+    let mut sonnet_payload = super::plan::tool_result_payload(&sonnet_result);
+    if !sonnet_payload.is_object() {
+        // Defensive — sonnet path always emits an object; preserve
+        // inner if it didn't.
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_APPLIED_SONNET,
+            false,
+            true,
+            AUTO_SONNET_MODEL_INVALID_OUTPUT,
+            ctx.rules_value.clone(),
+            caller_approval,
+            caller_mode,
+            Some("sonnet payload was not a JSON object"),
+            ctx.sidecar,
+            chain_id.as_deref(),
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        return ToolResult::json_pretty(&payload);
+    }
+
+    // Carry forward wave-19 + wave-20 receipt fields from the original
+    // dry_run payload so observers do not lose the chain recording.
+    if let Some(obj) = sonnet_payload.as_object_mut() {
+        for key in [
+            "auto_chain",
+            "auto_chain_status",
+            "auto_chain_id",
+            "auto_trigger",
+            "auto_trigger_status",
+            "auto_trigger_chain_id",
+        ] {
+            if let Some(v) = payload.get(key).cloned() {
+                obj.entry(key.to_string()).or_insert(v);
+            }
+        }
+    }
+
+    // I6: review_required PINNED true on the auto-sonnet block; the
+    // sonnet payload itself already carries `review_required: true`
+    // for callers grepping that field directly.
+    let block = build_auto_sonnet_block(
+        true,
+        AUTO_SONNET_STATUS_APPLIED_SONNET,
+        true,
+        true,
+        AUTO_SONNET_MODEL_INVOKED,
+        ctx.rules_value.clone(),
+        caller_approval,
+        caller_mode,
+        None,
+        ctx.sidecar,
+        chain_id.as_deref(),
+    );
+    attach_auto_sonnet_to_payload(&mut sonnet_payload, block);
+    ToolResult::json_pretty(&sonnet_payload)
+}
+
+/// Wave-21 / task 07 helper: the wave-19 explicit `auto_chain=true`
+/// path (no wave-20 trigger) does NOT pre-evaluate the safety rules —
+/// it just records. When the caller flips `auto_sonnet=true` on that
+/// path the gate must still refuse (I3) because the deterministic rule
+/// set was never run. We surface a `skipped_no_trigger` status so the
+/// caller sees the missed pre-condition explicitly.
+///
+/// This wrapper is invoked from the wave-19 explicit path inside
+/// `maybe_apply_distill_chain_layers` (see the early-return branch
+/// for `trigger=Never AND auto_chain=true`).
+async fn maybe_apply_auto_sonnet_no_trigger(
+    state: &AppState,
+    args: &Value,
+    plan: &missiond_core::types::Plan,
+    name: &str,
+    inner: ToolResult,
+) -> ToolResult {
+    if !auto_sonnet_requested(args) {
+        return inner;
+    }
+    let ctx = AutoSonnetTriggerContext {
+        trigger_mode: AutoChainTrigger::Never,
+        rules_passed: false,
+        rules_value: Value::Array(Vec::new()),
+        sidecar: None,
+    };
+    maybe_apply_auto_sonnet(state, args, plan, name, inner, ctx).await
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -6342,5 +6928,293 @@ mod tests {
     fn auto_trigger_min_evidence_default_is_one() {
         // Pin the default so a refactor that bumps it is loud.
         assert_eq!(AUTO_TRIGGER_DEFAULT_MIN_EVIDENCE, 1);
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // wave-21 / task 07 :: sonnet distill chain auto-apply v1
+    //
+    // Pure-fn tests pin the deterministic gate semantics + the
+    // auto-sonnet status taxonomy. No tokio / no AppState — the
+    // orchestrator's tokio path (`maybe_apply_auto_sonnet`) is
+    // exercised indirectly via the daemon-wide test suite.
+    // ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn auto_sonnet_status_constants_pin_the_wire_form() {
+        assert_eq!(AUTO_SONNET_STATUS_NOT_REQUESTED, "not_requested");
+        assert_eq!(AUTO_SONNET_STATUS_DISABLED, "disabled");
+        assert_eq!(AUTO_SONNET_STATUS_SKIPPED_NO_TRIGGER, "skipped_no_trigger");
+        assert_eq!(
+            AUTO_SONNET_STATUS_SKIPPED_RULES_FAILED,
+            "skipped_rules_failed"
+        );
+        assert_eq!(
+            AUTO_SONNET_STATUS_SKIPPED_NOT_APPROVED,
+            "skipped_caller_approval_missing"
+        );
+        assert_eq!(
+            AUTO_SONNET_STATUS_SKIPPED_ALREADY_SONNET,
+            "skipped_already_sonnet"
+        );
+        assert_eq!(
+            AUTO_SONNET_STATUS_SKIPPED_INNER_ERROR,
+            "skipped_inner_error"
+        );
+        assert_eq!(AUTO_SONNET_STATUS_APPLIED_SONNET, "applied_sonnet");
+    }
+
+    #[test]
+    fn auto_sonnet_model_call_status_constants_pin_the_wire_form() {
+        assert_eq!(AUTO_SONNET_MODEL_NOT_INVOKED, "not_invoked");
+        assert_eq!(AUTO_SONNET_MODEL_INVOKED, "invoked");
+        assert_eq!(AUTO_SONNET_MODEL_FAILED, "failed");
+        assert_eq!(AUTO_SONNET_MODEL_INVALID_OUTPUT, "invalid_output");
+    }
+
+    #[test]
+    fn validate_auto_sonnet_args_accepts_missing_and_bool() {
+        // Missing keys are valid (default-off byte-compat).
+        assert!(validate_auto_sonnet_args(&serde_json::json!({})).is_ok());
+        // Both bool shapes are valid.
+        assert!(
+            validate_auto_sonnet_args(&serde_json::json!({"auto_sonnet": true})).is_ok()
+        );
+        assert!(
+            validate_auto_sonnet_args(&serde_json::json!({"auto_sonnet": false})).is_ok()
+        );
+        assert!(
+            validate_auto_sonnet_args(&serde_json::json!({"auto_sonnet_approved": true}))
+                .is_ok()
+        );
+        assert!(validate_auto_sonnet_args(
+            &serde_json::json!({"auto_sonnet": true, "auto_sonnet_approved": true})
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn validate_auto_sonnet_args_rejects_string_typo() {
+        // "true" / "false" strings are NOT booleans — fail loud.
+        let err = validate_auto_sonnet_args(&serde_json::json!({"auto_sonnet": "true"}))
+            .unwrap_err();
+        assert!(
+            err.contains("auto_sonnet must be a boolean"),
+            "diagnostic: {}",
+            err
+        );
+        assert!(err.contains("string"), "shape label leaked: {}", err);
+    }
+
+    #[test]
+    fn validate_auto_sonnet_args_rejects_number_typo() {
+        let err = validate_auto_sonnet_args(&serde_json::json!({"auto_sonnet": 1}))
+            .unwrap_err();
+        assert!(err.contains("auto_sonnet must be a boolean"));
+    }
+
+    #[test]
+    fn validate_auto_sonnet_args_rejects_approved_string_typo() {
+        let err = validate_auto_sonnet_args(
+            &serde_json::json!({"auto_sonnet_approved": "yes"}),
+        )
+        .unwrap_err();
+        assert!(err.contains("auto_sonnet_approved must be a boolean"));
+    }
+
+    #[test]
+    fn auto_sonnet_requested_default_false_and_explicit_true() {
+        assert!(!auto_sonnet_requested(&serde_json::json!({})));
+        // Non-bool / null collapses to false (validator already rejected
+        // non-bool, but the read-side guard preserves byte-compat).
+        assert!(!auto_sonnet_requested(
+            &serde_json::json!({"auto_sonnet": null})
+        ));
+        assert!(!auto_sonnet_requested(
+            &serde_json::json!({"auto_sonnet": false})
+        ));
+        assert!(auto_sonnet_requested(
+            &serde_json::json!({"auto_sonnet": true})
+        ));
+    }
+
+    #[test]
+    fn auto_sonnet_caller_approved_default_false_and_explicit_true() {
+        assert!(!auto_sonnet_caller_approved(&serde_json::json!({})));
+        assert!(!auto_sonnet_caller_approved(
+            &serde_json::json!({"auto_sonnet_approved": false})
+        ));
+        assert!(auto_sonnet_caller_approved(
+            &serde_json::json!({"auto_sonnet_approved": true})
+        ));
+        // I2 invariant — `auto_sonnet=true` alone is NOT caller approval.
+        assert!(!auto_sonnet_caller_approved(
+            &serde_json::json!({"auto_sonnet": true})
+        ));
+    }
+
+    #[test]
+    fn caller_already_chose_sonnet_detects_explicit_sonnet_only() {
+        // Default / dry_run / unknown → not "already sonnet".
+        assert!(!caller_already_chose_sonnet(&serde_json::json!({})));
+        assert!(!caller_already_chose_sonnet(
+            &serde_json::json!({"distill_mode": ""})
+        ));
+        assert!(!caller_already_chose_sonnet(
+            &serde_json::json!({"distill_mode": "dry_run"})
+        ));
+        assert!(!caller_already_chose_sonnet(
+            &serde_json::json!({"distill_mode": "Sonnet"})
+        ));
+        // Only explicit lowercase "sonnet" matches.
+        assert!(caller_already_chose_sonnet(
+            &serde_json::json!({"distill_mode": "sonnet"})
+        ));
+    }
+
+    #[test]
+    fn build_auto_sonnet_block_minimum_shape_carries_all_required_fields() {
+        let rules = render_safety_rule_results(&[SafetyRuleResult::pass(
+            SAFETY_RULE_INNER_DISTILL_OK,
+        )]);
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_APPLIED_SONNET,
+            true,
+            true,
+            AUTO_SONNET_MODEL_INVOKED,
+            rules.clone(),
+            true,
+            Some("dry_run"),
+            None,
+            Some("/abs/p.evidence.json"),
+            Some("chain:auto:wf-aaa"),
+        );
+        assert_eq!(block["requested"], true);
+        assert_eq!(block["status"], AUTO_SONNET_STATUS_APPLIED_SONNET);
+        assert_eq!(block["applied"], true);
+        assert_eq!(block["review_required"], true);
+        assert_eq!(block["model_call_status"], AUTO_SONNET_MODEL_INVOKED);
+        assert_eq!(block["safety_rule_results"], rules);
+        assert_eq!(block["caller_approval"], true);
+        assert_eq!(block["caller_distill_mode"], "dry_run");
+        assert_eq!(block["sidecar"], "/abs/p.evidence.json");
+        assert_eq!(block["chain_id"], "chain:auto:wf-aaa");
+        // Optional fields omitted when None.
+        assert!(block.get("model_call_error").is_none());
+    }
+
+    #[test]
+    fn build_auto_sonnet_block_failure_shape_carries_error_text() {
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_APPLIED_SONNET,
+            false, // applied=false on failure (I5)
+            true,  // review_required=true PINNED
+            AUTO_SONNET_MODEL_FAILED,
+            serde_json::json!([]),
+            true,
+            Some("dry_run"),
+            Some("sonnet handler error: gateway timeout"),
+            None,
+            None,
+        );
+        assert_eq!(block["status"], AUTO_SONNET_STATUS_APPLIED_SONNET);
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["review_required"], true);
+        assert_eq!(block["model_call_status"], AUTO_SONNET_MODEL_FAILED);
+        assert_eq!(
+            block["model_call_error"],
+            "sonnet handler error: gateway timeout"
+        );
+        // Optional fields omitted when None.
+        assert!(block.get("sidecar").is_none());
+        assert!(block.get("chain_id").is_none());
+    }
+
+    #[test]
+    fn build_auto_sonnet_block_skipped_not_approved_omits_chain_id() {
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_SKIPPED_NOT_APPROVED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            serde_json::json!([]),
+            false, // caller_approval=false
+            Some("dry_run"),
+            None,
+            None,
+            None,
+        );
+        assert_eq!(block["status"], AUTO_SONNET_STATUS_SKIPPED_NOT_APPROVED);
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["caller_approval"], false);
+        assert!(block.get("chain_id").is_none());
+    }
+
+    #[test]
+    fn attach_auto_sonnet_to_payload_splices_block_and_top_level_shortcut() {
+        let mut payload = serde_json::json!({"status": "distilled"});
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_APPLIED_SONNET,
+            true,
+            true,
+            AUTO_SONNET_MODEL_INVOKED,
+            serde_json::json!([]),
+            true,
+            None,
+            None,
+            None,
+            None,
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        // Original payload preserved.
+        assert_eq!(payload["status"], "distilled");
+        // Block + shortcut attached.
+        assert_eq!(payload["auto_sonnet"]["applied"], true);
+        assert_eq!(
+            payload["auto_sonnet_status"],
+            AUTO_SONNET_STATUS_APPLIED_SONNET
+        );
+    }
+
+    #[test]
+    fn attach_auto_sonnet_to_payload_skipped_omits_no_top_level_id_field() {
+        // Auto-sonnet has no top-level chain_id shortcut (the wave-19
+        // `auto_chain_id` carries that). Confirm only the status
+        // shortcut lands.
+        let mut payload = serde_json::json!({});
+        let block = build_auto_sonnet_block(
+            true,
+            AUTO_SONNET_STATUS_SKIPPED_NOT_APPROVED,
+            false,
+            true,
+            AUTO_SONNET_MODEL_NOT_INVOKED,
+            serde_json::json!([]),
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        attach_auto_sonnet_to_payload(&mut payload, block);
+        assert_eq!(
+            payload["auto_sonnet_status"],
+            AUTO_SONNET_STATUS_SKIPPED_NOT_APPROVED
+        );
+        // No `auto_sonnet_id` (the auto-sonnet block reuses chain_id
+        // from the wave-19 receipt instead of inventing a new one).
+        assert!(payload.get("auto_sonnet_id").is_none());
+    }
+
+    #[test]
+    fn shape_label_returns_canonical_json_type_name() {
+        assert_eq!(shape_label(&serde_json::json!(null)), "null");
+        assert_eq!(shape_label(&serde_json::json!(true)), "boolean");
+        assert_eq!(shape_label(&serde_json::json!(42)), "number");
+        assert_eq!(shape_label(&serde_json::json!("x")), "string");
+        assert_eq!(shape_label(&serde_json::json!([1, 2])), "array");
+        assert_eq!(shape_label(&serde_json::json!({"k": "v"})), "object");
     }
 }
