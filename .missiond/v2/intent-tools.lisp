@@ -43,6 +43,11 @@
      "task_runner_mode=dry_run 返回 task-runner plan block, Rust 语义与 scripts/plan-task-runner.mjs 对齐; applied=false 仍为字面量"
      "scripts/render-wave-briefs.mjs + scripts/verify-task-runner-batch.mjs 作为外部 read-only runner 工具上线; 不新增 MCP tool"
      "thin brief/shared preamble 降低 ClaudeCode worker 的重复协议负担, 但 Markdown 仍只是 task-contract/manifest 的人类视图"]
+  :wave-29-status-summary
+    ["Wave29 新增的是 repo-local Node runner/checker 工具, 不新增 MCP endpoint; MCP tool count 仍为 83"
+     "new CLIs/checkers: check-context-atlas.mjs, check-pattern-card.mjs, prepare-task-runner-wave.mjs, check-verification-receipt.mjs, plan-task-runner.mjs --schedule ready-queue"
+     "verify-task-runner-batch.mjs 可选消费 receipts, verify-task-run.mjs / check-task-report.mjs 暴露 commit-lineage 事实; legacy 无 receipt / 无 lineage 路径保持兼容"
+     "Wave30 若新增生命周期 finalizer / parent-hotfix helper / staged-source hygiene, 仍优先作为 repo-local scripts 接入 task runner; 是否升 MCP surface 必须等 Lisp-driven loop 能稳定闭环后再定"]
 
   :actual-state-sources
     [".missiond/intent-mcp-defs.lisp (schema SSOT, 24 mcp-module, 详细 input/returns)"

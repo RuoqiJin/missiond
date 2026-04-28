@@ -40,6 +40,11 @@
      "renderer/brief 进入 thin+preamble 模式: task Lisp/manifest 仍是 SSOT, Markdown 只保留任务特异信息 + shared preamble 指针"
      "mission_plan task_runner_mode=dry_run 把 manifest planner 暴露给现有 surface, 但不执行、不 spawn、不切 backend"
      "下一步效率主线: context-atlas / pattern-card / commit-lineage / verification receipt / ready-queue 调度; frontend Lisp 仍 postpone"]
+  :wave-29-status-summary
+    ["efficiency 主线已实际落地: context atlas / pattern cards / prepare-task-runner-wave / verification receipts / ready-queue planner / 8-layer smoke 全部 code-aligned"
+     "GPT Pro 结论被收敛成一个 intent-layer 要求: MissionD 不能靠 worker 自己猜最终状态, 必须由 orchestrator 维护任务生命周期真相并投影 finalized report"
+     "parent 后行 hotfix 是 Wave29 暴露的核心机制缺口: sub-agent 退场后不知道 final commit, 所以 actor 责任必须上收为 lifecycle protocol"
+     "Wave30 主线不是继续做旁路优化, 而是让 intent-alignment.lisp → PLAN.lisp → workflow.lisp 的任务执行链拥有 event log、finalizer、receipt、source-hygiene 这些自举执行所需的硬边界"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar intent-layer (v0.4.17+ 已有详细占位)"

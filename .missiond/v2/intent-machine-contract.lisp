@@ -28,6 +28,13 @@
   :task-runner-plan-cli "scripts/plan-task-runner.mjs"
   :wave-brief-batch-renderer "scripts/render-wave-briefs.mjs"
   :task-runner-batch-verifier "scripts/verify-task-runner-batch.mjs"
+  :context-atlas-schema ".missiond/tasks/schema/context-atlas-v1.lisp"
+  :context-atlas-checker "scripts/check-context-atlas.mjs"
+  :pattern-card-schema ".missiond/tasks/schema/pattern-card-v1.lisp"
+  :pattern-card-checker "scripts/check-pattern-card.mjs"
+  :task-runner-wave-prep "scripts/prepare-task-runner-wave.mjs"
+  :verification-receipt-schema ".missiond/tasks/schema/verification-receipt-v1.lisp"
+  :verification-receipt-checker "scripts/check-verification-receipt.mjs"
   :trace-corpus-indexer "scripts/build-session-trace-index.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :wave-23-status-summary
@@ -68,6 +75,15 @@
      "task-runner batch verifier code-aligned (wave 28 task 05 commit fe70a5f); joins manifest nodes to task contracts, reports, shared-memory completions, and verify-task-run output; pseudo archive/backfill/index nodes are skipped because they are orchestrator-owned"
      "task-runner loop smoke code-aligned (wave 28 task 06 commit 4717713); 5-layer smoke pins manifest checker, planner, renderer, batch verifier, and Rust dry-run invariants; daemon tests 1667→1681 and Node fixtures 20/12/9/8→22/13/11/9 prove productive-only and no-execution semantics across layers"
      "process result: wave 28 removed archive/backfill/parallel-index worker tasks; orchestrator owns archive/backfill, worker briefs are thin views, shared preamble is read once, and dispatch-plan/manifest carry scheduling facts for MissionD runner evolution"]
+  :wave-29-status-summary
+    ["context atlas schema/checker code-aligned (wave 29 task 01 commit 1a5b01f); real wave29 atlas is validated and gives workers stable navigation anchors for large runner/checker files"
+     "pattern-card schema/checker code-aligned (wave 29 task 02 commit 57fdc88); seed cards cover schema-checker, node-cli-readonly, report-lineage, cross-layer-smoke, and large-file-navigation patterns"
+     "runner wave prep code-aligned (wave 29 task 03 commits d36de80 + parent hotfix d842b1d); prepare-task-runner-wave.mjs renders briefs, report skeletons, bootstrap ledger entries, and preamble-read trace expectations; report lineage was backfilled because the parent hotfix happened after worker exit"
+     "parent-hotfix lineage v1 code-aligned (wave 29 task 04 commits c037c63 + d7e314a); report checker/verifiers understand agent/final/verified commit fields and parent_patches, but the actor that finalizes parent hotfixes remains a Wave30 lifecycle responsibility"
+     "verification receipt schema/checker code-aligned (wave 29 task 05 commit ed7940f); batch verifier can consume receipt coverage without changing legacy no-receipt output shape"
+     "ready-queue planner code-aligned (wave 29 task 06 commits 15c5267 + 1951aaa); plan-task-runner.mjs keeps default group-barrier output byte-compatible and adds --schedule ready-queue for dependency-driven release"
+     "runner efficiency smoke code-aligned (wave 29 task 07 commit 08bf1a6); eight Node layers pin atlas, pattern cards, prep CLI, report lineage, receipts, planner, renderer, and batch verifier, with real disk artifacts in the fixture loop"
+     "architecture result: Wave30 must make task lifecycle orchestrator-owned — event append, parent-hotfix protocol, finalized report projection, receipt binding, and staged source hygiene are part of the Lisp-driven MissionD execution loop, not side governance"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -98,7 +114,22 @@
       :machine-contract "records write-scope, must-not-touch, dependencies, acceptance commands, commit scope-check, report fields")
     (task-runner-manifest-lisp
       :role "wave dispatch manifest"
-      :machine-contract "records productive task nodes, dependency DAG, dispatch groups, verification tiers, estimates, heartbeat policy, shared preamble path, and write-scope overlap policy; archive/backfill/index stay orchestrator-owned"))
+      :machine-contract "records productive task nodes, dependency DAG, dispatch groups, verification tiers, estimates, heartbeat policy, shared preamble path, and write-scope overlap policy; archive/backfill/index stay orchestrator-owned")
+    (context-atlas-lisp
+      :role "runner navigation map"
+      :machine-contract "records large-file anchors, read-order guidance, global symbols, and navigation risks so workers do not rediscover file topology from scratch")
+    (pattern-card-lisp
+      :role "reusable implementation memory"
+      :machine-contract "records known-good examples, failure modes, commands, and scope notes for recurring task patterns")
+    (verification-receipt-lisp
+      :role "verified acceptance cache"
+      :machine-contract "records commit/file/tier coverage, validity scope, and exit-code evidence so later batch verification can avoid duplicate work without widening trust")
+    (task-lifecycle-event-lisp
+      :role "future append-only lifecycle event"
+      :machine-contract "Wave30 target: records claim, trace, commit, parent-hotfix, finalization, receipt, and completion events via orchestrator-owned atomic append")
+    (finalized-report-lisp
+      :role "future projected task completion truth"
+      :machine-contract "Wave30 target: worker draft report plus parent patch events plus receipts projected into one final report; a task is not complete until final commit, lineage, and receipt facts agree"))
 
   (pipeline
     (s1-author-task-contract
@@ -149,7 +180,19 @@
       :output "task-runner plan JSON/Lisp + optional mission_plan dry-run response + batch verification summary"
       :command "node scripts/plan-task-runner.mjs --manifest <manifest.lisp> && node scripts/verify-task-runner-batch.mjs --manifest <manifest.lisp>"
       :status "code-aligned partial (wave 28 task 01-06)"
-      :rule "no execution: dry-run/verification surfaces never spawn ClaudeCode, never switch backend, never mutate git, and skip orchestrator-owned pseudo nodes"))
+      :rule "no execution: dry-run/verification surfaces never spawn ClaudeCode, never switch backend, never mutate git, and skip orchestrator-owned pseudo nodes")
+    (s9-runner-efficiency-guidance
+      :input "context-atlas.lisp + pattern-card.lisp + task-runner-manifest.lisp"
+      :output "better worker navigation, fewer repeated template reads, and fixture choices that reuse known-good patterns"
+      :command "node scripts/check-context-atlas.mjs <atlas.lisp> && node scripts/check-pattern-card.mjs <pattern-card.lisp>"
+      :status "code-aligned partial (wave 29 task 01/02/07)"
+      :rule "guidance artifacts inform worker briefs and smoke fixtures; they are not allowed to override task.lisp write-scope, acceptance, or commit policy")
+    (s10-finalize-lifecycle-truth
+      :input "worker draft report + scoped commit + parent hotfix event(s) + verification receipt(s) + staged source hygiene"
+      :output "finalized report.lisp + lifecycle event log projection + batch verifier receipt binding"
+      :command "future Wave30: task-runner-finalize-report.mjs + task-runner-parent-hotfix.mjs + check-staged-source-hygiene.mjs"
+      :status "architecture-required by wave 29 GPT Pro/Codex result; not code-aligned yet"
+      :rule "no task reaches complete until final_commit_hash, commit_hash, parent_patches tail, staged source hygiene, receipts, and verify-task-runner-batch agree"))
 
   (task-report-v1
     :required-fields [:task_id :status :commit_hash :files_changed :acceptance_results :scope_deviations :notes]

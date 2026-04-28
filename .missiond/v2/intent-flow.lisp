@@ -39,6 +39,11 @@
      "flow 层新增的是 orchestration metadata / dry-run planning stage, 不是 runtime execution stage; applied=false / no execution 仍硬边界"
      "archive/backfill/parallel-index worker 从 flow 中移出, 由 orchestrator/Codex 直接处理; ClaudeCode worker 只接 productive task"
      "Group barrier 暴露临界路径空窗; 后续需 ready-queue / phase barrier / verification receipt 去重"]
+  :wave-29-status-summary
+    ["task-runner loop 已从 group-barrier 进入 dependency-ready 方向: wave29 实测三路并发 + ready-queue planner flag, 但真正 dispatch 仍必须只看 hard dependency, 不把 soft reference 当 barrier"
+     "context atlas / pattern cards / prepare-task-runner-wave 把 worker 启动前的上下文、brief、report skeleton、ledger bootstrap 做成机器产物, 降低每个 worker 重复摸索成本"
+     "verification receipt / parent-hotfix lineage / 8-layer smoke 把完成事实从自然语言 report 推向可 join 的 machine evidence, 但 parent 后行 hotfix 暴露 actor 责任仍未闭环"
+     "flow 层下一跳是 orchestrator-owned lifecycle: append event → worker draft → scoped commit → parent hotfix event → finalized report projection → receipt-backed batch verification; 这是 intent-alignment.lisp → PLAN.lisp → workflow.lisp 自举执行主线"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"
