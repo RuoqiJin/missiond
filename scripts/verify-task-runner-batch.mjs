@@ -68,6 +68,11 @@ import {
   readVerificationReceiptFile,
   validateReceiptObject,
 } from './check-verification-receipt.mjs';
+import { checkSuppliedFiles } from './check-staged-source-hygiene.mjs';
+import { validateLifecycleEventFiles } from './check-task-lifecycle-events.mjs';
+import { appendLifecycleEvent } from './task-runner-append-event.mjs';
+import { planParentHotfixFromSource } from './task-runner-parent-hotfix.mjs';
+import { planFromManifestObject } from './plan-task-runner.mjs';
 
 export const SCHEMA = 'missiond.task-runner-batch-verification.v0';
 
@@ -1978,6 +1983,236 @@ function runFixtures({ json }) {
       receipt_coverage_reusable_count_for: { task: 'wave99-01-foo', count: 1 },
     },
   });
+
+  // ---------------------------------------------------------------------
+  // wave30-05 lifecycle/receipt/finalization smoke: one synthetic flow
+  // starts from a worker draft report, appends a parent-hotfix lifecycle
+  // event through the atomic append helper, projects a finalized report,
+  // validates source hygiene, validates a reusable receipt for the FINAL
+  // commit, verifies the batch against the finalized truth, and proves
+  // ready-queue does not wait on a soft reference.
+  // ---------------------------------------------------------------------
+  {
+    const smokeTask = 'wave99-04-lifecycle';
+    const workerCommit = 'aa10aa1';
+    const finalCommit = 'aa10aa2';
+    const smokeCommand = 'node scripts/foo.mjs --dry-fixture';
+    const workerDraft = buildReportSource({
+      id: smokeTask,
+      commitHash: workerCommit,
+      files: ['scripts/foo.mjs'],
+    });
+    const parentPlan = planParentHotfixFromSource(workerDraft, {
+      taskId: smokeTask,
+      agentCommit: workerCommit,
+      parentCommit: finalCommit,
+      kind: 'lint-cleanup',
+      reason: 'Wave30 smoke parent cleanup after worker commit',
+      files: ['scripts/foo.mjs'],
+      acceptanceCommands: [smokeCommand],
+    });
+
+    const tmp = fs.mkdtempSync(path.join(process.cwd(), '.tmp-wave30-05-'));
+    try {
+      fs.mkdirSync(path.join(tmp, 'scripts'), { recursive: true });
+      fs.writeFileSync(path.join(tmp, 'scripts', 'foo.mjs'), 'export const ok = true;\n');
+      const hygiene = checkSuppliedFiles({ files: ['scripts/foo.mjs'], cwd: tmp });
+      if (!hygiene.ok) {
+        throw new Error(`wave30-05 hygiene check failed: ${hygiene.errors.join('; ')}`);
+      }
+
+      const lifecyclePath = path.join(tmp, 'task-lifecycle-events.lisp');
+      appendLifecycleEvent({
+        ledgerPath: lifecyclePath,
+        task: smokeTask,
+        eventKind: 'parent_hotfix',
+        actorRole: 'parent',
+        commitRole: 'parent_hotfix',
+        commitHash: finalCommit,
+        touched: ['scripts/foo.mjs'],
+        summary: 'Wave30 smoke parent hotfix after worker commit',
+        reportPath: '.missiond/tasks/wave99/reports/wave99-04-lifecycle.report.lisp',
+        receiptPath: '.missiond/tasks/wave99/receipts/wave99-04-lifecycle.receipt.lisp',
+        at: '2026-04-28T00:00:00Z',
+      });
+      const lifecycle = validateLifecycleEventFiles([lifecyclePath]);
+      if (!lifecycle.ok || lifecycle.events !== 1) {
+        throw new Error('wave30-05 lifecycle event append did not validate');
+      }
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+
+    const smokeReceipt = {
+      id: `${smokeTask}-${finalCommit}-smoke`,
+      wave: 'wave99',
+      task_id: smokeTask,
+      commit_hash: finalCommit,
+      command: smokeCommand,
+      exit_code: 0,
+      tier: 'smoke',
+      started_at: null,
+      finished_at: null,
+      duration_ms: 250,
+      files: ['scripts/foo.mjs'],
+      notes: null,
+      loc: null,
+    };
+    const receiptErrors = validateReceiptObject(smokeReceipt);
+    if (receiptErrors.length > 0) {
+      throw new Error(`wave30-05 receipt invalid: ${receiptErrors.join('; ')}`);
+    }
+    if (!isReceiptReusable(smokeReceipt, {
+      commit_hash: finalCommit,
+      command: smokeCommand,
+      tier: 'local',
+    })) {
+      throw new Error('wave30-05 receipt should cover the local reuse query');
+    }
+
+    const smokeManifest = {
+      id: 'm-wave30-05-lifecycle-smoke',
+      schema: 'missiond.task-runner-manifest.v1',
+      wave: 'wave99',
+      brief_mode: 'thin',
+      shared_preamble_path: '.missiond/claudecode/wave99-shared-preamble.md',
+      productive_only: true,
+      overlap_policy: 'reject',
+      description: null,
+      generated_at: null,
+      generator: null,
+      nodes: [
+        {
+          task_id: smokeTask,
+          depends_on: [],
+          verification_tier: 'local',
+          dispatch_group: 'A',
+          estimated_minutes: 20,
+          heartbeat_minutes: 5,
+          write_scope: ['scripts/foo.mjs'],
+          notes: null,
+          owner: null,
+          kind: null,
+          loc: null,
+        },
+      ],
+      loc: null,
+    };
+
+    const smokeContracts = {
+      [`.missiond/tasks/wave99/${smokeTask}.lisp`]: loadContractFromSourceShim(
+        buildContractSource({
+          id: smokeTask,
+          message: 'feat(tasks): lifecycle smoke',
+          writeScope: ['scripts/foo.mjs'],
+        }),
+      ),
+    };
+    const smokeReports = {
+      [`.missiond/tasks/wave99/reports/${smokeTask}.report.lisp`]: loadReportFromSource(
+        parentPlan.finalized_report_source,
+        '<fx-wave30-05-finalized-report>',
+      ),
+    };
+    const smokeLedgers = {
+      '.missiond/tasks/wave99/shared-memory.lisp': loadLedgerFromSource(
+        buildLedgerSource('wave99', [
+          { task: smokeTask, summary: `worker completed at commit ${workerCommit}; parent finalized ${finalCommit}` },
+        ]),
+        '<fx-wave30-05-memory>',
+      ),
+    };
+    const smokeCommits = {
+      [finalCommit]: syntheticCommit(finalCommit, 'feat(tasks): lifecycle smoke', ['scripts/foo.mjs']),
+    };
+
+    fixtures.push({
+      name: 'wave30-05 lifecycle receipt finalized-report smoke verifies',
+      manifest: smokeManifest,
+      manifestPath: '.missiond/tasks/wave99/manifest-wave30-05.lisp',
+      loaders: syntheticLoaders({
+        contracts: smokeContracts,
+        reports: smokeReports,
+        ledgers: smokeLedgers,
+        commits: smokeCommits,
+      }),
+      receipts: [smokeReceipt],
+      expect: {
+        aggregate_status: STATUS_ALL_GREEN,
+        verified_nodes: 1,
+        total_nodes: 1,
+        missing_reports: [],
+        missing_memory_completions: [],
+        failed_contract_verifications: [],
+        skipped_nodes: [],
+        receipt_coverage_present: true,
+        receipt_coverage_reusable_count_for: { task: smokeTask, count: 1 },
+      },
+    });
+
+    const readyPlan = planFromManifestObject({
+      id: 'm-wave30-05-ready-queue-soft-ref',
+      schema: 'missiond.task-runner-manifest.v2',
+      wave: 'wave99',
+      brief_mode: 'thin',
+      shared_preamble_path: '.missiond/claudecode/wave99-shared-preamble.md',
+      productive_only: true,
+      overlap_policy: 'reject',
+      description: null,
+      generated_at: null,
+      generator: null,
+      nodes: [
+        {
+          task_id: 'wave99-01-anchor',
+          depends_on: [],
+          hard_deps: [],
+          hard_deps_declared: false,
+          soft_refs: [],
+          verification_tier: 'local',
+          dispatch_group: 'A',
+          estimated_minutes: 10,
+          heartbeat_minutes: 5,
+          write_scope: ['scripts/anchor.mjs'],
+        },
+        {
+          task_id: 'wave99-02-soft-slow',
+          depends_on: [],
+          hard_deps: [],
+          hard_deps_declared: false,
+          soft_refs: [],
+          verification_tier: 'local',
+          dispatch_group: 'A',
+          estimated_minutes: 90,
+          heartbeat_minutes: 10,
+          write_scope: ['scripts/soft-slow.mjs'],
+        },
+        {
+          task_id: 'wave99-03-follower',
+          depends_on: ['wave99-01-anchor'],
+          hard_deps: ['wave99-01-anchor'],
+          hard_deps_declared: true,
+          soft_refs: ['wave99-02-soft-slow'],
+          verification_tier: 'local',
+          dispatch_group: 'B',
+          estimated_minutes: 5,
+          heartbeat_minutes: 5,
+          write_scope: ['scripts/follower.mjs'],
+        },
+      ],
+    }, {
+      manifest_path: '<wave30-05-ready-queue>',
+      schedule: 'ready-queue',
+    });
+    if (!readyPlan.ok) {
+      throw new Error(`wave30-05 ready-queue fixture failed: ${readyPlan.message}`);
+    }
+    const follower = readyPlan.plan.ready_queue.tasks.find((t) => t.task_id === 'wave99-03-follower');
+    if (!follower || follower.ready_at_minutes !== 10) {
+      throw new Error(
+        `wave30-05 ready-queue should ignore soft_refs and release follower at 10, got ${follower?.ready_at_minutes}`,
+      );
+    }
+  }
 
   fixtures.push({
     name: 'wave29-05 receipts pass: full-tier receipt covers local-tier node ⇒ reusable_count=1',
