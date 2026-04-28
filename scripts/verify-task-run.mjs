@@ -35,7 +35,6 @@ import {
 import {
   ENTRY_HEAD as TRACE_ENTRY_HEAD,
   KIND_VALUES as TRACE_KIND_VALUES,
-  SCHEMA as TRACE_SCHEMA,
   parseTraceEvents,
 } from './check-session-trace.mjs';
 
