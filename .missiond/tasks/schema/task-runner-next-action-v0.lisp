@@ -10,7 +10,8 @@
   (purpose
     "Bridge read-only wave-state projection and a daemon/MCP dispatcher wrapper."
     "Default to read-only selection so callers can inspect the next action without mutation."
-    "Make dispatch recording explicit and lifecycle-backed before any future worker spawn integration.")
+    "Make dispatch recording explicit and lifecycle-backed before any future worker spawn integration."
+    "task-runner-dispatch-v0 consumes this output and packages dispatch_task actions as mission_task_delegate call descriptors.")
 
   (inputs
     (:manifest "task-runner-manifest v1/v2; required")

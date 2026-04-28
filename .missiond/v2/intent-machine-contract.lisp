@@ -84,6 +84,10 @@
      "ready-queue planner code-aligned (wave 29 task 06 commits 15c5267 + 1951aaa); plan-task-runner.mjs keeps default group-barrier output byte-compatible and adds --schedule ready-queue for dependency-driven release"
      "runner efficiency smoke code-aligned (wave 29 task 07 commit 08bf1a6); eight Node layers pin atlas, pattern cards, prep CLI, report lineage, receipts, planner, renderer, and batch verifier, with real disk artifacts in the fixture loop"
      "architecture result: Wave30 must make task lifecycle orchestrator-owned — event append, parent-hotfix protocol, finalized report projection, receipt binding, and staged source hygiene are part of the Lisp-driven MissionD execution loop, not side governance"]
+  :wave-30-status-summary
+    ["parent hotfix finalizer / staged source hygiene / lifecycle append-projection / hard-vs-soft manifest / lifecycle-receipt smoke 已 code-aligned; Wave30 historical manifest projects to complete=5"
+     "task-runner-wave-state.mjs + task-runner-next-action.mjs expose orchestration state and selected next action from Lisp artifacts, with dispatch events as explicit lifecycle writes"
+     "task-runner-dispatch.mjs adds the worker handoff descriptor: ready dispatch_task actions become mission_task_delegate target_args while missing briefs, hard-dep waits, and finalization blockers prevent delegation"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -125,11 +129,14 @@
       :role "verified acceptance cache"
       :machine-contract "records commit/file/tier coverage, validity scope, and exit-code evidence so later batch verification can avoid duplicate work without widening trust")
     (task-lifecycle-event-lisp
-      :role "future append-only lifecycle event"
-      :machine-contract "Wave30 target: records claim, trace, commit, parent-hotfix, finalization, receipt, and completion events via orchestrator-owned atomic append")
+      :role "append-only lifecycle event"
+      :machine-contract "Wave30 code-aligned partial: records dispatch, claim, trace, commit, parent-hotfix, finalization, receipt, and completion events via orchestrator-owned append CLI and projection helper")
     (finalized-report-lisp
-      :role "future projected task completion truth"
-      :machine-contract "Wave30 target: worker draft report plus parent patch events plus receipts projected into one final report; a task is not complete until final commit, lineage, and receipt facts agree"))
+      :role "projected task completion truth"
+      :machine-contract "Wave30 code-aligned partial: worker report plus parent patch facts plus verification commit facts are projected into one final report; a task is not complete until final commit, lineage, and receipt facts agree")
+    (task-runner-dispatch-json
+      :role "worker handoff descriptor"
+      :machine-contract "task-runner-dispatch.mjs converts selected dispatch_task actions into mission_task_delegate target_args without spawning; this is the current Lisp-state-to-worker bridge"))
 
   (pipeline
     (s1-author-task-contract

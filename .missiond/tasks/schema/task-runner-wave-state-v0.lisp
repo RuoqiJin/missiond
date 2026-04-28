@@ -31,11 +31,11 @@
 
   (output-json
     "{ ok, schema, manifest_path, lifecycle_path, receipts_path, wave, counts, next_actions[], dispatchable[], needs_finalization[], running[], blocked[], complete[], ready_queue_order[], tasks[] }"
-    "Each task row carries task_id, state, hard_deps, soft_refs, pending_hard_deps, dispatch_group, verification_tier, report_path, final_commit_hash, agent_commit_hash, latest_parent_hotfix_hash, lifecycle_event_count, receipt_count, reusable_receipt_count.")
+    "Each task row carries task_id, state, hard_deps, soft_refs, pending_hard_deps, dispatch_group, verification_tier, estimated_minutes, heartbeat_minutes, write_scope, report_path, final_commit_hash, agent_commit_hash, latest_parent_hotfix_hash, lifecycle_event_count, receipt_count, reusable_receipt_count.")
 
   (next-actions
     (finalize_report "Emitted before dispatch actions when worker commits or parent_hotfix events are not reflected in a final report.")
-    (dispatch_task "Emitted for dispatchable tasks with all hard deps complete; includes brief_path plus soft_refs for context.")
+    (dispatch_task "Emitted for dispatchable tasks with all hard deps complete; includes brief_path, soft_refs, timing, tier, group, and write_scope for delegate descriptor construction.")
     (wait_for_hard_deps "Emitted for blocked tasks with the exact pending_hard_deps list."))
 
   (non-goals

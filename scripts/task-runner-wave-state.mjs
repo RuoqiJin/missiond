@@ -205,6 +205,8 @@ export function projectWaveState({
       dispatch_group: node.dispatch_group,
       verification_tier: node.verification_tier,
       estimated_minutes: node.estimated_minutes,
+      heartbeat_minutes: node.heartbeat_minutes,
+      write_scope: [...(node.write_scope ?? [])].sort((a, b) => a.localeCompare(b)),
       report_path: reportPath,
       final_commit_hash: finalHash,
       agent_commit_hash: report?.agentCommitHash ?? null,
@@ -278,6 +280,11 @@ function buildNextActions(tasks, wave) {
         brief_path: path.posix.join('.missiond', 'claudecode', `${task.task_id}.md`),
         hard_deps: task.hard_deps,
         soft_refs: task.soft_refs,
+        dispatch_group: task.dispatch_group,
+        verification_tier: task.verification_tier,
+        estimated_minutes: task.estimated_minutes,
+        heartbeat_minutes: task.heartbeat_minutes,
+        write_scope: task.write_scope,
         wave,
       });
     }

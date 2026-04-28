@@ -44,6 +44,10 @@
      "context atlas / pattern cards / prepare-task-runner-wave 把 worker 启动前的上下文、brief、report skeleton、ledger bootstrap 做成机器产物, 降低每个 worker 重复摸索成本"
      "verification receipt / parent-hotfix lineage / 8-layer smoke 把完成事实从自然语言 report 推向可 join 的 machine evidence, 但 parent 后行 hotfix 暴露 actor 责任仍未闭环"
      "flow 层下一跳是 orchestrator-owned lifecycle: append event → worker draft → scoped commit → parent hotfix event → finalized report projection → receipt-backed batch verification; 这是 intent-alignment.lisp → PLAN.lisp → workflow.lisp 自举执行主线"]
+  :wave-30-status-summary
+    ["task-runner lifecycle 已推进为可执行 CLI 链: prepare seeds lifecycle, append-event owns lifecycle writes, wave-state projects complete/dispatchable/running/finalization, next-action selects runnable work"
+     "task-runner-dispatch.mjs 是 flow→worker 的当前 bridge: 从 Lisp wave state 生成 mission_task_delegate call descriptors, 默认 read-only, 不 spawn, 不调用 MCP"
+     "这让下一轮 wave 可由 MissionD 读取 manifest/lifecycle 后产出 delegate calls; 人类不再需要把每个 brief 手工翻译成 ClaudeCode 派发请求"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"

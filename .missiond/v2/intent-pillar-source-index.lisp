@@ -4108,17 +4108,29 @@
         :title "task lifecycle finalization — orchestrator-owned completion truth"
         :source-file ".missiond/v2/intent-machine-contract.lisp"
         :local-path "pillar intent-layer :: section machine-contract-layer :: task-lifecycle-finalization-required"
-        :status architecture-designed
+        :status code-aligned-partial
         :compression-safe? false
         :implements
           [".missiond/research/result.md"
            ".missiond/research/wave30-codex-action-plan.md"
-           ".missiond/research/wave30-orchestrator-architecture-research-pack.md"]
+           ".missiond/research/wave30-orchestrator-architecture-research-pack.md"
+           "scripts/task-runner-finalize-report.mjs"
+           "scripts/task-runner-parent-hotfix.mjs"
+           "scripts/check-staged-source-hygiene.mjs"
+           "scripts/task-runner-append-event.mjs"
+           "scripts/project-task-lifecycle-ledger.mjs"
+           "scripts/task-runner-wave-state.mjs"
+           "scripts/task-runner-next-action.mjs"
+           "scripts/task-runner-dispatch.mjs"
+           ".missiond/tasks/schema/task-lifecycle-event-v1.lisp"
+           ".missiond/tasks/schema/task-runner-wave-state-v0.lisp"
+           ".missiond/tasks/schema/task-runner-next-action-v0.lisp"
+           ".missiond/tasks/schema/task-runner-dispatch-v0.lisp"]
         :cross-ref ["intent-layer.machine-contract.report-lineage-v1"
                     "intent-layer.machine-contract.verification-receipt-v1"
                     "intent-layer.machine-contract.ready-queue-planner-v0"]
-        :wave "wave 29 research result / Wave30 input"
-        :note "GPT Pro/Codex result: parent hotfix, staged source hygiene, atomic lifecycle events, hard-vs-soft dependencies, and receipt binding must be owned by the orchestrator. Wave30 should close this as part of the Lisp-driven MissionD execution loop, not as detached process documentation.")
+        :wave "wave 29 research result / Wave30 implementation"
+        :note "GPT Pro/Codex result: parent hotfix, staged source hygiene, atomic lifecycle events, hard-vs-soft dependencies, and receipt binding must be owned by the orchestrator. Wave30 has code-aligned the repo-local CLI boundary through wave-state / next-action / dispatch descriptor; daemon/MCP should wrap this stable interface rather than reimplement the scheduling semantics.")
 
       ;; ── 区域 93 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
       ;; 注: section-id 已存在 (区域 36 / wave-19-backfill / wave-20-backfill / wave-21-backfill), 本 entry 不新增 anchor; 仅在 wave-22-backfill 块内

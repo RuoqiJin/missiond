@@ -48,6 +48,10 @@
      "new CLIs/checkers: check-context-atlas.mjs, check-pattern-card.mjs, prepare-task-runner-wave.mjs, check-verification-receipt.mjs, plan-task-runner.mjs --schedule ready-queue"
      "verify-task-runner-batch.mjs 可选消费 receipts, verify-task-run.mjs / check-task-report.mjs 暴露 commit-lineage 事实; legacy 无 receipt / 无 lineage 路径保持兼容"
      "Wave30 若新增生命周期 finalizer / parent-hotfix helper / staged-source hygiene, 仍优先作为 repo-local scripts 接入 task runner; 是否升 MCP surface 必须等 Lisp-driven loop 能稳定闭环后再定"]
+  :wave-30-status-summary
+    ["Wave30 架构升级继续遵守 no-new-MCP-tool 边界: lifecycle finalizer, parent-hotfix helper, staged-source hygiene, lifecycle append/projection, wave-state, next-action, dispatch descriptor 均是 repo-local Node/Lisp CLI"
+     "task-runner-dispatch.mjs 把 task-runner-next-action 的 dispatch_task 输出包装成 mission_task_delegate target_args, 但默认 read-only 且不直接调用 MCP/slot/spawn"
+     "daemon/MCP 后续只需 thin wrapper 消费 dispatch descriptor; 调度语义仍由 Lisp artifacts + deterministic CLI 承担, 避免 premature daemon rewrite"]
 
   :actual-state-sources
     [".missiond/intent-mcp-defs.lisp (schema SSOT, 24 mcp-module, 详细 input/returns)"
