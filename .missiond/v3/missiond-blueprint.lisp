@@ -209,7 +209,7 @@
       :ref-resolution
         (:order [explicit-arg artifact-extracted review-event-extracted request-local-materialized]
          :explicit-arg "callers may pass approved_directive_id / directive_id / approved_plan_id / plan_id directly"
-         :artifact-extracted "request-local intent-alignment.lisp / plan.lisp is parsed for the persisted id when the explicit arg is omitted; plan.lisp extraction trusts :plan_id, and treats generic :id as a persisted plan ref only when it is UUID-shaped so nested node ids such as (:id \"root\") never become plan refs"
+         :artifact-extracted "request-local intent-alignment.lisp / plan.lisp is parsed for the persisted id when the explicit arg is omitted; artifact extraction trusts explicit :directive_id / :plan_id, and treats generic :id as a persisted directive/plan ref only when it is UUID-shaped so nested ids such as (:id \"root\") never become refs"
          :review-event-extracted "execute_plan can recover the plan_id from the latest request-local approve_plan review event"
          :request-local-materialized "approve_plan may materialize a persisted plan_id by inserting a draft Plan row from request-local plan.lisp, reusing its BoardTask anchor when present and creating a hidden request-local anchor only when needed"
          :missing "when neither source yields or can materialize a persisted ref, return a structured blocked response with next_action describing how to obtain it; mission_request never fabricates non-persisted ids")

@@ -432,6 +432,10 @@ fn extract_lisp_keyword_int(text: &str, key: &str) -> Option<i32> {
     None
 }
 
+fn is_uuid_shaped(id: &str) -> bool {
+    uuid::Uuid::parse_str(id).is_ok()
+}
+
 fn resolve_directive_ref(args: &Value, intent_alignment_text: Option<&str>) -> Option<DirectiveRef> {
     let id = nonblank(args.get("approved_directive_id"))
         .or_else(|| nonblank(args.get("directive_id")));
@@ -451,8 +455,10 @@ fn resolve_directive_ref(args: &Value, intent_alignment_text: Option<&str>) -> O
 }
 
 fn extract_directive_ref_from_artifact(text: &str) -> Option<DirectiveRef> {
-    let id = extract_lisp_keyword_string(text, "directive_id")
-        .or_else(|| extract_lisp_keyword_string(text, "id"))?;
+    let id = match extract_lisp_keyword_string(text, "directive_id") {
+        Some(id) => id,
+        None => extract_lisp_keyword_string(text, "id").filter(|id| is_uuid_shaped(id))?,
+    };
     let version = extract_lisp_keyword_int(text, "directive_version")
         .or_else(|| extract_lisp_keyword_int(text, "version"))?;
     Some(DirectiveRef { id, version })
@@ -480,7 +486,7 @@ fn extract_plan_ref_from_artifact(text: &str) -> Option<PlanRef> {
     // Request-local plan.lisp may contain nested node ids such as
     // `(:id "root" ...)`; never treat those as persisted plan refs.
     extract_lisp_keyword_string(text, "id")
-        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
+        .filter(|id| is_uuid_shaped(id))
         .map(|id| PlanRef { id })
 }
 
@@ -3032,6 +3038,24 @@ mod tests {
         let resolved = resolve_directive_ref(&args, Some(artifact)).expect("ref resolves");
         assert_eq!(resolved.id, "artifact-uuid");
         assert_eq!(resolved.version, 3);
+    }
+
+    #[test]
+    fn resolve_directive_ref_ignores_nested_non_uuid_id() {
+        let artifact = r#"(intent-alignment
+  :request_id "req-x"
+  :scope (:id "root" :version 2)
+  :version 2)"#;
+        assert!(resolve_directive_ref(&json!({}), Some(artifact)).is_none());
+    }
+
+    #[test]
+    fn resolve_directive_ref_accepts_uuid_generic_id_for_legacy_artifacts() {
+        let artifact =
+            "(intent-alignment :id \"00000000-0000-0000-0000-000000000abc\" :version 2)";
+        let resolved = resolve_directive_ref(&json!({}), Some(artifact)).expect("ref resolves");
+        assert_eq!(resolved.id, "00000000-0000-0000-0000-000000000abc");
+        assert_eq!(resolved.version, 2);
     }
 
     #[test]
