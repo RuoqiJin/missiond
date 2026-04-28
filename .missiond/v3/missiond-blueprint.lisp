@@ -420,4 +420,7 @@
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."
     :v2 "Kept as historical source index, implementation status, and wave evidence."
     :v3 "Small executable contracts only: request, artifact, state-machine, policy, implementation map."
+    :checks ["node scripts/check-lisp-blueprint-compression.mjs"
+             "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+             "node scripts/check-v3-request-lisp-isomorphism.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))
