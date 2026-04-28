@@ -166,10 +166,14 @@ export function projectWaveState({
 
     const taskEvents = eventsByTask.get(node.task_id) ?? [];
     const latestParentHotfix = latestEvent(taskEvents, 'parent_hotfix');
+    const latestRunEvent = latestEventOfKinds(taskEvents, ['dispatch', 'claim', 'trace_start', 'read']);
+    const latestCancellation = latestEvent(taskEvents, 'cancelled');
+    const runCancelled =
+      latestRunEvent != null &&
+      latestCancellation != null &&
+      (latestCancellation.seq ?? 0) > (latestRunEvent.seq ?? 0);
     const hasWorkerCommit = taskEvents.some((e) => e.event_kind === 'worker_commit');
-    const hasClaimOrRun = taskEvents.some((e) =>
-      ['dispatch', 'claim', 'trace_start', 'read'].includes(e.event_kind),
-    );
+    const hasClaimOrRun = latestRunEvent != null && !runCancelled;
     const finalHash = finalReportHash(report);
     const lineageHashes = collectLineageHashes(report);
     const latestParentHash = latestParentHotfix?.commit_hash ?? null;
@@ -366,6 +370,13 @@ function latestEvent(events, kind) {
     .sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0))[0] ?? null;
 }
 
+function latestEventOfKinds(events, kinds) {
+  const kindSet = new Set(kinds);
+  return events
+    .filter((event) => kindSet.has(event.event_kind))
+    .sort((a, b) => (b.seq ?? 0) - (a.seq ?? 0))[0] ?? null;
+}
+
 function shaPrefixAgrees(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string') return false;
   const ax = a.trim().toLowerCase();
@@ -554,6 +565,26 @@ function runFixtures() {
       'next_actions should explain blocked child',
     );
 
+    const cancelled = projectWaveState({
+      manifest: blockedManifest,
+      manifestPath: '<cancelled>',
+      repoRoot: tmp,
+      events: [
+        event('wave99-01-root', 'dispatch', 1),
+        event('wave99-01-root', 'cancelled', 2),
+      ],
+      receipts: [],
+      reportLoader: () => null,
+    });
+    assert(
+      cancelled.dispatchable.includes('wave99-01-root'),
+      'cancelled not-yet-committed dispatch should be re-dispatchable',
+    );
+    assert(
+      !cancelled.running.includes('wave99-01-root'),
+      'cancelled not-yet-committed dispatch should not remain running',
+    );
+
     const manifestFile = path.join(tmp, '.missiond/tasks/wave99/manifest.lisp');
     const lifecycleFile = path.join(tmp, '.missiond/tasks/wave99/task-lifecycle-events.lisp');
     fs.mkdirSync(path.dirname(manifestFile), { recursive: true });
@@ -645,12 +676,13 @@ function fakeReport(taskId, commitHash, opts = {}) {
 }
 
 function event(task, eventKind, seq, commitHash = null) {
+  const hasCommit = ['worker_commit', 'parent_hotfix'].includes(eventKind);
   return {
     id: `${task}-${eventKind}-${seq}`,
     task,
     actor_role: eventKind === 'parent_hotfix' ? 'parent' : 'worker',
     event_kind: eventKind,
-    commit_role: eventKind === 'parent_hotfix' ? 'parent_hotfix' : 'worker',
+    commit_role: eventKind === 'parent_hotfix' ? 'parent_hotfix' : hasCommit ? 'worker' : 'none',
     seq,
     at: '2026-04-28T00:00:00Z',
     touched: [`scripts/${task}.mjs`],

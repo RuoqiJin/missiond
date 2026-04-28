@@ -45,6 +45,7 @@ export const EVENT_KINDS = new Set([
   'finalized_report',
   'receipt',
   'completion',
+  'cancelled',
   'issue',
 ]);
 
@@ -496,6 +497,29 @@ function runFixtures(json) {
       ],
     });
     cases.push({ name: 'valid-ledger', source: valid, ok: true });
+    cases.push({
+      name: 'cancelled-kind-valid',
+      source: renderLifecycleEventLog({
+        id: 'wave99-cancelled-lifecycle',
+        wave: 'wave99',
+        createdAt: '2026-04-28T00:00:00Z',
+        sequence: 1,
+        events: [
+          {
+            id: 'wave99-01-cancelled-001',
+            task: 'wave99-01-demo',
+            actor_role: 'orchestrator',
+            event_kind: 'cancelled',
+            commit_role: 'none',
+            seq: 1,
+            at: '2026-04-28T00:00:01Z',
+            touched: [],
+            summary: 'cancelled wrong dispatch',
+          },
+        ],
+      }),
+      ok: true,
+    });
     cases.push({
       name: 'duplicate-id',
       source: valid.replace('wave99-01-commit-003', 'wave99-01-claim-002'),

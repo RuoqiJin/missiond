@@ -143,6 +143,9 @@ export function projectLifecycleEvents(events, { wave }) {
     } else if (event.event_kind === 'completion') {
       sharedMemoryEntries.push(memoryEntry(event, 'completion'));
       sessionTraceEvents.push(traceEvent(event, 'complete'));
+    } else if (event.event_kind === 'cancelled') {
+      sharedMemoryEntries.push(memoryEntry(event, 'observation'));
+      sessionTraceEvents.push(traceEvent(event, 'failure'));
     } else if (event.event_kind === 'issue') {
       sharedMemoryEntries.push(memoryEntry(event, 'blocker'));
       sessionTraceEvents.push(traceEvent(event, 'failure'));
