@@ -42,7 +42,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                     error_codes::MISSING_PARAM,
                     "mission_request requires `action`",
                 )
-                .with_suggestion("actions: start|advance|status"),
+                .with_suggestion("actions: start|advance|status|respond"),
             ))
         }
     };
@@ -469,6 +469,50 @@ fn extract_plan_ref_from_artifact(text: &str) -> Option<PlanRef> {
         .map(|id| PlanRef { id })
 }
 
+/// Build the plan-authoring continuation for response=approve_intent.
+///
+/// `mission_request` stays the public adapter, but the actual plan compile
+/// still flows through unified_entry so the existing mission_plan gate,
+/// compiler, and projection metadata remain authoritative.
+fn build_respond_plan_compile_args(
+    args: &Value,
+    directive: &DirectiveRef,
+    request_id: &str,
+) -> Value {
+    let mut out = serde_json::Map::new();
+    let board_task_id =
+        nonblank(args.get("board_task_id")).unwrap_or_else(|| request_id.to_string());
+    out.insert("approved_directive_id".into(), json!(directive.id.clone()));
+    out.insert("directive_version".into(), json!(directive.version));
+    out.insert("board_task_id".into(), json!(board_task_id));
+
+    for key in [
+        "compiler_mode",
+        "persist",
+        "target_project",
+        "dispatch_strategy",
+        "parallelism",
+        "write_file",
+        "overwrite_file",
+        "topic",
+        "project",
+        "cwd",
+        "review_gate_policy",
+        "emit_review_question",
+        "review_question_text",
+        "review_question_id",
+        "plan_acceptance",
+        "plan_constraints",
+    ] {
+        if let Some(v) = args.get(key) {
+            if !v.is_null() {
+                out.insert(key.into(), v.clone());
+            }
+        }
+    }
+    Value::Object(out)
+}
+
 /// Pure event-sequence allocator. The initial `request_received` event
 /// occupies seq 1; review responses pick up at max(existing) + 1 so each
 /// respond call lands a fresh, monotonically increasing event file.
@@ -596,7 +640,7 @@ fn build_review_event_lisp(args: &ReviewEventArgs<'_>) -> String {
 fn next_action_for(decision: RespondDecision, outcome: RespondOutcome) -> &'static str {
     match (decision, outcome) {
         (RespondDecision::ApproveIntent, RespondOutcome::Dispatched) => {
-            "directive approved; call mission_request advance with approved_directive_id (+ board_task_id) to compile plan.lisp"
+            "directive approved and plan.lisp projection requested; review the returned plan review_packet"
         }
         (RespondDecision::ApprovePlan, RespondOutcome::Dispatched) => {
             "plan approved; call mission_request respond with response=execute_plan + execute=true to dispatch the plan"
@@ -671,6 +715,10 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     let note = nonblank(args.get("note"));
+    let overwrite = args
+        .get("overwrite_file")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     let execute_flag_explicit = args
         .get("execute")
         .and_then(|v| v.as_bool())
@@ -732,6 +780,7 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let mut inner_payload: Option<Value> = None;
     let mut inner_is_error = false;
+    let mut projection_payload: Option<Value> = None;
 
     if outcome == RespondOutcome::Dispatched {
         match decision {
@@ -744,9 +793,38 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
                 });
                 let inner =
                     super::directive::handle(state, "mission_directive", inner_args).await?;
-                inner_is_error = inner.is_error.unwrap_or(false);
-                inner_payload = Some(tool_result_payload(&inner));
-                inner_action = Some("mission_directive::approve");
+                let approve_is_error = inner.is_error.unwrap_or(false);
+                let approve_payload = tool_result_payload(&inner);
+                let mut combined = json!({
+                    "approval": approve_payload,
+                });
+
+                if approve_is_error {
+                    inner_is_error = true;
+                    inner_action = Some("mission_directive::approve");
+                } else {
+                    let plan_args = build_respond_plan_compile_args(args, d, &request_id);
+                    let plan_inner = super::unified_entry::run_pipeline(state, plan_args).await?;
+                    let plan_is_error = plan_inner.is_error.unwrap_or(false);
+                    let projection = run_projection(&plan_inner, Some(&paths), overwrite, true);
+                    let projection_json = projection_to_json(&projection);
+                    let projection_failed = projection.status != ProjectionStatus::Written;
+
+                    if let Some(obj) = combined.as_object_mut() {
+                        obj.insert("plan_compile".into(), tool_result_payload(&plan_inner));
+                        obj.insert("projection".into(), projection_json.clone());
+                    }
+                    projection_payload = Some(projection_json);
+                    inner_is_error = plan_is_error || projection_failed;
+                    if projection_failed && blocked_reason.is_none() {
+                        blocked_reason = Some(format!(
+                            "plan.lisp projection did not complete (status={})",
+                            projection.status.wire()
+                        ));
+                    }
+                    inner_action = Some("mission_directive::approve+unified_entry::plan_compile");
+                }
+                inner_payload = Some(combined);
             }
             RespondDecision::ApprovePlan => {
                 let p = plan_ref.as_ref().expect("ref enforced above");
@@ -891,6 +969,11 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     if let Some(payload) = inner_payload {
         if let Some(obj) = response.as_object_mut() {
             obj.insert("pipeline_result".into(), payload);
+        }
+    }
+    if let Some(projection) = projection_payload {
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("projection".into(), projection);
         }
     }
 
@@ -2558,6 +2641,50 @@ mod tests {
         // Blocked when both missing.
         assert!(resolve_plan_ref(&json!({}), Some("(plan :goal :ship)")).is_none());
         assert!(resolve_plan_ref(&json!({}), None).is_none());
+    }
+
+    #[test]
+    fn respond_plan_compile_args_default_board_task_to_request_id() {
+        let directive = DirectiveRef {
+            id: "00000000-0000-0000-0000-000000000abc".into(),
+            version: 7,
+        };
+        let args = json!({
+            "compiler_mode": "dry_run",
+            "project": "missiond",
+            "persist": false,
+            "directive_version": 99,
+        });
+        let out = build_respond_plan_compile_args(&args, &directive, "req-123");
+
+        assert_eq!(out["approved_directive_id"], directive.id);
+        assert_eq!(out["directive_version"], 7);
+        assert_eq!(out["board_task_id"], "req-123");
+        assert_eq!(out["compiler_mode"], "dry_run");
+        assert_eq!(out["project"], "missiond");
+        assert_eq!(out["persist"], false);
+    }
+
+    #[test]
+    fn respond_plan_compile_args_use_explicit_board_task() {
+        let directive = DirectiveRef {
+            id: "00000000-0000-0000-0000-000000000abc".into(),
+            version: 1,
+        };
+        let args = json!({
+            "board_task_id": "btk-42",
+            "target_project": "missiond",
+            "write_file": true,
+            "overwrite_file": true,
+            "review_gate_policy": "manual",
+        });
+        let out = build_respond_plan_compile_args(&args, &directive, "req-123");
+
+        assert_eq!(out["board_task_id"], "btk-42");
+        assert_eq!(out["target_project"], "missiond");
+        assert_eq!(out["write_file"], true);
+        assert_eq!(out["overwrite_file"], true);
+        assert_eq!(out["review_gate_policy"], "manual");
     }
 
     // ── event sequencing — pure ────────────────────────────────────────

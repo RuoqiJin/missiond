@@ -156,7 +156,7 @@
          :max-bytes 480
          :truncation "missiond-core safe_byte_truncate (UTF-8 boundary safe)"
          :rationale "previews must never panic on multi-byte CJK runes")
-      :non-goal "review_packet must not silently approve, must not call mission_directive/mission_plan approve, and must not dispatch workstation slots.")
+      :non-goal "review_packet is pure observation; only an explicit review-response may call approval gates or plan-authoring, and no path dispatches workstation slots without execute_plan.")
     (review-response
       :desc "Caller continuation of a review_packet through mission_request. The user-facing surface answers a review_packet without learning the inner mission_directive / mission_plan calls; mission_request is the adapter that routes to the existing approval gates and never bypasses them or directly dispatches workstation work."
       :surface mission_request
@@ -169,8 +169,9 @@
       :decision-routing
         ((rule approve-intent
            :requires [persisted-or-explicit-directive-ref]
-           :route "delegate to mission_directive(action=approve, directive_id, version) using the existing approval gate; mission_request never silently flips directive status"
-           :next_action "after approval, call mission_request advance with approved_directive_id (+ board_task_id) to compile plan.lisp")
+           :route "delegate to mission_directive(action=approve, directive_id, version) using the existing approval gate; when approval succeeds, immediately continue through unified_entry s4 plan-authoring and project the resulting sexp into the same request-local plan.lisp"
+           :default-board-task "board_task_id if supplied; otherwise request_id as the request-local dry-run plan anchor"
+           :next_action "review request-local plan.lisp from the returned review_packet")
          (rule reject-intent
            :requires [persisted-or-explicit-directive-ref :note]
            :route "no DB mutation; record review event under .missiond/requests/<request_id>/events as auditable user decision"
@@ -207,7 +208,8 @@
         (:respond_result {:decision :outcome :event_path :event_seq :next_action
                           :directive_id :plan_id :execute :inner_action}
          :review_packet review-packet
-         :pipeline_result "inner directive/plan/unified-entry payload when the route invoked one; null for record-only routes"
+         :projection "present on approve_intent when the follow-up plan compile projected plan.lisp"
+         :pipeline_result "inner directive/plan/unified-entry payload when the route invoked one; approve_intent nests approval + plan_compile + projection; null for record-only routes"
          :next_action "human-readable continuation hint mirroring review_packet.next_action")
       :non-goals
         ("never auto-approves intent or plan when the user said reject/ask"
@@ -346,7 +348,7 @@
       :role "single user-facing request entry"
       :code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
              "crates/missiond-mcp/src/tools/knowledge/request.rs"]
-      :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; review_packet (state, artifact_kind, artifact_path, artifact_exists, artifact_preview, prompt, allowed_responses, next_action, execute_allowed) is derived purely from request-local artifact existence + latest projection per the unified-entry/review-packet contract — UTF-8-safe via missiond_core::util::safe_byte_truncate; respond action accepts approve_intent/reject_intent/ask_question/approve_plan/reject_plan/execute_plan, resolves directive/plan refs from explicit args or request-local intent-alignment.lisp/plan.lisp parses, records a request-local review event under events/<seq>.event.lisp via the same atomic_write_artifact + monotonically-increasing local sequence, delegates approve/execute decisions to mission_directive / mission_plan / unified_entry without bypassing their gates, and returns blocked responses (with next_action) when refs are missing or execute=true was not passed; still no DB schema migration, no auto-approval, no direct workstation dispatch")
+      :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; review_packet (state, artifact_kind, artifact_path, artifact_exists, artifact_preview, prompt, allowed_responses, next_action, execute_allowed) is derived purely from request-local artifact existence + latest projection per the unified-entry/review-packet contract — UTF-8-safe via missiond_core::util::safe_byte_truncate; respond action accepts approve_intent/reject_intent/ask_question/approve_plan/reject_plan/execute_plan, resolves directive/plan refs from explicit args or request-local intent-alignment.lisp/plan.lisp parses, records a request-local review event under events/<seq>.event.lisp via the same atomic_write_artifact + monotonically-increasing local sequence, delegates approve/execute decisions to mission_directive / mission_plan / unified_entry without bypassing their gates, and returns blocked responses (with next_action) when refs are missing or execute=true was not passed; approve_intent is the unified-entry bridge for the human yes step: after directive approval succeeds it immediately calls unified_entry s4 plan-authoring and projects request-local plan.lisp so the next packet asks for plan review rather than requiring a separate advance call; still no DB schema migration, no auto-approval, no direct workstation dispatch")
 
     (surface mission_directive
       :status "compat"

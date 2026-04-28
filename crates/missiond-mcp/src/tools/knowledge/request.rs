@@ -19,9 +19,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
          (approved_directive_id / directive_id + directive_version, approved_plan_id / plan_id) or \
          from the request-local intent-alignment.lisp / plan.lisp; missing refs return a structured \
          blocked response with next_action instead of fabricating an id. approve_intent delegates to \
-         mission_directive(action=approve); approve_plan delegates to mission_plan(action=approve) \
-         and never sets execute=true; execute_plan requires execute=true (or response=execute_plan) \
-         and routes through the existing mission_plan execute path via unified_entry. reject_intent / \
+         mission_directive(action=approve), then on successful approval immediately runs unified_entry \
+         plan-authoring and projects request-local plan.lisp for the same request; approve_plan \
+         delegates to mission_plan(action=approve) and never sets execute=true; execute_plan requires \
+         execute=true (or response=execute_plan) and routes through the existing mission_plan execute \
+         path via unified_entry. reject_intent / \
          reject_plan / ask_question never mutate directive/plan approval state and only append a \
          request-local review event under .missiond/requests/<request_id>/events/<seq>.event.lisp. \
          All actions never auto-approve intent or plan, never bypass mission_plan, and never spawn \
@@ -36,7 +38,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
          artifact_exists, respond_result: { decision, outcome: recorded|dispatched|blocked, \
          event_path, event_seq, event_sha256, event_bytes, execute, next_action, directive_id?, \
          directive_version?, plan_id?, inner_action?, blocked_reason?, note? }, review_packet, \
-         next_action, v3_contract, pipeline_result? }. review_packet is a pure projection of \
+         next_action, v3_contract, projection?, pipeline_result? }. review_packet is a pure projection of \
          request-local artifact existence + the latest projection target — the caller decides \
          whether to approve via mission_directive/mission_plan; mission_request never silently \
          approves or dispatches.",
@@ -59,7 +61,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "reject_plan",
                         "execute_plan"
                     ],
-                    "description": "[respond] review decision — approve_intent dispatches to mission_directive approve; approve_plan dispatches to mission_plan approve (never execute); execute_plan requires execute=true and routes through mission_plan execute; reject_intent/reject_plan/ask_question only append a request-local review event"
+                    "description": "[respond] review decision — approve_intent dispatches to mission_directive approve and then unified_entry plan-authoring to project request-local plan.lisp; approve_plan dispatches to mission_plan approve (never execute); execute_plan requires execute=true and routes through mission_plan execute; reject_intent/reject_plan/ask_question only append a request-local review event"
                 },
                 "decision": {
                     "type": "string",
@@ -108,16 +110,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "overwrite_file": {
                     "type": "boolean",
-                    "description": "[start|advance] allow replacing an existing request.lisp / initial event AND any request-local intent-alignment.lisp / plan.lisp projection produced from the inner compile sexp. Default false."
+                    "description": "[start|advance|respond approve_intent] allow replacing an existing request.lisp / initial event AND any request-local intent-alignment.lisp / plan.lisp projection produced from the inner compile sexp. Default false."
                 },
                 "compiler_mode": {
                     "type": "string",
                     "enum": ["dry_run", "sonnet"],
-                    "description": "[start|advance] forwarded to mission_directive / mission_plan compile. Default dry_run on those surfaces."
+                    "description": "[start|advance|respond approve_intent] forwarded to mission_directive / mission_plan compile. Default dry_run on those surfaces."
                 },
                 "persist": {
                     "type": "boolean",
-                    "description": "[start|advance] forwarded to directive/plan compile. Default false on inner surfaces."
+                    "description": "[start|advance|respond approve_intent] forwarded to directive/plan compile. Default false on inner surfaces."
                 },
                 "approved_directive_id": {
                     "type": "string",
@@ -133,7 +135,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "board_task_id": {
                     "type": "string",
-                    "description": "[advance plan-authoring|respond] board task anchor required by mission_plan compile; respond forwards it to follow-up advance calls"
+                    "description": "[advance plan-authoring|respond approve_intent] board task anchor for mission_plan compile. respond approve_intent defaults it to request_id for request-local dry-run plan projection when omitted."
                 },
                 "approved_plan_id": {
                     "type": "string",
