@@ -81,4 +81,16 @@
     :files [".missiond/v3/missiond-blueprint.lisp"
             "crates/missiond-daemon/src/handlers/knowledge/request.rs"
             "crates/missiond-mcp/src/tools/knowledge/request.rs"]
-    :summary "Parent hotfix commit 3937a738a236: live smoke showed approve_intent did not project plan.lisp; respond now chains directive approval into unified_entry plan-authoring and request-local plan projection."))
+    :summary "Parent hotfix commit 3937a738a236: live smoke showed approve_intent did not project plan.lisp; respond now chains directive approval into unified_entry plan-authoring and request-local plan projection.")
+
+  (trace-event
+    :id wave36-trace-01-parent-hotfix-009
+    :seq 8
+    :at "2026-04-28T16:18:40Z"
+    :task wave36-01-mission-request-review-response-v0
+    :backend codex-orchestrator
+    :kind commit
+    :files [".missiond/v3/missiond-blueprint.lisp"
+            "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+            "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+    :summary "Parent hotfix commit d34759b0e2b7: live smoke showed BoardTask/Plan internals still leaked through approve_intent/approve_plan. The adapter now creates/reuses the hidden BoardTask anchor, materializes plan.lisp to a draft Plan row on approve_plan, and routes approval through mission_plan."))

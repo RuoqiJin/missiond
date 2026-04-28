@@ -60,4 +60,15 @@
     :touched [".missiond/v3/missiond-blueprint.lisp"
               "crates/missiond-daemon/src/handlers/knowledge/request.rs"
               "crates/missiond-mcp/src/tools/knowledge/request.rs"]
-    :summary "Parent hotfix commit 3937a738a236 after live smoke: response=approve_intent no longer stops after directive approval; it immediately runs unified_entry s4 plan-authoring and request-local plan.lisp projection, so the next review_packet asks for plan approval from the same mission_request entry."))
+    :summary "Parent hotfix commit 3937a738a236 after live smoke: response=approve_intent no longer stops after directive approval; it immediately runs unified_entry s4 plan-authoring and request-local plan.lisp projection, so the next review_packet asks for plan approval from the same mission_request entry.")
+
+  (observation
+    :id wave36-01-parent-hotfix-006
+    :task wave36-01-mission-request-review-response-v0
+    :agent codex-orchestrator
+    :seq 6
+    :at "2026-04-28T16:18:40Z"
+    :touched [".missiond/v3/missiond-blueprint.lisp"
+              "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+              "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+    :summary "Parent hotfix commit d34759b0e2b7 after live IPC smoke: approve_intent creates/reuses a hidden BoardTask anchor when board_task_id is omitted, approve_plan materializes request-local plan.lisp into a draft Plan row when plan_id is omitted, and the smoke verified approve_plan reused the same BoardTask anchor before routing through mission_plan approve."))
