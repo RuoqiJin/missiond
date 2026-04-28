@@ -2,7 +2,7 @@
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave31
   :created-at "2026-04-28T11:22:52Z"
-  :sequence 5
+  :sequence 6
 
 
   (lifecycle-event
@@ -61,4 +61,17 @@
     :seq 5
     :at "2026-04-28T11:56:50Z"
     :touched [".missiond/claudecode/wave31-01-mission-request-local-projections-v0.md" ".missiond/tasks/wave31/manifest.lisp"]
-    :summary "Dispatch wave31-01-mission-request-local-projections-v0: hard dependencies satisfied."))
+    :summary "Dispatch wave31-01-mission-request-local-projections-v0: hard dependencies satisfied.")
+
+  (lifecycle-event
+    :id wave31-01-mission-request-local-projections-v0-completion-006
+    :task wave31-01-mission-request-local-projections-v0
+    :actor_role claudecode
+    :event_kind completion
+    :commit_role worker
+    :seq 6
+    :at "2026-04-28T12:09:14Z"
+    :touched ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
+              "crates/missiond-mcp/src/tools/knowledge/request.rs"
+              ".missiond/v3/missiond-blueprint.lisp"]
+    :summary "Worker completion: request-local Lisp projection v0 implemented + tested + acceptance commands green; report contract written; awaiting commit."))
