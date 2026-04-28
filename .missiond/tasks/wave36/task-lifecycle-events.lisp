@@ -4,7 +4,7 @@
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave36
   :created-at "2026-04-28T22:56:00+08:00"
-  :sequence 7
+  :sequence 8
 
   (lifecycle-event
     :id wave36-lifecycle-bootstrap-start-001
@@ -97,4 +97,19 @@
     :touched [".missiond/tasks/wave36/reports/wave36-01-mission-request-review-response-v0.report.lisp"]
     :summary "Wrote done-status report at commit 37421f4ae3af; check-task-report.mjs PASS; verify-task-contract.mjs PASS."
     :legacy_memory_id wave36-01-completion-004
-    :legacy_trace_id wave36-trace-01-completion-007))
+    :legacy_trace_id wave36-trace-01-completion-007)
+
+  (lifecycle-event
+    :id wave36-01-mission-request-review-response-v0-parent-hotfix-008
+    :task wave36-01-mission-request-review-response-v0
+    :actor_role codex-orchestrator
+    :event_kind parent_hotfix
+    :commit_role parent_hotfix
+    :seq 8
+    :at "2026-04-28T15:33:53Z"
+    :touched [".missiond/v3/missiond-blueprint.lisp"
+              "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+              "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+    :summary "Parent hotfix 3937a738a236: approve_intent respond now compiles/projects request-local plan.lisp through unified_entry s4 after directive approval, closing the live-smoke gap without editing inner directive/plan handlers."
+    :legacy_memory_id wave36-01-parent-hotfix-005
+    :legacy_trace_id wave36-trace-01-parent-hotfix-008))

@@ -4,7 +4,7 @@
   :schema "missiond.shared-memory.v1"
   :wave wave36
   :created-at "2026-04-28T22:56:00+08:00"
-  :sequence 4
+  :sequence 5
 
   (observation
     :id wave36-theme-001
@@ -49,4 +49,15 @@
     :touched [".missiond/v3/missiond-blueprint.lisp"
               "crates/missiond-daemon/src/handlers/knowledge/request.rs"
               "crates/missiond-mcp/src/tools/knowledge/request.rs"]
-    :summary "Completed wave36-01 at commit 37421f4ae3af. Added (review-response ...) form under unified-entry; added action_respond + RespondDecision/RespondOutcome + parse_respond_decision + resolve_directive_ref/plan_ref + next_event_seq + build_review_event_lisp + next_action_for in request.rs (all pure helpers + one async dispatcher); extended MCP schema with action=respond, response/decision enums and aliases. 25 new pure tests pin decision parsing, ref resolution, event sequencing, blocked responses, and no-execute-by-default behaviour. Acceptance: cargo test daemon (65 ok) + mcp surfaces (1 ok) + cargo check daemon/mcp + blueprint compression + architecture-lisp + perl NUL scan + git diff --check + task-scope-guard + verify-task-contract all green."))
+    :summary "Completed wave36-01 at commit 37421f4ae3af. Added (review-response ...) form under unified-entry; added action_respond + RespondDecision/RespondOutcome + parse_respond_decision + resolve_directive_ref/plan_ref + next_event_seq + build_review_event_lisp + next_action_for in request.rs (all pure helpers + one async dispatcher); extended MCP schema with action=respond, response/decision enums and aliases. 25 new pure tests pin decision parsing, ref resolution, event sequencing, blocked responses, and no-execute-by-default behaviour. Acceptance: cargo test daemon (65 ok) + mcp surfaces (1 ok) + cargo check daemon/mcp + blueprint compression + architecture-lisp + perl NUL scan + git diff --check + task-scope-guard + verify-task-contract all green.")
+
+  (observation
+    :id wave36-01-parent-hotfix-005
+    :task wave36-01-mission-request-review-response-v0
+    :agent codex-orchestrator
+    :seq 5
+    :at "2026-04-28T15:34:12Z"
+    :touched [".missiond/v3/missiond-blueprint.lisp"
+              "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+              "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+    :summary "Parent hotfix commit 3937a738a236 after live smoke: response=approve_intent no longer stops after directive approval; it immediately runs unified_entry s4 plan-authoring and request-local plan.lisp projection, so the next review_packet asks for plan approval from the same mission_request entry."))

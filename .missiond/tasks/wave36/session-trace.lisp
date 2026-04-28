@@ -4,7 +4,7 @@
   :schema "missiond.session-trace.v1"
   :wave wave36
   :created-at "2026-04-28T22:56:00+08:00"
-  :sequence 6
+  :sequence 7
 
   (trace-event
     :id wave36-trace-bootstrap-start-001
@@ -69,4 +69,16 @@
     :backend claudecode
     :kind complete
     :files [".missiond/tasks/wave36/reports/wave36-01-mission-request-review-response-v0.report.lisp"]
-    :summary "Report written with status=done + commit_hash 37421f4ae3af + 10 acceptance results; check-task-report.mjs PASS; verify-task-contract.mjs PASS."))
+    :summary "Report written with status=done + commit_hash 37421f4ae3af + 10 acceptance results; check-task-report.mjs PASS; verify-task-contract.mjs PASS.")
+
+  (trace-event
+    :id wave36-trace-01-parent-hotfix-008
+    :seq 7
+    :at "2026-04-28T15:33:53Z"
+    :task wave36-01-mission-request-review-response-v0
+    :backend codex-orchestrator
+    :kind commit
+    :files [".missiond/v3/missiond-blueprint.lisp"
+            "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+            "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+    :summary "Parent hotfix commit 3937a738a236: live smoke showed approve_intent did not project plan.lisp; respond now chains directive approval into unified_entry plan-authoring and request-local plan projection."))
