@@ -20,6 +20,9 @@
   :router-policy-schema ".missiond/tasks/schema/router-policy-v1.lisp"
   :router-policy-checker "scripts/check-router-policy.mjs"
   :router-recommendation-cli "scripts/recommend-task-backend.mjs"
+  :router-dispatch-descriptor-schema ".missiond/tasks/schema/router-dispatch-descriptor-v1.lisp"
+  :router-dispatch-descriptor-checker "scripts/check-router-dispatch-descriptor.mjs"
+  :router-dispatch-descriptor-cli "scripts/build-router-dispatch-descriptor.mjs"
   :trace-corpus-indexer "scripts/build-session-trace-index.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :wave-23-status-summary
@@ -46,6 +49,12 @@
      "mission_plan backend readiness dry-run surface code-aligned-partial (wave 26 task 03 commit fcd937a); router_backend_registry_path optional, 6-condition Rust gate, off/default with registry+trace path remains byte-identical and no I/O"
      "report/renderer readiness fields code-aligned (wave 26 tasks 04/05 commits 44ddf9d/43df6230); five optional report fields, strict atom booleans, renderer check-router-backend-registry command + --backend-registry, explicit MUST NOT switch backend"
      "router readiness smoke code-aligned (wave 26 task 06 commit 4bfa710); 5-layer smoke pins 9 invariants, including current-default not apply-eligible and no shell/LLM/git/network; runtime backend replacement remains pending"]
+  :wave-27-status-summary
+    ["router dispatch descriptor schema/checker code-aligned (wave 27 task 01 commit f451b04); missiond.router-dispatch-descriptor.v1 locks dry_run_only=true / runtime_replacement=false / no_execution=true as literal booleans"
+     "descriptor CLI code-aligned (wave 27 task 02 commits 14fdf5a + 752fe40); builds ephemeral Lisp/JSON descriptors from task + router policy + backend registry, validates in-process, never shells out"
+     "mission_plan descriptor dry-run surface code-aligned-partial (wave 27 task 03 commit 6e4f14d); router_dispatch_descriptor optional bool only splices advisory descriptor evidence under router_policy_mode=dry_run"
+     "report/renderer descriptor fields code-aligned (wave 27 tasks 04/05 commits afb5ffb/17cb401); report gains six optional descriptor fields, renderer emits build/check commands only when policy and registry resolve"
+     "router dispatch descriptor smoke code-aligned (wave 27 task 06 commit 7f65f05); 5-layer smoke pins descriptor schema/CLI/Rust/report/renderer invariants; descriptor remains no-execution handoff, not runtime backend replacement"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -330,6 +339,52 @@
                  "report checker rejects string booleans and invalid readiness fields"
                  "no shell, LLM, git mutation, or network calls in readiness path"])
 
+  (router-dispatch-descriptor-v1
+    :purpose "Represent router recommendation plus backend readiness as a machine-checkable handoff descriptor"
+    :schema ".missiond/tasks/schema/router-dispatch-descriptor-v1.lisp"
+    :checker "scripts/check-router-dispatch-descriptor.mjs"
+    :status "code-aligned — wave 27 task 01 commit f451b04"
+    :required-fields [:schema :task_id :recommended_backend :router_confidence :backend_readiness_status :backend_runtime_allowed :router_apply_eligible :router_apply_blockers :dry_run_only :runtime_replacement :no_execution :source_recommendation_schema :source_policy_path :source_backend_registry_path]
+    :locked-invariants ["dry_run_only literal true"
+                        "runtime_replacement literal false"
+                        "no_execution literal true"
+                        "router_apply_eligible=true requires runtime-ready + runtime_allowed=true + confidence=high + zero blockers"]
+    :runtime-boundary "descriptor is an ephemeral handoff record; it never executes backend replacement")
+
+  (router-dispatch-descriptor-cli-v0
+    :purpose "Build the descriptor on demand from task contract, router policy, and backend registry"
+    :cli "scripts/build-router-dispatch-descriptor.mjs"
+    :status "code-aligned — wave 27 task 02 commits 14fdf5a + 752fe40"
+    :input "task.lisp + router-policy-v1.lisp + router-backend-registry-v1.lisp + optional trace index"
+    :output "missiond.router-dispatch-descriptor.v1 Lisp by default; JSON with --json"
+    :rule "read-only deterministic; imports router recommendation/readiness helpers and validates before emit; no shell/git/LLM/network")
+
+  (router-dispatch-descriptor-plan-surface-v0
+    :purpose "Expose the descriptor in mission_plan execute dry-run response without changing dispatch"
+    :status "code-aligned-partial — wave 27 task 03 commit 6e4f14d"
+    :arg "router_dispatch_descriptor boolean; honored only with router_policy_mode=dry_run"
+    :response "router_dispatch_descriptor sub-object when registry resolves, descriptor_status=registry_missing when it does not"
+    :rule "off/default mode stays byte-identical and does no extra file I/O; applied=false remains pinned")
+
+  (router-dispatch-descriptor-report-fields-v0
+    :purpose "Allow completion reports to record descriptor evidence"
+    :status "code-aligned — wave 27 task 04 commit afb5ffb"
+    :fields [:router_dispatch_descriptor_path :router_dispatch_descriptor_status :router_dispatch_backend :router_dispatch_eligible :router_dispatch_no_execution :router_dispatch_blockers]
+    :rule "router_dispatch_no_execution accepts literal atom true only; strings and false are rejected")
+
+  (renderer-router-dispatch-descriptor-context-v0
+    :purpose "Render advisory descriptor build/check commands in ClaudeCode briefs"
+    :status "code-aligned — wave 27 task 05 commit 17cb401"
+    :commands ["node scripts/build-router-dispatch-descriptor.mjs --task <task> --policy <policy> --backend-registry <registry>"
+               "node scripts/build-router-dispatch-descriptor.mjs --task <task> --policy <policy> --backend-registry <registry> | node scripts/check-router-dispatch-descriptor.mjs --stdin"]
+    :rule "renderer emits text only; it never shells out and it does not add a static :router-dispatch-descriptor-path task field because descriptors are generated on demand")
+
+  (router-dispatch-descriptor-smoke-v0
+    :purpose "Pin descriptor invariants across checker, CLI, mission_plan, report, and renderer"
+    :status "code-aligned — wave 27 task 06 commit 7f65f05"
+    :layers ["descriptor checker" "descriptor CLI" "mission_plan Rust surface" "report checker" "renderer fixture"]
+    :invariants ["dry_run_only=true" "runtime_replacement=false" "no_execution=true" "eligible=false lists blockers" "eligible=true still no_execution=true" "dispatch fields byte-identical with vs without descriptor flag"])
+
   (task-contract-v1
     :required-fields [:schema :title :kind :status :owner :goal :write-scope :must-not-touch :acceptance :commit]
     :schema-value "missiond.task-contract.v1"
@@ -378,7 +433,7 @@
      "Do not auto-dispatch from task.lisp until verifier/report loop exists (wave 19 closed + wave 20-04 machine-driven dispatch v0 + wave 21-02/03 task-run verifier + execution-side verified gate 已落 + **wave 22-02 (commit 02ac627) 加 daemon-internal auto_run_task_run_verifier 8 cross-checks in-process 当 task_contract_path + task_report_path + shared_memory_path + commit_hash 4 路径全提供时 daemon 自跑 (verification_source='daemon-auto-verifier'), legacy verified=true 降级 'legacy-caller-claim'**; remaining: 完全无 hint 的 autonomous spawn / report-contract checker auto-invoke (wave22-02 已大幅推进, 但 caller 必须仍提供 4 路径才触发 daemon-internal verifier)."
      "Do not auto-apply LLM/inference proposals without explicit gate — wave 22-03 (commit 4b55cb4) 加 review LLM approve apply gate v1 (apply_llm_auto_approve + proposal_hash + caller_approved 4 opt-in + 6 道 gate); wave 22-04 (commit fee6567) 加 persisted plan inference apply v2 (persist_inference + caller_approved + proposal_hash 4 opt-in + plan_insert(version=max+1) + plan_supersede(old) 真改 plan.sexp_text); wave 22-05 (commit 162a303) 加 autonomous workstation true spawn v1 (auto_spawn + workstation_caller_approved + preflight_acceptable 4 opt-in + 12-rule gate matrix + mission_task_delegate substrate **绝不 claude -p**); wave 22-06 (commit 2423d4b) 加 distill chain policy auto-sonnet v2 (auto_sonnet_policy=safe_after_rules **policy 选择即 attestation**, dual opt-in 移除); 4 路 LLM/inference 通道全部进入 'caller explicit opt-in + 6/12-rule gate + deterministic SHA-256 hash + structured fail-fast errors' 模式. 仍未实现: 完全 LLM 自主无任何 caller opt-in / Sonnet 真无任何 attestation."
      "Do not enable hooks default-on real install — wave 21-01 hooks installer 是 opt-in repo-local only; **wave 22-01 (commit 49555c4) 加 default-on doctor v2** (install-missiond-hooks.mjs default mode = --check 只读 doctor, --install 仍唯一 mutation; renderer renderHooksDoctorPreflight() 块在 commit section 上方提示 caller 跑 --install); 但 git config core.hooksPath .githooks 默认仍未启用 — caller 必须显式跑 --install 才生效; enforce-by-default real install 仍 future."
-     "Do not use router recommendation as runtime replacement — wave 24 router-policy / indexer / CLI / mission_plan surface, wave 25 evaluator/report/trace-index confidence loop, and wave 26 backend-readiness/apply-blocker loop are advisory dry-run only; runtime_replacement=false, dry_run_only=true, applied=false, and current-default-not-apply-eligible are hard boundaries."
+     "Do not use router recommendation or dispatch descriptor as runtime replacement — wave 24 router-policy / indexer / CLI / mission_plan surface, wave 25 evaluator/report/trace-index confidence loop, wave 26 backend-readiness/apply-blocker loop, and wave 27 dispatch descriptor layer are advisory dry-run/no-execution only; runtime_replacement=false, dry_run_only=true, no_execution=true, applied=false, and current-default-not-apply-eligible are hard boundaries."
      "Do not start frontend Lisp in this wave (continue postpone)."
      "Do not interpret arbitrary Common Lisp; this is MissionD data Lisp only."])
 
@@ -426,5 +481,6 @@
      "DONE wave24-01..06 — router-policy dry-run chain: schema/checker/seed + trace corpus indexer + recommendation CLI + mission_plan dry-run surface + renderer advisory block + full-chain smoke; no runtime backend replacement."
      "DONE wave25-01..05 — router-policy measurement loop: corpus evaluator (67 real tasks), report-contract seven router fields, mission_plan trace-index confidence path, renderer recommend command, and CLI/Rust parity smoke; no runtime backend replacement."
      "DONE wave26-01..06 — router backend readiness loop: backend registry schema/seed/checker, Node/Rust readiness annotations, report/renderer readiness fields, and 5-layer smoke; seed registry real corpus apply_eligible_count=0; no runtime backend replacement."
+     "DONE wave27-01..06 — router dispatch descriptor loop: descriptor schema/checker + build CLI + mission_plan descriptor dry-run surface + report/renderer descriptor fields + 5-layer smoke; descriptors are ephemeral no-execution handoff records, not runtime backend replacement."
      "After backend loop stabilizes, reuse the same contract style for timeline-edit operations."
      "Frontend Lisp 仍 postpone (本 wave 不开)."]))

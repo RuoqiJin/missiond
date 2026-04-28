@@ -310,7 +310,7 @@
   ;; ──────────────────────────────────────────────────────────
   (trace-derived-router-policy
     :desc "基于 session-trace 的后续 LLM router / backend selection 草案 — 用真实执行轨迹压缩 ClaudeCode 步数, 但本 wave 不替换 ClaudeCode"
-    :status "code-aligned partial — wave 24 已完成 advisory dry-run 链路; wave 25 已完成 measurable dry-run loop; wave 26 已完成 backend readiness/apply-blocker loop (registry + Node/Rust readiness + report/renderer + smoke); runtime router replacement 未 code-aligned"
+    :status "code-aligned partial — wave 24 已完成 advisory dry-run 链路; wave 25 已完成 measurable dry-run loop; wave 26 已完成 backend readiness/apply-blocker loop (registry + Node/Rust readiness + report/renderer + smoke); wave 27 已完成 no-execution dispatch descriptor handoff loop; runtime router replacement 未 code-aligned"
     :truth-sources ["session-trace.lisp (append-only factual telemetry)"
                     "task-report.lisp + shared-memory.lisp + scoped commit hash"
                     "mission_execution companion log / evidence sidecar"]
@@ -413,9 +413,37 @@
        (readiness-smoke-v1
          :status code-aligned
          :contract "5-layer smoke pins 9 invariants, including current-default != apply-eligible and no shell/LLM/git/network")]
+    :wave-27-dispatch-descriptor-loop
+      [(descriptor-schema-v1
+         :status code-aligned
+         :files [".missiond/tasks/schema/router-dispatch-descriptor-v1.lisp"
+                 "scripts/check-router-dispatch-descriptor.mjs"]
+         :contract "13 required fields plus locked dry_run_only=true / runtime_replacement=false / no_execution=true literal bools")
+       (descriptor-cli-v0
+         :status code-aligned
+         :file "scripts/build-router-dispatch-descriptor.mjs"
+         :contract "builds ephemeral descriptor from task + policy + registry; validates before emit; no shell/git/LLM/network")
+       (plan-descriptor-surface-v0
+         :status code-aligned-partial
+         :files ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                 "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+         :contract "router_dispatch_descriptor bool only affects dry-run evidence; off/default byte-identical")
+       (report-descriptor-fields-v0
+         :status code-aligned
+         :files [".missiond/tasks/schema/report-contract-v1.lisp"
+                 "scripts/check-task-report.mjs"]
+         :contract "six optional descriptor fields; router_dispatch_no_execution accepts literal true only")
+       (renderer-descriptor-context-v0
+         :status code-aligned
+         :file "scripts/render-claudecode-task.mjs"
+         :contract "renders build/check commands only when policy+registry resolve; still says no execution and MUST NOT switch backend")
+       (descriptor-smoke-v0
+         :status code-aligned
+         :contract "5-layer smoke pins descriptor schema/CLI/Rust/report/renderer invariants")]
     :runtime-boundary ["current MissionD still dispatches through existing workstation/plan substrates"
                        "recommendation block is advisory evidence for humans / future policy"
                        "wave25 confidence can raise dry-run confidence from measured trace evidence, but cannot apply backend routing"
                        "wave26 router_apply_eligible is readiness metadata only; no runtime consumer applies it"
+                       "wave27 router dispatch descriptor is no-execution handoff evidence only; no runtime consumer applies it"
                        "current-default backend status is intentionally insufficient for apply eligibility; a future backend must opt into runtime-ready explicitly"
                        "runtime replacement of ClaudeCode or mission_task_delegate is pending explicit policy wave"]))

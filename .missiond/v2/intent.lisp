@@ -20,7 +20,7 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — pillar code-truth registry; v1.7 (wave 26) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-26 全部 task (含 wave 23 session-trace v1 / wave 24 router-policy dry-run chain / wave 25 router measurement loop / wave 26 router backend readiness loop); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
+      :desc "判真索引 — pillar code-truth registry; v1.8 (wave 27) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-27 全部 task (含 wave 23 session-trace v1 / wave 24 router-policy dry-run chain / wave 25 router measurement loop / wave 26 router backend readiness loop / wave 27 router dispatch descriptor loop); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
     (session-trace-v1
       :desc "wave 23 — .missiond/tasks/**/session-trace.lisp append-only factual telemetry; schema/checker/analyzer code-aligned; :session-trace-writable default false opt-in"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.session-trace-v1"
@@ -29,7 +29,7 @@
       :analyzer "scripts/analyze-session-trace.mjs"
       :status code-aligned-partial)
     (trace-derived-router-policy
-      :desc "wave 23 Codex architecture draft → wave 24 advisory dry-run implementation → wave 25 measurable dry-run loop → wave 26 backend readiness/apply-blocker loop; aggregated traces feed router-policy v1 / recommendation CLI / mission_plan trace-index confidence and readiness metadata; no runtime router replacement yet"
+      :desc "wave 23 Codex architecture draft → wave 24 advisory dry-run implementation → wave 25 measurable dry-run loop → wave 26 backend readiness/apply-blocker loop → wave 27 dispatch descriptor handoff loop; aggregated traces feed router-policy v1 / recommendation CLI / mission_plan trace-index confidence, readiness metadata, and no-execution descriptors; no runtime router replacement yet"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry worker.section.trace-derived-router-policy"
       :status code-aligned-partial)
     (router-policy-v1
@@ -62,6 +62,15 @@
       :schema ".missiond/tasks/schema/router-backend-registry-v1.lisp"
       :seed ".missiond/router/router-backend-registry-v1.lisp"
       :checker "scripts/check-router-backend-registry.mjs"
+      :report-schema ".missiond/tasks/schema/report-contract-v1.lisp"
+      :report-checker "scripts/check-task-report.mjs"
+      :status code-aligned-partial)
+    (router-dispatch-descriptor-loop
+      :desc "wave 27 — no-execution router dispatch descriptor loop: descriptor schema/checker, build CLI, mission_plan descriptor dry-run surface, report/renderer descriptor fields, and 5-layer smoke; descriptor is ephemeral handoff evidence and never switches backend"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.router-dispatch-descriptor-v1 / tools.surface.plan-router-dispatch-descriptor-v0 / intent-layer.unified-entry-pipeline.router-dispatch-descriptor-smoke-v0"
+      :schema ".missiond/tasks/schema/router-dispatch-descriptor-v1.lisp"
+      :checker "scripts/check-router-dispatch-descriptor.mjs"
+      :cli "scripts/build-router-dispatch-descriptor.mjs"
       :report-schema ".missiond/tasks/schema/report-contract-v1.lisp"
       :report-checker "scripts/check-task-report.mjs"
       :status code-aligned-partial)

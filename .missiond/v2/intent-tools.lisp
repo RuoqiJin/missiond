@@ -33,6 +33,11 @@
      "router_recommendation 增 backend_registry_status / backend_readiness_status / backend_runtime_allowed / router_apply_eligible / router_apply_blockers; applied=false 仍为字面量"
      "report-contract 增五个 readiness 字段, checker 严格 atom bool / enum / repo-relative path / non-empty blocker; 不新增 MCP tool"
      "renderer 增 check-router-backend-registry 与 --backend-registry 命令文本, 明确 MUST NOT switch backend; MCP tool count 仍 83 不变"]
+  :wave-27-status-summary
+    ["mission_plan execute 增加 router_dispatch_descriptor dry-run evidence input; absent/off 保持旧响应形状且不读文件"
+     "router_recommendation 可附 router_dispatch_descriptor 或 descriptor_status=registry_missing; descriptor 内三锁定布尔为 JSON bool, 不为字符串"
+     "report-contract 增六个 descriptor 字段, checker 严格 enum / repo-relative path / literal true / blocker vector; 不新增 MCP tool"
+     "renderer 增 build-router-dispatch-descriptor + check-router-dispatch-descriptor 管道命令文本, 明确 no execution / MUST NOT switch backend; MCP tool count 仍 83 不变"]
 
   :actual-state-sources
     [".missiond/intent-mcp-defs.lisp (schema SSOT, 24 mcp-module, 详细 input/returns)"

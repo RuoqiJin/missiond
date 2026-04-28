@@ -30,6 +30,10 @@
      "router_apply_eligible 是 dry-run metadata, 不改变 flow dispatch; current-default backend status 明确不足以触发 apply eligibility"
      "seed registry real corpus 75 tasks apply_eligible_count=0; runtime-ready 必须由 future backend 显式 opt-in"
      "runtime router replacement / automatic backend selection 仍 pending, 后续必须单独 runtime policy wave"]
+  :wave-27-status-summary
+    ["router dry-run chain 已加 dispatch descriptor handoff loop: descriptor schema → build CLI → mission_plan descriptor surface → report/renderer descriptor evidence → 5-layer smoke"
+     "descriptor 把 recommendation + readiness 投影成机器可验收 S-expression, 但 no_execution=true / runtime_replacement=false 仍硬边界"
+     "descriptor 是执行前交接记录, 不是 workflow dispatch stage; runtime router replacement 仍 pending, 后续必须单独 runtime policy wave"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"

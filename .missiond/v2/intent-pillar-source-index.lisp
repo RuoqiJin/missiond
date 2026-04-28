@@ -166,7 +166,7 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v1.7 — wave 26 router backend readiness loop layered on wave 25 measurement loop"
+    :version "v1.8 — wave 27 router dispatch descriptor handoff layered on wave 26 readiness loop"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
     :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
@@ -3756,7 +3756,118 @@
         :new-status code-aligned-partial
         :note-extension "wave 26 introduces router-backend-registry v1 and Node/Rust readiness annotations. router_apply_eligible is advisory metadata only; no runtime consumer applies it, and applied=false remains pinned.")
 
-      ;; ── 区域 90 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
+      ;; ── 区域 90 · router dispatch descriptor handoff loop (wave 27 tasks 01-06) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-dispatch-descriptor-v1"
+        :title "router dispatch descriptor v1 — no-execution handoff schema/checker"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-dispatch-descriptor-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/router-dispatch-descriptor-v1.lisp"
+           "scripts/check-router-dispatch-descriptor.mjs"]
+        :cross-ref ["intent-layer.machine-contract.router-backend-registry-v1"
+                    "intent-layer.machine-contract.router-recommendation-cli-v0"
+                    "worker.section.trace-derived-router-policy"]
+        :wave "27 task 01 (commit f451b04)"
+        :note "schema missiond.router-dispatch-descriptor.v1 + checker. The descriptor requires recommendation/readiness provenance plus locked literal bools: dry_run_only=true, runtime_replacement=false, no_execution=true. router_apply_eligible=true is rejected unless readiness is runtime-ready, runtime_allowed=true, confidence=high, and blockers are empty.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-dispatch-descriptor-cli-v0"
+        :title "router dispatch descriptor CLI v0 — build ephemeral descriptor from task/policy/registry"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-dispatch-descriptor-cli-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/build-router-dispatch-descriptor.mjs"
+           "scripts/recommend-task-backend.mjs"
+           "scripts/check-router-backend-registry.mjs"
+           "scripts/check-router-dispatch-descriptor.mjs"]
+        :cross-ref ["intent-layer.machine-contract.router-dispatch-descriptor-v1"
+                    "intent-layer.machine-contract.router-recommendation-readiness-v1"]
+        :wave "27 task 02 (commits 14fdf5a + 752fe40)"
+        :note "CLI emits Lisp by default and JSON with --json. It imports existing recommendation/readiness helpers, hard-codes the three descriptor bool invariants, validates before emit, handles missing registry as blocked descriptor evidence, and does not shell out / call git / use LLM or network.")
+
+      (section-entry
+        :section-id "tools.surface.plan-router-dispatch-descriptor-v0"
+        :title "mission_plan router_dispatch_descriptor — dry-run descriptor surface"
+        :source-file ".missiond/v2/intent-tools.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_plan :: router dispatch descriptor"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["tools.surface.plan-router-backend-readiness-v1"
+                    "intent-layer.machine-contract.router-dispatch-descriptor-v1"]
+        :wave "27 task 03 (commit 6e4f14d)"
+        :note "mission_plan execute adds optional router_dispatch_descriptor bool. The arg is honored only in router_policy_mode=dry_run; absent, false, off/default, or malformed values keep legacy shape/no-I/O. When registry resolves, response carries router_dispatch_descriptor; with no registry path, descriptor_status=registry_missing is surfaced and descriptor body is omitted.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-dispatch-descriptor-report-fields-v0"
+        :title "report-contract router dispatch descriptor fields — no-execution proof"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-dispatch-descriptor-report-fields-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/report-contract-v1.lisp"
+           "scripts/check-task-report.mjs"]
+        :cross-ref ["intent-layer.machine-contract.router-dispatch-descriptor-v1"
+                    "intent-layer.machine-contract.router-readiness-report-fields-v0"]
+        :wave "27 task 04 (commit afb5ffb)"
+        :note "report-contract v1 adds six optional flat fields: router_dispatch_descriptor_path, router_dispatch_descriptor_status, router_dispatch_backend, router_dispatch_eligible, router_dispatch_no_execution, router_dispatch_blockers. Checker rejects strings for booleans and accepts router_dispatch_no_execution only as literal atom true.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.renderer-router-dispatch-descriptor-context-v0"
+        :title "renderer router dispatch descriptor context — build/check commands, no execution"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: renderer-router-dispatch-descriptor-context-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/render-claudecode-task.mjs"
+           ".missiond/tasks/schema/task-contract-v1.lisp"]
+        :cross-ref ["intent-layer.machine-contract.router-dispatch-descriptor-cli-v0"
+                    "intent-layer.machine-contract.router-dispatch-descriptor-report-fields-v0"
+                    "intent-layer.machine-contract.renderer-router-readiness-context-v1"]
+        :wave "27 task 05 (commit 17cb401)"
+        :note "Renderer appends build-router-dispatch-descriptor and pipe-to-check-router-dispatch-descriptor commands only when both policy and registry resolve. It documents that descriptors are generated on demand and intentionally does not add a static :router-dispatch-descriptor-path task field. Brief text contains advisory / dry-run only / no execution / MUST NOT switch backend.")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.router-dispatch-descriptor-smoke-v0"
+        :title "router dispatch descriptor smoke v0 — 5-layer no-execution invariant suite"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: router-dispatch-descriptor-smoke-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/check-router-dispatch-descriptor.mjs"
+           "scripts/build-router-dispatch-descriptor.mjs"
+           "scripts/check-task-report.mjs"
+           "scripts/render-claudecode-task.mjs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.machine-contract.router-dispatch-descriptor-v1"
+                    "tools.surface.plan-router-dispatch-descriptor-v0"
+                    "intent-layer.machine-contract.renderer-router-dispatch-descriptor-context-v0"]
+        :wave "27 task 06 (commit 7f65f05)"
+        :note "5-layer smoke pins checker fixtures, CLI descriptor builds, Rust mission_plan descriptor literals, report checker descriptor block, and renderer literals. It keeps dispatch fields byte-identical with vs without descriptor flag and proves no shell/LLM/git/network/runtime backend replacement enters the path.")
+
+      (status-upgrade
+        :section-id "worker.section.trace-derived-router-policy"
+        :prev-status code-aligned-partial
+        :new-status code-aligned-partial
+        :note-extension "wave 27 tasks 01-06 add a router dispatch descriptor layer after readiness: recommendation + readiness are projected into an ephemeral no-execution S-expression handoff. This improves machine readability for future runner/router work but still does not replace ClaudeCode or mission_task_delegate at runtime.")
+
+      (status-upgrade
+        :section-id "intent-layer.machine-contract.trace-derived-router-policy"
+        :prev-status code-aligned-partial
+        :new-status code-aligned-partial
+        :note-extension "wave 27 adds router-dispatch-descriptor v1, build CLI, mission_plan descriptor surface, report fields, renderer context, and smoke. Descriptor facts are advisory/no-execution evidence only; runtime_replacement=false, dry_run_only=true, no_execution=true, and applied=false remain pinned.")
+
+      ;; ── 区域 91 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
       ;; 注: section-id 已存在 (区域 36 / wave-19-backfill / wave-20-backfill / wave-21-backfill), 本 entry 不新增 anchor; 仅在 wave-22-backfill 块内
       ;;     声明 note 扩展 (hooks default-on doctor v2 + daemon-internal auto-run-verifier 8 cross-checks)
       (status-upgrade
@@ -3767,8 +3878,8 @@
 
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 / ExecutionEvent dispatch metadata v1 / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade; v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade; v1.2 (wave 21 task 09) 回填 hooks-path installer v1 / task-run verifier v1 / execution report-verifier integration v1 / autonomous workstation LLM proposal v0 / plan inference apply gate v1 / LLM auto-approve proposal v0 / sonnet distill chain auto-apply v1 / machine-contract autonomous loop smoke v3 共 +8 entry + 2 status-upgrade; v1.3 (wave 22 task 08) 回填 explicit-gate-promotion + auto-verifier + smoke v4 共 +7 entry + 1 status-upgrade; v1.4 (wave 23 Codex) 回填 session-trace / trace analyzer / router draft 共 +4 entry; v1.5 (wave 24 Codex) 回填 router-policy dry-run chain 共 +6 entry + 2 status-upgrade; **v1.6 (wave 25 Codex) 回填 router-policy measurement loop 共 +5 entry + 2 status-upgrade**. 仍有以下未细化项, 等后续 wave 再补"
-      :latest-backfill "v1.7 (wave 26 Codex) 回填 router backend readiness loop 共 +6 entry + 2 status-upgrade; reason 文本保留历史串, 本字段记录最新收口"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 / ExecutionEvent dispatch metadata v1 / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade; v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade; v1.2 (wave 21 task 09) 回填 hooks-path installer v1 / task-run verifier v1 / execution report-verifier integration v1 / autonomous workstation LLM proposal v0 / plan inference apply gate v1 / LLM auto-approve proposal v0 / sonnet distill chain auto-apply v1 / machine-contract autonomous loop smoke v3 共 +8 entry + 2 status-upgrade; v1.3 (wave 22 task 08) 回填 explicit-gate-promotion + auto-verifier + smoke v4 共 +7 entry + 1 status-upgrade; v1.4 (wave 23 Codex) 回填 session-trace / trace analyzer / router draft 共 +4 entry; v1.5 (wave 24 Codex) 回填 router-policy dry-run chain 共 +6 entry + 2 status-upgrade; v1.6 (wave 25 Codex) 回填 router-policy measurement loop 共 +5 entry + 2 status-upgrade; v1.7 (wave 26 Codex) 回填 router backend readiness loop 共 +6 entry + 2 status-upgrade; **v1.8 (wave 27 Codex) 回填 router dispatch descriptor handoff loop 共 +6 entry + 2 status-upgrade**. 仍有以下未细化项, 等后续 wave 再补"
+      :latest-backfill "v1.8 (wave 27 Codex) 回填 router dispatch descriptor handoff loop 共 +6 entry + 2 status-upgrade; reason 文本保留历史串, 本字段记录最新收口"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"
@@ -3977,6 +4088,20 @@
        "renderer recommendation command → code-aligned (wave 25 task 04 commit e1fdbe4; parameterized recommend-task-backend command + MAY report fields; renderer never shells out)"
        "router measurement smoke → code-aligned (wave 25 task 05 commit 0f5d857; CLI/Rust parity for rich trace evidence >=5; dry_run_only/applied/runtime_replacement invariants pinned)"
        "trace-derived router policy status remains code-aligned-partial: measurement loop improves observability, not runtime backend replacement"]
+    :wave-26-status-summary
+      ["router backend readiness registry → code-aligned (wave 26 task 01 commit 2ac6a5b; 5 backend enum + current-default/advisory-only/runtime-ready/unavailable readiness taxonomy + checker)"
+       "recommend/evaluate readiness annotations → code-aligned (wave 26 task 02 commit ad8ec04; --backend-registry + apply blockers; real corpus 75 tasks apply_eligible_count=0)"
+       "mission_plan router_backend_registry_path → code-aligned-partial (wave 26 task 03 commit fcd937a; dry-run only, off/default no-I/O byte-shape)"
+       "report/renderer readiness fields → code-aligned (wave 26 tasks 04/05 commits 44ddf9d/43df6230; five report fields + check-router-backend-registry command + MUST NOT switch backend)"
+       "router readiness smoke → code-aligned (wave 26 task 06 commit 4bfa710; 5-layer smoke pins current-default not apply-eligible and no shell/LLM/git/network)"
+       "trace-derived router policy remains code-aligned-partial: readiness improves evidence but no runtime consumer applies router_apply_eligible"]
+    :wave-27-status-summary
+      ["router dispatch descriptor schema/checker → code-aligned (wave 27 task 01 commit f451b04; 13 required fields + literal dry_run_only/runtime_replacement/no_execution invariants)"
+       "router dispatch descriptor CLI → code-aligned (wave 27 task 02 commits 14fdf5a + 752fe40; read-only build from task/policy/registry, validates before emit)"
+       "mission_plan router_dispatch_descriptor → code-aligned-partial (wave 27 task 03 commit 6e4f14d; dry-run evidence only, off/default no-I/O byte-shape)"
+       "report/renderer descriptor fields → code-aligned (wave 27 tasks 04/05 commits afb5ffb/17cb401; six report fields + build/check commands, no static descriptor path field)"
+       "router dispatch descriptor smoke → code-aligned (wave 27 task 06 commit 7f65f05; 5-layer smoke pins no-execution descriptor invariants)"
+       "trace-derived router policy remains code-aligned-partial: descriptor improves machine handoff but runtime backend replacement stays pending"]
     :next-step
       ["条件全满足后 (11 条件全 code-aligned; 完整 11-stage PLAN DAG scheduler 已 close 主线; wave 19 加 machine-contract task SSOT 全闭环; wave 20 加 machine-driven dispatch + scoped-commit 全 5 段闭环 + ExecutionEvent metadata 11 variants 闭环 + review auto-answer deterministic_safe; wave 21 加 propose+apply-gate 范式覆盖 4 路 LLM/inference 通道 + execution 端 daemon-internal verified gate 6 段闭环 + hooks-path installer + 三合一 run verifier; **wave 22 加 explicit-gate-promotion 范式 — wave-21 propose-only 通道全部升级到 explicit-apply-gate (review LLM approve apply gate v1 6 道 gate / persisted plan inference apply v2 plan_supersede rollback handle / autonomous workstation true spawn v1 12-rule gate matrix mission_task_delegate substrate 绝不 claude -p / distill chain policy auto-sonnet v2 dual opt-in 移除 policy 即 attestation) + execution auto-run-verifier v2 daemon-internal 8 cross-checks (verification_source taxonomy) + hooks default-on doctor v2 (--check 只读 doctor + 4 reason codes + renderer renderHooksDoctorPreflight() 块) + autonomous loop apply smoke v4 22 cross-wave invariants pinned** — 留 完全 LLM 自主无任何 caller opt-in (wave22-03/04/05/06 仍 require explicit caller_approval/proposal_hash/policy/auto_spawn opt-in) / Sonnet 真无任何 attestation (wave22-06 policy=safe_after_rules 仍是 explicit policy 选择即 attestation) / git hooks default-on real install (wave22-01 仍 doctor only — caller 必须显式 git config core.hooksPath .githooks 才生效) / Auto-seed shared-memory ledger claim entry on parallel workstation spawn (wave22-05 真 spawn 已落, ledger seed 仍 future) / report-contract checker auto-invoke without caller-supplied 4 paths (wave22-02 仍要求 caller 提供 4 路径才触发 daemon-internal verifier) / frontend Lisp 仍 future), 由 lisp-review skill 牵头, 按 compression-policy.allowed 三类做批量压缩"
        "wave 22 explicit-gate-promotion 范式 — 后续可推: (a) wave22-05 workstation true spawn 升级到 完全 LLM 自主 (无 caller_approved opt-in, plan-runner 全局推断 + 真 spawn — 尚需 ledger auto-seed claim entry); (b) wave22-04 persisted plan inference apply 升级到 自主 persist (无 caller_approved opt-in, 自动判断 deterministic high-confidence 即 persist + 自动 rollback policy); (c) wave22-03 review LLM approve apply gate 升级到 完全自主 (无 caller_approved opt-in, 自动 6 gate pass 即 apply); (d) wave22-06 distill chain policy 升级到 真无任何 attestation (plan-runner 全局推断 + auto-promote sonnet 而无需 policy 选择); (e) wave22-01 hooks default-on doctor 升级到 default-on real install (default-mode = --install 自动跑 git config core.hooksPath .githooks); (f) wave22-02 daemon-internal auto-verifier 升级到 自动 spawn (verifier 路径无需 caller 提供 4 路径, daemon 从 task contract / report cache 自动 resolve)"

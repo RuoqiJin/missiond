@@ -30,6 +30,11 @@
      "mission_plan execute 新增 router_backend_registry_path, 只在 router_policy_mode=dry_run 读取; off/default 即使带 registry+trace-index 路径也不 I/O"
      "report-contract / renderer 增 readiness 字段与 check-router-backend-registry / --backend-registry 上下文, 但 Markdown 仍非 SSOT 且明确 MUST NOT switch backend"
      "frontend Lisp 与 runtime backend replacement 仍 postpone; 本波只补 router readiness / apply-blocker evidence loop"]
+  :wave-27-status-summary
+    ["machine-contract 新增 router-dispatch-descriptor v1: descriptor schema/checker + build CLI + report fields + renderer context"
+     "mission_plan execute 新增 router_dispatch_descriptor bool, 只在 router_policy_mode=dry_run 下返回 no-execution handoff descriptor"
+     "descriptor 是 ephemeral 生成物, 不新增静态 :router-dispatch-descriptor-path task 字段, 避免 stale-by-design"
+     "frontend Lisp 与 runtime backend replacement 仍 postpone; 本波只补 router dispatch descriptor handoff loop"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar intent-layer (v0.4.17+ 已有详细占位)"
