@@ -1,0 +1,294 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const usage = `Usage:
+  node scripts/check-v3-workstation-config-isomorphism.mjs [--json] [--dry-fixture]
+
+Checks the V3 workstation-config Lisp/code isomorphism contract:
+  - coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model.
+  - caller model/model_profile choices are projected through compute_slot/task_delegate.
+  - delegated BoardTask auto-provision starts slots idle via suppress_initial_prompt.
+  - project-local Claude hooks and MISSION_IPC_ENDPOINT are injected before PTY spawn.
+  - Autopilot owns pty.send, close state, timeout budget, and dispatch guard.
+`;
+
+const DEFAULT_FILES = {
+  blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
+  taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
+  slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
+  spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
+  autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+  mcpComputeSlot: 'crates/missiond-mcp/src/tools/compute/compute_slot.rs',
+  mcpTaskDelegate: 'crates/missiond-mcp/src/tools/compute/task_delegate.rs',
+};
+
+function main() {
+  const args = process.argv.slice(2);
+  let json = false;
+  let dryFixture = false;
+  for (const arg of args) {
+    if (arg === '--help' || arg === '-h') {
+      console.log(usage);
+      process.exit(0);
+    } else if (arg === '--json') {
+      json = true;
+    } else if (arg === '--dry-fixture') {
+      dryFixture = true;
+    } else {
+      console.error(`unknown arg: ${arg}`);
+      console.error(usage);
+      process.exit(2);
+    }
+  }
+
+  const repoRoot = dryFixture ? buildFixture() : process.cwd();
+  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
+  const result = {
+    ok: diagnostics.length === 0,
+    files: Object.keys(DEFAULT_FILES).length,
+    diagnostics,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.ok) {
+    console.log('v3 workstation-config Lisp/code isomorphism check OK');
+  } else {
+    for (const d of diagnostics) {
+      console.error(`${d.file}: ${d.message}`);
+    }
+    console.error(
+      `v3 workstation-config Lisp/code isomorphism check FAILED -- ${diagnostics.length} diagnostic(s)`,
+    );
+  }
+
+  process.exit(result.ok ? 0 : 1);
+}
+
+function checkFiles(root, files) {
+  const diagnostics = [];
+  const sources = {};
+  for (const [key, rel] of Object.entries(files)) {
+    const abs = path.join(root, rel);
+    try {
+      sources[key] = fs.readFileSync(abs, 'utf8');
+    } catch (err) {
+      diagnostics.push({ file: rel, message: `cannot read: ${err.message}` });
+    }
+  }
+  if (diagnostics.length > 0) return diagnostics;
+
+  requireAll(diagnostics, files.blueprint, sources.blueprint, [
+    'workstation-config',
+    'coding-default-opus-4-7',
+    ':effective-model "Opus 4.7 with 1M context"',
+    ':spawn-model-arg nil',
+    'code and research dynamic slots MUST NOT hardcode --model sonnet',
+    'model_profile=coding-default-opus-4-7 both mean no CLI --model override',
+    'task_delegate must pass model/model_profile through to compute_slot',
+    'Project-bound workstation spawn MUST sync MissionD Claude hooks',
+    'MISSION_IPC_ENDPOINT',
+    'Autopilot pty.send budget MUST project from BoardTask.timeout_secs',
+    'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
+    'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
+    'The per-slot dispatch guard MUST be held across the entire state.pty.send call',
+    'node scripts/check-v3-workstation-config-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
+    'const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7"',
+    '"coder" => Some(TemplateConfig',
+    'model: None',
+    '"researcher" => Some(TemplateConfig',
+    '"ops" => Some(TemplateConfig',
+    'model: Some("sonnet")',
+    'pub(crate) fn resolve_model_projection',
+    'pub(crate) fn effective_initial_prompt',
+    'pub(crate) fn model_projection_matches',
+    'fn model_for_profile',
+    'Ok(None)',
+    'model must be a single safe CLI token',
+    'string_arg(args, &["model_profile", "modelProfile"])',
+    'string_arg(args, &["initial_prompt", "initialPrompt"])',
+    'suppress_initial_prompt',
+    'initial_prompt_for_spawn',
+    'PTYSpawnOptions',
+  ]);
+
+  requireAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
+    'const DEFAULT_TIMEOUT_SECS: i64 = 1800',
+    'const MAX_TIMEOUT_SECS: i64 = 7200',
+    '.max(60)',
+    'model_profile_arg',
+    'resolve_model_projection',
+    'model_projection_matches',
+    'find_and_reserve_slot',
+    'target_project_root',
+    'auto_provision_slot',
+    'build_compute_slot_create_args',
+    '"suppress_initial_prompt": true',
+    'create_args["model_profile"]',
+    'starts idle and Autopilot remains the sole task-prompt owner',
+  ]);
+
+  requireAll(diagnostics, files.slotEnv, sources.slotEnv, [
+    'MISSION_IPC_ENDPOINT',
+    'build_slot_tracking_env',
+    'sync_slot_hooks_to_local_settings',
+    'settings.local.json',
+    'SESSION_REGISTER_HOOK',
+    'CONTEXT_INJECT_HOOK',
+    'SessionStart',
+    'UserPromptSubmit',
+    'missiond-session-register.sh',
+    'missiond-context-inject-v2.sh',
+  ]);
+
+  requireAll(diagnostics, files.spawner, sources.spawner, [
+    'sync_slot_hooks_to_local_settings(cwd)',
+    'build_slot_tracking_env',
+    'options.extra_env.extend(tracking_env)',
+    'let initial_prompt = options.initial_prompt.take()',
+    'send_fire_and_forget',
+    'wait_for_idle',
+  ]);
+
+  requireAll(diagnostics, files.autopilot, sources.autopilot, [
+    'const PTY_TIMEOUT_DEFAULT_SECS: i64 = 1800',
+    'const PTY_TIMEOUT_MIN_SECS: i64 = 60',
+    'const PTY_TIMEOUT_MAX_SECS: i64 = 7200',
+    'const WATCHDOG_GRACE_SECS: i64 = 120',
+    'fn derive_pty_timeout_secs',
+    'fn idle_watchdog_threshold_secs',
+    'fn build_base_prompt',
+    'fn append_board_task_id_suffix',
+    'fn decide_close_action',
+    'state.slot_dispatch.try_acquire_guard(&slot_id)',
+    'state.pty.send(&slot_id, &full_prompt, timeout_ms).await',
+    'DispatchCloseAction::AlreadySelfClosed',
+    'DispatchCloseAction::PreserveBlocked',
+    'DispatchCloseAction::OwnerClosesAsDone',
+  ]);
+
+  requireAll(diagnostics, files.mcpComputeSlot, sources.mcpComputeSlot, [
+    '"initial_prompt"',
+    '"initialPrompt"',
+    '"objective"',
+    '"model"',
+    '"model_profile"',
+    '"modelProfile"',
+    'coding-default-opus-4-7',
+  ]);
+
+  requireAll(diagnostics, files.mcpTaskDelegate, sources.mcpTaskDelegate, [
+    '"timeout_secs"',
+    '"default": 1800',
+    '"model"',
+    '"model_profile"',
+    '"modelProfile"',
+    'coding-default-opus-4-7',
+  ]);
+
+  return diagnostics;
+}
+
+function requireAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (!source.includes(needle)) {
+      diagnostics.push({ file, message: `missing required contract text: ${needle}` });
+    }
+  }
+}
+
+function buildFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-workstation-isomorphism-'));
+  writeFixture(root, DEFAULT_FILES.blueprint, `
+(missiond-blueprint
+  (workstation-config
+    (model-profile coding-default-opus-4-7
+      :effective-model "Opus 4.7 with 1M context"
+      :spawn-model-arg nil)
+    :invariants
+      ["code and research dynamic slots MUST NOT hardcode --model sonnet"
+       "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
+       "task_delegate must pass model/model_profile through to compute_slot"
+       "Project-bound workstation spawn MUST sync MissionD Claude hooks"
+       "MISSION_IPC_ENDPOINT"
+       "Autopilot pty.send budget MUST project from BoardTask.timeout_secs"
+       "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"])
+    (execution-ownership delegated-boardtask
+      :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
+      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"))
+  (compression-contract
+    :checks ["node scripts/check-v3-workstation-config-isomorphism.mjs"]))`);
+  writeFixture(root, DEFAULT_FILES.computeSlot, `
+const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
+match name { "coder" => Some(TemplateConfig { model: None }), "researcher" => Some(TemplateConfig { model: None }), "ops" => Some(TemplateConfig { model: Some("sonnet") }) }
+pub(crate) fn resolve_model_projection() {}
+pub(crate) fn effective_initial_prompt() {}
+pub(crate) fn model_projection_matches() {}
+fn model_for_profile() { Ok(None); }
+const e = 'model must be a single safe CLI token';
+string_arg(args, &["model_profile", "modelProfile"]);
+string_arg(args, &["initial_prompt", "initialPrompt"]);
+let suppress_initial_prompt = true;
+let initial_prompt_for_spawn = None;
+PTYSpawnOptions;`);
+  writeFixture(root, DEFAULT_FILES.taskDelegate, `
+const DEFAULT_TIMEOUT_SECS: i64 = 1800;
+const MAX_TIMEOUT_SECS: i64 = 7200;
+x.max(60);
+let model_profile_arg = None;
+resolve_model_projection();
+model_projection_matches();
+find_and_reserve_slot();
+let target_project_root = None;
+auto_provision_slot();
+build_compute_slot_create_args();
+json!({ "suppress_initial_prompt": true });
+create_args["model_profile"] = v;
+// starts idle and Autopilot remains the sole task-prompt owner`);
+  writeFixture(root, DEFAULT_FILES.slotEnv, `
+const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
+fn build_slot_tracking_env() {}
+fn sync_slot_hooks_to_local_settings() {}`);
+  writeFixture(root, DEFAULT_FILES.spawner, `
+sync_slot_hooks_to_local_settings(cwd);
+build_slot_tracking_env();
+options.extra_env.extend(tracking_env);
+let initial_prompt = options.initial_prompt.take();
+send_fire_and_forget();
+let wait_for_idle = true;`);
+  writeFixture(root, DEFAULT_FILES.autopilot, `
+const PTY_TIMEOUT_DEFAULT_SECS: i64 = 1800;
+const PTY_TIMEOUT_MIN_SECS: i64 = 60;
+const PTY_TIMEOUT_MAX_SECS: i64 = 7200;
+const WATCHDOG_GRACE_SECS: i64 = 120;
+fn derive_pty_timeout_secs() {}
+fn idle_watchdog_threshold_secs() {}
+fn build_base_prompt() {}
+fn append_board_task_id_suffix() {}
+fn decide_close_action() {}
+state.slot_dispatch.try_acquire_guard(&slot_id);
+state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
+DispatchCloseAction::AlreadySelfClosed;
+DispatchCloseAction::PreserveBlocked;
+DispatchCloseAction::OwnerClosesAsDone;`);
+  writeFixture(root, DEFAULT_FILES.mcpComputeSlot, `
+"initial_prompt" "initialPrompt" "objective" "only" "model" "model_profile" "modelProfile" "coding-default-opus-4-7"`);
+  writeFixture(root, DEFAULT_FILES.mcpTaskDelegate, `
+"timeout_secs" "default": 1800 "model" "model_profile" "modelProfile" "coding-default-opus-4-7"`);
+  return root;
+}
+
+function writeFixture(root, rel, text) {
+  const abs = path.join(root, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, text.trimStart());
+}
+
+main();

@@ -428,5 +428,6 @@
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
-             "node scripts/check-v3-task-lifecycle-isomorphism.mjs"]
+             "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
+             "node scripts/check-v3-workstation-config-isomorphism.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))
