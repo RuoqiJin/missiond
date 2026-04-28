@@ -51,6 +51,8 @@ const BINARY_RATIO_THRESHOLD: f64 = 0.3;
 /// Source tag for message_labels written by this worker.
 const LABEL_SOURCE: &str = "tagger_chunker";
 
+const USER_PREVIEW_MAX_BYTES: usize = 80;
+
 /// Regex to extract branch, commit hash, and summary from git commit output.
 /// Matches standard:      `[main 9facdfa] refactor: some changes`
 /// Matches root:          `[main (root-commit) 9facdfa] initial commit`
@@ -264,7 +266,7 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
 async fn analyze_messages(state: &AppState, session_id: &str, messages: &[ConversationMessage]) {
     let user_msgs: Vec<_> = messages.iter()
         .filter(|m| m.role == "user")
-        .map(|m| (m.id, &m.content[..m.content.len().min(80)]))
+        .map(|m| (m.id, user_preview(&m.content)))
         .collect();
     info!(
         session_id,
@@ -334,6 +336,10 @@ async fn analyze_messages(state: &AppState, session_id: &str, messages: &[Conver
                 .await;
         }
     }
+}
+
+fn user_preview(content: &str) -> &str {
+    missiond_core::util::safe_byte_truncate(content, USER_PREVIEW_MAX_BYTES)
 }
 
 /// Stage 3: Turn chunking — extract structured turns, trim active tail, persist.
@@ -1073,6 +1079,18 @@ mod tests {
         // No commit labels, no commits detected
         assert!(labels.is_empty());
         assert!(commits.is_empty());
+    }
+
+    #[test]
+    fn test_user_preview_respects_cjk_byte_boundary() {
+        let content =
+            "wave27-00 archive agent slot这个 wave27 之前还有很多个 wave,在同一个会话里,看看能找到吗";
+
+        let preview = user_preview(content);
+
+        assert!(preview.len() <= USER_PREVIEW_MAX_BYTES);
+        assert!(content.is_char_boundary(preview.len()));
+        assert!(content.starts_with(preview));
     }
 
     #[test]
