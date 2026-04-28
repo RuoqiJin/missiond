@@ -411,7 +411,7 @@ function collectOverlapDiagnostics(nodes, overlapPolicy) {
         for (let j = i + 1; j < sortedIds.length; j += 1) {
           const a = sortedIds[i];
           const b = sortedIds[j];
-          const key = `${group} ${a} ${b}`;
+          const key = `${group}\u0000${a}\u0000${b}`;
           const row = rows.get(key) ?? {
             pair: [a, b],
             group,
