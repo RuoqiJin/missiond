@@ -381,16 +381,24 @@ async fn action_distill_dry_run(
         payload["persisted"] = json!(true);
         payload["workflow_id"] = json!(id);
 
-        // wave-14 :: file-first SSOT mirror. Topic defaults to `name` (the
-        // distill UNIQUE key) so the on-disk path matches the registry
-        // entry without an extra arg. The DB row stays committed even if
-        // the file write fails (file-vs-db contract).
+        // wave-14/35 :: file-first SSOT mirror. Topic defaults to `name`
+        // (the distill UNIQUE key) so the on-disk path matches the registry
+        // entry without an extra arg. The file content is the enriched V3
+        // workflow artifact, not a bare preview body. The DB row stays
+        // committed even if the file write fails (file-vs-db contract).
         let file_args = extract_workflow_file_args(args);
         let topic_for_gate = file_args
             .topic
             .map(|s| s.to_string())
             .unwrap_or_else(|| name.to_string());
-        maybe_write_workflow_artifact(state, &file_args, &mut payload, &preview_sexp, name).await;
+        let artifact_sexp = render_workflow_artifact_sexp(
+            &id.to_string(),
+            &[plan.id.to_string()],
+            &json!({}),
+            "draft",
+            &preview_sexp,
+        );
+        maybe_write_workflow_artifact(state, &file_args, &mut payload, &artifact_sexp, name).await;
 
         // wave-14 :: review-gate auto-create. Default policy = Manual; the
         // workflow distill draft is rare enough that explicit-emit usually
@@ -628,16 +636,23 @@ async fn action_distill_sonnet(
         payload["persisted"] = json!(true);
         payload["workflow_id"] = json!(id);
 
-        // wave-14 :: file-first SSOT mirror — same partial semantics as the
-        // dry_run path. The distilled workflow_sexp is the durable
-        // artifact; we splice the path/sha so future distill runs / forge
-        // compilers can verify on-disk parity.
+        // wave-14/35 :: file-first SSOT mirror — same partial semantics as
+        // the dry_run path. The distilled workflow_sexp is wrapped in the
+        // enriched V3 workflow artifact so the on-disk Lisp carries the row
+        // ref, source plan, match rules, extracted steps, and status.
         let file_args = extract_workflow_file_args(args);
         let topic_for_gate = file_args
             .topic
             .map(|s| s.to_string())
             .unwrap_or_else(|| name.to_string());
-        maybe_write_workflow_artifact(state, &file_args, &mut payload, &workflow_sexp, name).await;
+        let artifact_sexp = render_workflow_artifact_sexp(
+            &id.to_string(),
+            &[plan.id.to_string()],
+            &match_rules,
+            "distilled",
+            &workflow_sexp,
+        );
+        maybe_write_workflow_artifact(state, &file_args, &mut payload, &artifact_sexp, name).await;
 
         // wave-14 :: review-gate auto-create. Same policy semantics as the
         // dry_run branch above.
@@ -3781,6 +3796,104 @@ async fn maybe_write_workflow_artifact(
     outcome.splice_into(payload);
 }
 
+fn render_workflow_artifact_sexp(
+    workflow_id: &str,
+    source_plans: &[String],
+    match_rules: &Value,
+    status: &str,
+    body: &str,
+) -> String {
+    let source_plans = render_lisp_vector(
+        &source_plans
+            .iter()
+            .map(|plan| lisp_string(plan))
+            .collect::<Vec<_>>(),
+    );
+    let steps = render_workflow_steps(body);
+    format!(
+        "(workflow\n  :workflow_id {workflow_id}\n  :source_plans {source_plans}\n  :match_rules {match_rules}\n  :steps {steps}\n  :status :{status}\n  :body {body}\n)\n",
+        workflow_id = lisp_string(workflow_id),
+        source_plans = source_plans,
+        match_rules = json_to_lisp(match_rules),
+        steps = steps,
+        status = sanitize_lisp_symbol(status),
+        body = body.trim(),
+    )
+}
+
+fn render_workflow_steps(body: &str) -> String {
+    let steps = extract_steps(body);
+    if steps.is_empty() {
+        return "[]".to_string();
+    }
+    render_lisp_vector(
+        &steps
+            .iter()
+            .map(|step| {
+                format!(
+                    "(:id {} :body {})",
+                    lisp_string(&step.id),
+                    lisp_string(&step.body)
+                )
+            })
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn json_to_lisp(value: &Value) -> String {
+    match value {
+        Value::Null => "nil".to_string(),
+        Value::Bool(true) => "true".to_string(),
+        Value::Bool(false) => "false".to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => lisp_string(s),
+        Value::Array(items) => render_lisp_vector(
+            &items
+                .iter()
+                .map(json_to_lisp)
+                .collect::<Vec<_>>(),
+        ),
+        Value::Object(map) => {
+            let fields = map
+                .iter()
+                .map(|(key, value)| {
+                    format!(":{} {}", sanitize_lisp_symbol(key), json_to_lisp(value))
+                })
+                .collect::<Vec<_>>();
+            format!("({})", fields.join(" "))
+        }
+    }
+}
+
+fn render_lisp_vector(items: &[String]) -> String {
+    if items.is_empty() {
+        "[]".to_string()
+    } else {
+        format!("[{}]", items.join(" "))
+    }
+}
+
+fn lisp_string(s: &str) -> String {
+    format!("{:?}", s)
+}
+
+fn sanitize_lisp_symbol(s: &str) -> String {
+    let mut out = String::with_capacity(s.len().max(1));
+    for ch in s.chars() {
+        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '-' {
+            out.push(ch);
+        } else {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() {
+        "value".to_string()
+    } else {
+        trimmed.to_ascii_lowercase()
+    }
+}
+
 // ───────────────────────────────────────────────────────────────────────
 // helpers — methodology compiler v0 (pure, covered by unit tests)
 // ───────────────────────────────────────────────────────────────────────
@@ -6451,6 +6564,38 @@ mod tests {
         assert_eq!(payload["file_written"], true);
         let path = payload["file_path"].as_str().unwrap();
         assert!(path.ends_with(".missiond/workflows/wave14-foo.lisp"));
+    }
+
+    #[test]
+    fn render_workflow_artifact_sexp_wraps_distilled_body_with_v3_refs() {
+        let artifact = render_workflow_artifact_sexp(
+            "00000000-0000-0000-0000-000000000abc",
+            &["00000000-0000-0000-0000-000000000def".to_string()],
+            &serde_json::json!({"tokens": ["bus"], "protected": true}),
+            "distilled",
+            "(workflow demo\n  (step inspect)\n)",
+        );
+        assert!(artifact.starts_with("(workflow\n"));
+        assert!(artifact.contains(":workflow_id \"00000000-0000-0000-0000-000000000abc\""));
+        assert!(artifact.contains(":source_plans [\"00000000-0000-0000-0000-000000000def\"]"));
+        assert!(artifact.contains(":match_rules (:protected true :tokens [\"bus\"])"));
+        assert!(artifact.contains(":steps [(:id \"inspect\""));
+        assert!(artifact.contains(":status :distilled"));
+        assert!(artifact.contains(":body (workflow demo"));
+    }
+
+    #[test]
+    fn render_workflow_artifact_sexp_keeps_draft_without_steps_explicit() {
+        let artifact = render_workflow_artifact_sexp(
+            "wf-draft",
+            &["plan-1".to_string()],
+            &serde_json::json!({}),
+            "draft",
+            "(workflow-draft :name \"demo\")",
+        );
+        assert!(artifact.contains(":match_rules ()"));
+        assert!(artifact.contains(":steps []"));
+        assert!(artifact.contains(":status :draft"));
     }
 
     /// `write_file=true` but no topic (and no fallback `name`) must downgrade

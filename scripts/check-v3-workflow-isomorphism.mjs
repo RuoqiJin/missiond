@@ -11,7 +11,8 @@ Checks the V3 workflow Lisp/code isomorphism contract:
   - V3 blueprint declares workflow.lisp as the reusable workflow artifact.
   - mission_workflow distill emits workflow Lisp previews or Sonnet-distilled workflow_sexp.
   - compile_methodology reads workflow methodology Lisp and emits deterministic executable YAML.
-  - file-first workflow writes, review gates, and auto-Sonnet policy are tied to the same surface.
+  - distill file-first writes produce enriched V3 workflow artifacts.
+  - review gates and auto-Sonnet policy are tied to the same surface.
   - MCP schema exposes the same distill/compile/run/review knobs.
 `;
 
@@ -84,6 +85,8 @@ function checkFiles(root, files) {
     ':status "code-aligned-partial"',
     'distill dry_run emits workflow-draft Lisp',
     'sonnet distiller requires JSON workflow_sexp + object match_rules',
+    'distill persist+write_file writes an enriched V3 workflow artifact',
+    ':body workflow_sexp',
     'compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp',
     'ArtifactKind::Workflow',
     'auto_sonnet_policy={off|safe_after_rules|dry_run}',
@@ -99,6 +102,7 @@ function checkFiles(root, files) {
     '"(workflow-draft\\n  :name',
     '"compiled_sexp_preview": preview_sexp',
     '.workflow_insert(name, &preview_sexp, &json!({}), Some(plan.id))',
+    'render_workflow_artifact_sexp(',
     'async fn action_distill_sonnet',
     'build_distiller_prompt(plan, name, &match_hint, &evidence_value)',
     '"workflow_sexp"',
@@ -119,6 +123,14 @@ function checkFiles(root, files) {
     'fn extract_workflow_file_args',
     'ArtifactKind::Workflow',
     'attempt_artifact_write(',
+    'fn render_workflow_artifact_sexp',
+    ':workflow_id',
+    ':source_plans',
+    ':match_rules',
+    ':steps',
+    ':body',
+    'fn json_to_lisp',
+    'fn render_workflow_steps',
     'parse_review_gate_policy(args)',
     'apply_compile_review_gates(',
     'fn parse_auto_sonnet_policy',
@@ -136,6 +148,7 @@ function checkFiles(root, files) {
     '"compile_mode"',
     '&["dry_run", "deterministic"]',
     '"write_file"',
+    'enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp',
     '"overwrite_file"',
     '"review_gate_policy"',
     '"review_automation_policy"',
@@ -171,7 +184,7 @@ function buildFixture() {
   (implementation-map
     (surface mission_workflow
       :status "code-aligned-partial"
-      :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}"))
+      :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
@@ -184,6 +197,7 @@ async fn action_distill_dry_run() {
   "(workflow-draft\\n  :name";
   "compiled_sexp_preview": preview_sexp;
   .workflow_insert(name, &preview_sexp, &json!({}), Some(plan.id));
+  render_workflow_artifact_sexp();
 }
 async fn action_distill_sonnet() {
   build_distiller_prompt(plan, name, &match_hint, &evidence_value);
@@ -206,6 +220,9 @@ async fn action_run_methodology() {}
 fn extract_workflow_file_args() {}
 ArtifactKind::Workflow;
 attempt_artifact_write();
+fn render_workflow_artifact_sexp() { ":workflow_id"; ":source_plans"; ":match_rules"; ":steps"; ":body"; }
+fn json_to_lisp() {}
+fn render_workflow_steps() {}
 parse_review_gate_policy(args);
 apply_compile_review_gates();
 fn parse_auto_sonnet_policy() { "safe_after_rules"; }`);
@@ -214,7 +231,8 @@ manager action — see Lisp implemented-surface mission_workflow
 "distill" "compile_methodology" "run_methodology" "resolve_review"
 "distill_mode" &["dry_run", "sonnet"]
 "compile_mode" &["dry_run", "deterministic"]
-"write_file" "overwrite_file" "review_gate_policy" "review_automation_policy"
+"write_file" enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp
+"overwrite_file" "review_gate_policy" "review_automation_policy"
 "auto_sonnet_policy" &["off", "safe_after_rules", "dry_run"]
 Lisp 源: intent-flow.lisp`);
   return root;

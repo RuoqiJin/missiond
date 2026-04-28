@@ -157,7 +157,7 @@ fn build_properties() -> Value {
 
     p.insert("write_file".into(), prop(
         "boolean",
-        "[distill persist=true | compile_methodology persist=true] (wave-14 file-first SSOT) mirror the workflow_sexp (distill) or methodology source (compile_methodology) to `<project_root>/.missiond/workflows/<topic>.lisp` after the DB row / YAML is committed. Default false. Topic precedence: explicit `topic` > distill's `name` / compile_methodology's source stem. DB / YAML stay committed even on file failure — response surfaces status=\"partial\" + file_write_error.",
+        "[distill persist=true | compile_methodology persist=true] (wave-14/35 file-first SSOT) write `<project_root>/.missiond/workflows/<topic>.lisp` after the DB row / YAML is committed. distill writes an enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp; compile_methodology canonicalizes the methodology source because that branch has no workflow_id row. Default false. Topic precedence: explicit `topic` > distill's `name` / compile_methodology's source stem. DB / YAML stay committed even on file failure — response surfaces status=\"partial\" + file_write_error.",
     ));
 
     p.insert("overwrite_file".into(), prop(
@@ -285,10 +285,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
          (atomic, overwrite 控制) 并附 source_hash + lifted_form_count + lifted_form_breakdown；\
          run_methodology 解析 flow_id|flow_path|name 找 compiled YAML，dry_run=true 返 would_run，\
          dry_run=false 内部派发到 mission_flow_run 引擎；缺 YAML 时返结构化 MISSING_COMPILED_FLOW + 下一步指引。\
-         wave-14 file-first SSOT: distill / compile_methodology persist=true 时再传 write_file=true 即把 \
-         workflow_sexp (distill) 或 source content (compile_methodology) 镜像到 \
+         wave-14/35 file-first SSOT: distill / compile_methodology persist=true 时再传 write_file=true 即写 \
          `<project_root>/.missiond/workflows/<topic>.lisp` (ArtifactKind::Workflow, atomic, 默认拒覆, \
-         overwrite_file=true 替换); topic 默认取 distill 的 `name` 或 compile_methodology 的源文件 stem; \
+         overwrite_file=true 替换); distill 写 enriched V3 workflow artifact, 包含 :workflow_id / :source_plans / \
+         :match_rules / :steps / :status / :body workflow_sexp; compile_methodology 因无 workflow_id row, 仍规范化 \
+         methodology source content; topic 默认取 distill 的 `name` 或 compile_methodology 的源文件 stem; \
          project root 解析强制走 resolve_target_project_root (project > absolute cwd > target_project, 禁止 process cwd fallback); \
          DB / YAML 已写但 file 写失败 → status=\"partial\" + file_write_error, 不回滚已落的 row/yaml; \
          成功响应附 file_written / file_path / file_sha256 / file_bytes / file_created / file_overwritten。\
