@@ -2,7 +2,7 @@
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave32
   :created-at "2026-04-28T12:32:49Z"
-  :sequence 2
+  :sequence 3
 
 
   (lifecycle-event
@@ -28,4 +28,15 @@
     :at "2026-04-28T12:32:49Z"
     :touched [".missiond/claudecode/wave32-shared-preamble.md"]
     :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads."
-    :legacy_trace_id wave32-trace-bootstrap-read-002))
+    :legacy_trace_id wave32-trace-bootstrap-read-002)
+
+  (lifecycle-event
+    :id wave32-01-autopilot-timeout-budget-v0-dispatch-003
+    :task wave32-01-autopilot-timeout-budget-v0
+    :actor_role codex-orchestrator
+    :event_kind dispatch
+    :commit_role none
+    :seq 3
+    :at "2026-04-28T12:35:12Z"
+    :touched [".missiond/claudecode/wave32-01-autopilot-timeout-budget-v0.md" ".missiond/tasks/wave32/manifest.lisp"]
+    :summary "Dispatch wave32-01-autopilot-timeout-budget-v0: hard dependencies satisfied."))
