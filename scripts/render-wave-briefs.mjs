@@ -213,7 +213,7 @@ export function renderManifest({ manifestPath, cwd, force }) {
     const markdown = renderTask(task, taskContractPath, {
       briefMode: 'thin',
       sharedPreamble: sharedPreambleRel,
-    });
+    }) + renderSoftReferences(node);
     const briefAbs = path.join(briefDir, `${node.task_id}.md`);
     const action = writeIfAllowed(briefAbs, markdown, force);
     briefs.push({ task_id: node.task_id, path: briefAbs, action });
@@ -224,6 +224,17 @@ export function renderManifest({ manifestPath, cwd, force }) {
     preamble: { path: sharedPreambleAbs, action: preambleResult.action },
     briefs,
   };
+}
+
+function renderSoftReferences(node) {
+  const refs = Array.isArray(node.soft_refs) ? node.soft_refs : [];
+  if (refs.length === 0) return '';
+  const lines = refs
+    .slice()
+    .sort((a, b) => a.localeCompare(b))
+    .map((id) => `- ${id}`)
+    .join('\n');
+  return `\n## Soft References\n\n${lines}\n\nSoft references are context only; they are not dispatch dependencies or blockers.\n`;
 }
 
 // Locate the task contract Lisp file for `taskId` inside `wave`. Return
@@ -372,6 +383,67 @@ async function runFixtures() {
         for (const section of forbiddenSections) {
           if (brief.includes(section)) {
             throw new Error(`thin brief should NOT contain repeated boilerplate section '${section}'`);
+          }
+        }
+      } finally {
+        cleanupTmpRepo(env);
+      }
+    },
+  });
+
+  fixtures.push({
+    name: 'wave30-04-thin-brief-renders-soft-references-as-context',
+    category: 'wave30-04-hard-soft',
+    run: async () => {
+      const env = setupTmpRepo();
+      try {
+        const ids = ['wave99-01-atlas', 'wave99-02-patterns', 'wave99-03-runner-prep'];
+        for (const id of ids) {
+          fs.writeFileSync(path.join(env.tasksDir, `${id}.lisp`), taskContract(id));
+        }
+        const manifest = `(task-runner-manifest m-wave30-04-hard-soft
+  :schema "missiond.task-runner-manifest.v2"
+  :wave wave99
+  :brief_mode thin
+  :shared_preamble_path ".missiond/claudecode/wave99-shared-preamble.md"
+  :productive_only true
+  (node :task_id wave99-01-atlas
+        :depends_on []
+        :verification_tier local
+        :dispatch_group A
+        :estimated_minutes 10
+        :heartbeat_minutes 5
+        :write_scope ["scripts/wave99-01-atlas.mjs"])
+  (node :task_id wave99-02-patterns
+        :depends_on []
+        :verification_tier local
+        :dispatch_group A
+        :estimated_minutes 60
+        :heartbeat_minutes 10
+        :write_scope ["scripts/wave99-02-patterns.mjs"])
+  (node :task_id wave99-03-runner-prep
+        :depends_on [wave99-01-atlas]
+        :hard_deps [wave99-01-atlas]
+        :soft_refs [wave99-02-patterns]
+        :verification_tier local
+        :dispatch_group B
+        :estimated_minutes 10
+        :heartbeat_minutes 5
+        :write_scope ["scripts/wave99-03-runner-prep.mjs"]))\n`;
+        fs.writeFileSync(env.manifestPath, manifest);
+        renderManifest({ manifestPath: env.manifestPath, cwd: env.cwd, force: false });
+        const brief = fs.readFileSync(
+          path.resolve(env.cwd, '.missiond/claudecode/wave99-03-runner-prep.md'),
+          'utf8',
+        );
+        for (const literal of [
+          '## Soft References',
+          'wave99-02-patterns',
+          'context only',
+          'not dispatch dependencies or blockers',
+        ]) {
+          if (!brief.includes(literal)) {
+            throw new Error(`soft-reference brief missing literal '${literal}'`);
           }
         }
       } finally {

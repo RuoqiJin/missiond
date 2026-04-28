@@ -50,7 +50,7 @@ Output JSON top-level keys (sorted):
   overlap_diagnostics, verification_tier_counts.
 
 Cross-wave invariants enforced structurally:
-  * Topological batches respect both :depends_on edges AND :dispatch_group
+  * Topological batches respect hard dependency edges AND :dispatch_group
     boundaries — nodes in different groups are NEVER in the same batch.
   * Same-dispatch_group write_scope overlap is reported in
     overlap_diagnostics; severity follows :overlap_policy
@@ -65,7 +65,7 @@ Schedule modes (wave29-06 additive):
     dispatch_group boundaries. The batch advances only when every node in
     it finishes.
   * ready-queue — additionally emits a 'ready_queue' field where each
-    node is RELEASED as soon as all :depends_on edges (plus same-group
+    node is RELEASED as soon as all hard dependency edges (plus same-group
     write_scope overlap edges, treated as additional serializing edges)
     are satisfied, INDEPENDENT of unrelated long-running peers in the
     same dispatch_group. Priority is critical-path remaining minutes
@@ -87,6 +87,16 @@ export const DEFAULT_SCHEDULE_MODE = 'group-barrier';
 
 // Re-export from wave28-01 so downstream tooling has a single import surface.
 export { MANIFEST_SCHEMA, VERIFICATION_TIERS, OVERLAP_POLICIES };
+
+export function hardDepsForNode(node) {
+  if (
+    Array.isArray(node?.hard_deps) &&
+    (node.hard_deps_declared === true || node.hard_deps.length > 0)
+  ) {
+    return node.hard_deps;
+  }
+  return Array.isArray(node?.depends_on) ? node.depends_on : [];
+}
 
 function main() {
   const args = process.argv.slice(2);
@@ -282,7 +292,7 @@ export function planFromManifestObject(manifest, opts = {}) {
     dependents.set(node.task_id, []);
   }
   for (const node of sortedNodes) {
-    for (const dep of node.depends_on) {
+    for (const dep of hardDepsForNode(node)) {
       // wave28-01 already guarantees dep references resolve, but defend
       // against tampered objects.
       if (!idToNode.has(dep)) continue;
@@ -450,12 +460,13 @@ function computeReadyQueue({
   longestFrom,
   manifest,
 }) {
-  // Collect explicit dependency edges per task.
+  // Collect explicit HARD dependency edges per task. :soft_refs are context
+  // only and intentionally do not participate in release times.
   const explicitDeps = new Map();
   for (const node of sortedNodes) {
     explicitDeps.set(
       node.task_id,
-      [...(node.depends_on ?? [])].filter((d) => idToNode.has(d)),
+      [...hardDepsForNode(node)].filter((d) => idToNode.has(d)),
     );
   }
 
@@ -582,6 +593,8 @@ function computeReadyQueue({
     return sortKeys({
       task_id: id,
       dispatch_group: node.dispatch_group,
+      hard_deps: [...hardDepsForNode(node)].sort((a, b) => a.localeCompare(b)),
+      soft_refs: [...(node.soft_refs ?? [])].sort((a, b) => a.localeCompare(b)),
       estimated_minutes: node.estimated_minutes,
       ready_at_minutes: release,
       finish_at_minutes: finish,
@@ -746,7 +759,7 @@ function findCycle(_allNodes, idToNode, remaining) {
     path.push(current);
     const node = idToNode.get(current);
     let next = null;
-    const deps = [...(node?.depends_on ?? [])].sort((a, b) => a.localeCompare(b));
+    const deps = [...hardDepsForNode(node)].sort((a, b) => a.localeCompare(b));
     for (const dep of deps) {
       if (inSet.has(dep)) {
         next = dep;
@@ -2053,6 +2066,58 @@ function buildFixtures() {
           throw new Error(
             'wave29-07 layer F: default group-barrier MUST NOT carry ready_queue field (additive-only contract)',
           );
+        }
+      },
+    },
+    {
+      name: 'wave30-04-ready-queue-ignores-soft-refs',
+      category: 'wave30-04-hard-soft',
+      expect: 'ok',
+      schedule: 'ready-queue',
+      // The follower hard-depends only on anchor but soft-refers to the
+      // slow peer. It must release at t=10 when anchor finishes, not t=90
+      // when the soft reference finishes.
+      source: `(task-runner-manifest m-wave30-04-hard-soft
+        :schema "missiond.task-runner-manifest.v2"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${SHARED_PREAMBLE_PATH}"
+        :productive_only true
+        (node :task_id wave99-01-anchor
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/anchor.mjs"])
+        (node :task_id wave99-02-soft-slow
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 90
+              :heartbeat_minutes 10
+              :write_scope ["scripts/soft-slow.mjs"])
+        (node :task_id wave99-03-follower
+              :depends_on [wave99-01-anchor]
+              :hard_deps [wave99-01-anchor]
+              :soft_refs [wave99-02-soft-slow]
+              :verification_tier local
+              :dispatch_group B
+              :estimated_minutes 5
+              :heartbeat_minutes 5
+              :write_scope ["scripts/follower.mjs"]))`,
+      assert: (plan) => {
+        if (!plan.ready_queue) throw new Error('ready_queue missing');
+        const follower = plan.ready_queue.tasks.find((t) => t.task_id === 'wave99-03-follower');
+        if (!follower) throw new Error('follower missing from ready_queue tasks');
+        if (follower.ready_at_minutes !== 10) {
+          throw new Error(`follower ready_at must ignore soft_refs and equal 10, got ${follower.ready_at_minutes}`);
+        }
+        if (JSON.stringify(follower.hard_deps) !== JSON.stringify(['wave99-01-anchor'])) {
+          throw new Error(`follower hard_deps projection wrong: ${JSON.stringify(follower.hard_deps)}`);
+        }
+        if (JSON.stringify(follower.soft_refs) !== JSON.stringify(['wave99-02-soft-slow'])) {
+          throw new Error(`follower soft_refs projection wrong: ${JSON.stringify(follower.soft_refs)}`);
         }
       },
     },

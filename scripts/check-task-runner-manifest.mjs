@@ -15,14 +15,15 @@ import {
 const usage = `Usage:
   node scripts/check-task-runner-manifest.mjs [--json] [--stdin] [--dry-fixture] [<manifest.lisp> ...]
 
-Checks MissionD task-runner-manifest v1 Lisp records:
+Checks MissionD task-runner-manifest v1/v2 Lisp records:
   - validates reader syntax through the shared MissionD Lisp parser
   - validates each (task-runner-manifest <id> ...) header: required
     :schema :wave :brief_mode :shared_preamble_path :productive_only;
     optional :overlap_policy :description :generated_at :generator
   - validates each (node ...) entry: required :task_id :depends_on
     :verification_tier :dispatch_group :estimated_minutes
-    :heartbeat_minutes :write_scope; optional :notes :owner :kind
+    :heartbeat_minutes :write_scope; optional :hard_deps :soft_refs
+    :notes :owner :kind
   - rejects: schema mismatch; unknown / missing / unknown-extra fields;
     brief_mode / verification_tier / overlap_policy enum violations;
     non-literal-atom productive_only (strings rejected); non-positive
@@ -49,6 +50,8 @@ Use --dry-fixture to run self-contained pass/fail fixtures.
 `;
 
 export const SCHEMA = 'missiond.task-runner-manifest.v1';
+export const SCHEMA_V2 = 'missiond.task-runner-manifest.v2';
+export const ACCEPTED_SCHEMAS = new Set([SCHEMA, SCHEMA_V2]);
 
 export const MANIFEST_HEAD = 'task-runner-manifest';
 export const NODE_HEAD = 'node';
@@ -105,7 +108,7 @@ const NODE_REQUIRED = [
   ':write_scope',
 ];
 
-const NODE_OPTIONAL = [':notes', ':owner', ':kind'];
+const NODE_OPTIONAL = [':hard_deps', ':soft_refs', ':notes', ':owner', ':kind'];
 
 const NODE_ALLOWED = new Set([...NODE_REQUIRED, ...NODE_OPTIONAL]);
 
@@ -285,12 +288,12 @@ function validateManifest(file, manifest, diagnostics, opts = {}) {
 
   // :schema literal pin
   const schema = keywordPropText(props, ':schema');
-  if (props[':schema'] && schema !== SCHEMA) {
+  if (props[':schema'] && !ACCEPTED_SCHEMAS.has(schema)) {
     addError(
       diagnostics,
       file,
       props[':schema'].value?.loc ?? manifest.loc,
-      `:schema must be "${SCHEMA}", got ${JSON.stringify(schema)}`,
+      `:schema must be one of {${[...ACCEPTED_SCHEMAS].join('|')}}, got ${JSON.stringify(schema)}`,
     );
   }
 
@@ -463,25 +466,54 @@ function validateManifest(file, manifest, diagnostics, opts = {}) {
     nodes.push(node);
   }
 
-  // Second pass: depends_on cross-reference + self-edge rejection.
+  // Second pass: hard dependency + soft reference cross-reference checks.
+  // :depends_on remains the v1 hard-dependency field. :hard_deps is the
+  // v2/additive explicit hard-dependency field; schedulers prefer it when
+  // present. :soft_refs are context-only references and never block dispatch,
+  // but they must still resolve to task ids so rendered briefs do not point
+  // at ghosts.
   const taskIds = new Set(nodes.map((n) => n.task_id).filter((id) => id != null));
   for (const node of nodes) {
-    for (const dep of node.depends_on ?? []) {
-      if (dep.value === node.task_id) {
-        addError(
-          diagnostics,
-          file,
-          dep.loc,
-          `node "${node.task_id}" :depends_on self-edge "${dep.value}" is not allowed`,
-        );
-        continue;
+    for (const [field, refs] of [
+      [':depends_on', node.depends_on ?? []],
+      [':hard_deps', node.hard_deps ?? []],
+      [':soft_refs', node.soft_refs ?? []],
+    ]) {
+      for (const dep of refs) {
+        if (dep.value === node.task_id) {
+          addError(
+            diagnostics,
+            file,
+            dep.loc,
+            `node "${node.task_id}" ${field} self-reference "${dep.value}" is not allowed`,
+          );
+          continue;
+        }
+        if (!taskIds.has(dep.value)) {
+          addError(
+            diagnostics,
+            file,
+            dep.loc,
+            `node "${node.task_id ?? '<missing>'}" ${field} entry "${dep.value}" does not match any node :task_id in this manifest`,
+          );
+        }
       }
-      if (!taskIds.has(dep.value)) {
+    }
+  }
+
+  // Explicit hard deps must not contradict legacy :depends_on in v2-style
+  // manifests. This catches accidental partial migrations where one field
+  // says "hard" and the other silently says "none".
+  for (const node of nodes) {
+    if ((node.hard_deps ?? []).length === 0) continue;
+    const legacy = new Set((node.depends_on ?? []).map((d) => d.value));
+    for (const dep of node.hard_deps) {
+      if (!legacy.has(dep.value)) {
         addError(
           diagnostics,
           file,
           dep.loc,
-          `node "${node.task_id ?? '<missing>'}" :depends_on entry "${dep.value}" does not match any node :task_id in this manifest`,
+          `node "${node.task_id}" :hard_deps entry "${dep.value}" must also appear in :depends_on for v1 compatibility`,
         );
       }
     }
@@ -561,6 +593,10 @@ function validateNode(file, nodeForm, diagnostics, ctx) {
     task_id: null,
     taskIdLoc: null,
     depends_on: [],
+    hard_deps: [],
+    hard_deps_declared: Boolean(props[':hard_deps']),
+    soft_refs: [],
+    soft_refs_declared: Boolean(props[':soft_refs']),
     verification_tier: null,
     dispatch_group: null,
     estimated_minutes: null,
@@ -587,6 +623,25 @@ function validateNode(file, nodeForm, diagnostics, ctx) {
       projected.task_id = taskIdText;
     }
   }
+
+  parseNodeRefVector({
+    field: ':hard_deps',
+    props,
+    projected,
+    targetKey: 'hard_deps',
+    file,
+    nodeForm,
+    diagnostics,
+  });
+  parseNodeRefVector({
+    field: ':soft_refs',
+    props,
+    projected,
+    targetKey: 'soft_refs',
+    file,
+    nodeForm,
+    diagnostics,
+  });
 
   // :depends_on — vector of task_id atoms/strings.
   if (props[':depends_on']) {
@@ -787,6 +842,44 @@ function validateNode(file, nodeForm, diagnostics, ctx) {
   return projected;
 }
 
+function parseNodeRefVector({ field, props, projected, targetKey, file, nodeForm, diagnostics }) {
+  if (!props[field]) return;
+  const node = props[field].value;
+  if (!isList(node)) {
+    addError(
+      diagnostics,
+      file,
+      node?.loc ?? nodeForm.loc,
+      `${field} must be a vector/list of node :task_id values (use [] for none)`,
+    );
+    return;
+  }
+  const seen = new Set();
+  for (const child of node.children) {
+    const text = nodeText(child);
+    if (text == null || text.trim() === '' || !TASK_ID_RE.test(text)) {
+      addError(
+        diagnostics,
+        file,
+        child.loc ?? node.loc,
+        `${field} entry "${text}" must match ${TASK_ID_RE}`,
+      );
+      continue;
+    }
+    if (seen.has(text)) {
+      addError(
+        diagnostics,
+        file,
+        child.loc ?? node.loc,
+        `${field} contains duplicate task id "${text}" inside the same node`,
+      );
+      continue;
+    }
+    seen.add(text);
+    projected[targetKey].push({ value: text, loc: child.loc });
+  }
+}
+
 function literalBoolAtom(node) {
   if (!node || node.type !== 'atom') return null;
   if (node.value === 'true' || node.value === 'false') return node.value;
@@ -831,7 +924,8 @@ function addError(diagnostics, file, loc, message) {
 //   { id, schema, wave, brief_mode, shared_preamble_path,
 //     productive_only: boolean|null, overlap_policy, description,
 //     generated_at, generator,
-//     nodes: [{ task_id, depends_on: string[], verification_tier,
+//     nodes: [{ task_id, depends_on: string[], hard_deps: string[],
+//               soft_refs: string[], verification_tier,
 //               dispatch_group, estimated_minutes: number|null,
 //               heartbeat_minutes: number|null, write_scope: string[],
 //               notes, owner, kind, loc }],
@@ -866,13 +960,9 @@ export function projectManifest(form) {
 function projectNode(form) {
   const props = readKeywordProps(form, { start: 1 });
   const dependsNode = props[':depends_on']?.value ?? null;
-  const depends_on = [];
-  if (isList(dependsNode)) {
-    for (const child of dependsNode.children) {
-      const text = nodeText(child);
-      if (text != null && text !== '') depends_on.push(text);
-    }
-  }
+  const depends_on = projectRefVector(dependsNode);
+  const hard_deps = projectRefVector(props[':hard_deps']?.value ?? null);
+  const soft_refs = projectRefVector(props[':soft_refs']?.value ?? null);
   const writeScopeNode = props[':write_scope']?.value ?? null;
   const write_scope = [];
   if (isList(writeScopeNode)) {
@@ -886,6 +976,10 @@ function projectNode(form) {
   return {
     task_id: keywordPropText(props, ':task_id'),
     depends_on,
+    hard_deps,
+    hard_deps_declared: Boolean(props[':hard_deps']),
+    soft_refs,
+    soft_refs_declared: Boolean(props[':soft_refs']),
     verification_tier: keywordPropText(props, ':verification_tier'),
     dispatch_group: keywordPropText(props, ':dispatch_group'),
     estimated_minutes: estimated,
@@ -896,6 +990,17 @@ function projectNode(form) {
     kind: keywordPropText(props, ':kind') ?? null,
     loc: form.loc ?? null,
   };
+}
+
+function projectRefVector(node) {
+  const out = [];
+  if (isList(node)) {
+    for (const child of node.children) {
+      const text = nodeText(child);
+      if (text != null && text !== '') out.push(text);
+    }
+  }
+  return out;
 }
 
 function literalBool(node) {
@@ -936,8 +1041,8 @@ export function validateManifestObject(obj) {
     errors.push('manifest must be an object');
     return errors;
   }
-  if (obj.schema !== SCHEMA) {
-    errors.push(`:schema must be "${SCHEMA}", got ${JSON.stringify(obj.schema)}`);
+  if (!ACCEPTED_SCHEMAS.has(obj.schema)) {
+    errors.push(`:schema must be one of {${[...ACCEPTED_SCHEMAS].join('|')}}, got ${JSON.stringify(obj.schema)}`);
   }
   if (typeof obj.wave !== 'string' || !WAVE_ID_RE.test(obj.wave)) {
     errors.push(`:wave "${obj.wave}" must match ${WAVE_ID_RE}`);
@@ -1004,6 +1109,12 @@ export function validateManifestObject(obj) {
     if (!Array.isArray(node.depends_on)) {
       errors.push(`node "${node.task_id}" :depends_on must be an array`);
     }
+    if (node.hard_deps != null && !Array.isArray(node.hard_deps)) {
+      errors.push(`node "${node.task_id}" :hard_deps must be an array when present`);
+    }
+    if (node.soft_refs != null && !Array.isArray(node.soft_refs)) {
+      errors.push(`node "${node.task_id}" :soft_refs must be an array when present`);
+    }
     if (!Array.isArray(node.write_scope)) {
       errors.push(`node "${node.task_id}" :write_scope must be an array`);
     } else {
@@ -1040,16 +1151,37 @@ export function validateManifestObject(obj) {
   }
   // Cross-node checks.
   for (const node of obj.nodes) {
-    if (!node || typeof node !== 'object' || !Array.isArray(node.depends_on)) continue;
-    for (const dep of node.depends_on) {
-      if (dep === node.task_id) {
-        errors.push(`node "${node.task_id}" :depends_on self-edge "${dep}" not allowed`);
-        continue;
+    if (!node || typeof node !== 'object') continue;
+    for (const [field, refs] of [
+      [':depends_on', node.depends_on],
+      [':hard_deps', node.hard_deps ?? []],
+      [':soft_refs', node.soft_refs ?? []],
+    ]) {
+      if (!Array.isArray(refs)) continue;
+      for (const dep of refs) {
+        if (typeof dep !== 'string' || !TASK_ID_RE.test(dep)) {
+          errors.push(`node "${node.task_id}" ${field} entry "${dep}" must match ${TASK_ID_RE}`);
+          continue;
+        }
+        if (dep === node.task_id) {
+          errors.push(`node "${node.task_id}" ${field} self-reference "${dep}" not allowed`);
+          continue;
+        }
+        if (!seenIds.has(dep)) {
+          errors.push(
+            `node "${node.task_id}" ${field} entry "${dep}" does not match any node :task_id`,
+          );
+        }
       }
-      if (!seenIds.has(dep)) {
-        errors.push(
-          `node "${node.task_id}" :depends_on entry "${dep}" does not match any node :task_id`,
-        );
+    }
+    if (Array.isArray(node.hard_deps) && node.hard_deps.length > 0) {
+      const legacy = new Set(Array.isArray(node.depends_on) ? node.depends_on : []);
+      for (const dep of node.hard_deps) {
+        if (!legacy.has(dep)) {
+          errors.push(
+            `node "${node.task_id}" :hard_deps entry "${dep}" must also appear in :depends_on for v1 compatibility`,
+          );
+        }
       }
     }
   }
@@ -1170,6 +1302,93 @@ function runFixtures(json = false) {
               :heartbeat_minutes 10
               :write_scope ["scripts/shared.mjs"]))`,
       ok: true,
+    },
+    {
+      name: 'wave30-04-pass-v2-hard-deps-and-soft-refs',
+      category: 'wave30-04-hard-soft',
+      source: `(task-runner-manifest m-wave30-04-hard-soft
+        :schema "${SCHEMA_V2}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${sharedPreamble}"
+        :productive_only true
+        (node :task_id wave99-01-atlas
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/atlas.mjs"])
+        (node :task_id wave99-02-patterns
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 60
+              :heartbeat_minutes 10
+              :write_scope ["scripts/patterns.mjs"])
+        (node :task_id wave99-03-runner-prep
+              :depends_on [wave99-01-atlas]
+              :hard_deps [wave99-01-atlas]
+              :soft_refs [wave99-02-patterns]
+              :verification_tier local
+              :dispatch_group B
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/runner-prep.mjs"]))`,
+      ok: true,
+    },
+    {
+      name: 'wave30-04-fail-soft-ref-must-resolve',
+      category: 'wave30-04-hard-soft',
+      source: `(task-runner-manifest m-wave30-04-soft-missing
+        :schema "${SCHEMA_V2}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${sharedPreamble}"
+        :productive_only true
+        (node :task_id wave99-01-atlas
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/atlas.mjs"])
+        (node :task_id wave99-03-runner-prep
+              :depends_on [wave99-01-atlas]
+              :hard_deps [wave99-01-atlas]
+              :soft_refs [wave99-99-missing]
+              :verification_tier local
+              :dispatch_group B
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/runner-prep.mjs"]))`,
+      ok: false,
+    },
+    {
+      name: 'wave30-04-fail-hard-deps-must-stay-v1-compatible',
+      category: 'wave30-04-hard-soft',
+      source: `(task-runner-manifest m-wave30-04-hard-compat
+        :schema "${SCHEMA_V2}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${sharedPreamble}"
+        :productive_only true
+        (node :task_id wave99-01-atlas
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/atlas.mjs"])
+        (node :task_id wave99-03-runner-prep
+              :depends_on []
+              :hard_deps [wave99-01-atlas]
+              :verification_tier local
+              :dispatch_group B
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/runner-prep.mjs"]))`,
+      ok: false,
     },
     {
       name: 'fail-duplicate-task-id',
