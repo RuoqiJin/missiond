@@ -2,6 +2,30 @@ use anyhow::{anyhow, Result};
 use std::collections::HashSet;
 use tracing::{debug, info, warn};
 
+// ── Autopilot pty.send / watchdog timeout policy ───────────────────────
+// These constants project the same shape as
+// `handlers/compute/task_delegate.rs :: DEFAULT_TIMEOUT_SECS / MAX_TIMEOUT_SECS`
+// so the dispatched pty.send budget matches the BoardTask.timeout_secs that
+// task_delegate already wrote, and the watchdog cannot reclaim a slot while
+// the configured budget is still ticking. See
+// `.missiond/v3/missiond-blueprint.lisp :: workstation-config invariants`
+// for the Lisp authority.
+const PTY_TIMEOUT_DEFAULT_SECS: i64 = 1800;
+const PTY_TIMEOUT_MIN_SECS: i64 = 60;
+const PTY_TIMEOUT_MAX_SECS: i64 = 7200;
+
+/// Extra wait beyond the declared task timeout before the smart watchdog
+/// treats an idle slot as orphaned. Long-running Opus runs sometimes return
+/// the prompt within seconds of the deadline; the grace prevents racing the
+/// natural completion path.
+const WATCHDOG_GRACE_SECS: i64 = 120;
+
+/// Window the watchdog gives a missing PTY session before reclaiming the
+/// task. A missing session means the slot process is gone, so we recover
+/// quickly without waiting for the full configured timeout — this is the
+/// "no-PTY-session" branch the brief mandates we keep fast.
+const WATCHDOG_MISSING_SESSION_PROBE_SECS: i64 = 120;
+
 use crate::claude_md_sync::sync_claude_md;
 use crate::engine::learning_engine;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
@@ -21,6 +45,36 @@ use crate::supervisor::{is_auth_error, is_quota_exhausted};
 use missiond_core::SessionState;
 
 // @beacon: orchestration
+
+/// Clamp `BoardTask.timeout_secs` to the autopilot wait budget.
+///
+/// Mirrors the shape of `handlers/compute/task_delegate.rs` so the pty.send
+/// budget always lines up with the timeout the delegator already stored:
+///   * `None` / `Some(<= 0)`             → `PTY_TIMEOUT_DEFAULT_SECS` (1800).
+///   * `Some(v) where v < PTY_TIMEOUT_MIN_SECS` → clamped to `PTY_TIMEOUT_MIN_SECS`.
+///   * `Some(v) where v > PTY_TIMEOUT_MAX_SECS` → clamped to `PTY_TIMEOUT_MAX_SECS`.
+///
+/// Pure helper so unit tests can pin the policy without an `AppState`.
+fn derive_pty_timeout_secs(timeout_secs: Option<i64>) -> i64 {
+    let raw = match timeout_secs {
+        Some(v) if v > 0 => v,
+        _ => PTY_TIMEOUT_DEFAULT_SECS,
+    };
+    raw.clamp(PTY_TIMEOUT_MIN_SECS, PTY_TIMEOUT_MAX_SECS)
+}
+
+/// Convert the derived timeout into the `pty.send` millisecond budget.
+fn derive_pty_timeout_ms(timeout_secs: Option<i64>) -> u64 {
+    (derive_pty_timeout_secs(timeout_secs) as u64).saturating_mul(1000)
+}
+
+/// Smallest claimed-age (seconds) at which the watchdog may reclaim an idle
+/// slot still bound to a running task. Equals the derived task timeout plus
+/// `WATCHDOG_GRACE_SECS` so the slot always gets the full configured window
+/// before being treated as orphaned.
+fn idle_watchdog_threshold_secs(timeout_secs: Option<i64>) -> i64 {
+    derive_pty_timeout_secs(timeout_secs).saturating_add(WATCHDOG_GRACE_SECS)
+}
 
 /// Notify Jarvis conversation when an async task fails.
 /// Extracts conversation_id from task metadata, writes error message, and emits event.
@@ -204,36 +258,58 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                     .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
                     .unwrap_or(0);
 
-                if claimed_age <= 120 {
-                    continue;
-                } // Too fresh, might still be in send()
+                let task_timeout_secs = derive_pty_timeout_secs(rt.timeout_secs);
+                let idle_threshold = idle_watchdog_threshold_secs(rt.timeout_secs);
 
-                if let Some(info) = state.pty.get_status(slot_id).await {
-                    if info.state == SessionState::Idle {
+                match state.pty.get_status(slot_id).await {
+                    Some(info) if info.state == SessionState::Idle => {
+                        // Slot is idle. Only reclaim once the configured task
+                        // budget plus grace has elapsed; otherwise the slot may
+                        // simply be between the natural prompt return and the
+                        // next dispatch.
+                        if claimed_age < idle_threshold {
+                            continue;
+                        }
                         warn!(
                             task_id = %rt.id, slot_id, age_secs = claimed_age,
-                            "Watchdog: slot idle but task still running — recovering orphaned task"
+                            timeout_secs = task_timeout_secs,
+                            grace_secs = WATCHDOG_GRACE_SECS,
+                            "Watchdog: task exceeded configured timeout/grace — slot idle, recovering"
                         );
                         let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
                         let _ = state.store.add_board_task_note(
                             &missiond_core::types::AddBoardTaskNoteInput {
                                 task_id: rt.id.to_string(),
                                 content: format!(
-                                    "🔄 **看门狗回收** — 工位 {} 已 idle 但任务仍在 running（{}s），可能是 daemon 重启导致 send() 丢失。已 unclaim，下次 tick 重新执行。",
-                                    slot_id, claimed_age
+                                    "🔄 **看门狗回收** — 任务超出配置 timeout/grace（claimed_age={}s, timeout={}s, grace={}s, 工位 {} 已 idle）。可能是 pty.send 在预算内自然结束、daemon 重启丢失 send()，或工位已归档结果。已 unclaim，下次 tick 重新执行。",
+                                    claimed_age, task_timeout_secs, WATCHDOG_GRACE_SECS, slot_id
                                 ),
                                 note_type: Some("note".to_string()),
                                 author: Some("watchdog".to_string()),
                             },
                         ).await;
                     }
-                } else {
-                    // No PTY session at all — slot not even spawned, definitely orphaned
-                    warn!(
-                        task_id = %rt.id, slot_id, age_secs = claimed_age,
-                        "Watchdog: no PTY session for slot — recovering orphaned task"
-                    );
-                    let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
+                    Some(_) => {
+                        // Slot is still busy (Thinking / Responding / etc) —
+                        // leave it alone, the original send() may still be
+                        // returning a result inside the configured budget.
+                        continue;
+                    }
+                    None => {
+                        // No PTY session at all — slot process is gone, so
+                        // the original send() can never return. Recover after
+                        // a small probe window without waiting for the full
+                        // task timeout.
+                        if claimed_age < WATCHDOG_MISSING_SESSION_PROBE_SECS {
+                            continue;
+                        }
+                        warn!(
+                            task_id = %rt.id, slot_id, age_secs = claimed_age,
+                            probe_secs = WATCHDOG_MISSING_SESSION_PROBE_SECS,
+                            "Watchdog: no PTY session for slot — slot process gone, recovering"
+                        );
+                        let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
+                    }
                 }
             }
         }
@@ -681,8 +757,10 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         // After this point, PTY state is non-Idle so other callers will see it as busy.
         state.slot_dispatch.release(&slot_id);
 
-        // Send prompt and wait for response
-        let timeout_ms = 600_000; // 10 minutes
+        // Send prompt and wait for response — derive the budget from the
+        // BoardTask.timeout_secs that mission_task_delegate already stored,
+        // so a 55-minute Opus coding task does not get capped at 10 minutes.
+        let timeout_ms = derive_pty_timeout_ms(task.timeout_secs);
         match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
             Ok(res) => {
                 // Check for auth errors in successful PTY response
@@ -1724,6 +1802,110 @@ mod tests {
         let refs = vec![&i1];
         let summary = build_stuck_summary(&refs);
         assert!(summary.contains("连续 1 次"));
+    }
+
+    // ── PTY timeout / watchdog policy — pure helpers, no AppState ───────
+
+    #[test]
+    fn pty_timeout_default_when_field_absent() {
+        assert_eq!(derive_pty_timeout_secs(None), PTY_TIMEOUT_DEFAULT_SECS);
+        assert_eq!(
+            derive_pty_timeout_ms(None),
+            (PTY_TIMEOUT_DEFAULT_SECS as u64) * 1000
+        );
+    }
+
+    #[test]
+    fn pty_timeout_default_for_invalid_values() {
+        // Zero and negative values are treated as "absent" and fall back to
+        // the default — mirrors task_delegate's safe-default behaviour.
+        assert_eq!(derive_pty_timeout_secs(Some(0)), PTY_TIMEOUT_DEFAULT_SECS);
+        assert_eq!(
+            derive_pty_timeout_secs(Some(-300)),
+            PTY_TIMEOUT_DEFAULT_SECS
+        );
+    }
+
+    #[test]
+    fn pty_timeout_clamps_low_values() {
+        // Anything under PTY_TIMEOUT_MIN_SECS rounds up to the floor so a
+        // mis-configured 5-second task still gets a usable PTY budget.
+        assert_eq!(derive_pty_timeout_secs(Some(5)), PTY_TIMEOUT_MIN_SECS);
+        assert_eq!(derive_pty_timeout_secs(Some(59)), PTY_TIMEOUT_MIN_SECS);
+        assert_eq!(derive_pty_timeout_secs(Some(60)), 60);
+    }
+
+    #[test]
+    fn pty_timeout_clamps_high_values() {
+        // The cap mirrors task_delegate::MAX_TIMEOUT_SECS so neither side
+        // can drift past the other.
+        assert_eq!(derive_pty_timeout_secs(Some(7200)), PTY_TIMEOUT_MAX_SECS);
+        assert_eq!(derive_pty_timeout_secs(Some(86_400)), PTY_TIMEOUT_MAX_SECS);
+    }
+
+    #[test]
+    fn pty_timeout_in_range_passes_through() {
+        // 55-minute Opus task — the wave31 stability bug case. Must not be
+        // shrunk to 10 minutes anywhere along the path.
+        assert_eq!(derive_pty_timeout_secs(Some(3300)), 3300);
+        assert_eq!(derive_pty_timeout_ms(Some(3300)), 3_300_000);
+    }
+
+    #[test]
+    fn idle_watchdog_threshold_adds_grace_to_task_timeout() {
+        // Default budget + grace.
+        assert_eq!(
+            idle_watchdog_threshold_secs(None),
+            PTY_TIMEOUT_DEFAULT_SECS + WATCHDOG_GRACE_SECS
+        );
+        // Explicit 55-minute task → 3300 + 120 = 3420.
+        assert_eq!(idle_watchdog_threshold_secs(Some(3300)), 3420);
+    }
+
+    #[test]
+    fn idle_watchdog_threshold_strictly_above_old_120s_floor() {
+        // Regression guard for wave31: the legacy 120s floor must never
+        // re-emerge for any in-range task timeout.
+        for secs in [
+            PTY_TIMEOUT_MIN_SECS,
+            300,
+            900,
+            1800,
+            3300,
+            PTY_TIMEOUT_MAX_SECS,
+        ] {
+            let threshold = idle_watchdog_threshold_secs(Some(secs));
+            assert!(
+                threshold > 120,
+                "threshold {} for timeout {}s must exceed legacy 120s",
+                threshold,
+                secs
+            );
+        }
+    }
+
+    #[test]
+    fn idle_watchdog_threshold_does_not_reclaim_within_budget() {
+        // claimed_age < idle_threshold ⇒ watchdog must not reclaim.
+        let timeout = Some(3300);
+        let threshold = idle_watchdog_threshold_secs(timeout);
+        // Within the budget — reclaim forbidden.
+        assert!(900 < threshold);
+        assert!(3300 < threshold);
+        // Past the budget+grace — reclaim allowed.
+        assert!(threshold + 1 > threshold);
+    }
+
+    #[test]
+    fn missing_session_probe_independent_of_task_timeout() {
+        // Even a 2-hour task must let the no-PTY-session branch recover
+        // after the small probe window — a missing process can never
+        // resume on its own.
+        assert_eq!(WATCHDOG_MISSING_SESSION_PROBE_SECS, 120);
+        assert!(
+            WATCHDOG_MISSING_SESSION_PROBE_SECS
+                < idle_watchdog_threshold_secs(Some(PTY_TIMEOUT_MAX_SECS))
+        );
     }
 }
 
