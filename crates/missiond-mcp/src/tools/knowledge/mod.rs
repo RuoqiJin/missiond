@@ -8,5 +8,6 @@ pub(crate) mod kb;
 pub(crate) mod memory;
 pub(crate) mod plan;
 pub(crate) mod project;
+pub(crate) mod request;
 pub(crate) mod skill;
 pub(crate) mod workflow;

@@ -173,8 +173,8 @@ mod sysinfra;
 
 // Domain aliases for readability
 use knowledge::{
-    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project, skill,
-    workflow,
+    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
+    request, skill, workflow,
 };
 use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job, flow_run, forge};
 use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
@@ -191,6 +191,7 @@ pub fn all_tools() -> Vec<ToolDefinition> {
     tools.extend(insight::definitions());
     tools.extend(cascade::definitions());
     tools.extend(intent::definitions());
+    tools.extend(request::definitions());
     tools.extend(directive::definitions());
     tools.extend(plan::definitions());
     tools.extend(workflow::definitions());
@@ -327,7 +328,7 @@ mod tests {
     fn test_directive_plan_workflow_surfaces_registered() {
         let tools = all_tools();
         let names: HashSet<_> = tools.iter().map(|t| t.name.as_str()).collect();
-        for n in ["mission_directive", "mission_plan", "mission_workflow"] {
+        for n in ["mission_request", "mission_directive", "mission_plan", "mission_workflow"] {
             assert!(names.contains(n), "{} not registered", n);
         }
     }

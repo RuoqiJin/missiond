@@ -168,10 +168,11 @@
 
   (implementation-map
     (surface mission_request
-      :status "target"
+      :status "code-aligned-partial"
       :role "single user-facing request entry"
-      :future-code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
-                    "crates/missiond-mcp/src/tools/knowledge/request.rs"])
+      :code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
+             "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+      :note "v0 file-first request.lisp + initial event + unified_entry composition; no DB schema migration, no auto-approval, no direct workstation dispatch")
 
     (surface mission_directive
       :status "compat"

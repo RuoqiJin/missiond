@@ -25,8 +25,8 @@ pub(crate) use comm::retrospective;
 use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
 use compute::{cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, task, task_delegate, worker};
 use knowledge::{
-    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project, skill,
-    workflow,
+    agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
+    request, skill, workflow,
 };
 use sysinfra::{global_instruction, health, infra, misc, permission, system};
 
@@ -63,6 +63,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             router_chat::handle(state, name, args).await
         }
         "mission_intent" => intent::handle(state, name, args).await,
+        "mission_request" => request::handle(state, name, args).await,
         "mission_directive" => directive::handle(state, name, args).await,
         "mission_plan" => plan::handle(state, name, args).await,
         "mission_workflow" => workflow::handle(state, name, args).await,
