@@ -79,20 +79,18 @@ pub(crate) fn resolve_model_projection(
 /// V3 workstation-config :: execution-ownership delegated-boardtask projection.
 ///
 /// Returns the effective `PTYSpawnOptions.initial_prompt` for a freshly
-/// provisioned slot. When `suppress` is true (the path used by
-/// `mission_task_delegate` auto-provision), the slot starts idle and Autopilot
-/// becomes the sole task-prompt owner; the spawner MUST NOT fire-and-forget the
-/// task objective. When `suppress` is false (default — direct
-/// `mission_compute_slot create`), the caller-supplied objective remains the
-/// warm-up prompt as before.
+/// provisioned slot. `objective` is slot metadata only; it must not implicitly
+/// become the first executable message. Callers that want a warm-up prompt must
+/// pass `initial_prompt` explicitly, and delegated BoardTask auto-provision
+/// still forces `suppress=true` so Autopilot remains the sole task-prompt owner.
 pub(crate) fn effective_initial_prompt(
-    objective: Option<String>,
+    initial_prompt: Option<String>,
     suppress: bool,
 ) -> Option<String> {
     if suppress {
         None
     } else {
-        objective
+        initial_prompt
     }
 }
 
@@ -276,12 +274,15 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let ttl = ttl.min(MAX_TTL_SECS).max(300); // min 5 minutes
 
     let objective = args.get("objective").and_then(|v| v.as_str());
+    let explicit_initial_prompt =
+        string_arg(args, &["initial_prompt", "initialPrompt"]).map(str::to_string);
 
     // V3 execution-ownership :: delegated-boardtask. When task_delegate
     // auto-provisions a dynamic slot for a queued BoardTask it sets
     // `suppress_initial_prompt: true` so the slot starts idle and Autopilot
     // remains the sole task-prompt owner. Direct `mission_compute_slot create`
-    // callers omit the flag and keep the legacy warm-up behaviour.
+    // callers that want warm-up behaviour must pass `initial_prompt`
+    // explicitly; `objective` is metadata and is never executed implicitly.
     let suppress_initial_prompt = args
         .get("suppress_initial_prompt")
         .and_then(|v| v.as_bool())
@@ -400,7 +401,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let template_owned = template_name.to_string();
     let objective_owned = objective.map(|s| s.to_string());
     let initial_prompt_for_spawn =
-        effective_initial_prompt(objective_owned.clone(), suppress_initial_prompt);
+        effective_initial_prompt(explicit_initial_prompt, suppress_initial_prompt);
     let expires_at_str = expires_at.to_rfc3339();
 
     tokio::spawn(async move {
@@ -682,27 +683,24 @@ mod tests {
     // ── V3 execution-ownership :: delegated-boardtask projection ─────────
     //
     // Tests for `effective_initial_prompt`: pure helper, no AppState. Pins
-    // the rule that mission_task_delegate auto-provisioning suppresses the
-    // spawner fire-and-forget initial-prompt while direct compute_slot
-    // create keeps the legacy warm-up behaviour.
+    // the rule that objective is metadata only, explicit initial_prompt is the
+    // only warm-up message, and mission_task_delegate auto-provisioning
+    // suppresses even that.
 
     #[test]
-    fn effective_initial_prompt_returns_objective_by_default() {
-        let objective = Some("ship the fix".to_string());
-        assert_eq!(
-            effective_initial_prompt(objective.clone(), false),
-            objective
-        );
+    fn effective_initial_prompt_returns_explicit_prompt() {
+        let prompt = Some("warm the slot".to_string());
+        assert_eq!(effective_initial_prompt(prompt.clone(), false), prompt);
     }
 
     #[test]
     fn effective_initial_prompt_suppresses_when_flag_set() {
-        let objective = Some("ship the fix".to_string());
-        assert_eq!(effective_initial_prompt(objective, true), None);
+        let prompt = Some("warm the slot".to_string());
+        assert_eq!(effective_initial_prompt(prompt, true), None);
     }
 
     #[test]
-    fn effective_initial_prompt_returns_none_when_objective_absent() {
+    fn effective_initial_prompt_returns_none_when_prompt_absent() {
         assert_eq!(effective_initial_prompt(None, false), None);
         assert_eq!(effective_initial_prompt(None, true), None);
     }

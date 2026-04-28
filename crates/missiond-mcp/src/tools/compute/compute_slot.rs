@@ -16,7 +16,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "action": {"type": "string", "enum": ["create", "terminate", "extend", "list"]},
                     "template": {"type": "string", "description": "[create] 模板 ID: coder/ops"},
-                    "objective": {"type": "string", "description": "[create] 意图描述"},
+                    "objective": {"type": "string", "description": "[create] 意图描述；仅作为工位元数据，不会被自动发送"},
+                    "initial_prompt": {"type": "string", "description": "[create] 可选显式 warm-up prompt；只有传入此字段才会在 slot Idle 后发送"},
+                    "initialPrompt": {"type": "string", "description": "[create] initial_prompt camelCase alias"},
                     "cwd": {"type": "string", "description": "[create] 工作目录"},
                     "max_ttl": {"type": "integer", "description": "[create] 最大 TTL 秒(默认 4h, 上限 8h)", "default": 14400},
                     "model": {"type": "string", "description": "[create] 可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model"},

@@ -924,15 +924,15 @@
         :desc "动态计算工位管理 create/terminate/extend/list (TTL 生命周期, 上限 5 活跃 · 8h)"
         :actions ["create" "terminate" "extend" "list"]
         :required ["action"]
-        :optional ["template" "objective" "cwd" "projectId" "max_ttl" "slot_id" "additional_seconds" "status" "model" "model_profile"]
+        :optional ["template" "objective" "initial_prompt" "cwd" "projectId" "max_ttl" "slot_id" "additional_seconds" "status" "model" "model_profile"]
         (ingress
-          :schema "action required; create requires template; create accepts cwd/projectId and must resolve target_project_root; create accepts model/model_profile; terminate/extend require slot_id; list accepts status"
+          :schema "action required; create requires template; create accepts cwd/projectId and must resolve target_project_root; create accepts model/model_profile; objective is metadata only; only explicit initial_prompt is sent after Idle; terminate/extend require slot_id; list accepts status"
           :callers ["intent-layer (autopilot 派发)" "board-frontend" "task_delegate auto-provision"])
         (logic-core
           (step s1 "dispatch action create/terminate/extend/list")
-          (step s2 "create: validate template, model/model_profile single-token override, active limit 5, resolve cwd/projectId to target_project_root, TTL min/max, objective")
+          (step s2 "create: validate template, model/model_profile single-token override, active limit 5, resolve cwd/projectId to target_project_root, TTL min/max, objective metadata, optional explicit initial_prompt")
           (step s3 "create: build SlotConfig(project_root, requested_cwd, model projection) and DynamicSlot row, persist to DB, register in SlotManager")
-          (step s4 "create: create AsyncJob and spawn background PTY task via spawn_tracked_slot with process cwd=target_project_root")
+          (step s4 "create: create AsyncJob and spawn background PTY task via spawn_tracked_slot with process cwd=target_project_root; never send objective as prompt")
           (step s5 "create background: complete job or mark dynamic slot spawn_failed and unregister")
           (step s6 "terminate: require slot-dyn-* id, kill PTY, terminate DB row, unregister slot")
           (step s7 "extend: validate additional_seconds <= 3600 and update expiry")

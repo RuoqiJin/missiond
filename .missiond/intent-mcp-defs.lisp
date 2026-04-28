@@ -511,7 +511,8 @@
     (input
       (action  string :required :enum (create terminate extend list))
       (template string :description "[create] 模板 ID: coder/ops")
-      (objective string :description "[create] 意图描述")
+      (objective string :description "[create] 意图描述；仅作为工位元数据，不会被自动发送")
+      (initial_prompt string :description "[create] 可选显式 warm-up prompt；只有传入此字段才会在 slot Idle 后发送")
       (cwd     string :description "[create] 工作目录")
       (max_ttl integer :default 14400 :description "[create] 最大 TTL 秒(默认 4h, 上限 8h)")
       (model string :description "[create] 可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model")

@@ -498,7 +498,7 @@
                    (step tracking-env   "注入 session tracking 环境变量")
                    (step pty-spawn      "实际调 PTYManager.spawn (唯一落点)")
                    (step uuid-capture   "捕获 session UUID, 归入 slot_sessions 表")
-                   (step initial-prompt "可选 initial_prompt 注入 (待 Idle 后发送)")])
+                   (step initial-prompt "仅当调用方显式传 initial_prompt 时注入 (待 Idle 后发送)；objective 只作工位元数据，不得隐式发送")])
 
       (invariant project-root-spawn-cwd
         :status "code-aligned in current worktree; project_root.rs resolver + spawner enforcement + SlotConfig project_root/requested_cwd fields"
