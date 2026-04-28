@@ -620,17 +620,73 @@ struct PlanMaterialization {
     version: i32,
     sexp_hash: String,
     board_task_created: bool,
+    artifact_projection: Option<PlanArtifactProjection>,
+    artifact_projection_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanArtifactProjection {
+    path: PathBuf,
+    sha256: String,
+    bytes: u64,
+    overwritten: bool,
 }
 
 fn plan_materialization_to_json(m: &PlanMaterialization) -> Value {
-    json!({
-        "plan_id": m.plan_ref.id,
-        "board_task_id": m.board_task_id,
-        "version": m.version,
-        "sexp_hash": m.sexp_hash,
-        "board_task_created": m.board_task_created,
-        "source": "request-local plan.lisp",
-    })
+    let mut obj = serde_json::Map::new();
+    obj.insert("plan_id".into(), json!(m.plan_ref.id));
+    obj.insert("board_task_id".into(), json!(m.board_task_id));
+    obj.insert("version".into(), json!(m.version));
+    obj.insert("sexp_hash".into(), json!(m.sexp_hash));
+    obj.insert("board_task_created".into(), json!(m.board_task_created));
+    obj.insert("source".into(), json!("request-local plan.lisp"));
+    if let Some(p) = m.artifact_projection.as_ref() {
+        obj.insert(
+            "artifact_projection".into(),
+            json!({
+                "path": path_json(&p.path),
+                "sha256": p.sha256,
+                "bytes": p.bytes,
+                "overwritten": p.overwritten,
+            }),
+        );
+    }
+    if let Some(e) = m.artifact_projection_error.as_ref() {
+        obj.insert("artifact_projection_error".into(), json!(e));
+    }
+    Value::Object(obj)
+}
+
+fn enrich_materialized_plan_lisp(
+    body: &str,
+    plan_ref: &PlanRef,
+    version: i32,
+    board_task_id: &str,
+) -> String {
+    if body.contains(":plan_id") && body.contains(":version") && body.contains(":board_task_id") {
+        return body.to_string();
+    }
+
+    let trimmed_len = body.trim_end().len();
+    let trailing = &body[trimmed_len..];
+    let mut core = body[..trimmed_len].to_string();
+    if !core.ends_with(')') {
+        return body.to_string();
+    }
+
+    core.pop();
+    if !core.contains(":plan_id") {
+        let _ = write!(core, "\n  :plan_id {}", lisp_string(&plan_ref.id));
+    }
+    if !core.contains(":version") {
+        let _ = write!(core, "\n  :version {}", version);
+    }
+    if !core.contains(":board_task_id") {
+        let _ = write!(core, "\n  :board_task_id {}", lisp_string(board_task_id));
+    }
+    core.push(')');
+    core.push_str(trailing);
+    core
 }
 
 fn sha256_hex(s: &str) -> String {
@@ -681,14 +737,36 @@ async fn materialize_request_plan(
         .await
         .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
 
+    let plan_ref = PlanRef {
+        id: plan_id.to_string(),
+    };
+    let enriched_plan_text =
+        enrich_materialized_plan_lisp(plan_text, &plan_ref, version, &anchor.board_task_id);
+    let (artifact_projection, artifact_projection_error) = if enriched_plan_text != plan_text {
+        match atomic_write_artifact(&paths.plan, &enriched_plan_text, true) {
+            Ok(write) => (
+                Some(PlanArtifactProjection {
+                    path: write.path,
+                    sha256: write.sha256,
+                    bytes: write.bytes,
+                    overwritten: write.overwritten,
+                }),
+                None,
+            ),
+            Err(e) => (None, Some(format!("{:#}", e))),
+        }
+    } else {
+        (None, None)
+    };
+
     Ok(PlanMaterialization {
-        plan_ref: PlanRef {
-            id: plan_id.to_string(),
-        },
+        plan_ref,
         board_task_id: anchor.board_task_id,
         version,
         sexp_hash,
         board_task_created: anchor.board_task_created,
+        artifact_projection,
+        artifact_projection_error,
     })
 }
 
@@ -3204,6 +3282,37 @@ mod tests {
     }
 
     #[test]
+    fn enrich_materialized_plan_lisp_adds_ref_before_final_paren() {
+        let body = "(plan-draft\n  :target \"mission_task_delegate\"\n  :nodes [(:id \"root\")])\n";
+        let enriched = enrich_materialized_plan_lisp(
+            body,
+            &PlanRef {
+                id: "plan-123".into(),
+            },
+            4,
+            "board-456",
+        );
+        assert!(enriched.contains(":plan_id \"plan-123\""));
+        assert!(enriched.contains(":version 4"));
+        assert!(enriched.contains(":board_task_id \"board-456\""));
+        assert!(enriched.ends_with(")\n"));
+    }
+
+    #[test]
+    fn enrich_materialized_plan_lisp_preserves_existing_ref() {
+        let body = "(plan-draft :plan_id \"existing\" :version 2 :board_task_id \"b\")";
+        assert_eq!(
+            enrich_materialized_plan_lisp(
+                body,
+                &PlanRef { id: "new".into() },
+                3,
+                "new-board",
+            ),
+            body
+        );
+    }
+
+    #[test]
     fn plan_materialization_json_exposes_ref_and_anchor() {
         let m = PlanMaterialization {
             plan_ref: PlanRef { id: "p1".into() },
@@ -3211,12 +3320,20 @@ mod tests {
             version: 2,
             sexp_hash: "abc".into(),
             board_task_created: true,
+            artifact_projection: Some(PlanArtifactProjection {
+                path: PathBuf::from("/tmp/plan.lisp"),
+                sha256: "def".into(),
+                bytes: 12,
+                overwritten: true,
+            }),
+            artifact_projection_error: None,
         };
         let v = plan_materialization_to_json(&m);
         assert_eq!(v["plan_id"], "p1");
         assert_eq!(v["board_task_id"], "b1");
         assert_eq!(v["version"], 2);
         assert_eq!(v["board_task_created"], true);
+        assert_eq!(v["artifact_projection"]["sha256"], "def");
     }
 
     #[test]
