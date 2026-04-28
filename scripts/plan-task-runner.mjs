@@ -447,7 +447,7 @@ function collectOverlapDiagnostics(nodes, overlapPolicy) {
 // from the lexicographically smallest remaining id following the first
 // in-cycle dependency until it loops back. Used only on cycle errors so
 // the user gets a concrete chain to debug.
-function findCycle(allNodes, idToNode, remaining) {
+function findCycle(_allNodes, idToNode, remaining) {
   const inSet = new Set(remaining);
   const start = [...inSet].sort((a, b) => a.localeCompare(b))[0];
   const path = [];
