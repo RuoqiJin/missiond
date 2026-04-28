@@ -396,13 +396,18 @@
              "crates/missiond-mcp/src/tools/knowledge/workflow.rs"])
 
     (surface task-runner-cli
-      :status "compat"
+      :status "code-aligned-partial"
       :implements [execution-lifecycle verification-receipt final-report]
       :code ["scripts/task-runner-next-action.mjs"
              "scripts/task-runner-dispatch.mjs"
              "scripts/task-runner-submit-dispatch.mjs"
-             "scripts/finalize-task-report.mjs"
-             "scripts/project-task-lifecycle-ledger.mjs"])
+             "scripts/check-task-lifecycle-events.mjs"
+             "scripts/task-runner-append-event.mjs"
+             "scripts/task-runner-finalize-report.mjs"
+             "scripts/task-runner-parent-hotfix.mjs"
+             "scripts/project-task-lifecycle-ledger.mjs"
+             "scripts/verify-task-runner-batch.mjs"]
+      :note "Current task-runner code projects the V3 event-sourced-runtime and orchestrator-final-truth rules through a task-scoped compatibility lifecycle ledger, not yet request-local one-event files. task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log: it uses a sibling lock, rereads under lock, validates the candidate ledger, then atomically renames. task-runner-next-action prioritizes finalize_report before dispatch_task and emits dispatch events through appendLifecycleEvent. task-runner-parent-hotfix is read-only by default and projects parent patches through task-runner-finalize-report, preserving worker commit as :agent_commit_hash while :commit_hash/:final_commit_hash/:verified_commit_hash move to the final commit. project-task-lifecycle-ledger backfills shared-memory/session-trace compatibility facts from lifecycle events. verify-task-runner-batch imports lifecycle validation, append-event, and parent-hotfix projections so batch smoke covers the lifecycle/final-report/receipt path.")
 
     (surface workstation-config
       :status "code-aligned-partial"
@@ -422,5 +427,6 @@
     :v3 "Small executable contracts only: request, artifact, state-machine, policy, implementation map."
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
-             "node scripts/check-v3-request-lisp-isomorphism.mjs"]
+             "node scripts/check-v3-request-lisp-isomorphism.mjs"
+             "node scripts/check-v3-task-lifecycle-isomorphism.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))
