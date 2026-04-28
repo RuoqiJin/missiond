@@ -37,7 +37,7 @@ fn build_properties() -> Value {
 
     p.insert("response".into(), prop_enum(
         "string",
-        "[respond] review decision — approve_intent dispatches to mission_directive approve, creates a hidden BoardTask anchor if no board_task_id is supplied, and then unified_entry plan-authoring projects request-local plan.lisp; approve_plan dispatches to mission_plan approve and materializes request-local plan.lisp into a draft Plan row when no plan_id exists, reusing plan.lisp's BoardTask anchor when present (never execute); execute_plan requires execute=true and routes through mission_plan execute, resolving plan_id from explicit args, plan.lisp, or a prior approve_plan event; reject_intent/reject_plan/ask_question only append a request-local review event",
+        "[respond] review decision — approve_intent dispatches to mission_directive approve, creates a hidden BoardTask anchor if no board_task_id is supplied, and then unified_entry plan-authoring projects request-local plan.lisp; approve_plan dispatches to mission_plan approve and materializes request-local plan.lisp into a draft Plan row when no plan_id exists, reusing plan.lisp's BoardTask anchor when present and stamping :plan_id/:version/:board_task_id back into request-local plan.lisp (never execute); execute_plan requires execute=true and routes through mission_plan execute, resolving plan_id from explicit args, plan.lisp, or a prior approve_plan event; reject_intent/reject_plan/ask_question only append a request-local review event",
         review_decisions,
     ));
     p.insert(
@@ -112,7 +112,7 @@ fn build_properties() -> Value {
     ));
     p.insert("approved_plan_id".into(), prop(
         "string",
-        "[advance execute|respond approve_plan/reject_plan/execute_plan] approved plan UUID. respond approve_plan may omit this when request-local plan.lisp exists; MissionD materializes it before approval.",
+        "[advance execute|respond approve_plan/reject_plan/execute_plan] approved plan UUID. respond approve_plan may omit this when request-local plan.lisp exists; MissionD materializes it before approval and writes the persisted ref back into plan.lisp.",
     ));
     p.insert(
         "plan_id".into(),
@@ -245,7 +245,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          includes executable :target/:objective hints so execute_plan can derive routing from Lisp); approve_plan \
          delegates to mission_plan(action=approve), and when only request-local plan.lisp exists it first \
          materializes that Lisp into a draft Plan row, reusing plan.lisp's BoardTask anchor when present \
-         or creating a hidden anchor only if needed; approve_plan never sets execute=true; execute_plan requires \
+         or creating a hidden anchor only if needed, then stamps :plan_id/:version/:board_task_id back into \
+         request-local plan.lisp so execute_plan can read the artifact directly; approve_plan never sets execute=true; execute_plan requires \
          execute=true (or response=execute_plan) and routes through the existing mission_plan execute \
          path via unified_entry. reject_intent / \
          reject_plan / ask_question never mutate directive/plan approval state and only append a \
