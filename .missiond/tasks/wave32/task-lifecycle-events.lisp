@@ -2,7 +2,7 @@
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave32
   :created-at "2026-04-28T12:32:49Z"
-  :sequence 3
+  :sequence 4
 
 
   (lifecycle-event
@@ -39,4 +39,16 @@
     :seq 3
     :at "2026-04-28T12:35:12Z"
     :touched [".missiond/claudecode/wave32-01-autopilot-timeout-budget-v0.md" ".missiond/tasks/wave32/manifest.lisp"]
-    :summary "Dispatch wave32-01-autopilot-timeout-budget-v0: hard dependencies satisfied."))
+    :summary "Dispatch wave32-01-autopilot-timeout-budget-v0: hard dependencies satisfied.")
+
+  (lifecycle-event
+    :id wave32-01-autopilot-timeout-budget-v0-completion-004
+    :task wave32-01-autopilot-timeout-budget-v0
+    :actor_role claudecode
+    :event_kind completion
+    :commit_role worker
+    :seq 4
+    :at "2026-04-28T12:41:38Z"
+    :touched ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+              ".missiond/v3/missiond-blueprint.lisp"]
+    :summary "Worker completion: pty.send + watchdog projected from BoardTask.timeout_secs (default 1800s, clamp 60..7200, grace 120s, missing-session probe 120s); 11 autopilot tests pass; v3 invariants/note refreshed; awaiting commit."))
