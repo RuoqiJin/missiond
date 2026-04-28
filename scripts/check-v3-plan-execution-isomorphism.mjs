@@ -1,0 +1,245 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const usage = `Usage:
+  node scripts/check-v3-plan-execution-isomorphism.mjs [--json] [--dry-fixture]
+
+Checks the V3 plan.lisp execution isomorphism contract:
+  - V3 blueprint declares plan.lisp as an executable routing artifact.
+  - mission_plan compile dry_run renders routing hints into Lisp.
+  - mission_plan execute can derive target/objective/dispatch hints from plan.sexp_text.
+  - DAG execution parses node-local Lisp hints and forwards them to the same dispatch path.
+  - unified_entry forwards plan compile/execute args instead of inventing a second plan schema.
+`;
+
+const DEFAULT_FILES = {
+  blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
+  unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
+  mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
+};
+
+function main() {
+  const args = process.argv.slice(2);
+  let json = false;
+  let dryFixture = false;
+  for (const arg of args) {
+    if (arg === '--help' || arg === '-h') {
+      console.log(usage);
+      process.exit(0);
+    } else if (arg === '--json') {
+      json = true;
+    } else if (arg === '--dry-fixture') {
+      dryFixture = true;
+    } else {
+      console.error(`unknown arg: ${arg}`);
+      console.error(usage);
+      process.exit(2);
+    }
+  }
+
+  const repoRoot = dryFixture ? buildFixture() : process.cwd();
+  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
+  const result = {
+    ok: diagnostics.length === 0,
+    files: Object.keys(DEFAULT_FILES).length,
+    diagnostics,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.ok) {
+    console.log('v3 plan execution Lisp/code isomorphism check OK');
+  } else {
+    for (const d of diagnostics) {
+      console.error(`${d.file}: ${d.message}`);
+    }
+    console.error(`v3 plan execution Lisp/code isomorphism check FAILED -- ${diagnostics.length} diagnostic(s)`);
+  }
+
+  process.exit(result.ok ? 0 : 1);
+}
+
+function checkFiles(root, files) {
+  const diagnostics = [];
+  const sources = {};
+  for (const [key, rel] of Object.entries(files)) {
+    const abs = path.join(root, rel);
+    try {
+      sources[key] = fs.readFileSync(abs, 'utf8');
+    } catch (err) {
+      diagnostics.push({ file: rel, message: `cannot read: ${err.message}` });
+    }
+  }
+  if (diagnostics.length > 0) return diagnostics;
+
+  requireAll(diagnostics, files.blueprint, sources.blueprint, [
+    '(surface mission_plan',
+    ':status "code-aligned-partial"',
+    'compiler_mode=dry_run must still emit executable routing hints in Lisp',
+    ':default-target mission_task_delegate',
+    'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
+    'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
+    'execute can derive target_source=plan_hint from plan.sexp_text',
+    'DAG execution parses node-local Lisp hints',
+    'node scripts/check-v3-plan-execution-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.planHandler, sources.planHandler, [
+    'fn resolve_dry_run_plan_target',
+    'return Ok("mission_task_delegate");',
+    'fn render_dry_run_plan_sexp',
+    'String::from("(plan-draft\\n")',
+    ':execution-readiness :dry-run-executable-scaffold',
+    'push_lisp_string_field(&mut out, "target", input.target);',
+    'push_lisp_string_field(&mut out, "objective", input.objective);',
+    'out.push_str("  :nodes\\n");',
+    'fn parse_plan_hints',
+    '"target" | "target-tool" | "tool"',
+    '"objective" => store_first(&mut h.objective, &value)',
+    'parse_plan_hints(&plan.sexp_text)',
+    '(t, "plan_hint")',
+    'target_source',
+    'dispatch_strategy_source',
+    'AGENT_TEAM_OBJECTIVE_HINT',
+  ]);
+
+  requireAll(diagnostics, files.planDag, sources.planDag, [
+    'fn parse_node_form',
+    '"target" | "target-tool" | "tool"',
+    '"objective" => set_first(&mut objective, &value)',
+    '"timeout-ms" | "timeout_ms"',
+    '"target-project" | "target_project" | "project"',
+    '"requested-cwd" | "requested_cwd" | "cwd"',
+    '"acceptance-commands" | "acceptance_commands"',
+    '"workstation-dispatch" | "workstation_dispatch"',
+    'node_args.insert("timeout_secs".to_string()',
+    'build_internal_dispatch_args(',
+    'run_workstation_dispatch',
+  ]);
+
+  requireAll(diagnostics, files.unifiedEntry, sources.unifiedEntry, [
+    'pub(crate) fn plan_pipeline',
+    'PipelineDecision::PlanCompile',
+    'PipelineDecision::PlanExecute',
+    'build_plan_compile_args',
+    'build_plan_execute_args',
+    '"compiler_mode"',
+    '"target"',
+    '"dispatch_strategy"',
+    '"target_project"',
+    '"objective"',
+    '"requested_cwd"',
+    '"flow_id"',
+    '"timeout_secs"',
+    '"infer_plan_fields"',
+    'approved_plan_id',
+    'execute_flag',
+  ]);
+
+  requireAll(diagnostics, files.mcpPlan, sources.mcpPlan, [
+    '[compile dry_run | execute] compile dry_run renders this into PLAN.lisp as :target',
+    'runner scans plan.sexp_text for :target / :target-tool / :tool hints',
+    'Source-resolution precedence is explicit_arg > plan_hint > missing',
+    '[execute internal mission_task_delegate] override the auto-derived objective',
+    '[execute internal mission_task_delegate] passthrough timeout',
+    'supported per-node fields: id / target / objective / depends-on / condition / failure-policy / timeout-ms / dispatch-strategy / target-project / requested-cwd / flow-id',
+    'Declaring `:acceptance-commands` without a typed `:acceptance-mode` defaults to `manual_required`',
+  ]);
+
+  return diagnostics;
+}
+
+function requireAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    requireText(diagnostics, file, source, needle);
+  }
+}
+
+function requireText(diagnostics, file, source, needle) {
+  if (!source.includes(needle)) {
+    diagnostics.push({ file, message: `missing required contract text: ${needle}` });
+  }
+}
+
+function buildFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-plan-execution-isomorphism-'));
+  writeFixture(root, DEFAULT_FILES.blueprint, `
+(missiond-blueprint
+  (artifact-contracts
+    (artifact plan
+      :runtime-hints (:default-target mission_task_delegate
+        :rule "compiler_mode=dry_run must still emit executable routing hints in Lisp")
+      :materialization-rule "plan artifact MUST be amended with :plan_id + :version + :board_task_id"))
+  (implementation-map
+    (surface mission_plan
+      :status "code-aligned-partial"
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+  (compression-contract
+    :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
+  writeFixture(root, DEFAULT_FILES.planHandler, `
+fn resolve_dry_run_plan_target() { return Ok("mission_task_delegate"); }
+fn render_dry_run_plan_sexp() {
+  String::from("(plan-draft\\n");
+  ":execution-readiness :dry-run-executable-scaffold";
+  push_lisp_string_field(&mut out, "target", input.target);
+  push_lisp_string_field(&mut out, "objective", input.objective);
+  out.push_str("  :nodes\\n");
+}
+fn parse_plan_hints() {
+  match key.as_str() {
+    "target" | "target-tool" | "tool" => {}
+    "objective" => store_first(&mut h.objective, &value)
+  }
+}
+parse_plan_hints(&plan.sexp_text);
+let x = (t, "plan_hint");
+let target_source = "";
+let dispatch_strategy_source = "";
+const AGENT_TEAM_OBJECTIVE_HINT: &str = "";`);
+  writeFixture(root, DEFAULT_FILES.planDag, `
+fn parse_node_form() {
+  match key.as_str() {
+    "target" | "target-tool" | "tool" => {}
+    "objective" => set_first(&mut objective, &value)
+    "timeout-ms" | "timeout_ms" => {}
+    "target-project" | "target_project" | "project" => {}
+    "requested-cwd" | "requested_cwd" | "cwd" => {}
+    "acceptance-commands" | "acceptance_commands" => {}
+    "workstation-dispatch" | "workstation_dispatch" => {}
+  }
+}
+node_args.insert("timeout_secs".to_string(), Value::Number(secs.into()));
+build_internal_dispatch_args();
+run_workstation_dispatch();`);
+  writeFixture(root, DEFAULT_FILES.unifiedEntry, `
+pub(crate) fn plan_pipeline() {}
+PipelineDecision::PlanCompile;
+PipelineDecision::PlanExecute;
+build_plan_compile_args();
+build_plan_execute_args();
+"compiler_mode" "target" "dispatch_strategy" "target_project" "objective" "requested_cwd" "flow_id" "timeout_secs" "infer_plan_fields";
+let approved_plan_id = "";
+let execute_flag = true;`);
+  writeFixture(root, DEFAULT_FILES.mcpPlan, `
+[compile dry_run | execute] compile dry_run renders this into PLAN.lisp as :target
+runner scans plan.sexp_text for :target / :target-tool / :tool hints
+Source-resolution precedence is explicit_arg > plan_hint > missing
+[execute internal mission_task_delegate] override the auto-derived objective
+[execute internal mission_task_delegate] passthrough timeout
+supported per-node fields: id / target / objective / depends-on / condition / failure-policy / timeout-ms / dispatch-strategy / target-project / requested-cwd / flow-id
+Declaring \`:acceptance-commands\` without a typed \`:acceptance-mode\` defaults to \`manual_required\``);
+  return root;
+}
+
+function writeFixture(root, rel, text) {
+  const abs = path.join(root, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, text.trimStart());
+}
+
+main();

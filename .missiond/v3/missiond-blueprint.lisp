@@ -382,12 +382,12 @@
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"])
 
     (surface mission_plan
-      :status "compat"
+      :status "code-aligned-partial"
       :implements [plan plan-review-gate plan-runner evidence-collector]
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters.")
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters. DAG execution parses node-local Lisp hints (:target, :objective, :timeout-ms, :target-project, :requested-cwd, :acceptance-commands, :workstation-dispatch) and forwards them into the same internal dispatch path. unified_entry owns only routing/argument forwarding: s4 compile forwards target/objective/project hints into mission_plan, and s6 execute forwards approved_plan_id + execute=true knobs without inventing a second plan schema.")
 
     (surface mission_workflow
       :status "compat"
@@ -428,6 +428,7 @@
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
+             "node scripts/check-v3-plan-execution-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))
