@@ -54,11 +54,43 @@
 //   - low    : no rule matched (fallback) OR the trace index is empty / not
 //              supplied.
 //
+// wave26-02 EXTENSION (additive, advisory-only):
+//   When --backend-registry <path> is supplied, the JSON output gains five
+//   OPTIONAL fields (omitted entirely otherwise so wave25 baseline output
+//   is byte-identical):
+//     - backend_readiness_status  : one of {current-default, advisory-only,
+//                                   runtime-ready, unavailable, unknown}
+//     - backend_runtime_allowed   : boolean (false when backend not in registry)
+//     - router_apply_eligible     : boolean — strict gate (see below)
+//     - router_apply_blockers     : string[] — registry's apply_blockers for the
+//                                   recommended backend, augmented with explicit
+//                                   reasons when other gate conditions fail
+//     - backend_registry_path     : echo of the supplied path
+//
+//   router_apply_eligible is true ONLY when ALL SEVEN conditions hold:
+//     1. policy.runtime_replacement === false
+//     2. policy.dry_run_only === true
+//     3. recommendation.chosen_rule_id !== null (status === "computed", i.e. a
+//        rule actually matched — fallback recommendations are never eligible)
+//     4. recommendation.confidence === "high"
+//     5. The recommended backend exists in the registry
+//     6. registry-entry.runtime_allowed === true
+//     7. registry-entry.readiness_status === "runtime-ready"
+//        AND registry-entry.apply_blockers.length === 0
+//
+//   IMPORTANT: condition 7 requires explicit "runtime-ready" — the legacy
+//   "current-default" status (held by claudecode in the seed) is NOT
+//   sufficient. Future apply gates must see an explicit runtime-ready opt-in
+//   beyond the historical default. With the wave26-01 seed registry, NO
+//   backend qualifies as router_apply_eligible=true today (claudecode is
+//   current-default; everything else is advisory-only / unavailable).
+//
 // Usage:
 //   node scripts/recommend-task-backend.mjs \
 //     --task <task.lisp> \
 //     --policy <router-policy.lisp> \
-//     [--trace-index <index.json>] [--json] [--dry-fixture]
+//     [--trace-index <index.json>] [--backend-registry <path>] \
+//     [--json] [--dry-fixture]
 
 import path from 'node:path';
 import fs from 'node:fs';
@@ -102,29 +134,37 @@ export const FALLBACK_BACKEND = 'claudecode';
 export const FALLBACK_REASON = 'insufficient_trace_history';
 
 const usage = `Usage:
-  node scripts/recommend-task-backend.mjs --task <task.lisp> --policy <router-policy.lisp> [--trace-index <index.json>] [--json] [--dry-fixture]
+  node scripts/recommend-task-backend.mjs --task <task.lisp> --policy <router-policy.lisp> [--trace-index <index.json>] [--backend-registry <path>] [--json] [--dry-fixture]
 
 Read-only deterministic CLI: parses a task contract + router-policy and emits
 an explainable backend recommendation. NEVER mutates files, NEVER shells out,
 NEVER calls an LLM. Output dry_run_only is ALWAYS true (cross-wave invariant).
 
 Flags:
-  --task <path>          Path to the task contract Lisp file (required).
-  --policy <path>        Path to the router-policy Lisp file (required).
-  --trace-index <path>   Path to a JSON corpus index produced by
-                         build-session-trace-index.mjs --json (optional).
-  --json                 Emit a deterministic JSON object (keys sorted).
-                         Without --json a human summary is printed.
-  --dry-fixture          Run self-contained fixtures and exit.
+  --task <path>             Path to the task contract Lisp file (required).
+  --policy <path>           Path to the router-policy Lisp file (required).
+  --trace-index <path>      Path to a JSON corpus index produced by
+                            build-session-trace-index.mjs --json (optional).
+  --backend-registry <path> Optional wave26-01 backend readiness registry
+                            (.missiond/router/router-backend-registry-v1.lisp).
+                            When supplied, the recommendation JSON gains
+                            backend_readiness_status / backend_runtime_allowed
+                            / router_apply_eligible / router_apply_blockers /
+                            backend_registry_path fields. When omitted, the
+                            output is byte-identical to the wave25 baseline.
+  --json                    Emit a deterministic JSON object (keys sorted).
+                            Without --json a human summary is printed.
+  --dry-fixture             Run self-contained fixtures and exit.
 `;
 
-function main() {
+async function main() {
   const args = process.argv.slice(2);
   let json = false;
   let dryFixture = false;
   let taskPath = null;
   let policyPath = null;
   let traceIndexPath = null;
+  let backendRegistryPath = null;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -141,6 +181,8 @@ function main() {
       policyPath = args[++i];
     } else if (arg === '--trace-index') {
       traceIndexPath = args[++i];
+    } else if (arg === '--backend-registry') {
+      backendRegistryPath = args[++i];
     } else {
       console.error(`recommend-task-backend: unknown flag ${arg}`);
       console.error(usage);
@@ -149,7 +191,7 @@ function main() {
   }
 
   if (dryFixture) {
-    runFixtures(json);
+    await runFixtures(json);
     return;
   }
 
@@ -163,6 +205,9 @@ function main() {
   const resolvedTask = path.resolve(cwd, taskPath);
   const resolvedPolicy = path.resolve(cwd, policyPath);
   const resolvedIndex = traceIndexPath ? path.resolve(cwd, traceIndexPath) : null;
+  const resolvedRegistry = backendRegistryPath
+    ? path.resolve(cwd, backendRegistryPath)
+    : null;
 
   let task;
   try {
@@ -215,10 +260,36 @@ function main() {
     policyPath: resolvedPolicy,
   });
 
+  // wave26-02: optionally annotate with backend readiness data. The registry
+  // module is lazy-imported here ONLY when the operator supplied --backend-
+  // registry; when the flag is absent we skip the import call entirely so the
+  // wave25 baseline output is byte-identical (zero new fields, zero extra
+  // file I/O). This is the backward-compatibility contract.
+  let annotated = recommendation;
+  if (resolvedRegistry) {
+    let registry;
+    try {
+      // Lazy import: pulled in only when --backend-registry was supplied.
+      const mod = await import('./check-router-backend-registry.mjs');
+      registry = mod.readBackendRegistryFile(resolvedRegistry);
+    } catch (err) {
+      console.error(
+        `recommend-task-backend: failed to read backend registry: ${err.message}`,
+      );
+      process.exit(1);
+    }
+    annotated = annotateRecommendationWithReadiness({
+      recommendation,
+      policy,
+      registry,
+      registryPath: resolvedRegistry,
+    });
+  }
+
   if (json) {
-    console.log(stableStringify(recommendation));
+    console.log(stableStringify(annotated));
   } else {
-    emitText(recommendation);
+    emitText(annotated);
   }
 }
 
@@ -333,6 +404,123 @@ export function recommend({ task, policy, traceIndex, taskPath, policyPath }) {
     evidence,
     policy_path: policyPath ?? policy.source_path ?? null,
     task_path: taskPath ?? task.source_path ?? null,
+  };
+}
+
+// wave26-02: annotate a base recommendation with backend-readiness data.
+//
+// Returns a NEW object (input is not mutated) carrying every field the base
+// recommendation had PLUS five additive fields:
+//   backend_readiness_status / backend_runtime_allowed /
+//   router_apply_eligible   / router_apply_blockers   / backend_registry_path
+//
+// router_apply_eligible is true ONLY when ALL SEVEN conditions hold:
+//   1. policy.runtime_replacement === false
+//   2. policy.dry_run_only === true
+//   3. recommendation.chosen_rule_id !== null  (a rule actually matched —
+//      fallback recommendations are never apply-eligible by design)
+//   4. recommendation.confidence === "high"
+//   5. The recommended backend exists in the registry
+//   6. registry-entry.runtime_allowed === true
+//   7. registry-entry.readiness_status === "runtime-ready"
+//      AND registry-entry.apply_blockers.length === 0
+//
+// IMPORTANT: condition 7 requires explicit "runtime-ready" — the legacy
+// "current-default" status (held by claudecode in the seed) is NOT
+// sufficient. This is intentional: the apply gate must see an explicit
+// runtime-ready opt-in beyond the historical default. With the wave26-01
+// seed registry, NO backend qualifies today.
+//
+// router_apply_blockers always contains the registry's apply_blockers for
+// the recommended backend (or ["recommended_backend not in registry"] when
+// the backend is not declared). Additional, explicit blocker strings are
+// appended for each failing gate condition so reviewers can read the
+// rejection reason directly off the JSON output.
+export function annotateRecommendationWithReadiness({
+  recommendation,
+  policy,
+  registry,
+  registryPath,
+}) {
+  const backendId = recommendation.backend;
+  const entry = registry.backends.find((b) => b.id === backendId) ?? null;
+
+  const inRegistry = entry !== null;
+  const readinessStatus = entry ? entry.readiness_status : 'unknown';
+  // When the entry is missing we surface runtime_allowed=false, NOT null,
+  // because false is the only safe default for an apply gate (an unknown
+  // backend cannot be runtime-allowed). The reason is recorded explicitly
+  // in router_apply_blockers below.
+  const runtimeAllowed = entry ? entry.runtime_allowed === true : false;
+
+  // Start with the registry-declared blockers (verbatim copy, sorted by
+  // source order). When the entry is missing we surface a sentinel string
+  // so reviewers can read the unknown-backend case directly off the row.
+  const blockers = entry ? [...entry.apply_blockers] : ['recommended_backend not in registry'];
+
+  // Gate evaluation. Each failing gate appends an explicit blocker string so
+  // the rejection reason is human-readable and machine-grep-able from a
+  // single field. Passing gates contribute no blocker.
+  const policyValid =
+    policy.runtime_replacement === false && policy.dry_run_only === true;
+  if (!policyValid) {
+    blockers.push(
+      `policy ${policy.id} fails dry-run/advisory invariant (dry_run_only=${policy.dry_run_only}, runtime_replacement=${policy.runtime_replacement})`,
+    );
+  }
+
+  // status === "computed" maps to "a rule matched". The wave26-01 brief uses
+  // the word "computed" while this CLI uses chosen_rule_id !== null; the two
+  // are equivalent — fallback rows have chosen_rule_id===null.
+  const statusComputed = recommendation.chosen_rule_id !== null;
+  if (!statusComputed) {
+    blockers.push('recommendation status is fallback (no rule matched)');
+  }
+
+  const confidenceHigh = recommendation.confidence === 'high';
+  if (!confidenceHigh) {
+    blockers.push(
+      `confidence is ${recommendation.confidence} (apply gate requires high)`,
+    );
+  }
+
+  if (!inRegistry) {
+    // already covered by the sentinel above; no additional blocker needed.
+  } else {
+    if (!runtimeAllowed) {
+      blockers.push(
+        `backend ${backendId} runtime_allowed=false in registry`,
+      );
+    }
+    // Strict: explicit runtime-ready required. current-default is NOT
+    // sufficient — see the doc-comment above for the rationale.
+    if (readinessStatus !== 'runtime-ready') {
+      blockers.push(
+        `backend ${backendId} readiness_status=${readinessStatus} (apply gate requires runtime-ready; current-default is NOT sufficient)`,
+      );
+    }
+    if (entry.apply_blockers.length > 0) {
+      // Already in `blockers` from the verbatim copy above; the gate failure
+      // is implicit. Add no duplicate string.
+    }
+  }
+
+  const apply_eligible =
+    policyValid &&
+    statusComputed &&
+    confidenceHigh &&
+    inRegistry &&
+    runtimeAllowed &&
+    readinessStatus === 'runtime-ready' &&
+    entry.apply_blockers.length === 0;
+
+  return {
+    ...recommendation,
+    backend_readiness_status: readinessStatus,
+    backend_runtime_allowed: runtimeAllowed,
+    router_apply_eligible: apply_eligible,
+    router_apply_blockers: blockers,
+    backend_registry_path: registryPath ?? registry.source_path ?? null,
   };
 }
 
@@ -514,6 +702,22 @@ function emitText(rec) {
     for (const g of rec.non_goals) lines.push(`    - ${g}`);
   }
   lines.push(`  dry_run_only: ${rec.dry_run_only}`);
+  // wave26-02: only print readiness lines when --backend-registry was
+  // supplied (i.e. the additive fields are present on the recommendation).
+  // Absent fields are not "false" — they are deliberately omitted to keep
+  // the wave25 baseline summary byte-stable.
+  if (Object.prototype.hasOwnProperty.call(rec, 'backend_readiness_status')) {
+    lines.push(
+      `  readiness  : status=${rec.backend_readiness_status} ` +
+        `runtime_allowed=${rec.backend_runtime_allowed} ` +
+        `apply_eligible=${rec.router_apply_eligible}`,
+    );
+    if (rec.router_apply_blockers && rec.router_apply_blockers.length > 0) {
+      lines.push('  apply_blockers:');
+      for (const b of rec.router_apply_blockers) lines.push(`    - ${b}`);
+    }
+    lines.push(`  backend_registry: ${rec.backend_registry_path ?? '(none)'}`);
+  }
   console.log(lines.join('\n'));
 }
 
@@ -546,7 +750,23 @@ function sortKeysDeep(value) {
 // pattern); it is rm'd at end.
 // ---------------------------------------------------------------------------
 
-function runFixtures(json = false) {
+async function runFixtures(json = false) {
+  // wave26-02 fixtures need to drive annotateRecommendationWithReadiness with
+  // in-memory registry projections. We load the registry parsing helpers via
+  // dynamic import once (the production code path uses dynamic import too,
+  // gated on --backend-registry; this single fixture-time import keeps the
+  // baseline (no --backend-registry) call graph free of the registry module).
+  const registryMod = await import('./check-router-backend-registry.mjs');
+  const parseRegistryFromString = (source) => {
+    const forms = parseLisp(source, '<fixture-registry>');
+    for (const form of forms) {
+      if (isList(form) && head(form) === registryMod.REGISTRY_HEAD) {
+        return registryMod.projectRegistry(form, '<fixture-registry>');
+      }
+    }
+    throw new Error('no (router-backend-registry ...) form found in <fixture>');
+  };
+
   const fixtures = [
     {
       name: 'pass: matching rule fires (rich trace -> high confidence)',
@@ -1112,6 +1332,270 @@ function runFixtures(json = false) {
         mustEqual('checker.dry_run_only', ckRec.dry_run_only, true);
       },
     },
+    {
+      // wave26-02: synthetic registry where the matched backend is BOTH
+      // runtime-ready AND has runtime_allowed=true AND empty apply_blockers
+      // AND the recommendation is high-confidence + computed (rule matched).
+      // ALL 7 conditions hold ⇒ router_apply_eligible MUST be true. This is
+      // the positive-control fixture for the strict gate.
+      name: 'wave26-readiness-eligible: all 7 conditions met -> apply_eligible=true',
+      category: 'wave26-readiness-eligible',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        const traceIndex = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 8,
+          backendEvents: 8,
+        });
+        const baseRec = recommend({ task, policy, traceIndex });
+        // Confirm the base recommendation matches a rule + high-confidence.
+        mustEqual('base.confidence', baseRec.confidence, 'high');
+        mustEqual('base.chosen_rule_id', baseRec.chosen_rule_id, 'r-docs-to-claudecode');
+        mustEqual('base.backend', baseRec.backend, 'claudecode');
+        // Synthetic registry: claudecode promoted to runtime-ready (the
+        // future opt-in shape that the apply gate requires).
+        const registry = parseRegistryFromString(`(router-backend-registry fixture-eligible
+          :schema "missiond.router-backend-registry.v1"
+          :version "v1"
+          (backend
+            :id claudecode
+            :readiness_status runtime-ready
+            :runtime_allowed true
+            :apply_blockers []
+            :substrate "missiond-daemon::handlers::knowledge::workstation_dispatch"
+            :non-goals ["does not replace runtime dispatch"]))`);
+        const annotated = annotateRecommendationWithReadiness({
+          recommendation: baseRec,
+          policy,
+          registry,
+          registryPath: '<fixture-eligible>',
+        });
+        mustEqual('annotated.backend_readiness_status', annotated.backend_readiness_status, 'runtime-ready');
+        mustEqual('annotated.backend_runtime_allowed', annotated.backend_runtime_allowed, true);
+        mustEqual('annotated.router_apply_eligible', annotated.router_apply_eligible, true);
+        mustEqual('annotated.router_apply_blockers.length', annotated.router_apply_blockers.length, 0);
+        mustEqual('annotated.backend_registry_path', annotated.backend_registry_path, '<fixture-eligible>');
+        // Cross-wave invariant survives annotation.
+        mustEqual('annotated.dry_run_only', annotated.dry_run_only, true);
+      },
+    },
+    {
+      // wave26-02: the seed-shape registry where claudecode is current-default
+      // (NOT runtime-ready). Even with high-confidence + matched rule, the
+      // strict gate REJECTS because condition 7 (readiness_status=runtime-
+      // ready) fails. Blocker string MUST mention current-default explicitly
+      // so reviewers see the rejection reason without re-running the CLI.
+      name: 'wave26-readiness-blocked-current-default: seed-shape registry -> apply_eligible=false',
+      category: 'wave26-readiness-blocked-current-default',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        const traceIndex = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 8,
+          backendEvents: 8,
+        });
+        const baseRec = recommend({ task, policy, traceIndex });
+        mustEqual('base.confidence', baseRec.confidence, 'high');
+        mustEqual('base.backend', baseRec.backend, 'claudecode');
+        // Seed-shape registry: claudecode current-default + runtime_allowed
+        // true + 0 blockers — exactly the wave26-01 seed shape.
+        const registry = parseRegistryFromString(`(router-backend-registry fixture-seed-shape
+          :schema "missiond.router-backend-registry.v1"
+          :version "v1"
+          (backend
+            :id claudecode
+            :readiness_status current-default
+            :runtime_allowed true
+            :apply_blockers []
+            :substrate "missiond-daemon::handlers::knowledge::workstation_dispatch"
+            :non-goals ["does not replace runtime dispatch"]))`);
+        const annotated = annotateRecommendationWithReadiness({
+          recommendation: baseRec,
+          policy,
+          registry,
+          registryPath: '<fixture-seed-shape>',
+        });
+        mustEqual('annotated.backend_readiness_status', annotated.backend_readiness_status, 'current-default');
+        mustEqual('annotated.backend_runtime_allowed', annotated.backend_runtime_allowed, true);
+        // The cross-wave point: even with claudecode current-default +
+        // runtime_allowed=true, apply_eligible MUST be false. The apply
+        // gate requires the explicit runtime-ready opt-in.
+        mustEqual('annotated.router_apply_eligible', annotated.router_apply_eligible, false);
+        // Blocker string explicitly mentions current-default (case-insensitive
+        // substring search to keep the assertion robust against future
+        // wording tweaks).
+        const joined = annotated.router_apply_blockers.join(' | ');
+        if (!/current-default/.test(joined)) {
+          throw new Error(`expected blocker mentioning current-default, got: ${joined}`);
+        }
+        if (!/runtime-ready/.test(joined)) {
+          throw new Error(`expected blocker mentioning runtime-ready opt-in, got: ${joined}`);
+        }
+      },
+    },
+    {
+      // wave26-02: matched backend IS runtime-ready + runtime_allowed=true,
+      // but the recommendation confidence is medium (sparse trace). Gate
+      // condition 4 fails. Blocker string MUST mention confidence so the
+      // reason is grep-able from the JSON output alone.
+      name: 'wave26-readiness-blocked-confidence-medium: medium confidence -> apply_eligible=false',
+      category: 'wave26-readiness-blocked-confidence-medium',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        // Sparse trace -> medium confidence (1..4 range hits the medium bucket).
+        const traceIndex = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 2,
+          backendEvents: 2,
+        });
+        const baseRec = recommend({ task, policy, traceIndex });
+        mustEqual('base.confidence', baseRec.confidence, 'medium');
+        mustEqual('base.backend', baseRec.backend, 'claudecode');
+        const registry = parseRegistryFromString(`(router-backend-registry fixture-conf-med
+          :schema "missiond.router-backend-registry.v1"
+          :version "v1"
+          (backend
+            :id claudecode
+            :readiness_status runtime-ready
+            :runtime_allowed true
+            :apply_blockers []
+            :substrate "missiond-daemon::handlers::knowledge::workstation_dispatch"
+            :non-goals ["does not replace runtime dispatch"]))`);
+        const annotated = annotateRecommendationWithReadiness({
+          recommendation: baseRec,
+          policy,
+          registry,
+          registryPath: '<fixture-conf-med>',
+        });
+        // Gate fails on confidence even though everything else is green.
+        mustEqual('annotated.router_apply_eligible', annotated.router_apply_eligible, false);
+        mustEqual('annotated.backend_readiness_status', annotated.backend_readiness_status, 'runtime-ready');
+        mustEqual('annotated.backend_runtime_allowed', annotated.backend_runtime_allowed, true);
+        const joined = annotated.router_apply_blockers.join(' | ');
+        if (!/confidence/.test(joined)) {
+          throw new Error(`expected blocker mentioning confidence, got: ${joined}`);
+        }
+      },
+    },
+    {
+      // wave26-02: registry exists but does NOT contain the recommended
+      // backend. Gate condition 5 fails. backend_readiness_status MUST be
+      // "unknown" (sentinel) and the blocker list MUST include the
+      // explicit "recommended_backend not in registry" reason.
+      name: 'wave26-readiness-unknown-backend: backend missing from registry -> status=unknown',
+      category: 'wave26-readiness-unknown-backend',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        const traceIndex = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 8,
+          backendEvents: 8,
+        });
+        const baseRec = recommend({ task, policy, traceIndex });
+        mustEqual('base.backend', baseRec.backend, 'claudecode');
+        // Registry intentionally only declares verifier-worker; claudecode
+        // (the recommended backend) is absent.
+        const registry = parseRegistryFromString(`(router-backend-registry fixture-unknown
+          :schema "missiond.router-backend-registry.v1"
+          :version "v1"
+          (backend
+            :id verifier-worker
+            :readiness_status advisory-only
+            :runtime_allowed false
+            :apply_blockers ["no runtime adapter shipped"]
+            :substrate nil
+            :non-goals ["does not replace runtime dispatch"]))`);
+        const annotated = annotateRecommendationWithReadiness({
+          recommendation: baseRec,
+          policy,
+          registry,
+          registryPath: '<fixture-unknown>',
+        });
+        mustEqual('annotated.backend_readiness_status', annotated.backend_readiness_status, 'unknown');
+        mustEqual('annotated.backend_runtime_allowed', annotated.backend_runtime_allowed, false);
+        mustEqual('annotated.router_apply_eligible', annotated.router_apply_eligible, false);
+        // The sentinel string is the FIRST blocker (we surface it before
+        // gate-derived blockers in annotateRecommendationWithReadiness).
+        if (annotated.router_apply_blockers[0] !== 'recommended_backend not in registry') {
+          throw new Error(
+            `expected first blocker to be the unknown-backend sentinel, got: ${annotated.router_apply_blockers[0]}`,
+          );
+        }
+      },
+    },
+    {
+      // wave26-02 BACKWARD-COMPAT contract: when --backend-registry is NOT
+      // supplied, the recommendation output MUST be byte-identical to the
+      // wave25 baseline (no new fields, no new keys at any depth).
+      // Annotate is NOT called; we check the recommendation surface
+      // directly.
+      name: 'wave26-readiness-without-registry-flag: no registry -> output byte-identical to baseline',
+      category: 'wave26-readiness-without-registry-flag',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        const traceIndex = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 8,
+          backendEvents: 8,
+        });
+        const rec = recommend({ task, policy, traceIndex });
+        // None of the wave26-02 additive fields are present.
+        const forbidden = [
+          'backend_readiness_status',
+          'backend_runtime_allowed',
+          'router_apply_eligible',
+          'router_apply_blockers',
+          'backend_registry_path',
+        ];
+        for (const key of forbidden) {
+          if (Object.prototype.hasOwnProperty.call(rec, key)) {
+            throw new Error(
+              `wave26 backward-compat broken: baseline recommend() emitted ${key}`,
+            );
+          }
+        }
+        // The wave25 baseline top-level keys, in alphabetical order.
+        const expectedKeys = [
+          'backend',
+          'chosen_rule_id',
+          'confidence',
+          'dry_run_only',
+          'evidence',
+          'matched_rules',
+          'non_goals',
+          'policy_path',
+          'rejected_rules',
+          'schema',
+          'task_id',
+          'task_path',
+        ];
+        const actualKeys = Object.keys(rec).sort();
+        if (actualKeys.join(',') !== expectedKeys.join(',')) {
+          throw new Error(
+            `wave26 backward-compat broken: baseline keys ${actualKeys.join(',')} do not match wave25 set ${expectedKeys.join(',')}`,
+          );
+        }
+        // Stable JSON surface also free of the wave26-02 keys.
+        const stable = stableStringify(rec);
+        for (const key of forbidden) {
+          if (new RegExp(`"${key}"`).test(stable)) {
+            throw new Error(
+              `wave26 backward-compat broken: stable JSON contains "${key}" without --backend-registry`,
+            );
+          }
+        }
+      },
+    },
   ];
 
   let failed = 0;
@@ -1360,5 +1844,12 @@ void fs;
 // Only run the CLI when invoked directly. Keep recommend/projectTaskContract
 // importable for tooling that wants to drive the algorithm in-process.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  // main() is async because the wave26-02 --backend-registry path uses
+  // dynamic import to keep the registry module out of the wave25 baseline
+  // call graph. Surface any rejection as a non-zero exit; errors inside
+  // main() already self-report and exit before reaching this catch.
+  main().catch((err) => {
+    console.error(`recommend-task-backend: ${err.message}`);
+    process.exit(1);
+  });
 }

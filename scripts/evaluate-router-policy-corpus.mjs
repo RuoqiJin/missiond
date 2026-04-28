@@ -40,14 +40,38 @@
 //         matched_rule_id, fallback_reason }, ...
 //     ]
 //   }
+//
+// wave26-02 EXTENSION (additive, advisory-only):
+//   When --backend-registry <path> is supplied, the JSON output gains TWO
+//   OPTIONAL top-level fields (omitted entirely otherwise so wave25 baseline
+//   output is byte-identical):
+//     - by_backend_readiness  : { <readiness_status>: <count>, ... } including
+//                               "unknown" when the recommended backend is not
+//                               in the registry. Always populated for every
+//                               readiness status that appears at least once.
+//     - apply_eligible_count  : count of per_task rows where the strict 7-
+//                               condition gate evaluates to router_apply_
+//                               eligible=true. With the wave26-01 seed
+//                               registry this is expected to be 0 because no
+//                               backend declares :readiness_status runtime-
+//                               ready (claudecode is current-default).
+//   Existing top-level keys (totals, by_backend, by_confidence, fallback_
+//   count, rejected_count, per_task, policy_path, schema, tasks_root,
+//   trace_index_source) keep their meanings unchanged. The per_task rows do
+//   NOT gain new keys — the readiness aggregates are derived in-line and
+//   only the top-level rollup is surfaced. This keeps the per_task row
+//   shape backward-compatible with the wave25-02 report contract.
 
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import { head, isList, parseLisp } from './lib/missiond_lisp.mjs';
+
 import {
   recommend,
   readTaskContractFile,
+  annotateRecommendationWithReadiness,
   FALLBACK_BACKEND,
   FALLBACK_REASON,
 } from './recommend-task-backend.mjs';
@@ -68,7 +92,7 @@ import { parseTraceEvents } from './check-session-trace.mjs';
 export const SCHEMA = 'missiond.router-policy-evaluation.v0';
 
 const usage = `Usage:
-  node scripts/evaluate-router-policy-corpus.mjs --policy <router-policy.lisp> [--tasks-root .missiond/tasks] [--trace-index <index.json>] [--json] [--dry-fixture]
+  node scripts/evaluate-router-policy-corpus.mjs --policy <router-policy.lisp> [--tasks-root .missiond/tasks] [--trace-index <index.json>] [--backend-registry <path>] [--json] [--dry-fixture]
 
 Read-only deterministic evaluator: walks a directory of task contracts and
 runs recommend() against each contract, then aggregates totals / by_backend /
@@ -77,25 +101,32 @@ by_confidence / fallback_count / rejected_count into a stable JSON report.
 NEVER mutates files, NEVER shells out, NEVER calls an LLM.
 
 Flags:
-  --policy <path>          Path to the router-policy Lisp file (required).
-  --tasks-root <dir>       Directory to walk for *.lisp task contracts.
-                           Default: .missiond/tasks
-  --trace-index <path>     JSON corpus index (output of
-                           build-session-trace-index.mjs --json). When omitted,
-                           the index is built in-process from any
-                           session-trace.lisp under --tasks-root.
-  --json                   Emit deterministic JSON (keys sorted).
-                           Without --json a human summary is printed.
-  --dry-fixture            Run self-contained fixtures and exit.
+  --policy <path>           Path to the router-policy Lisp file (required).
+  --tasks-root <dir>        Directory to walk for *.lisp task contracts.
+                            Default: .missiond/tasks
+  --trace-index <path>      JSON corpus index (output of
+                            build-session-trace-index.mjs --json). When omitted,
+                            the index is built in-process from any
+                            session-trace.lisp under --tasks-root.
+  --backend-registry <path> Optional wave26-01 backend readiness registry
+                            (.missiond/router/router-backend-registry-v1.lisp).
+                            When supplied, the report gains by_backend_
+                            readiness and apply_eligible_count top-level
+                            fields. When omitted, output is byte-identical
+                            to the wave25 baseline.
+  --json                    Emit deterministic JSON (keys sorted).
+                            Without --json a human summary is printed.
+  --dry-fixture             Run self-contained fixtures and exit.
 `;
 
-function main() {
+async function main() {
   const args = process.argv.slice(2);
   let json = false;
   let dryFixture = false;
   let policyPath = null;
   let tasksRoot = null;
   let traceIndexPath = null;
+  let backendRegistryPath = null;
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -112,6 +143,8 @@ function main() {
       tasksRoot = args[++i];
     } else if (arg === '--trace-index') {
       traceIndexPath = args[++i];
+    } else if (arg === '--backend-registry') {
+      backendRegistryPath = args[++i];
     } else {
       console.error(`evaluate-router-policy-corpus: unknown flag ${arg}`);
       console.error(usage);
@@ -120,7 +153,7 @@ function main() {
   }
 
   if (dryFixture) {
-    runFixtures(json);
+    await runFixtures(json);
     return;
   }
 
@@ -135,6 +168,9 @@ function main() {
   const resolvedTasksRoot = path.resolve(cwd, tasksRoot ?? DEFAULT_SCAN_ROOT);
   const resolvedTraceIndex = traceIndexPath
     ? path.resolve(cwd, traceIndexPath)
+    : null;
+  const resolvedRegistry = backendRegistryPath
+    ? path.resolve(cwd, backendRegistryPath)
     : null;
 
   // Read the router policy. Both the wave24-01 checker and the wave24-03 CLI
@@ -193,6 +229,24 @@ function main() {
     }
   }
 
+  // wave26-02: optionally load the backend readiness registry. The registry
+  // module is lazy-imported here ONLY when the operator supplied --backend-
+  // registry; when the flag is absent we skip the import call entirely so the
+  // wave25 baseline output is byte-identical (zero new fields, zero extra
+  // file I/O). This is the backward-compatibility contract.
+  let registry = null;
+  if (resolvedRegistry) {
+    try {
+      const mod = await import('./check-router-backend-registry.mjs');
+      registry = mod.readBackendRegistryFile(resolvedRegistry);
+    } catch (err) {
+      console.error(
+        `evaluate-router-policy-corpus: failed to read backend registry: ${err.message}`,
+      );
+      process.exit(1);
+    }
+  }
+
   // Walk the corpus.
   const taskFiles = findTaskContractFiles(resolvedTasksRoot);
 
@@ -204,6 +258,8 @@ function main() {
     tasksRoot: resolvedTasksRoot,
     traceIndex,
     traceIndexSource,
+    registry,
+    registryPath: resolvedRegistry,
   });
 
   if (json) {
@@ -265,6 +321,8 @@ export function evaluateCorpus({
   tasksRoot,
   traceIndex,
   traceIndexSource,
+  registry = null,
+  registryPath = null,
 }) {
   // by_backend buckets are seeded with every backend the wave24-01 schema
   // defines so the report shape is stable even when the corpus does not
@@ -278,6 +336,12 @@ export function evaluateCorpus({
   let fallbackCount = 0;
   let rejectedCount = 0;
   const perTask = [];
+
+  // wave26-02: readiness aggregates. Only populated when a registry was
+  // supplied; otherwise both stay null and are stripped from the output to
+  // preserve the wave25 baseline shape (byte-identical).
+  const byBackendReadiness = registry ? {} : null;
+  let applyEligibleCount = registry ? 0 : null;
 
   for (const file of taskFiles) {
     const relPath = repoRelative(cwd, file);
@@ -301,13 +365,27 @@ export function evaluateCorpus({
       continue;
     }
 
-    const rec = recommend({
+    const baseRec = recommend({
       task,
       policy,
       traceIndex,
       taskPath: file,
       policyPath,
     });
+
+    // wave26-02: when a registry was supplied, annotate the per-task
+    // recommendation with readiness data so the rollup can count
+    // by_backend_readiness and apply_eligible_count. The annotated record
+    // is used ONLY for aggregation; the per_task row shape stays
+    // backward-compatible (no new keys appear on per_task entries).
+    const rec = registry
+      ? annotateRecommendationWithReadiness({
+          recommendation: baseRec,
+          policy,
+          registry,
+          registryPath,
+        })
+      : baseRec;
 
     if (byBackend[rec.backend] === undefined) {
       // A backend that the policy recommends but the schema enum does not
@@ -316,6 +394,12 @@ export function evaluateCorpus({
     }
     byBackend[rec.backend] += 1;
     byConfidence[rec.confidence] = (byConfidence[rec.confidence] ?? 0) + 1;
+
+    if (registry) {
+      const readinessKey = rec.backend_readiness_status;
+      byBackendReadiness[readinessKey] = (byBackendReadiness[readinessKey] ?? 0) + 1;
+      if (rec.router_apply_eligible === true) applyEligibleCount += 1;
+    }
 
     const fallbackReason =
       rec.evidence?.reason && typeof rec.evidence.reason === 'string'
@@ -345,7 +429,7 @@ export function evaluateCorpus({
 
   perTask.sort((a, b) => (a.task_id < b.task_id ? -1 : a.task_id > b.task_id ? 1 : 0));
 
-  return {
+  const out = {
     by_backend: byBackend,
     by_confidence: byConfidence,
     fallback_count: fallbackCount,
@@ -361,6 +445,14 @@ export function evaluateCorpus({
     },
     trace_index_source: traceIndexSource,
   };
+  // wave26-02: append the readiness aggregates ONLY when a registry was
+  // supplied. The wave25 baseline shape is unchanged when registry === null,
+  // so the additive contract holds (no extra keys appear in older callers).
+  if (registry) {
+    out.by_backend_readiness = byBackendReadiness;
+    out.apply_eligible_count = applyEligibleCount;
+  }
+  return out;
 }
 
 // Build a session-trace corpus index in-process. Mirrors the production
@@ -422,6 +514,17 @@ function emitText(evaluation) {
       );
     }
   }
+  // wave26-02: only print readiness lines when a registry was supplied
+  // (i.e. the additive fields are present on the evaluation result).
+  if (Object.prototype.hasOwnProperty.call(evaluation, 'by_backend_readiness')) {
+    lines.push('  by_backend_readiness:');
+    for (const status of Object.keys(evaluation.by_backend_readiness).sort()) {
+      lines.push(
+        `    - ${status.padEnd(16)} ${evaluation.by_backend_readiness[status]}`,
+      );
+    }
+    lines.push(`  apply_eligible_count: ${evaluation.apply_eligible_count}`);
+  }
   console.log(lines.join('\n'));
 }
 
@@ -451,7 +554,24 @@ function sortKeysDeep(value) {
 // directly mapping to the wave25-01 contract's --dry-fixture targets.
 // ---------------------------------------------------------------------------
 
-function runFixtures(json = false) {
+async function runFixtures(json = false) {
+  // wave26-02 fixtures need to drive the registry-aware aggregator with
+  // in-memory registry projections. We load the registry parsing helpers
+  // via dynamic import once (the production code path uses dynamic import
+  // too, gated on --backend-registry; this single fixture-time import keeps
+  // the baseline (no --backend-registry) call graph free of the registry
+  // module).
+  const registryMod = await import('./check-router-backend-registry.mjs');
+  const parseRegistryFromString = (source) => {
+    const forms = parseLisp(source, '<fixture-registry>');
+    for (const form of forms) {
+      if (isList(form) && head(form) === registryMod.REGISTRY_HEAD) {
+        return registryMod.projectRegistry(form, '<fixture-registry>');
+      }
+    }
+    throw new Error('no (router-backend-registry ...) form found in <fixture>');
+  };
+
   const fixtures = [
     {
       name: 'empty corpus -> totals=0, no per_task rows',
@@ -908,6 +1028,211 @@ function runFixtures(json = false) {
         }
       },
     },
+    {
+      // wave26-02: with --backend-registry supplied, the report MUST gain
+      // by_backend_readiness (per readiness_status counts) and
+      // apply_eligible_count (count of per_task rows where the strict 7-
+      // condition gate evaluates true). 3-task synthetic corpus + a
+      // synthetic registry where claudecode is runtime-ready (so the docs
+      // task with high-confidence trace becomes apply-eligible) and the
+      // rest are advisory-only.
+      name: 'wave26-corpus-with-registry-aggregates-readiness',
+      category: 'wave26-corpus-with-registry',
+      run: () => {
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wave26-02-corpus-'));
+        try {
+          const tasksRoot = path.join(tmp, 'tasks');
+          fs.mkdirSync(tasksRoot, { recursive: true });
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-docs.lisp'),
+            taskDocsText('fx-docs'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-checker.lisp'),
+            taskCheckerText('fx-checker'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-review.lisp'),
+            taskReviewText('fx-review'),
+            'utf8',
+          );
+          // Plant a session-trace.lisp so the docs task gets >=5 events on
+          // claudecode and lands in the high-confidence bucket; the other
+          // two tasks have no events (low-confidence) so they will fail
+          // the apply-eligible gate even though the registry might mark
+          // their backends runtime-ready in this fixture.
+          fs.writeFileSync(
+            path.join(tasksRoot, 'session-trace.lisp'),
+            traceFixtureText('fx-docs', 'claudecode'),
+            'utf8',
+          );
+          const policyPath = writePolicyFile(tmp, seedPolicyText());
+          const policy = readRouterPolicyFile(policyPath);
+          const taskFiles = findTaskContractFiles(tasksRoot);
+          const traceIndex = buildIndexFromTasksRoot(tasksRoot);
+          // Synthetic registry: claudecode is runtime-ready (the future
+          // opt-in shape that the apply gate requires); the others are
+          // advisory-only. The fx-docs task should land apply-eligible
+          // (high-confidence claudecode + runtime-ready); fx-checker
+          // (deterministic-checker, low-confidence + advisory-only) and
+          // fx-review (verifier-worker, low-confidence + advisory-only)
+          // should NOT.
+          const registry = parseRegistryFromString(`(router-backend-registry fixture-corpus
+            :schema "missiond.router-backend-registry.v1"
+            :version "v1"
+            (backend
+              :id claudecode
+              :readiness_status runtime-ready
+              :runtime_allowed true
+              :apply_blockers []
+              :substrate "missiond-daemon::handlers::knowledge::workstation_dispatch"
+              :non-goals ["does not replace runtime dispatch"])
+            (backend
+              :id deterministic-checker
+              :readiness_status advisory-only
+              :runtime_allowed false
+              :apply_blockers ["no runtime adapter shipped"]
+              :substrate nil
+              :non-goals ["does not replace runtime dispatch"])
+            (backend
+              :id verifier-worker
+              :readiness_status advisory-only
+              :runtime_allowed false
+              :apply_blockers ["no runtime adapter shipped"]
+              :substrate nil
+              :non-goals ["does not replace runtime dispatch"]))`);
+          const evalResult = evaluateCorpus({
+            cwd: tmp,
+            taskFiles,
+            policy,
+            policyPath,
+            tasksRoot,
+            traceIndex,
+            traceIndexSource: 'built-in-process:tasks',
+            registry,
+            registryPath: '<fixture-corpus-registry>',
+          });
+          mustEqual('totals.tasks', evalResult.totals.tasks, 3);
+          // by_backend_readiness present and populated.
+          if (!Object.prototype.hasOwnProperty.call(evalResult, 'by_backend_readiness')) {
+            throw new Error('expected by_backend_readiness on output when registry supplied');
+          }
+          // 1 runtime-ready (claudecode/fx-docs) + 2 advisory-only (deterministic-
+          // checker/fx-checker, verifier-worker/fx-review).
+          mustEqual(
+            'by_backend_readiness[runtime-ready]',
+            evalResult.by_backend_readiness['runtime-ready'],
+            1,
+          );
+          mustEqual(
+            'by_backend_readiness[advisory-only]',
+            evalResult.by_backend_readiness['advisory-only'],
+            2,
+          );
+          // apply_eligible_count == 1 (fx-docs only — high confidence,
+          // runtime-ready, runtime_allowed=true, 0 blockers).
+          mustEqual('apply_eligible_count', evalResult.apply_eligible_count, 1);
+          // Sanity: per_task rows are NOT mutated with new keys (rows stay
+          // backward-compatible with the wave25-02 report contract).
+          for (const row of evalResult.per_task) {
+            const keys = Object.keys(row).sort();
+            const expected = [
+              'backend',
+              'confidence',
+              'fallback_reason',
+              'matched_rule_id',
+              'task_id',
+              'task_path',
+            ];
+            if (keys.join(',') !== expected.join(',')) {
+              throw new Error(
+                `wave26-02 corpus: per_task row keys ${keys.join(',')} drifted from baseline ${expected.join(',')}`,
+              );
+            }
+          }
+        } finally {
+          fs.rmSync(tmp, { recursive: true, force: true });
+        }
+      },
+    },
+    {
+      // wave26-02 BACKWARD-COMPAT contract for the corpus evaluator: when
+      // --backend-registry is NOT supplied, the report MUST be byte-
+      // identical to the wave25 baseline (no by_backend_readiness, no
+      // apply_eligible_count). We compare two evaluations of the SAME
+      // corpus — one with registry=null and one omitting registry entirely
+      // — and assert the JSON bytes match exactly.
+      name: 'wave26-corpus-without-registry-omits-fields',
+      category: 'wave26-corpus-without-registry',
+      run: () => {
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wave26-02-bcompat-'));
+        try {
+          const tasksRoot = path.join(tmp, 'tasks');
+          fs.mkdirSync(tasksRoot, { recursive: true });
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-docs.lisp'),
+            taskDocsText('fx-docs'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-checker.lisp'),
+            taskCheckerText('fx-checker'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-review.lisp'),
+            taskReviewText('fx-review'),
+            'utf8',
+          );
+          const policyPath = writePolicyFile(tmp, seedPolicyText());
+          // Run via the same in-process helper the other corpus fixtures
+          // use; runOnTmp does NOT pass a registry so this is the wave25
+          // baseline shape.
+          const baseline = runOnTmp({ tmp, policyPath, tasksRoot });
+          // Forbidden additive keys must be absent.
+          const forbidden = ['by_backend_readiness', 'apply_eligible_count'];
+          for (const key of forbidden) {
+            if (Object.prototype.hasOwnProperty.call(baseline, key)) {
+              throw new Error(
+                `wave26 backward-compat broken: baseline evaluator emitted ${key}`,
+              );
+            }
+          }
+          // Stable JSON surface also free of the wave26-02 keys.
+          const stable = stableStringify(baseline);
+          for (const key of forbidden) {
+            if (new RegExp(`"${key}"`).test(stable)) {
+              throw new Error(
+                `wave26 backward-compat broken: stable JSON contains "${key}" without --backend-registry`,
+              );
+            }
+          }
+          // Top-level keys are exactly the wave25 baseline set.
+          const expectedKeys = [
+            'by_backend',
+            'by_confidence',
+            'fallback_count',
+            'per_task',
+            'policy_path',
+            'rejected_count',
+            'schema',
+            'tasks_root',
+            'totals',
+            'trace_index_source',
+          ];
+          const actualKeys = Object.keys(baseline).sort();
+          if (actualKeys.join(',') !== expectedKeys.join(',')) {
+            throw new Error(
+              `wave26 backward-compat broken: baseline keys ${actualKeys.join(',')} drifted from wave25 set ${expectedKeys.join(',')}`,
+            );
+          }
+        } finally {
+          fs.rmSync(tmp, { recursive: true, force: true });
+        }
+      },
+    },
   ];
 
   let failed = 0;
@@ -1109,5 +1434,12 @@ function traceFixtureText(taskId, backend) {
 // tooling (a wave25-04 renderer surface, e.g.) can drive the algorithm
 // in-process without re-implementing the walker.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  // main() is async because the wave26-02 --backend-registry path uses
+  // dynamic import to keep the registry module out of the wave25 baseline
+  // call graph. Surface any rejection as a non-zero exit; errors inside
+  // main() already self-report and exit before reaching this catch.
+  main().catch((err) => {
+    console.error(`evaluate-router-policy-corpus: ${err.message}`);
+    process.exit(1);
+  });
 }
