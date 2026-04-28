@@ -233,7 +233,11 @@
         ("never auto-approves intent or plan when the user said reject/ask"
          "never spawns workstation work directly — execute_plan is a thin wrapper around mission_plan execute"
          "never invents a directive/plan id; missing-ref always returns blocked"
-         "never edits the inner mission_directive / mission_plan / unified_entry handlers — adapter only")))
+         "never edits the inner mission_directive / mission_plan / unified_entry handlers — adapter only"))
+    (tool-schema-contract
+      :surface mission_request
+      :rule "The MCP input_schema is a projection of this Lisp review-response contract, not a permissive hidden bag; fields used for plan routing such as :target, :objective, :flow_id, :dispatch_strategy, :parallelism, :target_project, :cwd, :project, :execute_mode, :scheduler_mode, and :dry_run must be visible as explicit tool properties even when additionalProperties remains true for compatibility."
+      :implementation "crates/missiond-mcp/src/tools/knowledge/request.rs builds properties structurally to avoid serde_json::json! recursion limits as the Lisp contract grows."))
 
   (state-machines
     (state-machine unified-entry

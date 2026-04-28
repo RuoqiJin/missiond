@@ -334,6 +334,35 @@ mod tests {
     }
 
     #[test]
+    fn test_request_schema_exposes_plan_routing_contract() {
+        let def = get_tool("mission_request").expect("mission_request not registered");
+        let props = def
+            .input_schema
+            .pointer("/properties")
+            .and_then(|v| v.as_object())
+            .expect("mission_request schema properties");
+        for field in [
+            "target",
+            "objective",
+            "flow_id",
+            "dispatch_strategy",
+            "parallelism",
+            "target_project",
+            "cwd",
+            "project",
+            "execute_mode",
+            "scheduler_mode",
+            "dry_run",
+        ] {
+            assert!(
+                props.contains_key(field),
+                "mission_request schema must expose `{}` from the Lisp routing contract",
+                field
+            );
+        }
+    }
+
+    #[test]
     fn test_global_instruction_surface_registered() {
         let def = get_tool("mission_global_instruction")
             .expect("mission_global_instruction not registered");
