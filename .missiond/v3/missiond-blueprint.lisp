@@ -391,10 +391,11 @@
       :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters. DAG execution parses node-local Lisp hints (:target, :objective, :timeout-ms, :target-project, :requested-cwd, :acceptance-commands, :workstation-dispatch) and forwards them into the same internal dispatch path. unified_entry owns only routing/argument forwarding: s4 compile forwards target/objective/project hints into mission_plan, and s6 execute forwards approved_plan_id + execute=true knobs without inventing a second plan schema.")
 
     (surface mission_workflow
-      :status "compat"
+      :status "code-aligned-partial"
       :implements [workflow workflow-distiller]
       :code ["crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
-             "crates/missiond-mcp/src/tools/knowledge/workflow.rs"])
+             "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
+      :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules and validates balanced workflow_sexp before persisting a Workflow row. compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp or workflow_path, then deterministic mode validates Lisp and emits executable YAML through the same workflow surface; run_methodology dispatches that compiled YAML. Optional file-first writes use ArtifactKind::Workflow at .missiond/workflows/<topic>.lisp with partial-on-file-failure semantics, review gates remain receipt-only, and auto_sonnet_policy={off|safe_after_rules|dry_run} is a closed enum. Remaining gap: the persisted workflow file mirrors workflow_sexp/source methodology rather than a fully enriched V3 workflow artifact with :workflow_id/:source_plans/:match_rules/:steps embedded.")
 
     (surface task-runner-cli
       :status "code-aligned-partial"
@@ -431,6 +432,7 @@
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-intent-alignment-isomorphism.mjs"
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
+             "node scripts/check-v3-workflow-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))
