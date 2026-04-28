@@ -481,6 +481,9 @@ fn build_plan_compile_args(approved_directive_id: String, board_task_id: String,
     if let Some(o) = nonblank(args.get("objective")) {
         out.insert("objective".into(), json!(o));
     }
+    if let Some(cwd) = nonblank(args.get("requested_cwd")) {
+        out.insert("requested_cwd".into(), json!(cwd));
+    }
     if let Some(flow_id) = nonblank(args.get("flow_id")) {
         out.insert("flow_id".into(), json!(flow_id));
     }
@@ -1687,6 +1690,7 @@ mod tests {
             "persist": true,
             "target": "mission_task_delegate",
             "objective": "compile an executable scaffold",
+            "requested_cwd": "/Users/jinchen/Projects/missiond",
             "flow_id": "F-demo",
             // file-first writer
             "write_file": true,
@@ -1713,6 +1717,10 @@ mod tests {
         assert_eq!(compile_args["board_task_id"], "btk-wave14-04");
         assert_eq!(compile_args["target"], "mission_task_delegate");
         assert_eq!(compile_args["objective"], "compile an executable scaffold");
+        assert_eq!(
+            compile_args["requested_cwd"],
+            "/Users/jinchen/Projects/missiond"
+        );
         assert_eq!(compile_args["flow_id"], "F-demo");
         // file-first.
         assert_eq!(compile_args["write_file"], true);

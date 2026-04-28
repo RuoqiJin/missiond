@@ -531,6 +531,7 @@ fn build_respond_plan_compile_args(
         "dispatch_strategy",
         "parallelism",
         "objective",
+        "requested_cwd",
         "flow_id",
         "write_file",
         "overwrite_file",
@@ -3156,6 +3157,7 @@ mod tests {
             "target": "mission_task_delegate",
             "target_project": "missiond",
             "objective": "ship from request-local PLAN",
+            "requested_cwd": "/Users/jinchen/Projects/missiond",
             "write_file": true,
             "overwrite_file": true,
             "review_gate_policy": "manual",
@@ -3166,6 +3168,7 @@ mod tests {
         assert_eq!(out["target"], "mission_task_delegate");
         assert_eq!(out["target_project"], "missiond");
         assert_eq!(out["objective"], "ship from request-local PLAN");
+        assert_eq!(out["requested_cwd"], "/Users/jinchen/Projects/missiond");
         assert_eq!(out["write_file"], true);
         assert_eq!(out["overwrite_file"], true);
         assert_eq!(out["review_gate_policy"], "manual");

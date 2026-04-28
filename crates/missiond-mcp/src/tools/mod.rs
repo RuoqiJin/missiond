@@ -344,6 +344,7 @@ mod tests {
         for field in [
             "target",
             "objective",
+            "requested_cwd",
             "flow_id",
             "dispatch_strategy",
             "parallelism",

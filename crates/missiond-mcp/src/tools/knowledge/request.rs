@@ -171,6 +171,10 @@ fn build_properties() -> Value {
         "string",
         "[advance|respond approve_intent/execute_plan] explicit plan objective. approve_intent forwards it into dry-run plan.lisp as :objective; execute_plan forwards it only as an override while the preferred path is deriving it from plan.lisp.",
     ));
+    p.insert("requested_cwd".into(), prop(
+        "string",
+        "[advance|respond approve_intent/execute_plan] explicit execution cwd hint. approve_intent forwards it into dry-run plan.lisp as :requested-cwd; execute_plan forwards it only as an override while the preferred path is deriving it from plan.lisp.",
+    ));
     p.insert("flow_id".into(), prop(
         "string",
         "[advance|respond approve_intent/execute_plan] explicit mission_flow_run id. approve_intent forwards it into plan compile; execute_plan forwards it only as an override while the preferred path is deriving it from plan.lisp :flow-id / :flow_id.",
