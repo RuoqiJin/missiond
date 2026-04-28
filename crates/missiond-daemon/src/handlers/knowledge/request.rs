@@ -1493,6 +1493,39 @@ fn extract_projected_sexp(inner_payload: &Value) -> Option<(String, &'static str
     None
 }
 
+fn enrich_intent_alignment_projection(body: String, inner_payload: &Value) -> String {
+    let directive_id = match nonblank(inner_payload.get("directive_id")) {
+        Some(id) => id,
+        None => return body,
+    };
+    let version = match inner_payload.get("version").and_then(|v| v.as_i64()) {
+        Some(v) => v,
+        None => return body,
+    };
+    if body.contains(":directive_id")
+        && (body.contains(":version") || body.contains(":directive_version"))
+    {
+        return body;
+    }
+
+    let trimmed_len = body.trim_end().len();
+    let trailing = body[trimmed_len..].to_string();
+    let mut core = body[..trimmed_len].to_string();
+    if !core.ends_with(')') {
+        return body;
+    }
+    core.pop();
+    if !core.contains(":directive_id") {
+        let _ = write!(core, "\n  :directive_id {}", lisp_string(&directive_id));
+    }
+    if !core.contains(":version") && !core.contains(":directive_version") {
+        let _ = write!(core, "\n  :version {}", version);
+    }
+    core.push(')');
+    core.push_str(&trailing);
+    core
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ProjectionStatus {
     Written,
@@ -1568,11 +1601,18 @@ fn plan_projection(
         }
     };
     match extract_projected_sexp(inner_payload) {
-        Some((body, source)) => ProjectionPlan::Write {
-            kind,
-            body,
-            sexp_source: source,
-        },
+        Some((body, source)) => {
+            let body = if target == ProjectionTarget::IntentAlignment {
+                enrich_intent_alignment_projection(body, inner_payload)
+            } else {
+                body
+            };
+            ProjectionPlan::Write {
+                kind,
+                body,
+                sexp_source: source,
+            }
+        }
         None => ProjectionPlan::Skip {
             status: ProjectionStatus::SkippedNoSexp,
             kind: Some(kind),
@@ -2294,6 +2334,30 @@ mod tests {
                 assert_eq!(kind, "intent_alignment");
                 assert_eq!(sexp_source, "compiled_sexp_preview");
                 assert!(body.contains("directive-draft"));
+            }
+            other => panic!("expected Write, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn plan_projection_persisted_directive_preview_carries_ref() {
+        let payload = json!({
+            "status": "dry_run",
+            "directive_id": "00000000-0000-0000-0000-000000000abc",
+            "version": 1,
+            "compiled_sexp_preview": "(directive-draft\n  :utterance \"do x\"\n  :status :draft)\n",
+        });
+        let plan = plan_projection(ProjectionTarget::IntentAlignment, &payload, false);
+        match plan {
+            ProjectionPlan::Write { body, .. } => {
+                assert!(body.contains(":directive_id \"00000000-0000-0000-0000-000000000abc\""));
+                assert!(body.contains(":version 1"));
+                assert_eq!(
+                    resolve_directive_ref(&json!({}), Some(&body))
+                        .expect("projected ref resolves")
+                        .id,
+                    "00000000-0000-0000-0000-000000000abc"
+                );
             }
             other => panic!("expected Write, got {:?}", other),
         }
