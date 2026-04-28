@@ -51,6 +51,17 @@ const ALLOWED_ROUTER_BACKENDS = new Set([
 ]);
 const ALLOWED_ROUTER_CONFIDENCE = new Set(['high', 'medium', 'low']);
 
+// wave26-04: router-readiness enum. Mirrors the wave26-01 backend-registry
+// :readiness_status enum plus the 'unknown' fallback the wave26-02/03
+// pipelines emit when the backend is missing from the registry.
+const ALLOWED_ROUTER_READINESS = new Set([
+  'current-default',
+  'advisory-only',
+  'runtime-ready',
+  'unavailable',
+  'unknown',
+]);
+
 function main() {
   const args = process.argv.slice(2);
   let all = false;
@@ -331,6 +342,112 @@ function validateReport(file, report, diagnostics) {
     diagnostics,
   );
   validateRouterReasons(file, report, props[':router_reasons']?.value, diagnostics);
+
+  // wave26-04: optional router-readiness fields. Mirror the wave26-02
+  // (Node CLI) and wave26-03 (daemon plan dry_run) backend readiness
+  // annotations on the report side so completion reports can RECORD what
+  // the readiness pipeline observed without that record ever being treated
+  // as runtime authoritative. All five fields are optional; when present,
+  // each is validated structurally:
+  //   :router_backend_readiness_status — enum (5 readiness classes)
+  //   :router_backend_runtime_allowed  — literal atom true|false
+  //   :router_apply_eligible           — literal atom true|false
+  //   :router_apply_blockers           — vector of non-empty strings
+  //   :router_backend_registry_path    — repo-relative string
+  validateRouterEnumField(
+    file,
+    report,
+    props[':router_backend_readiness_status']?.value,
+    ':router_backend_readiness_status',
+    ALLOWED_ROUTER_READINESS,
+    diagnostics,
+  );
+  validateRouterLiteralBoolEither(
+    file,
+    report,
+    props[':router_backend_runtime_allowed']?.value,
+    ':router_backend_runtime_allowed',
+    diagnostics,
+  );
+  validateRouterLiteralBoolEither(
+    file,
+    report,
+    props[':router_apply_eligible']?.value,
+    ':router_apply_eligible',
+    diagnostics,
+  );
+  validateRouterApplyBlockers(
+    file,
+    report,
+    props[':router_apply_blockers']?.value,
+    diagnostics,
+  );
+  validateRouterRepoRelativePath(
+    file,
+    report,
+    props[':router_backend_registry_path']?.value,
+    ':router_backend_registry_path',
+    diagnostics,
+  );
+}
+
+// wave26-04 helper: STRICT literal-atom validator that accepts either
+// `true` OR `false` (cross-wave invariant — strings are rejected). Tight
+// wrapper around the wave25-02 validateRouterLiteralBool helper which only
+// accepts a single fixed atom; the wave26-04 readiness fields legitimately
+// carry both polarities (e.g. runtime_allowed=true for claudecode default,
+// false for advisory-only backends; apply_eligible=false in seed today,
+// true once a runtime adapter ships).
+function validateRouterLiteralBoolEither(file, report, node, fieldName, diagnostics) {
+  if (node == null) return; // optional
+  if (node.type !== 'atom' || (node.value !== 'true' && node.value !== 'false')) {
+    const got = node.type === 'atom' ? node.value : `<${node.type}>`;
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      `${fieldName} must be the literal atom true or false (cross-wave invariant), got ${got}`,
+    );
+  }
+}
+
+// wave26-04 helper: :router_apply_blockers must be a vector of non-empty
+// strings — mirrors the wave25-02 validateRouterReasons pattern. Each
+// entry names a concrete reason live promotion is rejected; empty strings
+// are rejected because they carry no signal and almost always indicate a
+// templating bug. Property-list entries are not allowed — wave26-01
+// emits plain strings, wave26-02/03 splice in plain strings.
+function validateRouterApplyBlockers(file, report, node, diagnostics) {
+  if (node == null) return; // optional
+  if (!isList(node)) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      ':router_apply_blockers must be a vector/list when present',
+    );
+    return;
+  }
+  for (const entry of node.children) {
+    const text = nodeText(entry);
+    if (text == null) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':router_apply_blockers entries must be strings',
+      );
+      continue;
+    }
+    if (text.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':router_apply_blockers entries must be non-empty strings',
+      );
+    }
+  }
 }
 
 // wave25-02 helper: enum validator for the router fields. The value must be
@@ -1034,6 +1151,120 @@ function runFixtures() {
                          "trace-events:7"]
         :router_trace_index_path ".missiond/v2/index/session-trace-index.json")`,
       ok: true,
+    },
+    // wave26-04: router-readiness field fixtures (legacy + valid + 5
+    // negatives). Backward-compat is non-negotiable — the legacy fixture
+    // re-pins that reports without any of the 5 new fields stay valid.
+    // The valid fixture mirrors the wave26-01 seed shape: claudecode is
+    // current-default with runtime_allowed=true but apply_eligible=false
+    // (current-default alone is NEVER sufficient for the apply gate;
+    // explicit runtime-ready opt-in is required upstream — see wave26-02
+    // and wave26-03 strict gates).
+    {
+      name: 'wave26-04 legacy report (no readiness fields) — backward compat',
+      source: `(report wave26-fix-readiness-legacy
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-fix-readiness-legacy"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)])`,
+      ok: true,
+    },
+    {
+      name: 'wave26-04 valid readiness block (all 5 fields, claudecode seed shape)',
+      source: `(report wave26-fix-readiness-ok
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-fix-readiness-ok"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)]
+        :recommended_backend "claudecode"
+        :router_confidence "high"
+        :router_policy_path ".missiond/router/router-policy-v1.lisp"
+        :router_dry_run_only true
+        :router_applied false
+        :router_backend_readiness_status "current-default"
+        :router_backend_runtime_allowed true
+        :router_apply_eligible false
+        :router_apply_blockers
+          ["apply gate requires runtime-ready; current-default is NOT sufficient"
+           "explicit runtime-ready opt-in required upstream before live promotion"]
+        :router_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
+      ok: true,
+    },
+    {
+      name: 'wave26-04 invalid router_backend_readiness_status rejected',
+      source: `(report wave26-fix-readiness-bad-status
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-fix-readiness-bad-status"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_backend_readiness_status "unknown-status")`,
+      ok: false,
+      expects: /:router_backend_readiness_status must be one of/,
+    },
+    {
+      name: 'wave26-04 router_apply_eligible="false" string rejected (cross-wave invariant)',
+      source: `(report wave26-fix-readiness-eligible-string
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-fix-readiness-eligible-string"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_apply_eligible "false")`,
+      ok: false,
+      expects: /:router_apply_eligible must be the literal atom true or false/,
+    },
+    {
+      name: 'wave26-04 router_backend_runtime_allowed="true" string rejected (cross-wave invariant)',
+      source: `(report wave26-fix-readiness-runtime-string
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-fix-readiness-runtime-string"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_backend_runtime_allowed "true")`,
+      ok: false,
+      expects: /:router_backend_runtime_allowed must be the literal atom true or false/,
+    },
+    {
+      name: 'wave26-04 absolute router_backend_registry_path rejected',
+      source: `(report wave26-fix-readiness-abs-registry
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-fix-readiness-abs-registry"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_backend_registry_path "/abs/path/registry.lisp")`,
+      ok: false,
+      expects: /:router_backend_registry_path must be repo-relative/,
+    },
+    {
+      name: 'wave26-04 empty string in router_apply_blockers rejected',
+      source: `(report wave26-fix-readiness-empty-blocker
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-fix-readiness-empty-blocker"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_apply_blockers ["valid blocker" ""])`,
+      ok: false,
+      expects: /:router_apply_blockers entries must be non-empty strings/,
     },
   ];
 
