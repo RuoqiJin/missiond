@@ -376,10 +376,11 @@
       :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; review_packet (state, artifact_kind, artifact_path, artifact_exists, artifact_preview, prompt, allowed_responses, next_action, execute_allowed) is derived from request-local artifact existence + latest projection + latest review event per the unified-entry/review-packet contract — UTF-8-safe via missiond_core::util::safe_byte_truncate; respond action accepts approve_intent/reject_intent/ask_question/approve_plan/reject_plan/execute_plan, resolves directive/plan refs from explicit args, request-local intent-alignment.lisp/plan.lisp parses, or prior request-local review events; approve_intent can create a hidden BoardTask anchor before s4 plan-authoring so callers do not need to know internal board ids; approve_plan can materialize request-local plan.lisp into a persisted draft Plan row, reusing plan.lisp's BoardTask anchor when present and creating a hidden anchor only if needed, then amends request-local plan.lisp with :plan_id + :version + :board_task_id before delegating to mission_plan approve; records a request-local review event under events/<seq>.event.lisp via the same atomic_write_artifact + monotonically-increasing local sequence; delegates approve/execute decisions to mission_directive / mission_plan / unified_entry without bypassing their gates, and returns blocked responses (with next_action) when refs are missing or execute=true was not passed; approve_intent is the unified-entry bridge for the human yes step: after directive approval succeeds it immediately calls unified_entry s4 plan-authoring and projects request-local plan.lisp so the next packet asks for plan review rather than requiring a separate advance call; approve_plan moves the packet to awaiting_execution so the next legal response is execute_plan; still no DB schema migration, no auto-approval, no direct workstation dispatch")
 
     (surface mission_directive
-      :status "compat"
+      :status "code-aligned-partial"
       :implements [intent-alignment alignment-review-gate]
       :code ["crates/missiond-daemon/src/handlers/knowledge/directive.rs"
-             "crates/missiond-mcp/src/tools/knowledge/directive.rs"])
+             "crates/missiond-mcp/src/tools/knowledge/directive.rs"]
+      :note "dry_run emits a deterministic directive-draft Lisp artifact with utterance/source/status; sonnet output is accepted only when it is one balanced Lisp s-expression with head directive|directive-draft|intent-alignment. Persisted directive Lisp is enriched with :directive_id + :version before being surfaced as compiled_sexp(_preview) and before optional file-first writes. The compatibility file writer targets ArtifactKind::IntentAlignment at .missiond/alignment/<topic>/intent-alignment.lisp, never rolls back a committed row on file failure, and review_gate_policy only emits/records gates; it never auto-approves intent.")
 
     (surface mission_plan
       :status "code-aligned-partial"
@@ -428,6 +429,7 @@
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
+             "node scripts/check-v3-intent-alignment-isomorphism.mjs"
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"]
