@@ -10069,6 +10069,19 @@ mod router_policy_dry_run {
     /// the response block. Always returns a serializable JSON object;
     /// never panics; surfaces I/O / parse / invariant failures via the
     /// `status` field (`computed` / `rejected` / `error`).
+    ///
+    /// wave27-03: the OPTIONAL `router_dispatch_descriptor` arg, when
+    /// the JSON literal `true`, is honored ONLY here (i.e. inside the
+    /// dry_run code path; `attach_router_recommendation_block`'s Off
+    /// early-return predates this entry). When `BackendRegistryInfo` is
+    /// `Absent`, the recommendation block surfaces `descriptor_status =
+    /// "registry_missing"` and the descriptor body is OMITTED. Otherwise
+    /// a `router_dispatch_descriptor` sub-object is spliced onto the
+    /// recommendation block, projecting the wave27-01 schema fields off
+    /// the existing readiness/recommendation values plus three LOCKED
+    /// literal-bool invariants (`Value::Bool(true)` / `Value::Bool(false)`
+    /// — never strings, never computed) so the descriptor can never be
+    /// mis-read as a runtime promote signal.
     fn compute_recommendation(args: &Value, resolved: &ResolvedExec, plan: &Plan) -> Value {
         let policy_path_input = arg_string(args, "router_policy_path")
             .unwrap_or_else(|| DEFAULT_POLICY_PATH.to_string());
@@ -10082,15 +10095,59 @@ mod router_policy_dry_run {
         // gated path — same invariant applies (no file I/O when mode=off).
         let backend_registry_path_input = arg_string(args, "router_backend_registry_path");
         let registry_info = load_backend_registry(backend_registry_path_input.as_deref());
-        let resolved_path = resolve_policy_path(&policy_path_input);
+        let mut block = compute_recommendation_block(
+            args,
+            resolved,
+            plan,
+            &policy_path_input,
+            &trace_info,
+            &registry_info,
+        );
+        // wave27-03: optional descriptor surface. Always evaluated AFTER
+        // the recommendation + readiness fields land so the descriptor
+        // can simply project off them. `arg_bool` is strict — only the
+        // JSON literal `true` opts in; absent / `false` / strings are
+        // ignored. The descriptor branch performs ZERO additional file
+        // I/O (registry / policy / trace-index were already loaded above
+        // for the recommendation itself).
+        if dispatch_descriptor_requested(args) {
+            attach_router_dispatch_descriptor(&mut block, plan, &registry_info, &policy_path_input);
+        }
+        block
+    }
+
+    /// wave27-03: did the caller opt in to the dispatch descriptor surface?
+    /// Strict: only the JSON literal `true` returns `true`. Absent / `false`
+    /// / strings / numbers all return `false` so a typo can never
+    /// silently emit the descriptor.
+    fn dispatch_descriptor_requested(args: &Value) -> bool {
+        matches!(
+            args.get("router_dispatch_descriptor"),
+            Some(Value::Bool(true))
+        )
+    }
+
+    /// Internal: build the wave24-04 / wave25-03 / wave26-03 recommendation
+    /// block. Extracted so wave27-03 can post-process the block (splicing
+    /// the dispatch descriptor) without duplicating the policy / trace /
+    /// registry pre-loads.
+    fn compute_recommendation_block(
+        args: &Value,
+        resolved: &ResolvedExec,
+        plan: &Plan,
+        policy_path_input: &str,
+        trace_info: &TraceIndexInfo,
+        registry_info: &BackendRegistryInfo,
+    ) -> Value {
+        let resolved_path = resolve_policy_path(policy_path_input);
         let raw = match std::fs::read_to_string(&resolved_path) {
             Ok(s) => s,
             Err(e) => {
                 return error_block(
-                    &policy_path_input,
+                    policy_path_input,
                     &format!("read failed: {}", e),
-                    &trace_info,
-                    &registry_info,
+                    trace_info,
+                    registry_info,
                     None,
                     "low",
                 );
@@ -10099,30 +10156,30 @@ mod router_policy_dry_run {
         let policy = match parse_router_policy(&raw) {
             Ok(p) => p,
             Err(msg) => return error_block(
-                &policy_path_input,
+                policy_path_input,
                 &msg,
-                &trace_info,
-                &registry_info,
+                trace_info,
+                registry_info,
                 None,
                 "low",
             ),
         };
         if !policy.dry_run_only {
             return rejected_block(
-                &policy_path_input,
+                policy_path_input,
                 "policy missing :dry-run-only true (cross-wave invariant: router output is advisory only)",
-                &trace_info,
-                &registry_info,
+                trace_info,
+                registry_info,
                 None,
                 "low",
             );
         }
         if policy.runtime_replacement {
             return rejected_block(
-                &policy_path_input,
+                policy_path_input,
                 "policy declares :runtime-replacement true (cross-wave invariant: router output is advisory only)",
-                &trace_info,
-                &registry_info,
+                trace_info,
+                registry_info,
                 None,
                 "low",
             );
@@ -10144,12 +10201,12 @@ mod router_policy_dry_run {
             // No-match: confidence is `low` regardless of trace-index
             // (mirrors the Node CLI's `if matched.length === 0 -> low`).
             return computed_block(
-                &policy_path_input,
+                policy_path_input,
                 FALLBACK_BACKEND,
                 "low",
                 vec![format!("fallback (no rule matched): {}", FALLBACK_REASON)],
-                &trace_info,
-                &registry_info,
+                trace_info,
+                registry_info,
             );
         }
         let winner = &matched[0];
@@ -10185,7 +10242,7 @@ mod router_policy_dry_run {
         //   * trace-index supplied AND parsed AND max == 0 -> low
         //   * trace-index NOT supplied OR degraded (missing/unreadable/malformed) ->
         //     `medium` (the legacy wave24-04 default for matched outcomes).
-        let confidence = match &trace_info {
+        let confidence = match trace_info {
             TraceIndexInfo::Used { task_events, backend_events, .. } => {
                 let task_events = events_for_task(task_events, &plan.board_task_id);
                 let backend_events = events_for_backend(backend_events, &backend);
@@ -10201,7 +10258,7 @@ mod router_policy_dry_run {
             // Degraded / absent: keep wave24-04 default of `medium` for matched.
             _ => "medium",
         };
-        computed_block(&policy_path_input, &backend, confidence, reasons, &trace_info, &registry_info)
+        computed_block(policy_path_input, &backend, confidence, reasons, trace_info, registry_info)
     }
 
     /// wave25-03: trace-index threshold mirrors scripts/recommend-task-backend.mjs
@@ -10852,6 +10909,169 @@ mod router_policy_dry_run {
                 );
                 map.insert("trace_index_warning".to_string(), Value::String(warning.clone()));
             }
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // wave27-03: optional router dispatch descriptor surface.
+    //
+    // Splice a `router_dispatch_descriptor` sub-object onto an existing
+    // recommendation block, mirroring the wave27-01 schema
+    // (`missiond.router-dispatch-descriptor.v1`). The descriptor is a
+    // PURE PROJECTION of the wave24-04 / wave25-03 / wave26-03 fields
+    // already on the block — no new file I/O happens here, no backend is
+    // ever invoked, and dispatch is never altered. Three invariants are
+    // hard-coded as `Value::Bool` literals so the descriptor cannot be
+    // mis-promoted to a runtime apply signal:
+    //
+    //   - dry_run_only        = Value::Bool(true)   (locked)
+    //   - runtime_replacement = Value::Bool(false)  (locked)
+    //   - no_execution        = Value::Bool(true)   (locked)
+    //
+    // Registry semantics:
+    //   * `BackendRegistryInfo::Absent` (i.e. no `router_backend_registry_path`
+    //     supplied) → top-level `descriptor_status="registry_missing"` is
+    //     surfaced on the recommendation block; the descriptor BODY is
+    //     OMITTED so a downstream consumer cannot mistake the absence of
+    //     readiness for "ready". This matches the wave27-01 schema's
+    //     refusal to fake readiness.
+    //   * Any other registry state → emit a structured descriptor body.
+    //     For degraded states (Missing / Unreadable / Malformed /
+    //     unknown_backend) the recommendation block already carries the
+    //     synthetic `router_apply_eligible=false` / `router_apply_blockers`
+    //     fields plus (for unknown_backend) `backend_readiness_status="unknown"`;
+    //     the descriptor projects those off the block as-is. For Missing /
+    //     Unreadable / Malformed the block has no `backend_readiness_status`
+    //     at all — the descriptor falls back to the synthetic
+    //     `unknown` enum value (legal per wave27-01 readiness-statuses)
+    //     and `backend_runtime_allowed=false`.
+    fn attach_router_dispatch_descriptor(
+        block: &mut Value,
+        plan: &Plan,
+        registry: &BackendRegistryInfo,
+        policy_path_input: &str,
+    ) {
+        let Some(map) = block.as_object_mut() else {
+            return;
+        };
+        // Branch 1: registry path was not supplied. Surface a structured
+        // status field on the recommendation block; the descriptor body
+        // is intentionally omitted because the wave27-01 schema requires
+        // backend_readiness_status / backend_runtime_allowed values that
+        // we cannot honestly produce without consulting a registry.
+        if matches!(registry, BackendRegistryInfo::Absent) {
+            map.insert(
+                "descriptor_status".to_string(),
+                Value::String("registry_missing".to_string()),
+            );
+            return;
+        }
+        // Branch 2: registry path supplied (any state — Used / Missing /
+        // Unreadable / Malformed / unknown_backend). Build the descriptor
+        // body by reading the wave26-03 fields back off the block. They
+        // are guaranteed to be present except in the Missing / Unreadable
+        // / Malformed paths where readiness/runtime_allowed are NOT set
+        // upstream — for those we fall back to the synthetic `unknown`
+        // enum + `false` runtime-allowed.
+        let recommended_backend = map
+            .get("recommended_backend")
+            .and_then(|v| v.as_str())
+            .unwrap_or(FALLBACK_BACKEND)
+            .to_string();
+        let router_confidence = map
+            .get("confidence")
+            .and_then(|v| v.as_str())
+            .unwrap_or("low")
+            .to_string();
+        let backend_readiness_status = map
+            .get("backend_readiness_status")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let backend_runtime_allowed = map
+            .get("backend_runtime_allowed")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let router_apply_eligible = map
+            .get("router_apply_eligible")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let router_apply_blockers: Vec<Value> = map
+            .get("router_apply_blockers")
+            .and_then(|v| v.as_array())
+            .cloned()
+            .unwrap_or_default();
+        let source_backend_registry_path = registry_path(registry).to_string();
+
+        let mut descriptor = serde_json::Map::new();
+        descriptor.insert(
+            "schema".to_string(),
+            Value::String("missiond.router-dispatch-descriptor.v1".to_string()),
+        );
+        descriptor.insert(
+            "task_id".to_string(),
+            Value::String(plan.board_task_id.clone()),
+        );
+        descriptor.insert(
+            "recommended_backend".to_string(),
+            Value::String(recommended_backend),
+        );
+        descriptor.insert(
+            "router_confidence".to_string(),
+            Value::String(router_confidence),
+        );
+        descriptor.insert(
+            "backend_readiness_status".to_string(),
+            Value::String(backend_readiness_status),
+        );
+        descriptor.insert(
+            "backend_runtime_allowed".to_string(),
+            Value::Bool(backend_runtime_allowed),
+        );
+        descriptor.insert(
+            "router_apply_eligible".to_string(),
+            Value::Bool(router_apply_eligible),
+        );
+        descriptor.insert(
+            "router_apply_blockers".to_string(),
+            Value::Array(router_apply_blockers),
+        );
+        // wave27-01 LOCKED INVARIANTS — these are hard-coded literal bools
+        // and MUST NEVER be derived from any other field. If any future
+        // change tries to compute these, the descriptor is no longer a
+        // safe handoff record (per wave27-01 cross-wave-invariant text).
+        descriptor.insert("dry_run_only".to_string(), Value::Bool(true));
+        descriptor.insert("runtime_replacement".to_string(), Value::Bool(false));
+        descriptor.insert("no_execution".to_string(), Value::Bool(true));
+        descriptor.insert(
+            "source_recommendation_schema".to_string(),
+            Value::String(SCHEMA.to_string()),
+        );
+        descriptor.insert(
+            "source_policy_path".to_string(),
+            Value::String(policy_path_input.to_string()),
+        );
+        descriptor.insert(
+            "source_backend_registry_path".to_string(),
+            Value::String(source_backend_registry_path),
+        );
+
+        map.insert(
+            "router_dispatch_descriptor".to_string(),
+            Value::Object(descriptor),
+        );
+    }
+
+    /// Extract the registry path string from any non-`Absent`
+    /// `BackendRegistryInfo` variant. `Absent` should never reach this
+    /// helper (the caller branches before).
+    fn registry_path(registry: &BackendRegistryInfo) -> &str {
+        match registry {
+            BackendRegistryInfo::Absent => "",
+            BackendRegistryInfo::Used { path, .. }
+            | BackendRegistryInfo::Missing { path, .. }
+            | BackendRegistryInfo::Unreadable { path, .. }
+            | BackendRegistryInfo::Malformed { path, .. } => path.as_str(),
         }
     }
 
@@ -21012,5 +21232,450 @@ mod tests {
         let _ = std::fs::remove_file(&policy_path);
         let _ = std::fs::remove_file(&trace_path);
         let _ = std::fs::remove_file(&registry_path);
+    }
+
+    // -----------------------------------------------------------------
+    // wave-27 / task 03 — router dispatch descriptor surface tests.
+    //
+    // These pin the OPTIONAL `router_dispatch_descriptor` arg.
+    // Invariants this block enforces:
+    //   * Off/default mode + descriptor=true MUST be byte-identical to
+    //     the wave-15..23 baseline (no extra file I/O happens because
+    //     the Off-path early-return predates compute_recommendation).
+    //   * dry_run + descriptor=true + seed registry (claudecode is
+    //     current-default) -> descriptor body present, no_execution=true,
+    //     dry_run_only=true, runtime_replacement=false (all literal Bool),
+    //     router_apply_eligible=false (current-default is rejected by
+    //     the wave26-03 6-condition gate).
+    //   * dry_run + descriptor=true + synthetic runtime-ready registry +
+    //     high confidence -> router_apply_eligible=true BUT the three
+    //     locked invariants STILL hold (runtime_replacement=false,
+    //     no_execution=true, dry_run_only=true).
+    //   * dry_run + descriptor=true + NO registry path -> descriptor body
+    //     OMITTED, descriptor_status="registry_missing" surfaced.
+    //   * dry_run + descriptor=true MUST NOT change any dispatch field
+    //     (re-pin of the wave24-04 dispatch invariant under the new code
+    //     path).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn router_dispatch_descriptor_off_default_does_no_extra_io() {
+        // wave27-03: mode=off with router_dispatch_descriptor=true AND all
+        // three wave24-04 / wave25-03 / wave26-03 router args supplied
+        // (with non-existent paths) MUST be byte-identical to baseline.
+        // Proves the Off-path early-return predates every read site,
+        // including the new descriptor branch.
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+
+        let args = json!({
+            "router_policy_mode": "off",
+            "router_policy_path":
+                "/this/path/does/not/exist/wave27-03/policy.lisp",
+            "router_policy_trace_index_path":
+                "/this/path/does/not/exist/wave27-03/trace.json",
+            "router_backend_registry_path":
+                "/this/path/does/not/exist/wave27-03/registry.lisp",
+            "router_dispatch_descriptor": true,
+        });
+        let mode = parse_router_policy_mode(&args).expect("explicit off");
+        assert!(matches!(mode, RouterPolicyMode::Off));
+        let after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let after_text = match after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after_text,
+            "wave27-03: mode=off + descriptor=true + all three router args (policy/trace/registry) supplied MUST be byte-identical to baseline (the Off early-return predates the descriptor branch — no extra I/O)"
+        );
+        let v: Value = serde_json::from_str(&after_text).unwrap();
+        assert!(
+            v.get("router_recommendation").is_none(),
+            "wave27-03: mode=off must NOT splice a recommendation block (descriptor or otherwise)"
+        );
+
+        // Default (mode arg absent) + descriptor=true + same three paths:
+        // same invariant.
+        let args2 = json!({
+            "router_policy_path":
+                "/another/missing/wave27-03/policy.lisp",
+            "router_policy_trace_index_path":
+                "/another/missing/wave27-03/trace.json",
+            "router_backend_registry_path":
+                "/another/missing/wave27-03/registry.lisp",
+            "router_dispatch_descriptor": true,
+        });
+        let mode2 = parse_router_policy_mode(&args2).expect("default off");
+        assert!(matches!(mode2, RouterPolicyMode::Off));
+        let after2 = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode2,
+            &args2,
+            &resolved,
+            &plan,
+        );
+        let after2_text = match after2.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after2_text,
+            "wave27-03: default mode (arg absent) + descriptor=true + all three router args MUST stay byte-identical"
+        );
+    }
+
+    #[test]
+    fn router_dispatch_descriptor_dry_run_with_seed_registry_emits_no_execution_true() {
+        // wave27-03: dry_run + descriptor=true + seed-shape registry where
+        // claudecode is current-default. Descriptor body MUST be present
+        // and carry the three locked literal-bool invariants. Eligibility
+        // MUST be false (current-default does NOT satisfy the wave26-03
+        // 6-condition gate; runtime-ready opt-in is required).
+        let policy = write_temp_docs_policy("desc-seed-current-default");
+        let trace = write_temp_trace_index("desc-seed-current-default", 8, 0);
+        let registry_body =
+            registry_body_single("claudecode", "current-default", true, &[]);
+        let registry = write_temp_registry("desc-seed-current-default", &registry_body);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "router_dispatch_descriptor": true,
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        // Descriptor body present.
+        let descriptor = &block["router_dispatch_descriptor"];
+        assert!(
+            descriptor.is_object(),
+            "wave27-03: descriptor body must be present when registry is supplied + descriptor=true (got `{}`)",
+            descriptor
+        );
+        // Locked literal-bool invariants — MUST be Value::Bool, never strings.
+        assert_eq!(
+            descriptor["dry_run_only"],
+            Value::Bool(true),
+            "wave27-03 LOCKED INVARIANT: dry_run_only must be literal Bool true"
+        );
+        assert!(
+            descriptor["dry_run_only"].is_boolean(),
+            "wave27-03: dry_run_only must be a JSON bool, never a string"
+        );
+        assert_eq!(
+            descriptor["runtime_replacement"],
+            Value::Bool(false),
+            "wave27-03 LOCKED INVARIANT: runtime_replacement must be literal Bool false"
+        );
+        assert!(
+            descriptor["runtime_replacement"].is_boolean(),
+            "wave27-03: runtime_replacement must be a JSON bool, never a string"
+        );
+        assert_eq!(
+            descriptor["no_execution"],
+            Value::Bool(true),
+            "wave27-03 LOCKED INVARIANT: no_execution must be literal Bool true"
+        );
+        assert!(
+            descriptor["no_execution"].is_boolean(),
+            "wave27-03: no_execution must be a JSON bool, never a string"
+        );
+        // Schema + task_id + recommendation source identifier.
+        assert_eq!(
+            descriptor["schema"],
+            "missiond.router-dispatch-descriptor.v1",
+            "wave27-03: descriptor schema id mirrors wave27-01"
+        );
+        assert_eq!(
+            descriptor["task_id"], "btk-1",
+            "wave27-03: descriptor task_id must echo plan.board_task_id"
+        );
+        assert_eq!(
+            descriptor["source_recommendation_schema"],
+            "missiond.router-recommendation.v0",
+            "wave27-03: descriptor must record the upstream wave24-04 recommendation schema id"
+        );
+        assert_eq!(
+            descriptor["source_policy_path"], policy.to_str().unwrap(),
+            "wave27-03: descriptor must echo router_policy_path"
+        );
+        assert_eq!(
+            descriptor["source_backend_registry_path"], registry.to_str().unwrap(),
+            "wave27-03: descriptor must echo router_backend_registry_path"
+        );
+        // Projected fields off the wave26-03 readiness block.
+        assert_eq!(descriptor["recommended_backend"], "claudecode");
+        assert_eq!(descriptor["router_confidence"], "high");
+        assert_eq!(descriptor["backend_readiness_status"], "current-default");
+        assert_eq!(descriptor["backend_runtime_allowed"], Value::Bool(true));
+        assert_eq!(
+            descriptor["router_apply_eligible"], Value::Bool(false),
+            "wave27-03: current-default registry does NOT satisfy the wave26-03 gate (runtime-ready required)"
+        );
+        let blockers = descriptor["router_apply_blockers"]
+            .as_array()
+            .expect("router_apply_blockers must be a JSON array");
+        assert!(
+            !blockers.is_empty(),
+            "wave27-03: eligible=false MUST list at least one blocker (got {:?})",
+            blockers
+        );
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn router_dispatch_descriptor_dry_run_with_runtime_ready_eligible() {
+        // wave27-03: synthetic registry where the matched backend is
+        // runtime-ready + runtime_allowed=true + zero blockers + high
+        // confidence -> router_apply_eligible=true. The three locked
+        // invariants (dry_run_only / runtime_replacement / no_execution)
+        // MUST still hold — eligibility flipping does NOT promote the
+        // descriptor to a runtime apply signal.
+        let policy = write_temp_docs_policy("desc-runtime-ready");
+        let trace = write_temp_trace_index("desc-runtime-ready", 9, 0);
+        let registry_body =
+            registry_body_single("claudecode", "runtime-ready", true, &[]);
+        let registry = write_temp_registry("desc-runtime-ready", &registry_body);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "router_dispatch_descriptor": true,
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        let descriptor = &block["router_dispatch_descriptor"];
+        assert!(
+            descriptor.is_object(),
+            "wave27-03: descriptor body must be present"
+        );
+        // Cross-wave invariant: even when eligibility flips to true, the
+        // three locked invariants MUST stay literal Bool literals.
+        assert_eq!(
+            descriptor["router_apply_eligible"], Value::Bool(true),
+            "wave27-03: runtime-ready + high confidence + runtime_allowed=true + zero blockers -> eligible=true"
+        );
+        let blockers = descriptor["router_apply_blockers"]
+            .as_array()
+            .expect("router_apply_blockers must be array");
+        assert!(
+            blockers.is_empty(),
+            "wave27-03: eligible=true means router_apply_blockers MUST be empty (got {:?})",
+            blockers
+        );
+        // CROSS-WAVE INVARIANT: eligibility=true does NOT promote the
+        // descriptor to a runtime signal. The three locked literals stay
+        // literal Bool, hard-coded.
+        assert_eq!(
+            descriptor["dry_run_only"], Value::Bool(true),
+            "wave27-03 LOCKED: dry_run_only stays literal Bool true even when eligible=true"
+        );
+        assert_eq!(
+            descriptor["runtime_replacement"], Value::Bool(false),
+            "wave27-03 LOCKED: runtime_replacement stays literal Bool false even when eligible=true"
+        );
+        assert_eq!(
+            descriptor["no_execution"], Value::Bool(true),
+            "wave27-03 LOCKED: no_execution stays literal Bool true even when eligible=true"
+        );
+        assert_eq!(descriptor["backend_readiness_status"], "runtime-ready");
+        assert_eq!(descriptor["backend_runtime_allowed"], Value::Bool(true));
+        assert_eq!(descriptor["router_confidence"], "high");
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn router_dispatch_descriptor_dry_run_without_registry_path_emits_status_registry_missing() {
+        // wave27-03: dry_run + descriptor=true with NO router_backend_registry_path
+        // -> descriptor body OMITTED + top-level descriptor_status="registry_missing"
+        // surfaced on the recommendation block. The wave27-01 schema
+        // requires backend_readiness_status / backend_runtime_allowed
+        // values that we cannot honestly produce without consulting a
+        // registry, so we intentionally refuse to fake readiness.
+        let policy = write_temp_docs_policy("desc-no-registry");
+        let trace = write_temp_trace_index("desc-no-registry", 8, 0);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_dispatch_descriptor": true,
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(
+            block["descriptor_status"], "registry_missing",
+            "wave27-03: NO registry path + descriptor=true -> descriptor_status=registry_missing on the recommendation block"
+        );
+        assert!(
+            block.get("router_dispatch_descriptor").is_none(),
+            "wave27-03: descriptor body MUST be omitted when registry path is absent (got `{:?}`)",
+            block.get("router_dispatch_descriptor")
+        );
+        // Recommendation block itself is unchanged; status is still
+        // computed because the docs rule matched.
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["applied"], Value::Bool(false));
+        // Sanity: NO backend_* readiness fields leaked (registry was Absent).
+        assert!(block.get("backend_registry_path").is_none());
+        assert!(block.get("backend_registry_status").is_none());
+        assert!(block.get("backend_readiness_status").is_none());
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+    }
+
+    #[test]
+    fn router_dispatch_descriptor_does_not_change_dispatch() {
+        // wave27-03 re-pin of the wave24-04 dispatch invariant under the
+        // new descriptor code path. With vs without the descriptor flag
+        // (both in dry_run + same registry), every dispatch-shaping field
+        // (target_tool / dispatch_strategy / next_call / runner_status /
+        // execute_mode / target_source / dispatch_strategy_source) MUST
+        // be byte-identical. Only the additive descriptor block delta is
+        // expected.
+        let policy = write_temp_docs_policy("desc-dispatch-pin");
+        let trace = write_temp_trace_index("desc-dispatch-pin", 9, 0);
+        let registry_body =
+            registry_body_single("claudecode", "runtime-ready", true, &[]);
+        let registry = write_temp_registry("desc-dispatch-pin", &registry_body);
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        // Path A: dry_run + registry, NO descriptor.
+        let args_a = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_a = parse_router_policy_mode(&args_a).unwrap();
+        let result_a = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_a,
+            &args_a,
+            &resolved,
+            &plan,
+        );
+        let v_a = parse_payload(&result_a);
+
+        // Path B: dry_run + registry + descriptor=true.
+        let args_b = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "router_dispatch_descriptor": true,
+            "kind": "docs",
+        });
+        let mode_b = parse_router_policy_mode(&args_b).unwrap();
+        let result_b = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_b,
+            &args_b,
+            &resolved,
+            &plan,
+        );
+        let v_b = parse_payload(&result_b);
+
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                v_a[field], v_b[field],
+                "wave27-03: dispatch field `{}` MUST be byte-identical with vs without router_dispatch_descriptor=true",
+                field
+            );
+        }
+
+        let block_a = &v_a["router_recommendation"];
+        let block_b = &v_b["router_recommendation"];
+        // Recommendation core fields are unchanged by the descriptor flag.
+        assert_eq!(block_a["status"], block_b["status"]);
+        assert_eq!(block_a["applied"], block_b["applied"]);
+        assert_eq!(block_a["recommended_backend"], block_b["recommended_backend"]);
+        assert_eq!(block_a["confidence"], block_b["confidence"]);
+        assert_eq!(
+            block_a["backend_readiness_status"],
+            block_b["backend_readiness_status"]
+        );
+        assert_eq!(
+            block_a["router_apply_eligible"],
+            block_b["router_apply_eligible"]
+        );
+
+        // Additive delta: descriptor present in B, absent in A.
+        assert!(
+            block_a.get("router_dispatch_descriptor").is_none(),
+            "wave27-03: NO descriptor in path A (flag absent)"
+        );
+        assert!(
+            block_b.get("router_dispatch_descriptor").is_some(),
+            "wave27-03: descriptor present in path B (flag=true)"
+        );
+
+        // applied=false literal is invariant across both paths.
+        assert_eq!(block_a["applied"], Value::Bool(false));
+        assert_eq!(block_b["applied"], Value::Bool(false));
+
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
     }
 }

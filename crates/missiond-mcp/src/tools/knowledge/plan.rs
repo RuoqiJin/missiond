@@ -949,6 +949,23 @@ fn build_properties() -> Value {
         "[execute] (wave-26 / task 03) OPTIONAL path to a router-backend-registry v1 Lisp file (produced by `scripts/check-router-backend-registry.mjs`'s schema; seed at `.missiond/router/router-backend-registry-v1.lisp`) consumed ONLY when `router_policy_mode=\"dry_run\"`. When supplied, the daemon reads the file via `std::fs::read_to_string` + a minimal Lisp parser (extracting `:id` `:readiness_status` `:runtime_allowed` `:apply_blockers` per backend) and joins the registry to the recommendation block. Six additive fields are surfaced under `router_recommendation`: `backend_registry_path` (echo of input), `backend_registry_status` (`used | missing | unreadable | malformed | unknown_backend`), `backend_readiness_status` (`current-default | advisory-only | runtime-ready | unavailable | unknown`), `backend_runtime_allowed` (bool), `router_apply_eligible` (bool — the 6-condition gate), and `router_apply_blockers` (Vec<String>). The 6-condition apply-eligibility gate (mirrors wave26-02 Node logic): policy valid (status=computed) + confidence=high + backend present in registry + `runtime_allowed=true` + `readiness_status=runtime-ready` + `apply_blockers` empty. `current-default` is INTENTIONALLY NOT sufficient — explicit `runtime-ready` opt-in is required so a future apply gate cannot promote the legacy default by accident. When the arg is absent OR `router_policy_mode=\"off\"` (the default), NO file I/O happens — preserves the wave-15..23 byte-identical baseline. Failure handling is non-fatal: missing/unreadable/malformed/unknown-backend all surface a `backend_registry_status` value + `backend_warning`, force `router_apply_eligible=false`, and let dispatch continue. Dispatch is NEVER altered by registry issues. `applied=false` remains a hard-coded literal in every emitted block. The fields are OMITTED entirely when this arg is absent.",
     ));
 
+    // wave-27 / task 03 — OPTIONAL boolean opt-in to surface a router
+    // dispatch descriptor block on the dry-run recommendation. Mirrors
+    // the wave27-01 schema (missiond.router-dispatch-descriptor.v1) by
+    // projecting recommended_backend / router_confidence /
+    // backend_readiness_status / backend_runtime_allowed /
+    // router_apply_eligible / router_apply_blockers off the existing
+    // wave26-03 readiness fields, plus three LOCKED literal-bool
+    // invariants (dry_run_only=true, runtime_replacement=false,
+    // no_execution=true). Pure response-surface — dispatch / target /
+    // dispatch_strategy / next_call / runner_status are never altered.
+    // Off/default mode is byte-identical even when this arg is supplied
+    // (the dry_run gate predates the descriptor branch — no extra I/O).
+    p.insert("router_dispatch_descriptor".into(), prop(
+        "boolean",
+        "[execute] (wave-27 / task 03) OPTIONAL bool. Default absent ⇒ no descriptor block emitted (response byte-identical to wave-26 baseline). When `true` AND `router_policy_mode=\"dry_run\"`, the recommendation block additionally carries either (a) a structured `router_dispatch_descriptor` sub-object with the wave27-01 schema fields (`schema=\"missiond.router-dispatch-descriptor.v1\"`, `task_id` from the plan's `board_task_id`, `recommended_backend`, `router_confidence`, `backend_readiness_status`, `backend_runtime_allowed`, `router_apply_eligible`, `router_apply_blockers`, `source_recommendation_schema=\"missiond.router-recommendation.v0\"`, `source_policy_path` echoing `router_policy_path`, `source_backend_registry_path` echoing `router_backend_registry_path`) plus the three LOCKED literal-bool invariants (`dry_run_only=true`, `runtime_replacement=false`, `no_execution=true` — all hard-coded `Value::Bool`, never strings, never computed) when a registry path was supplied AND its lookup produced a backend match; OR (b) a top-level `descriptor_status=\"registry_missing\"` field on the recommendation block (descriptor body OMITTED) when no `router_backend_registry_path` was supplied. The descriptor is purely an advisory handoff — dispatch is NEVER altered, `applied=false` remains the hard-coded literal it has been since wave24-04, and the recommendation continues to be dry-run only. When `router_policy_mode=\"off\"` (default), the arg is IGNORED — no descriptor is emitted, no extra file I/O happens, the response stays byte-identical to the wave-15..23 baseline. Anything other than the JSON literals `true` / `false` is treated as absent.",
+    ));
+
     Value::Object(p)
 }
 
