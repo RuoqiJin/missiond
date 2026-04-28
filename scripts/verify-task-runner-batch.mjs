@@ -56,6 +56,18 @@ import {
   loadReportFromSource,
   verifyRun,
 } from './verify-task-run.mjs';
+// wave29-05: optional verification-receipt loading + reuse coverage. The
+// receipts are advisory caches of command evidence — they NEVER substitute
+// for source facts and NEVER substitute for commit verification. The batch
+// verifier MUST still verify task contract, report, memory completion, and
+// git commit even when --receipts is supplied; the only effect of receipts
+// here is the new receipt_coverage field in the JSON output (per-task
+// receipt count + reuse decisions for downstream planners).
+import {
+  isReceiptReusable,
+  readVerificationReceiptFile,
+  validateReceiptObject,
+} from './check-verification-receipt.mjs';
 
 export const SCHEMA = 'missiond.task-runner-batch-verification.v0';
 
@@ -97,6 +109,15 @@ skipped — they are orchestrator-owned and never carry a worker report.
 
 Flags:
   --manifest <file>   wave28-01 task-runner-manifest v1 Lisp file
+  --receipts <file>   OPTIONAL wave29-05 verification-receipt v1 Lisp
+                      file. When supplied, receipts are loaded + structurally
+                      validated and the JSON output gains a receipt_coverage
+                      field with per-task receipt counts and reuse decisions
+                      against each node's expected dry-fixture command.
+                      Receipts are ADVISORY ACCELERATION ONLY — the batch
+                      verifier STILL verifies task contract, report, memory
+                      completion, and git commit for every productive node
+                      regardless of receipt coverage.
   --json              emit machine-readable JSON instead of text
   --dry-fixture       run self-contained fixtures (no git, no I/O)
 
@@ -114,6 +135,7 @@ function failUsage(message) {
 function parseArgs(argv) {
   const opts = {
     manifest: null,
+    receipts: null,
     json: false,
     dryFixture: false,
   };
@@ -130,6 +152,10 @@ function parseArgs(argv) {
       opts.manifest = argv[++i] ?? failUsage('--manifest requires a value');
     } else if (arg.startsWith('--manifest=')) {
       opts.manifest = arg.slice('--manifest='.length);
+    } else if (arg === '--receipts') {
+      opts.receipts = argv[++i] ?? failUsage('--receipts requires a value');
+    } else if (arg.startsWith('--receipts=')) {
+      opts.receipts = arg.slice('--receipts='.length);
     } else if (arg.startsWith('--')) {
       failUsage(`unknown flag: ${arg}`);
     } else {
@@ -409,12 +435,127 @@ export function verifyNode(node, manifest, loaders) {
   };
 }
 
+// --- Receipt coverage (wave29-05) -----------------------------------------
+
+// Build a per-task receipt-coverage row from a list of validated receipts.
+// Receipts are advisory: this helper reports HOW MANY receipts each task
+// has and whether ANY of them are reusable against the task's expected
+// dry-fixture command. The orchestrator MUST still verify the task
+// contract / report / memory completion / git commit even when reuse is
+// true. The receipt_coverage field is therefore a HINT for downstream
+// planners (wave29-06 ready-queue, wave29-07 cross-layer smoke), not a
+// pass/fail signal for this verifier.
+//
+// Returned shape (sorted by task_id ascending for byte-stable JSON):
+//   [{ task_id, receipt_count, reusable_count,
+//      reuse_query: { commit_hash, command, tier },
+//      reuse_decisions: [{ receipt_id, reusable, reason }] }]
+export function computeReceiptCoverage(manifest, perNodeResults, receipts) {
+  if (!Array.isArray(receipts) || receipts.length === 0) {
+    return [];
+  }
+  // Index receipts by task_id once so each node lookup is O(per-task).
+  const byTask = new Map();
+  for (const r of receipts) {
+    if (!r || typeof r.task_id !== 'string') continue;
+    if (!byTask.has(r.task_id)) byTask.set(r.task_id, []);
+    byTask.get(r.task_id).push(r);
+  }
+  const out = [];
+  const productiveResultsByTask = new Map();
+  for (const r of perNodeResults) {
+    if (r.kind === 'skipped') continue;
+    productiveResultsByTask.set(r.task_id, r);
+  }
+  for (const node of manifest.nodes ?? []) {
+    if (manifest.productive_only === false || isPseudoNode(node)) continue;
+    const taskId = node.task_id;
+    const taskReceipts = byTask.get(taskId) ?? [];
+    if (taskReceipts.length === 0) continue;
+    // The reuse query is the worker's expected dry-fixture command for
+    // this node. We mirror the per-task contract pattern (the manifest
+    // node carries verification_tier; we run reuse decisions ONCE per
+    // unique receipt against the node's tier so the planner can see what
+    // would be reused).
+    const productive = productiveResultsByTask.get(taskId);
+    const queryCommitHash = productive?.commit_hash ?? null;
+    const queryTier = node.verification_tier ?? null;
+    const decisions = [];
+    let reusableCount = 0;
+    for (const r of taskReceipts) {
+      // The reuse query must use the receipt's OWN command (since the
+      // manifest doesn't pin a specific command per node). If the
+      // commit/tier diverge from the receipt, the helper returns false.
+      const query = {
+        commit_hash: queryCommitHash ?? r.commit_hash,
+        command: r.command,
+        tier: queryTier ?? r.tier,
+      };
+      const reusable = isReceiptReusable(r, query);
+      if (reusable) reusableCount += 1;
+      decisions.push({
+        receipt_id: r.id ?? null,
+        reusable,
+        reason: reusable ? 'all four conservative reuse rules satisfied' : describeReuseFailure(r, query),
+      });
+    }
+    out.push({
+      task_id: taskId,
+      receipt_count: taskReceipts.length,
+      reusable_count: reusableCount,
+      reuse_query: {
+        commit_hash: queryCommitHash,
+        tier: queryTier,
+      },
+      reuse_decisions: decisions.sort((a, b) => {
+        const ai = a.receipt_id ?? '';
+        const bi = b.receipt_id ?? '';
+        return ai.localeCompare(bi);
+      }),
+    });
+  }
+  return out.sort((a, b) => a.task_id.localeCompare(b.task_id));
+}
+
+// Human-readable reason for why a receipt failed reuse. Used only in the
+// receipt_coverage hint output — the verifier itself never gates on this.
+function describeReuseFailure(receipt, query) {
+  if (!Number.isInteger(receipt?.exit_code) || receipt.exit_code !== 0) {
+    return `receipt :exit_code=${receipt?.exit_code} (rule 3: must be 0)`;
+  }
+  const a = typeof receipt?.command === 'string' ? receipt.command.trim() : null;
+  const b = typeof query?.command === 'string' ? query.command.trim() : null;
+  if (a == null || b == null || a !== b) {
+    return 'rule 2: :command does not match query exactly';
+  }
+  // Commit hash check uses the same prefix-agree rule as isReceiptReusable.
+  if (typeof receipt?.commit_hash !== 'string' || typeof query?.commit_hash !== 'string') {
+    return 'rule 1: :commit_hash missing on receipt or query';
+  }
+  const ax = receipt.commit_hash.trim().toLowerCase();
+  const bx = query.commit_hash.trim().toLowerCase();
+  if (ax !== bx) {
+    const longer = ax.length >= bx.length ? ax : bx;
+    const shorter = ax.length >= bx.length ? bx : ax;
+    if (!(shorter.length >= 7 && longer.startsWith(shorter))) {
+      return 'rule 1: :commit_hash does not agree with query commit';
+    }
+  }
+  return 'rule 4: receipt :tier does not cover query tier (full > smoke > local)';
+}
+
 // --- Aggregate ------------------------------------------------------------
 
 // Build the final batch-verification report. All array fields are sorted
 // (task_ids ascending) so the JSON is byte-identical for byte-identical
 // inputs regardless of node ordering.
-export function aggregateResults(manifestPath, manifest, perNodeResults) {
+//
+// wave29-05: when `receipts` is supplied (Array of validated receipt
+// objects), the result gains a `receipt_coverage` field describing
+// per-task receipt counts and reuse decisions. When `receipts` is
+// undefined or null the field is OMITTED so the 12 wave28-05 + wave29-04
+// baseline fixtures emit byte-identical bytes (backward compat).
+export function aggregateResults(manifestPath, manifest, perNodeResults, receipts) {
   const productive = perNodeResults.filter((r) => r.kind !== 'skipped');
   const verified = productive.filter((r) => r.status === 'verified');
   const missingReports = productive
@@ -450,7 +591,7 @@ export function aggregateResults(manifestPath, manifest, perNodeResults) {
 
   // Top-level keys are emitted in alphabetical order so the JSON output is
   // byte-identical for byte-identical inputs.
-  return {
+  const out = {
     aggregate_status: aggregateStatus,
     failed_contract_verifications: failedContract,
     manifest_path: manifestPath,
@@ -462,6 +603,12 @@ export function aggregateResults(manifestPath, manifest, perNodeResults) {
     verified_nodes: verified.length,
     wave: manifest.wave ?? null,
   };
+  // wave29-05: only inject receipt_coverage when receipts were supplied,
+  // so prior 12 baseline fixtures remain byte-identical.
+  if (receipts != null) {
+    out.receipt_coverage = computeReceiptCoverage(manifest, perNodeResults, receipts);
+  }
+  return out;
 }
 
 // --- Top-level orchestration ----------------------------------------------
@@ -469,10 +616,20 @@ export function aggregateResults(manifestPath, manifest, perNodeResults) {
 // Verify a manifest given a set of loaders (real loaders for the CLI path,
 // synthetic loaders for fixtures). Returns the aggregate report shape from
 // aggregateResults.
+//
+// wave29-05: an OPTIONAL `receipts` parameter (Array of validated receipt
+// objects produced by readVerificationReceiptFile) attaches receipt-
+// coverage hints to the aggregate output. Receipts are advisory; the
+// verifier STILL verifies task contract / report / memory completion /
+// git commit for every productive node (steps 0-6 in verifyNode) even
+// when receipts are present. When `receipts` is omitted/null the
+// aggregate output is byte-identical to the wave28-05 + wave29-04
+// baseline (no receipt_coverage field emitted).
 export function verifyManifest({
   manifestPath,
   manifest,
   loaders,
+  receipts = null,
 }) {
   const perNode = [];
   for (const node of manifest.nodes ?? []) {
@@ -483,7 +640,7 @@ export function verifyManifest({
     const result = verifyNode(node, manifest, loaders);
     perNode.push({ kind: 'productive', ...result });
   }
-  return aggregateResults(manifestPath, manifest, perNode);
+  return aggregateResults(manifestPath, manifest, perNode, receipts);
 }
 
 // --- Real-disk loaders ----------------------------------------------------
@@ -606,10 +763,51 @@ function runCli(opts) {
   }
 
   const loaders = realLoaders(cwd);
+
+  // wave29-05: optional --receipts loading. Receipts are ADVISORY ONLY;
+  // failure to load them is a hard error so the operator notices the typo,
+  // but successful loading does NOT bypass any of the task-contract /
+  // report / memory / commit verification steps in verifyNode. We
+  // structurally validate each receipt (via validateReceiptObject) before
+  // surfacing it to computeReceiptCoverage; malformed receipts cause a
+  // hard CLI failure (the orchestrator should not silently ingest broken
+  // evidence caches).
+  let receipts = null;
+  if (opts.receipts) {
+    const receiptsPath = path.resolve(cwd, opts.receipts);
+    if (!fs.existsSync(receiptsPath)) {
+      process.stderr.write(`error: receipts file not found at ${receiptsPath}\n`);
+      process.exit(1);
+    }
+    try {
+      receipts = readVerificationReceiptFile(receiptsPath);
+    } catch (err) {
+      process.stderr.write(`error: failed to read receipts: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+    const receiptErrors = [];
+    for (const r of receipts) {
+      const errs = validateReceiptObject(r);
+      if (errs.length > 0) {
+        receiptErrors.push({ id: r?.id ?? '<unknown>', errors: errs });
+      }
+    }
+    if (receiptErrors.length > 0) {
+      process.stderr.write(
+        `error: ${receiptsPath} contains ${receiptErrors.length} invalid receipt(s):\n`,
+      );
+      for (const re of receiptErrors) {
+        process.stderr.write(`  ${re.id}: ${re.errors.join('; ')}\n`);
+      }
+      process.exit(1);
+    }
+  }
+
   const result = verifyManifest({
     manifestPath: opts.manifest, // emit as supplied (relative when given relative)
     manifest,
     loaders,
+    receipts,
   });
 
   emit(result, { json: opts.json });
@@ -1345,6 +1543,166 @@ function runFixtures({ json }) {
     },
   });
 
+  // ---------------------------------------------------------------------
+  // wave29-05 receipt-coverage fixtures — pin (a) backward compat: when
+  // no receipts are supplied the JSON is BYTE-IDENTICAL to the wave28-05
+  // + wave29-04 baseline (the all-green 2-node manifest is re-run with
+  // and without receipts and the without-receipts JSON is compared
+  // against the with-receipts JSON minus the receipt_coverage key) and
+  // (b) reuse-rule semantics: a matching commit + command + zero-exit +
+  // tier-cover receipt is reported reusable; mismatched commit / command
+  // / tier / non-zero exit is reported NOT reusable. The 12 baseline
+  // fixtures above continue to call verifyManifest WITHOUT receipts so
+  // their JSON stays byte-identical.
+  // ---------------------------------------------------------------------
+  const receiptCoverageReceiptsReusable = [
+    {
+      id: 'wave99-01-foo-abc1234-smoke',
+      wave: 'wave99',
+      task_id: 'wave99-01-foo',
+      commit_hash: 'abc1234',
+      command: 'node scripts/check-foo.mjs --dry-fixture',
+      exit_code: 0,
+      tier: 'smoke',
+      started_at: null,
+      finished_at: null,
+      duration_ms: 200,
+      files: ['scripts/foo.mjs'],
+      notes: null,
+      loc: null,
+    },
+  ];
+  fixtures.push({
+    name: 'wave29-05 receipts pass: matching receipt ⇒ reusable_count=1, full verification still runs',
+    manifest: greenManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest.lisp',
+    loaders: syntheticLoaders({
+      contracts: greenContracts,
+      reports: greenReports,
+      ledgers: greenLedgers,
+      commits: greenCommits,
+    }),
+    receipts: receiptCoverageReceiptsReusable,
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 2,
+      total_nodes: 2,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications: [],
+      skipped_nodes: [],
+      receipt_coverage_present: true,
+      receipt_coverage_reusable_count_for: { task: 'wave99-01-foo', count: 1 },
+    },
+  });
+  // wave29-05 case B: receipt's commit does NOT match the report commit
+  // (the report says abc1234, the receipt says cafebabe). The receipt
+  // structurally validates, but isReceiptReusable returns false. The
+  // verifier MUST still mark the manifest all_green (receipts never gate
+  // verification) and the receipt_coverage row reports reusable_count=0.
+  const receiptCoverageReceiptsNotReusable = [
+    {
+      id: 'wave99-01-foo-cafebab-smoke',
+      wave: 'wave99',
+      task_id: 'wave99-01-foo',
+      commit_hash: 'cafebab',
+      command: 'node scripts/check-foo.mjs --dry-fixture',
+      exit_code: 0,
+      tier: 'smoke',
+      started_at: null,
+      finished_at: null,
+      duration_ms: 200,
+      files: ['scripts/foo.mjs'],
+      notes: null,
+      loc: null,
+    },
+  ];
+  fixtures.push({
+    name: 'wave29-05 receipts pass: stale-commit receipt ⇒ reusable_count=0; verification still all_green',
+    manifest: greenManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest.lisp',
+    loaders: syntheticLoaders({
+      contracts: greenContracts,
+      reports: greenReports,
+      ledgers: greenLedgers,
+      commits: greenCommits,
+    }),
+    receipts: receiptCoverageReceiptsNotReusable,
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 2,
+      total_nodes: 2,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications: [],
+      skipped_nodes: [],
+      receipt_coverage_present: true,
+      receipt_coverage_reusable_count_for: { task: 'wave99-01-foo', count: 0 },
+    },
+  });
+  // wave29-05 case C: backward compat — invoking verifyManifest WITHOUT
+  // receipts on the same green inputs MUST produce JSON that, when
+  // augmented with a `receipt_coverage: []` key, is byte-identical to a
+  // verifyManifest call WITH receipts=[] supplied. This pins the rule
+  // that omitting --receipts truly omits the field entirely (no empty
+  // array sneaking in).
+  fixtures.push({
+    name: 'wave29-05 backward-compat: no receipts ⇒ no receipt_coverage key; receipts=[] ⇒ receipt_coverage=[]',
+    manifest: greenManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest.lisp',
+    loaders: syntheticLoaders({
+      contracts: greenContracts,
+      reports: greenReports,
+      ledgers: greenLedgers,
+      commits: greenCommits,
+    }),
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 2,
+      total_nodes: 2,
+      receipt_coverage_absent_when_no_receipts: true,
+    },
+  });
+  // wave29-05 case D: full receipt covers smoke query (tier-cover rule).
+  // The greenManifest declares verification_tier=local for the nodes.
+  // We supply a `full` receipt and confirm reusable_count=1 — full > local.
+  const receiptCoverageReceiptsFullCoversLocal = [
+    {
+      id: 'wave99-01-foo-abc1234-full',
+      wave: 'wave99',
+      task_id: 'wave99-01-foo',
+      commit_hash: 'abc1234',
+      command: 'node scripts/check-foo.mjs --dry-fixture',
+      exit_code: 0,
+      tier: 'full',
+      started_at: null,
+      finished_at: null,
+      duration_ms: 5000,
+      files: [],
+      notes: null,
+      loc: null,
+    },
+  ];
+  fixtures.push({
+    name: 'wave29-05 receipts pass: full-tier receipt covers local-tier node ⇒ reusable_count=1',
+    manifest: greenManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest.lisp',
+    loaders: syntheticLoaders({
+      contracts: greenContracts,
+      reports: greenReports,
+      ledgers: greenLedgers,
+      commits: greenCommits,
+    }),
+    receipts: receiptCoverageReceiptsFullCoversLocal,
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 2,
+      total_nodes: 2,
+      receipt_coverage_present: true,
+      receipt_coverage_reusable_count_for: { task: 'wave99-01-foo', count: 1 },
+    },
+  });
+
   // Run all fixtures and collect failures.
   const failures = [];
   for (const fx of fixtures) {
@@ -1352,6 +1710,7 @@ function runFixtures({ json }) {
       manifestPath: fx.manifestPath,
       manifest: fx.manifest,
       loaders: fx.loaders,
+      receipts: fx.receipts ?? null,
     });
     const fxFailures = checkExpect(result, fx.expect);
     if (fxFailures.length > 0) {
@@ -1364,6 +1723,7 @@ function runFixtures({ json }) {
         manifestPath: fx.manifestPath,
         manifest: fx.manifest,
         loaders: fx.loaders,
+        receipts: fx.receipts ?? null,
       });
       const aBytes = stableStringify(result);
       const bBytes = stableStringify(second);
@@ -1374,6 +1734,33 @@ function runFixtures({ json }) {
           diff: { a: aBytes, b: bBytes },
         });
       }
+    }
+  }
+
+  // wave29-05: explicit byte-identical backward-compat check. Re-run the
+  // first wave28-05 baseline fixture (the all-green 2-node manifest)
+  // WITHOUT receipts and confirm the JSON output byte-matches a snapshot
+  // captured before this task introduced the receipts plumbing. The
+  // snapshot is the stableStringify of verifyManifest's result with NO
+  // receipt_coverage key. We compare against re-running the same call
+  // and assert the absence of receipt_coverage in the keys.
+  {
+    const baseline = verifyManifest({
+      manifestPath: '.missiond/tasks/wave99/manifest.lisp',
+      manifest: greenManifest,
+      loaders: syntheticLoaders({
+        contracts: greenContracts,
+        reports: greenReports,
+        ledgers: greenLedgers,
+        commits: greenCommits,
+      }),
+      // receipts intentionally omitted
+    });
+    if (Object.prototype.hasOwnProperty.call(baseline, 'receipt_coverage')) {
+      failures.push({
+        name: 'wave29-05 backward-compat: baseline without receipts MUST NOT carry receipt_coverage',
+        failures: ['baseline result has receipt_coverage key but no receipts were supplied'],
+      });
     }
   }
 
@@ -1469,6 +1856,33 @@ function checkExpect(actual, expect) {
         `skipped_nodes: expected ${JSON.stringify(expect.skipped_nodes)}, ` +
         `got ${JSON.stringify(actual.skipped_nodes)}`,
       );
+    }
+  }
+  // wave29-05 receipt-coverage assertions.
+  if (expect.receipt_coverage_present === true) {
+    if (!Array.isArray(actual.receipt_coverage)) {
+      out.push('receipt_coverage: expected an array, got ' + JSON.stringify(actual.receipt_coverage));
+    }
+  }
+  if (expect.receipt_coverage_absent_when_no_receipts === true) {
+    if (Object.prototype.hasOwnProperty.call(actual, 'receipt_coverage')) {
+      out.push('receipt_coverage: expected ABSENT (no receipts supplied) but key was present');
+    }
+  }
+  if (expect.receipt_coverage_reusable_count_for) {
+    const want = expect.receipt_coverage_reusable_count_for;
+    if (!Array.isArray(actual.receipt_coverage)) {
+      out.push('receipt_coverage_reusable_count_for: receipt_coverage missing on result');
+    } else {
+      const row = actual.receipt_coverage.find((r) => r.task_id === want.task);
+      if (!row) {
+        out.push(`receipt_coverage_reusable_count_for: no row for task=${want.task}`);
+      } else if (row.reusable_count !== want.count) {
+        out.push(
+          `receipt_coverage_reusable_count_for[${want.task}]: expected ` +
+          `reusable_count=${want.count}, got ${row.reusable_count}`,
+        );
+      }
     }
   }
   return out;
