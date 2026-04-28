@@ -985,6 +985,44 @@ function runFixtures(json = false) {
         :known-good ["scripts/x.mjs"])`,
       ok: false,
     },
+    // wave29-07 cross-layer smoke: all 5 wave29-02 seed pattern files on
+    // disk MUST validate clean through the in-process readPatternCardFile +
+    // validateCardObject pair. This is the layer-B pin for the wave29-07
+    // cross-layer smoke — a regression where the durable schema drifts from
+    // any seed card surfaces here BEFORE downstream tooling notices.
+    {
+      name: 'wave29-07-loop-smoke-5-seed-cards-validate',
+      category: 'wave29-07-loop-smoke',
+      source: null,
+      ok: true,
+      run: () => {
+        const seedRel = [
+          '.missiond/patterns/schema-checker.pattern.lisp',
+          '.missiond/patterns/node-cli-readonly.pattern.lisp',
+          '.missiond/patterns/report-lineage.pattern.lisp',
+          '.missiond/patterns/cross-layer-smoke.pattern.lisp',
+          '.missiond/patterns/large-file-navigation.pattern.lisp',
+        ];
+        for (const rel of seedRel) {
+          const abs = path.resolve(process.cwd(), rel);
+          if (!fs.existsSync(abs)) {
+            throw new Error(`seed pattern file missing at ${abs}`);
+          }
+          const cards = readPatternCardFile(abs);
+          if (cards.length === 0) {
+            throw new Error(`seed pattern file ${rel} contained no cards`);
+          }
+          for (const card of cards) {
+            const errors = validateCardObject(card);
+            if (errors.length !== 0) {
+              throw new Error(
+                `seed card ${rel}#${card.id} failed validation:\n  ${errors.join('\n  ')}`,
+              );
+            }
+          }
+        }
+      },
+    },
   ];
 
   let failed = 0;
@@ -992,6 +1030,27 @@ function runFixtures(json = false) {
   for (const fixture of fixtures) {
     categories.add(fixture.category);
     const file = `<fixture:${fixture.name}>`;
+    // wave29-07 hook: a fixture with `run` runs an out-of-band check
+    // (e.g. against the 5 wave29-02 seed pattern files on disk via the
+    // named exports). It throws on failure; otherwise it counts as ok.
+    if (typeof fixture.run === 'function') {
+      let runOk = true;
+      let runErr = null;
+      try {
+        fixture.run();
+      } catch (err) {
+        runOk = false;
+        runErr = err;
+      }
+      if (runOk !== fixture.ok) {
+        failed += 1;
+        console.error(
+          `fixture failed: ${fixture.name} (expected ok=${fixture.ok}, got ok=${runOk})`,
+        );
+        if (runErr) console.error(`  ${runErr.message}`);
+      }
+      continue;
+    }
     const diagnostics = [];
     let forms;
     try {

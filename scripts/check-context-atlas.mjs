@@ -1280,6 +1280,39 @@ function runFixtures(json = false) {
         (file "scripts/check-context-atlas.mjs"))`,
       ok: false,
     },
+    // wave29-07 cross-layer smoke: the real wave29 dispatch atlas on disk
+    // MUST validate clean through the in-process projectAtlas +
+    // validateAtlasObject pair the prep CLI / planner depend on. This is
+    // the layer-A pin for the wave29-07 cross-layer smoke — a regression
+    // where the durable schema drifts away from the live dispatch shape
+    // surfaces here BEFORE downstream tooling notices.
+    {
+      name: 'wave29-07-loop-smoke-real-wave29-atlas-validates',
+      category: 'wave29-07-loop-smoke',
+      source: null,
+      ok: true,
+      run: () => {
+        const realPath = path.resolve(
+          process.cwd(),
+          '.missiond/tasks/wave29/context-atlas.lisp',
+        );
+        if (!fs.existsSync(realPath)) {
+          throw new Error(`real wave29 context atlas missing at ${realPath}`);
+        }
+        const projected = readContextAtlasFile(realPath);
+        if (projected.length !== 1) {
+          throw new Error(
+            `expected exactly 1 (context-atlas ...) form on disk, got ${projected.length}`,
+          );
+        }
+        const errors = validateAtlasObject(projected[0]);
+        if (errors.length !== 0) {
+          throw new Error(
+            `real wave29 atlas failed validation:\n  ${errors.join('\n  ')}`,
+          );
+        }
+      },
+    },
   ];
 
   let failed = 0;
@@ -1287,6 +1320,27 @@ function runFixtures(json = false) {
   for (const fixture of fixtures) {
     categories.add(fixture.category);
     const file = `<fixture:${fixture.name}>`;
+    // wave29-07 hook: a fixture with `run` runs an out-of-band check
+    // (e.g. against a real on-disk atlas via the named exports). It
+    // throws on failure; otherwise it counts as ok.
+    if (typeof fixture.run === 'function') {
+      let runOk = true;
+      let runErr = null;
+      try {
+        fixture.run();
+      } catch (err) {
+        runOk = false;
+        runErr = err;
+      }
+      if (runOk !== fixture.ok) {
+        failed += 1;
+        console.error(
+          `fixture failed: ${fixture.name} (expected ok=${fixture.ok}, got ok=${runOk})`,
+        );
+        if (runErr) console.error(`  ${runErr.message}`);
+      }
+      continue;
+    }
     const diagnostics = [];
     let forms;
     try {

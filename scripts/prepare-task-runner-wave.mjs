@@ -68,6 +68,20 @@ import {
   FORBIDDEN_ID_SUBSTRINGS,
 } from './render-wave-briefs.mjs';
 
+// wave29-07 cross-layer smoke (layer C): the wave29-07 fixture parses the
+// appended session-trace via the shared Lisp reader so the structured
+// `:kind read` / `:files [...]` shape is asserted mechanically (not via a
+// fragile substring check). These helpers are NOT used by the production
+// path; they only appear inside the dry-fixture loop body.
+import {
+  parseLisp,
+  isList,
+  head,
+  readKeywordProps,
+  nodeText,
+  nodeToStringArray,
+} from './lib/missiond_lisp.mjs';
+
 const usage = `Usage:
   node scripts/prepare-task-runner-wave.mjs --manifest <manifest.lisp>
     [--out-dir <repo>] [--dry-run] [--force] [--json] [--dry-fixture]
@@ -897,6 +911,74 @@ async function runFixtures() {
           }
         }
         if (!threw) throw new Error('backfill-kind node should have been rejected');
+      } finally {
+        cleanupTmpRepo(env);
+      }
+    },
+  });
+
+  // wave29-07 cross-layer smoke (layer C): prove the trace-event audit
+  // expectation is mechanically pinned. The prep CLI MUST emit a
+  // `:kind read` trace-event whose `:files` vector references the
+  // manifest's shared_preamble_path; this is the auditability guarantee
+  // shared with wave29-shared-preamble-read invariants. The existing
+  // `preamble-read-trace-event-emitted` fixture asserts the substring;
+  // this wave29-07 fixture parses the appended trace via the shared Lisp
+  // reader and asserts the structured event shape so a regression that
+  // breaks the keyword form (but happens to leave the path string intact)
+  // surfaces here, near the prep-CLI layer.
+  fixtures.push({
+    name: 'wave29-07-loop-smoke-preamble-read-trace-emitted',
+    category: 'wave29-07-loop-smoke',
+    run: () => {
+      const env = setupTmpRepo();
+      try {
+        seedTwoNodeWave(env);
+        const result = prepareWave({
+          manifestPath: env.manifestPath,
+          cwd: env.cwd,
+          dryRun: false,
+          force: false,
+          nowIso: '2026-04-28T15:45:00Z',
+        });
+        const tracePath = path.resolve(env.cwd, '.missiond/tasks/wave99/session-trace.lisp');
+        const body = fs.readFileSync(tracePath, 'utf8');
+        const forms = parseLisp(body, tracePath);
+        // Walk the parsed forms and find a (trace-event ...) child whose
+        // :kind is `read` AND whose :files vector contains the manifest's
+        // shared_preamble_path. Mechanical assertion (no substring shortcut).
+        const expectedPreamble = '.missiond/claudecode/wave99-shared-preamble.md';
+        let foundReadEvent = false;
+        for (const form of forms) {
+          if (!isList(form)) continue;
+          if (head(form) !== 'session-trace') continue;
+          for (const child of form.children.slice(2)) {
+            if (!isList(child) || head(child) !== 'trace-event') continue;
+            const props = readKeywordProps(child, { start: 1 });
+            const kind = nodeText(props[':kind']?.value);
+            if (kind !== 'read') continue;
+            const filesNode = props[':files']?.value;
+            const files = nodeToStringArray(filesNode) ?? [];
+            if (files.includes(expectedPreamble)) {
+              foundReadEvent = true;
+              break;
+            }
+          }
+        }
+        if (!foundReadEvent) {
+          throw new Error(
+            'wave29-07 layer C: prep CLI MUST emit a (trace-event :kind read :files [...]) referencing the shared_preamble_path',
+          );
+        }
+        // Cross-check: the bootstrap-emitted `bootstrapEntryIds` must
+        // include exactly one read-style id so the structured-vs-substring
+        // count agrees with the API surface.
+        const readIds = result.bootstrapEntryIds.filter((id) => id.includes('-bootstrap-read-'));
+        if (readIds.length !== 1) {
+          throw new Error(
+            `wave29-07 layer C: expected 1 bootstrap-read id, got ${readIds.length}`,
+          );
+        }
       } finally {
         cleanupTmpRepo(env);
       }

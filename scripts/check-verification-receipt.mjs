@@ -1355,6 +1355,86 @@ function runFixtures(json = false) {
     }
   }
 
+  // wave29-07 cross-layer smoke (layer E): pin the conservative-reuse
+  // contract as a single composite check. One synthetic receipt + 5
+  // queries: matching-all → reusable=true; wrong commit → false; wrong
+  // command → false; wrong tier → false (local CANNOT cover smoke); and
+  // non-zero exit → false. ANY single failed sub-check fails the whole
+  // smoke fixture. This is the layer-E pin: a regression that loosens any
+  // one of the four conservative rules surfaces here, near the receipt
+  // checker, BEFORE the batch verifier or planner is misled.
+  categories.add('wave29-07-loop-smoke');
+  {
+    const wave2907Receipt = {
+      id: 'wave29-07-foo-1234567-smoke',
+      wave: 'wave99',
+      task_id: 'wave99-01-foo',
+      commit_hash: '1234567abc',
+      command: 'node scripts/foo.mjs --dry-fixture',
+      exit_code: 0,
+      tier: 'smoke',
+      started_at: null,
+      finished_at: null,
+      duration_ms: 250,
+      files: [],
+      notes: null,
+      loc: null,
+    };
+    const wave2907Subchecks = [
+      {
+        sub: 'matching-all-4-rules ⇒ true',
+        receipt: wave2907Receipt,
+        query: { commit_hash: '1234567abc', command: 'node scripts/foo.mjs --dry-fixture', tier: 'smoke' },
+        expect: true,
+      },
+      {
+        sub: 'wrong commit ⇒ false',
+        receipt: wave2907Receipt,
+        query: { commit_hash: 'cafebabe', command: 'node scripts/foo.mjs --dry-fixture', tier: 'smoke' },
+        expect: false,
+      },
+      {
+        sub: 'wrong command ⇒ false',
+        receipt: wave2907Receipt,
+        query: { commit_hash: '1234567abc', command: 'node scripts/foo.mjs --different-flag', tier: 'smoke' },
+        expect: false,
+      },
+      {
+        sub: 'wrong tier (local CANNOT cover smoke) ⇒ false',
+        receipt: { ...wave2907Receipt, tier: 'local' },
+        query: { commit_hash: '1234567abc', command: 'node scripts/foo.mjs --dry-fixture', tier: 'smoke' },
+        expect: false,
+      },
+      {
+        sub: 'non-zero exit ⇒ false',
+        receipt: { ...wave2907Receipt, exit_code: 1 },
+        query: { commit_hash: '1234567abc', command: 'node scripts/foo.mjs --dry-fixture', tier: 'smoke' },
+        expect: false,
+      },
+    ];
+    let smokeOk = true;
+    const subFailures = [];
+    for (const c of wave2907Subchecks) {
+      const got = isReceiptReusable(c.receipt, c.query);
+      if (got !== c.expect) {
+        smokeOk = false;
+        subFailures.push(`${c.sub} (expected ${c.expect}, got ${got})`);
+      }
+    }
+    reuseHelperResults.push({
+      name: 'wave29-07-loop-smoke-receipt-reuse-conservative',
+      expect: true,
+      got: smokeOk,
+      ok: smokeOk,
+    });
+    if (!smokeOk) {
+      failed += 1;
+      console.error(
+        `wave29-07-loop-smoke-receipt-reuse-conservative FAILED: ${subFailures.join(' | ')}`,
+      );
+    }
+  }
+
   if (json) {
     console.log(
       JSON.stringify(

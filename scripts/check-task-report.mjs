@@ -1874,6 +1874,34 @@ function runFixtures() {
       ok: false,
       expects: /:parent_patches :kind must be one of/,
     },
+    // wave29-07 cross-layer smoke (layer D): pin the hotfix-lineage drift
+    // invariant. Synthetic worker commit `aaaaaaa` + parent lint-cleanup
+    // hotfix `bbbbbbb`. This fixture flips `:commit_hash` to `aaaaaaa`
+    // (worker hash) while `:parent_patches[-1].commit` is `bbbbbbb`, so
+    // the wave29-04 final-hash drift rule fires. The PASS direction (final
+    // hash matches trailing parent_patches commit) is already exercised by
+    // the wave29-04 wave28-02 lineage exemplar fixture above. Together the
+    // two fixtures pin the invariant from both sides.
+    {
+      name: 'wave29-07-loop-smoke-hotfix-lineage-pin (worker hash drifts from parent_patches[-1])',
+      source: `(report wave29-07-lineage-drift
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-07-lineage-drift"
+        :status complete
+        :owner "claudecode"
+        :commit_hash "aaaaaaa"
+        :agent_commit_hash "aaaaaaa"
+        :parent_patches
+          [(:commit "bbbbbbb"
+            :kind lint-cleanup
+            :reason "TS6133 unused parameter cleanup"
+            :files ["scripts/x.mjs"])]
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/foo.mjs --dry-fixture" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /commit_hash.*does not match.*parent_patches|parent_patches.*does not match.*commit_hash|drift|final|trailing/i,
+    },
   ];
 
   let failed = 0;

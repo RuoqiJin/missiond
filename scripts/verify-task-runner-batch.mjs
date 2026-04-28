@@ -1683,6 +1683,197 @@ function runFixtures({ json }) {
       loc: null,
     },
   ];
+  // ---------------------------------------------------------------------
+  // wave29-07 cross-layer smoke (layer H): pin the batch verifier as the
+  // capstone for the runner-efficiency contract. One synthetic 3-node
+  // manifest where every report carries the wave29-04 lineage fields
+  // (worker commit + parent_patches + final commit_hash matching the
+  // trailing parent_patches[-1].commit); every shared-memory completion
+  // cites a hash inside the lineage; every git stub commit aligns with
+  // the report's final hash; AND wave29-05 receipts are supplied for one
+  // node so the receipt_coverage field is populated. The verifier MUST
+  // return aggregate_status=all_green AND receipt_coverage MUST be
+  // present with reusable_count=1 for the receipt-bearing node. This is
+  // the layer-H pin: a regression where the lineage join, memory join,
+  // git join, OR receipt coverage breaks surfaces here.
+  // ---------------------------------------------------------------------
+  const crossLayerManifest = {
+    id: 'm-wave29-07-cross-layer',
+    schema: 'missiond.task-runner-manifest.v1',
+    wave: 'wave99',
+    brief_mode: 'thin',
+    shared_preamble_path: '.missiond/claudecode/wave99-shared-preamble.md',
+    productive_only: true,
+    overlap_policy: 'reject',
+    description: null,
+    generated_at: null,
+    generator: null,
+    nodes: [
+      {
+        task_id: 'wave99-01-foo',
+        depends_on: [],
+        verification_tier: 'local',
+        dispatch_group: 'A',
+        estimated_minutes: 30,
+        heartbeat_minutes: 10,
+        write_scope: ['scripts/foo.mjs'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+      {
+        task_id: 'wave99-02-bar',
+        depends_on: ['wave99-01-foo'],
+        verification_tier: 'local',
+        dispatch_group: 'B',
+        estimated_minutes: 25,
+        heartbeat_minutes: 10,
+        write_scope: ['scripts/bar.mjs'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+      {
+        task_id: 'wave99-03-baz',
+        depends_on: ['wave99-01-foo'],
+        verification_tier: 'local',
+        dispatch_group: 'C',
+        estimated_minutes: 20,
+        heartbeat_minutes: 10,
+        write_scope: ['scripts/baz.mjs'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+    ],
+    loc: null,
+  };
+  const crossLayerContracts = {
+    '.missiond/tasks/wave99/wave99-01-foo.lisp': loadContractFromSourceShim(
+      buildContractSource({ id: 'wave99-01-foo', message: 'feat(tasks): wave29-07 foo' }),
+    ),
+    '.missiond/tasks/wave99/wave99-02-bar.lisp': loadContractFromSourceShim(
+      buildContractSource({ id: 'wave99-02-bar', message: 'feat(tasks): wave29-07 bar' }),
+    ),
+    '.missiond/tasks/wave99/wave99-03-baz.lisp': loadContractFromSourceShim(
+      buildContractSource({ id: 'wave99-03-baz', message: 'feat(tasks): wave29-07 baz' }),
+    ),
+  };
+  // Every report carries lineage fields. final commit_hash MUST match
+  // trailing :parent_patches[-1].commit (wave29-04 drift rule).
+  const crossLayerReports = {
+    '.missiond/tasks/wave99/reports/wave99-01-foo.report.lisp': loadReportFromSource(
+      buildReportSource({
+        id: 'wave99-01-foo',
+        commitHash: 'aa11bb2',
+        agentCommitHash: 'aa11bb1',
+        parentPatches: [
+          {
+            commit: 'aa11bb2',
+            kind: 'lint-cleanup',
+            reason: 'TS6133 unused parameter cleanup',
+            files: ['scripts/foo.mjs'],
+          },
+        ],
+      }),
+      '<fx-wave29-07-foo>',
+    ),
+    '.missiond/tasks/wave99/reports/wave99-02-bar.report.lisp': loadReportFromSource(
+      buildReportSource({
+        id: 'wave99-02-bar',
+        commitHash: 'cc33dd2',
+        agentCommitHash: 'cc33dd1',
+        parentPatches: [
+          {
+            commit: 'cc33dd2',
+            kind: 'lint-cleanup',
+            reason: 'TS6133 unused parameter cleanup',
+            files: ['scripts/bar.mjs'],
+          },
+        ],
+      }),
+      '<fx-wave29-07-bar>',
+    ),
+    '.missiond/tasks/wave99/reports/wave99-03-baz.report.lisp': loadReportFromSource(
+      buildReportSource({
+        id: 'wave99-03-baz',
+        commitHash: 'ee55ff2',
+        agentCommitHash: 'ee55ff1',
+        parentPatches: [
+          {
+            commit: 'ee55ff2',
+            kind: 'lint-cleanup',
+            reason: 'TS6133 unused parameter cleanup',
+            files: ['scripts/baz.mjs'],
+          },
+        ],
+      }),
+      '<fx-wave29-07-baz>',
+    ),
+  };
+  // Memory completions cite the FINAL commit hash for each node.
+  const crossLayerLedgers = {
+    '.missiond/tasks/wave99/shared-memory.lisp': loadLedgerFromSource(
+      buildLedgerSource('wave99', [
+        { task: 'wave99-01-foo', summary: 'done at commit aa11bb2 (post-hotfix)' },
+        { task: 'wave99-02-bar', summary: 'done at commit cc33dd2 (post-hotfix)' },
+        { task: 'wave99-03-baz', summary: 'done at commit ee55ff2 (post-hotfix)' },
+      ]),
+      '<fx-wave29-07-ledger>',
+    ),
+  };
+  const crossLayerCommits = {
+    aa11bb2: syntheticCommit('aa11bb2', 'feat(tasks): wave29-07 foo'),
+    cc33dd2: syntheticCommit('cc33dd2', 'feat(tasks): wave29-07 bar'),
+    ee55ff2: syntheticCommit('ee55ff2', 'feat(tasks): wave29-07 baz'),
+  };
+  // wave29-05 receipt for the foo node only — proves receipt_coverage
+  // populates and reusable_count=1 when the receipt's commit/command/tier
+  // align with the report.
+  const crossLayerReceipts = [
+    {
+      id: 'wave99-01-foo-aa11bb2-smoke',
+      wave: 'wave99',
+      task_id: 'wave99-01-foo',
+      commit_hash: 'aa11bb2',
+      command: 'node scripts/check-foo.mjs --dry-fixture',
+      exit_code: 0,
+      tier: 'smoke',
+      started_at: null,
+      finished_at: null,
+      duration_ms: 250,
+      files: ['scripts/foo.mjs'],
+      notes: null,
+      loc: null,
+    },
+  ];
+  fixtures.push({
+    name: 'wave29-07-loop-smoke-cross-layer-batch-verifies',
+    manifest: crossLayerManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest-wave29-07.lisp',
+    loaders: syntheticLoaders({
+      contracts: crossLayerContracts,
+      reports: crossLayerReports,
+      ledgers: crossLayerLedgers,
+      commits: crossLayerCommits,
+    }),
+    receipts: crossLayerReceipts,
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 3,
+      total_nodes: 3,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications: [],
+      skipped_nodes: [],
+      receipt_coverage_present: true,
+      receipt_coverage_reusable_count_for: { task: 'wave99-01-foo', count: 1 },
+    },
+  });
+
   fixtures.push({
     name: 'wave29-05 receipts pass: full-tier receipt covers local-tier node ⇒ reusable_count=1',
     manifest: greenManifest,

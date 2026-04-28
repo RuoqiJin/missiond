@@ -1935,6 +1935,127 @@ function buildFixtures() {
         }
       },
     },
+    // wave29-07 cross-layer smoke (layer F): pin both halves of the
+    // wave29-06 ready-queue contract simultaneously on a single 4-node
+    // unbalanced DAG. (a) `--schedule ready-queue` MUST surface
+    // `wave_duration_savings_minutes` strictly > 0 (the savings ARE
+    // realized for an unbalanced wave); (b) the same manifest under the
+    // default `--schedule group-barrier` MUST produce a plan whose JSON
+    // is byte-identical to the pre-wave29-06 baseline (no `ready_queue`
+    // top-level key). This is the layer-F pin: a regression that either
+    // breaks ready-queue savings OR leaks the additive field into the
+    // default branch surfaces here.
+    {
+      name: 'wave29-07-loop-smoke-ready-queue-saves-time-on-unbalanced-dag',
+      category: 'wave29-07-loop-smoke',
+      expect: 'ok',
+      schedule: 'ready-queue',
+      // Unbalanced 4-node DAG: anchor (10 min, group A) finishes early;
+      // slow-peer (90 min, group A) holds the group-A barrier; fast-follower
+      // (5 min, group B, depends on anchor) MUST release at t=10 under
+      // ready-queue but waits until t=90 under group-barrier; medium-tail
+      // (20 min, group C, depends on anchor) MUST release at t=10 under
+      // ready-queue but waits until t=90 under group-barrier. This gives
+      // strictly positive aggregate + wave-duration savings.
+      source: `(task-runner-manifest m-wave29-07-savings
+        :schema "${MANIFEST_SCHEMA}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${SHARED_PREAMBLE_PATH}"
+        :productive_only true
+        (node :task_id wave99-01-anchor
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 10
+              :heartbeat_minutes 5
+              :write_scope ["scripts/anchor.mjs"])
+        (node :task_id wave99-02-slow-peer
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 90
+              :heartbeat_minutes 10
+              :write_scope ["scripts/slow.mjs"])
+        (node :task_id wave99-03-fast-follower
+              :depends_on [wave99-01-anchor]
+              :verification_tier local
+              :dispatch_group B
+              :estimated_minutes 5
+              :heartbeat_minutes 5
+              :write_scope ["scripts/fast.mjs"])
+        (node :task_id wave99-04-medium-tail
+              :depends_on [wave99-01-anchor]
+              :verification_tier local
+              :dispatch_group C
+              :estimated_minutes 20
+              :heartbeat_minutes 5
+              :write_scope ["scripts/medium.mjs"]))`,
+      assert: (plan) => {
+        // (a) ready-queue savings strictly > 0.
+        if (!plan.ready_queue) {
+          throw new Error('wave29-07 layer F: ready_queue field missing under --schedule ready-queue');
+        }
+        const rq = plan.ready_queue;
+        if (!(rq.wave_duration_savings_minutes > 0)) {
+          throw new Error(
+            `wave29-07 layer F: wave_duration_savings_minutes must be > 0 for unbalanced DAG, got ${rq.wave_duration_savings_minutes}`,
+          );
+        }
+        if (!(rq.aggregate_idle_window_savings_minutes > 0)) {
+          throw new Error(
+            `wave29-07 layer F: aggregate_idle_window_savings_minutes must be > 0 for unbalanced DAG, got ${rq.aggregate_idle_window_savings_minutes}`,
+          );
+        }
+        // (b) re-plan the SAME source under the default group-barrier
+        // schedule and assert no ready_queue field leaks in. This pins the
+        // wave29-06 backward-compat half of the contract.
+        const baselineManifest = parseManifestSource(`(task-runner-manifest m-wave29-07-savings-baseline
+          :schema "${MANIFEST_SCHEMA}"
+          :wave wave99
+          :brief_mode thin
+          :shared_preamble_path "${SHARED_PREAMBLE_PATH}"
+          :productive_only true
+          (node :task_id wave99-01-anchor
+                :depends_on []
+                :verification_tier local
+                :dispatch_group A
+                :estimated_minutes 10
+                :heartbeat_minutes 5
+                :write_scope ["scripts/anchor.mjs"])
+          (node :task_id wave99-02-slow-peer
+                :depends_on []
+                :verification_tier local
+                :dispatch_group A
+                :estimated_minutes 90
+                :heartbeat_minutes 10
+                :write_scope ["scripts/slow.mjs"])
+          (node :task_id wave99-03-fast-follower
+                :depends_on [wave99-01-anchor]
+                :verification_tier local
+                :dispatch_group B
+                :estimated_minutes 5
+                :heartbeat_minutes 5
+                :write_scope ["scripts/fast.mjs"])
+          (node :task_id wave99-04-medium-tail
+                :depends_on [wave99-01-anchor]
+                :verification_tier local
+                :dispatch_group C
+                :estimated_minutes 20
+                :heartbeat_minutes 5
+                :write_scope ["scripts/medium.mjs"]))`);
+        const baseline = planFromManifestObject(baselineManifest, {
+          manifest_path: '<wave29-07-baseline>',
+          schedule: 'group-barrier',
+        });
+        if (!baseline.ok) throw new Error('wave29-07 layer F: baseline group-barrier plan failed');
+        if (Object.prototype.hasOwnProperty.call(baseline.plan, 'ready_queue')) {
+          throw new Error(
+            'wave29-07 layer F: default group-barrier MUST NOT carry ready_queue field (additive-only contract)',
+          );
+        }
+      },
+    },
   ];
 }
 
