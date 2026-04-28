@@ -28,6 +28,7 @@ Use --dry-fixture to run self-contained pass/fail fixtures.
 `;
 
 export const SCHEMA = 'missiond.task-lifecycle-event.v1';
+export const REQUEST_EVENT_SCHEMA = 'missiond.lifecycle-event.v1';
 export const LOG_HEAD = 'task-lifecycle-event-log';
 export const EVENT_HEAD = 'lifecycle-event';
 export const ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
@@ -79,6 +80,17 @@ const OPTIONAL_EVENT_FIELDS = [
   ':legacy_trace_id',
 ];
 const ALLOWED_EVENT_FIELDS = new Set([...REQUIRED_EVENT_FIELDS, ...OPTIONAL_EVENT_FIELDS]);
+const REQUEST_EVENT_REQUIRED_FIELDS = [
+  ':schema',
+  ':event_id',
+  ':request_id',
+  ':kind',
+  ':actor',
+  ':time',
+  ':payload',
+  ':idempotency_key',
+];
+const REQUEST_EVENT_ALLOWED_FIELDS = new Set(REQUEST_EVENT_REQUIRED_FIELDS);
 
 function main() {
   const args = process.argv.slice(2);
@@ -131,6 +143,7 @@ export function validateLifecycleEventFiles(files) {
   const diagnostics = [];
   let ledgers = 0;
   let events = 0;
+  let requestEvents = 0;
   for (const file of [...new Set(files)]) {
     let forms;
     try {
@@ -146,9 +159,14 @@ export function validateLifecycleEventFiles(files) {
       continue;
     }
     for (const form of forms) {
-      if (!isList(form) || head(form) !== LOG_HEAD) continue;
-      ledgers += 1;
-      events += validateLifecycleEventLog(file, form, diagnostics);
+      if (!isList(form)) continue;
+      if (head(form) === LOG_HEAD) {
+        ledgers += 1;
+        events += validateLifecycleEventLog(file, form, diagnostics);
+      } else if (head(form) === EVENT_HEAD && isRequestLifecycleEventForm(form)) {
+        requestEvents += 1;
+        validateRequestLifecycleEventFile(file, form, diagnostics);
+      }
     }
   }
   return {
@@ -156,8 +174,14 @@ export function validateLifecycleEventFiles(files) {
     files: files.length,
     ledgers,
     events,
+    request_events: requestEvents,
     diagnostics,
   };
+}
+
+function isRequestLifecycleEventForm(form) {
+  const props = readKeywordProps(form, { start: 1 });
+  return keywordPropText(props, ':schema') === REQUEST_EVENT_SCHEMA;
 }
 
 export function parseLifecycleEventLogsFromText(source, file = '<memory>') {
@@ -337,6 +361,46 @@ export function validateLifecycleEvent(file, node, diagnostics) {
   return event;
 }
 
+export function validateRequestLifecycleEventFile(file, node, diagnostics) {
+  const props = readKeywordProps(node, { start: 1 });
+  for (const field of REQUEST_EVENT_REQUIRED_FIELDS) {
+    if (!props[field]) {
+      addError(diagnostics, file, node.loc, `(${EVENT_HEAD} ...) missing required request-local field ${field}`);
+    }
+  }
+  for (const key of Object.keys(props)) {
+    if (!REQUEST_EVENT_ALLOWED_FIELDS.has(key)) {
+      addError(diagnostics, file, props[key].keyNode.loc, `unknown request-local lifecycle event field ${key}`);
+    }
+  }
+
+  const schema = keywordPropText(props, ':schema');
+  if (schema !== REQUEST_EVENT_SCHEMA) {
+    addError(diagnostics, file, props[':schema']?.value?.loc ?? node.loc, `:schema must be "${REQUEST_EVENT_SCHEMA}", got ${JSON.stringify(schema)}`);
+  }
+  const eventId = keywordPropText(props, ':event_id');
+  validateIdField(file, props, ':event_id', eventId, 'event_id', diagnostics);
+  const requestId = keywordPropText(props, ':request_id');
+  validateIdField(file, props, ':request_id', requestId, 'request_id', diagnostics);
+  const kind = keywordPropText(props, ':kind');
+  if (kind && !EVENT_KINDS.has(kind)) {
+    addError(diagnostics, file, props[':kind']?.value?.loc ?? node.loc, `unknown :kind "${kind}"; expected one of ${[...EVENT_KINDS].join('|')}`);
+  }
+  const actor = keywordPropText(props, ':actor');
+  validateIdField(file, props, ':actor', actor, 'actor', diagnostics);
+  const time = keywordPropText(props, ':time');
+  if (time && !ISO8601_RE.test(time)) {
+    addError(diagnostics, file, props[':time']?.value?.loc ?? node.loc, `:time "${time}" must be ISO-8601 with timezone`);
+  }
+  if (!props[':payload']?.value || !isList(props[':payload'].value)) {
+    addError(diagnostics, file, props[':payload']?.value?.loc ?? node.loc, ':payload must be a list');
+  }
+  const idempotencyKey = keywordPropText(props, ':idempotency_key');
+  if (idempotencyKey == null || idempotencyKey.trim() === '') {
+    addError(diagnostics, file, props[':idempotency_key']?.value?.loc ?? node.loc, ':idempotency_key must be non-empty');
+  }
+}
+
 export function isRepoRelativePath(value) {
   if (typeof value !== 'string' || value.trim() === '') return false;
   if (path.isAbsolute(value) || value.startsWith('~')) return false;
@@ -497,6 +561,33 @@ function runFixtures(json) {
       ],
     });
     cases.push({ name: 'valid-ledger', source: valid, ok: true });
+    cases.push({
+      name: 'valid-request-local-event-file',
+      source: `(lifecycle-event
+  :schema "${REQUEST_EVENT_SCHEMA}"
+  :event_id wave99-01-read-001
+  :request_id req-wave99-01
+  :kind read
+  :actor worker
+  :time "2026-04-28T00:00:01Z"
+  :payload (:task wave99-01-demo :task_seq 1 :commit_role none :touched ["scripts/demo.mjs"] :summary "read files")
+  :idempotency_key "req-wave99-01:wave99-01-read-001")
+`,
+      ok: true,
+    });
+    cases.push({
+      name: 'request-local-event-rejects-missing-payload',
+      source: `(lifecycle-event
+  :schema "${REQUEST_EVENT_SCHEMA}"
+  :event_id wave99-01-read-001
+  :request_id req-wave99-01
+  :kind read
+  :actor worker
+  :time "2026-04-28T00:00:01Z"
+  :idempotency_key "req-wave99-01:wave99-01-read-001")
+`,
+      ok: false,
+    });
     cases.push({
       name: 'cancelled-kind-valid',
       source: renderLifecycleEventLog({

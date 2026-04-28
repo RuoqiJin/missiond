@@ -11,6 +11,7 @@ Checks the V3 task-runner lifecycle Lisp/code isomorphism contract:
   - V3 blueprint names the real task-runner lifecycle/finalizer scripts.
   - lifecycle events are validated before append/projection.
   - append-event owns cooperative sequence allocation and atomic ledger writes.
+  - append-event can project request-local one-event files when request ids are supplied.
   - parent-hotfix and final-report projection preserve lineage fields.
   - scheduler and batch verifier consume lifecycle/finalization projections.
 `;
@@ -95,12 +96,16 @@ function checkFiles(root, files) {
     'scripts/project-task-lifecycle-ledger.mjs',
     'scripts/verify-task-runner-batch.mjs',
     'task-scoped compatibility lifecycle ledger',
+    '.missiond/requests/<request_id>/events/<seq>.event.lisp',
+    'request-local one-event files',
     'task-runner-append-event is the only cooperative mutation helper',
     'node scripts/check-v3-task-lifecycle-isomorphism.mjs',
   ]);
 
   requireAll(diagnostics, files.lifecycleChecker, sources.lifecycleChecker, [
     'missiond.task-lifecycle-event.v1',
+    'missiond.lifecycle-event.v1',
+    'validateRequestLifecycleEventFile',
     'parent_hotfix',
     'finalized_report',
     'receipt',
@@ -119,6 +124,11 @@ function checkFiles(root, files) {
     'validateLifecycleEventFiles([tmp])',
     'fs.renameSync(tmp, ledgerPath)',
     'renderLifecycleEventLog',
+    '--request-id',
+    '--request-events-dir',
+    'writeRequestLifecycleEventFile',
+    'renderRequestLifecycleEventFile',
+    'request-local projection',
     'concurrent child appends',
   ]);
 
@@ -197,11 +207,13 @@ function buildFixture() {
              "scripts/task-runner-parent-hotfix.mjs"
              "scripts/project-task-lifecycle-ledger.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "task-scoped compatibility lifecycle ledger; task-runner-append-event is the only cooperative mutation helper"))
+      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; task-runner-append-event is the only cooperative mutation helper"))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.lifecycleChecker, `
 const SCHEMA = 'missiond.task-lifecycle-event.v1';
+const REQUEST_EVENT_SCHEMA = 'missiond.lifecycle-event.v1';
+function validateRequestLifecycleEventFile() {}
 const EVENT_KINDS = ['parent_hotfix', 'finalized_report', 'receipt', 'completion'];
 const COMMIT_HASH_RE = /x/;
 function isRepoRelativePath() {}
@@ -215,7 +227,10 @@ nextSeq(log.events);
 validateLifecycleEventFiles([tmp]);
 fs.renameSync(tmp, ledgerPath);
 renderLifecycleEventLog({});
-const msg = 'concurrent child appends';`);
+const args = '--request-id --request-events-dir';
+function writeRequestLifecycleEventFile() {}
+function renderRequestLifecycleEventFile() {}
+const msg = 'request-local projection concurrent child appends';`);
   writeFixture(root, DEFAULT_FILES.finalizer, `
 export function finalizeReportObject() {}
 const a = 'at least one parent patch is required';

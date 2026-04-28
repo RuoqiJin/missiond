@@ -9,6 +9,7 @@ import {
   EVENT_KINDS,
   COMMIT_ROLES,
   ID_RE,
+  REQUEST_EVENT_SCHEMA,
   readLifecycleEventLogs,
   renderLifecycleEvent,
   renderLifecycleEventLog,
@@ -22,6 +23,7 @@ const usage = `Usage:
     [--commit-role <role>] [--commit-hash <sha>] [--summary <text>]
     [--touched <path[,path...]>] [--file <path>] [--report-path <path>]
     [--receipt-path <path>] [--ref <event-id>] [--id <event-id>]
+    [--request-id <request-id> --request-events-dir <dir>]
     [--at <iso8601>] [--wave <wave-id>] [--json] [--dry-fixture]
 
 Appends one lifecycle event using a cooperative sibling .lock file.
@@ -70,11 +72,21 @@ function main() {
     id: opts.id,
     at: opts.at ?? isoNow(),
     wave: opts.wave,
+    requestId: opts.requestId,
+    requestEventsDir: opts.requestEventsDir
+      ? path.resolve(process.cwd(), opts.requestEventsDir)
+      : null,
   });
   if (opts.json) {
-    console.log(JSON.stringify({ ok: true, event: result.event, ledger_path: result.ledgerPath }, null, 2));
+    console.log(JSON.stringify({
+      ok: true,
+      event: result.event,
+      ledger_path: result.ledgerPath,
+      request_event_path: result.requestEventPath ?? null,
+    }, null, 2));
   } else {
-    console.log(`task-runner-append-event OK (${result.event.id} seq ${result.event.seq})`);
+    const suffix = result.requestEventPath ? `; request event ${result.requestEventPath}` : '';
+    console.log(`task-runner-append-event OK (${result.event.id} seq ${result.event.seq}${suffix})`);
   }
 }
 
@@ -98,6 +110,8 @@ function parseArgs(args) {
     else if (arg === '--receipt-path') opts.receiptPath = needValue(args, ++i, arg);
     else if (arg === '--ref') opts.refs.push(needValue(args, ++i, arg));
     else if (arg === '--id') opts.id = needValue(args, ++i, arg);
+    else if (arg === '--request-id') opts.requestId = needValue(args, ++i, arg);
+    else if (arg === '--request-events-dir') opts.requestEventsDir = needValue(args, ++i, arg);
     else if (arg === '--at') opts.at = needValue(args, ++i, arg);
     else if (arg === '--wave') opts.wave = needValue(args, ++i, arg);
     else fail(`unknown argument: ${arg}\n\n${usage}`);
@@ -135,10 +149,12 @@ export function appendLifecycleEvent({
   wave = null,
   legacyMemoryId = null,
   legacyTraceId = null,
+  requestId = null,
+  requestEventsDir = null,
   lockTimeoutMs = 5000,
   staleLockMs = 30000,
 }) {
-  validateAppendInput({ task, eventKind, actorRole, commitRole, id });
+  validateAppendInput({ task, eventKind, actorRole, commitRole, id, requestId, requestEventsDir });
   fs.mkdirSync(path.dirname(ledgerPath), { recursive: true });
   const lockPath = `${ledgerPath}.lock`;
   return withLedgerLock(lockPath, { timeoutMs: lockTimeoutMs, staleMs: staleLockMs }, () => {
@@ -192,8 +208,75 @@ export function appendLifecycleEvent({
       throw new Error(`candidate lifecycle ledger failed validation:\n${check.diagnostics.map((d) => `  - ${d.message}`).join('\n')}`);
     }
     fs.renameSync(tmp, ledgerPath);
-    return { ledgerPath, event };
+    let requestEventPath = null;
+    if (requestId && requestEventsDir) {
+      requestEventPath = writeRequestLifecycleEventFile({
+        eventsDir: requestEventsDir,
+        requestId,
+        event,
+      });
+    }
+    return { ledgerPath, event, requestEventPath };
   });
+}
+
+export function writeRequestLifecycleEventFile({ eventsDir, requestId, event }) {
+  fs.mkdirSync(eventsDir, { recursive: true });
+  for (let attempt = 0; attempt < 1000; attempt += 1) {
+    const seq = nextRequestEventSeq(eventsDir);
+    const file = path.join(eventsDir, `${String(seq).padStart(6, '0')}.event.lisp`);
+    const tmp = path.join(eventsDir, `.${path.basename(file)}.${process.pid}.${Date.now()}.tmp`);
+    const source = renderRequestLifecycleEventFile({ requestId, event });
+    fs.writeFileSync(tmp, source);
+    const check = validateLifecycleEventFiles([tmp]);
+    if (!check.ok) {
+      fs.rmSync(tmp, { force: true });
+      throw new Error(`candidate request lifecycle event failed validation:\n${check.diagnostics.map((d) => `  - ${d.message}`).join('\n')}`);
+    }
+    try {
+      const fd = fs.openSync(file, 'wx');
+      try {
+        fs.writeFileSync(fd, source);
+      } finally {
+        fs.closeSync(fd);
+      }
+      fs.rmSync(tmp, { force: true });
+      return file;
+    } catch (err) {
+      fs.rmSync(tmp, { force: true });
+      if (err.code === 'EEXIST') continue;
+      throw err;
+    }
+  }
+  throw new Error(`could not allocate request lifecycle event sequence under ${eventsDir}`);
+}
+
+export function renderRequestLifecycleEventFile({ requestId, event }) {
+  const payload = [
+    `:task ${event.task}`,
+    `:task_seq ${event.seq}`,
+    `:commit_role ${event.commit_role ?? 'none'}`,
+    `:touched ${renderStringVector(event.touched ?? [])}`,
+    `:summary ${quoteString(event.summary ?? '')}`,
+  ];
+  if (event.commit_hash) payload.push(`:commit_hash ${event.commit_hash}`);
+  if (event.report_path) payload.push(`:report_path ${quoteString(event.report_path)}`);
+  if (event.receipt_path) payload.push(`:receipt_path ${quoteString(event.receipt_path)}`);
+  if (event.refs?.length) payload.push(`:refs ${renderAtomVector(event.refs)}`);
+  if (event.legacy_memory_id) payload.push(`:legacy_memory_id ${event.legacy_memory_id}`);
+  if (event.legacy_trace_id) payload.push(`:legacy_trace_id ${event.legacy_trace_id}`);
+  return [
+    '(lifecycle-event',
+    `  :schema ${quoteString(REQUEST_EVENT_SCHEMA)}`,
+    `  :event_id ${event.id}`,
+    `  :request_id ${requestId}`,
+    `  :kind ${event.event_kind}`,
+    `  :actor ${event.actor_role}`,
+    `  :time ${quoteString(event.at)}`,
+    `  :payload (${payload.join(' ')})`,
+    `  :idempotency_key ${quoteString(`${requestId}:${event.id}`)})`,
+    '',
+  ].join('\n');
 }
 
 export function buildLifecycleEventRecord({
@@ -278,12 +361,16 @@ function sleepSync(ms) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
 }
 
-function validateAppendInput({ task, eventKind, actorRole, commitRole, id }) {
+function validateAppendInput({ task, eventKind, actorRole, commitRole, id, requestId, requestEventsDir }) {
   if (!ID_RE.test(task)) throw new Error(`task id "${task}" must match ${ID_RE}`);
   if (!EVENT_KINDS.has(eventKind)) throw new Error(`unknown event kind "${eventKind}"`);
   if (!ID_RE.test(actorRole)) throw new Error(`actor role "${actorRole}" must match ${ID_RE}`);
   if (!COMMIT_ROLES.has(commitRole)) throw new Error(`unknown commit role "${commitRole}"`);
   if (id && !ID_RE.test(id)) throw new Error(`event id "${id}" must match ${ID_RE}`);
+  if ((requestId && !requestEventsDir) || (!requestId && requestEventsDir)) {
+    throw new Error('--request-id and --request-events-dir must be supplied together');
+  }
+  if (requestId && !ID_RE.test(requestId)) throw new Error(`request id "${requestId}" must match ${ID_RE}`);
 }
 
 function inferWave(task) {
@@ -298,6 +385,31 @@ function nextSeq(events) {
     if (Number.isInteger(event.seq) && event.seq > max) max = event.seq;
   }
   return max + 1;
+}
+
+function nextRequestEventSeq(eventsDir) {
+  let max = 0;
+  if (!fs.existsSync(eventsDir)) return 1;
+  for (const name of fs.readdirSync(eventsDir)) {
+    const match = name.match(/^(\d+)\.event\.lisp$/);
+    if (!match) continue;
+    max = Math.max(max, Number.parseInt(match[1], 10));
+  }
+  return max + 1;
+}
+
+function renderStringVector(values) {
+  if (!values || values.length === 0) return '[]';
+  return `[${values.map((value) => quoteString(value)).join(' ')}]`;
+}
+
+function renderAtomVector(values) {
+  if (!values || values.length === 0) return '[]';
+  return `[${values.join(' ')}]`;
+}
+
+function quoteString(value) {
+  return JSON.stringify(String(value));
 }
 
 function isoNow() {
@@ -334,6 +446,28 @@ async function runFixtures() {
       wave: 'wave99',
     });
     if (second.event.seq !== 2) throw new Error(`second seq should be 2, got ${second.event.seq}`);
+
+    const requestEventsDir = path.join(tmp, '.missiond/requests/req-wave99-01/events');
+    const projected = appendLifecycleEvent({
+      ledgerPath: ledger,
+      task: 'wave99-01-demo',
+      eventKind: 'receipt',
+      actorRole: 'verifier',
+      commitRole: 'receipt',
+      summary: 'receipt recorded',
+      receiptPath: '.missiond/tasks/wave99/receipts/wave99-01.receipt.lisp',
+      at: '2026-04-28T00:00:03Z',
+      wave: 'wave99',
+      requestId: 'req-wave99-01',
+      requestEventsDir,
+    });
+    if (!projected.requestEventPath?.endsWith('000001.event.lisp')) {
+      throw new Error(`request-local projection should allocate 000001.event.lisp, got ${projected.requestEventPath}`);
+    }
+    const projectedCheck = validateLifecycleEventFiles([projected.requestEventPath]);
+    if (!projectedCheck.ok || projectedCheck.request_events !== 1) {
+      throw new Error(`projected request event failed validation: ${projectedCheck.diagnostics.map((d) => d.message).join('; ')}`);
+    }
 
     const childLedger = path.join(tmp, 'concurrent-lifecycle-events.lisp');
     fs.writeFileSync(
@@ -379,7 +513,7 @@ async function runFixtures() {
     if (!check.ok) {
       throw new Error(`concurrent ledger failed validation: ${check.diagnostics.map((d) => d.message).join('; ')}`);
     }
-    console.log('task-runner-append-event fixtures OK (3 cases, including concurrent child appends)');
+    console.log('task-runner-append-event fixtures OK (4 cases, including request-local projection and concurrent child appends)');
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
