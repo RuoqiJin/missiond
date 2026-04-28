@@ -1005,6 +1005,142 @@ function runFixtures({ json }) {
     },
   });
 
+  // ---------------------------------------------------------------------
+  // wave28-06 cross-layer smoke pins — confirm batch verifier skips the
+  // same pseudo nodes the wave28-01 checker rejects + the wave28-03
+  // renderer drops, AND that productive-node accounting agrees with the
+  // wave28-02 plan CLI for the SAME synthetic manifest.
+  // ---------------------------------------------------------------------
+
+  // Build a wave28-06 synthetic manifest mixing 2 productive nodes plus
+  // 2 pseudo nodes (archive id substring + backfill kind). The verifier
+  // MUST surface verified_nodes=2 and skipped_nodes containing both pseudo
+  // ids, mirroring the wave28-03 renderer's productive-only emit pass.
+  const loopSmokeManifest = {
+    id: 'm-wave28-06-loop-smoke-batch',
+    schema: 'missiond.task-runner-manifest.v1',
+    wave: 'wave99',
+    brief_mode: 'thin',
+    shared_preamble_path: '.missiond/claudecode/wave28-shared-preamble.md',
+    productive_only: true,
+    overlap_policy: 'reject',
+    description: null,
+    generated_at: null,
+    generator: null,
+    nodes: [
+      {
+        task_id: 'wave99-01-alpha',
+        depends_on: [],
+        verification_tier: 'local',
+        dispatch_group: 'A',
+        estimated_minutes: 30,
+        heartbeat_minutes: 10,
+        write_scope: ['scripts/alpha.mjs'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+      {
+        task_id: 'wave99-02-beta',
+        depends_on: ['wave99-01-alpha'],
+        verification_tier: 'local',
+        dispatch_group: 'B',
+        estimated_minutes: 25,
+        heartbeat_minutes: 10,
+        write_scope: ['scripts/beta.mjs'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+      // pseudo via id substring — defence-in-depth skip
+      {
+        task_id: 'wave99-99-archive-prior-task-docs',
+        depends_on: [],
+        verification_tier: 'local',
+        dispatch_group: 'C',
+        estimated_minutes: 5,
+        heartbeat_minutes: 5,
+        write_scope: ['.missiond/claudecode/_archive/foo.md'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+      // pseudo via :kind — defence-in-depth skip
+      {
+        task_id: 'wave99-50-helper',
+        depends_on: [],
+        verification_tier: 'local',
+        dispatch_group: 'D',
+        estimated_minutes: 10,
+        heartbeat_minutes: 5,
+        write_scope: ['scripts/helper.mjs'],
+        notes: null,
+        owner: null,
+        kind: 'backfill',
+        loc: null,
+      },
+    ],
+    loc: null,
+  };
+  const loopSmokeContracts = {
+    '.missiond/tasks/wave99/wave99-01-alpha.lisp': loadContractFromSourceShim(
+      buildContractSource({ id: 'wave99-01-alpha', message: 'feat(tasks): wave28-06 alpha' }),
+    ),
+    '.missiond/tasks/wave99/wave99-02-beta.lisp': loadContractFromSourceShim(
+      buildContractSource({ id: 'wave99-02-beta', message: 'feat(tasks): wave28-06 beta' }),
+    ),
+  };
+  const loopSmokeReports = {
+    '.missiond/tasks/wave99/reports/wave99-01-alpha.report.lisp': loadReportFromSource(
+      buildReportSource({ id: 'wave99-01-alpha', commitHash: '1111aaa' }),
+      '<fx-report-loop-alpha>',
+    ),
+    '.missiond/tasks/wave99/reports/wave99-02-beta.report.lisp': loadReportFromSource(
+      buildReportSource({ id: 'wave99-02-beta', commitHash: '2222bbb' }),
+      '<fx-report-loop-beta>',
+    ),
+  };
+  const loopSmokeLedgers = {
+    '.missiond/tasks/wave99/shared-memory.lisp': loadLedgerFromSource(
+      buildLedgerSource('wave99', [
+        { task: 'wave99-01-alpha', summary: 'done at commit 1111aaa' },
+        { task: 'wave99-02-beta', summary: 'done at commit 2222bbb' },
+      ]),
+      '<fx-ledger-loop-smoke>',
+    ),
+  };
+  const loopSmokeCommits = {
+    '1111aaa': syntheticCommit('1111aaa', 'feat(tasks): wave28-06 alpha'),
+    '2222bbb': syntheticCommit('2222bbb', 'feat(tasks): wave28-06 beta'),
+  };
+  fixtures.push({
+    name: 'wave28-06-loop-smoke-batch-aggregate-aligns-with-plan',
+    manifest: loopSmokeManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest-loop-smoke.lisp',
+    loaders: syntheticLoaders({
+      contracts: loopSmokeContracts,
+      reports: loopSmokeReports,
+      ledgers: loopSmokeLedgers,
+      commits: loopSmokeCommits,
+    }),
+    expect: {
+      // Productive-node accounting MUST equal 2 (alpha + beta), matching
+      // what the wave28-02 plan CLI would topological-batch from the same
+      // manifest. The two pseudo nodes are silently skipped.
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 2,
+      total_nodes: 2,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications: [],
+      // skipped_nodes is sorted lexicographically by the verifier.
+      skipped_nodes: ['wave99-50-helper', 'wave99-99-archive-prior-task-docs'],
+    },
+  });
+
   // Run all fixtures and collect failures.
   const failures = [];
   for (const fx of fixtures) {

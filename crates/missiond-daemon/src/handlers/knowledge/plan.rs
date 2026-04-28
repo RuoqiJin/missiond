@@ -23493,6 +23493,273 @@ mod tests {
         assert!(v.get("router_recommendation").is_none());
     }
 
+    /// Synthetic productive-only manifest used by the wave28-06 cross-layer
+    /// smoke. Mirrors the shape the Node-side wave28-06 fixtures drive
+    /// through wave28-01 checker, wave28-02 plan CLI, wave28-03 renderer,
+    /// wave28-05 batch verifier — same node ids, same dispatch_groups,
+    /// same heartbeat_minutes, same verification_tier mix (local x 2 +
+    /// full x 1 on the final smoke node).
+    fn manifest_wave28_06_loop_smoke_body() -> &'static str {
+        r#"(task-runner-manifest m-wave28-06-loop-smoke
+  :schema "missiond.task-runner-manifest.v1"
+  :wave wave99
+  :brief_mode thin
+  :shared_preamble_path ".missiond/claudecode/wave28-shared-preamble.md"
+  :productive_only true
+  (node :task_id wave99-01-alpha
+    :depends_on []
+    :verification_tier local
+    :dispatch_group A
+    :estimated_minutes 30
+    :heartbeat_minutes 10
+    :write_scope ["scripts/alpha.mjs"])
+  (node :task_id wave99-02-beta
+    :depends_on [wave99-01-alpha]
+    :verification_tier local
+    :dispatch_group B
+    :estimated_minutes 25
+    :heartbeat_minutes 10
+    :write_scope ["scripts/beta.mjs"])
+  (node :task_id wave99-99-final-smoke
+    :depends_on [wave99-01-alpha wave99-02-beta]
+    :verification_tier full
+    :dispatch_group C
+    :estimated_minutes 45
+    :heartbeat_minutes 10
+    :write_scope ["scripts/final.mjs"]))
+"#
+    }
+
+    #[test]
+    fn task_runner_loop_smoke_pins_wave28_invariants() {
+        // wave28-06 cross-layer smoke (Layer E — Rust daemon dry-run
+        // surface). Pins the same productive-only manifest that the
+        // wave28-06 Node fixtures drive through the other 4 layers
+        // (wave28-01 checker, wave28-02 plan CLI, wave28-03 renderer,
+        // wave28-05 batch verifier) and asserts the daemon's dry-run
+        // projection agrees on the cross-layer invariants.
+        //
+        // Invariants pinned (as numbered in the wave28-06 task brief):
+        //   1. Same manifest validates clean through all 5 layers.
+        //   2. Productive-only: archive/backfill skipped at the schema
+        //      layer; the daemon manifest body MUST contain only
+        //      productive nodes (this test inspects the rendered batches).
+        //   3. Verification-tier: full appears exactly once (final smoke);
+        //      local x 2 elsewhere. The daemon block's
+        //      verification_tier_counts MUST agree.
+        //   5. No execution: applied=Value::Bool(false); no spawn / no
+        //      git / no Node / no network — re-pinned by the static
+        //      audit at the bottom of this test.
+        //   6. Determinism: re-running the same manifest produces a
+        //      byte-identical task_runner block (modulo manifest_path).
+
+        let manifest = write_temp_manifest("wave28-06-loop-smoke", manifest_wave28_06_loop_smoke_body());
+        let args = json!({
+            "task_runner_mode": "dry_run",
+            "task_runner_manifest_path": manifest.to_str().unwrap(),
+        });
+        let mode = parse_task_runner_mode(&args).expect("dry_run parses");
+        assert!(matches!(mode, TaskRunnerMode::DryRun));
+
+        // Baseline (no task_runner args) for the dispatch-field byte-
+        // identical re-pin (mirrors wave28-04's invariant test).
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_v: Value = serde_json::from_str(
+            match baseline.content.first() {
+                Some(ToolContent::Text { text }) => text,
+                _ => panic!("expected text content"),
+            },
+        )
+        .unwrap();
+
+        let result = attach_task_runner_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+        );
+        let v = parse_payload(&result);
+        let block = v
+            .get("task_runner")
+            .expect("wave28-06 invariant 1: dry_run MUST emit task_runner block for the synthetic manifest");
+
+        // Invariant 5: applied=false hard-coded literal Value::Bool(false).
+        assert_eq!(
+            block["applied"],
+            Value::Bool(false),
+            "wave28-06 invariant 5: applied MUST be hard-coded Value::Bool(false)"
+        );
+        assert!(
+            block["applied"].is_boolean(),
+            "wave28-06 invariant 5: applied MUST be JSON bool, never string"
+        );
+
+        // Invariant 1: schema label + manifest_status MUST agree with the
+        // wave28-02 plan CLI output.
+        assert_eq!(block["schema"], "missiond.task-runner-plan.v0");
+        assert_eq!(block["manifest_status"], "used");
+        assert_eq!(block["wave"], "wave99");
+
+        // Invariant 2: productive_only echoed AND every emitted batch id
+        // is a productive id (no archive/backfill substring leakage).
+        assert_eq!(block["productive_only"], Value::Bool(true));
+        let batches = block["batches"].as_array().expect("batches array");
+        let pseudo_substrings = ["-archive-", "-backfill-", "-index", "lisp-backfill"];
+        let mut productive_ids: Vec<String> = Vec::new();
+        for batch in batches {
+            for id in batch.as_array().expect("batch is array") {
+                let id_str = id.as_str().expect("batch id is string").to_string();
+                for sub in pseudo_substrings.iter() {
+                    assert!(
+                        !id_str.contains(sub),
+                        "wave28-06 invariant 2: emitted batch id `{}` MUST NOT contain forbidden substring `{}`",
+                        id_str,
+                        sub
+                    );
+                }
+                productive_ids.push(id_str);
+            }
+        }
+        // 3 productive nodes -> 3 batches (split by dispatch_group A/B/C).
+        assert_eq!(
+            batches.len(),
+            3,
+            "wave28-06 invariant 1: 3 productive nodes -> 3 batches (split by dispatch_group)"
+        );
+        productive_ids.sort();
+        assert_eq!(
+            productive_ids,
+            vec![
+                "wave99-01-alpha".to_string(),
+                "wave99-02-beta".to_string(),
+                "wave99-99-final-smoke".to_string(),
+            ],
+            "wave28-06 invariant 1: emitted productive node ids MUST exactly match the manifest"
+        );
+
+        // Invariant 3: verification_tier_counts — full=1 (final smoke),
+        // local=2 (alpha + beta), smoke=0. Mirrors the wave28-02 plan CLI
+        // wave28-06 fixture assertion.
+        assert_eq!(
+            block["verification_tier_counts"]["full"], 1,
+            "wave28-06 invariant 3: full tier appears exactly once (final smoke)"
+        );
+        assert_eq!(
+            block["verification_tier_counts"]["local"], 2,
+            "wave28-06 invariant 3: local tier x 2 (alpha + beta)"
+        );
+        assert_eq!(
+            block["verification_tier_counts"]["smoke"], 0,
+            "wave28-06 invariant 3: smoke tier == 0 in this synthetic manifest"
+        );
+
+        // Critical-path = longest dependency chain by estimated_minutes.
+        // The DAG is: alpha (30) -> beta (25) -> final-smoke (45), AND
+        // alpha (30) -> final-smoke (45) directly. The longest_from
+        // memoized DFS yields:
+        //   final-smoke = 45
+        //   beta        = 25 + 45 = 70
+        //   alpha       = 30 + max(beta=70, final-smoke=45) = 100
+        // So critical path = 100; total = 30 + 25 + 45 = 100 too.
+        assert_eq!(
+            block["critical_path_minutes"], 100,
+            "wave28-06: critical path MUST equal alpha (30) + beta (25) + final-smoke (45)"
+        );
+        assert_eq!(
+            block["total_estimated_minutes"], 100,
+            "wave28-06: total estimated MUST equal 30 + 25 + 45"
+        );
+
+        // Re-pin wave28-04 dispatch byte-identical invariant under the new
+        // wave28-06 synthetic manifest: dispatch fields MUST NOT change.
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                v[field], baseline_v[field],
+                "wave28-06 invariant 5: dry_run must NOT change dispatch field `{}`",
+                field
+            );
+        }
+
+        // Invariant 6: byte-identical determinism. Re-attach the block
+        // with the same args + same fresh manifest read; the rendered
+        // task_runner block MUST be byte-identical (modulo manifest_path
+        // which always echoes the absolute tmp path).
+        let result2 = attach_task_runner_block(
+            action_execute_bridge(&plan, &resolved),
+            parse_task_runner_mode(&args).unwrap(),
+            &args,
+        );
+        let v2 = parse_payload(&result2);
+        let block2 = v2.get("task_runner").expect("re-render produces block");
+        // Strip manifest_path (the only field that legitimately echoes the
+        // absolute tmp path). All other fields MUST be byte-identical.
+        let mut a = block.clone();
+        let mut b = block2.clone();
+        a.as_object_mut().unwrap().remove("manifest_path");
+        b.as_object_mut().unwrap().remove("manifest_path");
+        assert_eq!(
+            serde_json::to_string(&a).unwrap(),
+            serde_json::to_string(&b).unwrap(),
+            "wave28-06 invariant 6: dry-run task_runner block MUST be byte-identical on re-run"
+        );
+
+        // ---- Invariant 5 + 7 (no-execution + no-LLM/no-network) self-audit ----
+        // Read plan.rs from disk and grep the active code (comments and
+        // string literals stripped) for forbidden patterns. The pattern
+        // table is assembled from string fragments at runtime so the
+        // audit body itself does NOT trip the audit (wave24-06 / wave25-05
+        // / wave26-06 / wave27-06 lesson). Variable names also stay clear
+        // of the literal forbidden tokens.
+        let plan_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/handlers/knowledge/plan.rs");
+        let src = std::fs::read_to_string(&plan_path)
+            .expect("wave28-06: plan.rs must be readable from CARGO_MANIFEST_DIR");
+        let stripped = strip_rust_comments_and_strings(&src);
+        let t_cp = String::from("ch") + "ild" + "_" + "process";
+        let t_spawn = String::from("\\bsp") + "awn\\(";
+        let t_spawnblock = String::from("\\bsp") + "awn_blocking\\(";
+        let t_tproc = String::from("to") + "kio::process";
+        let t_stdcmd = String::from("std::process::") + "Co" + "mmand";
+        let t_rq = String::from("re") + "qwest::";
+        let t_hyperc = String::from("\\bhy") + "per::";
+        let t_oa = String::from("op") + "enai";
+        let t_an = String::from("anth") + "ropic";
+        let t_git = String::from("\\bg") + "it " + "(?:add|commit|push|reset|checkout|rm)";
+        let t_libgit = String::from("g") + "it2::Repository::open";
+        let forbidden = [
+            t_cp.as_str(),
+            t_spawn.as_str(),
+            t_spawnblock.as_str(),
+            t_tproc.as_str(),
+            t_stdcmd.as_str(),
+            t_rq.as_str(),
+            t_hyperc.as_str(),
+            t_oa.as_str(),
+            t_an.as_str(),
+            t_git.as_str(),
+            t_libgit.as_str(),
+        ];
+        for pat in forbidden {
+            let re = regex::Regex::new(pat).expect("wave28-06: audit pattern compiles");
+            assert!(
+                !re.is_match(&stripped),
+                "wave28-06 invariant 5/7: forbidden audit pattern `{}` found in plan.rs active source",
+                pat
+            );
+        }
+
+        let _ = std::fs::remove_file(&manifest);
+    }
+
     /// wave27-06 helper: strip line comments, block comments, and string
     /// literals from a Rust source so the self-audit grep does NOT
     /// match patterns mentioned in commentary or in the forbidden-pattern

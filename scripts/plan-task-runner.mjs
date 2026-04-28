@@ -1111,6 +1111,109 @@ function buildFixtures() {
               :heartbeat_minutes 10
               :write_scope ["scripts/shared.mjs"]))`,
     },
+    // ---------------------------------------------------------------------
+    // wave28-06 cross-layer smoke pins — same synthetic productive-only
+    // manifest the smoke drives through wave28-01 checker, wave28-03
+    // renderer, wave28-04 daemon dry-run surface, wave28-05 batch verifier.
+    // The fixtures below pin the planner's contribution to the cross-layer
+    // chain so a regression that breaks alignment with one layer surfaces
+    // here too.
+    // ---------------------------------------------------------------------
+    {
+      name: 'wave28-06-loop-smoke-plan-determinism',
+      category: 'wave28-06-loop-smoke',
+      expect: 'ok',
+      // Same manifest the wave28-06 smoke drives through every layer.
+      // Asserts byte-identical plan output between two consecutive
+      // planFromManifestObject calls — pins invariant 6 (determinism)
+      // at the plan-CLI boundary.
+      source: `(task-runner-manifest m-wave28-06-loop-smoke-plan
+        :schema "${MANIFEST_SCHEMA}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${SHARED_PREAMBLE_PATH}"
+        :productive_only true
+        (node :task_id wave99-01-alpha
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 30
+              :heartbeat_minutes 10
+              :write_scope ["scripts/alpha.mjs"])
+        (node :task_id wave99-02-beta
+              :depends_on [wave99-01-alpha]
+              :verification_tier local
+              :dispatch_group B
+              :estimated_minutes 25
+              :heartbeat_minutes 10
+              :write_scope ["scripts/beta.mjs"])
+        (node :task_id wave99-99-final-smoke
+              :depends_on [wave99-01-alpha wave99-02-beta]
+              :verification_tier full
+              :dispatch_group C
+              :estimated_minutes 45
+              :heartbeat_minutes 10
+              :write_scope ["scripts/final.mjs"]))`,
+      assert: (plan) => {
+        // Tier-counts pin: invariant 3 (only the final smoke node carries
+        // verification_tier=full; everything else is local). The wave28
+        // dispatch-plan policy sets the precedent for real waves.
+        const c = plan.verification_tier_counts;
+        if (c.full !== 1) {
+          throw new Error(`tier full count expected 1 (final smoke), got ${c.full}`);
+        }
+        if (c.local !== 2) {
+          throw new Error(`tier local count expected 2, got ${c.local}`);
+        }
+        if (c.smoke !== 0) {
+          throw new Error(`tier smoke count expected 0, got ${c.smoke}`);
+        }
+        // Productive-only invariant pin (invariant 2): no archive/backfill
+        // node leaked through.
+        if (plan.productive_only !== true) {
+          throw new Error('productive_only must be true');
+        }
+        // Determinism pin (invariant 6): same manifest re-planned must
+        // serialize byte-identically. The fixture parses once and plans
+        // twice — both stringify identically modulo manifest_path.
+        const manifest = parseManifestSource(`(task-runner-manifest m-wave28-06-loop-smoke-plan
+          :schema "${MANIFEST_SCHEMA}"
+          :wave wave99
+          :brief_mode thin
+          :shared_preamble_path "${SHARED_PREAMBLE_PATH}"
+          :productive_only true
+          (node :task_id wave99-01-alpha
+                :depends_on []
+                :verification_tier local
+                :dispatch_group A
+                :estimated_minutes 30
+                :heartbeat_minutes 10
+                :write_scope ["scripts/alpha.mjs"])
+          (node :task_id wave99-02-beta
+                :depends_on [wave99-01-alpha]
+                :verification_tier local
+                :dispatch_group B
+                :estimated_minutes 25
+                :heartbeat_minutes 10
+                :write_scope ["scripts/beta.mjs"])
+          (node :task_id wave99-99-final-smoke
+                :depends_on [wave99-01-alpha wave99-02-beta]
+                :verification_tier full
+                :dispatch_group C
+                :estimated_minutes 45
+                :heartbeat_minutes 10
+                :write_scope ["scripts/final.mjs"]))`);
+        const r2 = planFromManifestObject(manifest, {
+          manifest_path: '<wave28-06-loop-smoke-replay>',
+        });
+        if (!r2.ok) throw new Error('replay plan failed');
+        const aBytes = JSON.stringify({ ...plan, manifest_path: '<normalized>' });
+        const bBytes = JSON.stringify({ ...r2.plan, manifest_path: '<normalized>' });
+        if (aBytes !== bBytes) {
+          throw new Error('wave28-06 invariant 6 (determinism): plan output not byte-identical');
+        }
+      },
+    },
   ];
 }
 

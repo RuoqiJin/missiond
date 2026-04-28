@@ -1485,6 +1485,66 @@ function runFixtures(json = false) {
               :write_scope ["scripts/foo.mjs"]))`,
       ok: false,
     },
+    // wave28-06 cross-layer smoke pin (Layer A). Synthetic productive-only
+    // manifest matching the shape the smoke drives through plan CLI,
+    // renderer, daemon dry-run surface, and batch verifier. Pins the
+    // wave28-06 invariant 1 (same manifest validates clean at the schema
+    // layer) at the checker boundary.
+    {
+      name: 'wave28-06-loop-smoke-productive-only-pinned',
+      category: 'wave28-06-loop-smoke',
+      source: `(task-runner-manifest m-wave28-06-loop-smoke
+        :schema "${SCHEMA}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${sharedPreamble}"
+        :productive_only true
+        (node :task_id wave99-01-alpha
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 30
+              :heartbeat_minutes 10
+              :write_scope ["scripts/alpha.mjs"])
+        (node :task_id wave99-02-beta
+              :depends_on [wave99-01-alpha]
+              :verification_tier local
+              :dispatch_group B
+              :estimated_minutes 25
+              :heartbeat_minutes 10
+              :write_scope ["scripts/beta.mjs"])
+        (node :task_id wave99-99-final-smoke
+              :depends_on [wave99-01-alpha wave99-02-beta]
+              :verification_tier full
+              :dispatch_group C
+              :estimated_minutes 45
+              :heartbeat_minutes 10
+              :write_scope ["scripts/final.mjs"]))`,
+      ok: true,
+    },
+    // wave28-06 invariant 2 defence-in-depth pin: even with a real-looking
+    // task id, an archive substring is rejected when productive_only=true.
+    // Mirrors the wave28-03 renderer + wave28-05 batch verifier skip-paths
+    // — the schema layer is the first defence, the renderer/verifier are
+    // the second + third.
+    {
+      name: 'wave28-06-loop-smoke-archive-substring-rejected',
+      category: 'wave28-06-loop-smoke',
+      source: `(task-runner-manifest m-wave28-06-archive-rejected
+        :schema "${SCHEMA}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${sharedPreamble}"
+        :productive_only true
+        (node :task_id wave99-00-archive-prior-task-docs
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 30
+              :heartbeat_minutes 10
+              :write_scope [".missiond/claudecode/_archive/foo.md"]))`,
+      ok: false,
+    },
   ];
 
   let failed = 0;

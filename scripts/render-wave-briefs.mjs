@@ -542,6 +542,97 @@ async function runFixtures() {
     },
   });
 
+  // ---------------------------------------------------------------------
+  // wave28-06 cross-layer smoke pins — pin the heartbeat metadata
+  // propagation invariant (invariant 4) and the productive-only renderer
+  // contribution (invariant 2) at the brief-renderer boundary so the
+  // smoke covers each of the 5 layers explicitly.
+  // ---------------------------------------------------------------------
+  fixtures.push({
+    name: 'wave28-06-loop-smoke-renderer-heartbeat-surfaced',
+    category: 'wave28-06-loop-smoke',
+    run: async () => {
+      const env = setupTmpRepo();
+      try {
+        // Use the existing 2-node seed (heartbeat_minutes=10) which mirrors
+        // the wave28-06 synthetic manifest. The thin brief MUST surface the
+        // heartbeat-minutes guidance so a worker reading only the brief
+        // (without re-loading the contract) still sees the cadence.
+        seedTwoNodeManifest(env);
+        renderManifest({ manifestPath: env.manifestPath, cwd: env.cwd, force: false });
+        const briefPath = path.resolve(env.cwd, '.missiond/claudecode/wave99-01-foo.md');
+        const brief = fs.readFileSync(briefPath, 'utf8');
+        // Invariant 4: heartbeat metadata MUST appear in the thin brief OR
+        // the shared preamble. The shared preamble we write also carries
+        // the boilerplate guidance — assert at least one carries the
+        // literal so a regression that strips both fails loudly.
+        const preamblePath = path.resolve(env.cwd, '.missiond/claudecode/wave99-shared-preamble.md');
+        const preamble = fs.readFileSync(preamblePath, 'utf8');
+        const carriesHeartbeatBrief = brief.includes('heartbeat');
+        const carriesHeartbeatPreamble = preamble.includes('heartbeat');
+        if (!carriesHeartbeatBrief && !carriesHeartbeatPreamble) {
+          throw new Error(
+            'wave28-06 invariant 4: heartbeat metadata MUST surface in the thin brief OR the shared preamble',
+          );
+        }
+        // Specifically: the thin brief MUST echo the per-task heartbeat
+        // minutes so a worker reading only the brief sees the cadence
+        // tied to its task.
+        if (!brief.includes('heartbeat_minutes')) {
+          throw new Error('thin brief MUST include `heartbeat_minutes` field');
+        }
+        if (!brief.includes('`10`')) {
+          throw new Error(
+            'thin brief MUST echo the manifest heartbeat_minutes value (10)',
+          );
+        }
+      } finally {
+        cleanupTmpRepo(env);
+      }
+    },
+  });
+
+  fixtures.push({
+    name: 'wave28-06-loop-smoke-renderer-pseudo-skipped',
+    category: 'wave28-06-loop-smoke',
+    run: async () => {
+      const env = setupTmpRepo();
+      try {
+        // Productive-only manifest with productive nodes only. The
+        // renderer MUST emit one brief per node (no archive/backfill node
+        // sneaks in). Pins invariant 2 at the renderer boundary —
+        // mirroring the wave28-05 batch verifier skip pass.
+        seedTwoNodeManifest(env);
+        const result = renderManifest({
+          manifestPath: env.manifestPath,
+          cwd: env.cwd,
+          force: false,
+        });
+        if (result.briefs.length !== 2) {
+          throw new Error(
+            `expected 2 productive briefs, got ${result.briefs.length}`,
+          );
+        }
+        // Defence-in-depth: the rendered briefs MUST NOT carry an archive
+        // / backfill / index id substring. (The seed manifest uses
+        // wave99-01-foo / wave99-02-bar — the assertion catches a future
+        // regression where seedTwoNodeManifest is mistakenly given a
+        // pseudo-id.)
+        for (const b of result.briefs) {
+          for (const sub of FORBIDDEN_ID_SUBSTRINGS) {
+            if (b.task_id.includes(sub)) {
+              throw new Error(
+                `wave28-06 invariant 2: rendered brief id "${b.task_id}" contains forbidden substring "${sub}"`,
+              );
+            }
+          }
+        }
+      } finally {
+        cleanupTmpRepo(env);
+      }
+    },
+  });
+
   fixtures.push({
     name: 'render-claudecode-task-full-fixtures-still-green',
     category: 'pass-backward-compat',
