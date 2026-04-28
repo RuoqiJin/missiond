@@ -46,7 +46,7 @@
       :writer alignment-author
       :required [:request_id :objective :scope :assumptions :non_goals
                  :acceptance :risk :approval]
-      :materialization-rule "When mission_request persists a directive row for a request-local intent artifact, the projected intent-alignment.lisp MUST carry :directive_id + :version so a later approve_intent can advance by reading Lisp alone; callers must not need hidden DB ids."
+      :materialization-rule "When a persisted directive row is projected to Lisp, request-local and compatibility intent-alignment files MUST carry :directive_id + :version so a later approve_intent can advance by reading Lisp alone; callers must not need hidden DB ids."
       :review-gate intent-review-gate)
 
     (artifact plan

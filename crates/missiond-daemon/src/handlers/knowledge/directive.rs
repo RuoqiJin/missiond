@@ -281,6 +281,31 @@ async fn maybe_write_directive_artifact(
     outcome.splice_into(payload);
 }
 
+fn enrich_persisted_directive_sexp(sexp: &str, directive_id: &str, version: i32) -> String {
+    if sexp.contains(":directive_id")
+        && (sexp.contains(":version") || sexp.contains(":directive_version"))
+    {
+        return sexp.to_string();
+    }
+
+    let trimmed_len = sexp.trim_end().len();
+    let trailing = &sexp[trimmed_len..];
+    let mut core = sexp[..trimmed_len].to_string();
+    if !core.ends_with(')') {
+        return sexp.to_string();
+    }
+    core.pop();
+    if !core.contains(":directive_id") {
+        core.push_str(&format!("\n  :directive_id {:?}", directive_id));
+    }
+    if !core.contains(":version") && !core.contains(":directive_version") {
+        core.push_str(&format!("\n  :version {}", version));
+    }
+    core.push(')');
+    core.push_str(trailing);
+    core
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn action_compile_dry_run(
     state: &AppState,
@@ -334,13 +359,20 @@ async fn action_compile_dry_run(
         payload["persisted"] = json!(true);
         payload["directive_id"] = json!(id);
         payload["version"] = json!(1);
+        let persisted_preview_sexp =
+            enrich_persisted_directive_sexp(&preview_sexp, &id.to_string(), 1);
+        payload["compiled_sexp_preview"] = json!(persisted_preview_sexp);
 
         // wave-14 :: file-first SSOT mirror. Only writes when the caller
         // opted in via write_file=true; the DB row stays committed even if
         // the file write fails (file-vs-db contract — partial status).
         let file_args = extract_directive_file_args(args);
         let topic_for_gate = file_args.topic.map(|s| s.to_string());
-        maybe_write_directive_artifact(state, &file_args, &mut payload, &preview_sexp).await;
+        let sexp_for_file = payload["compiled_sexp_preview"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| preview_sexp.clone());
+        maybe_write_directive_artifact(state, &file_args, &mut payload, &sexp_for_file).await;
 
         // wave-14 :: review-gate auto-create. Default policy = Manual keeps
         // the wave-11 explicit-emit (`emit_review_question=true`) the only
@@ -468,13 +500,20 @@ async fn action_compile_sonnet(
         payload["persisted"] = json!(true);
         payload["directive_id"] = json!(id);
         payload["version"] = json!(1);
+        let persisted_compiled_sexp =
+            enrich_persisted_directive_sexp(&compiled_sexp, &id.to_string(), 1);
+        payload["compiled_sexp"] = json!(persisted_compiled_sexp);
 
         // wave-14 :: file-first SSOT mirror — same partial semantics as
         // dry_run path. The compiled sexp is the durable artifact; we
         // splice the path/sha so callers can verify on-disk parity.
         let file_args = extract_directive_file_args(args);
         let topic_for_gate = file_args.topic.map(|s| s.to_string());
-        maybe_write_directive_artifact(state, &file_args, &mut payload, &compiled_sexp).await;
+        let sexp_for_file = payload["compiled_sexp"]
+            .as_str()
+            .map(str::to_string)
+            .unwrap_or_else(|| compiled_sexp.clone());
+        maybe_write_directive_artifact(state, &file_args, &mut payload, &sexp_for_file).await;
 
         // wave-14 :: review-gate auto-create. See dry_run branch above for
         // policy semantics; same hook applies after the file write splice
@@ -2215,6 +2254,28 @@ mod tests {
     fn strip_fence_preserves_inner_whitespace_after_trim() {
         let raw = "```lisp\n(directive\n  :goal :x)\n```";
         assert_eq!(strip_fenced_code_block(raw), "(directive\n  :goal :x)");
+    }
+
+    #[test]
+    fn enrich_persisted_directive_sexp_adds_ref_before_final_paren() {
+        let sexp = "(directive-draft\n  :utterance \"ship\"\n  :status :draft)\n";
+        let enriched = enrich_persisted_directive_sexp(
+            sexp,
+            "00000000-0000-0000-0000-000000000abc",
+            3,
+        );
+        assert!(enriched.contains(":directive_id \"00000000-0000-0000-0000-000000000abc\""));
+        assert!(enriched.contains(":version 3"));
+        assert!(enriched.ends_with(")\n"));
+    }
+
+    #[test]
+    fn enrich_persisted_directive_sexp_preserves_existing_ref() {
+        let sexp = "(directive :directive_id \"existing\" :version 2)";
+        assert_eq!(
+            enrich_persisted_directive_sexp(sexp, "new", 3),
+            sexp
+        );
     }
 
     // -- parens_balanced --
