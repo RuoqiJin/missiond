@@ -244,6 +244,14 @@ export function collectReportLineageHashes(report) {
   );
 }
 
+// wave30-01: the finalized report is the completion truth. Prefer the
+// explicit verified hash, then final hash, then legacy commit_hash. This is
+// exported so parent-hotfix finalizers and smoke fixtures can share the
+// same final-commit resolution rule as the batch verifier.
+export function finalVerificationHash(report) {
+  return report?.verifiedCommitHash ?? report?.finalCommitHash ?? report?.commitHash ?? null;
+}
+
 // --- Per-node verification (pure) -----------------------------------------
 
 // Verify a single productive node against its evidence. All filesystem and
@@ -387,7 +395,7 @@ export function verifyNode(node, manifest, loaders) {
   // readCommitAt returns a synthetic commitInfo so the same code path runs
   // without git.
   let commitInfo;
-  const verificationHash = report.verifiedCommitHash ?? report.finalCommitHash ?? report.commitHash;
+  const verificationHash = finalVerificationHash(report);
   try {
     commitInfo = loaders.readCommitAt(verificationHash);
   } catch (err) {
@@ -876,10 +884,18 @@ function buildReportSource({
   files = ['scripts/foo.mjs'],
   status = 'done',
   agentCommitHash = null,
+  finalCommitHash = null,
+  verifiedCommitHash = null,
   parentPatches = null,
 }) {
   const agentLine = agentCommitHash
     ? `  :agent_commit_hash "${agentCommitHash}"\n`
+    : '';
+  const finalLine = finalCommitHash
+    ? `  :final_commit_hash "${finalCommitHash}"\n`
+    : '';
+  const verifiedLine = verifiedCommitHash
+    ? `  :verified_commit_hash "${verifiedCommitHash}"\n`
     : '';
   const patchesLine = parentPatches
     ? `  :parent_patches\n    [${parentPatches
@@ -899,6 +915,8 @@ function buildReportSource({
     `  :status ${status}\n` +
     `  :commit_hash "${commitHash}"\n` +
     agentLine +
+    finalLine +
+    verifiedLine +
     patchesLine +
     `  :files_changed [${files.map((f) => `"${f}"`).join(' ')}]\n` +
     `  :acceptance_results [(:command "true" :exit_code 0 :ok true)])`
@@ -1539,6 +1557,93 @@ function runFixtures({ json }) {
       missing_memory_completions: [],
       failed_contract_verifications_task_ids: ['wave99-01-foo'],
       failed_contract_verifications_reason_match: /commit hash mismatch/,
+      skipped_nodes: [],
+    },
+  });
+
+  // wave30-01: pin the real Wave29-03 drift shape. The worker reported
+  // d36de80, the parent later applied d842b1d, and the finalized report
+  // must verify against the finalized commit while still accepting a
+  // shared-memory completion that mentions the worker commit.
+  const parentFinalizerManifest = {
+    ...greenManifest,
+    id: 'm-wave30-01-parent-finalizer',
+    nodes: [
+      {
+        task_id: 'wave99-03-runner-prep',
+        depends_on: [],
+        verification_tier: 'local',
+        dispatch_group: 'A',
+        estimated_minutes: 30,
+        heartbeat_minutes: 10,
+        write_scope: ['scripts/prepare-task-runner-wave.mjs'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+    ],
+  };
+  const parentFinalizerContracts = {
+    '.missiond/tasks/wave99/wave99-03-runner-prep.lisp': loadContractFromSourceShim(
+      buildContractSource({
+        id: 'wave99-03-runner-prep',
+        message: 'feat(tasks): prepare runner wave',
+        writeScope: ['scripts/prepare-task-runner-wave.mjs'],
+      }),
+    ),
+  };
+  const parentFinalizerReports = {
+    '.missiond/tasks/wave99/reports/wave99-03-runner-prep.report.lisp': loadReportFromSource(
+      buildReportSource({
+        id: 'wave99-03-runner-prep',
+        commitHash: 'd842b1d',
+        agentCommitHash: 'd36de80',
+        finalCommitHash: 'd842b1d4a9c2',
+        verifiedCommitHash: 'd842b1d',
+        files: ['scripts/prepare-task-runner-wave.mjs'],
+        parentPatches: [
+          {
+            commit: 'd842b1d',
+            kind: 'lint-cleanup',
+            reason: 'TS80007 sync await cleanup after worker commit',
+            files: ['scripts/prepare-task-runner-wave.mjs'],
+          },
+        ],
+      }),
+      '<fx-wave30-01-finalized-report>',
+    ),
+  };
+  fixtures.push({
+    name: 'wave30-01 parent hotfix finalizer accepts worker-memory hash and verifies final commit',
+    manifest: parentFinalizerManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest-wave30-01.lisp',
+    loaders: syntheticLoaders({
+      contracts: parentFinalizerContracts,
+      reports: parentFinalizerReports,
+      ledgers: {
+        '.missiond/tasks/wave99/shared-memory.lisp': loadLedgerFromSource(
+          buildLedgerSource('wave99', [
+            { task: 'wave99-03-runner-prep', summary: 'worker completed at commit d36de80 before parent hotfix' },
+          ]),
+          '<fx-wave30-01-ledger>',
+        ),
+      },
+      commits: {
+        d842b1d: syntheticCommit(
+          'd842b1d',
+          'feat(tasks): prepare runner wave',
+          ['scripts/prepare-task-runner-wave.mjs'],
+        ),
+      },
+    }),
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 1,
+      total_nodes: 1,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications: [],
       skipped_nodes: [],
     },
   });

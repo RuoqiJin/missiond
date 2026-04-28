@@ -480,8 +480,8 @@ function validateReport(file, report, diagnostics) {
   // wave29-prep: optional commit-lineage fields. These keep parent hotfixes
   // auditable without amending the worker's original commit. :commit_hash
   // remains the final report hash; :agent_commit_hash preserves the worker's
-  // first commit; :final_commit_hash / :verified_commit_hash must agree with
-  // :commit_hash when present.
+  // first commit; :final_commit_hash / :verified_commit_hash must hex-prefix
+  // agree with :commit_hash when present.
   validateCommitLineage(file, report, props, commitHash, diagnostics);
 }
 
@@ -522,20 +522,20 @@ function validateCommitLineage(file, report, props, commitHash, diagnostics) {
     }
   }
 
-  if (finalHash && commitHash && finalHash !== commitHash) {
+  if (finalHash && commitHash && !shaPrefixAgrees(finalHash, commitHash)) {
     addError(
       diagnostics,
       file,
       props[':final_commit_hash'].value.loc,
-      ':final_commit_hash must equal :commit_hash when present',
+      ':final_commit_hash must agree with :commit_hash when present',
     );
   }
-  if (verifiedHash && commitHash && verifiedHash !== commitHash) {
+  if (verifiedHash && commitHash && !shaPrefixAgrees(verifiedHash, commitHash)) {
     addError(
       diagnostics,
       file,
       props[':verified_commit_hash'].value.loc,
-      ':verified_commit_hash must equal :commit_hash when present',
+      ':verified_commit_hash must agree with :commit_hash when present',
     );
   }
 
@@ -1739,6 +1739,26 @@ function runFixtures() {
       ok: true,
     },
     {
+      name: 'wave30-01 wave29-03 parent hotfix finalized by orchestrator',
+      source: `(report wave30-01-wave29-03-finalizer-pin
+        :schema "missiond.report-contract.v1"
+        :task_id "wave30-01-wave29-03-finalizer-pin"
+        :status done
+        :commit_hash "d842b1d"
+        :agent_commit_hash "d36de80"
+        :final_commit_hash "d842b1d4a9c2"
+        :verified_commit_hash "d842b1d"
+        :parent_patches
+          [(:commit "d842b1d"
+            :kind lint-cleanup
+            :reason "Parent hotfix cleaned TS80007 sync await after the worker commit."
+            :files ["scripts/prepare-task-runner-wave.mjs"])]
+        :files_changed ["scripts/prepare-task-runner-wave.mjs"]
+        :acceptance_results
+          [(:command "node scripts/prepare-task-runner-wave.mjs --dry-fixture" :exit_code 0 :ok true)])`,
+      ok: true,
+    },
+    {
       name: 'wave29-prep final commit hash must match commit_hash',
       source: `(report wave29-prep-commit-lineage-mismatch
         :schema "missiond.report-contract.v1"
@@ -1750,7 +1770,7 @@ function runFixtures() {
         :acceptance_results
           [(:command "echo ok" :exit_code 0 :ok true)])`,
       ok: false,
-      expects: /:final_commit_hash must equal :commit_hash/,
+      expects: /:final_commit_hash must agree with :commit_hash/,
     },
     {
       name: 'wave29-prep parent patch requires files',

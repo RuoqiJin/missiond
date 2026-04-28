@@ -11,7 +11,7 @@
 
 (report-contract-schema missiond.report-contract.v1
   :version "v1"
-  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp); wave25-02 added optional router-recommendation fields (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) — flat surface, mirrors the wave24-04 daemon dry-run block, additive-only, recommendation is NEVER authoritative; wave26-04 added optional router-readiness fields (:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path) — flat surface, mirrors the wave26-02/03 backend readiness annotations, additive-only, runtime_allowed/apply_eligible MUST be literal atom booleans; wave27-04 added optional router-dispatch-descriptor fields (:router_dispatch_descriptor_path :router_dispatch_descriptor_status :router_dispatch_backend :router_dispatch_eligible :router_dispatch_no_execution :router_dispatch_blockers) — flat surface, mirrors the wave27-01 missiond.router-dispatch-descriptor.v1 head plus the wave27-02 builder output, additive-only, eligible MUST be literal atom true|false, no_execution MUST be literal atom true (false AND strings rejected — cross-wave invariant); wave29 prep adds optional commit-lineage fields (:agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches) so parent hotfixes can be recorded without amending worker commits; final/verified hashes must equal :commit_hash when present"
+  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp); wave25-02 added optional router-recommendation fields (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) — flat surface, mirrors the wave24-04 daemon dry-run block, additive-only, recommendation is NEVER authoritative; wave26-04 added optional router-readiness fields (:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path) — flat surface, mirrors the wave26-02/03 backend readiness annotations, additive-only, runtime_allowed/apply_eligible MUST be literal atom booleans; wave27-04 added optional router-dispatch-descriptor fields (:router_dispatch_descriptor_path :router_dispatch_descriptor_status :router_dispatch_backend :router_dispatch_eligible :router_dispatch_no_execution :router_dispatch_blockers) — flat surface, mirrors the wave27-01 missiond.router-dispatch-descriptor.v1 head plus the wave27-02 builder output, additive-only, eligible MUST be literal atom true|false, no_execution MUST be literal atom true (false AND strings rejected — cross-wave invariant); wave29 prep adds optional commit-lineage fields (:agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches) so parent hotfixes can be recorded without amending worker commits; wave30-01 pins orchestrator-owned parent hotfix finalization through scripts/task-runner-finalize-report.mjs + scripts/task-runner-parent-hotfix.mjs; final/verified hashes must hex-prefix-agree with :commit_hash when present"
   :checker "scripts/check-task-report.mjs"
   :run-verifier "scripts/verify-task-run.mjs"
 
@@ -159,9 +159,9 @@
     (:agent_commit_hash
       "Optional. Git SHA string for the worker's original commit when a parent/orchestrator hotfix creates a later final commit. Hex string >= 7 and <= 64 chars; observational, never authoritative for dispatch.")
     (:final_commit_hash
-      "Optional. Git SHA string for the final effective commit. When present it MUST equal :commit_hash so legacy readers still see the final commit.")
+      "Optional. Git SHA string for the final effective commit. When present it MUST hex-prefix-agree with :commit_hash so legacy readers still see the final commit.")
     (:verified_commit_hash
-      "Optional. Git SHA string for the commit whose acceptance/scope verification was rerun. When present it MUST equal :commit_hash.")
+      "Optional. Git SHA string for the commit whose acceptance/scope verification was rerun. When present it MUST hex-prefix-agree with :commit_hash.")
     (:parent_patches
       "Optional. Vector of property lists, each (parent-patch :commit <sha> :kind <atom> :reason <string> :files [repo-relative paths...])."
       "Cross-wave invariants enforced structurally:"
@@ -169,7 +169,8 @@
       "  :kind            — atom enum, one of: lint-cleanup | doc-fix | test-fix | scope-trim | hotfix-other."
       "  :reason          — non-empty string (human-readable why)."
       "  :files           — non-empty vector of repo-relative paths (no leading '/' or '~', no '..' traversal)."
-      "  Final-hash drift — when :commit_hash and the LAST :parent_patches entry's :commit are both present, they MUST agree (hex prefix-match >= 7 chars). Worker commit before any patches is recorded in :agent_commit_hash; the final :commit_hash should equal the most recent parent patch commit."))
+      "  Final-hash drift — when :commit_hash and the LAST :parent_patches entry's :commit are both present, they MUST agree (hex prefix-match >= 7 chars). Worker commit before any patches is recorded in :agent_commit_hash; the final :commit_hash should equal the most recent parent patch commit."
+      "  Wave30-01 actor boundary — when the parent/orchestrator applies a post-worker hotfix after the worker session exits, the orchestrator owns rewriting the report through task-runner-finalize-report.mjs / task-runner-parent-hotfix.mjs. The worker commit is preserved in :agent_commit_hash; :commit_hash, :final_commit_hash, and :verified_commit_hash point at the finalized commit."))
 
   (status-contract
     :allowed [draft in-progress done blocked rejected]
@@ -212,7 +213,7 @@
        ":router_dispatch_blockers not a vector of non-empty strings"
        "absolute or ~/.. paths inside :router_dispatch_descriptor_path"
        ":agent_commit_hash / :final_commit_hash / :verified_commit_hash malformed (hex string >= 7 and <= 64 chars)"
-       ":final_commit_hash or :verified_commit_hash present but not equal to :commit_hash"
+       ":final_commit_hash or :verified_commit_hash present but not hex-prefix-agreeing with :commit_hash"
        ":parent_patches entry missing :commit / :kind / :reason / non-empty :files"
        ":parent_patches :kind not in {lint-cleanup, doc-fix, test-fix, scope-trim, hotfix-other}"
        ":parent_patches entry :files contains absolute / ~ / .. path"
