@@ -1266,6 +1266,32 @@ function runFixtures() {
       ok: false,
       expects: /:router_apply_blockers entries must be non-empty strings/,
     },
+    // wave26-06 Layer C cross-layer smoke: positive control. A report
+    // that populates ALL 5 wave26-04 readiness fields with the
+    // canonical wave26-01 seed shape (claudecode current-default +
+    // runtime_allowed=true + apply_eligible=false + the canonical
+    // 'apply gate requires runtime-ready; current-default is NOT
+    // sufficient' blocker + the seed registry path). MUST validate.
+    // Distinct from the wave26-04 valid fixture by including the
+    // canonical blocker text verbatim (so a future re-word in
+    // wave26-02 / wave26-03 surfaces here as a coordination signal).
+    {
+      name: 'wave26-06-readiness-all-fields-claudecode-smoke (canonical seed shape valid)',
+      source: `(report wave26-06-fix-readiness-smoke
+        :schema "missiond.report-contract.v1"
+        :task_id "wave26-06-fix-readiness-smoke"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_backend_readiness_status "current-default"
+        :router_backend_runtime_allowed true
+        :router_apply_eligible false
+        :router_apply_blockers ["backend claudecode readiness_status=current-default (apply gate requires runtime-ready; current-default is NOT sufficient)"]
+        :router_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
+      ok: true,
+    },
   ];
 
   let failed = 0;

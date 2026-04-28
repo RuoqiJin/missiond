@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import {
   head,
@@ -14,10 +15,17 @@ import {
 
 const usage = `Usage:
   node scripts/render-claudecode-task.mjs [--stdout] [--force] [--out <path>] <task.lisp>
+  node scripts/render-claudecode-task.mjs --dry-fixture
 
 Renders a MissionD task-contract v1 Lisp file into the current ClaudeCode
 Markdown task-brief format. By default writes:
   .missiond/claudecode/<task-id>.md
+
+--dry-fixture runs self-contained smoke fixtures that render a synthetic
+in-memory task contract and assert the wave26-06 cross-wave literals
+(advisory / dry-run only / router-backend-registry / --backend-registry /
+MUST NOT switch backend) all surface in the rendered output. The renderer
+NEVER shells out — every command in the rendered brief is text only.
 `;
 
 function main() {
@@ -25,6 +33,7 @@ function main() {
   let stdout = false;
   let force = false;
   let outPath = null;
+  let dryFixture = false;
   const inputs = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -39,9 +48,16 @@ function main() {
     } else if (arg === '--out') {
       outPath = args[++i];
       if (!outPath) fail('--out requires a path');
+    } else if (arg === '--dry-fixture') {
+      dryFixture = true;
     } else {
       inputs.push(arg);
     }
+  }
+
+  if (dryFixture) {
+    runFixtures();
+    return;
   }
 
   if (inputs.length !== 1) fail(usage);
@@ -480,6 +496,139 @@ function code(value) {
 function fail(message) {
   console.error(message);
   process.exit(2);
+}
+
+// wave26-06 Layer D cross-layer smoke: render a synthetic in-memory task
+// that opts into BOTH `:router-policy-path` and `:router-backend-registry-
+// path`, then assert the rendered Markdown carries every wave24-05 +
+// wave25-04 + wave26-05 literal that downstream coordination depends on.
+// Pure-in-process: no shell-out, no LLM probe, no git, no network. The
+// fixture writes its synthetic task to the OS tmp dir so loadSingleTask
+// (which reads from disk) can drive the same code path the production
+// renderer uses; the tmp file is removed on exit.
+function runFixtures() {
+  const fixtures = [];
+  fixtures.push({
+    name: 'wave26-06-renderer-readiness-literals: rendered brief carries advisory + dry-run only + router-backend-registry + --backend-registry + MUST NOT switch backend',
+    category: 'wave26-06-renderer-readiness-literals',
+    run: () => {
+      // Synthetic task contract that opts into BOTH router fields. The
+      // task body mirrors a wave26-style smoke contract minus the
+      // wave-specific fields the smoke does not need (wave26-05 schema
+      // additions plus the wave24-05 :router-policy-path).
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave26-06-render-'));
+      const tmpTask = path.join(tmpDir, 'wave26-06-render-fixture.lisp');
+      const lisp = `(task wave26-06-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Render fixture"\n  :kind smoke\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "manual"\n  :goal "Render fixture goal"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements []\n  :acceptance ["true"]\n  :router-policy-path ".missiond/router/router-policy-v1.lisp"\n  :router-backend-registry-path ".missiond/router/router-backend-registry-v1.lisp"\n  :commit (:required false :scope-check none)\n  :report ["Commit hash."])\n`;
+      try {
+        fs.writeFileSync(tmpTask, lisp, 'utf8');
+        // Drive the same loadSingleTask + renderTask path production
+        // uses. We need both router files to resolve so the renderer
+        // emits the wave26-05 surface; the auto-detect default seeds
+        // are checked against the repo's actual files (the renderer
+        // resolves them relative to process.cwd()).
+        const task = loadSingleTask(tmpTask);
+        const markdown = renderTask(task, tmpTask);
+        // Required literals — every entry is a substring search; if any
+        // literal goes missing the smoke fails loudly with the missing
+        // token name. The `--backend-registry` and `MUST NOT switch
+        // backend` literals are wave26-05 additions; the others
+        // pre-date wave26-05 (wave24-05 / wave25-04).
+        const required = [
+          'advisory',
+          'dry-run only',
+          'router-backend-registry',
+          '--backend-registry',
+          'MUST NOT switch backend',
+        ];
+        for (const literal of required) {
+          if (!markdown.includes(literal)) {
+            throw new Error(
+              `wave26-06 invariant: rendered brief missing required literal '${literal}'`,
+            );
+          }
+        }
+        // Cross-wave invariant: rendered brief surfaces both router file
+        // paths verbatim so downstream tooling can grep them.
+        if (!markdown.includes('.missiond/router/router-policy-v1.lisp')) {
+          throw new Error('wave26-06 invariant: rendered brief missing router-policy path');
+        }
+        if (!markdown.includes('.missiond/router/router-backend-registry-v1.lisp')) {
+          throw new Error('wave26-06 invariant: rendered brief missing router-backend-registry path');
+        }
+        // Cross-wave invariant: the recommend-task-backend command
+        // includes the --backend-registry flag when BOTH files resolve
+        // (wave26-05 contract). A regression that drops the flag fails
+        // here.
+        if (!markdown.match(/recommend-task-backend\.mjs.*--backend-registry/)) {
+          throw new Error(
+            'wave26-06 invariant: recommend-task-backend command must include --backend-registry when registry resolves',
+          );
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  });
+  // Static-audit smoke: the renderer module itself must remain free of
+  // shell-out / LLM clients / network / mutating git invocations. The
+  // forbidden-pattern table is assembled from string parts so this
+  // audit does not self-trip on the patterns it scans for (wave24-06 /
+  // wave25-01 / wave25-05 self-audit lesson).
+  fixtures.push({
+    name: 'wave26-06-renderer-static-audit: zero shell/LLM/git/network in renderer',
+    category: 'wave26-06-renderer-static-audit',
+    run: () => {
+      const selfPath = path.resolve(process.cwd(), 'scripts', 'render-claudecode-task.mjs');
+      const src = fs.readFileSync(selfPath, 'utf8');
+      const stripped = src
+        .split('\n')
+        .filter((ln) => !/^\s*\/\//.test(ln))
+        .join('\n')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
+        .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
+        .replace(/`(?:\\.|[^`\\])*`/g, '``');
+      const forbidden = [
+        new RegExp('child' + '_' + 'process'),
+        new RegExp('\\bspawn\\('),
+        new RegExp('\\bspawn' + 'Sync\\b'),
+        new RegExp('\\bexec' + 'Sync\\b'),
+        new RegExp('\\bfork\\('),
+        new RegExp('open' + 'ai', 'i'),
+        new RegExp('anthrop' + 'ic', 'i'),
+        new RegExp('chat\\.compl' + 'etion', 'i'),
+        new RegExp('\\bfetch\\('),
+        new RegExp('\\bhttps?\\.(?:get|request|post)\\b'),
+      ];
+      for (const re of forbidden) {
+        if (re.test(stripped)) {
+          throw new Error(
+            `wave26-06 self-audit: forbidden pattern ${re} found in renderer active source`,
+          );
+        }
+      }
+    },
+  });
+
+  let failed = 0;
+  const categories = new Set();
+  for (const fixture of fixtures) {
+    categories.add(fixture.category);
+    try {
+      fixture.run();
+    } catch (err) {
+      failed += 1;
+      console.error(`fixture failed: ${fixture.name}`);
+      console.error(`  ${err.message}`);
+    }
+  }
+  if (failed > 0) {
+    console.error(`render-claudecode-task fixtures FAILED — ${failed} of ${fixtures.length}`);
+    process.exit(1);
+  }
+  console.log(
+    `render-claudecode-task fixtures OK (${fixtures.length} cases, ${categories.size} categories)`,
+  );
 }
 
 main();

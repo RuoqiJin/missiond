@@ -1233,6 +1233,125 @@ async function runFixtures(json = false) {
         }
       },
     },
+    {
+      // wave26-06 Layer A2 cross-layer smoke: build a synthetic 3-task
+      // corpus with the SEED-shape registry where claudecode is at
+      // current-default. Even with a high-confidence trace on the docs
+      // task (the only backend that lands in the registry as
+      // current-default + runtime_allowed=true), the strict 7-condition
+      // gate REJECTS — apply_eligible_count MUST be 0. This pins
+      // wave26-06 cross-wave invariant 4 (current-default alone is
+      // INSUFFICIENT) on the corpus aggregate surface, complementing
+      // the wave26-corpus-with-registry fixture (which uses a synthetic
+      // runtime-ready registry to drive apply_eligible_count=1).
+      // Together the two fixtures pin both polarities of the gate at
+      // the corpus boundary.
+      name: 'wave26-06-corpus-aggregates-readiness-smoke: seed-shape registry -> apply_eligible_count=0',
+      category: 'wave26-06-corpus-aggregates-readiness-smoke',
+      run: () => {
+        const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'wave26-06-corpus-'));
+        try {
+          const tasksRoot = path.join(tmp, 'tasks');
+          fs.mkdirSync(tasksRoot, { recursive: true });
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-docs.lisp'),
+            taskDocsText('fx-docs'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-checker.lisp'),
+            taskCheckerText('fx-checker'),
+            'utf8',
+          );
+          fs.writeFileSync(
+            path.join(tasksRoot, 'fx-review.lisp'),
+            taskReviewText('fx-review'),
+            'utf8',
+          );
+          // Plant a session-trace.lisp so fx-docs has >=5 events on
+          // claudecode. Without this the docs task confidence would be
+          // low and the gate would fail on confidence (wave26-02 cond 4),
+          // which would mask the readiness=current-default rejection
+          // (wave26-02 cond 7) we want to pin.
+          fs.writeFileSync(
+            path.join(tasksRoot, 'session-trace.lisp'),
+            traceFixtureText('fx-docs', 'claudecode'),
+            'utf8',
+          );
+          const policyPath = writePolicyFile(tmp, seedPolicyText());
+          const policy = readRouterPolicyFile(policyPath);
+          const taskFiles = findTaskContractFiles(tasksRoot);
+          const traceIndex = buildIndexFromTasksRoot(tasksRoot);
+          // Seed-shape registry: claudecode current-default + runtime_allowed
+          // true + 0 blockers (wave26-01 seed shape). Other backends are
+          // advisory-only with the canonical apply_blockers entry.
+          const registry = parseRegistryFromString(`(router-backend-registry fixture-wave26-06-corpus-seed
+            :schema "missiond.router-backend-registry.v1"
+            :version "v1"
+            (backend
+              :id claudecode
+              :readiness_status current-default
+              :runtime_allowed true
+              :apply_blockers []
+              :substrate "missiond-daemon::handlers::knowledge::workstation_dispatch"
+              :non-goals ["does not replace runtime dispatch"])
+            (backend
+              :id deterministic-checker
+              :readiness_status advisory-only
+              :runtime_allowed false
+              :apply_blockers ["no runtime adapter shipped"]
+              :substrate nil
+              :non-goals ["does not replace runtime dispatch"])
+            (backend
+              :id verifier-worker
+              :readiness_status advisory-only
+              :runtime_allowed false
+              :apply_blockers ["no runtime adapter shipped"]
+              :substrate nil
+              :non-goals ["does not replace runtime dispatch"]))`);
+          const evalResult = evaluateCorpus({
+            cwd: tmp,
+            taskFiles,
+            policy,
+            policyPath,
+            tasksRoot,
+            traceIndex,
+            traceIndexSource: 'built-in-process:tasks',
+            registry,
+            registryPath: '<wave26-06-corpus-seed-smoke>',
+          });
+          mustEqual('totals.tasks', evalResult.totals.tasks, 3);
+          // by_backend_readiness MUST be present and populated.
+          if (!Object.prototype.hasOwnProperty.call(evalResult, 'by_backend_readiness')) {
+            throw new Error('wave26-06: expected by_backend_readiness on output when registry supplied');
+          }
+          mustEqual(
+            'wave26-06: by_backend_readiness[current-default]',
+            evalResult.by_backend_readiness['current-default'],
+            1,
+          );
+          mustEqual(
+            'wave26-06: by_backend_readiness[advisory-only]',
+            evalResult.by_backend_readiness['advisory-only'],
+            2,
+          );
+          // Cross-wave invariant 4 (current-default alone is INSUFFICIENT):
+          // even though fx-docs has high confidence + runtime_allowed=true
+          // + 0 blockers + matched rule, the gate fails on readiness_status
+          // because current-default is NOT runtime-ready. apply_eligible_count
+          // MUST be 0.
+          mustEqual('wave26-06: apply_eligible_count', evalResult.apply_eligible_count, 0);
+          // Cross-wave invariant 1+2: the policy projection still surfaces
+          // dry_run_only=true / runtime_replacement=false on the input
+          // policy (the evaluator output does NOT carry these as top-level
+          // fields, but the policy projection it consumes MUST).
+          mustEqual('wave26-06: policy.dry_run_only', policy.dry_run_only, true);
+          mustEqual('wave26-06: policy.runtime_replacement', policy.runtime_replacement, false);
+        } finally {
+          fs.rmSync(tmp, { recursive: true, force: true });
+        }
+      },
+    },
   ];
 
   let failed = 0;

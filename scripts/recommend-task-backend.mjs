@@ -1596,6 +1596,223 @@ async function runFixtures(json = false) {
         }
       },
     },
+    {
+      // wave26-06 Layer A1 cross-layer smoke: synthetic registry promotes
+      // claudecode to runtime-ready + runtime_allowed=true + 0 blockers.
+      // ALL 7 wave26-02 gate conditions hold ⇒ apply_eligible MUST be the
+      // literal Boolean true, the wave24-01 dry_run_only invariant survives
+      // annotation, and applied has no presence on the recommendation
+      // surface (applied is a separate concept owned by mission_plan and
+      // the report contract — recommend() never carries it). This is the
+      // positive-control smoke for the strict gate, distinct from the
+      // wave26-02 readiness-eligible fixture by ALSO asserting the
+      // dry_run_only literal is preserved in stable JSON form (wave26-06
+      // cross-wave invariant 1 is pinned end-to-end by stable JSON).
+      name: 'wave26-06: cross-layer smoke pins apply_eligible=true under strict gate',
+      category: 'wave26-06-readiness-eligible-smoke',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        const traceIndex = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 8,
+          backendEvents: 8,
+        });
+        const baseRec = recommend({ task, policy, traceIndex });
+        // Sanity: the base recommendation matched + high-confidence so the
+        // gate failure cannot blame wave25 confidence engine.
+        mustEqual('smoke.confidence', baseRec.confidence, 'high');
+        mustEqual('smoke.backend', baseRec.backend, 'claudecode');
+        mustEqual('smoke.dry_run_only', baseRec.dry_run_only, true);
+        const registry = parseRegistryFromString(`(router-backend-registry fixture-wave26-06-eligible
+          :schema "missiond.router-backend-registry.v1"
+          :version "v1"
+          (backend
+            :id claudecode
+            :readiness_status runtime-ready
+            :runtime_allowed true
+            :apply_blockers []
+            :substrate "missiond-daemon::handlers::knowledge::workstation_dispatch"
+            :non-goals ["does not replace runtime dispatch"]))`);
+        const annotated = annotateRecommendationWithReadiness({
+          recommendation: baseRec,
+          policy,
+          registry,
+          registryPath: '<wave26-06-eligible-smoke>',
+        });
+        // Cross-wave invariant: dry_run_only=true literal survives the
+        // annotate step (wave26-06 invariant 1 / wave24-01 :dry-run-only).
+        mustEqual('smoke.annotated.dry_run_only', annotated.dry_run_only, true);
+        // Cross-wave invariant: backend_runtime_allowed and the gate are
+        // BOTH literal Booleans, never strings (wave26-06 invariant 4 /
+        // wave26-04 strict literal-atom rule).
+        if (typeof annotated.router_apply_eligible !== 'boolean') {
+          throw new Error(
+            `wave26-06 invariant: router_apply_eligible must be a literal boolean, got ${typeof annotated.router_apply_eligible}`,
+          );
+        }
+        if (typeof annotated.backend_runtime_allowed !== 'boolean') {
+          throw new Error(
+            `wave26-06 invariant: backend_runtime_allowed must be a literal boolean, got ${typeof annotated.backend_runtime_allowed}`,
+          );
+        }
+        mustEqual('smoke.annotated.router_apply_eligible', annotated.router_apply_eligible, true);
+        mustEqual('smoke.annotated.backend_readiness_status', annotated.backend_readiness_status, 'runtime-ready');
+        mustEqual('smoke.annotated.backend_runtime_allowed', annotated.backend_runtime_allowed, true);
+        mustEqual('smoke.annotated.router_apply_blockers.length', annotated.router_apply_blockers.length, 0);
+        // Cross-wave invariant: applied is NOT a recommend() field — it
+        // belongs to mission_plan / report-contract. recommend() never
+        // surfaces applied (true OR false) so a future regression that
+        // sneaks an applied field onto recommend output trips here.
+        if (Object.prototype.hasOwnProperty.call(annotated, 'applied')) {
+          throw new Error(
+            'wave26-06 invariant: recommend() must NOT carry an `applied` field — applied lives on mission_plan + report-contract surfaces',
+          );
+        }
+        // Stable JSON byte-shape check: dry_run_only=true is the literal
+        // bool string `true` in JSON, never the string `"true"`.
+        const stable = stableStringify(annotated);
+        if (!/"dry_run_only"\s*:\s*true/.test(stable)) {
+          throw new Error('wave26-06 invariant: dry_run_only must serialise to literal true, not "true"');
+        }
+        if (!/"router_apply_eligible"\s*:\s*true/.test(stable)) {
+          throw new Error('wave26-06 invariant: router_apply_eligible must serialise to literal true, not "true"');
+        }
+      },
+    },
+    {
+      // wave26-06 Layer A1 cross-layer smoke: the wave26-01 SEED-shape
+      // registry has claudecode at current-default + runtime_allowed=true
+      // + 0 blockers. Even with high-confidence + matched rule, the
+      // strict gate REJECTS because condition 7 (readiness_status=
+      // runtime-ready) fails — current-default alone is INTENTIONALLY
+      // insufficient. This is the negative-control smoke for the strict
+      // gate, distinct from wave26-02 by also asserting that the gate
+      // produces a Boolean literal false (not a string "false"), and
+      // that the blocker text remains stable across the wave26 chain.
+      name: 'wave26-06: cross-layer smoke pins apply_eligible=false for current-default seed',
+      category: 'wave26-06-readiness-current-default-blocked-smoke',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        const traceIndex = synthesizeTraceIndex({
+          task: task.id,
+          backend: 'claudecode',
+          taskEvents: 8,
+          backendEvents: 8,
+        });
+        const baseRec = recommend({ task, policy, traceIndex });
+        mustEqual('smoke.confidence', baseRec.confidence, 'high');
+        mustEqual('smoke.backend', baseRec.backend, 'claudecode');
+        // Seed-shape registry: claudecode current-default + runtime_allowed
+        // true + 0 blockers — exactly the wave26-01 seed.
+        const registry = parseRegistryFromString(`(router-backend-registry fixture-wave26-06-seed-shape
+          :schema "missiond.router-backend-registry.v1"
+          :version "v1"
+          (backend
+            :id claudecode
+            :readiness_status current-default
+            :runtime_allowed true
+            :apply_blockers []
+            :substrate "missiond-daemon::handlers::knowledge::workstation_dispatch"
+            :non-goals ["does not replace runtime dispatch"]))`);
+        const annotated = annotateRecommendationWithReadiness({
+          recommendation: baseRec,
+          policy,
+          registry,
+          registryPath: '<wave26-06-seed-shape-smoke>',
+        });
+        mustEqual('smoke.annotated.backend_readiness_status', annotated.backend_readiness_status, 'current-default');
+        mustEqual('smoke.annotated.backend_runtime_allowed', annotated.backend_runtime_allowed, true);
+        // Cross-wave invariant: literal boolean false, never the string.
+        if (typeof annotated.router_apply_eligible !== 'boolean') {
+          throw new Error(
+            `wave26-06 invariant: router_apply_eligible must be a literal boolean, got ${typeof annotated.router_apply_eligible}`,
+          );
+        }
+        mustEqual('smoke.annotated.router_apply_eligible', annotated.router_apply_eligible, false);
+        // Stable JSON byte-shape check: must serialise to literal false.
+        const stable = stableStringify(annotated);
+        if (!/"router_apply_eligible"\s*:\s*false/.test(stable)) {
+          throw new Error('wave26-06 invariant: router_apply_eligible must serialise to literal false, not "false"');
+        }
+        // Blocker text stability: wave26-02 documented the canonical
+        // 'apply gate requires runtime-ready; current-default is NOT
+        // sufficient' phrase. wave26-06 re-pins it so a future re-word
+        // surfaces here.
+        const joined = annotated.router_apply_blockers.join(' | ');
+        if (!/current-default is NOT sufficient/.test(joined)) {
+          throw new Error(
+            `wave26-06 invariant: blocker must contain the canonical 'current-default is NOT sufficient' phrase, got: ${joined}`,
+          );
+        }
+        if (!/runtime-ready/.test(joined)) {
+          throw new Error(
+            `wave26-06 invariant: blocker must mention runtime-ready, got: ${joined}`,
+          );
+        }
+      },
+    },
+    {
+      // wave26-06 Layer A1 cross-layer smoke: STATIC AUDIT of the four
+      // Node scripts in the router readiness path (recommend +
+      // evaluate-router-policy-corpus + check-task-report + render-
+      // claudecode-task). Each must remain free of forbidden patterns
+      // for shell-out / LLM clients / network / mutating git invocations.
+      // The forbidden-pattern table is assembled from string parts so
+      // this audit script does not self-trip on the patterns it scans
+      // for (wave24-06 / wave25-01 / wave25-05 self-audit lesson).
+      name: 'wave26-06: static audit -> zero shell/LLM/git/network in router readiness scripts',
+      category: 'wave26-06-readiness-static-audit',
+      run: () => {
+        const auditTargets = [
+          'scripts/recommend-task-backend.mjs',
+          'scripts/evaluate-router-policy-corpus.mjs',
+          'scripts/check-task-report.mjs',
+          'scripts/render-claudecode-task.mjs',
+        ];
+        // Assemble forbidden patterns from string parts. Each pattern is
+        // built by concatenation so the literal pattern string never
+        // appears in this source — the regex compiles at runtime.
+        const forbidden = [
+          new RegExp('child' + '_' + 'process'),
+          new RegExp('\\bspawn' + 'Sync\\b'),
+          new RegExp('\\bspawn\\(' ),
+          new RegExp('\\bexec' + 'Sync\\b'),
+          new RegExp('\\bfork\\('),
+          new RegExp('open' + 'ai', 'i'),
+          new RegExp('anthrop' + 'ic', 'i'),
+          new RegExp('chat\\.compl' + 'etion', 'i'),
+          new RegExp('\\bfetch\\('),
+          new RegExp('\\bhttps?\\.(?:get|request|post)\\b'),
+          // git mutations: any literal "git " followed by a write verb.
+          new RegExp("['\"]git['\" ].*(commit|push|reset|checkout|add)"),
+        ];
+        for (const rel of auditTargets) {
+          const abs = path.resolve(process.cwd(), rel);
+          const src = fs.readFileSync(abs, 'utf8');
+          // Strip line comments + block comments + string literals so
+          // documentation prose and fixture names that name the patterns
+          // do not self-trip. Mirror the wave25-01 / wave25-05 pattern.
+          const stripped = src
+            .split('\n')
+            .filter((ln) => !/^\s*\/\//.test(ln))
+            .join('\n')
+            .replace(/\/\*[\s\S]*?\*\//g, '')
+            .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
+            .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
+            .replace(/`(?:\\.|[^`\\])*`/g, '``');
+          for (const re of forbidden) {
+            if (re.test(stripped)) {
+              throw new Error(
+                `wave26-06 self-audit: forbidden pattern ${re} found in active source ${rel}`,
+              );
+            }
+          }
+        }
+      },
+    },
   ];
 
   let failed = 0;

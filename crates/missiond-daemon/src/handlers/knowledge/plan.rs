@@ -20587,4 +20587,430 @@ mod tests {
             "wave26-03: default mode (arg absent) must be byte-identical even when both new args are supplied"
         );
     }
+
+    // -----------------------------------------------------------------
+    // wave26-06 — cross-layer smoke pinning the FULL Wave 26 backend
+    // readiness loop is still ADVISORY at the daemon boundary.
+    //
+    // Pins the 9 cross-wave invariants the brief enumerates:
+    //   1. :runtime-replacement false in router-policy schema (wave24-01).
+    //   2. :dry-run-only true in router-policy schema (wave24-01).
+    //   3. applied=false literal in EVERY router recommendation surface.
+    //   4. router_apply_eligible=true ONLY when readiness_status=runtime-
+    //      ready AND runtime_allowed=true AND blockers empty AND high
+    //      confidence AND status=computed. With the seed registry where
+    //      claudecode is current-default, apply_eligible MUST always be
+    //      false even for high-confidence claudecode matches.
+    //   5. Renderer advisory text — pinned by Layer D.
+    //   6. Report-checker rejects literal-string booleans — pinned by
+    //      Layer C and the wave26-04 fixtures already in
+    //      check-task-report.mjs.
+    //   7. mission_plan off/default mode byte-shape unchanged EVEN WITH
+    //      BOTH router_backend_registry_path AND
+    //      router_policy_trace_index_path supplied.
+    //   8. CLI/Rust parity for one fixture: same registry + same trace
+    //      evidence -> both engines agree on backend_readiness_status +
+    //      router_apply_eligible.
+    //   9. No real LLM call, no spawn, no mutating git, no network —
+    //      pinned by the static audit at the bottom.
+    //
+    // Forbidden-pattern table is assembled from string parts so the
+    // audit does not self-trip on the patterns it scans for (wave24-06
+    // / wave25-01 / wave25-05 self-audit lesson).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn router_policy_dry_run_smoke_pins_wave26_invariants() {
+        // Layer B Rust smoke: drive mission_plan(router_policy_mode=
+        // dry_run) with all three router args supplied and assert every
+        // wave26 invariant holds. Two scenarios are exercised back-to-
+        // back: (a) seed-shape registry where claudecode is current-
+        // default -> apply_eligible MUST be Bool(false); (b) synthetic
+        // runtime-ready registry -> apply_eligible MUST be Bool(true).
+        // Off-mode invariant 7 is re-pinned at the end with both router
+        // args supplied to non-existent paths.
+
+        // (a) Seed-shape registry path. claudecode is current-default
+        // + runtime_allowed=true + 0 blockers — exactly the wave26-01
+        // seed shape. Even with high-confidence trace, the strict gate
+        // MUST reject (apply_eligible=Bool(false)).
+        let policy_path = write_temp_docs_policy("wave26-06-smoke");
+        let trace_path = write_temp_trace_index("wave26-06-smoke", 7, 7);
+        let seed_body = registry_body_single("claudecode", "current-default", true, &[]);
+        let seed_path = write_temp_registry("wave26-06-seed", &seed_body);
+
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        let dry_args_seed = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy_path.to_str().unwrap(),
+            "router_policy_trace_index_path": trace_path.to_str().unwrap(),
+            "router_backend_registry_path": seed_path.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_seed = parse_router_policy_mode(&dry_args_seed).expect("dry_run parses");
+        assert!(matches!(mode_seed, RouterPolicyMode::DryRun));
+        let result_seed = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_seed,
+            &dry_args_seed,
+            &resolved,
+            &plan,
+        );
+        let v_seed = parse_payload(&result_seed);
+        let block_seed = v_seed
+            .get("router_recommendation")
+            .expect("dry_run mode must splice a recommendation block");
+
+        // Invariant 1+2: status=computed proves the parsed policy was
+        // accepted (the daemon rejects runtime_replacement=true and
+        // dry_run_only=false at validation time, so reaching computed
+        // pins both invariants end-to-end).
+        assert_eq!(
+            block_seed["status"], "computed",
+            "wave26-06 invariant 1+2: policy with runtime_replacement=false + dry_run_only=true must surface status=computed"
+        );
+
+        // Invariant 3: applied is the literal JSON Bool false. Type-
+        // checked, not just value-equality, so a future regression that
+        // switches to "false" string fails loudly here.
+        assert_eq!(
+            block_seed["applied"],
+            Value::Bool(false),
+            "wave26-06 invariant 3: applied MUST be literal JSON Bool false under wave26-03 code path"
+        );
+        assert!(
+            block_seed["applied"].is_boolean(),
+            "wave26-06 invariant 3: applied must be a JSON bool, never a string or number"
+        );
+
+        // Invariant 4 (negative case): seed-shape registry where
+        // claudecode is current-default + runtime_allowed=true + 0
+        // blockers + high confidence + matched rule. router_apply_
+        // eligible MUST be Bool(false) because readiness_status is
+        // current-default, not runtime-ready. current-default alone is
+        // INTENTIONALLY insufficient.
+        assert_eq!(
+            block_seed["confidence"], "high",
+            "wave26-06 invariant 4 prereq: trace must produce high confidence so the failing gate is readiness, not confidence"
+        );
+        assert_eq!(
+            block_seed["recommended_backend"], "claudecode",
+            "wave26-06 invariant 4 prereq: docs->claudecode rule must match"
+        );
+        assert_eq!(
+            block_seed["backend_readiness_status"], "current-default",
+            "wave26-06 invariant 4 prereq: seed-shape registry yields current-default"
+        );
+        assert_eq!(
+            block_seed["backend_runtime_allowed"], Value::Bool(true),
+            "wave26-06 invariant 4 prereq: seed claudecode runtime_allowed=true"
+        );
+        assert_eq!(
+            block_seed["router_apply_eligible"], Value::Bool(false),
+            "wave26-06 invariant 4: current-default + high-confidence + runtime_allowed=true MUST still yield apply_eligible=false (current-default alone is INSUFFICIENT)"
+        );
+        assert!(
+            block_seed["router_apply_eligible"].is_boolean(),
+            "wave26-06 invariant 4: router_apply_eligible must be a literal bool, never a string"
+        );
+        let blockers_seed = block_seed["router_apply_blockers"]
+            .as_array()
+            .expect("router_apply_blockers must be an array");
+        let joined_seed = blockers_seed
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(
+            joined_seed.contains("current-default")
+                && joined_seed.contains("runtime-ready"),
+            "wave26-06 invariant 4: blocker must mention current-default + runtime-ready (got `{}`)",
+            joined_seed
+        );
+        assert_eq!(
+            block_seed["backend_registry_status"], "used",
+            "wave26-06 invariant 4: well-formed registry must surface backend_registry_status=used"
+        );
+
+        // (b) Synthetic runtime-ready registry. Same policy, same trace,
+        // same docs task — only the registry shape differs. ALL 6 daemon
+        // gate conditions hold so router_apply_eligible MUST flip to
+        // Bool(true). This is the positive control proving the gate is
+        // not stuck-false.
+        let ready_body = registry_body_single("claudecode", "runtime-ready", true, &[]);
+        let ready_path = write_temp_registry("wave26-06-ready", &ready_body);
+        let dry_args_ready = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy_path.to_str().unwrap(),
+            "router_policy_trace_index_path": trace_path.to_str().unwrap(),
+            "router_backend_registry_path": ready_path.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_ready = parse_router_policy_mode(&dry_args_ready).expect("dry_run parses");
+        let result_ready = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_ready,
+            &dry_args_ready,
+            &resolved,
+            &plan,
+        );
+        let v_ready = parse_payload(&result_ready);
+        let block_ready = &v_ready["router_recommendation"];
+
+        assert_eq!(
+            block_ready["applied"], Value::Bool(false),
+            "wave26-06 invariant 3: applied MUST be literal Bool(false) EVEN UNDER apply_eligible=true (runtime replacement is rejected by contract)"
+        );
+        assert_eq!(
+            block_ready["backend_readiness_status"], "runtime-ready",
+            "wave26-06 invariant 4 positive: registry shape determines readiness_status"
+        );
+        assert_eq!(
+            block_ready["router_apply_eligible"], Value::Bool(true),
+            "wave26-06 invariant 4 positive: ALL 6 gate conditions met -> apply_eligible=true"
+        );
+        let blockers_ready = block_ready["router_apply_blockers"]
+            .as_array()
+            .expect("router_apply_blockers must be an array");
+        assert!(
+            blockers_ready.is_empty(),
+            "wave26-06 invariant 4 positive: apply_eligible=true means router_apply_blockers must be empty (got {:?})",
+            blockers_ready
+        );
+
+        // Invariant 7 (off mode + BOTH router args): re-pin under the
+        // wave26-06 smoke. mode=off MUST be byte-identical to baseline
+        // even when both router_backend_registry_path AND
+        // router_policy_trace_index_path are supplied. Use NON-existent
+        // paths to additionally prove no file I/O happens.
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        let off_args = json!({
+            "router_policy_mode": "off",
+            "router_policy_path": policy_path.to_str().unwrap(),
+            "router_policy_trace_index_path":
+                "/this/path/does/not/exist/wave26-06/trace.json",
+            "router_backend_registry_path":
+                "/this/path/does/not/exist/wave26-06/registry.lisp",
+            "kind": "docs",
+        });
+        let off_mode = parse_router_policy_mode(&off_args).expect("explicit off");
+        assert!(matches!(off_mode, RouterPolicyMode::Off));
+        let off_after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            off_mode,
+            &off_args,
+            &resolved,
+            &plan,
+        );
+        let off_text = match off_after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, off_text,
+            "wave26-06 invariant 7: mode=off must be byte-identical EVEN WITH BOTH router_backend_registry_path AND router_policy_trace_index_path supplied (no file I/O may happen)"
+        );
+
+        // Invariant 7 (cont.): also verify dispatch shape is byte-
+        // identical between baseline and the dry_run+seed-registry
+        // result. Mode=dry_run is allowed to add the recommendation
+        // block but every dispatch field must remain byte-identical.
+        let baseline_v = parse_payload(&baseline);
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                baseline_v[field], v_seed[field],
+                "wave26-06 invariant 7: dispatch field `{}` must be byte-identical with vs without router args",
+                field
+            );
+            assert_eq!(
+                baseline_v[field], v_ready[field],
+                "wave26-06 invariant 7: dispatch field `{}` must be byte-identical regardless of registry shape",
+                field
+            );
+        }
+
+        // Invariant 9 (audit): zero shell-out / LLM / git / network in
+        // the daemon plan.rs router-readiness path. Forbidden patterns
+        // assembled from string parts so the audit does not self-trip
+        // on the patterns it scans for. Mirrors the wave25-05 smoke.
+        let plan_rs = std::fs::read_to_string(
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("src/handlers/knowledge/plan.rs"),
+        )
+        .expect("plan.rs must be readable for self-audit");
+        let stripped: String = plan_rs
+            .lines()
+            .filter(|ln| !ln.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let forbidden_router_patterns: Vec<String> = vec![
+            String::from("std::") + "process::" + "Command",
+            String::from("tokio::") + "process",
+            String::from("req") + "west::",
+            String::from("hyper::") + "Client",
+            String::from("open") + "ai_api",
+            String::from("anthrop") + "ic_api",
+        ];
+        for pat in &forbidden_router_patterns {
+            assert!(
+                !stripped.contains(pat.as_str()),
+                "wave26-06 invariant 9: forbidden router-side pattern `{}` found in plan.rs active source",
+                pat
+            );
+        }
+
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&trace_path);
+        let _ = std::fs::remove_file(&seed_path);
+        let _ = std::fs::remove_file(&ready_path);
+    }
+
+    #[test]
+    fn router_policy_cli_rust_parity_for_readiness() {
+        // Layer B Rust smoke (parity): both engines (Node CLI
+        // recommend-task-backend.mjs --dry-fixture and the daemon's
+        // mission_plan dry_run) MUST agree on backend_readiness_status
+        // and router_apply_eligible for the SAME registry shape +
+        // SAME confidence level. We assert the daemon side here against
+        // the EXPECTED values that the Node Layer A1 fixtures
+        // (wave26-06: cross-layer smoke pins apply_eligible=false for
+        // current-default seed) also assert. A divergence on either
+        // side fails this test AND the corresponding Node fixture so
+        // the parity is bidirectional.
+        //
+        // Documented expected agreement (Node CLI side, wave26-06 Layer
+        // A1 smoke fixtures):
+        //   policy:    docs->claudecode (high priority match)
+        //   trace:     (8,8)-event index -> high confidence
+        //   registry:  claudecode current-default + runtime_allowed=true + 0 blockers
+        //   annotate() ->  backend_readiness_status: 'current-default'
+        //                  backend_runtime_allowed:  true
+        //                  router_apply_eligible:    false
+        //
+        // Daemon expected agreement (this test):
+        //   args.kind=docs, mode=dry_run, registry=current-default
+        //   block.backend_readiness_status === 'current-default'  (parity)
+        //   block.backend_runtime_allowed  === true               (parity)
+        //   block.router_apply_eligible    === false              (parity)
+        //   block.applied                  === Bool(false)        (cross-wave)
+        let policy_path = write_temp_docs_policy("wave26-06-parity");
+        // Trace index supplies (8,8) events on btk-1/claudecode buckets;
+        // matches the Node fixture's synthesizeTraceIndex(8,8) shape.
+        let trace_path = write_temp_trace_index("wave26-06-parity", 8, 8);
+        let seed_body = registry_body_single("claudecode", "current-default", true, &[]);
+        let registry_path = write_temp_registry("wave26-06-parity", &seed_body);
+
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy_path.to_str().unwrap(),
+            "router_policy_trace_index_path": trace_path.to_str().unwrap(),
+            "router_backend_registry_path": registry_path.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).expect("dry_run parses");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+
+        // Hard-coded expected values that the Node Layer A1 smoke
+        // fixture also asserts for the SAME shape. A divergence on
+        // either side fails BOTH tests so the parity is bidirectional.
+        assert_eq!(
+            block["recommended_backend"], "claudecode",
+            "wave26-06 parity: Node CLI emits backend='claudecode' for docs task on seed policy"
+        );
+        assert_eq!(
+            block["confidence"], "high",
+            "wave26-06 parity: Node CLI emits confidence='high' for (8,8)-event trace-index"
+        );
+        assert_eq!(
+            block["backend_readiness_status"], "current-default",
+            "wave26-06 parity: Node CLI emits backend_readiness_status='current-default' for seed-shape registry"
+        );
+        assert_eq!(
+            block["backend_runtime_allowed"], Value::Bool(true),
+            "wave26-06 parity: Node CLI emits backend_runtime_allowed=true for seed claudecode"
+        );
+        assert_eq!(
+            block["router_apply_eligible"], Value::Bool(false),
+            "wave26-06 parity: Node CLI emits router_apply_eligible=false for current-default (current-default alone is INSUFFICIENT)"
+        );
+        assert_eq!(
+            block["applied"],
+            Value::Bool(false),
+            "wave26-06 parity: cross-wave invariant — applied=false literal under any registry status"
+        );
+        assert_eq!(
+            block["status"], "computed",
+            "wave26-06 parity: matched rule on well-formed policy must surface status=computed"
+        );
+        assert_eq!(
+            block["backend_registry_status"], "used",
+            "wave26-06 parity: well-formed registry must surface backend_registry_status=used"
+        );
+
+        // Recommended backend ∈ wave24-01 enum (re-spelled locally to
+        // keep the test pure-Rust per wave24-06 lesson — no script
+        // imports). Mirrors the wave25-05 parity test.
+        let allowed_backends = [
+            "claudecode",
+            "missiond-llm-router",
+            "deterministic-checker",
+            "patch-worker",
+            "verifier-worker",
+        ];
+        let backend = block["recommended_backend"]
+            .as_str()
+            .expect("recommended_backend must be a string");
+        assert!(
+            allowed_backends.contains(&backend),
+            "wave26-06 parity: recommended_backend `{}` not in wave24-01 enum",
+            backend
+        );
+
+        // Allowed readiness status ∈ wave26-01 enum (re-spelled
+        // locally). A future regression that introduces a non-enum
+        // value fails here.
+        let allowed_readiness = [
+            "current-default",
+            "advisory-only",
+            "runtime-ready",
+            "unavailable",
+            "unknown",
+        ];
+        let readiness = block["backend_readiness_status"]
+            .as_str()
+            .expect("backend_readiness_status must be a string");
+        assert!(
+            allowed_readiness.contains(&readiness),
+            "wave26-06 parity: backend_readiness_status `{}` not in wave26-01 enum",
+            readiness
+        );
+
+        let _ = std::fs::remove_file(&policy_path);
+        let _ = std::fs::remove_file(&trace_path);
+        let _ = std::fs::remove_file(&registry_path);
+    }
 }
