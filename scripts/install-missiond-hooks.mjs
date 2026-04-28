@@ -54,6 +54,7 @@ const SCRIPT_DIR = path.dirname(SCRIPT_PATH);
 const REPO_ROOT = path.resolve(SCRIPT_DIR, '..');
 const EXPECTED_HOOKS_PATH = '.githooks';
 const EXPECTED_HOOK_FILE = path.join(REPO_ROOT, EXPECTED_HOOKS_PATH, 'pre-commit');
+const STAGED_SOURCE_HYGIENE_FILE = path.join(SCRIPT_DIR, 'check-staged-source-hygiene.mjs');
 
 const usage = `Usage:
   node scripts/install-missiond-hooks.mjs [--check] [--json] [--strict]
@@ -69,7 +70,8 @@ command, but never mutates git config on its own.
 Modes:
   --check        Read git config --get core.hooksPath and report whether it
                  equals "${EXPECTED_HOOKS_PATH}". Also reports whether the
-                 expected ${EXPECTED_HOOKS_PATH}/pre-commit file exists. The
+                 expected ${EXPECTED_HOOKS_PATH}/pre-commit file and staged
+                 source hygiene checker exist. The
                  JSON payload includes a severity tag (ok | preflight-drift)
                  and a concrete advice command. By default exits 0 even on
                  drift; pair with --strict to make drift a hard non-zero exit
@@ -162,14 +164,19 @@ export const DOCTOR_SEVERITY = Object.freeze({
 //   hooks-path-unset   — git config core.hooksPath returned no value
 //   hooks-path-wrong   — git config core.hooksPath != expected (set elsewhere)
 //   hook-file-missing  — expected hook file absent from working tree
+//   staged-source-hygiene-missing — hook entrypoint dependency is absent
 function classifyDoctorState(info) {
   if (!info.hook_file_exists) return 'hook-file-missing';
+  if (!info.staged_source_hygiene_available) return 'staged-source-hygiene-missing';
   if (info.current_hooks_path == null) return 'hooks-path-unset';
   if (!info.matches) return 'hooks-path-wrong';
   return 'aligned';
 }
 
-export function inspectHooksPath({ git = realGit } = {}) {
+export function inspectHooksPath({
+  git = realGit,
+  stagedSourceHygieneFile = STAGED_SOURCE_HYGIENE_FILE,
+} = {}) {
   const repoRoot = git.repoRoot();
   const expectedHooksDir = path.join(repoRoot, EXPECTED_HOOKS_PATH);
   const expectedHookFile = path.join(expectedHooksDir, 'pre-commit');
@@ -177,6 +184,7 @@ export function inspectHooksPath({ git = realGit } = {}) {
   const matches = current === EXPECTED_HOOKS_PATH;
   const hookFileExists = fs.existsSync(expectedHookFile);
   const hookFileExecutable = hookFileExists ? isExecutable(expectedHookFile) : false;
+  const stagedSourceHygieneExists = fs.existsSync(stagedSourceHygieneFile);
   const info = {
     repo_root: repoRoot,
     expected_hooks_path: EXPECTED_HOOKS_PATH,
@@ -185,6 +193,8 @@ export function inspectHooksPath({ git = realGit } = {}) {
     expected_hook_file: path.relative(repoRoot, expectedHookFile),
     hook_file_exists: hookFileExists,
     hook_file_executable: hookFileExecutable,
+    staged_source_hygiene_file: path.relative(repoRoot, stagedSourceHygieneFile),
+    staged_source_hygiene_available: stagedSourceHygieneExists,
   };
   info.reason = classifyDoctorState(info);
   return info;
@@ -208,7 +218,7 @@ function runCheck({ json, strict }) {
     process.exit(1);
   }
 
-  const ok = info.matches && info.hook_file_exists;
+  const ok = info.matches && info.hook_file_exists && info.staged_source_hygiene_available;
   const severity = ok ? DOCTOR_SEVERITY.OK : DOCTOR_SEVERITY.PREFLIGHT_DRIFT;
   const payload = {
     mode: 'check',
@@ -226,13 +236,15 @@ function runCheck({ json, strict }) {
     payload,
     humanOk: (p) =>
       `install-missiond-hooks check OK: core.hooksPath=${p.current_hooks_path} (expected ${p.expected_hooks_path}); ` +
-      `hook file ${p.expected_hook_file} present` +
+      `hook file ${p.expected_hook_file} present; ` +
+      `staged source hygiene ${p.staged_source_hygiene_file} available` +
       (p.hook_file_executable ? '' : ' (not marked executable; git still runs it via /bin/sh)'),
     humanFail: (p) =>
       `install-missiond-hooks check PREFLIGHT-DRIFT [${p.reason}]: ` +
       `core.hooksPath=${p.current_hooks_path ?? '<unset>'} ` +
       `(expected ${p.expected_hooks_path}); ` +
-      `hook file ${p.expected_hook_file} ${p.hook_file_exists ? 'present' : 'MISSING'}\n  ${p.advice}`,
+      `hook file ${p.expected_hook_file} ${p.hook_file_exists ? 'present' : 'MISSING'}; ` +
+      `staged source hygiene ${p.staged_source_hygiene_available ? 'available' : 'MISSING'}\n  ${p.advice}`,
   });
 
   if (!ok && strict) process.exit(1);
@@ -242,6 +254,9 @@ function runCheck({ json, strict }) {
 function adviceFor(info) {
   if (!info.hook_file_exists) {
     return `Hook file ${info.expected_hook_file} is missing — restore it before enabling core.hooksPath. Do not run --install while the hook file is absent; the installer refuses in that state.`;
+  }
+  if (!info.staged_source_hygiene_available) {
+    return `Staged source hygiene checker ${info.staged_source_hygiene_file} is missing — restore it before enabling core.hooksPath.`;
   }
   if (info.current_hooks_path == null) {
     return `core.hooksPath is unset for this clone. Run \`node scripts/install-missiond-hooks.mjs --install\` (repo-local mutation only) to opt this clone in.`;
@@ -254,13 +269,25 @@ function adviceFor(info) {
 
 // --- install (write-once mutation) ----------------------------------------
 
-export function performInstall({ git = realGit } = {}) {
-  const before = inspectHooksPath({ git });
+export function performInstall({
+  git = realGit,
+  stagedSourceHygieneFile = STAGED_SOURCE_HYGIENE_FILE,
+} = {}) {
+  const before = inspectHooksPath({ git, stagedSourceHygieneFile });
   if (!before.hook_file_exists) {
     return {
       ok: false,
       changed: false,
       reason: `cannot install: ${before.expected_hook_file} is missing in the working tree`,
+      before,
+      after: before,
+    };
+  }
+  if (!before.staged_source_hygiene_available) {
+    return {
+      ok: false,
+      changed: false,
+      reason: `cannot install: ${before.staged_source_hygiene_file} is missing in the working tree`,
       before,
       after: before,
     };
@@ -275,7 +302,7 @@ export function performInstall({ git = realGit } = {}) {
     };
   }
   git.setCoreHooksPath(EXPECTED_HOOKS_PATH);
-  const after = inspectHooksPath({ git });
+  const after = inspectHooksPath({ git, stagedSourceHygieneFile });
   return {
     ok: after.matches,
     changed: true,
@@ -491,7 +518,32 @@ function runFixtures({ json }) {
     }
   }
 
-  // 5. install: from drift -> mutates exactly once and reports change
+  // 5. doctor state: staged source hygiene missing -> reason
+  //    'staged-source-hygiene-missing'. The hook now depends on this checker,
+  //    so the doctor reports availability without mutating git config.
+  {
+    const git = makeFakeGit({ hooksPath: EXPECTED_HOOKS_PATH });
+    const missingHygiene = path.join(REPO_ROOT, '__missiond_missing_hygiene_fixture__.mjs');
+    const info = inspectHooksPath({ git, stagedSourceHygieneFile: missingHygiene });
+    if (
+      info.staged_source_hygiene_available !== false ||
+      info.reason !== 'staged-source-hygiene-missing'
+    ) {
+      failures.push({
+        name: 'doctor state: missing staged source hygiene checker',
+        expected: {
+          staged_source_hygiene_available: false,
+          reason: 'staged-source-hygiene-missing',
+        },
+        got: {
+          staged_source_hygiene_available: info.staged_source_hygiene_available,
+          reason: info.reason,
+        },
+      });
+    }
+  }
+
+  // 6. install: from drift -> mutates exactly once and reports change
   {
     const git = makeFakeGit({ hooksPath: '.git/hooks' });
     const result = performInstall({ git });
@@ -504,7 +556,7 @@ function runFixtures({ json }) {
     }
   }
 
-  // 6. install: from already-aligned -> no-op, ok=true changed=false
+  // 7. install: from already-aligned -> no-op, ok=true changed=false
   {
     const git = makeFakeGit({ hooksPath: EXPECTED_HOOKS_PATH });
     const result = performInstall({ git });
@@ -517,7 +569,7 @@ function runFixtures({ json }) {
     }
   }
 
-  // 7. install: from unset -> sets to .githooks
+  // 8. install: from unset -> sets to .githooks
   {
     const git = makeFakeGit({ hooksPath: null });
     const result = performInstall({ git });
@@ -530,7 +582,7 @@ function runFixtures({ json }) {
     }
   }
 
-  // 8. install: refuses when hook file is missing (must not silently arm a
+  // 9. install: refuses when hook file is missing (must not silently arm a
   //    no-op hooksPath; doctor advice already says so).
   {
     const git = makeFakeGitWithMissingHookFile({ hooksPath: null });
@@ -544,7 +596,21 @@ function runFixtures({ json }) {
     }
   }
 
-  // 9. install: never touches global/system. The fake git has no
+  // 10. install: refuses when staged source hygiene checker is missing.
+  {
+    const git = makeFakeGit({ hooksPath: null });
+    const missingHygiene = path.join(REPO_ROOT, '__missiond_missing_hygiene_fixture__.mjs');
+    const result = performInstall({ git, stagedSourceHygieneFile: missingHygiene });
+    if (result.ok !== false || result.changed !== false || git._peek() !== null) {
+      failures.push({
+        name: 'install: refuses when staged source hygiene checker missing',
+        expected: { ok: false, changed: false, finalValue: null },
+        got: { ok: result.ok, changed: result.changed, finalValue: git._peek() },
+      });
+    }
+  }
+
+  // 11. install: never touches global/system. The fake git has no
   //    global/system surface; the real adapter passes --local explicitly.
   //    Here we assert the adapter signature: realGit.setCoreHooksPath uses
   //    --local form. Read the source string for the constant we control.
@@ -559,11 +625,12 @@ function runFixtures({ json }) {
     }
   }
 
-  // 10. doctor adviceFor() emits the expected install-command shape for each
+  // 12. doctor adviceFor() emits the expected install-command shape for each
   //     non-ok reason so the renderer / agents can rely on the surface text.
   {
     const adviceUnset = adviceFor({
       hook_file_exists: true,
+      staged_source_hygiene_available: true,
       current_hooks_path: null,
       matches: false,
       expected_hooks_path: EXPECTED_HOOKS_PATH,
@@ -571,6 +638,7 @@ function runFixtures({ json }) {
     });
     const adviceWrong = adviceFor({
       hook_file_exists: true,
+      staged_source_hygiene_available: true,
       current_hooks_path: '.git/hooks',
       matches: false,
       expected_hooks_path: EXPECTED_HOOKS_PATH,
@@ -578,6 +646,16 @@ function runFixtures({ json }) {
     });
     const adviceMissing = adviceFor({
       hook_file_exists: false,
+      staged_source_hygiene_available: true,
+      current_hooks_path: EXPECTED_HOOKS_PATH,
+      matches: true,
+      expected_hooks_path: EXPECTED_HOOKS_PATH,
+      expected_hook_file: '.githooks/pre-commit',
+    });
+    const adviceMissingHygiene = adviceFor({
+      hook_file_exists: true,
+      staged_source_hygiene_available: false,
+      staged_source_hygiene_file: 'scripts/check-staged-source-hygiene.mjs',
       current_hooks_path: EXPECTED_HOOKS_PATH,
       matches: true,
       expected_hooks_path: EXPECTED_HOOKS_PATH,
@@ -587,7 +665,8 @@ function runFixtures({ json }) {
     const adviceOk =
       typeof adviceUnset === 'string' && adviceUnset.includes(wantInstallSnippet) &&
       typeof adviceWrong === 'string' && adviceWrong.includes(wantInstallSnippet) &&
-      typeof adviceMissing === 'string' && adviceMissing.includes('Hook file');
+      typeof adviceMissing === 'string' && adviceMissing.includes('Hook file') &&
+      typeof adviceMissingHygiene === 'string' && adviceMissingHygiene.includes('Staged source hygiene');
     if (!adviceOk) {
       failures.push({
         name: 'doctor advice surfaces install command for each drift state',
@@ -595,13 +674,14 @@ function runFixtures({ json }) {
           unset_includes: wantInstallSnippet,
           wrong_includes: wantInstallSnippet,
           missing_mentions_hook_file: true,
+          missing_hygiene_mentions_checker: true,
         },
-        got: { adviceUnset, adviceWrong, adviceMissing },
+        got: { adviceUnset, adviceWrong, adviceMissing, adviceMissingHygiene },
       });
     }
   }
 
-  // 11. fixture sanity: the real .githooks/pre-commit file ships in the repo
+  // 13. fixture sanity: the real .githooks/pre-commit file ships in the repo
   {
     if (!fs.existsSync(EXPECTED_HOOK_FILE)) {
       failures.push({
@@ -612,13 +692,30 @@ function runFixtures({ json }) {
     }
   }
 
-  const FIXTURES_RUN = 11;
+  // 14. fixture sanity: the staged source hygiene checker ships in the repo
+  {
+    if (!fs.existsSync(STAGED_SOURCE_HYGIENE_FILE)) {
+      failures.push({
+        name: 'repo ships scripts/check-staged-source-hygiene.mjs',
+        expected: { exists: true, path: path.relative(REPO_ROOT, STAGED_SOURCE_HYGIENE_FILE) },
+        got: { exists: false },
+      });
+    }
+  }
+
+  const FIXTURES_RUN = 14;
   const ok = failures.length === 0;
   const summary = {
     mode: 'dry-fixture',
     ok,
     fixtures_run: FIXTURES_RUN,
-    doctor_states_covered: ['installed', 'unset', 'wrong-path', 'missing-hook-file'],
+    doctor_states_covered: [
+      'installed',
+      'unset',
+      'wrong-path',
+      'missing-hook-file',
+      'staged-source-hygiene-missing',
+    ],
     failures,
   };
 
@@ -626,7 +723,7 @@ function runFixtures({ json }) {
     console.log(JSON.stringify(summary, null, 2));
   } else if (ok) {
     console.log(
-      `install-missiond-hooks fixtures OK (${FIXTURES_RUN}/${FIXTURES_RUN}) — doctor states: installed, unset, wrong-path, missing-hook-file`,
+      `install-missiond-hooks fixtures OK (${FIXTURES_RUN}/${FIXTURES_RUN}) — doctor states: installed, unset, wrong-path, missing-hook-file, staged-source-hygiene-missing`,
     );
   } else {
     console.error(`install-missiond-hooks fixtures FAILED — ${failures.length} failure(s)`);

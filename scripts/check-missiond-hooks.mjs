@@ -20,8 +20,9 @@ import { fileURLToPath } from 'node:url';
 // Flags forwarded:
 //   --json     machine-readable output
 //   --strict   make drift a hard non-zero exit
+//   --dry-fixture  run installer/doctor self-tests without git mutation
 //
-// Mutating flags (--install, --dry-fixture, etc.) are rejected here so the
+// Mutating flags (--install, --check, etc.) are rejected here so the
 // doctor stays predictable. Use install-missiond-hooks.mjs directly when you
 // need to mutate.
 
@@ -30,6 +31,7 @@ const INSTALLER = path.join(SCRIPT_DIR, 'install-missiond-hooks.mjs');
 
 const usage = `Usage:
   node scripts/check-missiond-hooks.mjs [--json] [--strict]
+  node scripts/check-missiond-hooks.mjs --dry-fixture [--json]
 
 Default-on read-only doctor for git core.hooksPath = .githooks. Delegates to
 \`install-missiond-hooks.mjs --check\` and forwards exit code + output.
@@ -46,6 +48,8 @@ Flags:
   --strict   exit non-zero when core.hooksPath != .githooks or the hook
              file is missing (default exits 0 even on drift so callers
              choose how to react).
+  --dry-fixture
+             delegate installer/doctor fixtures. No git config mutation.
 
 Use \`node scripts/install-missiond-hooks.mjs --install\` when you want to
 mutate git config (the only mutating surface in the hook-installer suite).
@@ -59,6 +63,7 @@ function failUsage(message) {
 function main() {
   const argv = process.argv.slice(2);
   const forwarded = ['--check'];
+  let dryFixture = false;
 
   for (const arg of argv) {
     if (arg === '-h' || arg === '--help') {
@@ -66,9 +71,11 @@ function main() {
       process.exit(0);
     } else if (arg === '--json' || arg === '--strict') {
       forwarded.push(arg);
+    } else if (arg === '--dry-fixture') {
+      dryFixture = true;
+      forwarded[0] = '--dry-fixture';
     } else if (
       arg === '--install' ||
-      arg === '--dry-fixture' ||
       arg === '--check'
     ) {
       failUsage(
@@ -80,6 +87,10 @@ function main() {
     } else {
       failUsage(`unexpected positional argument: ${arg}`);
     }
+  }
+
+  if (dryFixture && forwarded.includes('--strict')) {
+    failUsage('--strict is only meaningful for --check, not --dry-fixture');
   }
 
   const child = spawnSync('node', [INSTALLER, ...forwarded], { stdio: 'inherit' });

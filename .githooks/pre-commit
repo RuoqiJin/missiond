@@ -2,7 +2,7 @@
 # MissionD task-contract aware pre-commit hook.
 #
 # Activation rule:
-#   Runs scripts/task-scope-guard.mjs in --mode staged ONLY when the
+#   Runs scripts/check-staged-source-hygiene.mjs ONLY when the
 #   environment variable MISSIOND_TASK_CONTRACT is set to a task.lisp path.
 #   Without that variable the hook is a no-op (exit 0) so it stays opt-in
 #   per commit / per agent session.
@@ -20,9 +20,11 @@
 #   MISSIOND_TASK_CONTRACT=.missiond/tasks/wave21/wave21-01-hooks-path-installer-v1.lisp \
 #     git commit -m "feat(tasks): ..."
 #
-# The guard itself is read-only: no git add / commit / reset / checkout /
-# stash / push / merge / rebase. This wrapper only forwards exit codes; it
-# never mutates the index, working tree, or remotes.
+# The hygiene checker itself is read-only: no git add / commit / reset /
+# checkout / stash / push / merge / rebase. It checks staged NUL bytes,
+# git diff --cached --check whitespace errors, then delegates staged scope
+# enforcement to scripts/task-scope-guard.mjs. This wrapper only forwards
+# exit codes; it never mutates the index, working tree, or remotes.
 
 set -euo pipefail
 
@@ -31,11 +33,11 @@ if [ -z "${MISSIOND_TASK_CONTRACT:-}" ]; then
 fi
 
 repo_root="$(git rev-parse --show-toplevel)"
-guard="${repo_root}/scripts/task-scope-guard.mjs"
+hygiene="${repo_root}/scripts/check-staged-source-hygiene.mjs"
 contract="${MISSIOND_TASK_CONTRACT}"
 
-if [ ! -f "${guard}" ]; then
-  echo "pre-commit: task-scope-guard.mjs not found at ${guard}" >&2
+if [ ! -f "${hygiene}" ]; then
+  echo "pre-commit: check-staged-source-hygiene.mjs not found at ${hygiene}" >&2
   exit 1
 fi
 
@@ -55,4 +57,4 @@ if [ ! -f "${contract}" ]; then
   exit 1
 fi
 
-exec node "${guard}" --task "${contract}" --mode staged
+exec node "${hygiene}" --task "${contract}"
