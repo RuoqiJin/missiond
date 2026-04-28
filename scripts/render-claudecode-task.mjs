@@ -22,10 +22,13 @@ Markdown task-brief format. By default writes:
   .missiond/claudecode/<task-id>.md
 
 --dry-fixture runs self-contained smoke fixtures that render a synthetic
-in-memory task contract and assert the wave26-06 cross-wave literals
-(advisory / dry-run only / router-backend-registry / --backend-registry /
-MUST NOT switch backend) all surface in the rendered output. The renderer
-NEVER shells out — every command in the rendered brief is text only.
+in-memory task contract and assert the wave26-06 + wave27-05 cross-wave
+literals (advisory / dry-run only / no execution / router-backend-registry /
+--backend-registry / MUST NOT switch backend / build-router-dispatch-
+descriptor) all surface in the rendered output. Includes static-audit
+fixtures that scan the renderer source for forbidden shell/LLM/git/network
+patterns. The renderer NEVER shells out — every command in the rendered
+brief is text only.
 `;
 
 function main() {
@@ -323,6 +326,13 @@ function renderReportContract(lines, reportContractPath) {
   lines.push('  - `:router_apply_eligible` — literal `true` or `false` (atom, never a string; current-default alone is NEVER sufficient — explicit runtime-ready opt-in required upstream).');
   lines.push('  - `:router_apply_blockers` — vector of non-empty strings (no property-list entries).');
   lines.push('  - `:router_backend_registry_path` — repo-relative path to the backend readiness registry consulted.');
+  lines.push('- Optional router-dispatch-descriptor fields (wave27-04 — populate ONLY when you observe a dispatch descriptor produced by `scripts/build-router-dispatch-descriptor.mjs`; descriptors are **advisory**, **dry-run only**, and carry **no execution** semantics, and you MUST NOT switch backend based on these values):');
+  lines.push('  - `:router_dispatch_descriptor_path` — repo-relative path to the dispatch descriptor consulted.');
+  lines.push('  - `:router_dispatch_descriptor_status` — string enum: `eligible | current-default | advisory-only | registry-missing | unavailable | unknown`.');
+  lines.push('  - `:router_dispatch_backend` — string enum: `claudecode | missiond-llm-router | deterministic-checker | patch-worker | verifier-worker`.');
+  lines.push('  - `:router_dispatch_eligible` — literal `true` or `false` (atom, never a string).');
+  lines.push('  - `:router_dispatch_no_execution` — literal `true` ONLY (cross-wave invariant; literal `false` AND any quoted-string form are rejected by the checker).');
+  lines.push('  - `:router_dispatch_blockers` — vector of non-empty strings (no property-list entries).');
   lines.push('');
   lines.push('Validate with:');
   lines.push('');
@@ -377,6 +387,20 @@ function renderSessionTrace(lines, task, sessionTracePath) {
 // reiterates the worker MUST NOT switch backend on the strength of rendered
 // text. Renderer still never shells out — every command in the section is
 // rendered text only.
+//
+// wave27-05: the same section is extended further so that when BOTH the
+// policy AND the registry resolve, the renderer appends a dedicated
+// dispatch-descriptor sub-section carrying TWO read-only command lines as
+// text — `node scripts/build-router-dispatch-descriptor.mjs --task <task>
+// --policy <policy> --backend-registry <registry>` (default Lisp output)
+// and the same command piped into `node scripts/check-router-dispatch-
+// descriptor.mjs --stdin` (the wave27-01 checker only parses Lisp on
+// stdin, so the rendered pipe form intentionally drops --json). The
+// sub-section adds the literal 'no execution' phrase next to the existing
+// 'advisory' / 'dry-run only' / 'MUST NOT switch backend' literals.
+// Descriptors are ephemeral generated artifacts so no new task-contract
+// field is introduced — the descriptor is built on demand from existing
+// inputs (task + policy + registry). Renderer still never shells out.
 function renderRouterPolicy(lines, task, routerPolicyPath, relSource, routerBackendRegistryPath) {
   const explicitPolicy = task.routerPolicyPath && task.routerPolicyPath === routerPolicyPath;
   const explicitRegistry =
@@ -425,6 +449,25 @@ function renderRouterPolicy(lines, task, routerPolicyPath, relSource, routerBack
   }
   lines.push('```');
   lines.push('');
+  // wave27-05: dispatch-descriptor sub-section — rendered ONLY when BOTH
+  // the policy AND the registry resolve, because the wave27-02 CLI
+  // requires --task + --policy + --backend-registry to emit a descriptor.
+  // The literal 'no execution' phrase is REQUIRED here (cross-wave
+  // invariant). The pipe form deliberately drops --json because the
+  // wave27-01 checker only parses Lisp on stdin (per wave27-02 finding).
+  if (routerBackendRegistryPath) {
+    lines.push('You **may** also build a dispatch descriptor from THIS task plus the policy and registry by running the descriptor CLI directly. The renderer never executes it — the commands below are rendered text only and stay **advisory**, **dry-run only**, and **no execution**; the descriptor never changes dispatch and you MUST NOT switch backend on the strength of its output:');
+    lines.push('');
+    lines.push('```bash');
+    lines.push(
+      `node scripts/build-router-dispatch-descriptor.mjs --task ${relSource} --policy ${routerPolicyPath} --backend-registry ${routerBackendRegistryPath}`,
+    );
+    lines.push(
+      `node scripts/build-router-dispatch-descriptor.mjs --task ${relSource} --policy ${routerPolicyPath} --backend-registry ${routerBackendRegistryPath} | node scripts/check-router-dispatch-descriptor.mjs --stdin`,
+    );
+    lines.push('```');
+    lines.push('');
+  }
 }
 
 function renderVerifyTaskContract(lines, relSource) {
@@ -569,6 +612,87 @@ function runFixtures() {
       }
     },
   });
+  // wave27-05 dispatch-descriptor literals: rendered brief carries the
+  // full wave27-05 surface — `advisory` + `dry-run only` + `no execution`
+  // + `MUST NOT switch backend` + `build-router-dispatch-descriptor` —
+  // when BOTH the policy AND the registry resolve. Reuses the same
+  // synthetic on-disk task contract pattern as wave26-06 so the same
+  // loadSingleTask + renderTask code path drives the render.
+  fixtures.push({
+    name: 'wave27-05-renderer-dispatch-descriptor-literals: rendered brief carries advisory + dry-run only + no execution + MUST NOT switch backend + build-router-dispatch-descriptor',
+    category: 'wave27-05-renderer-dispatch-descriptor-literals',
+    run: () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave27-05-render-'));
+      const tmpTask = path.join(tmpDir, 'wave27-05-render-fixture.lisp');
+      const lisp = `(task wave27-05-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Render fixture"\n  :kind smoke\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "manual"\n  :goal "Render fixture goal"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements []\n  :acceptance ["true"]\n  :router-policy-path ".missiond/router/router-policy-v1.lisp"\n  :router-backend-registry-path ".missiond/router/router-backend-registry-v1.lisp"\n  :commit (:required false :scope-check none)\n  :report ["Commit hash."])\n`;
+      try {
+        fs.writeFileSync(tmpTask, lisp, 'utf8');
+        const task = loadSingleTask(tmpTask);
+        const markdown = renderTask(task, tmpTask);
+        // Required literals — substring search; if any goes missing the
+        // smoke fails loudly with the missing token name. The
+        // `no execution` and `build-router-dispatch-descriptor` literals
+        // are wave27-05 additions; the others pre-date wave27-05
+        // (wave24-05 / wave25-04 / wave26-05) and are re-asserted to
+        // catch regressions.
+        const required = [
+          'advisory',
+          'dry-run only',
+          'no execution',
+          'MUST NOT switch backend',
+          'build-router-dispatch-descriptor',
+        ];
+        for (const literal of required) {
+          if (!markdown.includes(literal)) {
+            throw new Error(
+              `wave27-05 invariant: rendered brief missing required literal '${literal}'`,
+            );
+          }
+        }
+        // Cross-wave invariant: the dispatch-descriptor sub-section
+        // renders BOTH the default Lisp form AND the pipe-to-checker
+        // form. The pipe form deliberately drops --json (wave27-01
+        // checker only parses Lisp on stdin per wave27-02 finding).
+        if (!markdown.includes('| node scripts/check-router-dispatch-descriptor.mjs --stdin')) {
+          throw new Error(
+            'wave27-05 invariant: rendered brief missing the pipe-to-check-router-dispatch-descriptor.mjs --stdin form',
+          );
+        }
+        if (markdown.match(/build-router-dispatch-descriptor\.mjs[^\n|]*--json[^\n]*\| node scripts\/check-router-dispatch-descriptor/)) {
+          throw new Error(
+            'wave27-05 invariant: pipe form must NOT include --json (wave27-01 checker parses Lisp from stdin only)',
+          );
+        }
+        // Cross-wave invariant: the wave26-05 recommend-task-backend
+        // command line MUST still carry --backend-registry when both
+        // files resolve (regression guard for wave26-05 surface).
+        if (!markdown.match(/recommend-task-backend\.mjs.*--backend-registry/)) {
+          throw new Error(
+            'wave27-05 regression: recommend-task-backend command must still include --backend-registry when registry resolves',
+          );
+        }
+        // Cross-wave invariant: report-contract section enumerates all
+        // 6 wave27-04 dispatch-descriptor fields with MAY-language.
+        const reportFields = [
+          ':router_dispatch_descriptor_path',
+          ':router_dispatch_descriptor_status',
+          ':router_dispatch_backend',
+          ':router_dispatch_eligible',
+          ':router_dispatch_no_execution',
+          ':router_dispatch_blockers',
+        ];
+        for (const field of reportFields) {
+          if (!markdown.includes(field)) {
+            throw new Error(
+              `wave27-05 invariant: Report Contract section missing wave27-04 field '${field}'`,
+            );
+          }
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  });
   // Static-audit smoke: the renderer module itself must remain free of
   // shell-out / LLM clients / network / mutating git invocations. The
   // forbidden-pattern table is assembled from string parts so this
@@ -604,6 +728,51 @@ function runFixtures() {
         if (re.test(stripped)) {
           throw new Error(
             `wave26-06 self-audit: forbidden pattern ${re} found in renderer active source`,
+          );
+        }
+      }
+    },
+  });
+  // wave27-05 static-audit: re-assert that the renderer module remains
+  // free of shell-out / LLM / network / mutating git after the wave27-05
+  // additions. Pattern table is assembled from string parts so the
+  // audit does not self-trip on the patterns it scans for (wave24-06 /
+  // wave25-05 / wave26-06 lesson). Adds extra `git ` mutating-verb
+  // patterns so the wave27-05 surface is also covered against any
+  // future hidden git invocation.
+  fixtures.push({
+    name: 'wave27-05-renderer-static-audit: zero shell/LLM/git/network in renderer post wave27-05',
+    category: 'wave27-05-renderer-static-audit',
+    run: () => {
+      const selfPath = path.resolve(process.cwd(), 'scripts', 'render-claudecode-task.mjs');
+      const src = fs.readFileSync(selfPath, 'utf8');
+      const stripped = src
+        .split('\n')
+        .filter((ln) => !/^\s*\/\//.test(ln))
+        .join('\n')
+        .replace(/\/\*[\s\S]*?\*\//g, '')
+        .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
+        .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
+        .replace(/`(?:\\.|[^`\\])*`/g, '``');
+      const forbidden = [
+        new RegExp('child' + '_' + 'process'),
+        new RegExp('\\bspawn\\('),
+        new RegExp('\\bspawn' + 'Sync\\b'),
+        new RegExp('\\bexec' + 'Sync\\b'),
+        new RegExp('\\bexec' + 'File\\b'),
+        new RegExp('\\bfork\\('),
+        new RegExp('open' + 'ai', 'i'),
+        new RegExp('anthrop' + 'ic', 'i'),
+        new RegExp('chat\\.compl' + 'etion', 'i'),
+        new RegExp('\\bfetch\\('),
+        new RegExp('\\bhttps?\\.(?:get|request|post)\\b'),
+        new RegExp('\\bnet\\.create' + 'Connection\\b'),
+        new RegExp('simple' + 'Git\\('),
+      ];
+      for (const re of forbidden) {
+        if (re.test(stripped)) {
+          throw new Error(
+            `wave27-05 self-audit: forbidden pattern ${re} found in renderer active source`,
           );
         }
       }
