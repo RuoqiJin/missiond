@@ -99,7 +99,64 @@
          :audit "intent alignment is embedded in plan.intent and preserved in lifecycle events"))
     :single-entry-surface mission_request
     :compat-surfaces [mission_directive mission_plan mission_workflow]
-    :non-goal "Do not let clients bypass plan-runner by directly dispatching workstation work.")
+    :non-goal "Do not let clients bypass plan-runner by directly dispatching workstation work."
+    (review-packet
+      :desc "Compact projection of which artifact mission_request expects the human to review next; pure projection from request-local artifact existence + latest pipeline projection. Never auto-approves intent, never auto-dispatches plan."
+      :surface mission_request
+      :emitted-on [start advance status]
+      :fields [:state :artifact_kind :artifact_path :artifact_exists
+               :artifact_preview :prompt :allowed_responses :next_action
+               :execute_allowed]
+      :states [:received :intent_drafting :awaiting_intent_approval
+               :awaiting_plan_approval :execute_requested]
+      :state-derivation
+        ((rule plan-present-wins
+           :when "plan.lisp exists and execute was not explicitly requested"
+           :state :awaiting_plan_approval
+           :artifact_kind :plan
+           :next_action "approve plan via mission_plan, then call mission_request advance with execute=true"
+           :execute_allowed false)
+         (rule plan-present-execute-requested
+           :when "plan.lisp exists and execute=true was passed on this call"
+           :state :execute_requested
+           :artifact_kind :plan
+           :next_action "mission_plan execute path will run via the existing approved-plan flow"
+           :execute_allowed true)
+         (rule intent-only-present
+           :when "intent-alignment.lisp exists and plan.lisp does not"
+           :state :awaiting_intent_approval
+           :artifact_kind :intent_alignment
+           :next_action "approve intent via mission_directive, then call mission_request advance"
+           :execute_allowed false)
+         (rule intent-drafting
+           :when "neither intent-alignment.lisp nor plan.lisp exists, but projection just wrote one (target=intent_alignment|plan)"
+           :state :intent_drafting
+           :artifact_kind :intent_alignment
+           :next_action "wait for projection to land, then re-poll mission_request status"
+           :execute_allowed false)
+         (rule received-default
+           :when "no request-local artifacts and no projection target"
+           :state :received
+           :artifact_kind :request
+           :next_action "call mission_request advance to drive the next pipeline stage"
+           :execute_allowed false))
+      :allowed-responses
+        ((human-interactive
+           :awaiting_intent_approval [approve_intent reject_intent ask_question]
+           :awaiting_plan_approval [approve_plan reject_plan ask_question]
+           :execute_requested [observe]
+           :default [observe])
+         (trusted-agent
+           :awaiting_intent_approval [approve_intent ask_question]
+           :awaiting_plan_approval [approve_plan ask_question]
+           :execute_requested [observe]
+           :default [observe]))
+      :preview-policy
+        (:source "request-local artifact bytes when artifact_exists; otherwise compiled_sexp_preview from latest projection"
+         :max-bytes 480
+         :truncation "missiond-core safe_byte_truncate (UTF-8 boundary safe)"
+         :rationale "previews must never panic on multi-byte CJK runes")
+      :non-goal "review_packet must not silently approve, must not call mission_directive/mission_plan approve, and must not dispatch workstation slots."))
 
   (state-machines
     (state-machine unified-entry
@@ -232,7 +289,7 @@
       :role "single user-facing request entry"
       :code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
              "crates/missiond-mcp/src/tools/knowledge/request.rs"]
-      :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; still no DB schema migration, no auto-approval, no direct workstation dispatch")
+      :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; review_packet (state, artifact_kind, artifact_path, artifact_exists, artifact_preview, prompt, allowed_responses, next_action, execute_allowed) is derived purely from request-local artifact existence + latest projection per the unified-entry/review-packet contract — UTF-8-safe via missiond_core::util::safe_byte_truncate; still no DB schema migration, no auto-approval, no direct workstation dispatch")
 
     (surface mission_directive
       :status "compat"

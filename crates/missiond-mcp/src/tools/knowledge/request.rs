@@ -16,7 +16,14 @@ pub fn definitions() -> Vec<ToolDefinition> {
          auto-approves intent or plan, never bypasses mission_plan, and never spawns workstation \
          work directly. Wrapper response shape: { status, action, mode, request_artifacts, \
          projection: { status: written|skipped_*|write_failed, target?, sexp_source?, path?, \
-         sha256?, bytes?, created?, overwritten?, error? }, pipeline, v3_contract, next_step }.",
+         sha256?, bytes?, created?, overwritten?, error? }, pipeline, v3_contract, next_step, \
+         review_packet?: { state: received|intent_drafting|awaiting_intent_approval|\
+         awaiting_plan_approval|execute_requested, artifact_kind: request|intent_alignment|plan, \
+         artifact_path, artifact_exists, artifact_preview (UTF-8-safe truncation, ≤480 bytes), \
+         prompt, allowed_responses, next_action, execute_allowed } }. review_packet is a pure \
+         projection of request-local artifact existence + the latest projection target — the \
+         caller decides whether to approve via mission_directive/mission_plan; mission_request \
+         never silently approves or dispatches.",
         json!({
             "type": "object",
             "required": ["action"],

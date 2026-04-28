@@ -19,6 +19,7 @@
 
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
+use missiond_core::util::safe_byte_truncate;
 use missiond_mcp::tools::{error_codes, ToolContent, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -169,11 +170,14 @@ async fn action_start(state: &AppState, args: &Value) -> Result<ToolResult> {
     let inner = super::unified_entry::run_pipeline(state, pipeline_args).await?;
 
     let projection = run_projection(&inner, request_paths.as_ref(), overwrite, true);
+    let execute_requested = parse_execute_requested(args);
     Ok(wrap_pipeline_result(
         "start",
         mode,
         file_payload,
         projection,
+        request_paths.as_ref(),
+        execute_requested,
         inner,
     ))
 }
@@ -197,6 +201,7 @@ async fn action_advance(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let request_id_present = sanitized_request_id.is_some();
     let projection = run_projection(&inner, request_paths.as_ref(), overwrite, request_id_present);
+    let execute_requested = parse_execute_requested(args);
 
     let file_payload = json!({
         "request_id": sanitized_request_id,
@@ -208,6 +213,8 @@ async fn action_advance(state: &AppState, args: &Value) -> Result<ToolResult> {
         mode,
         file_payload,
         projection,
+        request_paths.as_ref(),
+        execute_requested,
         inner,
     ))
 }
@@ -247,14 +254,28 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
 
+    let mode = extract_mode_from_request_lisp(&text);
+    let existence = read_artifact_existence(&paths);
+    let inputs = ReviewPacketInputs {
+        mode,
+        paths: &paths,
+        existence,
+        projection_target: None,
+        fallback_preview: None,
+        execute_requested: false,
+    };
+    let review_packet = derive_review_packet(&inputs, |p| std::fs::read_to_string(p).ok());
+
     Ok(ToolResult::json_pretty(&json!({
         "status": "ok",
         "action": "status",
+        "mode": mode.wire(),
         "request_id": request_id,
         "request_path": path_json(&paths.request),
         "request_lisp": text,
         "artifact_paths": build_artifact_paths_json(&paths),
         "artifact_exists": build_artifact_existence(&paths),
+        "review_packet": review_packet,
     })))
 }
 
@@ -271,10 +292,25 @@ fn wrap_pipeline_result(
     mode: RequestMode,
     request_artifacts: Value,
     projection: ProjectionOutcome,
+    request_paths: Option<&RequestPaths>,
+    execute_requested: bool,
     inner: ToolResult,
 ) -> ToolResult {
     let inner_is_error = inner.is_error.unwrap_or(false);
     let inner_payload = tool_result_payload(&inner);
+    let fallback_preview = extract_projected_sexp(&inner_payload).map(|(body, _)| body);
+    let review_packet = request_paths.map(|paths| {
+        let existence = read_artifact_existence(paths);
+        let inputs = ReviewPacketInputs {
+            mode,
+            paths,
+            existence,
+            projection_target: projection.target,
+            fallback_preview: fallback_preview.as_deref(),
+            execute_requested,
+        };
+        derive_review_packet(&inputs, |p| std::fs::read_to_string(p).ok())
+    });
     let mut response = json!({
         "status": if inner_is_error { "pipeline_error" } else { "ok" },
         "action": request_action,
@@ -299,6 +335,9 @@ fn wrap_pipeline_result(
     });
     if let Some(obj) = response.as_object_mut() {
         obj.insert("inner_is_error".into(), json!(inner_is_error));
+        if let Some(packet) = review_packet {
+            obj.insert("review_packet".into(), packet);
+        }
     }
     let mut out = ToolResult::json_pretty(&response);
     if inner_is_error {
@@ -852,6 +891,205 @@ fn now_rfc3339() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
+// ───────────────────────────────────────────────────────────────────────
+// Review packet — V3 unified-entry projection. Pure derivation from
+// request-local artifact existence + latest projection target/preview.
+// Never approves intent or plan, never dispatches workstation work.
+// ───────────────────────────────────────────────────────────────────────
+
+const REVIEW_PREVIEW_MAX_BYTES: usize = 480;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ArtifactExistence {
+    request: bool,
+    intent_alignment: bool,
+    plan: bool,
+}
+
+fn read_artifact_existence(paths: &RequestPaths) -> ArtifactExistence {
+    ArtifactExistence {
+        request: paths.request.exists(),
+        intent_alignment: paths.intent_alignment.exists(),
+        plan: paths.plan.exists(),
+    }
+}
+
+struct ReviewPacketInputs<'a> {
+    mode: RequestMode,
+    paths: &'a RequestPaths,
+    existence: ArtifactExistence,
+    projection_target: Option<&'static str>,
+    fallback_preview: Option<&'a str>,
+    execute_requested: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewState {
+    Received,
+    IntentDrafting,
+    AwaitingIntentApproval,
+    AwaitingPlanApproval,
+    ExecuteRequested,
+}
+
+impl ReviewState {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Received => "received",
+            Self::IntentDrafting => "intent_drafting",
+            Self::AwaitingIntentApproval => "awaiting_intent_approval",
+            Self::AwaitingPlanApproval => "awaiting_plan_approval",
+            Self::ExecuteRequested => "execute_requested",
+        }
+    }
+}
+
+fn classify_review_state(
+    existence: ArtifactExistence,
+    projection_target: Option<&'static str>,
+    execute_requested: bool,
+) -> (ReviewState, &'static str) {
+    if existence.plan && execute_requested {
+        (ReviewState::ExecuteRequested, "plan")
+    } else if existence.plan {
+        (ReviewState::AwaitingPlanApproval, "plan")
+    } else if existence.intent_alignment {
+        (ReviewState::AwaitingIntentApproval, "intent_alignment")
+    } else if let Some(target) = projection_target {
+        (ReviewState::IntentDrafting, target)
+    } else {
+        (ReviewState::Received, "request")
+    }
+}
+
+fn review_state_messages(state: ReviewState) -> (&'static str, &'static str, bool) {
+    match state {
+        ReviewState::ExecuteRequested => (
+            "Plan execution requested; mission_plan execute path runs via the existing approved-plan flow.",
+            "mission_plan execute path runs via the existing approved-plan flow",
+            true,
+        ),
+        ReviewState::AwaitingPlanApproval => (
+            "Review plan.lisp and approve via mission_plan, then call mission_request advance with execute=true.",
+            "approve plan via mission_plan, then call mission_request advance with execute=true",
+            false,
+        ),
+        ReviewState::AwaitingIntentApproval => (
+            "Review intent-alignment.lisp and approve via mission_directive, then call mission_request advance.",
+            "approve intent via mission_directive, then call mission_request advance",
+            false,
+        ),
+        ReviewState::IntentDrafting => (
+            "Drafting; pipeline projection targeted an artifact but it has not landed yet. Re-poll mission_request status.",
+            "wait for projection to land, then re-poll mission_request status",
+            false,
+        ),
+        ReviewState::Received => (
+            "Request received; advance pipeline to draft intent or plan.",
+            "call mission_request advance to drive the next pipeline stage",
+            false,
+        ),
+    }
+}
+
+fn allowed_responses_for(mode: RequestMode, state: ReviewState) -> Vec<&'static str> {
+    match (mode, state) {
+        (RequestMode::HumanInteractive, ReviewState::AwaitingIntentApproval) => {
+            vec!["approve_intent", "reject_intent", "ask_question"]
+        }
+        (RequestMode::HumanInteractive, ReviewState::AwaitingPlanApproval) => {
+            vec!["approve_plan", "reject_plan", "ask_question"]
+        }
+        (RequestMode::TrustedAgent, ReviewState::AwaitingIntentApproval) => {
+            vec!["approve_intent", "ask_question"]
+        }
+        (RequestMode::TrustedAgent, ReviewState::AwaitingPlanApproval) => {
+            vec!["approve_plan", "ask_question"]
+        }
+        (_, ReviewState::ExecuteRequested) => vec!["observe"],
+        _ => vec!["observe"],
+    }
+}
+
+fn artifact_path_for_kind<'a>(paths: &'a RequestPaths, kind: &str) -> &'a Path {
+    match kind {
+        "plan" => paths.plan.as_path(),
+        "intent_alignment" => paths.intent_alignment.as_path(),
+        _ => paths.request.as_path(),
+    }
+}
+
+fn build_review_artifact_preview<F>(
+    target_path: &Path,
+    artifact_exists: bool,
+    fallback: Option<&str>,
+    read_file: F,
+    max_bytes: usize,
+) -> Option<String>
+where
+    F: Fn(&Path) -> Option<String>,
+{
+    if artifact_exists {
+        if let Some(text) = read_file(target_path) {
+            return Some(safe_byte_truncate(&text, max_bytes).to_string());
+        }
+    }
+    fallback.map(|s| safe_byte_truncate(s, max_bytes).to_string())
+}
+
+fn derive_review_packet<F>(inputs: &ReviewPacketInputs<'_>, read_file: F) -> Value
+where
+    F: Fn(&Path) -> Option<String>,
+{
+    let (state, artifact_kind) = classify_review_state(
+        inputs.existence,
+        inputs.projection_target,
+        inputs.execute_requested,
+    );
+    let (prompt, next_action, execute_allowed) = review_state_messages(state);
+    let target_path = artifact_path_for_kind(inputs.paths, artifact_kind);
+    let artifact_exists = match artifact_kind {
+        "plan" => inputs.existence.plan,
+        "intent_alignment" => inputs.existence.intent_alignment,
+        _ => inputs.existence.request,
+    };
+    let preview = build_review_artifact_preview(
+        target_path,
+        artifact_exists,
+        inputs.fallback_preview,
+        read_file,
+        REVIEW_PREVIEW_MAX_BYTES,
+    );
+    let allowed = allowed_responses_for(inputs.mode, state);
+    json!({
+        "state": state.wire(),
+        "artifact_kind": artifact_kind,
+        "artifact_path": path_json(target_path),
+        "artifact_exists": artifact_exists,
+        "artifact_preview": preview,
+        "prompt": prompt,
+        "allowed_responses": allowed,
+        "next_action": next_action,
+        "execute_allowed": execute_allowed,
+    })
+}
+
+fn parse_execute_requested(args: &Value) -> bool {
+    args.get("execute").and_then(|v| v.as_bool()).unwrap_or(false)
+        || args
+            .get("execute_after_approval")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+}
+
+fn extract_mode_from_request_lisp(text: &str) -> RequestMode {
+    if text.contains(":mode :trusted-agent") {
+        RequestMode::TrustedAgent
+    } else {
+        RequestMode::HumanInteractive
+    }
+}
+
 fn lisp_string(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len() + 2);
     out.push('"');
@@ -1159,6 +1397,345 @@ mod tests {
         assert_eq!(v["plan"], false);
         assert_eq!(v["receipts_dir"], false);
         assert_eq!(v["reports_dir"], false);
+    }
+
+    // ── review_packet helpers — pure derivation, no AppState / no IO ───
+    fn paths_fixture() -> RequestPaths {
+        request_paths_for(Path::new("/repo"), "req-rp")
+    }
+
+    fn no_read(_p: &Path) -> Option<String> {
+        None
+    }
+
+    #[test]
+    fn classify_review_state_plan_present_wins_over_intent() {
+        let existence = ArtifactExistence {
+            request: true,
+            intent_alignment: true,
+            plan: true,
+        };
+        let (state, kind) = classify_review_state(existence, None, false);
+        assert_eq!(state, ReviewState::AwaitingPlanApproval);
+        assert_eq!(kind, "plan");
+    }
+
+    #[test]
+    fn classify_review_state_plan_with_execute_yields_execute_requested() {
+        let existence = ArtifactExistence {
+            request: true,
+            intent_alignment: false,
+            plan: true,
+        };
+        let (state, kind) = classify_review_state(existence, None, true);
+        assert_eq!(state, ReviewState::ExecuteRequested);
+        assert_eq!(kind, "plan");
+    }
+
+    #[test]
+    fn classify_review_state_intent_only_yields_awaiting_intent() {
+        let existence = ArtifactExistence {
+            request: true,
+            intent_alignment: true,
+            plan: false,
+        };
+        let (state, kind) = classify_review_state(existence, None, false);
+        assert_eq!(state, ReviewState::AwaitingIntentApproval);
+        assert_eq!(kind, "intent_alignment");
+    }
+
+    #[test]
+    fn classify_review_state_no_artifacts_with_projection_target_drafts() {
+        let existence = ArtifactExistence {
+            request: true,
+            intent_alignment: false,
+            plan: false,
+        };
+        let (state, kind) = classify_review_state(existence, Some("plan"), false);
+        assert_eq!(state, ReviewState::IntentDrafting);
+        assert_eq!(kind, "plan");
+    }
+
+    #[test]
+    fn classify_review_state_default_is_received() {
+        let existence = ArtifactExistence::default();
+        let (state, kind) = classify_review_state(existence, None, false);
+        assert_eq!(state, ReviewState::Received);
+        assert_eq!(kind, "request");
+    }
+
+    #[test]
+    fn allowed_responses_match_blueprint_for_human_interactive() {
+        assert_eq!(
+            allowed_responses_for(
+                RequestMode::HumanInteractive,
+                ReviewState::AwaitingIntentApproval
+            ),
+            vec!["approve_intent", "reject_intent", "ask_question"]
+        );
+        assert_eq!(
+            allowed_responses_for(
+                RequestMode::HumanInteractive,
+                ReviewState::AwaitingPlanApproval
+            ),
+            vec!["approve_plan", "reject_plan", "ask_question"]
+        );
+        assert_eq!(
+            allowed_responses_for(RequestMode::HumanInteractive, ReviewState::Received),
+            vec!["observe"]
+        );
+    }
+
+    #[test]
+    fn allowed_responses_match_blueprint_for_trusted_agent() {
+        assert_eq!(
+            allowed_responses_for(
+                RequestMode::TrustedAgent,
+                ReviewState::AwaitingIntentApproval
+            ),
+            vec!["approve_intent", "ask_question"]
+        );
+        assert_eq!(
+            allowed_responses_for(RequestMode::TrustedAgent, ReviewState::AwaitingPlanApproval),
+            vec!["approve_plan", "ask_question"]
+        );
+    }
+
+    #[test]
+    fn build_review_artifact_preview_truncates_on_utf8_boundary() {
+        // 60 Chinese characters * 3 bytes each = 180 bytes; ask for 80 bytes.
+        let cjk: String = std::iter::repeat('好').take(60).collect();
+        let preview =
+            build_review_artifact_preview(Path::new("/x"), false, Some(&cjk), no_read, 80)
+                .expect("preview");
+        // Each '好' = 3 bytes. 80 / 3 = 26 chars * 3 = 78 bytes.
+        assert_eq!(preview.len(), 78);
+        assert_eq!(preview.chars().count(), 26);
+        // Round-trip must remain valid UTF-8 (already a String, but pin the
+        // intent: every byte boundary is a char boundary).
+        for (i, _) in preview.char_indices() {
+            assert!(preview.is_char_boundary(i));
+        }
+    }
+
+    #[test]
+    fn build_review_artifact_preview_prefers_file_when_exists() {
+        let read = |_p: &Path| Some("(plan :board_task_id \"btk-1\")\n".to_string());
+        let preview =
+            build_review_artifact_preview(Path::new("/x"), true, Some("(fallback)"), read, 480)
+                .expect("preview");
+        assert!(preview.contains("board_task_id"));
+        assert!(!preview.contains("fallback"));
+    }
+
+    #[test]
+    fn build_review_artifact_preview_falls_back_when_file_absent() {
+        let preview = build_review_artifact_preview(
+            Path::new("/x"),
+            false,
+            Some("(directive-draft)"),
+            no_read,
+            480,
+        )
+        .expect("preview");
+        assert_eq!(preview, "(directive-draft)");
+    }
+
+    #[test]
+    fn build_review_artifact_preview_returns_none_without_data() {
+        let preview =
+            build_review_artifact_preview(Path::new("/x"), false, None, no_read, 480);
+        assert!(preview.is_none());
+    }
+
+    #[test]
+    fn derive_review_packet_intent_only_state() {
+        let paths = paths_fixture();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence {
+                request: true,
+                intent_alignment: true,
+                plan: false,
+            },
+            projection_target: Some("intent_alignment"),
+            fallback_preview: Some("(directive-draft)"),
+            execute_requested: false,
+        };
+        let packet = derive_review_packet(&inputs, no_read);
+        assert_eq!(packet["state"], "awaiting_intent_approval");
+        assert_eq!(packet["artifact_kind"], "intent_alignment");
+        assert_eq!(packet["artifact_exists"], true);
+        assert_eq!(packet["execute_allowed"], false);
+        assert!(packet["artifact_path"]
+            .as_str()
+            .unwrap()
+            .ends_with("intent-alignment.lisp"));
+        let allowed: Vec<&str> = packet["allowed_responses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(allowed, vec!["approve_intent", "reject_intent", "ask_question"]);
+    }
+
+    #[test]
+    fn derive_review_packet_plan_present_overrides_intent() {
+        let paths = paths_fixture();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence {
+                request: true,
+                intent_alignment: true,
+                plan: true,
+            },
+            projection_target: Some("plan"),
+            fallback_preview: Some("(plan :ok)"),
+            execute_requested: false,
+        };
+        let packet = derive_review_packet(&inputs, no_read);
+        assert_eq!(packet["state"], "awaiting_plan_approval");
+        assert_eq!(packet["artifact_kind"], "plan");
+        assert_eq!(packet["execute_allowed"], false);
+    }
+
+    #[test]
+    fn derive_review_packet_execute_requested_when_plan_and_execute() {
+        let paths = paths_fixture();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence {
+                request: true,
+                intent_alignment: false,
+                plan: true,
+            },
+            projection_target: None,
+            fallback_preview: None,
+            execute_requested: true,
+        };
+        let packet = derive_review_packet(&inputs, no_read);
+        assert_eq!(packet["state"], "execute_requested");
+        assert_eq!(packet["execute_allowed"], true);
+        assert_eq!(packet["allowed_responses"][0], "observe");
+    }
+
+    #[test]
+    fn derive_review_packet_received_default_when_no_artifacts() {
+        let paths = paths_fixture();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence {
+                request: true,
+                intent_alignment: false,
+                plan: false,
+            },
+            projection_target: None,
+            fallback_preview: None,
+            execute_requested: false,
+        };
+        let packet = derive_review_packet(&inputs, no_read);
+        assert_eq!(packet["state"], "received");
+        assert_eq!(packet["artifact_kind"], "request");
+        assert_eq!(packet["execute_allowed"], false);
+    }
+
+    #[test]
+    fn derive_review_packet_intent_drafting_when_projection_targets_but_no_file() {
+        let paths = paths_fixture();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence::default(),
+            projection_target: Some("intent_alignment"),
+            fallback_preview: Some("(directive-draft)"),
+            execute_requested: false,
+        };
+        let packet = derive_review_packet(&inputs, no_read);
+        assert_eq!(packet["state"], "intent_drafting");
+        assert_eq!(packet["artifact_kind"], "intent_alignment");
+        assert_eq!(packet["artifact_exists"], false);
+        assert_eq!(packet["artifact_preview"], "(directive-draft)");
+    }
+
+    #[test]
+    fn derive_review_packet_uses_safe_byte_truncation_for_cjk_preview() {
+        let paths = paths_fixture();
+        // ~120 bytes of CJK should be safely truncated to ≤80 bytes via
+        // safe_byte_truncate. We feed it as the fallback preview to keep the
+        // test pure (no file IO). Use a small max via the helper directly is
+        // already covered above; here we just confirm derive_review_packet
+        // does not panic on multi-byte input and produces a UTF-8 string.
+        let cjk: String = std::iter::repeat('字').take(200).collect();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence::default(),
+            projection_target: Some("intent_alignment"),
+            fallback_preview: Some(&cjk),
+            execute_requested: false,
+        };
+        let packet = derive_review_packet(&inputs, no_read);
+        let preview = packet["artifact_preview"].as_str().expect("preview present");
+        assert!(preview.len() <= REVIEW_PREVIEW_MAX_BYTES);
+        for (i, _) in preview.char_indices() {
+            assert!(preview.is_char_boundary(i));
+        }
+    }
+
+    #[test]
+    fn derive_review_packet_reads_artifact_file_via_callback() {
+        let paths = paths_fixture();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence {
+                request: true,
+                intent_alignment: false,
+                plan: true,
+            },
+            projection_target: None,
+            fallback_preview: None,
+            execute_requested: false,
+        };
+        let read = |_p: &Path| Some("(plan :from-disk true)".to_string());
+        let packet = derive_review_packet(&inputs, read);
+        assert_eq!(packet["state"], "awaiting_plan_approval");
+        let preview = packet["artifact_preview"].as_str().expect("preview");
+        assert!(preview.contains("from-disk"));
+    }
+
+    #[test]
+    fn parse_execute_requested_handles_aliases() {
+        assert!(!parse_execute_requested(&json!({})));
+        assert!(parse_execute_requested(&json!({ "execute": true })));
+        assert!(parse_execute_requested(
+            &json!({ "execute_after_approval": true })
+        ));
+        assert!(!parse_execute_requested(&json!({ "execute": false })));
+    }
+
+    #[test]
+    fn extract_mode_from_request_lisp_recognizes_trusted_agent() {
+        let trusted = "(mission-request foo\n  :mode :trusted-agent\n  :state :received)";
+        assert_eq!(
+            extract_mode_from_request_lisp(trusted),
+            RequestMode::TrustedAgent
+        );
+        let human = "(mission-request foo\n  :mode :human-interactive)";
+        assert_eq!(
+            extract_mode_from_request_lisp(human),
+            RequestMode::HumanInteractive
+        );
+        // Default safe-side: anything that isn't trusted-agent stays human-interactive.
+        assert_eq!(
+            extract_mode_from_request_lisp(""),
+            RequestMode::HumanInteractive
+        );
     }
 
     #[test]
