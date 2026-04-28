@@ -51,12 +51,13 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "start" => action_start(state, &args).await,
         "advance" => action_advance(state, &args).await,
         "status" => action_status(state, &args).await,
+        "respond" => action_respond(state, &args).await,
         other => Ok(ToolResult::structured_error(
             ToolError::new(
                 error_codes::UNKNOWN_ACTION,
                 format!("unknown mission_request action `{}`", other),
             )
-            .with_suggestion("valid: start|advance|status"),
+            .with_suggestion("valid: start|advance|status|respond"),
         )),
     }
 }
@@ -277,6 +278,627 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
         "artifact_exists": build_artifact_existence(&paths),
         "review_packet": review_packet,
     })))
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// review-response adapter — V3 unified-entry continuation. mission_request
+// is the user-facing surface for answering a review_packet; it never
+// silently approves, never bypasses mission_directive / mission_plan
+// gates, and never spawns workstation work directly.
+//
+// Lisp authority:
+//   .missiond/v3/missiond-blueprint.lisp :: unified-entry :: review-response
+// ───────────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RespondDecision {
+    ApproveIntent,
+    RejectIntent,
+    AskQuestion,
+    ApprovePlan,
+    RejectPlan,
+    ExecutePlan,
+}
+
+impl RespondDecision {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::ApproveIntent => "approve_intent",
+            Self::RejectIntent => "reject_intent",
+            Self::AskQuestion => "ask_question",
+            Self::ApprovePlan => "approve_plan",
+            Self::RejectPlan => "reject_plan",
+            Self::ExecutePlan => "execute_plan",
+        }
+    }
+
+    fn requires_directive_ref(self) -> bool {
+        matches!(self, Self::ApproveIntent | Self::RejectIntent)
+    }
+
+    fn requires_plan_ref(self) -> bool {
+        matches!(
+            self,
+            Self::ApprovePlan | Self::RejectPlan | Self::ExecutePlan
+        )
+    }
+
+    /// Record-only routes never mutate directive/plan approval state and
+    /// only persist a request-local review event so the user decision
+    /// remains auditable.
+    fn record_only(self) -> bool {
+        matches!(
+            self,
+            Self::RejectIntent | Self::RejectPlan | Self::AskQuestion
+        )
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum RespondParseError {
+    Missing,
+    Unknown(String),
+}
+
+impl RespondParseError {
+    fn into_tool_error(self) -> ToolError {
+        match self {
+            Self::Missing => ToolError::new(
+                error_codes::MISSING_PARAM,
+                "respond requires `response` (or `decision`)",
+            )
+            .with_suggestion(
+                "valid: approve_intent|reject_intent|ask_question|approve_plan|reject_plan|execute_plan",
+            ),
+            Self::Unknown(raw) => ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!("unknown respond decision `{}`", raw),
+            )
+            .with_suggestion(
+                "valid: approve_intent|reject_intent|ask_question|approve_plan|reject_plan|execute_plan",
+            ),
+        }
+    }
+}
+
+/// Pure decision parse — accepts `response` or `decision`. Pulled out so
+/// unit tests can pin the canonical wire vocabulary without an AppState.
+fn parse_respond_decision(args: &Value) -> std::result::Result<RespondDecision, RespondParseError> {
+    let raw = nonblank(args.get("response"))
+        .or_else(|| nonblank(args.get("decision")))
+        .ok_or(RespondParseError::Missing)?;
+    match raw.as_str() {
+        "approve_intent" => Ok(RespondDecision::ApproveIntent),
+        "reject_intent" => Ok(RespondDecision::RejectIntent),
+        "ask_question" => Ok(RespondDecision::AskQuestion),
+        "approve_plan" => Ok(RespondDecision::ApprovePlan),
+        "reject_plan" => Ok(RespondDecision::RejectPlan),
+        "execute_plan" => Ok(RespondDecision::ExecutePlan),
+        _ => Err(RespondParseError::Unknown(raw)),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectiveRef {
+    id: String,
+    version: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanRef {
+    id: String,
+}
+
+/// Best-effort scan of a Lisp artifact for `:<key> "<uuid>"`. Pure helper —
+/// no IO, no regex crate. Picks the first occurrence so callers keep the
+/// canonical persisted ref ahead of any later debug noise.
+fn extract_lisp_keyword_string(text: &str, key: &str) -> Option<String> {
+    let needle = format!(":{}", key);
+    let mut cursor = 0;
+    while let Some(found) = text[cursor..].find(&needle) {
+        let abs = cursor + found;
+        let after = &text[abs + needle.len()..];
+        let trimmed = after.trim_start_matches([' ', '\t', '\r', '\n']);
+        if let Some(stripped) = trimmed.strip_prefix('"') {
+            if let Some(end) = stripped.find('"') {
+                let val = &stripped[..end];
+                if !val.is_empty() {
+                    return Some(val.to_string());
+                }
+            }
+        }
+        cursor = abs + needle.len();
+    }
+    None
+}
+
+fn extract_lisp_keyword_int(text: &str, key: &str) -> Option<i32> {
+    let needle = format!(":{}", key);
+    let mut cursor = 0;
+    while let Some(found) = text[cursor..].find(&needle) {
+        let abs = cursor + found;
+        let after = &text[abs + needle.len()..];
+        let trimmed = after.trim_start_matches([' ', '\t', '\r', '\n']);
+        let digits: String = trimmed.chars().take_while(|c| c.is_ascii_digit()).collect();
+        if let Ok(n) = digits.parse::<i32>() {
+            return Some(n);
+        }
+        cursor = abs + needle.len();
+    }
+    None
+}
+
+fn resolve_directive_ref(args: &Value, intent_alignment_text: Option<&str>) -> Option<DirectiveRef> {
+    let id = nonblank(args.get("approved_directive_id"))
+        .or_else(|| nonblank(args.get("directive_id")));
+    let version = args
+        .get("directive_version")
+        .and_then(|v| v.as_i64())
+        .map(|n| n as i32);
+
+    let (id, version) = match (id, version) {
+        (Some(id), Some(v)) => (id, v),
+        _ => match intent_alignment_text.and_then(extract_directive_ref_from_artifact) {
+            Some(parsed) => (parsed.id, parsed.version),
+            None => return None,
+        },
+    };
+    Some(DirectiveRef { id, version })
+}
+
+fn extract_directive_ref_from_artifact(text: &str) -> Option<DirectiveRef> {
+    let id = extract_lisp_keyword_string(text, "directive_id")
+        .or_else(|| extract_lisp_keyword_string(text, "id"))?;
+    let version = extract_lisp_keyword_int(text, "directive_version")
+        .or_else(|| extract_lisp_keyword_int(text, "version"))?;
+    Some(DirectiveRef { id, version })
+}
+
+fn resolve_plan_ref(args: &Value, plan_text: Option<&str>) -> Option<PlanRef> {
+    if let Some(id) =
+        nonblank(args.get("approved_plan_id")).or_else(|| nonblank(args.get("plan_id")))
+    {
+        return Some(PlanRef { id });
+    }
+    plan_text.and_then(extract_plan_ref_from_artifact)
+}
+
+fn extract_plan_ref_from_artifact(text: &str) -> Option<PlanRef> {
+    extract_lisp_keyword_string(text, "plan_id")
+        .or_else(|| extract_lisp_keyword_string(text, "id"))
+        .map(|id| PlanRef { id })
+}
+
+/// Pure event-sequence allocator. The initial `request_received` event
+/// occupies seq 1; review responses pick up at max(existing) + 1 so each
+/// respond call lands a fresh, monotonically increasing event file.
+fn next_event_seq(existing_filenames: &[String]) -> u64 {
+    let max = existing_filenames
+        .iter()
+        .filter_map(|n| parse_event_seq_from_filename(n))
+        .max()
+        .unwrap_or(0);
+    max + 1
+}
+
+fn parse_event_seq_from_filename(name: &str) -> Option<u64> {
+    let stem = name.strip_suffix(".event.lisp")?;
+    stem.parse::<u64>().ok()
+}
+
+fn event_path_for_seq(events_dir: &Path, seq: u64) -> PathBuf {
+    events_dir.join(format!("{:06}.event.lisp", seq))
+}
+
+fn list_event_filenames(events_dir: &Path) -> Vec<String> {
+    let read = match std::fs::read_dir(events_dir) {
+        Ok(r) => r,
+        Err(_) => return Vec::new(),
+    };
+    read.filter_map(|entry| entry.ok())
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RespondOutcome {
+    Recorded,
+    Dispatched,
+    Blocked,
+}
+
+impl RespondOutcome {
+    fn wire(self) -> &'static str {
+        match self {
+            Self::Recorded => "recorded",
+            Self::Dispatched => "dispatched",
+            Self::Blocked => "blocked",
+        }
+    }
+
+    fn event_kind(self) -> &'static str {
+        match self {
+            Self::Recorded => "review_response_recorded",
+            Self::Dispatched => "review_response_dispatched",
+            Self::Blocked => "review_response_blocked",
+        }
+    }
+}
+
+struct ReviewEventArgs<'a> {
+    request_id: &'a str,
+    seq: u64,
+    decision: RespondDecision,
+    outcome: RespondOutcome,
+    note: Option<&'a str>,
+    directive_ref: Option<&'a DirectiveRef>,
+    plan_ref: Option<&'a PlanRef>,
+    execute: bool,
+    inner_action: Option<&'a str>,
+    blocked_reason: Option<&'a str>,
+    created_at: &'a str,
+}
+
+fn build_review_event_lisp(args: &ReviewEventArgs<'_>) -> String {
+    let mut out = String::new();
+    let _ = writeln!(out, ";; MissionD review-response event.");
+    let _ = writeln!(out, ";; Schema: {}", EVENT_SCHEMA);
+    let event_id = format!("evt-{}-{:06}", args.request_id, args.seq);
+    let _ = writeln!(out, "(lifecycle-event {}", lisp_string(&event_id));
+    let _ = writeln!(out, "  :schema {}", lisp_string(EVENT_SCHEMA));
+    let _ = writeln!(out, "  :seq {}", args.seq);
+    let _ = writeln!(out, "  :event_id {}", lisp_string(&event_id));
+    let _ = writeln!(out, "  :request_id {}", lisp_string(args.request_id));
+    let _ = writeln!(out, "  :kind :{}", args.outcome.event_kind());
+    let _ = writeln!(
+        out,
+        "  :actor (:role :user :id \"mission_request.respond\")"
+    );
+    let _ = writeln!(out, "  :time {}", lisp_string(args.created_at));
+    let _ = writeln!(out, "  :payload");
+    let _ = writeln!(out, "    (:decision :{}", args.decision.wire());
+    let _ = writeln!(out, "     :outcome :{}", args.outcome.wire());
+    if let Some(note) = args.note {
+        let _ = writeln!(out, "     :note {}", lisp_string(note));
+    }
+    if let Some(d) = args.directive_ref {
+        let _ = writeln!(out, "     :directive_id {}", lisp_string(&d.id));
+        let _ = writeln!(out, "     :directive_version {}", d.version);
+    }
+    if let Some(p) = args.plan_ref {
+        let _ = writeln!(out, "     :plan_id {}", lisp_string(&p.id));
+    }
+    let _ = writeln!(
+        out,
+        "     :execute {}",
+        if args.execute { "true" } else { "false" }
+    );
+    if let Some(inner) = args.inner_action {
+        let _ = writeln!(out, "     :inner_action {}", lisp_string(inner));
+    }
+    if let Some(reason) = args.blocked_reason {
+        let _ = writeln!(out, "     :blocked_reason {}", lisp_string(reason));
+    }
+    let _ = writeln!(out, "    )");
+    let _ = writeln!(
+        out,
+        "  :idempotency_key {})",
+        lisp_string(&format!(
+            "{}/{}/{:06}",
+            args.request_id,
+            args.outcome.event_kind(),
+            args.seq
+        ))
+    );
+    out
+}
+
+fn next_action_for(decision: RespondDecision, outcome: RespondOutcome) -> &'static str {
+    match (decision, outcome) {
+        (RespondDecision::ApproveIntent, RespondOutcome::Dispatched) => {
+            "directive approved; call mission_request advance with approved_directive_id (+ board_task_id) to compile plan.lisp"
+        }
+        (RespondDecision::ApprovePlan, RespondOutcome::Dispatched) => {
+            "plan approved; call mission_request respond with response=execute_plan + execute=true to dispatch the plan"
+        }
+        (RespondDecision::ExecutePlan, RespondOutcome::Dispatched) => {
+            "plan execute requested; mission_plan execute path runs via the existing approved-plan flow"
+        }
+        (RespondDecision::RejectIntent, RespondOutcome::Recorded) => {
+            "rejection recorded; revise the message and call mission_request start/advance again"
+        }
+        (RespondDecision::RejectPlan, RespondOutcome::Recorded) => {
+            "rejection recorded; revise the plan and call mission_request advance, or use mission_plan with explicit review_decision=rejected"
+        }
+        (RespondDecision::AskQuestion, RespondOutcome::Recorded) => {
+            "question recorded; wait for follow-up answer, then call mission_request respond again"
+        }
+        (_, RespondOutcome::Blocked) => {
+            "supply the missing reference (or required flag) and re-call mission_request respond"
+        }
+        _ => "review_packet describes the next legal continuation",
+    }
+}
+
+async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let request_id_raw = match nonblank(args.get("request_id")) {
+        Some(id) => id,
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::MISSING_PARAM, "respond requires `request_id`")
+                    .with_suggestion(
+                        "pass the request_id returned by mission_request(action=start)",
+                    ),
+            ))
+        }
+    };
+    let request_id = sanitize_request_id(&request_id_raw);
+
+    let decision = match parse_respond_decision(args) {
+        Ok(d) => d,
+        Err(e) => return Ok(ToolResult::structured_error(e.into_tool_error())),
+    };
+
+    let root = match resolve_request_project_root(state, args).await {
+        Ok(root) => root,
+        Err(reason) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(error_codes::INVALID_PARAM, reason)
+                    .with_suggestion("pass project, absolute cwd, or target_project"),
+            ))
+        }
+    };
+    let paths = request_paths_for(&root, &request_id);
+
+    let request_text = std::fs::read_to_string(&paths.request).ok();
+    let mode = match request_text.as_deref() {
+        Some(text) => extract_mode_from_request_lisp(text),
+        None => RequestMode::HumanInteractive,
+    };
+    let request_exists = request_text.is_some();
+
+    let intent_text = std::fs::read_to_string(&paths.intent_alignment).ok();
+    let plan_text = std::fs::read_to_string(&paths.plan).ok();
+    let directive_ref = if decision.requires_directive_ref() {
+        resolve_directive_ref(args, intent_text.as_deref())
+    } else {
+        None
+    };
+    let plan_ref = if decision.requires_plan_ref() {
+        resolve_plan_ref(args, plan_text.as_deref())
+    } else {
+        None
+    };
+
+    let note = nonblank(args.get("note"));
+    let execute_flag_explicit = args
+        .get("execute")
+        .and_then(|v| v.as_bool())
+        .or_else(|| {
+            args.get("execute_after_approval")
+                .and_then(|v| v.as_bool())
+        });
+
+    // Pure decision routing — pick outcome / inner action / blocked reason
+    // before any IO so unit tests can pin the routing without AppState.
+    let mut outcome = if decision.record_only() {
+        RespondOutcome::Recorded
+    } else {
+        RespondOutcome::Dispatched
+    };
+    let mut blocked_reason: Option<String> = None;
+    let mut inner_action: Option<&'static str> = None;
+    let mut effective_execute = false;
+
+    if !request_exists {
+        outcome = RespondOutcome::Blocked;
+        blocked_reason = Some(format!(
+            "request.lisp missing at {}; call mission_request(action=start) first",
+            path_json(&paths.request)
+        ));
+    }
+
+    if outcome != RespondOutcome::Blocked && decision.requires_directive_ref() && directive_ref.is_none() {
+        outcome = RespondOutcome::Blocked;
+        blocked_reason = Some(
+            "directive ref missing; pass approved_directive_id (or directive_id) + directive_version, or wait for intent-alignment.lisp to carry a persisted ref".into(),
+        );
+    }
+
+    if outcome != RespondOutcome::Blocked && decision.requires_plan_ref() && plan_ref.is_none() {
+        outcome = RespondOutcome::Blocked;
+        blocked_reason = Some(
+            "plan ref missing; pass approved_plan_id (or plan_id), or wait for plan.lisp to carry a persisted ref".into(),
+        );
+    }
+
+    if outcome != RespondOutcome::Blocked && matches!(decision, RespondDecision::ExecutePlan) {
+        match execute_flag_explicit {
+            Some(false) => {
+                outcome = RespondOutcome::Blocked;
+                blocked_reason = Some(
+                    "execute_plan requires execute=true (or omit `execute` so response=execute_plan implies it)".into(),
+                );
+            }
+            _ => {
+                effective_execute = true;
+            }
+        }
+    }
+
+    let allocated_seq = next_event_seq(&list_event_filenames(&paths.events_dir));
+    let event_path = event_path_for_seq(&paths.events_dir, allocated_seq);
+    let created_at = now_rfc3339();
+
+    let mut inner_payload: Option<Value> = None;
+    let mut inner_is_error = false;
+
+    if outcome == RespondOutcome::Dispatched {
+        match decision {
+            RespondDecision::ApproveIntent => {
+                let d = directive_ref.as_ref().expect("ref enforced above");
+                let inner_args = json!({
+                    "action": "approve",
+                    "directive_id": d.id,
+                    "version": d.version,
+                });
+                let inner =
+                    super::directive::handle(state, "mission_directive", inner_args).await?;
+                inner_is_error = inner.is_error.unwrap_or(false);
+                inner_payload = Some(tool_result_payload(&inner));
+                inner_action = Some("mission_directive::approve");
+            }
+            RespondDecision::ApprovePlan => {
+                let p = plan_ref.as_ref().expect("ref enforced above");
+                let inner_args = json!({
+                    "action": "approve",
+                    "plan_id": p.id,
+                });
+                let inner = super::plan::handle(state, "mission_plan", inner_args).await?;
+                inner_is_error = inner.is_error.unwrap_or(false);
+                inner_payload = Some(tool_result_payload(&inner));
+                inner_action = Some("mission_plan::approve");
+            }
+            RespondDecision::ExecutePlan => {
+                let p = plan_ref.as_ref().expect("ref enforced above");
+                let mut pipeline_args = serde_json::Map::new();
+                pipeline_args.insert("approved_plan_id".into(), json!(p.id));
+                pipeline_args.insert("execute".into(), json!(true));
+                for key in [
+                    "target",
+                    "execute_mode",
+                    "scheduler_mode",
+                    "dispatch_strategy",
+                    "parallelism",
+                    "dry_run",
+                    "project",
+                    "cwd",
+                    "target_project",
+                    "review_question_id",
+                ] {
+                    if let Some(v) = args.get(key) {
+                        if !v.is_null() {
+                            pipeline_args.insert(key.into(), v.clone());
+                        }
+                    }
+                }
+                let inner =
+                    super::unified_entry::run_pipeline(state, Value::Object(pipeline_args)).await?;
+                inner_is_error = inner.is_error.unwrap_or(false);
+                inner_payload = Some(tool_result_payload(&inner));
+                inner_action = Some("unified_entry::plan_execute");
+            }
+            _ => {}
+        }
+    }
+
+    if inner_is_error {
+        outcome = RespondOutcome::Blocked;
+        if blocked_reason.is_none() {
+            blocked_reason =
+                Some("inner approval/execute surface returned a structured error".into());
+        }
+    }
+
+    let event_body = build_review_event_lisp(&ReviewEventArgs {
+        request_id: &request_id,
+        seq: allocated_seq,
+        decision,
+        outcome,
+        note: note.as_deref(),
+        directive_ref: directive_ref.as_ref(),
+        plan_ref: plan_ref.as_ref(),
+        execute: effective_execute,
+        inner_action,
+        blocked_reason: blocked_reason.as_deref(),
+        created_at: &created_at,
+    });
+    let event_write_outcome = atomic_write_artifact(&event_path, &event_body, false);
+    let event_write = match event_write_outcome {
+        Ok(o) => o,
+        Err(e) => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!("failed to append review event {}: {:#}", event_path.display(), e),
+                )
+                .with_suggestion("ensure the request_id and project root are correct"),
+            ))
+        }
+    };
+
+    let existence = read_artifact_existence(&paths);
+    let review_packet = derive_review_packet(
+        &ReviewPacketInputs {
+            mode,
+            paths: &paths,
+            existence,
+            projection_target: None,
+            fallback_preview: None,
+            execute_requested: effective_execute,
+        },
+        |p| std::fs::read_to_string(p).ok(),
+    );
+
+    let next_action = next_action_for(decision, outcome);
+
+    let mut respond_result = serde_json::Map::new();
+    respond_result.insert("decision".into(), json!(decision.wire()));
+    respond_result.insert("outcome".into(), json!(outcome.wire()));
+    respond_result.insert("event_path".into(), json!(path_json(&event_write.path)));
+    respond_result.insert("event_seq".into(), json!(allocated_seq));
+    respond_result.insert("event_sha256".into(), json!(event_write.sha256));
+    respond_result.insert("event_bytes".into(), json!(event_write.bytes));
+    respond_result.insert("execute".into(), json!(effective_execute));
+    respond_result.insert("next_action".into(), json!(next_action));
+    if let Some(d) = directive_ref.as_ref() {
+        respond_result.insert("directive_id".into(), json!(d.id));
+        respond_result.insert("directive_version".into(), json!(d.version));
+    }
+    if let Some(p) = plan_ref.as_ref() {
+        respond_result.insert("plan_id".into(), json!(p.id));
+    }
+    if let Some(inner) = inner_action {
+        respond_result.insert("inner_action".into(), json!(inner));
+    }
+    if let Some(reason) = blocked_reason.as_ref() {
+        respond_result.insert("blocked_reason".into(), json!(reason));
+    }
+    if let Some(n) = note.as_ref() {
+        respond_result.insert("note".into(), json!(n));
+    }
+
+    let mut response = json!({
+        "status": match outcome {
+            RespondOutcome::Blocked => "blocked",
+            _ => "ok",
+        },
+        "action": "respond",
+        "mode": mode.wire(),
+        "request_id": request_id,
+        "request_path": path_json(&paths.request),
+        "artifact_paths": build_artifact_paths_json(&paths),
+        "artifact_exists": build_artifact_existence(&paths),
+        "respond_result": Value::Object(respond_result),
+        "review_packet": review_packet,
+        "next_action": next_action,
+        "v3_contract": {
+            "blueprint": ".missiond/v3/missiond-blueprint.lisp",
+            "surface": "mission_request",
+            "feature": "review-response"
+        }
+    });
+    if let Some(payload) = inner_payload {
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("pipeline_result".into(), payload);
+        }
+    }
+
+    let mut out = ToolResult::json_pretty(&response);
+    if outcome == RespondOutcome::Blocked {
+        out.is_error = Some(true);
+    }
+    Ok(out)
 }
 
 fn normalize_start_args(args: &mut Value, request_id: &str) {
@@ -1765,5 +2387,358 @@ mod tests {
             Some("s1_message_intake")
         );
         assert_eq!(extracted.artifact_scope.as_deref(), Some("directive"));
+    }
+
+    // ── respond decision parsing — pure, no AppState ──────────────────
+
+    #[test]
+    fn parse_respond_decision_accepts_response_field() {
+        let cases = [
+            ("approve_intent", RespondDecision::ApproveIntent),
+            ("reject_intent", RespondDecision::RejectIntent),
+            ("ask_question", RespondDecision::AskQuestion),
+            ("approve_plan", RespondDecision::ApprovePlan),
+            ("reject_plan", RespondDecision::RejectPlan),
+            ("execute_plan", RespondDecision::ExecutePlan),
+        ];
+        for (wire, expected) in cases {
+            let parsed = parse_respond_decision(&json!({ "response": wire }))
+                .expect("decision should parse");
+            assert_eq!(parsed, expected, "wire `{}`", wire);
+            assert_eq!(parsed.wire(), wire);
+        }
+    }
+
+    #[test]
+    fn parse_respond_decision_accepts_decision_alias() {
+        let parsed = parse_respond_decision(&json!({ "decision": "approve_plan" }))
+            .expect("decision should parse via alias");
+        assert_eq!(parsed, RespondDecision::ApprovePlan);
+    }
+
+    #[test]
+    fn parse_respond_decision_response_wins_over_alias() {
+        let parsed = parse_respond_decision(&json!({
+            "response": "execute_plan",
+            "decision": "approve_intent",
+        }))
+        .expect("decision should parse");
+        assert_eq!(parsed, RespondDecision::ExecutePlan);
+    }
+
+    #[test]
+    fn parse_respond_decision_missing_returns_missing_param() {
+        let err = parse_respond_decision(&json!({})).unwrap_err();
+        assert_eq!(err, RespondParseError::Missing);
+        let tool_err = err.into_tool_error();
+        assert_eq!(tool_err.error_code, error_codes::MISSING_PARAM);
+    }
+
+    #[test]
+    fn parse_respond_decision_unknown_returns_invalid_param() {
+        let err = parse_respond_decision(&json!({ "response": "approve_workflow" })).unwrap_err();
+        assert!(matches!(err, RespondParseError::Unknown(_)));
+        let tool_err = err.into_tool_error();
+        assert_eq!(tool_err.error_code, error_codes::INVALID_PARAM);
+    }
+
+    #[test]
+    fn respond_decision_classification_matches_routing_table() {
+        // approve_intent / reject_intent need a directive ref.
+        for d in [RespondDecision::ApproveIntent, RespondDecision::RejectIntent] {
+            assert!(d.requires_directive_ref());
+            assert!(!d.requires_plan_ref());
+        }
+        // approve_plan / reject_plan / execute_plan need a plan ref.
+        for d in [
+            RespondDecision::ApprovePlan,
+            RespondDecision::RejectPlan,
+            RespondDecision::ExecutePlan,
+        ] {
+            assert!(!d.requires_directive_ref());
+            assert!(d.requires_plan_ref());
+        }
+        // record-only routes — no directive/plan mutation, only event ledger.
+        for d in [
+            RespondDecision::RejectIntent,
+            RespondDecision::RejectPlan,
+            RespondDecision::AskQuestion,
+        ] {
+            assert!(d.record_only());
+        }
+        // approve_intent / approve_plan / execute_plan dispatch through the
+        // existing inner surfaces.
+        for d in [
+            RespondDecision::ApproveIntent,
+            RespondDecision::ApprovePlan,
+            RespondDecision::ExecutePlan,
+        ] {
+            assert!(!d.record_only());
+        }
+    }
+
+    // ── ref resolution — pure, no IO ──────────────────────────────────
+
+    #[test]
+    fn extract_lisp_keyword_string_finds_quoted_value() {
+        let text = "(directive\n  :directive_id \"abc-123\"\n  :version 4)";
+        assert_eq!(
+            extract_lisp_keyword_string(text, "directive_id"),
+            Some("abc-123".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_lisp_keyword_int_finds_numeric_value() {
+        let text = "(directive\n  :directive_id \"abc-123\"\n  :version 4)";
+        assert_eq!(extract_lisp_keyword_int(text, "version"), Some(4));
+    }
+
+    #[test]
+    fn extract_lisp_keyword_string_returns_none_when_missing() {
+        let text = "(directive :goal :ship)";
+        assert!(extract_lisp_keyword_string(text, "directive_id").is_none());
+        assert!(extract_lisp_keyword_int(text, "version").is_none());
+    }
+
+    #[test]
+    fn extract_directive_ref_from_artifact_round_trip() {
+        let text = "(directive :directive_id \"00000000-0000-0000-0000-000000000abc\" :directive_version 7)";
+        let parsed = extract_directive_ref_from_artifact(text).expect("ref present");
+        assert_eq!(parsed.id, "00000000-0000-0000-0000-000000000abc");
+        assert_eq!(parsed.version, 7);
+    }
+
+    #[test]
+    fn resolve_directive_ref_prefers_explicit_args_over_artifact() {
+        let args = json!({
+            "approved_directive_id": "explicit-uuid",
+            "directive_version": 9,
+        });
+        let artifact = "(directive :directive_id \"artifact-uuid\" :version 1)";
+        let resolved = resolve_directive_ref(&args, Some(artifact)).expect("ref resolves");
+        assert_eq!(resolved.id, "explicit-uuid");
+        assert_eq!(resolved.version, 9);
+    }
+
+    #[test]
+    fn resolve_directive_ref_falls_back_to_artifact_when_args_missing() {
+        let args = json!({});
+        let artifact = "(directive :directive_id \"artifact-uuid\" :version 3)";
+        let resolved = resolve_directive_ref(&args, Some(artifact)).expect("ref resolves");
+        assert_eq!(resolved.id, "artifact-uuid");
+        assert_eq!(resolved.version, 3);
+    }
+
+    #[test]
+    fn resolve_directive_ref_returns_none_without_id_or_version() {
+        let args = json!({});
+        // Artifact lacks :directive_id / :version → blocked.
+        let artifact = "(directive :goal :ship)";
+        assert!(resolve_directive_ref(&args, Some(artifact)).is_none());
+        // Args carry id but no version → still blocked (mission_directive
+        // approve requires both).
+        let args = json!({ "approved_directive_id": "x" });
+        assert!(resolve_directive_ref(&args, None).is_none());
+    }
+
+    #[test]
+    fn resolve_plan_ref_prefers_args_then_artifact_then_blocks() {
+        // Explicit arg wins.
+        let args = json!({ "approved_plan_id": "explicit-plan" });
+        let resolved =
+            resolve_plan_ref(&args, Some("(plan :plan_id \"artifact-plan\")"))
+                .expect("plan ref");
+        assert_eq!(resolved.id, "explicit-plan");
+        // Falls back to artifact when args missing.
+        let resolved =
+            resolve_plan_ref(&json!({}), Some("(plan :plan_id \"artifact-plan\")"))
+                .expect("plan ref");
+        assert_eq!(resolved.id, "artifact-plan");
+        // Blocked when both missing.
+        assert!(resolve_plan_ref(&json!({}), Some("(plan :goal :ship)")).is_none());
+        assert!(resolve_plan_ref(&json!({}), None).is_none());
+    }
+
+    // ── event sequencing — pure ────────────────────────────────────────
+
+    #[test]
+    fn next_event_seq_starts_after_initial_request_received_event() {
+        // Only the initial request_received event has landed.
+        let names = vec!["000001.event.lisp".to_string()];
+        assert_eq!(next_event_seq(&names), 2);
+    }
+
+    #[test]
+    fn next_event_seq_picks_max_plus_one() {
+        let names = vec![
+            "000001.event.lisp".to_string(),
+            "000002.event.lisp".to_string(),
+            "000007.event.lisp".to_string(),
+            "stray.txt".to_string(),
+        ];
+        assert_eq!(next_event_seq(&names), 8);
+    }
+
+    #[test]
+    fn next_event_seq_ignores_unrelated_filenames() {
+        let names = vec![
+            "README.md".to_string(),
+            "000003.event.lisp.bak".to_string(),
+            "abc.event.lisp".to_string(),
+        ];
+        // None match the strict <digits>.event.lisp pattern.
+        assert_eq!(next_event_seq(&names), 1);
+    }
+
+    #[test]
+    fn next_event_seq_with_no_existing_events_starts_at_one() {
+        let names: Vec<String> = Vec::new();
+        assert_eq!(next_event_seq(&names), 1);
+    }
+
+    #[test]
+    fn event_path_for_seq_zero_pads_to_six_digits() {
+        let path = event_path_for_seq(Path::new("/repo/.missiond/requests/req-x/events"), 5);
+        assert_eq!(
+            path,
+            Path::new("/repo/.missiond/requests/req-x/events/000005.event.lisp")
+        );
+    }
+
+    // ── review event lisp — pure render ───────────────────────────────
+
+    #[test]
+    fn build_review_event_lisp_records_dispatched_approve_intent() {
+        let directive = DirectiveRef {
+            id: "00000000-0000-0000-0000-000000000abc".into(),
+            version: 4,
+        };
+        let body = build_review_event_lisp(&ReviewEventArgs {
+            request_id: "req-rp",
+            seq: 2,
+            decision: RespondDecision::ApproveIntent,
+            outcome: RespondOutcome::Dispatched,
+            note: Some("looks good"),
+            directive_ref: Some(&directive),
+            plan_ref: None,
+            execute: false,
+            inner_action: Some("mission_directive::approve"),
+            blocked_reason: None,
+            created_at: "2026-04-28T00:00:00Z",
+        });
+        assert!(body.contains(":kind :review_response_dispatched"));
+        assert!(body.contains(":decision :approve_intent"));
+        assert!(body.contains(":outcome :dispatched"));
+        assert!(body.contains(":directive_id \"00000000-0000-0000-0000-000000000abc\""));
+        assert!(body.contains(":directive_version 4"));
+        assert!(body.contains(":note \"looks good\""));
+        assert!(body.contains(":execute false"));
+        assert!(body.contains(":inner_action \"mission_directive::approve\""));
+        assert!(body.contains(":idempotency_key \"req-rp/review_response_dispatched/000002\""));
+    }
+
+    #[test]
+    fn build_review_event_lisp_records_blocked_missing_plan_ref() {
+        let body = build_review_event_lisp(&ReviewEventArgs {
+            request_id: "req-rp",
+            seq: 3,
+            decision: RespondDecision::ExecutePlan,
+            outcome: RespondOutcome::Blocked,
+            note: None,
+            directive_ref: None,
+            plan_ref: None,
+            execute: false,
+            inner_action: None,
+            blocked_reason: Some("plan ref missing"),
+            created_at: "2026-04-28T00:00:00Z",
+        });
+        assert!(body.contains(":kind :review_response_blocked"));
+        assert!(body.contains(":decision :execute_plan"));
+        assert!(body.contains(":outcome :blocked"));
+        assert!(body.contains(":blocked_reason \"plan ref missing\""));
+        // Refs absent — ensure we did not invent fields.
+        assert!(!body.contains(":directive_id"));
+        assert!(!body.contains(":plan_id"));
+    }
+
+    #[test]
+    fn build_review_event_lisp_record_only_reject_plan_no_inner_action() {
+        let plan = PlanRef {
+            id: "11111111-1111-1111-1111-111111111111".into(),
+        };
+        let body = build_review_event_lisp(&ReviewEventArgs {
+            request_id: "req-rp",
+            seq: 4,
+            decision: RespondDecision::RejectPlan,
+            outcome: RespondOutcome::Recorded,
+            note: Some("wrong scope"),
+            directive_ref: None,
+            plan_ref: Some(&plan),
+            execute: false,
+            inner_action: None,
+            blocked_reason: None,
+            created_at: "2026-04-28T00:00:00Z",
+        });
+        assert!(body.contains(":kind :review_response_recorded"));
+        assert!(body.contains(":decision :reject_plan"));
+        assert!(body.contains(":outcome :recorded"));
+        assert!(body.contains(":plan_id \"11111111-1111-1111-1111-111111111111\""));
+        assert!(body.contains(":note \"wrong scope\""));
+        // reject_plan must NOT mutate approval state — no inner_action stamp.
+        assert!(!body.contains(":inner_action"));
+    }
+
+    // ── next_action vocabulary — pure ─────────────────────────────────
+
+    #[test]
+    fn next_action_dispatched_paths_describe_continuation() {
+        assert!(next_action_for(
+            RespondDecision::ApproveIntent,
+            RespondOutcome::Dispatched,
+        )
+        .contains("plan.lisp"));
+        assert!(next_action_for(
+            RespondDecision::ApprovePlan,
+            RespondOutcome::Dispatched,
+        )
+        .contains("execute_plan"));
+        assert!(next_action_for(
+            RespondDecision::ExecutePlan,
+            RespondOutcome::Dispatched,
+        )
+        .contains("execute"));
+    }
+
+    #[test]
+    fn next_action_blocked_message_describes_remediation() {
+        let msg = next_action_for(RespondDecision::ApproveIntent, RespondOutcome::Blocked);
+        assert!(msg.contains("missing"));
+    }
+
+    #[test]
+    fn next_action_record_only_paths_describe_followup() {
+        assert!(next_action_for(
+            RespondDecision::RejectIntent,
+            RespondOutcome::Recorded,
+        )
+        .contains("revise"));
+        assert!(next_action_for(
+            RespondDecision::AskQuestion,
+            RespondOutcome::Recorded,
+        )
+        .contains("question"));
+    }
+
+    // ── parse_event_seq_from_filename strictness ──────────────────────
+
+    #[test]
+    fn parse_event_seq_only_accepts_numeric_stem() {
+        assert_eq!(parse_event_seq_from_filename("000001.event.lisp"), Some(1));
+        assert_eq!(parse_event_seq_from_filename("999999.event.lisp"), Some(999999));
+        assert!(parse_event_seq_from_filename("abc.event.lisp").is_none());
+        assert!(parse_event_seq_from_filename("000001.event.lisp.bak").is_none());
+        assert!(parse_event_seq_from_filename("000001.lisp").is_none());
+        assert!(parse_event_seq_from_filename("").is_none());
     }
 }
