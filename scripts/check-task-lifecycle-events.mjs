@@ -36,6 +36,7 @@ export const ISO8601_RE =
   /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/;
 
 export const EVENT_KINDS = new Set([
+  'dispatch',
   'claim',
   'trace_start',
   'read',
@@ -456,27 +457,38 @@ function runFixtures(json) {
       id: 'wave99-lifecycle',
       wave: 'wave99',
       createdAt: '2026-04-28T00:00:00Z',
-      sequence: 2,
+      sequence: 3,
       events: [
         {
-          id: 'wave99-01-claim-001',
+          id: 'wave99-01-dispatch-001',
+          task: 'wave99-01-demo',
+          actor_role: 'orchestrator',
+          event_kind: 'dispatch',
+          commit_role: 'none',
+          seq: 1,
+          at: '2026-04-28T00:00:01Z',
+          touched: ['.missiond/claudecode/wave99-01-demo.md'],
+          summary: 'dispatched task',
+        },
+        {
+          id: 'wave99-01-claim-002',
           task: 'wave99-01-demo',
           actor_role: 'worker',
           event_kind: 'claim',
           commit_role: 'none',
-          seq: 1,
-          at: '2026-04-28T00:00:01Z',
+          seq: 2,
+          at: '2026-04-28T00:00:02Z',
           touched: [],
           summary: 'claimed task',
         },
         {
-          id: 'wave99-01-commit-002',
+          id: 'wave99-01-commit-003',
           task: 'wave99-01-demo',
           actor_role: 'worker',
           event_kind: 'worker_commit',
           commit_role: 'worker',
-          seq: 2,
-          at: '2026-04-28T00:00:02Z',
+          seq: 3,
+          at: '2026-04-28T00:00:03Z',
           touched: ['scripts/demo.mjs'],
           summary: 'worker commit recorded',
           commit_hash: 'abcdef1',
@@ -486,7 +498,7 @@ function runFixtures(json) {
     cases.push({ name: 'valid-ledger', source: valid, ok: true });
     cases.push({
       name: 'duplicate-id',
-      source: valid.replace('wave99-01-commit-002', 'wave99-01-claim-001'),
+      source: valid.replace('wave99-01-commit-003', 'wave99-01-claim-002'),
       ok: false,
     });
     cases.push({

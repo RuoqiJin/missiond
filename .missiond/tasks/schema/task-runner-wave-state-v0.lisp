@@ -22,7 +22,7 @@
     (complete "A finalized/done report exists with a final commit hash and no later unfinalized parent_hotfix event is observed.")
     (dispatchable "All effective hard deps are complete; task has no report and is not running.")
     (blocked "At least one effective hard dep is not complete.")
-    (running "Lifecycle events show claim/trace_start/read but no final report yet.")
+    (running "Lifecycle events show dispatch/claim/trace_start/read but no final report yet.")
     (needs_finalization "Worker commit or later parent_hotfix exists but the finalized report does not include that final lineage."))
 
   (dependency-contract

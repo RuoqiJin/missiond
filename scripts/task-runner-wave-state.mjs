@@ -168,7 +168,7 @@ export function projectWaveState({
     const latestParentHotfix = latestEvent(taskEvents, 'parent_hotfix');
     const hasWorkerCommit = taskEvents.some((e) => e.event_kind === 'worker_commit');
     const hasClaimOrRun = taskEvents.some((e) =>
-      ['claim', 'trace_start', 'read'].includes(e.event_kind),
+      ['dispatch', 'claim', 'trace_start', 'read'].includes(e.event_kind),
     );
     const finalHash = finalReportHash(report);
     const lineageHashes = collectLineageHashes(report);

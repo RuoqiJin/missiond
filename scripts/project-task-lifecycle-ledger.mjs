@@ -118,7 +118,10 @@ export function projectLifecycleEvents(events, { wave }) {
   const sharedMemoryEntries = [];
   const sessionTraceEvents = [];
   for (const event of events) {
-    if (event.event_kind === 'claim') {
+    if (event.event_kind === 'dispatch') {
+      sharedMemoryEntries.push(memoryEntry(event, 'observation'));
+      sessionTraceEvents.push(traceEvent(event, 'dispatch'));
+    } else if (event.event_kind === 'claim') {
       sharedMemoryEntries.push(memoryEntry(event, 'claim'));
       sessionTraceEvents.push(traceEvent(event, 'start'));
     } else if (event.event_kind === 'trace_start') {
@@ -286,16 +289,27 @@ function runFixtures() {
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave99
   :created-at "2026-04-28T00:00:00Z"
-  :sequence 4
+  :sequence 5
 
   (lifecycle-event
-    :id wave99-01-claim-001
+    :id wave99-01-dispatch-001
+    :task wave99-01-demo
+    :actor_role orchestrator
+    :event_kind dispatch
+    :commit_role none
+    :seq 1
+    :at "2026-04-28T00:00:01Z"
+    :touched [".missiond/claudecode/wave99-01-demo.md"]
+    :summary "dispatched task")
+
+  (lifecycle-event
+    :id wave99-01-claim-002
     :task wave99-01-demo
     :actor_role worker
     :event_kind claim
     :commit_role none
-    :seq 1
-    :at "2026-04-28T00:00:01Z"
+    :seq 2
+    :at "2026-04-28T00:00:02Z"
     :touched []
     :summary "claimed task")
 
@@ -305,8 +319,8 @@ function runFixtures() {
     :actor_role worker
     :event_kind read
     :commit_role none
-    :seq 2
-    :at "2026-04-28T00:00:02Z"
+    :seq 3
+    :at "2026-04-28T00:00:03Z"
     :touched ["scripts/demo.mjs"]
     :summary "read files")
 
@@ -316,8 +330,8 @@ function runFixtures() {
     :actor_role worker
     :event_kind worker_commit
     :commit_role worker
-    :seq 3
-    :at "2026-04-28T00:00:03Z"
+    :seq 4
+    :at "2026-04-28T00:00:04Z"
     :touched ["scripts/demo.mjs"]
     :summary "worker commit"
     :commit_hash abcdef1)
@@ -328,8 +342,8 @@ function runFixtures() {
     :actor_role worker
     :event_kind completion
     :commit_role none
-    :seq 4
-    :at "2026-04-28T00:00:04Z"
+    :seq 5
+    :at "2026-04-28T00:00:05Z"
     :touched ["scripts/demo.mjs"]
     :summary "completed task"))
 `,
@@ -358,15 +372,15 @@ function runFixtures() {
       sessionTracePath: tracePath,
       dryRun: false,
     });
-    if (result.shared_memory_appended !== 2) throw new Error(`expected 2 shared-memory appends, got ${result.shared_memory_appended}`);
-    if (result.session_trace_appended !== 4) throw new Error(`expected 4 trace appends, got ${result.session_trace_appended}`);
+    if (result.shared_memory_appended !== 3) throw new Error(`expected 3 shared-memory appends, got ${result.shared_memory_appended}`);
+    if (result.session_trace_appended !== 5) throw new Error(`expected 5 trace appends, got ${result.session_trace_appended}`);
     const shared = fs.readFileSync(sharedPath, 'utf8');
     const trace = fs.readFileSync(tracePath, 'utf8');
     if (!shared.includes('(claim') || !shared.includes('(completion')) {
       throw new Error('shared-memory projection missing claim/completion');
     }
-    if (!trace.includes(':kind start') || !trace.includes(':kind commit') || !trace.includes(':kind complete')) {
-      throw new Error('session-trace projection missing start/commit/complete');
+    if (!trace.includes(':kind dispatch') || !trace.includes(':kind start') || !trace.includes(':kind commit') || !trace.includes(':kind complete')) {
+      throw new Error('session-trace projection missing dispatch/start/commit/complete');
     }
     const second = projectLifecycleLedgerFile({
       ledgerPath,
