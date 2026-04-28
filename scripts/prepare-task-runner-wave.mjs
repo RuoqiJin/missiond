@@ -953,8 +953,7 @@ async function runFixtures() {
   for (const fixture of fixtures) {
     categories.add(fixture.category);
     try {
-      // eslint-disable-next-line no-await-in-loop
-      await fixture.run();
+      fixture.run();
     } catch (err) {
       failed += 1;
       console.error(`fixture failed: ${fixture.name}`);
