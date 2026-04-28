@@ -119,7 +119,7 @@ function main() {
   console.log(`rendered ${path.relative(process.cwd(), outputPath)} from ${path.relative(process.cwd(), sourcePath)}`);
 }
 
-function loadSingleTask(file) {
+export function loadSingleTask(file) {
   const forms = readLispFile(file);
   const tasks = forms.filter((form) => isList(form) && head(form) === 'task');
   if (tasks.length !== 1) fail(`${file} must contain exactly one (task ...) form; got ${tasks.length}`);
@@ -239,7 +239,7 @@ function resolveRouterBackendRegistryPath(task) {
   return null;
 }
 
-function renderTask(task, sourcePath, options = {}) {
+export function renderTask(task, sourcePath, options = {}) {
   if (options.briefMode === 'thin') return renderThinTask(task, sourcePath, options);
   const relSource = path.relative(process.cwd(), sourcePath);
   const sharedMemoryPath = resolveSharedMemoryPath(task.id);
@@ -401,7 +401,7 @@ function renderThinTask(task, sourcePath, options = {}) {
   return `${lines.join('\n')}\n`;
 }
 
-function renderSharedPreamble() {
+export function renderSharedPreamble() {
   const lines = [];
   lines.push('# MissionD ClaudeCode Shared Preamble');
   lines.push('');
@@ -449,7 +449,7 @@ function renderSharedPreamble() {
   return `${lines.join('\n')}\n`;
 }
 
-function deriveSharedPreamblePath(taskId) {
+export function deriveSharedPreamblePath(taskId) {
   const wave = deriveWaveId(taskId);
   if (!wave) return null;
   return path.join('.missiond', 'claudecode', `${wave}-shared-preamble.md`);
@@ -1067,4 +1067,12 @@ function runFixtures() {
   );
 }
 
-main();
+// wave28-03: gate main() on direct invocation so scripts/render-wave-briefs.mjs
+// can import the renderer functions in-process (loadSingleTask / renderTask /
+// renderSharedPreamble / deriveSharedPreamblePath) without triggering the CLI
+// or shelling out. Direct `node scripts/render-claudecode-task.mjs ...` still
+// runs main() exactly as before — every existing dry-fixture stays
+// byte-identical at runtime.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}
