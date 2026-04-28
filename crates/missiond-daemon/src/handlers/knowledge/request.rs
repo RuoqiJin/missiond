@@ -474,8 +474,13 @@ fn resolve_plan_ref(
 }
 
 fn extract_plan_ref_from_artifact(text: &str) -> Option<PlanRef> {
-    extract_lisp_keyword_string(text, "plan_id")
-        .or_else(|| extract_lisp_keyword_string(text, "id"))
+    if let Some(id) = extract_lisp_keyword_string(text, "plan_id") {
+        return Some(PlanRef { id });
+    }
+    // Request-local plan.lisp may contain nested node ids such as
+    // `(:id "root" ...)`; never treat those as persisted plan refs.
+    extract_lisp_keyword_string(text, "id")
+        .filter(|id| uuid::Uuid::parse_str(id).is_ok())
         .map(|id| PlanRef { id })
 }
 
@@ -3057,6 +3062,14 @@ mod tests {
         // Blocked when both missing.
         assert!(resolve_plan_ref(&json!({}), Some("(plan :goal :ship)"), &[]).is_none());
         assert!(resolve_plan_ref(&json!({}), None, &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_plan_ref_ignores_dry_run_node_id() {
+        let artifact = r#"(plan-draft
+  :target "mission_task_delegate"
+  :nodes [(:id "root" :objective "ship")])"#;
+        assert!(resolve_plan_ref(&json!({}), Some(artifact), &[]).is_none());
     }
 
     #[test]
