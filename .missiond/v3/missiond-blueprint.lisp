@@ -108,19 +108,25 @@
                :artifact_preview :prompt :allowed_responses :next_action
                :execute_allowed]
       :states [:received :intent_drafting :awaiting_intent_approval
-               :awaiting_plan_approval :execute_requested]
+               :awaiting_plan_approval :awaiting_execution :execute_requested]
       :state-derivation
         ((rule plan-present-wins
-           :when "plan.lisp exists and execute was not explicitly requested"
+           :when "plan.lisp exists, execute was not explicitly requested, and the latest review event is not dispatched approve_plan"
            :state :awaiting_plan_approval
            :artifact_kind :plan
            :next_action "call mission_request respond with response=approve_plan / reject_plan / ask_question; execute later via response=execute_plan + execute=true"
            :execute_allowed false)
          (rule plan-present-execute-requested
-           :when "plan.lisp exists and execute=true was passed on this call"
+           :when "plan.lisp exists and execute=true was passed on this call or the latest review event is dispatched execute_plan"
            :state :execute_requested
            :artifact_kind :plan
            :next_action "observe execution status through mission_request status and task receipts"
+           :execute_allowed true)
+         (rule plan-approved-event
+           :when "plan.lisp exists and the latest review event is dispatched approve_plan"
+           :state :awaiting_execution
+           :artifact_kind :plan
+           :next_action "call mission_request respond with response=execute_plan + execute=true"
            :execute_allowed true)
          (rule intent-only-present
            :when "intent-alignment.lisp exists and plan.lisp does not"
@@ -144,11 +150,13 @@
         ((human-interactive
            :awaiting_intent_approval [approve_intent reject_intent ask_question]
            :awaiting_plan_approval [approve_plan reject_plan ask_question]
+           :awaiting_execution [execute_plan ask_question]
            :execute_requested [observe]
            :default [observe])
          (trusted-agent
            :awaiting_intent_approval [approve_intent ask_question]
            :awaiting_plan_approval [approve_plan ask_question]
+           :awaiting_execution [execute_plan ask_question]
            :execute_requested [observe]
            :default [observe]))
       :preview-policy
@@ -352,7 +360,7 @@
       :role "single user-facing request entry"
       :code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
              "crates/missiond-mcp/src/tools/knowledge/request.rs"]
-      :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; review_packet (state, artifact_kind, artifact_path, artifact_exists, artifact_preview, prompt, allowed_responses, next_action, execute_allowed) is derived purely from request-local artifact existence + latest projection per the unified-entry/review-packet contract — UTF-8-safe via missiond_core::util::safe_byte_truncate; respond action accepts approve_intent/reject_intent/ask_question/approve_plan/reject_plan/execute_plan, resolves directive/plan refs from explicit args, request-local intent-alignment.lisp/plan.lisp parses, or prior request-local review events; approve_intent can create a hidden BoardTask anchor before s4 plan-authoring so callers do not need to know internal board ids; approve_plan can materialize request-local plan.lisp into a persisted draft Plan row, reusing plan.lisp's BoardTask anchor when present and creating a hidden anchor only if needed, before delegating to mission_plan approve; records a request-local review event under events/<seq>.event.lisp via the same atomic_write_artifact + monotonically-increasing local sequence; delegates approve/execute decisions to mission_directive / mission_plan / unified_entry without bypassing their gates, and returns blocked responses (with next_action) when refs are missing or execute=true was not passed; approve_intent is the unified-entry bridge for the human yes step: after directive approval succeeds it immediately calls unified_entry s4 plan-authoring and projects request-local plan.lisp so the next packet asks for plan review rather than requiring a separate advance call; still no DB schema migration, no auto-approval, no direct workstation dispatch")
+      :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; review_packet (state, artifact_kind, artifact_path, artifact_exists, artifact_preview, prompt, allowed_responses, next_action, execute_allowed) is derived from request-local artifact existence + latest projection + latest review event per the unified-entry/review-packet contract — UTF-8-safe via missiond_core::util::safe_byte_truncate; respond action accepts approve_intent/reject_intent/ask_question/approve_plan/reject_plan/execute_plan, resolves directive/plan refs from explicit args, request-local intent-alignment.lisp/plan.lisp parses, or prior request-local review events; approve_intent can create a hidden BoardTask anchor before s4 plan-authoring so callers do not need to know internal board ids; approve_plan can materialize request-local plan.lisp into a persisted draft Plan row, reusing plan.lisp's BoardTask anchor when present and creating a hidden anchor only if needed, before delegating to mission_plan approve; records a request-local review event under events/<seq>.event.lisp via the same atomic_write_artifact + monotonically-increasing local sequence; delegates approve/execute decisions to mission_directive / mission_plan / unified_entry without bypassing their gates, and returns blocked responses (with next_action) when refs are missing or execute=true was not passed; approve_intent is the unified-entry bridge for the human yes step: after directive approval succeeds it immediately calls unified_entry s4 plan-authoring and projects request-local plan.lisp so the next packet asks for plan review rather than requiring a separate advance call; approve_plan moves the packet to awaiting_execution so the next legal response is execute_plan; still no DB schema migration, no auto-approval, no direct workstation dispatch")
 
     (surface mission_directive
       :status "compat"

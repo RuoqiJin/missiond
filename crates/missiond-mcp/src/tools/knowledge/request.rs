@@ -35,7 +35,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
          request_artifacts, projection: { status: written|skipped_*|write_failed, target?, \
          sexp_source?, path?, sha256?, bytes?, created?, overwritten?, error? }, pipeline, v3_contract, \
          next_step, review_packet?: { state: received|intent_drafting|awaiting_intent_approval|\
-         awaiting_plan_approval|execute_requested, artifact_kind: request|intent_alignment|plan, \
+         awaiting_plan_approval|awaiting_execution|execute_requested, artifact_kind: request|intent_alignment|plan, \
          artifact_path, artifact_exists, artifact_preview (UTF-8-safe truncation, ≤480 bytes), \
          prompt, allowed_responses, next_action, execute_allowed } }. respond response shape: \
          { status: ok|blocked, action: respond, mode, request_id, request_path, artifact_paths, \

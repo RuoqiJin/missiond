@@ -258,6 +258,8 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let mode = extract_mode_from_request_lisp(&text);
     let existence = read_artifact_existence(&paths);
+    let event_filenames = list_event_filenames(&paths.events_dir);
+    let event_texts = read_event_texts(&paths.events_dir, &event_filenames);
     let inputs = ReviewPacketInputs {
         mode,
         paths: &paths,
@@ -265,6 +267,7 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
         projection_target: None,
         fallback_preview: None,
         execute_requested: false,
+        review_checkpoint: latest_review_event_checkpoint(&event_texts),
     };
     let review_packet = derive_review_packet(&inputs, |p| std::fs::read_to_string(p).ok());
 
@@ -952,9 +955,7 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
                     "execute_plan requires execute=true (or omit `execute` so response=execute_plan implies it)".into(),
                 );
             }
-            _ => {
-                effective_execute = true;
-            }
+            _ => {}
         }
     }
 
@@ -1087,6 +1088,9 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
                     super::unified_entry::run_pipeline(state, Value::Object(pipeline_args)).await?;
                 inner_is_error = inner.is_error.unwrap_or(false);
                 inner_payload = Some(tool_result_payload(&inner));
+                if !inner_is_error {
+                    effective_execute = true;
+                }
                 inner_action = Some("unified_entry::plan_execute");
             }
             _ => {}
@@ -1129,6 +1133,8 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     let existence = read_artifact_existence(&paths);
+    let mut updated_event_texts = event_texts.clone();
+    updated_event_texts.push(event_body.clone());
     let review_packet = derive_review_packet(
         &ReviewPacketInputs {
             mode,
@@ -1137,6 +1143,7 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
             projection_target: None,
             fallback_preview: None,
             execute_requested: effective_execute,
+            review_checkpoint: latest_review_event_checkpoint(&updated_event_texts),
         },
         |p| std::fs::read_to_string(p).ok(),
     );
@@ -1260,6 +1267,7 @@ fn wrap_pipeline_result(
             projection_target: projection.target,
             fallback_preview: fallback_preview.as_deref(),
             execute_requested,
+            review_checkpoint: None,
         };
         derive_review_packet(&inputs, |p| std::fs::read_to_string(p).ok())
     });
@@ -1873,6 +1881,7 @@ struct ReviewPacketInputs<'a> {
     projection_target: Option<&'static str>,
     fallback_preview: Option<&'a str>,
     execute_requested: bool,
+    review_checkpoint: Option<ReviewEventCheckpoint>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1881,6 +1890,7 @@ enum ReviewState {
     IntentDrafting,
     AwaitingIntentApproval,
     AwaitingPlanApproval,
+    AwaitingExecution,
     ExecuteRequested,
 }
 
@@ -1891,18 +1901,55 @@ impl ReviewState {
             Self::IntentDrafting => "intent_drafting",
             Self::AwaitingIntentApproval => "awaiting_intent_approval",
             Self::AwaitingPlanApproval => "awaiting_plan_approval",
+            Self::AwaitingExecution => "awaiting_execution",
             Self::ExecuteRequested => "execute_requested",
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReviewEventCheckpoint {
+    PlanApproved,
+    ExecuteRequested,
+}
+
+fn latest_review_event_checkpoint(event_texts: &[String]) -> Option<ReviewEventCheckpoint> {
+    for text in event_texts.iter().rev() {
+        if text.contains(":decision :execute_plan") {
+            if text.contains(":outcome :dispatched") {
+                return Some(ReviewEventCheckpoint::ExecuteRequested);
+            }
+            continue;
+        }
+        if text.contains(":decision :approve_plan") {
+            if text.contains(":outcome :dispatched") {
+                return Some(ReviewEventCheckpoint::PlanApproved);
+            }
+            continue;
+        }
+        if text.contains(":decision :reject_plan")
+            || text.contains(":decision :ask_question")
+            || text.contains(":decision :approve_intent")
+            || text.contains(":decision :reject_intent")
+        {
+            return None;
+        }
+    }
+    None
 }
 
 fn classify_review_state(
     existence: ArtifactExistence,
     projection_target: Option<&'static str>,
     execute_requested: bool,
+    review_checkpoint: Option<ReviewEventCheckpoint>,
 ) -> (ReviewState, &'static str) {
-    if existence.plan && execute_requested {
+    if existence.plan
+        && (execute_requested || review_checkpoint == Some(ReviewEventCheckpoint::ExecuteRequested))
+    {
         (ReviewState::ExecuteRequested, "plan")
+    } else if existence.plan && review_checkpoint == Some(ReviewEventCheckpoint::PlanApproved) {
+        (ReviewState::AwaitingExecution, "plan")
     } else if existence.plan {
         (ReviewState::AwaitingPlanApproval, "plan")
     } else if existence.intent_alignment {
@@ -1925,6 +1972,11 @@ fn review_state_messages(state: ReviewState) -> (&'static str, &'static str, boo
             "Review plan.lisp, then answer through mission_request respond with approve_plan, reject_plan, or ask_question.",
             "call mission_request respond with response=approve_plan, reject_plan, or ask_question",
             false,
+        ),
+        ReviewState::AwaitingExecution => (
+            "Plan is approved. Dispatch only through mission_request respond with execute_plan and execute=true.",
+            "call mission_request respond with response=execute_plan + execute=true",
+            true,
         ),
         ReviewState::AwaitingIntentApproval => (
             "Review intent-alignment.lisp, then answer through mission_request respond with approve_intent, reject_intent, or ask_question.",
@@ -1958,6 +2010,7 @@ fn allowed_responses_for(mode: RequestMode, state: ReviewState) -> Vec<&'static 
         (RequestMode::TrustedAgent, ReviewState::AwaitingPlanApproval) => {
             vec!["approve_plan", "ask_question"]
         }
+        (_, ReviewState::AwaitingExecution) => vec!["execute_plan", "ask_question"],
         (_, ReviewState::ExecuteRequested) => vec!["observe"],
         _ => vec!["observe"],
     }
@@ -1997,6 +2050,7 @@ where
         inputs.existence,
         inputs.projection_target,
         inputs.execute_requested,
+        inputs.review_checkpoint,
     );
     let (prompt, next_action, execute_allowed) = review_state_messages(state);
     let target_path = artifact_path_for_kind(inputs.paths, artifact_kind);
@@ -2367,8 +2421,25 @@ mod tests {
             intent_alignment: true,
             plan: true,
         };
-        let (state, kind) = classify_review_state(existence, None, false);
+        let (state, kind) = classify_review_state(existence, None, false, None);
         assert_eq!(state, ReviewState::AwaitingPlanApproval);
+        assert_eq!(kind, "plan");
+    }
+
+    #[test]
+    fn classify_review_state_plan_approved_event_yields_awaiting_execution() {
+        let existence = ArtifactExistence {
+            request: true,
+            intent_alignment: true,
+            plan: true,
+        };
+        let (state, kind) = classify_review_state(
+            existence,
+            None,
+            false,
+            Some(ReviewEventCheckpoint::PlanApproved),
+        );
+        assert_eq!(state, ReviewState::AwaitingExecution);
         assert_eq!(kind, "plan");
     }
 
@@ -2379,7 +2450,7 @@ mod tests {
             intent_alignment: false,
             plan: true,
         };
-        let (state, kind) = classify_review_state(existence, None, true);
+        let (state, kind) = classify_review_state(existence, None, true, None);
         assert_eq!(state, ReviewState::ExecuteRequested);
         assert_eq!(kind, "plan");
     }
@@ -2391,7 +2462,7 @@ mod tests {
             intent_alignment: true,
             plan: false,
         };
-        let (state, kind) = classify_review_state(existence, None, false);
+        let (state, kind) = classify_review_state(existence, None, false, None);
         assert_eq!(state, ReviewState::AwaitingIntentApproval);
         assert_eq!(kind, "intent_alignment");
     }
@@ -2403,7 +2474,7 @@ mod tests {
             intent_alignment: false,
             plan: false,
         };
-        let (state, kind) = classify_review_state(existence, Some("plan"), false);
+        let (state, kind) = classify_review_state(existence, Some("plan"), false, None);
         assert_eq!(state, ReviewState::IntentDrafting);
         assert_eq!(kind, "plan");
     }
@@ -2411,7 +2482,7 @@ mod tests {
     #[test]
     fn classify_review_state_default_is_received() {
         let existence = ArtifactExistence::default();
-        let (state, kind) = classify_review_state(existence, None, false);
+        let (state, kind) = classify_review_state(existence, None, false, None);
         assert_eq!(state, ReviewState::Received);
         assert_eq!(kind, "request");
     }
@@ -2433,6 +2504,13 @@ mod tests {
             vec!["approve_plan", "reject_plan", "ask_question"]
         );
         assert_eq!(
+            allowed_responses_for(
+                RequestMode::HumanInteractive,
+                ReviewState::AwaitingExecution
+            ),
+            vec!["execute_plan", "ask_question"]
+        );
+        assert_eq!(
             allowed_responses_for(RequestMode::HumanInteractive, ReviewState::Received),
             vec!["observe"]
         );
@@ -2450,6 +2528,10 @@ mod tests {
         assert_eq!(
             allowed_responses_for(RequestMode::TrustedAgent, ReviewState::AwaitingPlanApproval),
             vec!["approve_plan", "ask_question"]
+        );
+        assert_eq!(
+            allowed_responses_for(RequestMode::TrustedAgent, ReviewState::AwaitingExecution),
+            vec!["execute_plan", "ask_question"]
         );
     }
 
@@ -2514,6 +2596,7 @@ mod tests {
             projection_target: Some("intent_alignment"),
             fallback_preview: Some("(directive-draft)"),
             execute_requested: false,
+            review_checkpoint: None,
         };
         let packet = derive_review_packet(&inputs, no_read);
         assert_eq!(packet["state"], "awaiting_intent_approval");
@@ -2551,6 +2634,7 @@ mod tests {
             projection_target: Some("plan"),
             fallback_preview: Some("(plan :ok)"),
             execute_requested: false,
+            review_checkpoint: None,
         };
         let packet = derive_review_packet(&inputs, no_read);
         assert_eq!(packet["state"], "awaiting_plan_approval");
@@ -2559,6 +2643,69 @@ mod tests {
         assert_eq!(
             packet["next_action"],
             "call mission_request respond with response=approve_plan, reject_plan, or ask_question"
+        );
+    }
+
+    #[test]
+    fn derive_review_packet_plan_approved_allows_execute_plan() {
+        let paths = paths_fixture();
+        let inputs = ReviewPacketInputs {
+            mode: RequestMode::HumanInteractive,
+            paths: &paths,
+            existence: ArtifactExistence {
+                request: true,
+                intent_alignment: true,
+                plan: true,
+            },
+            projection_target: None,
+            fallback_preview: Some("(plan :ok)"),
+            execute_requested: false,
+            review_checkpoint: Some(ReviewEventCheckpoint::PlanApproved),
+        };
+        let packet = derive_review_packet(&inputs, no_read);
+        assert_eq!(packet["state"], "awaiting_execution");
+        assert_eq!(packet["execute_allowed"], true);
+        assert_eq!(
+            packet["next_action"],
+            "call mission_request respond with response=execute_plan + execute=true"
+        );
+        let allowed: Vec<&str> = packet["allowed_responses"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect();
+        assert_eq!(allowed, vec!["execute_plan", "ask_question"]);
+    }
+
+    #[test]
+    fn latest_review_event_checkpoint_uses_latest_relevant_event() {
+        let events = vec![
+            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))"
+                .to_string(),
+            "(lifecycle-event :payload (:decision :ask_question :outcome :recorded))"
+                .to_string(),
+        ];
+        assert_eq!(latest_review_event_checkpoint(&events), None);
+
+        let events = vec![
+            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))"
+                .to_string(),
+        ];
+        assert_eq!(
+            latest_review_event_checkpoint(&events),
+            Some(ReviewEventCheckpoint::PlanApproved)
+        );
+
+        let events = vec![
+            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))"
+                .to_string(),
+            "(lifecycle-event :payload (:decision :execute_plan :outcome :blocked))"
+                .to_string(),
+        ];
+        assert_eq!(
+            latest_review_event_checkpoint(&events),
+            Some(ReviewEventCheckpoint::PlanApproved)
         );
     }
 
@@ -2576,6 +2723,7 @@ mod tests {
             projection_target: None,
             fallback_preview: None,
             execute_requested: true,
+            review_checkpoint: None,
         };
         let packet = derive_review_packet(&inputs, no_read);
         assert_eq!(packet["state"], "execute_requested");
@@ -2601,6 +2749,7 @@ mod tests {
             projection_target: None,
             fallback_preview: None,
             execute_requested: false,
+            review_checkpoint: None,
         };
         let packet = derive_review_packet(&inputs, no_read);
         assert_eq!(packet["state"], "received");
@@ -2618,6 +2767,7 @@ mod tests {
             projection_target: Some("intent_alignment"),
             fallback_preview: Some("(directive-draft)"),
             execute_requested: false,
+            review_checkpoint: None,
         };
         let packet = derive_review_packet(&inputs, no_read);
         assert_eq!(packet["state"], "intent_drafting");
@@ -2642,6 +2792,7 @@ mod tests {
             projection_target: Some("intent_alignment"),
             fallback_preview: Some(&cjk),
             execute_requested: false,
+            review_checkpoint: None,
         };
         let packet = derive_review_packet(&inputs, no_read);
         let preview = packet["artifact_preview"].as_str().expect("preview present");
@@ -2665,6 +2816,7 @@ mod tests {
             projection_target: None,
             fallback_preview: None,
             execute_requested: false,
+            review_checkpoint: None,
         };
         let read = |_p: &Path| Some("(plan :from-disk true)".to_string());
         let packet = derive_review_packet(&inputs, read);
