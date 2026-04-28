@@ -198,7 +198,20 @@
        "caller-supplied model wins over model_profile, but must be a single shell token"
        "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs (default 1800s, clamped 60..7200) — never a fixed 600_000ms — so a delegated long-running task gets the timeout the delegator already declared"
-       "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget plus a small grace (default 120s); only the no-PTY-session branch may reclaim sooner so a missing process can never wedge the slot"])
+       "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget plus a small grace (default 120s); only the no-PTY-session branch may reclaim sooner so a missing process can never wedge the slot"]
+    (prompt-tool-contract autopilot-claudecode-prompt
+      :applies-to [coder researcher ops]
+      :always-shown
+        ["Board Task ID is surfaced in every dispatched prompt so the worker (and any reader of the prompt snapshot) can audit which BoardTask the slot is executing."]
+      :objective-dedupe
+        "Prompt assembly MUST suppress duplicated objective text: when BoardTask.description equals BoardTask.title or starts with the title followed only by blank lines, the assembled prompt uses description alone; distinct title + description still renders both joined by a blank line."
+      :board-self-close
+        (:mode conditional
+         :when-tools-present "If mission_board_update and mission_board_note_add MCP tools are attached to the slot, the worker SHOULD call mission_board_update(status=\"done\") and mission_board_note_add(noteType=\"summary\") when the task completes."
+         :when-tools-absent "If those board tools are not attached to the slot, the worker MUST instead return a concise final completion summary; Autopilot/orchestrator remains responsible for closing the BoardTask."
+         :rationale "ClaudeCode slots may run with reduced MCP surfaces; an unconditional must-call instruction makes such slots unable to honor the prompt and leaks orchestrator state into the worker contract.")
+      :non-prompt-guidance
+        ["Decision Engine escalation suffix (mission_question_create) and ops-task focus suffix remain behaviorally intact and are appended after the deduplicated base prompt."]))
 
   (implementation-map
     (surface mission_request
@@ -244,7 +257,7 @@
              "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-mcp/src/tools/compute/compute_slot.rs"
              "crates/missiond-mcp/src/tools/compute/task_delegate.rs"]
-      :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. Autopilot pty.send budget and smart-watchdog idle-recovery threshold are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs in autopilot.rs."))
+      :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. Autopilot pty.send budget and smart-watchdog idle-recovery threshold are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs in autopilot.rs. Autopilot prompt assembly projects the V3 prompt-tool-contract via build_base_prompt (objective dedupe) and append_board_task_id_suffix (conditional board self-close); the prompt no longer hardcodes mission_board_update / mission_board_note_add as unconditional must-calls."))
 
   (compression-contract
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."

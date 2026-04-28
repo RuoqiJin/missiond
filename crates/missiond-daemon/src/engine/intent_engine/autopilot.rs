@@ -76,6 +76,61 @@ fn idle_watchdog_threshold_secs(timeout_secs: Option<i64>) -> i64 {
     derive_pty_timeout_secs(timeout_secs).saturating_add(WATCHDOG_GRACE_SECS)
 }
 
+/// Build the base prompt body shown to a delegated worker.
+///
+/// `mission_task_delegate` stores the user objective as `BoardTask.title` and
+/// also seeds `BoardTask.description` with that same objective, so a naive
+/// `"{title}\n\n{description}"` render duplicates the goal. This helper
+/// projects the V3 `prompt-tool-contract` `objective-dedupe` rule:
+///
+///   * description empty                     → title alone
+///   * description == title                  → description alone
+///   * description starts with title, then
+///     only blank lines / whitespace before
+///     the next non-empty line               → description alone
+///   * otherwise (distinct description)      → "{title}\n\n{description}"
+///
+/// Pure helper so unit tests can pin the dedupe policy without an `AppState`.
+fn build_base_prompt(title: &str, description: &str) -> String {
+    if description.is_empty() {
+        return title.to_string();
+    }
+    if let Some(rest) = description.strip_prefix(title) {
+        // Dedupe only when the description already begins with the exact
+        // title token at a word boundary — i.e. the title is immediately
+        // followed by whitespace or end-of-string. This prevents a title
+        // like "Fix" from being treated as a prefix of "Fixing CORS" while
+        // still collapsing "Title", "Title\n\n", "Title\n\nbody", and
+        // "Title <space> body" into the description as-is. Title is by
+        // definition already inside such descriptions, so re-prepending it
+        // would just duplicate the objective text.
+        if rest.is_empty() || rest.starts_with(|c: char| c.is_whitespace()) {
+            return description.to_string();
+        }
+    }
+    format!("{}\n\n{}", title, description)
+}
+
+/// Append the V3 `prompt-tool-contract` board-self-close suffix.
+///
+/// The board task id is always surfaced for audit. The self-close instruction
+/// is conditional: if `mission_board_update` / `mission_board_note_add` are
+/// attached to the slot, the worker is asked to call them; if they are not,
+/// the worker is told to return a concise final summary and Autopilot /
+/// orchestrator stays responsible for closing the BoardTask. The unconditional
+/// "你必须调用" wording is replaced so a slot without board MCP tools is no
+/// longer asked to call tools it cannot see.
+fn append_board_task_id_suffix(prompt: &str, task_id: &str) -> String {
+    format!(
+        "{}\n\n---\n📋 **Board Task ID**: `{}`\n\
+        任务完成时：若当前工位已挂载 `mission_board_update` / `mission_board_note_add`，\
+        请调用 `mission_board_update(id=\"{}\", status=\"done\")` 关闭任务，\
+        并用 `mission_board_note_add(taskId=\"{}\", content=\"...\", noteType=\"summary\")` 写入诊断摘要。\
+        若上述 board MCP 工具未挂载到本工位，请直接返回一段简明的最终完成摘要，由 Autopilot/orchestrator 负责关闭此 BoardTask。",
+        prompt, task_id, task_id, task_id
+    )
+}
+
 /// Notify Jarvis conversation when an async task fails.
 /// Extracts conversation_id from task metadata, writes error message, and emits event.
 async fn notify_jarvis_failure(
@@ -490,16 +545,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
 
         // ===== Normal (non-flow) task handling =====
 
-        // Build prompt: template > "title\n\ndescription"
+        // Build prompt: template > deduped(title, description). The dedupe
+        // helper projects V3 prompt-tool-contract.objective-dedupe so a
+        // BoardTask whose description was seeded from the title (the
+        // mission_task_delegate path) does not show the same objective twice.
         let prompt = if let Some(ref tmpl) = task.prompt_template {
             tmpl.clone()
         } else {
-            let mut p = task.title.clone();
-            if !task.description.is_empty() {
-                p.push_str("\n\n");
-                p.push_str(&task.description);
-            }
-            p
+            build_base_prompt(&task.title, &task.description)
         };
 
         // Unified context injection via Context Prefetch Pipeline
@@ -685,14 +738,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
             full_prompt
         };
 
-        // Inject task ID + self-close instruction so slot can close the task itself
-        // This makes the system resilient to daemon restarts during send()
-        let full_prompt = format!(
-            "{}\n\n---\n📋 **Board Task ID**: `{}`\n\
-            任务完成后，你必须调用 `mission_board_update(id=\"{}\", status=\"done\")` 关闭此任务，\
-            并用 `mission_board_note_add(taskId=\"{}\", content=\"...\", noteType=\"summary\")` 写入诊断摘要。",
-            full_prompt, task.id, task.id, task.id
-        );
+        // Inject task ID + conditional self-close instruction so slot can
+        // close the task itself when board MCP tools are attached, while
+        // remaining valid for slots that lack those tools (in which case the
+        // worker returns a summary and Autopilot/orchestrator closes the
+        // BoardTask). Projects V3 prompt-tool-contract.board-self-close.
+        let full_prompt = append_board_task_id_suffix(&full_prompt, task.id.as_str());
 
         // Cache cited KB IDs for confidence feedback loop after task completion
         if !cited_kb_ids.is_empty() {
@@ -1905,6 +1956,125 @@ mod tests {
         assert!(
             WATCHDOG_MISSING_SESSION_PROBE_SECS
                 < idle_watchdog_threshold_secs(Some(PTY_TIMEOUT_MAX_SECS))
+        );
+    }
+
+    // ── Prompt-tool-contract: objective dedupe ──────────────────────────
+
+    #[test]
+    fn build_base_prompt_empty_description_returns_title_alone() {
+        // mission_task_delegate may store an empty description for a
+        // single-line objective; the prompt must still surface the title.
+        let p = build_base_prompt("Refactor autopilot prompt", "");
+        assert_eq!(p, "Refactor autopilot prompt");
+    }
+
+    #[test]
+    fn build_base_prompt_description_equal_to_title_drops_duplicate() {
+        // Worst case from the wave33 brief: title and description carry
+        // exactly the same text, so the previous `"{title}\n\n{desc}"` shape
+        // showed the objective twice.
+        let title = "Make the API idempotent";
+        let p = build_base_prompt(title, title);
+        assert_eq!(p, title);
+        assert_eq!(p.matches(title).count(), 1);
+    }
+
+    #[test]
+    fn build_base_prompt_description_starts_with_title_then_blank_lines_only() {
+        // task_delegate's `let mut description = objective.to_string()` path
+        // can emit `"{objective}\n\n"` (title + trailing blank) — the dedupe
+        // must collapse that to the description (which already starts with
+        // the title) without growing it back.
+        let title = "Fix CORS preflight";
+        let description = "Fix CORS preflight\n\n";
+        let p = build_base_prompt(title, description);
+        assert_eq!(p, description);
+        assert_eq!(p.matches(title).count(), 1);
+    }
+
+    #[test]
+    fn build_base_prompt_distinct_description_keeps_both() {
+        // Distinct title + description must still render both, joined by a
+        // blank line — this is the original behaviour for hand-authored
+        // BoardTasks that carry real detail in the description body.
+        let title = "Stabilize watchdog";
+        let description = "Investigate the 120s floor regression and add a regression test.";
+        let p = build_base_prompt(title, description);
+        assert_eq!(
+            p,
+            "Stabilize watchdog\n\n\
+             Investigate the 120s floor regression and add a regression test."
+        );
+    }
+
+    #[test]
+    fn build_base_prompt_title_prefix_with_extra_body_keeps_description_intact() {
+        // Description starts with the title but then has real body content
+        // (after blank lines). The dedupe rule keeps the description as-is
+        // so the body is preserved without re-prepending the title.
+        let title = "Stabilize watchdog";
+        let description = "Stabilize watchdog\n\nInvestigate the 120s floor regression.";
+        let p = build_base_prompt(title, description);
+        assert_eq!(p, description);
+        assert_eq!(p.matches("Stabilize watchdog").count(), 1);
+    }
+
+    // ── Prompt-tool-contract: conditional board-tool self-close ─────────
+
+    #[test]
+    fn append_board_task_id_suffix_surfaces_board_task_id() {
+        // The board task id MUST always be visible to the worker for audit,
+        // independent of whether board MCP tools are attached.
+        let suffix = append_board_task_id_suffix("BODY", "task-123");
+        assert!(
+            suffix.contains("Board Task ID"),
+            "missing Board Task ID label: {suffix}"
+        );
+        assert!(
+            suffix.contains("`task-123`"),
+            "task id not surfaced: {suffix}"
+        );
+        assert!(suffix.starts_with("BODY\n\n---\n"));
+    }
+
+    #[test]
+    fn append_board_task_id_suffix_is_conditional_not_unconditional() {
+        // Regression guard: the previous wording said the worker MUST call
+        // mission_board_update / mission_board_note_add, which broke slots
+        // without those tools attached. New wording must be conditional and
+        // must explicitly allow returning a final summary instead.
+        let suffix = append_board_task_id_suffix("BODY", "task-123");
+
+        // Old unconditional must-call wording is gone.
+        assert!(
+            !suffix.contains("你必须调用"),
+            "unconditional `你必须调用` wording leaked back in: {suffix}"
+        );
+
+        // New wording is conditional on tool availability.
+        assert!(
+            suffix.contains("若当前工位已挂载"),
+            "missing conditional clause about tool attachment: {suffix}"
+        );
+        // Both board MCP tools are still mentioned by name so a slot that
+        // *does* have them knows what to call.
+        assert!(suffix.contains("mission_board_update"));
+        assert!(suffix.contains("mission_board_note_add"));
+
+        // Tools-absent fallback is explicit: return a final summary, and
+        // Autopilot/orchestrator owns closing the BoardTask.
+        assert!(
+            suffix.contains("若上述 board MCP 工具未挂载到本工位"),
+            "missing explicit tools-absent fallback: {suffix}"
+        );
+        assert!(
+            suffix.contains("最终完成摘要"),
+            "missing instruction to return a final summary: {suffix}"
+        );
+        assert!(
+            suffix.contains("Autopilot/orchestrator"),
+            "missing handover-to-orchestrator wording: {suffix}"
         );
     }
 }
