@@ -12,15 +12,15 @@
 //   3. create the .missiond/tasks/<wave>/reports/ directory plus a
 //      deterministic report skeleton stub per productive node so the worker
 //      starts with a valid (report ...) draft to fill in;
-//   4. emit bootstrap shared-memory + session-trace entries (an
-//      observation-kind shared-memory entry + a `start` and `read` trace
-//      pair) so the preamble-read audit trail is created BEFORE the first
-//      worker boots, not retroactively.
+//   4. emit bootstrap lifecycle events alongside legacy shared-memory +
+//      session-trace projection entries (an observation-kind shared-memory
+//      entry + a `start` and `read` trace pair) so the preamble-read audit
+//      trail is created BEFORE the first worker boots, not retroactively.
 //
 // The CLI NEVER shells out — manifest reader, manifest validator, and brief
 // renderer all reach the prep script via direct named imports. The only
 // side effects are filesystem writes scoped to the manifest's wave (briefs,
-// preamble, report skeletons, ledger appends).
+// preamble, report skeletons, lifecycle + projection ledger appends).
 //
 // CLI:
 //   node scripts/prepare-task-runner-wave.mjs --manifest <manifest.lisp>
@@ -68,13 +68,17 @@ import {
   FORBIDDEN_ID_SUBSTRINGS,
 } from './render-wave-briefs.mjs';
 
-import { buildLifecycleEventRecord } from './task-runner-append-event.mjs';
+import {
+  appendLifecycleEvent,
+  buildLifecycleEventRecord,
+} from './task-runner-append-event.mjs';
 
 import {
   projectLifecycleEvents,
   renderSharedMemoryEntry,
   renderSessionTraceEvent,
 } from './project-task-lifecycle-ledger.mjs';
+import { validateLifecycleEventFiles } from './check-task-lifecycle-events.mjs';
 
 // wave29-07 cross-layer smoke (layer C): the wave29-07 fixture parses the
 // appended session-trace via the shared Lisp reader so the structured
@@ -99,9 +103,9 @@ Read-only-plus-file-generation preparation CLI for task-runner waves.
 Validates the manifest, renders thin briefs + shared preamble (delegating to
 scripts/render-wave-briefs.mjs renderManifest in-process — never shells out),
 prepares the reports/ directory + per-task report skeletons, and appends
-bootstrap shared-memory + session-trace entries (observation + start + read)
-so the wave29-shared-preamble-read audit expectation is recorded BEFORE the
-first worker boots.
+bootstrap lifecycle events plus shared-memory + session-trace projections
+(observation + start + read) so the wave29-shared-preamble-read audit
+expectation is recorded BEFORE the first worker boots.
 
 --dry-run validates + plans but writes NOTHING. --force overwrites existing
 brief / preamble / skeleton files (default: skip when present). --json emits
@@ -274,6 +278,13 @@ export function prepareWave({ manifestPath, cwd, dryRun, force, nowIso }) {
     wave,
     'session-trace.lisp',
   );
+  const lifecyclePath = path.resolve(
+    cwd,
+    '.missiond',
+    'tasks',
+    wave,
+    'task-lifecycle-events.lisp',
+  );
   const sharedPreambleRel = manifest.shared_preamble_path;
 
   // Plan-only path: validate + plan; no fs side effects.
@@ -288,6 +299,8 @@ export function prepareWave({ manifestPath, cwd, dryRun, force, nowIso }) {
       skeletonsWritten: 0,
       skeletonsSkipped: 0,
       skeletonsPlan: skeletonPlan.map((s) => path.relative(cwd, s.path)),
+      lifecyclePath: path.relative(cwd, lifecyclePath),
+      lifecycleEventsAppended: 0,
       sharedMemoryPath: path.relative(cwd, sharedMemoryPath),
       sessionTracePath: path.relative(cwd, sessionTracePath),
       sharedPreamblePath: sharedPreambleRel,
@@ -353,6 +366,11 @@ export function prepareWave({ manifestPath, cwd, dryRun, force, nowIso }) {
     startSeq: traceSeq,
     wave,
   });
+  const lifecycleEventsAppended = appendBootstrapLifecycleEvents({
+    lifecyclePath,
+    events: bootstrapProjection.lifecycleEvents,
+    wave,
+  });
 
   return {
     wave,
@@ -371,6 +389,8 @@ export function prepareWave({ manifestPath, cwd, dryRun, force, nowIso }) {
     skeletonsSkipped,
     skeletonsOverwritten,
     skeletonsPlan: skeletonPlan.map((s) => path.relative(cwd, s.path)),
+    lifecyclePath: path.relative(cwd, lifecyclePath),
+    lifecycleEventsAppended,
     sharedMemoryPath: path.relative(cwd, sharedMemoryPath),
     sessionTracePath: path.relative(cwd, sessionTracePath),
     sharedPreamblePath: sharedPreambleRel,
@@ -414,10 +434,9 @@ function writeSkeletonIfAllowed(taskId, outputAbs, force) {
 }
 
 // Build lifecycle facts for the bootstrap operation and project them back to
-// the legacy ledgers. The lifecycle event objects are in-memory here so the
-// CLI preserves its historical side effects: it still writes only briefs,
-// report skeletons, shared-memory, and session-trace unless a future caller
-// explicitly invokes task-runner-append-event.mjs for a lifecycle ledger.
+// the legacy ledgers. The lifecycle event log is now seeded alongside the
+// legacy projections so MissionD has an event-sourced truth to read before
+// the first worker starts.
 function projectBootstrapLifecycleEvents({
   wave,
   ordinal,
@@ -458,7 +477,33 @@ function projectBootstrapLifecycleEvents({
       'Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads.',
     legacyTraceId: bootstrapReadId,
   });
-  return projectLifecycleEvents([startEvent, readEvent], { wave });
+  const lifecycleEvents = [startEvent, readEvent];
+  return {
+    lifecycleEvents,
+    ...projectLifecycleEvents(lifecycleEvents, { wave }),
+  };
+}
+
+function appendBootstrapLifecycleEvents({ lifecyclePath, events, wave }) {
+  let appended = 0;
+  for (const event of events) {
+    appendLifecycleEvent({
+      ledgerPath: lifecyclePath,
+      task: event.task,
+      eventKind: event.event_kind,
+      actorRole: event.actor_role,
+      commitRole: event.commit_role,
+      touched: event.touched,
+      summary: event.summary,
+      id: event.id,
+      at: event.at,
+      wave,
+      legacyMemoryId: event.legacy_memory_id,
+      legacyTraceId: event.legacy_trace_id,
+    });
+    appended += 1;
+  }
+  return appended;
 }
 
 // Append the projected bootstrap observation entry to the wave's shared-memory
@@ -559,6 +604,7 @@ function printJsonResult(result, { manifestPath, dryRun }) {
     wave: result.wave,
     briefs_written: result.briefsWritten,
     skeletons_written: result.skeletonsWritten,
+    lifecycle_events_appended: result.lifecycleEventsAppended,
     bootstrap_emitted: result.bootstrapEmitted,
     dry_run: dryRun,
   };
@@ -624,6 +670,9 @@ async function runFixtures() {
         if (result.dryRun !== true) throw new Error('dryRun flag should round-trip on result');
         if (result.briefsWritten !== 0) throw new Error('dry-run briefsWritten should be 0');
         if (result.skeletonsWritten !== 0) throw new Error('dry-run skeletonsWritten should be 0');
+        if (result.lifecycleEventsAppended !== 0) {
+          throw new Error('dry-run lifecycleEventsAppended should be 0');
+        }
         if (result.bootstrapEmitted !== false) throw new Error('dry-run bootstrap should not emit');
       } finally {
         cleanupTmpRepo(env);
@@ -655,6 +704,21 @@ async function runFixtures() {
         if (result.bootstrapEntryIds.length !== 3) {
           throw new Error(
             `expected 3 bootstrap entry ids (memory + start + read), got ${result.bootstrapEntryIds.length}`,
+          );
+        }
+        if (result.lifecycleEventsAppended !== 2) {
+          throw new Error(
+            `expected 2 lifecycle bootstrap events, got ${result.lifecycleEventsAppended}`,
+          );
+        }
+        const lifecycleAbs = path.resolve(
+          env.cwd,
+          '.missiond/tasks/wave99/task-lifecycle-events.lisp',
+        );
+        const lifecycleCheck = validateLifecycleEventFiles([lifecycleAbs]);
+        if (!lifecycleCheck.ok || lifecycleCheck.events !== 2) {
+          throw new Error(
+            `lifecycle bootstrap ledger should validate with 2 events: ${JSON.stringify(lifecycleCheck)}`,
           );
         }
         // The shared-preamble file MUST exist on disk after the run.

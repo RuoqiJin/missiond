@@ -14,7 +14,7 @@
 
   (inputs
     (:manifest "task-runner-manifest v1/v2; required")
-    (:lifecycle "task-lifecycle-event v1 ledger; optional")
+    (:lifecycle "task-lifecycle-event v1 ledger; optional; defaults to .missiond/tasks/<wave>/task-lifecycle-events.lisp when present")
     (:reports ".missiond/tasks/<wave>/reports/<task>.report.lisp finalized reports; read by convention")
     (:receipts "verification-receipt v1 file; optional"))
 
@@ -30,7 +30,7 @@
     "Soft refs are projected for context but never appear in pending_hard_deps and never block dispatch.")
 
   (output-json
-    "{ ok, schema, manifest_path, wave, counts, next_actions[], dispatchable[], needs_finalization[], running[], blocked[], complete[], ready_queue_order[], tasks[] }"
+    "{ ok, schema, manifest_path, lifecycle_path, receipts_path, wave, counts, next_actions[], dispatchable[], needs_finalization[], running[], blocked[], complete[], ready_queue_order[], tasks[] }"
     "Each task row carries task_id, state, hard_deps, soft_refs, pending_hard_deps, dispatch_group, verification_tier, report_path, final_commit_hash, agent_commit_hash, latest_parent_hotfix_hash, lifecycle_event_count, receipt_count, reusable_receipt_count.")
 
   (next-actions

@@ -37,6 +37,9 @@ verification receipts into a deterministic orchestration state:
   complete | dispatchable | blocked | running | needs_finalization
 
 Read-only by construction: no git, no spawn, no network, no LLM, no writes.
+
+When --lifecycle is omitted, the projector reads the conventional
+.missiond/tasks/<wave>/task-lifecycle-events.lisp path if it exists.
 `;
 
 export const WAVE_STATE_SCHEMA = 'missiond.task-runner-wave-state.v0';
@@ -105,12 +108,19 @@ export function projectWaveStateFromFiles({
     throw new Error(`manifest failed validation: ${errors.join('; ')}`);
   }
 
-  const events = readOptionalLifecycleEvents(lifecyclePath, repo);
+  const effectiveLifecyclePath = lifecyclePath ?? defaultLifecyclePath(manifest.wave);
+  const lifecycleAbs = path.resolve(repo, effectiveLifecyclePath);
+  const lifecycleUsedPath = fs.existsSync(lifecycleAbs) ? toRepoRelative(lifecycleAbs, repo) : null;
+  const receiptsAbs = receiptsPath ? path.resolve(repo, receiptsPath) : null;
+  const receiptsUsedPath = receiptsAbs && fs.existsSync(receiptsAbs) ? toRepoRelative(receiptsAbs, repo) : null;
+  const events = readOptionalLifecycleEvents(effectiveLifecyclePath, repo);
   const receipts = readOptionalReceipts(receiptsPath, repo);
 
   return projectWaveState({
     manifest,
     manifestPath: toRepoRelative(manifestAbs, repo),
+    lifecyclePath: lifecycleUsedPath,
+    receiptsPath: receiptsUsedPath,
     repoRoot: repo,
     events,
     receipts,
@@ -120,6 +130,8 @@ export function projectWaveStateFromFiles({
 export function projectWaveState({
   manifest,
   manifestPath = '<memory>',
+  lifecyclePath = null,
+  receiptsPath = null,
   repoRoot = process.cwd(),
   events = [],
   receipts = [],
@@ -227,6 +239,8 @@ export function projectWaveState({
     ok: true,
     schema: WAVE_STATE_SCHEMA,
     manifest_path: manifestPath,
+    lifecycle_path: lifecyclePath,
+    receipts_path: receiptsPath,
     wave: manifest.wave,
     counts,
     next_actions: buildNextActions(tasks, manifest.wave),
@@ -318,6 +332,10 @@ function loadReportForTask({ taskId, reportPath, repoRoot, reportLoader }) {
 
 function reportPathFor(wave, taskId) {
   return path.posix.join('.missiond', 'tasks', wave, 'reports', `${taskId}.report.lisp`);
+}
+
+function defaultLifecyclePath(wave) {
+  return path.posix.join('.missiond', 'tasks', wave, 'task-lifecycle-events.lisp');
 }
 
 function finalReportHash(report) {
@@ -529,7 +547,58 @@ function runFixtures() {
       'next_actions should explain blocked child',
     );
 
-    return { ok: true, cases: 2 };
+    const manifestFile = path.join(tmp, '.missiond/tasks/wave99/manifest.lisp');
+    const lifecycleFile = path.join(tmp, '.missiond/tasks/wave99/task-lifecycle-events.lisp');
+    fs.mkdirSync(path.dirname(manifestFile), { recursive: true });
+    fs.writeFileSync(manifestFile, `(task-runner-manifest wave99-state
+  :schema "missiond.task-runner-manifest.v2"
+  :wave wave99
+  :brief_mode thin
+  :shared_preamble_path ".missiond/claudecode/wave99-shared-preamble.md"
+  :productive_only true
+  :overlap_policy reject
+  (node :task_id wave99-01-root
+        :depends_on []
+        :hard_deps []
+        :soft_refs []
+        :verification_tier local
+        :dispatch_group A
+        :estimated_minutes 10
+        :heartbeat_minutes 5
+        :write_scope ["scripts/root.mjs"]))
+`);
+    fs.writeFileSync(lifecycleFile, `(task-lifecycle-event-log wave99-lifecycle-events
+  :schema "missiond.task-lifecycle-event.v1"
+  :wave wave99
+  :created-at "2026-04-28T00:00:00Z"
+  :sequence 1
+
+  (lifecycle-event
+    :id wave99-01-root-worker-commit-001
+    :task wave99-01-root
+    :actor_role worker
+    :event_kind worker_commit
+    :commit_role worker
+    :seq 1
+    :at "2026-04-28T00:00:00Z"
+    :touched ["scripts/root.mjs"]
+    :summary "worker committed without finalized report"
+    :commit_hash abc1234))
+`);
+    const autoLifecycle = projectWaveStateFromFiles({
+      manifestPath: manifestFile,
+      repoRoot: tmp,
+    });
+    assert(
+      autoLifecycle.lifecycle_path === '.missiond/tasks/wave99/task-lifecycle-events.lisp',
+      'default lifecycle path should be auto-detected',
+    );
+    assert(
+      autoLifecycle.needs_finalization.includes('wave99-01-root'),
+      'auto-detected worker_commit should require finalization',
+    );
+
+    return { ok: true, cases: 3 };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

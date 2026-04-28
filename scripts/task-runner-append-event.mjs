@@ -133,6 +133,8 @@ export function appendLifecycleEvent({
   id = null,
   at = isoNow(),
   wave = null,
+  legacyMemoryId = null,
+  legacyTraceId = null,
   lockTimeoutMs = 5000,
   staleLockMs = 30000,
 }) {
@@ -176,6 +178,8 @@ export function appendLifecycleEvent({
     if (commitHash) event.commit_hash = commitHash;
     if (reportPath) event.report_path = reportPath;
     if (receiptPath) event.receipt_path = receiptPath;
+    if (legacyMemoryId) event.legacy_memory_id = legacyMemoryId;
+    if (legacyTraceId) event.legacy_trace_id = legacyTraceId;
 
     const original = fs.readFileSync(ledgerPath, 'utf8');
     const withSequence = original.replace(/(:sequence\s+)\d+\b/, `$1${seq}`);
