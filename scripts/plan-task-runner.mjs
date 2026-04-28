@@ -416,7 +416,6 @@ export function planFromManifestObject(manifest, opts = {}) {
     planFields.ready_queue = computeReadyQueue({
       sortedNodes,
       idToNode,
-      dependents,
       batches,
       longestFrom,
       manifest,
@@ -447,7 +446,6 @@ export function planFromManifestObject(manifest, opts = {}) {
 function computeReadyQueue({
   sortedNodes,
   idToNode,
-  dependents,
   batches,
   longestFrom,
   manifest,
