@@ -22,7 +22,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          an id. approve_intent delegates to \
          mission_directive(action=approve), creates a hidden BoardTask anchor when no board_task_id \
          is supplied, then on successful approval immediately runs unified_entry \
-         plan-authoring and projects request-local plan.lisp for the same request; approve_plan \
+         plan-authoring and projects request-local plan.lisp for the same request (dry_run plan-authoring \
+         includes executable :target/:objective hints so execute_plan can derive routing from Lisp); approve_plan \
          delegates to mission_plan(action=approve), and when only request-local plan.lisp exists it first \
          materializes that Lisp into a draft Plan row, reusing plan.lisp's BoardTask anchor when present \
          or creating a hidden anchor only if needed; approve_plan never sets execute=true; execute_plan requires \
@@ -107,7 +108,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "target_project": {
                     "type": "string",
-                    "description": "[start|status|respond] fallback project id used when project/cwd are omitted; also forwarded to mission_plan"
+                    "description": "[start|status|respond] fallback project id used when project/cwd are omitted; also forwarded to mission_plan and rendered into dry-run PLAN.lisp as :target-project"
                 },
                 "write_request_file": {
                     "type": "boolean",
@@ -185,15 +186,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "dispatch_strategy": {
                     "type": "string",
-                    "description": "[advance] forwarded to mission_plan compile/execute"
+                    "description": "[advance|respond approve_intent/execute_plan] forwarded to mission_plan compile/execute; dry-run plan compile renders it as :dispatch-strategy"
                 },
                 "parallelism": {
                     "type": "string",
-                    "description": "[advance] forwarded to mission_plan compile"
+                    "description": "[advance|respond approve_intent] forwarded to mission_plan compile; dry-run plan compile can derive :dispatch-strategy from it"
                 },
                 "target": {
                     "type": "string",
-                    "description": "[advance execute] forwarded to mission_plan execute"
+                    "description": "[advance|respond approve_intent/execute_plan] forwarded to mission_plan compile/execute; dry-run plan compile renders it as :target, defaulting to mission_task_delegate when omitted"
                 },
                 "execute_mode": {
                     "type": "string",

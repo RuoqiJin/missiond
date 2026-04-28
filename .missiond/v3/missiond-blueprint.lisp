@@ -55,6 +55,11 @@
       :ssot true
       :writer plan-author
       :required [:request_id :intent :execution :nodes :gates :approval]
+      :dry-run-scaffold
+        (:required-hints [:target :objective :nodes]
+         :default-target mission_task_delegate
+         :rule "compiler_mode=dry_run must still emit executable routing hints in Lisp; plan-runner may derive target/objective from plan.lisp without caller args"
+         :non-goal "dry_run does not bypass intent/plan review and does not dispatch before execute_plan")
       :invariant "plan.intent preserves enough alignment data for trusted-agent audit")
 
     (artifact workflow
@@ -171,13 +176,14 @@
       :action respond
       :inputs [:request_id :response :decision :note :board_task_id :execute
                :directive_id :approved_directive_id :directive_version
-               :plan_id :approved_plan_id :project :cwd :target_project]
+               :plan_id :approved_plan_id :project :cwd :target_project
+               :target :dispatch_strategy :parallelism :objective :flow_id]
       :decisions [approve_intent reject_intent ask_question
                   approve_plan reject_plan execute_plan]
       :decision-routing
         ((rule approve-intent
            :requires [persisted-or-explicit-directive-ref]
-           :route "delegate to mission_directive(action=approve, directive_id, version) using the existing approval gate; when approval succeeds, ensure a hidden BoardTask anchor if board_task_id was not supplied, then immediately continue through unified_entry s4 plan-authoring and project the resulting sexp into the same request-local plan.lisp"
+           :route "delegate to mission_directive(action=approve, directive_id, version) using the existing approval gate; when approval succeeds, ensure a hidden BoardTask anchor if board_task_id was not supplied, then immediately continue through unified_entry s4 plan-authoring and project the resulting sexp into the same request-local plan.lisp; dry_run plan-authoring must include Lisp-native execution hints (:target, :objective, :nodes) so later execute_plan can route from plan.lisp rather than caller-supplied escape hatches"
            :default-board-task "board_task_id if supplied; otherwise create a hidden request-local BoardTask anchor so callers do not need internal board ids"
            :next_action "review request-local plan.lisp from the returned review_packet")
          (rule reject-intent
@@ -373,7 +379,8 @@
       :implements [plan plan-review-gate plan-runner evidence-collector]
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
-             "crates/missiond-mcp/src/tools/knowledge/plan.rs"])
+             "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters.")
 
     (surface mission_workflow
       :status "compat"

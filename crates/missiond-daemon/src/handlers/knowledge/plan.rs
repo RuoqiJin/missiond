@@ -279,6 +279,132 @@ async fn maybe_write_plan_artifact(
     outcome.splice_into(payload);
 }
 
+struct DryRunPlanSexpInput<'a> {
+    directive_id: Option<&'a str>,
+    board_task_id: Option<&'a str>,
+    target: &'static str,
+    dispatch_strategy: Option<&'static str>,
+    target_project: Option<&'a str>,
+    requested_cwd: Option<&'a str>,
+    flow_id: Option<&'a str>,
+    objective: &'a str,
+    acceptance: Vec<String>,
+    constraints: Vec<String>,
+}
+
+fn arg_nonblank_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
+    args.get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+}
+
+fn resolve_dry_run_plan_target(args: &Value) -> std::result::Result<&'static str, ToolResult> {
+    let flow_id_present = arg_nonblank_str(args, "flow_id").is_some();
+    let Some(raw) = arg_nonblank_str(args, "target") else {
+        return Ok("mission_task_delegate");
+    };
+    normalize_target(raw, flow_id_present).ok_or_else(|| {
+        ToolResult::structured_error(
+            ToolError::new(
+                error_codes::INVALID_PARAM,
+                format!("compile dry_run target `{}` cannot be rendered as an executable PLAN.lisp hint", raw),
+            )
+            .with_suggestion(
+                "supported dry-run plan targets: mission_execution | mission_task_delegate | mission_flow_run with flow_id",
+            ),
+        )
+    })
+}
+
+fn resolve_dry_run_dispatch_strategy(args: &Value) -> Option<&'static str> {
+    arg_nonblank_str(args, "dispatch_strategy")
+        .and_then(canonicalize_strategy)
+        .or_else(|| arg_nonblank_str(args, "parallelism").and_then(canonicalize_strategy))
+}
+
+fn derive_dry_run_plan_objective(
+    args: &Value,
+    directive_sexp: Option<&str>,
+    board_task_id: Option<&str>,
+) -> String {
+    if let Some(o) = arg_nonblank_str(args, "objective") {
+        return truncate_chars(o, DERIVED_OBJECTIVE_MAX);
+    }
+    if let Some(sexp) = directive_sexp {
+        for wanted in ["objective", "goal", "utterance", "summary"] {
+            if let Some((_, value)) = scan_keyword_pairs(sexp)
+                .into_iter()
+                .find(|(key, value)| key.eq_ignore_ascii_case(wanted) && !value.trim().is_empty())
+            {
+                let value = value.trim().trim_start_matches(':');
+                if !value.trim().is_empty() {
+                    return truncate_chars(value.trim(), DERIVED_OBJECTIVE_MAX);
+                }
+            }
+        }
+    }
+    if let Some(task_id) = board_task_id.map(str::trim).filter(|s| !s.is_empty()) {
+        return format!("Execute MissionD request plan anchored to board_task {}", task_id);
+    }
+    "Execute MissionD request plan".to_string()
+}
+
+fn push_lisp_string_field(out: &mut String, key: &str, value: &str) {
+    out.push_str("  :");
+    out.push_str(key);
+    out.push_str(" \"");
+    out.push_str(&lisp_escape_string(value));
+    out.push_str("\"\n");
+}
+
+fn render_dry_run_plan_sexp(input: DryRunPlanSexpInput<'_>) -> String {
+    let mut out = String::from("(plan-draft\n");
+    push_lisp_string_field(&mut out, "directive_id", input.directive_id.unwrap_or(""));
+    push_lisp_string_field(&mut out, "board_task_id", input.board_task_id.unwrap_or(""));
+    out.push_str("  :status :awaiting-compiler-actor\n");
+    out.push_str("  :execution-readiness :dry-run-executable-scaffold\n");
+    push_lisp_string_field(&mut out, "target", input.target);
+    if let Some(strategy) = input.dispatch_strategy {
+        push_lisp_string_field(&mut out, "dispatch-strategy", strategy);
+    }
+    if let Some(tp) = input.target_project.map(str::trim).filter(|s| !s.is_empty()) {
+        push_lisp_string_field(&mut out, "target-project", tp);
+    }
+    if let Some(cwd) = input.requested_cwd.map(str::trim).filter(|s| !s.is_empty()) {
+        push_lisp_string_field(&mut out, "requested-cwd", cwd);
+    }
+    if let Some(flow_id) = input.flow_id.map(str::trim).filter(|s| !s.is_empty()) {
+        push_lisp_string_field(&mut out, "flow-id", flow_id);
+    }
+    push_lisp_string_field(&mut out, "objective", input.objective);
+    if !input.acceptance.is_empty() {
+        out.push_str("  :acceptance ");
+        out.push_str(&render_lisp_string_list(&input.acceptance));
+        out.push('\n');
+    }
+    if !input.constraints.is_empty() {
+        out.push_str("  :constraints ");
+        out.push_str(&render_lisp_string_list(&input.constraints));
+        out.push('\n');
+    }
+    out.push_str("  :nodes\n");
+    out.push_str("    [(:id \"root\"\n");
+    out.push_str("      :target \"");
+    out.push_str(&lisp_escape_string(input.target));
+    out.push_str("\"\n");
+    if let Some(strategy) = input.dispatch_strategy {
+        out.push_str("      :dispatch-strategy \"");
+        out.push_str(&lisp_escape_string(strategy));
+        out.push_str("\"\n");
+    }
+    out.push_str("      :objective \"");
+    out.push_str(&lisp_escape_string(input.objective));
+    out.push_str("\")]\n");
+    out.push_str(")\n");
+    out
+}
+
 async fn action_compile_dry_run(state: &AppState, args: &Value) -> Result<ToolResult> {
     let directive_id = args.get("directive_id").and_then(|v| v.as_str());
     let board_task_id = args.get("board_task_id").and_then(|v| v.as_str());
@@ -301,12 +427,41 @@ async fn action_compile_dry_run(state: &AppState, args: &Value) -> Result<ToolRe
         Some(s) => Some(uuid::Uuid::parse_str(s).map_err(|e| anyhow!("directive_id not UUID: {}", e))?),
         None => None,
     };
+    let directive_version_arg = args
+        .get("directive_version")
+        .and_then(|v| v.as_i64())
+        .map(|v| v as i32);
+    let directive = match directive_uuid {
+        Some(id) => resolve_directive(state, id, directive_version_arg).await.ok(),
+        None => None,
+    };
 
-    let dry_run_sexp = format!(
-        "(plan-draft\n  :directive_id {:?}\n  :board_task_id {:?}\n  :status :awaiting-compiler-actor)\n",
-        directive_id.unwrap_or(""),
-        board_task_id.unwrap_or(""),
+    let dry_run_target = match resolve_dry_run_plan_target(args) {
+        Ok(t) => t,
+        Err(err_result) => return Ok(err_result),
+    };
+    let dry_run_dispatch_strategy = resolve_dry_run_dispatch_strategy(args);
+    let dry_run_objective = derive_dry_run_plan_objective(
+        args,
+        directive.as_ref().map(|d| d.sexp_text.as_str()),
+        board_task_id,
     );
+    let dry_run_sexp = render_dry_run_plan_sexp(DryRunPlanSexpInput {
+        directive_id,
+        board_task_id,
+        target: dry_run_target,
+        dispatch_strategy: dry_run_dispatch_strategy,
+        target_project: args
+            .get("target_project")
+            .and_then(|v| v.as_str())
+            .or_else(|| args.get("project").and_then(|v| v.as_str())),
+        requested_cwd: args.get("requested_cwd").and_then(|v| v.as_str())
+            .or_else(|| args.get("cwd").and_then(|v| v.as_str())),
+        flow_id: arg_nonblank_str(args, "flow_id"),
+        objective: &dry_run_objective,
+        acceptance: collect_string_list(args.get("acceptance")),
+        constraints: collect_string_list(args.get("constraints")),
+    });
     let sexp_hash = sha256_hex(&dry_run_sexp);
 
     let mut payload = json!({
@@ -316,6 +471,9 @@ async fn action_compile_dry_run(state: &AppState, args: &Value) -> Result<ToolRe
         "flow_ref": "F-intent-alignment-plan-execution-loop :: s4 plan-authoring",
         "directive_id": directive_id,
         "board_task_id": board_task_id,
+        "target": dry_run_target,
+        "dispatch_strategy": dry_run_dispatch_strategy.unwrap_or("unknown"),
+        "objective": dry_run_objective,
         "compiled_sexp_preview": dry_run_sexp,
         "sexp_hash_preview": sexp_hash,
         "next_step": "rerun with compiler_mode=\"sonnet\" to invoke the plan-compiler actor; \
@@ -13214,6 +13372,45 @@ mod tests {
         // invariant ever drifts, downstream tooling that relies on
         // `compiler_mode` being optional + safe will break silently.
         assert_eq!(COMPILER_MODE_DRY_RUN, "dry_run");
+    }
+
+    #[test]
+    fn dry_run_plan_sexp_carries_executable_target_hints() {
+        let sexp = render_dry_run_plan_sexp(DryRunPlanSexpInput {
+            directive_id: Some("00000000-0000-0000-0000-000000000abc"),
+            board_task_id: Some("btk-42"),
+            target: "mission_task_delegate",
+            dispatch_strategy: Some("agent-team"),
+            target_project: Some("missiond"),
+            requested_cwd: Some("/Users/jinchen/Projects/missiond"),
+            flow_id: None,
+            objective: "ship request-local plan",
+            acceptance: vec!["cargo test -p missiond-daemon".to_string()],
+            constraints: vec!["only declared write scope".to_string()],
+        });
+
+        assert!(sexp.starts_with("(plan-draft"));
+        assert!(sexp.contains(":board_task_id \"btk-42\""));
+        assert!(sexp.contains(":execution-readiness :dry-run-executable-scaffold"));
+        assert!(sexp.contains(":target \"mission_task_delegate\""));
+        assert!(sexp.contains(":nodes"));
+        let hints = parse_plan_hints(&sexp);
+        assert_eq!(hints.target.as_deref(), Some("mission_task_delegate"));
+        assert_eq!(hints.dispatch_strategy.as_deref(), Some("agent-team"));
+        assert_eq!(hints.target_project.as_deref(), Some("missiond"));
+        assert_eq!(hints.requested_cwd.as_deref(), Some("/Users/jinchen/Projects/missiond"));
+        assert_eq!(hints.objective.as_deref(), Some("ship request-local plan"));
+    }
+
+    #[test]
+    fn dry_run_plan_objective_uses_directive_alignment_text() {
+        let args = json!({});
+        let objective = derive_dry_run_plan_objective(
+            &args,
+            Some("(directive-draft :utterance \"make MissionD Lisp-driven\")"),
+            Some("btk-42"),
+        );
+        assert_eq!(objective, "make MissionD Lisp-driven");
     }
 
     // ── planner prompt builders (light coverage) ──────────────────────

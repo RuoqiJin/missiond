@@ -515,9 +515,12 @@ fn build_respond_plan_compile_args(
     for key in [
         "compiler_mode",
         "persist",
+        "target",
         "target_project",
         "dispatch_strategy",
         "parallelism",
+        "objective",
+        "flow_id",
         "write_file",
         "overwrite_file",
         "topic",
@@ -1072,6 +1075,8 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
                     "scheduler_mode",
                     "dispatch_strategy",
                     "parallelism",
+                    "objective",
+                    "flow_id",
                     "dry_run",
                     "project",
                     "cwd",
@@ -3111,7 +3116,9 @@ mod tests {
         };
         let args = json!({
             "board_task_id": "btk-42",
+            "target": "mission_task_delegate",
             "target_project": "missiond",
+            "objective": "ship from request-local PLAN",
             "write_file": true,
             "overwrite_file": true,
             "review_gate_policy": "manual",
@@ -3119,7 +3126,9 @@ mod tests {
         let out = build_respond_plan_compile_args(&args, &directive, "req-123");
 
         assert_eq!(out["board_task_id"], "btk-42");
+        assert_eq!(out["target"], "mission_task_delegate");
         assert_eq!(out["target_project"], "missiond");
+        assert_eq!(out["objective"], "ship from request-local PLAN");
         assert_eq!(out["write_file"], true);
         assert_eq!(out["overwrite_file"], true);
         assert_eq!(out["review_gate_policy"], "manual");

@@ -466,6 +466,9 @@ fn build_plan_compile_args(approved_directive_id: String, board_task_id: String,
     if let Some(b) = args.get("persist").and_then(|v| v.as_bool()) {
         out.insert("persist".into(), json!(b));
     }
+    if let Some(t) = nonblank(args.get("target")) {
+        out.insert("target".into(), json!(t));
+    }
     if let Some(tp) = nonblank(args.get("target_project")) {
         out.insert("target_project".into(), json!(tp));
     }
@@ -474,6 +477,12 @@ fn build_plan_compile_args(approved_directive_id: String, board_task_id: String,
     }
     if let Some(p) = nonblank(args.get("parallelism")) {
         out.insert("parallelism".into(), json!(p));
+    }
+    if let Some(o) = nonblank(args.get("objective")) {
+        out.insert("objective".into(), json!(o));
+    }
+    if let Some(flow_id) = nonblank(args.get("flow_id")) {
+        out.insert("flow_id".into(), json!(flow_id));
     }
     forward_array(args, "plan_acceptance", &mut out, "acceptance");
     forward_array(args, "plan_constraints", &mut out, "constraints");
@@ -1404,6 +1413,7 @@ mod tests {
         assert!(out.get("compiler_mode").is_none());
         assert!(out.get("persist").is_none());
         assert!(out.get("acceptance").is_none());
+        assert!(out.get("target").is_none());
         assert!(out.get("dispatch_strategy").is_none());
     }
 
@@ -1675,6 +1685,9 @@ mod tests {
             "board_task_id": "btk-wave14-04",
             "compiler_mode": "sonnet",
             "persist": true,
+            "target": "mission_task_delegate",
+            "objective": "compile an executable scaffold",
+            "flow_id": "F-demo",
             // file-first writer
             "write_file": true,
             "overwrite_file": true,
@@ -1698,6 +1711,9 @@ mod tests {
             "00000000-0000-0000-0000-000000000abc"
         );
         assert_eq!(compile_args["board_task_id"], "btk-wave14-04");
+        assert_eq!(compile_args["target"], "mission_task_delegate");
+        assert_eq!(compile_args["objective"], "compile an executable scaffold");
+        assert_eq!(compile_args["flow_id"], "F-demo");
         // file-first.
         assert_eq!(compile_args["write_file"], true);
         assert_eq!(compile_args["overwrite_file"], true);
