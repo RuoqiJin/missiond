@@ -964,7 +964,12 @@ async function runFixtures(json = false) {
   for (const fixture of fixtures) {
     categories.add(fixture.category);
     try {
-      await fixture.run();
+      // Fixture run functions are synchronous (they only call pure helpers
+      // exported from the imported modules). No `await` needed — the
+      // surrounding runFixtures() stays declared `async` to match the
+      // overall main() async signature, but we do NOT add a defensive
+      // `await` here because that triggers TS80007 on a non-Promise.
+      fixture.run();
       results.push({ name: fixture.name, category: fixture.category, ok: true });
     } catch (err) {
       failed += 1;
