@@ -9856,6 +9856,35 @@ async fn resolve_project_root(
 // Off/default mode is byte-identical with NO file I/O, even if a trace-index
 // path is supplied. This is enforced by the Off-path early-return in
 // `attach_router_recommendation_block`.
+//
+// wave26-03 layers an OPTIONAL `router_backend_registry_path` arg on top of
+// the wave25-03 trace-index path. When supplied AND mode=dry_run the daemon
+// reads the wave26-01 backend readiness registry via `std::fs::read_to_string`
+// + a minimal subset of the existing Lisp parser (extracting only `:id`
+// `:readiness_status` `:runtime_allowed` `:apply_blockers` per `(backend ...)`
+// entry) and surfaces six additive fields on the recommendation block:
+//   * backend_registry_path     — echo of input
+//   * backend_registry_status   — used | missing | unreadable | malformed | unknown_backend
+//   * backend_readiness_status  — current-default | advisory-only | runtime-ready | unavailable | unknown
+//   * backend_runtime_allowed   — bool (verbatim from registry)
+//   * router_apply_eligible     — bool, ONLY true when ALL 6 of:
+//       1. policy valid (status=computed)
+//       2. confidence == "high"
+//       3. backend present in registry
+//       4. runtime_allowed == true
+//       5. readiness_status == "runtime-ready"  (current-default is NOT sufficient)
+//       6. apply_blockers empty
+//   * router_apply_blockers     — Vec<String>; echoes registry's apply_blockers
+//                                  for the matched backend, or synthesises
+//                                  explicit blockers ("confidence is medium",
+//                                  "recommended_backend not in registry",
+//                                  "backend readiness_status is current-default;
+//                                   runtime-ready required") when the gate fails.
+// `applied=false` stays a hard-coded literal even when the registry is
+// consulted; dispatch is NEVER altered by registry issues. Off/default mode
+// stays byte-identical with NO file I/O even when BOTH `router_backend_registry_path`
+// AND `router_policy_trace_index_path` are supplied — the Off-path early-
+// return in `attach_router_recommendation_block` predates both reads.
 // ---------------------------------------------------------------------------
 mod router_policy_dry_run {
     use super::ResolvedExec;
@@ -10049,6 +10078,10 @@ mod router_policy_dry_run {
         // "no file I/O when mode=off" invariant by construction.
         let trace_index_path_input = arg_string(args, "router_policy_trace_index_path");
         let trace_info = load_trace_index(trace_index_path_input.as_deref());
+        // wave26-03: backend-readiness registry is OPTIONAL on the same Off-
+        // gated path — same invariant applies (no file I/O when mode=off).
+        let backend_registry_path_input = arg_string(args, "router_backend_registry_path");
+        let registry_info = load_backend_registry(backend_registry_path_input.as_deref());
         let resolved_path = resolve_policy_path(&policy_path_input);
         let raw = match std::fs::read_to_string(&resolved_path) {
             Ok(s) => s,
@@ -10057,18 +10090,31 @@ mod router_policy_dry_run {
                     &policy_path_input,
                     &format!("read failed: {}", e),
                     &trace_info,
+                    &registry_info,
+                    None,
+                    "low",
                 );
             }
         };
         let policy = match parse_router_policy(&raw) {
             Ok(p) => p,
-            Err(msg) => return error_block(&policy_path_input, &msg, &trace_info),
+            Err(msg) => return error_block(
+                &policy_path_input,
+                &msg,
+                &trace_info,
+                &registry_info,
+                None,
+                "low",
+            ),
         };
         if !policy.dry_run_only {
             return rejected_block(
                 &policy_path_input,
                 "policy missing :dry-run-only true (cross-wave invariant: router output is advisory only)",
                 &trace_info,
+                &registry_info,
+                None,
+                "low",
             );
         }
         if policy.runtime_replacement {
@@ -10076,6 +10122,9 @@ mod router_policy_dry_run {
                 &policy_path_input,
                 "policy declares :runtime-replacement true (cross-wave invariant: router output is advisory only)",
                 &trace_info,
+                &registry_info,
+                None,
+                "low",
             );
         }
         let ctx = project_context(args, resolved, plan);
@@ -10100,6 +10149,7 @@ mod router_policy_dry_run {
                 "low",
                 vec![format!("fallback (no rule matched): {}", FALLBACK_REASON)],
                 &trace_info,
+                &registry_info,
             );
         }
         let winner = &matched[0];
@@ -10151,7 +10201,7 @@ mod router_policy_dry_run {
             // Degraded / absent: keep wave24-04 default of `medium` for matched.
             _ => "medium",
         };
-        computed_block(&policy_path_input, &backend, confidence, reasons, &trace_info)
+        computed_block(&policy_path_input, &backend, confidence, reasons, &trace_info, &registry_info)
     }
 
     /// wave25-03: trace-index threshold mirrors scripts/recommend-task-backend.mjs
@@ -10276,7 +10326,14 @@ mod router_policy_dry_run {
         }
     }
 
-    fn error_block(policy_source: &str, message: &str, trace: &TraceIndexInfo) -> Value {
+    fn error_block(
+        policy_source: &str,
+        message: &str,
+        trace: &TraceIndexInfo,
+        registry: &BackendRegistryInfo,
+        recommended_backend: Option<&str>,
+        confidence: &str,
+    ) -> Value {
         let mut block = json!({
             "applied": false,
             "confidence": "low",
@@ -10287,10 +10344,24 @@ mod router_policy_dry_run {
             "status": "error",
         });
         attach_trace_index_fields(&mut block, trace);
+        attach_backend_readiness_fields(
+            &mut block,
+            registry,
+            recommended_backend.unwrap_or(FALLBACK_BACKEND),
+            "error",
+            confidence,
+        );
         block
     }
 
-    fn rejected_block(policy_source: &str, message: &str, trace: &TraceIndexInfo) -> Value {
+    fn rejected_block(
+        policy_source: &str,
+        message: &str,
+        trace: &TraceIndexInfo,
+        registry: &BackendRegistryInfo,
+        recommended_backend: Option<&str>,
+        confidence: &str,
+    ) -> Value {
         let mut block = json!({
             "applied": false,
             "confidence": "low",
@@ -10301,6 +10372,13 @@ mod router_policy_dry_run {
             "status": "rejected",
         });
         attach_trace_index_fields(&mut block, trace);
+        attach_backend_readiness_fields(
+            &mut block,
+            registry,
+            recommended_backend.unwrap_or(FALLBACK_BACKEND),
+            "rejected",
+            confidence,
+        );
         block
     }
 
@@ -10310,6 +10388,7 @@ mod router_policy_dry_run {
         confidence: &str,
         reasons: Vec<String>,
         trace: &TraceIndexInfo,
+        registry: &BackendRegistryInfo,
     ) -> Value {
         let mut block = json!({
             "applied": false,
@@ -10321,7 +10400,416 @@ mod router_policy_dry_run {
             "status": "computed",
         });
         attach_trace_index_fields(&mut block, trace);
+        attach_backend_readiness_fields(&mut block, registry, backend, "computed", confidence);
         block
+    }
+
+    // -------------------------------------------------------------------
+    // wave26-03: optional backend-readiness registry consumption.
+    //
+    // The registry seed at .missiond/router/router-backend-registry-v1.lisp
+    // (top form: `(router-backend-registry <id> :schema ... :version ...
+    // (backend :id ... :readiness_status ... :runtime_allowed ...
+    //          :apply_blockers [...] ...))`) is read OPTIONALLY when
+    // `router_backend_registry_path` is supplied AND mode=dry_run. The
+    // daemon extracts ONLY the four fields it needs per backend entry —
+    // every other key (`:substrate`, `:non-goals`, `:notes`, `:owner`,
+    // `:adapter_path`) is ignored gracefully so the wave26-01 schema can
+    // grow without forcing a daemon update. Failure modes are non-fatal:
+    // dispatch always continues; only the apply-eligibility surface
+    // degrades.
+    // -------------------------------------------------------------------
+
+    /// Allowed readiness status values mirrored from the wave26-01 schema.
+    /// Anything outside this set is treated as malformed (the wave26-01
+    /// checker rejects unknown values upstream; this is a defence-in-depth
+    /// re-check).
+    const READINESS_STATUSES: &[&str] = &[
+        "current-default",
+        "advisory-only",
+        "runtime-ready",
+        "unavailable",
+    ];
+
+    #[derive(Debug, Clone)]
+    pub(super) struct BackendEntry {
+        pub(super) id: String,
+        pub(super) readiness_status: String,
+        pub(super) runtime_allowed: bool,
+        pub(super) apply_blockers: Vec<String>,
+    }
+
+    /// Backend-registry status flavours surfaced on the recommendation
+    /// block. `Absent` is the default (no path supplied) and is observable
+    /// on the wire as the absence of every `backend_*` field.
+    #[derive(Debug, Clone)]
+    pub(super) enum BackendRegistryInfo {
+        /// No registry path was supplied. Block does NOT carry any
+        /// `backend_*` field (preserves wave24-04 / wave25-03 byte-shape
+        /// for callers that opted out).
+        Absent,
+        /// Path was supplied; file read + parsed; backend entries indexed
+        /// by id for O(1) join against the recommended backend.
+        Used {
+            path: String,
+            backends: Vec<BackendEntry>,
+        },
+        /// Path was supplied but the file does not exist on disk.
+        Missing { path: String, warning: String },
+        /// Path was supplied; std::fs::read_to_string returned an I/O error
+        /// other than NotFound.
+        Unreadable { path: String, warning: String },
+        /// Path was supplied; the Lisp parser failed OR the top-level shape
+        /// did not match `(router-backend-registry ...)` OR a backend entry
+        /// was missing a required field / had an enum violation.
+        Malformed { path: String, warning: String },
+    }
+
+    fn load_backend_registry(input: Option<&str>) -> BackendRegistryInfo {
+        let Some(path_str) = input else {
+            return BackendRegistryInfo::Absent;
+        };
+        let path = path_str.to_string();
+        let resolved = resolve_policy_path(&path);
+        let raw = match std::fs::read_to_string(&resolved) {
+            Ok(s) => s,
+            Err(e) => {
+                let warning = format!("backend-registry read failed: {}", e);
+                return if e.kind() == std::io::ErrorKind::NotFound {
+                    BackendRegistryInfo::Missing { path, warning }
+                } else {
+                    BackendRegistryInfo::Unreadable { path, warning }
+                };
+            }
+        };
+        match parse_backend_registry(&raw) {
+            Ok(backends) => BackendRegistryInfo::Used { path, backends },
+            Err(msg) => BackendRegistryInfo::Malformed {
+                path,
+                warning: format!("backend-registry parse failed: {}", msg),
+            },
+        }
+    }
+
+    /// Minimal Lisp parser for the wave26-01 registry. Reuses the existing
+    /// tokeniser + cursor; extracts ONLY `:id` `:readiness_status`
+    /// `:runtime_allowed` `:apply_blockers` per `(backend ...)` entry. Any
+    /// other key inside a backend entry is tolerated (gracefully ignored)
+    /// so the registry schema can grow without breaking the daemon.
+    pub(super) fn parse_backend_registry(input: &str) -> Result<Vec<BackendEntry>, String> {
+        let tokens = tokenize(input)?;
+        let mut cursor = TokenCursor::new(&tokens);
+        let form = cursor
+            .read_form()
+            .ok_or_else(|| "no form found".to_string())?;
+        if cursor.peek().is_some() {
+            return Err("multiple top-level forms".to_string());
+        }
+        let list = match form {
+            Sexp::List(items) => items,
+            _ => {
+                return Err(
+                    "expected (router-backend-registry ...) at top level".to_string(),
+                )
+            }
+        };
+        let mut iter = list.into_iter();
+        let head = iter
+            .next()
+            .ok_or_else(|| "empty top-level list".to_string())?;
+        match head {
+            Sexp::Atom(s) if s == "router-backend-registry" => {}
+            _ => {
+                return Err(
+                    "expected (router-backend-registry ...) at top level".to_string(),
+                )
+            }
+        }
+        // Skip the registry id atom (next item).
+        let _id = iter.next();
+        let mut backends: Vec<BackendEntry> = Vec::new();
+        let mut pending_keyword: Option<String> = None;
+        for item in iter {
+            if pending_keyword.take().is_some() {
+                // Header keyword/value pair (`:schema`, `:version`,
+                // `:description`) — value already consumed; skip.
+                continue;
+            }
+            match &item {
+                Sexp::Keyword(k) => pending_keyword = Some(k.clone()),
+                Sexp::List(inner) => {
+                    if matches!(inner.first(), Some(Sexp::Atom(h)) if h == "backend") {
+                        let entry = parse_backend_entry(inner)?;
+                        backends.push(entry);
+                    }
+                    // Other top-level lists (none today) are tolerated.
+                }
+                _ => {}
+            }
+        }
+        Ok(backends)
+    }
+
+    fn parse_backend_entry(items: &[Sexp]) -> Result<BackendEntry, String> {
+        // items[0] is the `backend` atom.
+        let mut id: Option<String> = None;
+        let mut readiness_status: Option<String> = None;
+        let mut runtime_allowed: Option<bool> = None;
+        let mut apply_blockers: Option<Vec<String>> = None;
+        let mut idx = 1usize;
+        while idx < items.len() {
+            let key = match &items[idx] {
+                Sexp::Keyword(k) => k.clone(),
+                _ => {
+                    idx += 1;
+                    continue;
+                }
+            };
+            idx += 1;
+            if idx >= items.len() {
+                break;
+            }
+            let value = &items[idx];
+            idx += 1;
+            match key.as_str() {
+                ":id" => id = Some(sexp_as_text(value)),
+                ":readiness_status" => readiness_status = Some(sexp_as_text(value)),
+                ":runtime_allowed" => runtime_allowed = Some(sexp_as_bool(value)),
+                ":apply_blockers" => {
+                    let v = sexp_as_string_vec(value);
+                    apply_blockers = Some(v);
+                }
+                // Tolerated but not consumed: :substrate, :non-goals,
+                // :notes, :owner, :adapter_path. Future schema growth
+                // does not require a daemon update.
+                _ => {}
+            }
+        }
+        let id = id.ok_or_else(|| "backend entry missing :id".to_string())?;
+        let readiness_status = readiness_status
+            .ok_or_else(|| format!("backend `{}` missing :readiness_status", id))?;
+        if !READINESS_STATUSES.iter().any(|s| *s == readiness_status) {
+            return Err(format!(
+                "backend `{}` :readiness_status `{}` is not in the wave26-01 enum",
+                id, readiness_status
+            ));
+        }
+        let runtime_allowed = runtime_allowed
+            .ok_or_else(|| format!("backend `{}` missing :runtime_allowed", id))?;
+        let apply_blockers = apply_blockers.unwrap_or_default();
+        Ok(BackendEntry {
+            id,
+            readiness_status,
+            runtime_allowed,
+            apply_blockers,
+        })
+    }
+
+    /// Coerce a `Sexp::List` of strings/atoms into a `Vec<String>`. Used
+    /// for `:apply_blockers` (the wave26-01 schema requires a vector of
+    /// strings; an empty vector is `[]`).
+    fn sexp_as_string_vec(value: &Sexp) -> Vec<String> {
+        match value {
+            Sexp::List(items) => items
+                .iter()
+                .map(|i| sexp_as_text(i))
+                .filter(|s| !s.is_empty())
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// wave26-03: splice the optional `backend_*` fields onto a recommendation
+    /// block. `Absent` emits NO fields at all (preserves wave24-04 / wave25-03
+    /// byte-shape for callers that opted out). All other variants emit
+    /// `backend_registry_path` + `backend_registry_status`; degraded variants
+    /// additionally emit `backend_warning`. When `Used` AND the recommended
+    /// backend is present in the registry, the block also surfaces
+    /// `backend_readiness_status` + `backend_runtime_allowed` +
+    /// `router_apply_eligible` + `router_apply_blockers`. When `Used` AND
+    /// the backend is missing, `backend_registry_status="unknown_backend"`,
+    /// `backend_readiness_status="unknown"`, `router_apply_eligible=false`.
+    fn attach_backend_readiness_fields(
+        block: &mut Value,
+        registry: &BackendRegistryInfo,
+        recommended_backend: &str,
+        status: &str,
+        confidence: &str,
+    ) {
+        let Some(map) = block.as_object_mut() else {
+            return;
+        };
+        match registry {
+            BackendRegistryInfo::Absent => {
+                // Intentionally emit NOTHING — preserves the byte-shape
+                // for callers that did not opt in to wave26-03.
+            }
+            BackendRegistryInfo::Missing { path, warning } => {
+                map.insert(
+                    "backend_registry_path".to_string(),
+                    Value::String(path.clone()),
+                );
+                map.insert(
+                    "backend_registry_status".to_string(),
+                    Value::String("missing".to_string()),
+                );
+                map.insert(
+                    "backend_warning".to_string(),
+                    Value::String(warning.clone()),
+                );
+                map.insert(
+                    "router_apply_eligible".to_string(),
+                    Value::Bool(false),
+                );
+                map.insert(
+                    "router_apply_blockers".to_string(),
+                    Value::Array(vec![Value::String(
+                        "backend registry file is missing".to_string(),
+                    )]),
+                );
+            }
+            BackendRegistryInfo::Unreadable { path, warning } => {
+                map.insert(
+                    "backend_registry_path".to_string(),
+                    Value::String(path.clone()),
+                );
+                map.insert(
+                    "backend_registry_status".to_string(),
+                    Value::String("unreadable".to_string()),
+                );
+                map.insert(
+                    "backend_warning".to_string(),
+                    Value::String(warning.clone()),
+                );
+                map.insert(
+                    "router_apply_eligible".to_string(),
+                    Value::Bool(false),
+                );
+                map.insert(
+                    "router_apply_blockers".to_string(),
+                    Value::Array(vec![Value::String(
+                        "backend registry file is unreadable".to_string(),
+                    )]),
+                );
+            }
+            BackendRegistryInfo::Malformed { path, warning } => {
+                map.insert(
+                    "backend_registry_path".to_string(),
+                    Value::String(path.clone()),
+                );
+                map.insert(
+                    "backend_registry_status".to_string(),
+                    Value::String("malformed".to_string()),
+                );
+                map.insert(
+                    "backend_warning".to_string(),
+                    Value::String(warning.clone()),
+                );
+                map.insert(
+                    "router_apply_eligible".to_string(),
+                    Value::Bool(false),
+                );
+                map.insert(
+                    "router_apply_blockers".to_string(),
+                    Value::Array(vec![Value::String(
+                        "backend registry file is malformed".to_string(),
+                    )]),
+                );
+            }
+            BackendRegistryInfo::Used { path, backends } => {
+                map.insert(
+                    "backend_registry_path".to_string(),
+                    Value::String(path.clone()),
+                );
+                let matched: Option<&BackendEntry> =
+                    backends.iter().find(|b| b.id == recommended_backend);
+                match matched {
+                    None => {
+                        // Recommended backend absent from registry — surface
+                        // unknown_backend status and force eligible=false.
+                        map.insert(
+                            "backend_registry_status".to_string(),
+                            Value::String("unknown_backend".to_string()),
+                        );
+                        map.insert(
+                            "backend_readiness_status".to_string(),
+                            Value::String("unknown".to_string()),
+                        );
+                        map.insert(
+                            "router_apply_eligible".to_string(),
+                            Value::Bool(false),
+                        );
+                        map.insert(
+                            "router_apply_blockers".to_string(),
+                            Value::Array(vec![Value::String(format!(
+                                "recommended_backend `{}` not in registry",
+                                recommended_backend
+                            ))]),
+                        );
+                    }
+                    Some(entry) => {
+                        map.insert(
+                            "backend_registry_status".to_string(),
+                            Value::String("used".to_string()),
+                        );
+                        map.insert(
+                            "backend_readiness_status".to_string(),
+                            Value::String(entry.readiness_status.clone()),
+                        );
+                        map.insert(
+                            "backend_runtime_allowed".to_string(),
+                            Value::Bool(entry.runtime_allowed),
+                        );
+                        // 6-condition apply-eligibility gate — every miss
+                        // contributes a synthetic blocker so operators can
+                        // see WHY the gate is closed.
+                        let mut blockers: Vec<String> = Vec::new();
+                        if status != "computed" {
+                            blockers.push(format!(
+                                "policy status is `{}`; computed required",
+                                status
+                            ));
+                        }
+                        if confidence != "high" {
+                            blockers.push(format!(
+                                "confidence is `{}`; high required",
+                                confidence
+                            ));
+                        }
+                        if !entry.runtime_allowed {
+                            blockers.push(
+                                "backend runtime_allowed is false; runtime-ready adapter required"
+                                    .to_string(),
+                            );
+                        }
+                        if entry.readiness_status != "runtime-ready" {
+                            blockers.push(format!(
+                                "backend readiness_status is `{}`; runtime-ready required",
+                                entry.readiness_status
+                            ));
+                        }
+                        // Echo the registry's own apply_blockers verbatim
+                        // when present (operator should see the registry's
+                        // reasons even when the synthetic gate already
+                        // closed for another reason).
+                        for b in &entry.apply_blockers {
+                            blockers.push(b.clone());
+                        }
+                        let eligible = blockers.is_empty();
+                        map.insert(
+                            "router_apply_eligible".to_string(),
+                            Value::Bool(eligible),
+                        );
+                        map.insert(
+                            "router_apply_blockers".to_string(),
+                            Value::Array(
+                                blockers.into_iter().map(Value::String).collect(),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// wave25-03: splice the optional `trace_index_path` / `trace_index_status`
@@ -19360,5 +19848,743 @@ mod tests {
 
         let _ = std::fs::remove_file(&policy_path);
         let _ = std::fs::remove_file(&trace_path);
+    }
+
+    // -----------------------------------------------------------------
+    // wave26-03 — backend-readiness registry consumption tests.
+    //
+    // These pin the OPTIONAL `router_backend_registry_path` arg and the
+    // SIX additive fields on the recommendation block:
+    //   * backend_registry_path
+    //   * backend_registry_status   ∈ used | missing | unreadable | malformed | unknown_backend
+    //   * backend_readiness_status  ∈ current-default | advisory-only | runtime-ready | unavailable | unknown
+    //   * backend_runtime_allowed   bool
+    //   * router_apply_eligible     bool (the 6-condition gate)
+    //   * router_apply_blockers     Vec<String>
+    //
+    // 6-condition apply-eligibility gate (mirrors wave26-02 Node logic):
+    //   1. policy valid (status=computed)
+    //   2. confidence == "high"
+    //   3. backend present in registry
+    //   4. runtime_allowed == true
+    //   5. readiness_status == "runtime-ready"  (current-default INSUFFICIENT)
+    //   6. apply_blockers empty
+    //
+    // Cross-wave invariants re-pinned under the new code path:
+    //   * applied=false stays a hard-coded literal under EVERY registry status
+    //   * dispatch is byte-identical with vs without registry arg
+    //   * mode=off (or absent) does NO file I/O even with registry path supplied
+    //   * mode=off remains byte-identical even when BOTH new arg AND
+    //     router_policy_trace_index_path are supplied
+    // -----------------------------------------------------------------
+
+    /// Helper: temp registry file. `body` is written verbatim so each test
+    /// can shape its own backends. Returns path; caller unlinks.
+    fn write_temp_registry(tag: &str, body: &str) -> std::path::PathBuf {
+        let tmp = std::env::temp_dir().join(format!(
+            "wave26-03-{}-registry-{}.lisp",
+            tag,
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::write(&tmp, body).unwrap();
+        tmp
+    }
+
+    /// Helper: build a registry body with a single matched backend entry.
+    /// Used to exercise the 4 readiness flavours in isolation.
+    fn registry_body_single(
+        backend_id: &str,
+        readiness: &str,
+        runtime_allowed: bool,
+        apply_blockers: &[&str],
+    ) -> String {
+        let blockers = if apply_blockers.is_empty() {
+            "[]".to_string()
+        } else {
+            let inner = apply_blockers
+                .iter()
+                .map(|b| format!("\"{}\"", b))
+                .collect::<Vec<_>>()
+                .join("\n     ");
+            format!("[{}]", inner)
+        };
+        format!(
+            r#"(router-backend-registry seed-test
+  :schema "missiond.router-backend-registry.v1"
+  :version "v1"
+
+  (backend
+    :id {id}
+    :readiness_status {readiness}
+    :runtime_allowed {ra}
+    :apply_blockers {blockers}
+    :substrate nil
+    :non-goals ["does not replace runtime dispatch"]))
+"#,
+            id = backend_id,
+            readiness = readiness,
+            ra = if runtime_allowed { "true" } else { "false" },
+            blockers = blockers,
+        )
+    }
+
+    #[test]
+    fn router_policy_mode_off_with_registry_supplied_does_no_file_io() {
+        // wave26-03 invariant: mode=off MUST do NO file I/O for the registry
+        // path EVEN IF a non-existent path is supplied. Asserted by byte-
+        // identical baseline comparison — no recommendation block is even
+        // emitted, so no `backend_*` fields can leak.
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+
+        let args = json!({
+            "router_policy_mode": "off",
+            "router_backend_registry_path":
+                "/this/path/does/not/exist/wave26-03/registry.lisp",
+        });
+        let mode = parse_router_policy_mode(&args).expect("explicit off");
+        assert!(matches!(mode, RouterPolicyMode::Off));
+        let after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let after_text = match after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after_text,
+            "wave26-03: mode=off must be byte-identical to baseline EVEN WHEN registry path is supplied (no file I/O may happen)"
+        );
+        let v: Value = serde_json::from_str(&after_text).unwrap();
+        assert!(
+            v.get("router_recommendation").is_none(),
+            "wave26-03: mode=off must NOT splice a recommendation block"
+        );
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_registry_emits_readiness_block() {
+        // Happy path: registry has the matched backend at runtime-ready +
+        // runtime_allowed=true + 0 blockers; high confidence. Status=used,
+        // readiness mirrored, eligible=true.
+        let policy = write_temp_docs_policy("readiness-happy");
+        let trace = write_temp_trace_index("readiness-happy", 7, 0);
+        let registry_body = registry_body_single("claudecode", "runtime-ready", true, &[]);
+        let registry = write_temp_registry("happy", &registry_body);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["confidence"], "high");
+        assert_eq!(block["applied"], false);
+        assert_eq!(block["backend_registry_status"], "used");
+        assert_eq!(block["backend_registry_path"], registry.to_str().unwrap());
+        assert_eq!(block["backend_readiness_status"], "runtime-ready");
+        assert_eq!(block["backend_runtime_allowed"], true);
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_runtime_ready_eligible() {
+        // Synthetic registry: matched backend runtime-ready + runtime_allowed=true
+        // + zero blockers + high confidence -> router_apply_eligible=true.
+        let policy = write_temp_docs_policy("eligible");
+        let trace = write_temp_trace_index("eligible", 8, 0);
+        let registry_body = registry_body_single("claudecode", "runtime-ready", true, &[]);
+        let registry = write_temp_registry("eligible", &registry_body);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["confidence"], "high");
+        assert_eq!(block["backend_readiness_status"], "runtime-ready");
+        assert_eq!(block["backend_runtime_allowed"], true);
+        assert_eq!(
+            block["router_apply_eligible"], true,
+            "wave26-03: 6-condition gate satisfied -> eligible=true"
+        );
+        let blockers = block["router_apply_blockers"].as_array().unwrap();
+        assert!(
+            blockers.is_empty(),
+            "wave26-03: eligible=true means router_apply_blockers must be empty (got {:?})",
+            blockers
+        );
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_current_default_not_eligible() {
+        // Seed-shape registry: claudecode current-default + runtime_allowed=true
+        // + 0 blockers + high confidence. current-default is INTENTIONALLY NOT
+        // sufficient — only runtime-ready opens the gate.
+        let policy = write_temp_docs_policy("current-default");
+        let trace = write_temp_trace_index("current-default", 8, 0);
+        let registry_body =
+            registry_body_single("claudecode", "current-default", true, &[]);
+        let registry = write_temp_registry("current-default", &registry_body);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["backend_readiness_status"], "current-default");
+        assert_eq!(block["backend_runtime_allowed"], true);
+        assert_eq!(
+            block["router_apply_eligible"], false,
+            "wave26-03: current-default alone is NOT sufficient — runtime-ready required"
+        );
+        let blockers = block["router_apply_blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            blockers.iter().any(|b| b.contains("current-default")
+                && b.contains("runtime-ready required")),
+            "wave26-03: blocker must mention current-default + runtime-ready required (got {:?})",
+            blockers
+        );
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_advisory_only_not_eligible() {
+        // Matched backend = advisory-only + runtime_allowed=false +
+        // apply_blockers populated. Multiple blockers expected.
+        let policy = write_temp_docs_policy("advisory");
+        let trace = write_temp_trace_index("advisory", 8, 0);
+        let registry_body = registry_body_single(
+            "claudecode",
+            "advisory-only",
+            false,
+            &["no runtime adapter shipped", "router replacement out of scope"],
+        );
+        let registry = write_temp_registry("advisory", &registry_body);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["backend_readiness_status"], "advisory-only");
+        assert_eq!(block["backend_runtime_allowed"], false);
+        assert_eq!(block["router_apply_eligible"], false);
+        let blockers = block["router_apply_blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        // synthetic blockers: runtime_allowed=false + readiness != runtime-ready
+        // PLUS the registry's own 2 apply_blockers echoed verbatim.
+        assert!(blockers.iter().any(|b| b.contains("runtime_allowed is false")));
+        assert!(blockers.iter().any(|b| b.contains("advisory-only")));
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("no runtime adapter shipped")));
+        assert!(blockers
+            .iter()
+            .any(|b| b.contains("router replacement out of scope")));
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_missing_registry_emits_status_missing() {
+        // Non-existent registry path — fallback continues, status=missing,
+        // eligible=false, dispatch unchanged.
+        let policy = write_temp_docs_policy("reg-missing");
+        let trace = write_temp_trace_index("reg-missing", 8, 0);
+        let bogus_registry = std::env::temp_dir().join(format!(
+            "wave26-03-missing-{}-DOES-NOT-EXIST.lisp",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": bogus_registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(
+            block["status"], "computed",
+            "wave26-03: missing registry must NOT fail dispatch"
+        );
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["backend_registry_status"], "missing");
+        assert_eq!(
+            block["backend_registry_path"],
+            bogus_registry.to_str().unwrap()
+        );
+        assert!(
+            block.get("backend_warning").is_some(),
+            "wave26-03: missing must surface a backend_warning"
+        );
+        assert_eq!(block["router_apply_eligible"], false);
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_malformed_registry_emits_status_malformed() {
+        // Bad Lisp content — parser fails, fallback continues, eligible=false.
+        let policy = write_temp_docs_policy("reg-malformed");
+        let trace = write_temp_trace_index("reg-malformed", 8, 0);
+        let bad = write_temp_registry(
+            "malformed",
+            "(this is :not (a router-backend-registry top form))",
+        );
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": bad.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["backend_registry_status"], "malformed");
+        let warning = block["backend_warning"]
+            .as_str()
+            .expect("malformed must carry a backend_warning string");
+        assert!(
+            warning.contains("backend-registry"),
+            "wave26-03: warning must mention backend-registry (got `{}`)",
+            warning
+        );
+        assert_eq!(block["router_apply_eligible"], false);
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&bad);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_unknown_backend_emits_status_unknown_backend() {
+        // Registry valid but missing the recommended backend (claudecode);
+        // only contains a stub for `verifier-worker`. Surfaced as
+        // status=unknown_backend, readiness=unknown, eligible=false.
+        let policy = write_temp_docs_policy("reg-unknown-backend");
+        let trace = write_temp_trace_index("reg-unknown-backend", 8, 0);
+        let registry_body = registry_body_single(
+            "verifier-worker",
+            "advisory-only",
+            false,
+            &["no runtime adapter shipped"],
+        );
+        let registry = write_temp_registry("unknown-backend", &registry_body);
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        assert_eq!(block["status"], "computed");
+        assert_eq!(block["recommended_backend"], "claudecode");
+        assert_eq!(block["backend_registry_status"], "unknown_backend");
+        assert_eq!(block["backend_readiness_status"], "unknown");
+        assert_eq!(block["router_apply_eligible"], false);
+        let blockers = block["router_apply_blockers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(
+            blockers
+                .iter()
+                .any(|b| b.contains("not in registry") && b.contains("claudecode")),
+            "wave26-03: unknown_backend blocker must mention the missing id (got {:?})",
+            blockers
+        );
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn router_policy_mode_dry_run_with_registry_does_not_change_dispatch() {
+        // Re-pin the wave24-04 dispatch invariant under the wave26-03 code
+        // path. With vs without the registry arg, every dispatch field
+        // (target_tool / dispatch_strategy / next_call / ...) must be
+        // byte-identical.
+        let policy = write_temp_docs_policy("dispatch-pin");
+        let trace = write_temp_trace_index("dispatch-pin", 8, 0);
+        let registry_body = registry_body_single("claudecode", "runtime-ready", true, &[]);
+        let registry = write_temp_registry("dispatch-pin", &registry_body);
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        // Path A: dry_run + NO registry arg.
+        let args_a = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_a = parse_router_policy_mode(&args_a).unwrap();
+        let result_a = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_a,
+            &args_a,
+            &resolved,
+            &plan,
+        );
+        let v_a = parse_payload(&result_a);
+
+        // Path B: dry_run + registry arg.
+        let args_b = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_b = parse_router_policy_mode(&args_b).unwrap();
+        let result_b = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode_b,
+            &args_b,
+            &resolved,
+            &plan,
+        );
+        let v_b = parse_payload(&result_b);
+
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                v_a[field], v_b[field],
+                "wave26-03 invariant: dispatch field `{}` must be byte-identical with vs without registry arg",
+                field
+            );
+        }
+
+        let block_a = &v_a["router_recommendation"];
+        let block_b = &v_b["router_recommendation"];
+        assert_eq!(block_a["applied"], block_b["applied"]);
+        assert_eq!(block_a["recommended_backend"], block_b["recommended_backend"]);
+        assert_eq!(block_a["status"], block_b["status"]);
+        assert_eq!(block_a["confidence"], block_b["confidence"]);
+
+        // Additive delta: backend_* fields exist in B but NOT in A.
+        assert!(block_a.get("backend_registry_path").is_none());
+        assert!(block_a.get("backend_registry_status").is_none());
+        assert!(block_a.get("router_apply_eligible").is_none());
+        assert_eq!(block_b["backend_registry_status"], "used");
+        assert_eq!(block_b["router_apply_eligible"], true);
+
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    #[test]
+    fn applied_remains_false_with_registry() {
+        // Re-pin the wave24-04 / wave24-06 / wave25-03 invariant under the
+        // wave26-03 code path: `applied` must be the literal JSON bool
+        // `false` in EVERY emitted block, regardless of registry status.
+        // Exercise all five status flavours: used / missing / unreadable
+        // (simulated via missing) / malformed / unknown_backend.
+        let policy = write_temp_docs_policy("applied-reg");
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        // used.
+        let registry_used = write_temp_registry(
+            "applied-used",
+            &registry_body_single("claudecode", "runtime-ready", true, &[]),
+        );
+        let args_used = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_backend_registry_path": registry_used.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_used = parse_router_policy_mode(&args_used).unwrap();
+        let r_used = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_used,
+            &args_used,
+            &resolved,
+            &plan,
+        );
+        let v_used = parse_payload(&r_used);
+        assert_eq!(
+            v_used["router_recommendation"]["applied"],
+            Value::Bool(false),
+            "wave26-03 invariant: applied=false literal under backend_registry_status=used"
+        );
+
+        // missing.
+        let args_missing = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_backend_registry_path":
+                "/does/not/exist/wave26-03-applied-registry.lisp",
+            "kind": "docs",
+        });
+        let mode_missing = parse_router_policy_mode(&args_missing).unwrap();
+        let r_missing = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_missing,
+            &args_missing,
+            &resolved,
+            &plan,
+        );
+        let v_missing = parse_payload(&r_missing);
+        assert_eq!(
+            v_missing["router_recommendation"]["applied"],
+            Value::Bool(false),
+            "wave26-03 invariant: applied=false literal under backend_registry_status=missing"
+        );
+
+        // malformed.
+        let bad =
+            write_temp_registry("applied-malformed", "(not :a registry top form)");
+        let args_bad = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_backend_registry_path": bad.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_bad = parse_router_policy_mode(&args_bad).unwrap();
+        let r_bad = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_bad,
+            &args_bad,
+            &resolved,
+            &plan,
+        );
+        let v_bad = parse_payload(&r_bad);
+        assert_eq!(
+            v_bad["router_recommendation"]["applied"],
+            Value::Bool(false),
+            "wave26-03 invariant: applied=false literal under backend_registry_status=malformed"
+        );
+
+        // unknown_backend.
+        let registry_other = write_temp_registry(
+            "applied-unknown",
+            &registry_body_single("verifier-worker", "advisory-only", false, &[
+                "no runtime adapter shipped",
+            ]),
+        );
+        let args_other = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_backend_registry_path": registry_other.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_other = parse_router_policy_mode(&args_other).unwrap();
+        let r_other = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode_other,
+            &args_other,
+            &resolved,
+            &plan,
+        );
+        let v_other = parse_payload(&r_other);
+        assert_eq!(
+            v_other["router_recommendation"]["applied"],
+            Value::Bool(false),
+            "wave26-03 invariant: applied=false literal under backend_registry_status=unknown_backend"
+        );
+
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&registry_used);
+        let _ = std::fs::remove_file(&bad);
+        let _ = std::fs::remove_file(&registry_other);
+    }
+
+    #[test]
+    fn router_policy_mode_off_with_registry_and_trace_index_does_no_file_io() {
+        // Combined cross-wave check: mode=off + BOTH new (wave26-03) +
+        // wave25-03 args supplied + non-existent paths -> still byte-
+        // identical to baseline. Proves the Off-path early-return predates
+        // every read site.
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_execution", "fresh-code-alignment");
+        let baseline = action_execute_bridge(&plan, &resolved);
+        let baseline_text = match baseline.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+
+        let args = json!({
+            "router_policy_mode": "off",
+            "router_policy_trace_index_path":
+                "/this/path/does/not/exist/wave26-03/trace.json",
+            "router_backend_registry_path":
+                "/this/path/does/not/exist/wave26-03/registry.lisp",
+        });
+        let mode = parse_router_policy_mode(&args).expect("explicit off");
+        assert!(matches!(mode, RouterPolicyMode::Off));
+        let after = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let after_text = match after.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after_text,
+            "wave26-03: mode=off must be byte-identical EVEN WHEN BOTH router_backend_registry_path AND router_policy_trace_index_path are supplied (no file I/O may happen)"
+        );
+        let v: Value = serde_json::from_str(&after_text).unwrap();
+        assert!(v.get("router_recommendation").is_none());
+
+        // Default (arg absent) + both supplied: same invariant.
+        let args2 = json!({
+            "router_policy_trace_index_path":
+                "/another/missing/wave26-03/trace.json",
+            "router_backend_registry_path":
+                "/another/missing/wave26-03/registry.lisp",
+        });
+        let mode2 = parse_router_policy_mode(&args2).expect("default off");
+        assert!(matches!(mode2, RouterPolicyMode::Off));
+        let after2 = attach_router_recommendation_block(
+            action_execute_bridge(&plan, &resolved),
+            mode2,
+            &args2,
+            &resolved,
+            &plan,
+        );
+        let after2_text = match after2.content.first() {
+            Some(ToolContent::Text { text }) => text.clone(),
+            _ => panic!("expected text content"),
+        };
+        assert_eq!(
+            baseline_text, after2_text,
+            "wave26-03: default mode (arg absent) must be byte-identical even when both new args are supplied"
+        );
     }
 }
