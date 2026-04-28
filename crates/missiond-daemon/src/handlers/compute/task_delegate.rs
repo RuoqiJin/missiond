@@ -337,22 +337,11 @@ async fn auto_provision_slot(
     // TTL = max(1h, timeout_secs + 300s buffer)
     let ttl = (timeout_secs + 300).max(3600);
 
-    // Build args for compute_slot create
-    let mut create_args = json!({
-        "action": "create",
-        "template": template,
-        "objective": objective,
-        "max_ttl": ttl,
-    });
-    if let Some(cwd_val) = cwd {
-        create_args["cwd"] = Value::String(cwd_val.to_string());
-    }
-    if let Some(model_val) = model {
-        create_args["model"] = Value::String(model_val.to_string());
-    }
-    if let Some(profile_val) = model_profile {
-        create_args["model_profile"] = Value::String(profile_val.to_string());
-    }
+    // Build args for compute_slot create — projects V3 workstation-config
+    // execution-ownership :: delegated-boardtask. The slot is provisioned
+    // idle (suppress_initial_prompt=true) so Autopilot remains the sole
+    // task-prompt owner once the queued BoardTask is dispatched.
+    let create_args = build_compute_slot_create_args(template, objective, ttl, cwd, model, model_profile);
 
     // Delegate to existing compute_slot handler
     let result = super::compute_slot::handle(state, "mission_compute_slot", create_args).await?;
@@ -427,6 +416,41 @@ fn truncate_str(s: &str, max_chars: usize) -> &str {
     &s[..end]
 }
 
+/// V3 workstation-config :: execution-ownership delegated-boardtask projection.
+///
+/// Build the JSON args passed to `mission_compute_slot create` when
+/// `mission_task_delegate` auto-provisions a dynamic slot for a queued
+/// BoardTask. `suppress_initial_prompt` is hardcoded `true` so the slot
+/// starts idle and Autopilot remains the sole task-prompt owner — see
+/// `compute_slot::effective_initial_prompt`. Direct `mission_compute_slot
+/// create` callers omit the flag and keep the legacy warm-up behaviour.
+fn build_compute_slot_create_args(
+    template: &str,
+    objective: &str,
+    ttl: i64,
+    cwd: Option<&str>,
+    model: Option<&str>,
+    model_profile: Option<&str>,
+) -> Value {
+    let mut create_args = json!({
+        "action": "create",
+        "template": template,
+        "objective": objective,
+        "max_ttl": ttl,
+        "suppress_initial_prompt": true,
+    });
+    if let Some(cwd_val) = cwd {
+        create_args["cwd"] = Value::String(cwd_val.to_string());
+    }
+    if let Some(model_val) = model {
+        create_args["model"] = Value::String(model_val.to_string());
+    }
+    if let Some(profile_val) = model_profile {
+        create_args["model_profile"] = Value::String(profile_val.to_string());
+    }
+    create_args
+}
+
 /// Truncate objective to 80 chars for title.
 fn truncate_title(s: &str) -> String {
     let first_line = s.lines().next().unwrap_or(s);
@@ -438,5 +462,57 @@ fn truncate_title(s: &str) -> String {
             end -= 1;
         }
         format!("{}...", &first_line[..end])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── V3 execution-ownership :: delegated-boardtask projection ─────────
+    //
+    // Tests for `build_compute_slot_create_args`: pure helper, no AppState.
+    // Pins the rule that mission_task_delegate auto-provisioning always sets
+    // `suppress_initial_prompt: true` so the dynamic slot starts idle and
+    // Autopilot becomes the sole task-prompt owner.
+
+    #[test]
+    fn create_args_always_suppresses_initial_prompt() {
+        let args = build_compute_slot_create_args("coder", "ship the fix", 3600, None, None, None);
+        assert_eq!(args["suppress_initial_prompt"], json!(true));
+    }
+
+    #[test]
+    fn create_args_carry_template_objective_and_ttl() {
+        let args =
+            build_compute_slot_create_args("researcher", "investigate", 7200, None, None, None);
+        assert_eq!(args["action"], json!("create"));
+        assert_eq!(args["template"], json!("researcher"));
+        assert_eq!(args["objective"], json!("investigate"));
+        assert_eq!(args["max_ttl"], json!(7200));
+    }
+
+    #[test]
+    fn create_args_pass_through_optional_fields() {
+        let args = build_compute_slot_create_args(
+            "ops",
+            "patrol",
+            3600,
+            Some("/Users/jinchen/Projects/missiond"),
+            Some("sonnet"),
+            Some("daily-sonnet"),
+        );
+        assert_eq!(args["cwd"], json!("/Users/jinchen/Projects/missiond"));
+        assert_eq!(args["model"], json!("sonnet"));
+        assert_eq!(args["model_profile"], json!("daily-sonnet"));
+        assert_eq!(args["suppress_initial_prompt"], json!(true));
+    }
+
+    #[test]
+    fn create_args_omit_optional_fields_when_absent() {
+        let args = build_compute_slot_create_args("coder", "x", 3600, None, None, None);
+        assert!(args.get("cwd").is_none());
+        assert!(args.get("model").is_none());
+        assert!(args.get("model_profile").is_none());
     }
 }

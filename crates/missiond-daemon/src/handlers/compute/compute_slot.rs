@@ -76,6 +76,26 @@ pub(crate) fn resolve_model_projection(
     Ok(get_template(template_name).and_then(|template| template.model.map(str::to_string)))
 }
 
+/// V3 workstation-config :: execution-ownership delegated-boardtask projection.
+///
+/// Returns the effective `PTYSpawnOptions.initial_prompt` for a freshly
+/// provisioned slot. When `suppress` is true (the path used by
+/// `mission_task_delegate` auto-provision), the slot starts idle and Autopilot
+/// becomes the sole task-prompt owner; the spawner MUST NOT fire-and-forget the
+/// task objective. When `suppress` is false (default — direct
+/// `mission_compute_slot create`), the caller-supplied objective remains the
+/// warm-up prompt as before.
+pub(crate) fn effective_initial_prompt(
+    objective: Option<String>,
+    suppress: bool,
+) -> Option<String> {
+    if suppress {
+        None
+    } else {
+        objective
+    }
+}
+
 pub(crate) fn model_projection_matches(
     slot_model: Option<&str>,
     requested_model: Option<&str>,
@@ -257,6 +277,16 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let objective = args.get("objective").and_then(|v| v.as_str());
 
+    // V3 execution-ownership :: delegated-boardtask. When task_delegate
+    // auto-provisions a dynamic slot for a queued BoardTask it sets
+    // `suppress_initial_prompt: true` so the slot starts idle and Autopilot
+    // remains the sole task-prompt owner. Direct `mission_compute_slot create`
+    // callers omit the flag and keep the legacy warm-up behaviour.
+    let suppress_initial_prompt = args
+        .get("suppress_initial_prompt")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     // Generate slot ID
     let short_id = &uuid::Uuid::new_v4().to_string()[..8];
     let slot_id = format!("slot-dyn-{}", short_id);
@@ -369,6 +399,8 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let slot_id_owned = slot_id.clone();
     let template_owned = template_name.to_string();
     let objective_owned = objective.map(|s| s.to_string());
+    let initial_prompt_for_spawn =
+        effective_initial_prompt(objective_owned.clone(), suppress_initial_prompt);
     let expires_at_str = expires_at.to_rfc3339();
 
     tokio::spawn(async move {
@@ -403,7 +435,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 dangerously_skip_permissions: false,
                 model: slot_config.model.clone(),
                 extra_env: HashMap::new(),
-                initial_prompt: objective_owned.clone(),
+                initial_prompt: initial_prompt_for_spawn,
             },
             slot_config.env.as_ref(),
         )
@@ -645,5 +677,33 @@ mod tests {
         assert!(model_projection_matches(Some("default"), None));
         assert!(!model_projection_matches(Some("sonnet"), None));
         assert!(model_projection_matches(Some("sonnet"), Some("sonnet")));
+    }
+
+    // ── V3 execution-ownership :: delegated-boardtask projection ─────────
+    //
+    // Tests for `effective_initial_prompt`: pure helper, no AppState. Pins
+    // the rule that mission_task_delegate auto-provisioning suppresses the
+    // spawner fire-and-forget initial-prompt while direct compute_slot
+    // create keeps the legacy warm-up behaviour.
+
+    #[test]
+    fn effective_initial_prompt_returns_objective_by_default() {
+        let objective = Some("ship the fix".to_string());
+        assert_eq!(
+            effective_initial_prompt(objective.clone(), false),
+            objective
+        );
+    }
+
+    #[test]
+    fn effective_initial_prompt_suppresses_when_flag_set() {
+        let objective = Some("ship the fix".to_string());
+        assert_eq!(effective_initial_prompt(objective, true), None);
+    }
+
+    #[test]
+    fn effective_initial_prompt_returns_none_when_objective_absent() {
+        assert_eq!(effective_initial_prompt(None, false), None);
+        assert_eq!(effective_initial_prompt(None, true), None);
     }
 }

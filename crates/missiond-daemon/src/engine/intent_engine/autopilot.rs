@@ -111,6 +111,37 @@ fn build_base_prompt(title: &str, description: &str) -> String {
     format!("{}\n\n{}", title, description)
 }
 
+/// V3 workstation-config :: execution-ownership delegated-boardtask projection.
+///
+/// After `state.pty.send` returns Complete, decide what Autopilot — the
+/// declared close owner — should do with the BoardTask, given its current
+/// status. Pure helper so the close-ownership rule can be unit-tested
+/// without an `AppState`.
+///
+///   * `Done`    → worker self-closed via attached board MCP tools; preserve.
+///   * `Blocked` → task transitioned to Blocked (e.g. mission_question_create);
+///                 preserve and never overwrite with done.
+///   * anything else (running / open / failed / None) → owner closes; the
+///     normal path that transitions running→done.
+#[derive(Debug, PartialEq, Eq)]
+enum DispatchCloseAction {
+    AlreadySelfClosed,
+    PreserveBlocked,
+    OwnerClosesAsDone,
+}
+
+fn decide_close_action(
+    current_status: Option<missiond_core::types::BoardTaskStatus>,
+) -> DispatchCloseAction {
+    match current_status {
+        Some(missiond_core::types::BoardTaskStatus::Done) => DispatchCloseAction::AlreadySelfClosed,
+        Some(missiond_core::types::BoardTaskStatus::Blocked) => {
+            DispatchCloseAction::PreserveBlocked
+        }
+        _ => DispatchCloseAction::OwnerClosesAsDone,
+    }
+}
+
 /// Append the V3 `prompt-tool-contract` board-self-close suffix.
 ///
 /// The board task id is always surfaced for audit. The self-close instruction
@@ -786,31 +817,36 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 .await;
         }
 
-        // Pre-send state verification with dispatch guard: atomically check idle + send.
-        if !state.slot_dispatch.try_acquire(&slot_id) {
-            debug!(task_id = %task.id, slot_id = %slot_id,
-                "Autopilot: slot dispatch guard busy, releasing task");
-            let _ = state.store.unclaim_board_task(task.id.as_str()).await;
-            continue;
-        }
+        // V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
+        // Acquire the per-slot RAII guard and HOLD it across state.pty.send so
+        // a release-before-send race cannot let a second caller dispatch to
+        // the same slot while the first send is in flight. The guard is
+        // per-slot — holding it does not starve callers targeting other
+        // slots. The guard auto-releases on Drop at every continue/break/end
+        // of this iteration, so no manual release is needed.
+        let _slot_guard = match state.slot_dispatch.try_acquire_guard(&slot_id) {
+            Some(g) => g,
+            None => {
+                debug!(task_id = %task.id, slot_id = %slot_id,
+                    "Autopilot: slot dispatch guard busy, releasing task");
+                let _ = state.store.unclaim_board_task(task.id.as_str()).await;
+                continue;
+            }
+        };
         if let Some(pre_send_status) = state.pty.get_status(&slot_id).await {
             if pre_send_status.state != SessionState::Idle {
-                state.slot_dispatch.release(&slot_id);
                 debug!(task_id = %task.id, slot_id = %slot_id, state = ?pre_send_status.state,
                     "Autopilot: slot not Idle pre-send, releasing task without penalty");
                 let _ = state.store.unclaim_board_task(task.id.as_str()).await;
                 continue;
             }
         }
-        // Guard held: slot confirmed idle, send will transition state.
-        // Release after send initiation (pty.send blocks until completion, but state transitions immediately).
-        // We release here because pty.send() is blocking — holding the guard for 10min would starve other callers.
-        // After this point, PTY state is non-Idle so other callers will see it as busy.
-        state.slot_dispatch.release(&slot_id);
 
         // Send prompt and wait for response — derive the budget from the
         // BoardTask.timeout_secs that mission_task_delegate already stored,
         // so a 55-minute Opus coding task does not get capped at 10 minutes.
+        // _slot_guard is held across the entire send so Autopilot remains the
+        // sole prompt+close owner for this dispatch.
         let timeout_ms = derive_pty_timeout_ms(task.timeout_secs);
         match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
             Ok(res) => {
@@ -947,8 +983,11 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         author: Some("autopilot".to_string()),
                     })
                     .await;
-                // CAS guard: only mark done if task is still in 'running' state.
-                // If task was auto-blocked by mission_question_create, preserve 'blocked' status.
+                // V3 execution-ownership :: delegated-boardtask :: close-owner.
+                // Autopilot owns closure unless the worker self-closed via
+                // attached board MCP tools (Done) or the task transitioned to
+                // Blocked (e.g. mission_question_create). Pure helper
+                // `decide_close_action` projects the rule.
                 let current_status = state
                     .store
                     .get_board_task(task.id.as_str())
@@ -956,12 +995,12 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     .ok()
                     .flatten()
                     .map(|t| t.status);
-                match current_status {
-                    Some(missiond_core::types::BoardTaskStatus::Done) => {
-                        // Slot already self-closed the task
+                match decide_close_action(current_status) {
+                    DispatchCloseAction::AlreadySelfClosed => {
+                        // Worker self-closed via attached board MCP tools.
                         info!(task_id = %task.id, duration_ms = res.duration_ms, "Autopilot: task already done (self-closed)");
                     }
-                    Some(missiond_core::types::BoardTaskStatus::Blocked) => {
+                    DispatchCloseAction::PreserveBlocked => {
                         // Task was blocked by pending questions — do NOT overwrite
                         let _ = state.store.add_board_task_note(
                             &missiond_core::types::AddBoardTaskNoteInput {
@@ -973,8 +1012,8 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         ).await;
                         warn!(task_id = %task.id, "Autopilot: pty.send completed but task is blocked — preserving blocked status");
                     }
-                    _ => {
-                        // Normal case: running → done
+                    DispatchCloseAction::OwnerClosesAsDone => {
+                        // Normal case: running → done. Autopilot is the close owner.
                         let _ = state
                             .store
                             .update_board_task(
@@ -2036,6 +2075,53 @@ mod tests {
             "task id not surfaced: {suffix}"
         );
         assert!(suffix.starts_with("BODY\n\n---\n"));
+    }
+
+    // ── V3 execution-ownership :: delegated-boardtask close-owner ───────
+
+    #[test]
+    fn decide_close_action_preserves_self_close_done() {
+        // Worker self-closed the task via attached board MCP tools before
+        // pty.send returned. Autopilot must preserve Done and not overwrite.
+        assert_eq!(
+            decide_close_action(Some(missiond_core::types::BoardTaskStatus::Done)),
+            DispatchCloseAction::AlreadySelfClosed
+        );
+    }
+
+    #[test]
+    fn decide_close_action_preserves_blocked_question_state() {
+        // Task transitioned to Blocked via mission_question_create during
+        // execution. Autopilot must preserve Blocked and never overwrite
+        // with done on pty.send return.
+        assert_eq!(
+            decide_close_action(Some(missiond_core::types::BoardTaskStatus::Blocked)),
+            DispatchCloseAction::PreserveBlocked
+        );
+    }
+
+    #[test]
+    fn decide_close_action_owner_closes_running_or_open() {
+        // Default close-owner path: running → done.
+        assert_eq!(
+            decide_close_action(Some(missiond_core::types::BoardTaskStatus::Running)),
+            DispatchCloseAction::OwnerClosesAsDone
+        );
+        assert_eq!(
+            decide_close_action(Some(missiond_core::types::BoardTaskStatus::Open)),
+            DispatchCloseAction::OwnerClosesAsDone
+        );
+    }
+
+    #[test]
+    fn decide_close_action_owner_closes_when_status_unknown() {
+        // Lookup miss (DB error or task vanished) — Autopilot still owns
+        // closure. Treating None as OwnerClosesAsDone matches the legacy
+        // `_ =>` arm so we don't introduce a new orphan path.
+        assert_eq!(
+            decide_close_action(None),
+            DispatchCloseAction::OwnerClosesAsDone
+        );
     }
 
     #[test]
