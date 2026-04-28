@@ -166,6 +166,38 @@
     (policy verification-reuse
       :rule "Receipts may cover later states only when commit prefix, file set, tier, and exit_code rules pass."))
 
+  (workstation-config
+    :desc "Lisp-owned workstation spawn policy; runtime slot config is a projection, not an independent default."
+    :config-fields [:template :model_profile :model :cwd :project_root :mcp_config :ttl :permission_mode]
+    :resolution-order [caller-model caller-model-profile task-intent-template claude-code-default]
+    (model-profile coding-default-opus-4-7
+      :applies-to [code research]
+      :claude-code-ui "Default recommended"
+      :effective-model "Opus 4.7 with 1M context"
+      :spawn-model-arg nil
+      :rule "Omit --model so Claude Code uses the user's Default model selection.")
+    (model-profile daily-sonnet
+      :applies-to [ops low-risk-maintenance]
+      :spawn-model-arg "sonnet"
+      :rule "Use only when the task or caller explicitly asks for Sonnet-class daily work.")
+    (slot-template coder
+      :role coder
+      :default-model-profile coding-default-opus-4-7
+      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+    (slot-template researcher
+      :role coder
+      :default-model-profile coding-default-opus-4-7
+      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+    (slot-template ops
+      :role operator
+      :default-model-profile daily-sonnet
+      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+    :invariants
+      ["code and research dynamic slots MUST NOT hardcode --model sonnet"
+       "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
+       "caller-supplied model wins over model_profile, but must be a single shell token"
+       "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"])
+
   (implementation-map
     (surface mission_request
       :status "code-aligned-partial"
@@ -200,7 +232,16 @@
              "scripts/task-runner-dispatch.mjs"
              "scripts/task-runner-submit-dispatch.mjs"
              "scripts/finalize-task-report.mjs"
-             "scripts/project-task-lifecycle-ledger.mjs"]))
+             "scripts/project-task-lifecycle-ledger.mjs"])
+
+    (surface workstation-config
+      :status "code-aligned-partial"
+      :implements [workstation-config]
+      :code ["crates/missiond-daemon/src/handlers/compute/compute_slot.rs"
+             "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+             "crates/missiond-mcp/src/tools/compute/compute_slot.rs"
+             "crates/missiond-mcp/src/tools/compute/task_delegate.rs"]
+      :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model."))
 
   (compression-contract
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."

@@ -24,6 +24,8 @@ const ALLOWED_CWD_PREFIXES: &[&str] = &[
     "/tmp",
 ];
 
+const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
+
 /// Built-in templates — derived from slots.yaml patterns.
 fn get_template(name: &str) -> Option<TemplateConfig> {
     match name {
@@ -32,7 +34,7 @@ fn get_template(name: &str) -> Option<TemplateConfig> {
             description: "Dynamic coder slot (ephemeral)",
             mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
             default_cwd: "/Users/jinchen/Projects",
-            model: Some("sonnet"),
+            model: None,
         }),
         "ops" => Some(TemplateConfig {
             role: "operator",
@@ -46,7 +48,7 @@ fn get_template(name: &str) -> Option<TemplateConfig> {
             description: "Dynamic researcher slot (read-only analysis)",
             mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
             default_cwd: "/Users/jinchen/Projects",
-            model: Some("sonnet"),
+            model: None,
         }),
         _ => None,
     }
@@ -58,6 +60,86 @@ struct TemplateConfig {
     mcp_config: Option<&'static str>,
     default_cwd: &'static str,
     model: Option<&'static str>,
+}
+
+pub(crate) fn resolve_model_projection(
+    template_name: &str,
+    model: Option<&str>,
+    model_profile: Option<&str>,
+) -> std::result::Result<Option<String>, String> {
+    if let Some(value) = non_empty(model) {
+        return normalize_model_override(value);
+    }
+    if let Some(profile) = non_empty(model_profile) {
+        return model_for_profile(profile);
+    }
+    Ok(get_template(template_name).and_then(|template| template.model.map(str::to_string)))
+}
+
+pub(crate) fn model_projection_matches(
+    slot_model: Option<&str>,
+    requested_model: Option<&str>,
+) -> bool {
+    let slot = match slot_model {
+        Some(value) => match normalize_model_override(value) {
+            Ok(value) => value,
+            Err(_) => return false,
+        },
+        None => None,
+    };
+    slot.as_deref() == requested_model
+}
+
+fn model_for_profile(profile: &str) -> std::result::Result<Option<String>, String> {
+    match normalize_profile(profile).as_str() {
+        "default"
+        | "claude-code-default"
+        | "coding-default"
+        | CODING_DEFAULT_PROFILE
+        | "opus-4-7-default" => Ok(None),
+        "daily-sonnet" | "sonnet" => Ok(Some("sonnet".to_string())),
+        "quick-haiku" | "haiku" => Ok(Some("haiku".to_string())),
+        other => Err(format!(
+            "Unknown model_profile '{}'. Use {}, daily-sonnet, or quick-haiku.",
+            other, CODING_DEFAULT_PROFILE
+        )),
+    }
+}
+
+fn normalize_model_override(value: &str) -> std::result::Result<Option<String>, String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Ok(None);
+    }
+    let normalized = normalize_profile(value);
+    if matches!(
+        normalized.as_str(),
+        "default" | "claude-code-default" | "coding-default" | CODING_DEFAULT_PROFILE
+    ) {
+        return Ok(None);
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        return Err("model must be a single safe CLI token".to_string());
+    }
+    Ok(Some(value.to_string()))
+}
+
+fn normalize_profile(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|s| !s.is_empty())
+}
+
+fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| args.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
@@ -102,6 +184,19 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 )
                 .with_suggestion("Available templates: coder, ops, researcher"),
             ))
+        }
+    };
+    let model = match resolve_model_projection(
+        template_name,
+        string_arg(args, &["model"]),
+        string_arg(args, &["model_profile", "modelProfile"]),
+    ) {
+        Ok(model) => model,
+        Err(message) => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::INVALID_PARAM,
+                message,
+            )))
         }
     };
 
@@ -222,7 +317,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         lifecycle: Some(Lifecycle::OnDemand),
         auto_start: None,
         dangerously_skip_permissions: Some(false), // ALWAYS false for dynamic slots
-        model: template.model.map(|s| s.to_string()),
+        model,
         traits: vec![],
         category: None,
         env: None,
@@ -322,6 +417,8 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                         "slot_id": slot_id_owned,
                         "status": "spawned",
                         "template": template_owned,
+                        "model": slot_config.model.clone(),
+                        "model_profile": if slot_config.model.is_none() { CODING_DEFAULT_PROFILE } else { "explicit-model" },
                         "ttl_seconds": ttl,
                         "expires_at": expires_at_str,
                         "objective": objective_owned,
@@ -493,4 +590,60 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
         "dynamic_active": dynamic_slots.iter().filter(|s| s.status == "active").count(),
         "dynamic_limit": MAX_DYNAMIC_SLOTS,
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coder_template_uses_claude_code_default_profile() {
+        assert_eq!(resolve_model_projection("coder", None, None).unwrap(), None);
+        assert_eq!(
+            resolve_model_projection("researcher", None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn ops_template_keeps_sonnet_default() {
+        assert_eq!(
+            resolve_model_projection("ops", None, None).unwrap(),
+            Some("sonnet".to_string())
+        );
+    }
+
+    #[test]
+    fn caller_model_wins_over_profile() {
+        assert_eq!(
+            resolve_model_projection("coder", Some("haiku"), Some("daily-sonnet")).unwrap(),
+            Some("haiku".to_string())
+        );
+    }
+
+    #[test]
+    fn default_alias_means_no_model_arg() {
+        assert_eq!(
+            resolve_model_projection("coder", Some("claude-code-default"), None).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_model_projection("coder", None, Some("coding_default_opus_4_7")).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn unsafe_model_token_is_rejected() {
+        assert!(resolve_model_projection("coder", Some("sonnet;rm"), None).is_err());
+        assert!(resolve_model_projection("coder", Some("sonnet 4.6"), None).is_err());
+    }
+
+    #[test]
+    fn slot_model_matching_treats_default_alias_as_none() {
+        assert!(model_projection_matches(None, None));
+        assert!(model_projection_matches(Some("default"), None));
+        assert!(!model_projection_matches(Some("sonnet"), None));
+        assert!(model_projection_matches(Some("sonnet"), Some("sonnet")));
+    }
 }

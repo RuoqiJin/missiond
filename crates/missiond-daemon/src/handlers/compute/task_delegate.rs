@@ -78,6 +78,9 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 .collect()
         })
         .unwrap_or_default();
+    let model_arg = string_arg(&args, &["model"]).map(str::to_string);
+    let model_profile_arg =
+        string_arg(&args, &["model_profile", "modelProfile"]).map(str::to_string);
 
     let cwd = args.get("cwd").and_then(|v| v.as_str());
 
@@ -119,11 +122,30 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "research" => "researcher",
         _ => "coder",
     };
+    let requested_model = match super::compute_slot::resolve_model_projection(
+        template,
+        model_arg.as_deref(),
+        model_profile_arg.as_deref(),
+    ) {
+        Ok(model) => model,
+        Err(message) => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::INVALID_PARAM,
+                message,
+            )))
+        }
+    };
 
     // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve).
     // intent-flow.lisp F-task-delegate-autoprovision :: s2 requires
     // slot.project_root == target_project_root for reuse.
-    let guard = find_and_reserve_slot(state, template, target_project_root.as_deref()).await;
+    let guard = find_and_reserve_slot(
+        state,
+        template,
+        target_project_root.as_deref(),
+        requested_model.as_deref(),
+    )
+    .await;
     let assignee = guard
         .as_ref()
         .map(|g| g.slot_id().to_string())
@@ -138,7 +160,17 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
             // Queue without assignee; autopilot will pick up when a slot frees
             (String::new(), false)
         } else {
-            match auto_provision_slot(state, template, objective, timeout_secs, cwd).await {
+            match auto_provision_slot(
+                state,
+                template,
+                objective,
+                timeout_secs,
+                cwd,
+                model_arg.as_deref(),
+                model_profile_arg.as_deref(),
+            )
+            .await
+            {
                 Ok(id) => (id, true),
                 Err(e) => {
                     tracing::warn!("Auto-provision failed, queueing without assignee: {}", e);
@@ -213,6 +245,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "status": "queued",
         "intent": intent,
         "template": template,
+        "model": requested_model,
         "provisioned_new_slot": provisioned,
         "timeout_secs": timeout_secs,
         "hint": "结果将通过 TaskNotification 自动回报。也可用 mission_board_get 查询进度。"
@@ -230,6 +263,7 @@ async fn find_and_reserve_slot<'a>(
     state: &'a AppState,
     template: &str,
     target_project_root: Option<&str>,
+    requested_model: Option<&str>,
 ) -> Option<SlotAcquireGuard<'a>> {
     let target_role = match template {
         "coder" | "researcher" => "coder",
@@ -244,6 +278,12 @@ async fn find_and_reserve_slot<'a>(
             continue;
         }
         if slot.config.role != target_role {
+            continue;
+        }
+        if !super::compute_slot::model_projection_matches(
+            slot.config.model.as_deref(),
+            requested_model,
+        ) {
             continue;
         }
         // Project-root reuse check. Prefer the resolved project_root field;
@@ -281,6 +321,8 @@ async fn auto_provision_slot(
     objective: &str,
     timeout_secs: i64,
     cwd: Option<&str>,
+    model: Option<&str>,
+    model_profile: Option<&str>,
 ) -> Result<String> {
     // Check quota
     let active = state
@@ -305,6 +347,12 @@ async fn auto_provision_slot(
     if let Some(cwd_val) = cwd {
         create_args["cwd"] = Value::String(cwd_val.to_string());
     }
+    if let Some(model_val) = model {
+        create_args["model"] = Value::String(model_val.to_string());
+    }
+    if let Some(profile_val) = model_profile {
+        create_args["model_profile"] = Value::String(profile_val.to_string());
+    }
 
     // Delegate to existing compute_slot handler
     let result = super::compute_slot::handle(state, "mission_compute_slot", create_args).await?;
@@ -322,6 +370,13 @@ async fn auto_provision_slot(
     }
 
     Err(anyhow!("Failed to parse compute_slot response"))
+}
+
+fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    keys.iter()
+        .find_map(|key| args.get(*key).and_then(|v| v.as_str()))
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
 }
 
 /// Phase 6.3: Build context from KB/Skills with size limits.

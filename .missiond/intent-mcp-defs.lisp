@@ -331,7 +331,9 @@
       (timeout_secs integer :default 1800 :description "超时秒数(上限 7200)")
       (priority  string :enum (high medium low) :default "medium")
       (depends_on array :description "前置任务 ID 列表(DAG)")
-      (context_hints array :description "上下文关键词，预加载 KB/Skill"))
+      (context_hints array :description "上下文关键词，预加载 KB/Skill")
+      (model string :description "可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model")
+      (model_profile string :description "可选模型 profile；coding-default-opus-4-7 表示 Claude Code Default(Opus 4.7/1M)"))
     :returns "Value"))
 
 (mcp-module process
@@ -512,6 +514,8 @@
       (objective string :description "[create] 意图描述")
       (cwd     string :description "[create] 工作目录")
       (max_ttl integer :default 14400 :description "[create] 最大 TTL 秒(默认 4h, 上限 8h)")
+      (model string :description "[create] 可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model")
+      (model_profile string :description "[create] 可选模型 profile；coding-default-opus-4-7 表示 Claude Code Default(Opus 4.7/1M)")
       (slot_id string :description "[terminate/extend] 动态 slot ID")
       (additional_seconds integer :description "[extend] 延长秒数(每次上限 3600)")
       (status  string :description "[list] active/terminated"))

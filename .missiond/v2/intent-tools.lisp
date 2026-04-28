@@ -538,18 +538,19 @@
       (tool mission_task_delegate
         :desc "声明式任务委派 — 描述目标, daemon 自主选 slot/执行/回报"
         :required ["objective"]
-        :optional ["intent" "cwd" "projectId" "timeout_secs" "priority" "depends_on" "context_hints"]
+        :optional ["intent" "cwd" "projectId" "timeout_secs" "priority" "depends_on" "context_hints" "model" "model_profile"]
         (ingress
-          :schema "objective required; intent defaults/general maps to slot template; cwd/projectId resolve target_project_root; timeout clamped by handler"
+          :schema "objective required; intent defaults/general maps to slot template; cwd/projectId resolve target_project_root; timeout clamped by handler; model/model_profile optionally override slot-template model projection"
           :callers ["intent-layer (主)"])
         (logic-core
           (step s1 "validate objective/intent/cwd/timeout/priority")
           (step s2 "resolve target_project_root via ProjectRegistry; requested subdir is context only, not spawn cwd")
-          (step s3 "select idle slot using SlotAcquireGuard, excluding protected roles, only when slot.project_root == target_project_root")
-          (step s4 "if no idle slot and intent != ops, auto-provision via compute_slot with spawn cwd=target_project_root")
-          (step s5 "build context hints from KB/skills")
-          (step s6 "create board_task auto_execute=true with project binding")
-          (step s7 "notify board_dispatch_notify for immediate dispatch"))
+          (step s3 "resolve model projection: model wins, else model_profile, else slot template; code/research default is Claude Code Default(Opus 4.7/1M) represented by no --model")
+          (step s4 "select idle slot using SlotAcquireGuard, excluding protected roles, only when slot.project_root == target_project_root and slot.model matches the resolved model projection")
+          (step s5 "if no idle slot and intent != ops, auto-provision via compute_slot with spawn cwd=target_project_root and model/model_profile forwarded")
+          (step s6 "build context hints from KB/skills")
+          (step s7 "create board_task auto_execute=true with project binding")
+          (step s8 "notify board_dispatch_notify for immediate dispatch"))
         (egress
           :writes ["board_tasks" "dynamic_slots/slot_sessions indirectly when auto-provisioned"]
           :returns "created board task / dispatch receipt"
@@ -923,14 +924,14 @@
         :desc "动态计算工位管理 create/terminate/extend/list (TTL 生命周期, 上限 5 活跃 · 8h)"
         :actions ["create" "terminate" "extend" "list"]
         :required ["action"]
-        :optional ["template" "objective" "cwd" "projectId" "max_ttl" "slot_id" "additional_seconds" "status"]
+        :optional ["template" "objective" "cwd" "projectId" "max_ttl" "slot_id" "additional_seconds" "status" "model" "model_profile"]
         (ingress
-          :schema "action required; create requires template; create accepts cwd/projectId and must resolve target_project_root; terminate/extend require slot_id; list accepts status"
+          :schema "action required; create requires template; create accepts cwd/projectId and must resolve target_project_root; create accepts model/model_profile; terminate/extend require slot_id; list accepts status"
           :callers ["intent-layer (autopilot 派发)" "board-frontend" "task_delegate auto-provision"])
         (logic-core
           (step s1 "dispatch action create/terminate/extend/list")
-          (step s2 "create: validate template, active limit 5, resolve cwd/projectId to target_project_root, TTL min/max, objective")
-          (step s3 "create: build SlotConfig(project_root, requested_cwd) and DynamicSlot row, persist to DB, register in SlotManager")
+          (step s2 "create: validate template, model/model_profile single-token override, active limit 5, resolve cwd/projectId to target_project_root, TTL min/max, objective")
+          (step s3 "create: build SlotConfig(project_root, requested_cwd, model projection) and DynamicSlot row, persist to DB, register in SlotManager")
           (step s4 "create: create AsyncJob and spawn background PTY task via spawn_tracked_slot with process cwd=target_project_root")
           (step s5 "create background: complete job or mark dynamic slot spawn_failed and unregister")
           (step s6 "terminate: require slot-dyn-* id, kill PTY, terminate DB row, unregister slot")
