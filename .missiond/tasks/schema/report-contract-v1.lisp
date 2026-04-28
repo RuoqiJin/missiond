@@ -11,7 +11,7 @@
 
 (report-contract-schema missiond.report-contract.v1
   :version "v1"
-  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp); wave25-02 added optional router-recommendation fields (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) — flat surface, mirrors the wave24-04 daemon dry-run block, additive-only, recommendation is NEVER authoritative; wave26-04 added optional router-readiness fields (:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path) — flat surface, mirrors the wave26-02/03 backend readiness annotations, additive-only, runtime_allowed/apply_eligible MUST be literal atom booleans"
+  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp); wave25-02 added optional router-recommendation fields (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) — flat surface, mirrors the wave24-04 daemon dry-run block, additive-only, recommendation is NEVER authoritative; wave26-04 added optional router-readiness fields (:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path) — flat surface, mirrors the wave26-02/03 backend readiness annotations, additive-only, runtime_allowed/apply_eligible MUST be literal atom booleans; wave27-04 added optional router-dispatch-descriptor fields (:router_dispatch_descriptor_path :router_dispatch_descriptor_status :router_dispatch_backend :router_dispatch_eligible :router_dispatch_no_execution :router_dispatch_blockers) — flat surface, mirrors the wave27-01 missiond.router-dispatch-descriptor.v1 head plus the wave27-02 builder output, additive-only, eligible MUST be literal atom true|false, no_execution MUST be literal atom true (false AND strings rejected — cross-wave invariant)"
   :checker "scripts/check-task-report.mjs"
   :run-verifier "scripts/verify-task-run.mjs"
 
@@ -45,7 +45,21 @@
      ;;   runtime_allowed / apply_eligible MUST be literal atom booleans.
      :router_backend_readiness_status :router_backend_runtime_allowed
      :router_apply_eligible :router_apply_blockers
-     :router_backend_registry_path])
+     :router_backend_registry_path
+     ;; wave27-04: router-dispatch-descriptor fields. Mirror the wave27-01
+     ;; missiond.router-dispatch-descriptor.v1 schema head plus the wave27-02
+     ;; build-router-dispatch-descriptor.mjs output on the report side so
+     ;; completion reports can RECORD the descriptor a task was associated
+     ;; with WITHOUT claiming runtime backend execution happened. All six
+     ;; fields are optional and additive; legacy reports without them remain
+     ;; valid. Cross-wave invariants enforced structurally:
+     ;;   :router_dispatch_eligible      — literal atom true|false (strings rejected)
+     ;;   :router_dispatch_no_execution  — literal atom true ONLY (false AND
+     ;;                                    strings rejected — the descriptor
+     ;;                                    layer is locked no-execution).
+     :router_dispatch_descriptor_path :router_dispatch_descriptor_status
+     :router_dispatch_backend :router_dispatch_eligible
+     :router_dispatch_no_execution :router_dispatch_blockers])
 
   (field-contract
     (:schema "must equal missiond.report-contract.v1")
@@ -118,7 +132,25 @@
       "Vector of non-empty strings; each entry names a concrete reason promotion to live dispatch is rejected. Mirrors the wave26-01 backend-registry :apply_blockers vector and the synthetic blockers wave26-02/03 splice in for unknown_backend / runtime_allowed=false / readiness_status!=runtime-ready outcomes.")
     (:router_backend_registry_path
       "Optional. wave26-04 router-readiness surface."
-      "String; repo-relative path to the backend-registry file consulted (no leading '/' or '~', no '..' traversal). Mirrors the wave26-02 --backend-registry flag echo and the wave26-03 router_backend_registry_path MCP arg echo."))
+      "String; repo-relative path to the backend-registry file consulted (no leading '/' or '~', no '..' traversal). Mirrors the wave26-02 --backend-registry flag echo and the wave26-03 router_backend_registry_path MCP arg echo.")
+    (:router_dispatch_descriptor_path
+      "Optional. wave27-04 router-dispatch-descriptor surface."
+      "String; repo-relative path to the descriptor artifact recorded for this task (no leading '/' or '~', no '..' traversal). Mirrors the wave27-02 builder output location.")
+    (:router_dispatch_descriptor_status
+      "Optional. wave27-04 router-dispatch-descriptor surface."
+      "String enum — one of: absent | built | invalid | registry_missing | blocked. Records the descriptor lifecycle state observed when the report was assembled; observational only — never authoritative for dispatch.")
+    (:router_dispatch_backend
+      "Optional. wave27-04 router-dispatch-descriptor surface."
+      "String enum — one of: claudecode | missiond-llm-router | deterministic-checker | patch-worker | verifier-worker. Reuses the wave25-02 router backend enum. Records which backend the descriptor declared; recording NEVER promotes the backend to authoritative dispatch.")
+    (:router_dispatch_eligible
+      "Optional. wave27-04 router-dispatch-descriptor surface."
+      "Cross-wave invariant: MUST be the literal atom true or false when present (string forms or any other value rejected). Mirrors the wave27-01 :apply_eligible eligibility-gate output (runtime-ready + runtime_allowed=true + confidence=high + zero blockers); current-default alone is NEVER sufficient — observational only.")
+    (:router_dispatch_no_execution
+      "Optional. wave27-04 router-dispatch-descriptor surface."
+      "Cross-wave invariant: MUST be the literal atom true when present (the literal atom false AND any string form are rejected). Mirrors the wave27-01 :no_execution invariant — recording a descriptor never asserts a runtime backend swap happened, only that the handoff fact was captured.")
+    (:router_dispatch_blockers
+      "Optional. wave27-04 router-dispatch-descriptor surface."
+      "Vector of non-empty strings; each entry names a concrete reason the descriptor's dispatch handoff is blocked / advisory only. Mirrors the wave27-01 :blockers vector and the wave27-02 builder splice for absent / invalid / registry_missing / non-eligible outcomes."))
 
   (status-contract
     :allowed [draft in-progress done blocked rejected]
@@ -153,6 +185,12 @@
        ":router_backend_runtime_allowed not the literal atom true or false (cross-wave invariant — strings are rejected)"
        ":router_apply_eligible not the literal atom true or false (cross-wave invariant — strings are rejected)"
        ":router_apply_blockers not a vector of non-empty strings"
-       "absolute or ~/.. paths inside :router_backend_registry_path"]
+       "absolute or ~/.. paths inside :router_backend_registry_path"
+       ":router_dispatch_descriptor_status not in {absent, built, invalid, registry_missing, blocked}"
+       ":router_dispatch_backend not in {claudecode, missiond-llm-router, deterministic-checker, patch-worker, verifier-worker}"
+       ":router_dispatch_eligible not the literal atom true or false (cross-wave invariant — strings are rejected)"
+       ":router_dispatch_no_execution not the literal atom true (cross-wave invariant — false AND strings are rejected)"
+       ":router_dispatch_blockers not a vector of non-empty strings"
+       "absolute or ~/.. paths inside :router_dispatch_descriptor_path"]
     :non-goal
-      "checker does NOT execute the acceptance commands; it only validates structure. Worker-explanation fields are prose-only — they are validated structurally but their content is never treated as ground truth. Router-recommendation and router-readiness fields are observational — the recorded recommendation / readiness signals are NEVER promoted to authoritative dispatch by the checker."))
+      "checker does NOT execute the acceptance commands; it only validates structure. Worker-explanation fields are prose-only — they are validated structurally but their content is never treated as ground truth. Router-recommendation, router-readiness, and router-dispatch-descriptor fields are observational — the recorded recommendation / readiness / descriptor signals are NEVER promoted to authoritative dispatch by the checker."))

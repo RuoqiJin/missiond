@@ -62,6 +62,18 @@ const ALLOWED_ROUTER_READINESS = new Set([
   'unknown',
 ]);
 
+// wave27-04: router-dispatch-descriptor lifecycle enum. Mirrors the wave27-01
+// missiond.router-dispatch-descriptor.v1 :descriptor_status atom plus the
+// wave27-02 builder fallbacks for when the descriptor cannot be assembled
+// (registry missing, schema invalid, eligibility-gate blocked, etc.).
+const ALLOWED_ROUTER_DISPATCH_STATUS = new Set([
+  'absent',
+  'built',
+  'invalid',
+  'registry_missing',
+  'blocked',
+]);
+
 function main() {
   const args = process.argv.slice(2);
   let all = false;
@@ -389,6 +401,63 @@ function validateReport(file, report, diagnostics) {
     ':router_backend_registry_path',
     diagnostics,
   );
+
+  // wave27-04: optional router-dispatch-descriptor fields. Mirror the
+  // wave27-01 missiond.router-dispatch-descriptor.v1 schema head plus the
+  // wave27-02 builder output on the report side so completion reports can
+  // RECORD the descriptor a task was associated with WITHOUT claiming
+  // runtime backend execution. All six fields are optional; when present,
+  // each is validated structurally:
+  //   :router_dispatch_descriptor_path   — repo-relative string
+  //   :router_dispatch_descriptor_status — enum (5 lifecycle classes)
+  //   :router_dispatch_backend           — enum (5 backend classes; reuses wave25-02)
+  //   :router_dispatch_eligible          — literal atom true|false
+  //   :router_dispatch_no_execution      — literal atom true ONLY (cross-wave invariant)
+  //   :router_dispatch_blockers          — vector of non-empty strings
+  validateRouterRepoRelativePath(
+    file,
+    report,
+    props[':router_dispatch_descriptor_path']?.value,
+    ':router_dispatch_descriptor_path',
+    diagnostics,
+  );
+  validateRouterEnumField(
+    file,
+    report,
+    props[':router_dispatch_descriptor_status']?.value,
+    ':router_dispatch_descriptor_status',
+    ALLOWED_ROUTER_DISPATCH_STATUS,
+    diagnostics,
+  );
+  validateRouterEnumField(
+    file,
+    report,
+    props[':router_dispatch_backend']?.value,
+    ':router_dispatch_backend',
+    ALLOWED_ROUTER_BACKENDS,
+    diagnostics,
+  );
+  validateRouterLiteralBoolEither(
+    file,
+    report,
+    props[':router_dispatch_eligible']?.value,
+    ':router_dispatch_eligible',
+    diagnostics,
+  );
+  validateRouterLiteralBool(
+    file,
+    report,
+    props[':router_dispatch_no_execution']?.value,
+    ':router_dispatch_no_execution',
+    'true',
+    diagnostics,
+  );
+  validateRouterDispatchBlockers(
+    file,
+    report,
+    props[':router_dispatch_blockers']?.value,
+    diagnostics,
+  );
 }
 
 // wave26-04 helper: STRICT literal-atom validator that accepts either
@@ -445,6 +514,46 @@ function validateRouterApplyBlockers(file, report, node, diagnostics) {
         file,
         entry.loc ?? node.loc,
         ':router_apply_blockers entries must be non-empty strings',
+      );
+    }
+  }
+}
+
+// wave27-04 helper: :router_dispatch_blockers must be a vector of non-empty
+// strings — mirrors the wave26-04 validateRouterApplyBlockers shape. Each
+// entry names a concrete reason the descriptor's dispatch handoff is blocked
+// or stays advisory only. Empty strings are rejected because they carry no
+// signal and almost always indicate a templating bug. Property-list entries
+// are not allowed — the wave27-01 schema and the wave27-02 builder both
+// emit plain strings.
+function validateRouterDispatchBlockers(file, report, node, diagnostics) {
+  if (node == null) return; // optional
+  if (!isList(node)) {
+    addError(
+      diagnostics,
+      file,
+      node.loc ?? report.loc,
+      ':router_dispatch_blockers must be a vector/list when present',
+    );
+    return;
+  }
+  for (const entry of node.children) {
+    const text = nodeText(entry);
+    if (text == null) {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':router_dispatch_blockers entries must be strings',
+      );
+      continue;
+    }
+    if (text.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        entry.loc ?? node.loc,
+        ':router_dispatch_blockers entries must be non-empty strings',
       );
     }
   }
@@ -1291,6 +1400,115 @@ function runFixtures() {
         :router_apply_blockers ["backend claudecode readiness_status=current-default (apply gate requires runtime-ready; current-default is NOT sufficient)"]
         :router_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
       ok: true,
+    },
+    // wave27-04: router-dispatch-descriptor field fixtures (legacy + valid +
+    // 5 negatives). Backward-compat is non-negotiable — the legacy fixture
+    // re-pins that reports without any of the 6 new fields stay valid. The
+    // valid fixture mirrors the wave27-01 seed shape: claudecode descriptor
+    // built, eligible=false (current-default alone is NEVER sufficient for
+    // the apply gate), no_execution=true (descriptor recording NEVER asserts
+    // a runtime backend swap happened — cross-wave invariant).
+    {
+      name: 'wave27-04 legacy report (no descriptor fields) — backward compat',
+      source: `(report wave27-fix-dispatch-legacy
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-fix-dispatch-legacy"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)])`,
+      ok: true,
+    },
+    {
+      name: 'wave27-04 valid descriptor block (all 6 fields, claudecode seed shape)',
+      source: `(report wave27-fix-dispatch-ok
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-fix-dispatch-ok"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "node scripts/x.mjs --check" :exit_code 0 :ok true)]
+        :router_dispatch_descriptor_path ".missiond/router/dispatch-descriptors/wave27-fix-dispatch-ok.lisp"
+        :router_dispatch_descriptor_status "built"
+        :router_dispatch_backend "claudecode"
+        :router_dispatch_eligible false
+        :router_dispatch_no_execution true
+        :router_dispatch_blockers
+          ["descriptor recording NEVER asserts runtime backend swap"
+           "apply gate requires runtime-ready; current-default is NOT sufficient"])`,
+      ok: true,
+    },
+    {
+      name: 'wave27-04 router_dispatch_no_execution=false rejected (cross-wave invariant)',
+      source: `(report wave27-fix-dispatch-no-exec-false
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-fix-dispatch-no-exec-false"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_dispatch_no_execution false)`,
+      ok: false,
+      expects: /:router_dispatch_no_execution must be the literal atom true/,
+    },
+    {
+      name: 'wave27-04 router_dispatch_no_execution="true" string rejected (cross-wave invariant)',
+      source: `(report wave27-fix-dispatch-no-exec-string
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-fix-dispatch-no-exec-string"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_dispatch_no_execution "true")`,
+      ok: false,
+      expects: /:router_dispatch_no_execution must be the literal atom true/,
+    },
+    {
+      name: 'wave27-04 router_dispatch_eligible="false" string rejected (cross-wave invariant)',
+      source: `(report wave27-fix-dispatch-eligible-string
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-fix-dispatch-eligible-string"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_dispatch_eligible "false")`,
+      ok: false,
+      expects: /:router_dispatch_eligible must be the literal atom true or false/,
+    },
+    {
+      name: 'wave27-04 invalid router_dispatch_descriptor_status rejected',
+      source: `(report wave27-fix-dispatch-bad-status
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-fix-dispatch-bad-status"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_dispatch_descriptor_status "pending")`,
+      ok: false,
+      expects: /:router_dispatch_descriptor_status must be one of/,
+    },
+    {
+      name: 'wave27-04 absolute router_dispatch_descriptor_path rejected',
+      source: `(report wave27-fix-dispatch-abs-path
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-fix-dispatch-abs-path"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)]
+        :router_dispatch_descriptor_path "/etc/descriptor.lisp")`,
+      ok: false,
+      expects: /:router_dispatch_descriptor_path must be repo-relative/,
     },
   ];
 
