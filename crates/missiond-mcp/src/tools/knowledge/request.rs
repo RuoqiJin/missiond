@@ -6,11 +6,17 @@ pub fn definitions() -> Vec<ToolDefinition> {
         "mission_request",
         "MissionD v3 unified request entry — request-first surface for user/external/agent needs. \
          v0 is file-first + compatibility composition: action=start writes \
-         .missiond/requests/<request_id>/request.lisp and an initial lifecycle event, then \
-         forwards to the existing unified-entry pipeline (mission_directive / mission_plan). \
-         action=advance forwards an already-approved directive/plan breadcrumb to the same pipeline. \
-         action=status reads the request artifact. It never auto-approves intent or plan, never \
-         bypasses mission_plan, and never spawns workstation work directly.",
+         .missiond/requests/<request_id>/request.lisp + initial lifecycle event, forwards to the \
+         existing unified-entry pipeline (mission_directive / mission_plan), and projects the \
+         pipeline's stable inner sexp into request-local Lisp artifacts \
+         (.missiond/requests/<request_id>/intent-alignment.lisp from a directive compile, \
+         plan.lisp from a plan compile). action=advance forwards an already-approved directive/plan \
+         breadcrumb to the same pipeline and runs the same projection. action=status reads \
+         request.lisp and surfaces request-local artifact paths + existence booleans. It never \
+         auto-approves intent or plan, never bypasses mission_plan, and never spawns workstation \
+         work directly. Wrapper response shape: { status, action, mode, request_artifacts, \
+         projection: { status: written|skipped_*|write_failed, target?, sexp_source?, path?, \
+         sha256?, bytes?, created?, overwritten?, error? }, pipeline, v3_contract, next_step }.",
         json!({
             "type": "object",
             "required": ["action"],
@@ -51,7 +57,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "overwrite_file": {
                     "type": "boolean",
-                    "description": "[start] allow replacing an existing request.lisp / initial event. Default false."
+                    "description": "[start|advance] allow replacing an existing request.lisp / initial event AND any request-local intent-alignment.lisp / plan.lisp projection produced from the inner compile sexp. Default false."
                 },
                 "compiler_mode": {
                     "type": "string",

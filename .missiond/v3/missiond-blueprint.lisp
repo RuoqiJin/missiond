@@ -204,7 +204,7 @@
       :role "single user-facing request entry"
       :code ["crates/missiond-daemon/src/handlers/knowledge/request.rs"
              "crates/missiond-mcp/src/tools/knowledge/request.rs"]
-      :note "v0 file-first request.lisp + initial event + unified_entry composition; no DB schema migration, no auto-approval, no direct workstation dispatch")
+      :note "v0 request-local projections: writes request.lisp + initial lifecycle event, runs unified_entry, then projects compiled_sexp / compiled_sexp_preview into .missiond/requests/<request_id>/{intent-alignment,plan}.lisp via atomic_write_artifact and surfaces a projection status (written|skipped_*|write_failed); status action exposes artifact paths + existence booleans; still no DB schema migration, no auto-approval, no direct workstation dispatch")
 
     (surface mission_directive
       :status "compat"
