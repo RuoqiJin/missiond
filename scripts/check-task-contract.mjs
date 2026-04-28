@@ -43,6 +43,7 @@ const REQUIRED_TASK_FIELDS = [
 
 const ALLOWED_STATUS = new Set(['draft', 'ready', 'running', 'blocked', 'done', 'archived']);
 const ALLOWED_SCOPE_CHECK = new Set(['write-scope-only', 'none', 'not-required']);
+const ALLOWED_VERIFICATION_TIER = new Set(['local', 'smoke', 'full']);
 const SCHEMA = 'missiond.task-contract.v1';
 
 function main() {
@@ -170,7 +171,33 @@ function validateTask(file, task, diagnostics) {
     }
   }
 
+  validateDispatchMetadata(file, task, props, diagnostics);
+
   validateCommit(file, task, props[':commit']?.value, diagnostics);
+}
+
+function validateDispatchMetadata(file, task, props, diagnostics) {
+  const verificationTier = keywordPropText(props, ':verification-tier');
+  if (verificationTier && !ALLOWED_VERIFICATION_TIER.has(verificationTier)) {
+    addError(
+      diagnostics,
+      file,
+      props[':verification-tier'].value.loc,
+      `:verification-tier "${verificationTier}" must be one of ${[...ALLOWED_VERIFICATION_TIER].join('|')}`,
+    );
+  }
+
+  const dispatchGroup = keywordPropText(props, ':dispatch-group');
+  if (dispatchGroup && !/^[A-Za-z0-9._-]+$/.test(dispatchGroup)) {
+    addError(diagnostics, file, props[':dispatch-group'].value.loc, ':dispatch-group must be a compact id (letters, numbers, dot, underscore, dash)');
+  }
+
+  for (const key of [':estimated-minutes', ':heartbeat-minutes']) {
+    const value = keywordPropText(props, key);
+    if (value != null && !/^[1-9][0-9]*$/.test(value)) {
+      addError(diagnostics, file, props[key].value.loc, `${key} must be a positive integer atom`);
+    }
+  }
 }
 
 function validateCommit(file, task, node, diagnostics) {
@@ -245,6 +272,58 @@ function runFixtures() {
         :goal "bad"
         :write-scope ["a.rs"]
         :must-not-touch ["a.rs"]
+        :acceptance ["git diff --check"]
+        :commit (:required true :message "test: bad" :scope-check write-scope-only))`,
+      ok: false,
+    },
+    {
+      name: 'valid dispatch metadata',
+      source: `(task wave28-01
+        :schema "missiond.task-contract.v1"
+        :title "Dispatch metadata"
+        :kind code-alignment
+        :status ready
+        :owner "claudecode"
+        :dispatch-strategy "fresh-code-alignment"
+        :verification-tier smoke
+        :dispatch-group "A"
+        :estimated-minutes 25
+        :heartbeat-minutes 10
+        :goal "metadata"
+        :write-scope ["scripts/x.mjs"]
+        :must-not-touch []
+        :acceptance ["git diff --check"]
+        :commit (:required true :message "test: metadata" :scope-check write-scope-only))`,
+      ok: true,
+    },
+    {
+      name: 'invalid verification tier',
+      source: `(task wave28-02
+        :schema "missiond.task-contract.v1"
+        :title "Bad metadata"
+        :kind code-alignment
+        :status ready
+        :owner "claudecode"
+        :verification-tier huge
+        :goal "bad"
+        :write-scope ["scripts/x.mjs"]
+        :must-not-touch []
+        :acceptance ["git diff --check"]
+        :commit (:required true :message "test: bad" :scope-check write-scope-only))`,
+      ok: false,
+    },
+    {
+      name: 'invalid heartbeat',
+      source: `(task wave28-03
+        :schema "missiond.task-contract.v1"
+        :title "Bad heartbeat"
+        :kind code-alignment
+        :status ready
+        :owner "claudecode"
+        :heartbeat-minutes 0
+        :goal "bad"
+        :write-scope ["scripts/x.mjs"]
+        :must-not-touch []
         :acceptance ["git diff --check"]
         :commit (:required true :message "test: bad" :scope-check write-scope-only))`,
       ok: false,

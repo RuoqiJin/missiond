@@ -14,12 +14,17 @@ import {
 } from './lib/missiond_lisp.mjs';
 
 const usage = `Usage:
-  node scripts/render-claudecode-task.mjs [--stdout] [--force] [--out <path>] <task.lisp>
+  node scripts/render-claudecode-task.mjs [--stdout] [--force] [--brief-mode full|thin] [--shared-preamble <path>] [--out <path>] <task.lisp>
+  node scripts/render-claudecode-task.mjs --brief-mode preamble [--stdout] [--force] [--out <path>]
   node scripts/render-claudecode-task.mjs --dry-fixture
 
 Renders a MissionD task-contract v1 Lisp file into the current ClaudeCode
 Markdown task-brief format. By default writes:
   .missiond/claudecode/<task-id>.md
+
+--brief-mode thin renders only task-specific execution facts and points at a
+shared preamble for boilerplate protocols. --brief-mode preamble renders the
+shared boilerplate once per wave.
 
 --dry-fixture runs self-contained smoke fixtures that render a synthetic
 in-memory task contract and assert the wave26-06 + wave27-05 cross-wave
@@ -37,6 +42,8 @@ function main() {
   let force = false;
   let outPath = null;
   let dryFixture = false;
+  let briefMode = 'full';
+  let sharedPreamble = null;
   const inputs = [];
 
   for (let i = 0; i < args.length; i++) {
@@ -51,6 +58,12 @@ function main() {
     } else if (arg === '--out') {
       outPath = args[++i];
       if (!outPath) fail('--out requires a path');
+    } else if (arg === '--brief-mode') {
+      briefMode = args[++i];
+      if (!['full', 'thin', 'preamble'].includes(briefMode)) fail('--brief-mode must be full, thin, or preamble');
+    } else if (arg === '--shared-preamble') {
+      sharedPreamble = args[++i];
+      if (!sharedPreamble) fail('--shared-preamble requires a path');
     } else if (arg === '--dry-fixture') {
       dryFixture = true;
     } else {
@@ -63,11 +76,31 @@ function main() {
     return;
   }
 
+  if (briefMode === 'preamble') {
+    if (inputs.length !== 0) fail('--brief-mode preamble does not take a task.lisp input');
+    const markdown = renderSharedPreamble();
+    if (stdout) {
+      process.stdout.write(markdown);
+      return;
+    }
+    const outputPath = path.resolve(
+      process.cwd(),
+      outPath ?? path.join('.missiond', 'claudecode', 'shared-preamble.md'),
+    );
+    if (fs.existsSync(outputPath) && !force) {
+      fail(`${outputPath} already exists; pass --force to overwrite`);
+    }
+    fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+    fs.writeFileSync(outputPath, markdown);
+    console.log(`rendered ${path.relative(process.cwd(), outputPath)} shared preamble`);
+    return;
+  }
+
   if (inputs.length !== 1) fail(usage);
 
   const sourcePath = path.resolve(process.cwd(), inputs[0]);
   const task = loadSingleTask(sourcePath);
-  const markdown = renderTask(task, sourcePath);
+  const markdown = renderTask(task, sourcePath, { briefMode, sharedPreamble });
 
   if (stdout) {
     process.stdout.write(markdown);
@@ -112,6 +145,10 @@ function loadSingleTask(file) {
     sessionTraceWritable: keywordPropBool(props, ':session-trace-writable') === true,
     routerPolicyPath: keywordPropText(props, ':router-policy-path') ?? null,
     routerBackendRegistryPath: keywordPropText(props, ':router-backend-registry-path') ?? null,
+    verificationTier: keywordPropText(props, ':verification-tier') ?? null,
+    dispatchGroup: keywordPropText(props, ':dispatch-group') ?? null,
+    estimatedMinutes: keywordPropText(props, ':estimated-minutes') ?? null,
+    heartbeatMinutes: keywordPropText(props, ':heartbeat-minutes') ?? null,
     commit: {
       required: keywordPropBool(commitProps, ':required'),
       message: keywordPropText(commitProps, ':message'),
@@ -202,7 +239,8 @@ function resolveRouterBackendRegistryPath(task) {
   return null;
 }
 
-function renderTask(task, sourcePath) {
+function renderTask(task, sourcePath, options = {}) {
+  if (options.briefMode === 'thin') return renderThinTask(task, sourcePath, options);
   const relSource = path.relative(process.cwd(), sourcePath);
   const sharedMemoryPath = resolveSharedMemoryPath(task.id);
   const reportContractPath = resolveReportContractPath(task.id);
@@ -221,6 +259,10 @@ function renderTask(task, sourcePath) {
   lines.push(`- status: \`${task.status}\``);
   lines.push(`- owner: \`${task.owner}\``);
   if (task.dispatchStrategy) lines.push(`- dispatch_strategy: \`${task.dispatchStrategy}\``);
+  if (task.verificationTier) lines.push(`- verification_tier: \`${task.verificationTier}\``);
+  if (task.dispatchGroup) lines.push(`- dispatch_group: \`${task.dispatchGroup}\``);
+  if (task.estimatedMinutes) lines.push(`- estimated_minutes: \`${task.estimatedMinutes}\``);
+  if (task.heartbeatMinutes) lines.push(`- heartbeat_minutes: \`${task.heartbeatMinutes}\``);
   if (task.dependsOn.length > 0) lines.push(`- depends_on: ${task.dependsOn.map(code).join(', ')}`);
   if (sharedMemoryPath) lines.push(`- shared_memory: \`${sharedMemoryPath}\``);
   if (reportContractPath) lines.push(`- report_contract: \`${reportContractPath}\``);
@@ -279,6 +321,138 @@ function renderTask(task, sourcePath) {
     'Acceptance command results.',
   ], 'Return');
   return `${lines.join('\n')}\n`;
+}
+
+function renderThinTask(task, sourcePath, options = {}) {
+  const relSource = path.relative(process.cwd(), sourcePath);
+  const sharedMemoryPath = resolveSharedMemoryPath(task.id);
+  const reportContractPath = resolveReportContractPath(task.id);
+  const sessionTracePath = resolveSessionTracePath(task.id);
+  const routerPolicyPath = resolveRouterPolicyPath(task);
+  const routerBackendRegistryPath = resolveRouterBackendRegistryPath(task);
+  const sharedPreamble = options.sharedPreamble ?? deriveSharedPreamblePath(task.id);
+  const lines = [];
+
+  lines.push(`# ${task.id} — ${task.title}`);
+  lines.push('');
+  lines.push('> Thin brief rendered from MissionD task-contract v1. Task Lisp remains the SSOT.');
+  lines.push(`> Source: \`${relSource}\``);
+  if (sharedPreamble) lines.push(`> Shared preamble: \`${sharedPreamble}\``);
+  lines.push('');
+  lines.push('## Task Contract');
+  lines.push('');
+  lines.push(`- kind: \`${task.kind}\``);
+  lines.push(`- owner: \`${task.owner}\``);
+  if (task.dispatchStrategy) lines.push(`- dispatch_strategy: \`${task.dispatchStrategy}\``);
+  if (task.verificationTier) lines.push(`- verification_tier: \`${task.verificationTier}\``);
+  if (task.dispatchGroup) lines.push(`- dispatch_group: \`${task.dispatchGroup}\``);
+  if (task.estimatedMinutes) lines.push(`- estimated_minutes: \`${task.estimatedMinutes}\``);
+  if (task.heartbeatMinutes) lines.push(`- heartbeat_minutes: \`${task.heartbeatMinutes}\``);
+  if (task.dependsOn.length > 0) lines.push(`- depends_on: ${task.dependsOn.map(code).join(', ')}`);
+  if (sharedMemoryPath) lines.push(`- shared_memory: \`${sharedMemoryPath}\``);
+  if (reportContractPath) lines.push(`- report_contract: \`${reportContractPath}\``);
+  if (sessionTracePath) lines.push(`- session_trace: \`${sessionTracePath}\` (${task.sessionTraceWritable ? 'writable' : 'read-only'})`);
+  if (routerPolicyPath) lines.push(`- router_policy: \`${routerPolicyPath}\` (advisory / dry-run only)`);
+  if (routerBackendRegistryPath) lines.push(`- router_backend_registry: \`${routerBackendRegistryPath}\` (MUST NOT switch backend)`);
+  lines.push('');
+  lines.push('## Goal');
+  lines.push('');
+  lines.push(task.goal || '(no goal supplied)');
+  lines.push('');
+  renderList(lines, 'Ownership', task.writeScope, 'Expected files');
+  renderList(lines, 'Must Not Touch', task.mustNotTouch, 'Forbidden files');
+  renderNumbered(lines, 'Requirements', task.requirements);
+  renderCommands(lines, 'Acceptance Commands', task.acceptance);
+  lines.push('## Shared Protocol');
+  lines.push('');
+  if (sharedPreamble) {
+    lines.push(`Read \`${sharedPreamble}\` once for shared-memory, report, session-trace, router, hook, commit, and verifier protocol. Do not paste or duplicate that boilerplate into this task.`);
+  } else {
+    lines.push('Use the repository shared-memory, report, session-trace, hook, commit, and verifier protocol for this wave.');
+  }
+  lines.push('- Task-specific scope and acceptance above override generic guidance.');
+  lines.push('- Append coordination facts to shared memory when present; write the report contract when the task completes.');
+  if (task.heartbeatMinutes) {
+    lines.push(`- If work is still active after ${task.heartbeatMinutes} minutes without a completion, append a heartbeat/observation entry or report a blocker.`);
+  }
+  lines.push('');
+  lines.push('## Commit');
+  lines.push('');
+  if (task.commit.required) {
+    lines.push('Commit only files inside the declared write scope after acceptance:');
+    lines.push('');
+    lines.push('```bash');
+    lines.push(renderGitAdd(task.writeScope));
+    lines.push(`node scripts/task-scope-guard.mjs --task ${relSource} --mode staged`);
+    lines.push(`MISSIOND_TASK_CONTRACT=${relSource} \\`);
+    lines.push(`  git commit -m ${JSON.stringify(task.commit.message ?? '')}`);
+    lines.push(`node scripts/verify-task-contract.mjs ${relSource}`);
+    lines.push('```');
+    lines.push('');
+  } else {
+    lines.push('No commit required by contract.');
+    lines.push('');
+  }
+  renderList(lines, 'Report', task.report.length ? task.report : [
+    'Commit hash or no-commit reason.',
+    'Files changed.',
+    'Acceptance command results.',
+  ], 'Return');
+  return `${lines.join('\n')}\n`;
+}
+
+function renderSharedPreamble() {
+  const lines = [];
+  lines.push('# MissionD ClaudeCode Shared Preamble');
+  lines.push('');
+  lines.push('This file carries common execution protocol for thin task briefs. The task Lisp is still the source of truth for scope, dependencies, acceptance, and commit policy.');
+  lines.push('');
+  lines.push('## Execution Rules');
+  lines.push('');
+  lines.push('- Treat the task contract as the machine SSOT; Markdown is a human execution view.');
+  lines.push('- Stay inside `:write-scope`; never edit paths matching `:must-not-touch`.');
+  lines.push('- Use focused read/search tools first. Use shell mainly for deterministic checks, tests, and git inspection.');
+  lines.push('- Prefer local/smoke verification while implementing; leave full workspace builds for smoke/final tasks unless the task explicitly requires them.');
+  lines.push('');
+  lines.push('## Shared Memory');
+  lines.push('');
+  lines.push('- Append `claim` before starting, `observation` or `blocker` while running, and `completion` when finished.');
+  lines.push('- Entries are append-only S-expressions; never edit prior entries.');
+  lines.push('- If the task has `:heartbeat-minutes`, append a heartbeat/observation before that interval elapses when still active.');
+  lines.push('');
+  lines.push('## Report Contract');
+  lines.push('');
+  lines.push('- Write the expected report under `.missiond/tasks/<wave>/reports/<task-id>.report.lisp` when the task completes.');
+  lines.push('- Keep structural proof in fields; put prose explanation in `:notes` and trace references.');
+  lines.push('- Run `node scripts/check-task-report.mjs <report>` before commit when a report is required.');
+  lines.push('');
+  lines.push('## Session Trace');
+  lines.push('');
+  lines.push('- Treat `session-trace.lisp` as factual telemetry, not prose notes.');
+  lines.push('- Write trace entries only when the task contract says `:session-trace-writable true`; otherwise read it only.');
+  lines.push('');
+  lines.push('## Router Context');
+  lines.push('');
+  lines.push('- Router policy, recommendation, readiness, and dispatch descriptor outputs are advisory and dry-run only.');
+  lines.push('- `runtime_replacement=false`, `dry_run_only=true`, `no_execution=true`, and `applied=false` remain hard boundaries.');
+  lines.push('- Never switch backend based on rendered brief text or descriptor evidence.');
+  lines.push('');
+  lines.push('## Commit Protocol');
+  lines.push('');
+  lines.push('```bash');
+  lines.push('node scripts/check-missiond-hooks.mjs --json');
+  lines.push('node scripts/task-scope-guard.mjs --task <task.lisp> --mode staged');
+  lines.push('MISSIOND_TASK_CONTRACT=<task.lisp> git commit -m "<message>"');
+  lines.push('node scripts/verify-task-contract.mjs <task.lisp>');
+  lines.push('```');
+  lines.push('');
+  return `${lines.join('\n')}\n`;
+}
+
+function deriveSharedPreamblePath(taskId) {
+  const wave = deriveWaveId(taskId);
+  if (!wave) return null;
+  return path.join('.missiond', 'claudecode', `${wave}-shared-preamble.md`);
 }
 
 function renderSharedMemory(lines, sharedMemoryPath) {
@@ -816,6 +990,54 @@ function runFixtures() {
             throw new Error(
               `wave27-06 invariant: rendered brief missing required literal '${literal}'`,
             );
+          }
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  });
+  // wave28 dispatch-efficiency fixture: thin briefs must point at a
+  // shared preamble and omit the verbose boilerplate sections that used
+  // to be repeated in every worker prompt. Full mode remains the default
+  // path, so this fixture exercises the explicit --brief-mode thin code.
+  fixtures.push({
+    name: 'wave28-thin-brief: shared preamble pointer plus no repeated boilerplate sections',
+    category: 'wave28-dispatch-efficiency',
+    run: () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave28-thin-render-'));
+      const tmpTask = path.join(tmpDir, 'wave28-01-thin-render-fixture.lisp');
+      const lisp = `(task wave28-01-thin-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Thin render fixture"\n  :kind code-alignment\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "fresh-code-alignment"\n  :verification-tier smoke\n  :dispatch-group "A"\n  :estimated-minutes 25\n  :heartbeat-minutes 10\n  :goal "Render a thin brief"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements ["Use thin mode"]\n  :acceptance ["true"]\n  :commit (:required true :message "test: thin render" :scope-check write-scope-only)\n  :report ["Commit hash."])\n`;
+      try {
+        fs.writeFileSync(tmpTask, lisp, 'utf8');
+        const task = loadSingleTask(tmpTask);
+        const markdown = renderTask(task, tmpTask, {
+          briefMode: 'thin',
+          sharedPreamble: '.missiond/claudecode/wave28-shared-preamble.md',
+        });
+        const required = [
+          'Thin brief rendered',
+          '.missiond/claudecode/wave28-shared-preamble.md',
+          'verification_tier',
+          'heartbeat_minutes',
+          'node scripts/task-scope-guard.mjs',
+          'node scripts/verify-task-contract.mjs',
+        ];
+        for (const literal of required) {
+          if (!markdown.includes(literal)) {
+            throw new Error(`wave28 thin-brief invariant: missing '${literal}'`);
+          }
+        }
+        const forbiddenSections = ['## Shared Memory', '## Report Contract', '## Session Trace', '## Router Policy'];
+        for (const section of forbiddenSections) {
+          if (markdown.includes(section)) {
+            throw new Error(`wave28 thin-brief invariant: repeated boilerplate section '${section}' should be omitted`);
+          }
+        }
+        const preamble = renderSharedPreamble();
+        for (const literal of ['# MissionD ClaudeCode Shared Preamble', '## Shared Memory', '## Report Contract', '## Commit Protocol']) {
+          if (!preamble.includes(literal)) {
+            throw new Error(`wave28 preamble invariant: missing '${literal}'`);
           }
         }
       } finally {
