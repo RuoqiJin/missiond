@@ -87,7 +87,8 @@
   :wave-30-status-summary
     ["parent hotfix finalizer / staged source hygiene / lifecycle append-projection / hard-vs-soft manifest / lifecycle-receipt smoke 已 code-aligned; Wave30 historical manifest projects to complete=5"
      "task-runner-wave-state.mjs + task-runner-next-action.mjs expose orchestration state and selected next action from Lisp artifacts, with dispatch events as explicit lifecycle writes"
-     "task-runner-dispatch.mjs adds the worker handoff descriptor: ready dispatch_task actions become mission_task_delegate target_args while missing briefs, hard-dep waits, and finalization blockers prevent delegation"]
+     "task-runner-dispatch.mjs adds the worker handoff descriptor: ready dispatch_task actions become mission_task_delegate target_args while missing briefs, hard-dep waits, and finalization blockers prevent delegation"
+     "task-runner-submit-dispatch.mjs closes the human transport gap by submitting descriptors to daemon IPC only under --apply and recording dispatch events only for successful submissions"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -136,7 +137,7 @@
       :machine-contract "Wave30 code-aligned partial: worker report plus parent patch facts plus verification commit facts are projected into one final report; a task is not complete until final commit, lineage, and receipt facts agree")
     (task-runner-dispatch-json
       :role "worker handoff descriptor"
-      :machine-contract "task-runner-dispatch.mjs converts selected dispatch_task actions into mission_task_delegate target_args without spawning; this is the current Lisp-state-to-worker bridge"))
+      :machine-contract "task-runner-dispatch.mjs converts selected dispatch_task actions into mission_task_delegate target_args without spawning; task-runner-submit-dispatch.mjs can explicitly apply those descriptors to daemon IPC and then append dispatch events for successful submissions"))
 
   (pipeline
     (s1-author-task-contract

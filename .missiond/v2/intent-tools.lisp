@@ -51,6 +51,7 @@
   :wave-30-status-summary
     ["Wave30 架构升级继续遵守 no-new-MCP-tool 边界: lifecycle finalizer, parent-hotfix helper, staged-source hygiene, lifecycle append/projection, wave-state, next-action, dispatch descriptor 均是 repo-local Node/Lisp CLI"
      "task-runner-dispatch.mjs 把 task-runner-next-action 的 dispatch_task 输出包装成 mission_task_delegate target_args, 但默认 read-only 且不直接调用 MCP/slot/spawn"
+     "task-runner-submit-dispatch.mjs 是显式 --apply submitter: 通过现有 daemon IPC tools/call 调 mission_task_delegate, 成功后才追加 lifecycle dispatch event; 仍不新增 MCP tool"
      "daemon/MCP 后续只需 thin wrapper 消费 dispatch descriptor; 调度语义仍由 Lisp artifacts + deterministic CLI 承担, 避免 premature daemon rewrite"]
 
   :actual-state-sources

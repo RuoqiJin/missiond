@@ -4122,15 +4122,17 @@
            "scripts/task-runner-wave-state.mjs"
            "scripts/task-runner-next-action.mjs"
            "scripts/task-runner-dispatch.mjs"
+           "scripts/task-runner-submit-dispatch.mjs"
            ".missiond/tasks/schema/task-lifecycle-event-v1.lisp"
            ".missiond/tasks/schema/task-runner-wave-state-v0.lisp"
            ".missiond/tasks/schema/task-runner-next-action-v0.lisp"
-           ".missiond/tasks/schema/task-runner-dispatch-v0.lisp"]
+           ".missiond/tasks/schema/task-runner-dispatch-v0.lisp"
+           ".missiond/tasks/schema/task-runner-dispatch-submit-v0.lisp"]
         :cross-ref ["intent-layer.machine-contract.report-lineage-v1"
                     "intent-layer.machine-contract.verification-receipt-v1"
                     "intent-layer.machine-contract.ready-queue-planner-v0"]
         :wave "wave 29 research result / Wave30 implementation"
-        :note "GPT Pro/Codex result: parent hotfix, staged source hygiene, atomic lifecycle events, hard-vs-soft dependencies, and receipt binding must be owned by the orchestrator. Wave30 has code-aligned the repo-local CLI boundary through wave-state / next-action / dispatch descriptor; daemon/MCP should wrap this stable interface rather than reimplement the scheduling semantics.")
+        :note "GPT Pro/Codex result: parent hotfix, staged source hygiene, atomic lifecycle events, hard-vs-soft dependencies, and receipt binding must be owned by the orchestrator. Wave30 has code-aligned the repo-local CLI boundary through wave-state / next-action / dispatch descriptor / explicit IPC submitter; daemon/MCP should wrap this stable interface rather than reimplement the scheduling semantics.")
 
       ;; ── 区域 93 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
       ;; 注: section-id 已存在 (区域 36 / wave-19-backfill / wave-20-backfill / wave-21-backfill), 本 entry 不新增 anchor; 仅在 wave-22-backfill 块内

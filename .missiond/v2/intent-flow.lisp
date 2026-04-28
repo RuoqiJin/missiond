@@ -47,7 +47,8 @@
   :wave-30-status-summary
     ["task-runner lifecycle 已推进为可执行 CLI 链: prepare seeds lifecycle, append-event owns lifecycle writes, wave-state projects complete/dispatchable/running/finalization, next-action selects runnable work"
      "task-runner-dispatch.mjs 是 flow→worker 的当前 bridge: 从 Lisp wave state 生成 mission_task_delegate call descriptors, 默认 read-only, 不 spawn, 不调用 MCP"
-     "这让下一轮 wave 可由 MissionD 读取 manifest/lifecycle 后产出 delegate calls; 人类不再需要把每个 brief 手工翻译成 ClaudeCode 派发请求"]
+     "task-runner-submit-dispatch.mjs 在显式 --apply 时把 descriptor 提交给 daemon IPC tools/call, 并只为成功提交的 task 记录 dispatch event"
+     "这让下一轮 wave 可由 MissionD 读取 manifest/lifecycle 后产出并提交 delegate calls; 人类不再需要把每个 brief 手工翻译成 ClaudeCode 派发请求"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"
