@@ -68,6 +68,14 @@ import {
   FORBIDDEN_ID_SUBSTRINGS,
 } from './render-wave-briefs.mjs';
 
+import { buildLifecycleEventRecord } from './task-runner-append-event.mjs';
+
+import {
+  projectLifecycleEvents,
+  renderSharedMemoryEntry,
+  renderSessionTraceEvent,
+} from './project-task-lifecycle-ledger.mjs';
+
 // wave29-07 cross-layer smoke (layer C): the wave29-07 fixture parses the
 // appended session-trace via the shared Lisp reader so the structured
 // `:kind read` / `:files [...]` shape is asserted mechanically (not via a
@@ -324,23 +332,26 @@ export function prepareWave({ manifestPath, cwd, dryRun, force, nowIso }) {
   const memSeq = nextMemorySeq(sharedMemoryPath);
   const traceSeq = nextTraceSeq(sessionTracePath);
 
+  const bootstrapProjection = projectBootstrapLifecycleEvents({
+    wave,
+    ordinal,
+    bootstrapMemId,
+    bootstrapStartId,
+    bootstrapReadId,
+    nowIso,
+    sharedPreambleRel,
+  });
   appendSharedMemoryBootstrap({
     sharedMemoryPath,
-    id: bootstrapMemId,
+    entry: bootstrapProjection.sharedMemoryEntries[0],
     seq: memSeq,
-    nowIso,
     wave,
-    sharedPreambleRel,
   });
   appendSessionTraceBootstrap({
     sessionTracePath,
-    startId: bootstrapStartId,
-    readId: bootstrapReadId,
+    entries: bootstrapProjection.sessionTraceEvents,
     startSeq: traceSeq,
-    readSeq: traceSeq + 1,
-    nowIso,
     wave,
-    sharedPreambleRel,
   });
 
   return {
@@ -402,73 +413,77 @@ function writeSkeletonIfAllowed(taskId, outputAbs, force) {
   return exists ? 'overwritten' : 'written';
 }
 
-// Append the bootstrap observation entry to the wave's shared-memory ledger.
-// The entry head is `observation` (matches the existing wave29-bootstrap-001
-// convention in .missiond/tasks/wave29/shared-memory.lisp). Insertion is
-// done by replacing the trailing close-paren of the outer (shared-memory ...)
-// form so the file remains a single well-formed S-expression.
-function appendSharedMemoryBootstrap({
-  sharedMemoryPath,
-  id,
-  seq,
-  nowIso,
+// Build lifecycle facts for the bootstrap operation and project them back to
+// the legacy ledgers. The lifecycle event objects are in-memory here so the
+// CLI preserves its historical side effects: it still writes only briefs,
+// report skeletons, shared-memory, and session-trace unless a future caller
+// explicitly invokes task-runner-append-event.mjs for a lifecycle ledger.
+function projectBootstrapLifecycleEvents({
   wave,
+  ordinal,
+  bootstrapMemId,
+  bootstrapStartId,
+  bootstrapReadId,
+  nowIso,
   sharedPreambleRel,
 }) {
+  const startEvent = buildLifecycleEventRecord({
+    id: `${wave}-lifecycle-bootstrap-start-${String(ordinal).padStart(3, '0')}`,
+    task: `${wave}-bootstrap`,
+    actorRole: 'prepare-task-runner-wave',
+    eventKind: 'trace_start',
+    commitRole: 'none',
+    seq: 1,
+    at: nowIso,
+    touched: [sharedPreambleRel],
+    summary: 'Bootstrap lifecycle start.',
+    legacyMemoryId: bootstrapMemId,
+    legacyTraceId: bootstrapStartId,
+    legacyTraceFiles: [],
+    legacyMemorySummary:
+      'wave prepared by prepare-task-runner-wave.mjs — briefs + report skeletons + preamble-read audit expectation seeded.',
+    legacyTraceSummary:
+      'Bootstrap: validated manifest, rendered thin briefs + preamble, scaffolded report skeletons.',
+  });
+  const readEvent = buildLifecycleEventRecord({
+    id: `${wave}-lifecycle-bootstrap-read-${String(ordinal).padStart(3, '0')}`,
+    task: `${wave}-bootstrap`,
+    actorRole: 'prepare-task-runner-wave',
+    eventKind: 'read',
+    commitRole: 'none',
+    seq: 2,
+    at: nowIso,
+    touched: [sharedPreambleRel],
+    summary:
+      'Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads.',
+    legacyTraceId: bootstrapReadId,
+  });
+  return projectLifecycleEvents([startEvent, readEvent], { wave });
+}
+
+// Append the projected bootstrap observation entry to the wave's shared-memory
+// ledger. Insertion is done by replacing the trailing close-paren of the
+// outer (shared-memory ...) form so the file remains a single well-formed
+// S-expression.
+function appendSharedMemoryBootstrap({ sharedMemoryPath, entry, seq, wave }) {
   if (!fs.existsSync(sharedMemoryPath)) {
     fail(`shared-memory ledger missing for wave ${wave}: ${sharedMemoryPath}`);
   }
   const body = fs.readFileSync(sharedMemoryPath, 'utf8');
-  const block =
-    `\n\n  (observation\n` +
-    `    :id ${id}\n` +
-    `    :task ${wave}-bootstrap\n` +
-    `    :agent prepare-task-runner-wave\n` +
-    `    :seq ${seq}\n` +
-    `    :at "${nowIso}"\n` +
-    `    :touched ["${sharedPreambleRel}"]\n` +
-    `    :summary "wave prepared by prepare-task-runner-wave.mjs — briefs + report skeletons + preamble-read audit expectation seeded.")`;
+  const block = `\n\n${renderSharedMemoryEntry(entry, seq)}`;
   fs.writeFileSync(sharedMemoryPath, spliceBeforeFinalParen(body, block));
 }
 
-// Append the bootstrap session-trace pair (start + read) to the wave's
-// session-trace ledger. Two events are emitted so the audit trail records
-// (a) the start of the bootstrap orchestration step and (b) the EXPECTED
-// preamble-read every worker brief delegates to. The :kind=read event
-// references the :files vector containing the shared preamble path so
-// downstream verifiers can prove the audit expectation was created.
-function appendSessionTraceBootstrap({
-  sessionTracePath,
-  startId,
-  readId,
-  startSeq,
-  readSeq,
-  nowIso,
-  wave,
-  sharedPreambleRel,
-}) {
+// Append the projected bootstrap session-trace pair (start + read) to the
+// wave's session-trace ledger.
+function appendSessionTraceBootstrap({ sessionTracePath, entries, startSeq, wave }) {
   if (!fs.existsSync(sessionTracePath)) {
     fail(`session-trace ledger missing for wave ${wave}: ${sessionTracePath}`);
   }
   const body = fs.readFileSync(sessionTracePath, 'utf8');
-  const block =
-    `\n\n  (trace-event\n` +
-    `    :id ${startId}\n` +
-    `    :seq ${startSeq}\n` +
-    `    :at "${nowIso}"\n` +
-    `    :task ${wave}-bootstrap\n` +
-    `    :backend prepare-task-runner-wave\n` +
-    `    :kind start\n` +
-    `    :summary "Bootstrap: validated manifest, rendered thin briefs + preamble, scaffolded report skeletons.")\n\n` +
-    `  (trace-event\n` +
-    `    :id ${readId}\n` +
-    `    :seq ${readSeq}\n` +
-    `    :at "${nowIso}"\n` +
-    `    :task ${wave}-bootstrap\n` +
-    `    :backend prepare-task-runner-wave\n` +
-    `    :kind read\n` +
-    `    :files ["${sharedPreambleRel}"]\n` +
-    `    :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads.")`;
+  const block = `\n\n${entries
+    .map((entry, index) => renderSessionTraceEvent(entry, startSeq + index))
+    .join('\n\n')}`;
   fs.writeFileSync(sessionTracePath, spliceBeforeFinalParen(body, block));
 }
 
