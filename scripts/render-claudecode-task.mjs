@@ -92,6 +92,7 @@ function loadSingleTask(file) {
     report: nodeToStringArray(props[':report']?.value),
     sessionTraceWritable: keywordPropBool(props, ':session-trace-writable') === true,
     routerPolicyPath: keywordPropText(props, ':router-policy-path') ?? null,
+    routerBackendRegistryPath: keywordPropText(props, ':router-backend-registry-path') ?? null,
     commit: {
       required: keywordPropBool(commitProps, ':required'),
       message: keywordPropText(commitProps, ':message'),
@@ -161,12 +162,34 @@ function resolveRouterPolicyPath(task) {
   return null;
 }
 
+// wave26-05: resolve the router-backend readiness registry file for the
+// rendered "Router Policy (advisory)" section's backend-readiness context.
+// Precedence mirrors resolveRouterPolicyPath: explicit
+// :router-backend-registry-path on the task contract wins; otherwise the
+// renderer auto-detects the wave26-01 seed at
+// .missiond/router/router-backend-registry-v1.lisp. Returns null when neither
+// path resolves on disk so the registry context is omitted (the rest of the
+// section continues to render unchanged). The renderer never executes the
+// registry file — it only points at the path so human readers / ClaudeCode
+// workers can consult readiness themselves.
+function resolveRouterBackendRegistryPath(task) {
+  const candidates = [];
+  if (task.routerBackendRegistryPath) candidates.push(task.routerBackendRegistryPath);
+  candidates.push(path.join('.missiond', 'router', 'router-backend-registry-v1.lisp'));
+  for (const rel of candidates) {
+    const abs = path.resolve(process.cwd(), rel);
+    if (fs.existsSync(abs)) return rel;
+  }
+  return null;
+}
+
 function renderTask(task, sourcePath) {
   const relSource = path.relative(process.cwd(), sourcePath);
   const sharedMemoryPath = resolveSharedMemoryPath(task.id);
   const reportContractPath = resolveReportContractPath(task.id);
   const sessionTracePath = resolveSessionTracePath(task.id);
   const routerPolicyPath = resolveRouterPolicyPath(task);
+  const routerBackendRegistryPath = resolveRouterBackendRegistryPath(task);
   const lines = [];
   lines.push(`# ${task.id} — ${task.title}`);
   lines.push('');
@@ -204,7 +227,7 @@ function renderTask(task, sourcePath) {
   if (sharedMemoryPath) renderSharedMemory(lines, sharedMemoryPath);
   if (reportContractPath) renderReportContract(lines, reportContractPath);
   if (sessionTracePath) renderSessionTrace(lines, task, sessionTracePath);
-  if (routerPolicyPath) renderRouterPolicy(lines, task, routerPolicyPath, relSource);
+  if (routerPolicyPath) renderRouterPolicy(lines, task, routerPolicyPath, relSource, routerBackendRegistryPath);
   lines.push('## Commit');
   lines.push('');
   if (task.commit.required) {
@@ -278,6 +301,12 @@ function renderReportContract(lines, reportContractPath) {
   lines.push('  - `:router_applied` — literal `false` (cross-wave invariant — runtime replacement is rejected).');
   lines.push('  - `:router_reasons` — vector of non-empty strings.');
   lines.push('  - `:router_trace_index_path` — repo-relative path to the trace index that scored confidence (when used).');
+  lines.push('- Optional router-readiness fields (wave26-04 — populate ONLY when you observe a backend readiness registry; readiness is **advisory** and **dry-run only**, and you MUST NOT switch backend based on these values):');
+  lines.push('  - `:router_backend_readiness_status` — string enum: `current-default | advisory-only | runtime-ready | unavailable | unknown`.');
+  lines.push('  - `:router_backend_runtime_allowed` — literal `true` or `false` (atom, never a string).');
+  lines.push('  - `:router_apply_eligible` — literal `true` or `false` (atom, never a string; current-default alone is NEVER sufficient — explicit runtime-ready opt-in required upstream).');
+  lines.push('  - `:router_apply_blockers` — vector of non-empty strings (no property-list entries).');
+  lines.push('  - `:router_backend_registry_path` — repo-relative path to the backend readiness registry consulted.');
   lines.push('');
   lines.push('Validate with:');
   lines.push('');
@@ -318,30 +347,66 @@ function renderSessionTrace(lines, task, sessionTracePath) {
 // ClaudeCode (or any worker) to switch backend. The renderer never invokes
 // scripts/recommend-task-backend.mjs; recommendation remains an opt-in CLI
 // for humans and tooling, not a hidden side-effect of rendering a brief.
-function renderRouterPolicy(lines, task, routerPolicyPath, relSource) {
-  const explicit = task.routerPolicyPath && task.routerPolicyPath === routerPolicyPath;
+//
+// wave26-05: the same section is extended to surface the wave26-01 backend
+// readiness registry when a registry path resolves (either via the task
+// contract's :router-backend-registry-path or the auto-detected
+// .missiond/router/router-backend-registry-v1.lisp seed). When the registry
+// resolves, a read-only `node scripts/check-router-backend-registry.mjs
+// <registry-path>` line is appended; when BOTH the policy AND the registry
+// resolve, the wave25-04 recommend-task-backend command line gains
+// `--backend-registry <registry-path>` (when only the policy resolves the
+// wave25-04 command stays rendered byte-identical for backward compat).
+// Section keeps 'advisory' / 'dry-run only' literals verbatim and explicitly
+// reiterates the worker MUST NOT switch backend on the strength of rendered
+// text. Renderer still never shells out — every command in the section is
+// rendered text only.
+function renderRouterPolicy(lines, task, routerPolicyPath, relSource, routerBackendRegistryPath) {
+  const explicitPolicy = task.routerPolicyPath && task.routerPolicyPath === routerPolicyPath;
+  const explicitRegistry =
+    task.routerBackendRegistryPath && task.routerBackendRegistryPath === routerBackendRegistryPath;
   lines.push('## Router Policy (advisory)');
   lines.push('');
   lines.push(`Dry-run router-policy ledger: \`${routerPolicyPath}\` (schema \`missiond.router-policy.v1\`).`);
+  if (routerBackendRegistryPath) {
+    lines.push(`Backend readiness registry: \`${routerBackendRegistryPath}\` (schema \`missiond.router-backend-registry.v1\`).`);
+  }
   lines.push('');
   lines.push('- This section is **advisory** and **dry-run only**. The policy file is informational; it captures backend recommendations distilled from prior session-trace observations, but **runtime dispatch is unchanged** — ClaudeCode remains the live backend for this task.');
   lines.push('- The brief surfaces the policy path so human readers and ClaudeCode workers can consult the recommendations; it does not instruct the worker to switch backend, alter the dispatch strategy, or run the recommendation CLI.');
-  if (explicit) {
-    lines.push('- Source: explicit `:router-policy-path` on the task contract.');
+  lines.push('- **You MUST NOT switch backend** based on anything rendered in this section. The recommendation and readiness fields below are observational signals only — runtime dispatch never changes as a side-effect of reading this brief, and apply-eligibility is recorded for telemetry, not for worker action.');
+  if (explicitPolicy) {
+    lines.push('- Policy source: explicit `:router-policy-path` on the task contract.');
   } else {
-    lines.push('- Source: auto-detected default seed (no `:router-policy-path` on the task contract).');
+    lines.push('- Policy source: auto-detected default seed (no `:router-policy-path` on the task contract).');
+  }
+  if (routerBackendRegistryPath) {
+    if (explicitRegistry) {
+      lines.push('- Registry source: explicit `:router-backend-registry-path` on the task contract.');
+    } else {
+      lines.push('- Registry source: auto-detected default seed (no `:router-backend-registry-path` on the task contract).');
+    }
   }
   lines.push('');
   lines.push('Inspect the policy with the read-only checker (the renderer itself does not execute the policy or shell out to the recommendation CLI):');
   lines.push('');
   lines.push('```bash');
   lines.push(`node scripts/check-router-policy.mjs ${routerPolicyPath}`);
+  if (routerBackendRegistryPath) {
+    lines.push(`node scripts/check-router-backend-registry.mjs ${routerBackendRegistryPath}`);
+  }
   lines.push('```');
   lines.push('');
   lines.push('You **may** also inspect the dry-run recommendation for THIS task by running the recommendation CLI directly. The renderer never executes it — the command below is rendered text only and stays **advisory** and **dry-run only**; the recommendation does not change dispatch and you MUST NOT switch backend on the strength of its output:');
   lines.push('');
   lines.push('```bash');
-  lines.push(`node scripts/recommend-task-backend.mjs --task ${relSource} --policy ${routerPolicyPath} --json`);
+  if (routerBackendRegistryPath) {
+    lines.push(
+      `node scripts/recommend-task-backend.mjs --task ${relSource} --policy ${routerPolicyPath} --backend-registry ${routerBackendRegistryPath} --json`,
+    );
+  } else {
+    lines.push(`node scripts/recommend-task-backend.mjs --task ${relSource} --policy ${routerPolicyPath} --json`);
+  }
   lines.push('```');
   lines.push('');
 }
