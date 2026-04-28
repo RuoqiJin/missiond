@@ -4,7 +4,7 @@
   :schema "missiond.session-trace.v1"
   :wave wave36
   :created-at "2026-04-28T22:56:00+08:00"
-  :sequence 0
+  :sequence 6
 
   (trace-event
     :id wave36-trace-bootstrap-start-001
@@ -23,4 +23,50 @@
     :backend prepare-task-runner-wave
     :kind read
     :files [".missiond/claudecode/wave36-shared-preamble.md"]
-    :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads."))
+    :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads.")
+
+  (trace-event
+    :id wave36-trace-01-claim-004
+    :seq 3
+    :at "2026-04-28T15:05:00Z"
+    :task wave36-01-mission-request-review-response-v0
+    :backend claudecode
+    :kind observation
+    :summary "Claudecode worker claimed wave36-01-mission-request-review-response-v0; will extend mission_request with respond adapter.")
+
+  (trace-event
+    :id wave36-trace-01-read-005
+    :seq 4
+    :at "2026-04-28T15:05:00Z"
+    :task wave36-01-mission-request-review-response-v0
+    :backend claudecode
+    :kind read
+    :files [".missiond/claudecode/wave36-shared-preamble.md"
+            ".missiond/tasks/wave36/context-atlas.lisp"
+            ".missiond/tasks/wave36/pattern-cards.lisp"
+            ".missiond/v3/missiond-blueprint.lisp"
+            "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+            "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+    :summary "Read shared preamble, atlas, pattern cards, blueprint, request handlers before implementing respond action.")
+
+  (trace-event
+    :id wave36-trace-01-commit-006
+    :seq 5
+    :at "2026-04-28T15:15:12Z"
+    :task wave36-01-mission-request-review-response-v0
+    :backend claudecode
+    :kind commit
+    :files [".missiond/v3/missiond-blueprint.lisp"
+            "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+            "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+    :summary "Committed write-scope at 37421f4ae3af; task-scope-guard staged OK + acceptance commands green.")
+
+  (trace-event
+    :id wave36-trace-01-completion-007
+    :seq 6
+    :at "2026-04-28T15:17:58Z"
+    :task wave36-01-mission-request-review-response-v0
+    :backend claudecode
+    :kind complete
+    :files [".missiond/tasks/wave36/reports/wave36-01-mission-request-review-response-v0.report.lisp"]
+    :summary "Report written with status=done + commit_hash 37421f4ae3af + 10 acceptance results; check-task-report.mjs PASS; verify-task-contract.mjs PASS."))
