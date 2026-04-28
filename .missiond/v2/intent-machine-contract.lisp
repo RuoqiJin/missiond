@@ -40,6 +40,12 @@
      "mission_plan router trace-index confidence code-aligned-partial (wave 25 task 03 commit bd2b5a3); optional router_policy_trace_index_path, statuses used/missing/unreadable/malformed, absent path omitted, mode=off blocks I/O"
      "renderer router recommendation command code-aligned (wave 25 task 04 commit e1fdbe4); brief renders parameterized recommend-task-backend command and MAY report-field guidance, still never shells out"
      "router measurement smoke code-aligned (wave 25 task 05 commit 0f5d857); CLI/Rust parity when trace evidence >=5, dry_run_only/applied/runtime_replacement invariants pinned, no runtime backend replacement"]
+  :wave-26-status-summary
+    ["router backend readiness registry code-aligned (wave 26 task 01 commit 2ac6a5b); 5 backend enum aligned with router-policy v1, readiness current-default/advisory-only/runtime-ready/unavailable plus unknown sentinel, checker 19 fixtures"
+     "Node recommendation/evaluator readiness annotations code-aligned (wave 26 task 02 commit ad8ec04); --backend-registry adds apply blockers and 7-condition gate, real corpus 75 tasks with apply_eligible_count=0"
+     "mission_plan backend readiness dry-run surface code-aligned-partial (wave 26 task 03 commit fcd937a); router_backend_registry_path optional, 6-condition Rust gate, off/default with registry+trace path remains byte-identical and no I/O"
+     "report/renderer readiness fields code-aligned (wave 26 tasks 04/05 commits 44ddf9d/43df6230); five optional report fields, strict atom booleans, renderer check-router-backend-registry command + --backend-registry, explicit MUST NOT switch backend"
+     "router readiness smoke code-aligned (wave 26 task 06 commit 4bfa710); 5-layer smoke pins 9 invariants, including current-default not apply-eligible and no shell/LLM/git/network; runtime backend replacement remains pending"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -250,6 +256,80 @@
                  "CLI/Rust parity for rich trace evidence: claudecode/high at (5,5)"
                  "no shell-out, LLM, git, network, or runtime backend replacement"])
 
+  (router-backend-registry-v1
+    :purpose "Declare backend runtime readiness separately from router-policy recommendation rules, so future apply gates can see explicit runtime readiness and blockers"
+    :schema ".missiond/tasks/schema/router-backend-registry-v1.lisp"
+    :seed ".missiond/router/router-backend-registry-v1.lisp"
+    :checker "scripts/check-router-backend-registry.mjs"
+    :status "code-aligned — wave 26 task 01"
+    :backend-ids [claudecode missiond-llm-router deterministic-checker patch-worker verifier-worker]
+    :readiness-statuses [current-default advisory-only runtime-ready unavailable]
+    :unknown-sentinel unknown
+    :seed-state "claudecode=current-default/runtime_allowed=true/substrate present; deterministic-checker and verifier-worker advisory-only; missiond-llm-router and patch-worker unavailable or not runtime-ready; no non-claudecode backend is apply-eligible"
+    :invariants ["runtime_allowed must be literal atom true/false"
+                 "runtime_allowed=true requires readiness_status current-default or runtime-ready"
+                 "router apply eligibility requires runtime-ready; current-default is explicitly not sufficient"
+                 "runtime-ready requires non-nil substrate"
+                 "every backend entry carries non-goals and apply_blockers"])
+
+  (router-recommendation-readiness-v1
+    :purpose "Annotate dry-run recommendations with backend readiness and apply blockers while keeping recommendation advisory"
+    :cli "scripts/recommend-task-backend.mjs"
+    :evaluator "scripts/evaluate-router-policy-corpus.mjs"
+    :status "code-aligned — wave 26 task 02"
+    :arg "--backend-registry <path>"
+    :added-fields [:backend_readiness_status :backend_runtime_allowed :router_apply_eligible :router_apply_blockers :backend_registry_path]
+    :node-gate "7 conditions: valid policy runtime_replacement=false + dry_run_only=true, status=computed, confidence=high, backend exists in registry, runtime_allowed=true, readiness_status=runtime-ready, apply_blockers empty"
+    :real-corpus "75 task contracts; by_backend claudecode=54 / deterministic-checker=16 / verifier-worker=5; by_backend_readiness current-default=54 / advisory-only=21; apply_eligible_count=0"
+    :boundary "fields are advisory metadata; no runtime consumer applies them in wave26")
+
+  (mission-plan-router-backend-readiness-v1
+    :purpose "Expose the same backend readiness/apply-blocker information in mission_plan(router_policy_mode=dry_run)"
+    :handler "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+    :mcp-schema "crates/missiond-mcp/src/tools/knowledge/plan.rs"
+    :status "code-aligned partial — wave 26 task 03"
+    :arg :router_backend_registry_path
+    :backend-registry-statuses [used missing unreadable malformed unknown_backend]
+    :added-fields [:backend_registry_path :backend_registry_status :backend_readiness_status :backend_runtime_allowed :router_apply_eligible :router_apply_blockers]
+    :rust-gate "6 conditions: recommendation status=computed, confidence=high, backend in registry, runtime_allowed=true, readiness_status=runtime-ready, apply_blockers empty"
+    :compat ["path absent => backend_registry_* fields omitted"
+             "mode=off/default => early return; even registry + trace-index paths perform no I/O"
+             "missing/unreadable/malformed registry is non-fatal and keeps router_apply_eligible=false"
+             "applied remains literal false and dispatch fields are unchanged"])
+
+  (router-readiness-report-fields-v0
+    :purpose "Allow reports to record backend readiness/apply blockers observed from router dry-run outputs"
+    :schema ".missiond/tasks/schema/report-contract-v1.lisp"
+    :checker "scripts/check-task-report.mjs"
+    :status "code-aligned — wave 26 task 04"
+    :optional-fields [:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path]
+    :strictness ["readiness status enum: current-default / advisory-only / runtime-ready / unavailable / unknown"
+                 "router_backend_runtime_allowed and router_apply_eligible must be literal atoms, not strings"
+                 "router_apply_blockers is a vector of non-empty strings"
+                 "router_backend_registry_path is repo-relative when supplied"])
+
+  (renderer-router-readiness-context-v1
+    :purpose "Render backend-readiness commands and report-field guidance while keeping Markdown non-load-bearing"
+    :renderer "scripts/render-claudecode-task.mjs"
+    :task-field ":router-backend-registry-path / :router_backend_registry_path"
+    :status "code-aligned — wave 26 task 05"
+    :commands ["node scripts/check-router-backend-registry.mjs <registry-path>"
+               "node scripts/recommend-task-backend.mjs --task <task.lisp> --policy <policy-path> --backend-registry <registry-path> --json"]
+    :boundary "renderer emits advisory text only, includes explicit 'MUST NOT switch backend', and never shells out")
+
+  (router-readiness-smoke-v1
+    :purpose "Pin readiness-loop invariants across Node recommendation/evaluator, Rust mission_plan, report checker, renderer, and static audits"
+    :status "code-aligned — wave 26 task 06"
+    :invariants ["router-policy runtime_replacement=false and dry_run_only=true remain required"
+                 "applied=false remains literal on mission_plan/report surfaces; recommend() never owns applied"
+                 "router_apply_eligible=true only for runtime-ready, never for current-default"
+                 "seed registry real corpus apply_eligible_count=0"
+                 "CLI/Rust parity for seed current-default registry: readiness=current-default, runtime_allowed=true, apply_eligible=false"
+                 "off/default mode with registry+trace-index paths is byte-identical and no-I/O"
+                 "renderer contains advisory/dry-run only/MUST NOT switch backend"
+                 "report checker rejects string booleans and invalid readiness fields"
+                 "no shell, LLM, git mutation, or network calls in readiness path"])
+
   (task-contract-v1
     :required-fields [:schema :title :kind :status :owner :goal :write-scope :must-not-touch :acceptance :commit]
     :schema-value "missiond.task-contract.v1"
@@ -275,6 +355,9 @@
     (schema-router-policy ".missiond/tasks/schema/router-policy-v1.lisp")
     (seed-router-policy ".missiond/router/router-policy-v1.lisp")
     (checker-router-policy "scripts/check-router-policy.mjs")
+    (schema-router-backend-registry ".missiond/tasks/schema/router-backend-registry-v1.lisp")
+    (seed-router-backend-registry ".missiond/router/router-backend-registry-v1.lisp")
+    (checker-router-backend-registry "scripts/check-router-backend-registry.mjs")
     (indexer-session-trace-corpus "scripts/build-session-trace-index.mjs")
     (cli-router-recommendation "scripts/recommend-task-backend.mjs")
     (cli-router-policy-evaluator "scripts/evaluate-router-policy-corpus.mjs")
@@ -295,7 +378,7 @@
      "Do not auto-dispatch from task.lisp until verifier/report loop exists (wave 19 closed + wave 20-04 machine-driven dispatch v0 + wave 21-02/03 task-run verifier + execution-side verified gate 已落 + **wave 22-02 (commit 02ac627) 加 daemon-internal auto_run_task_run_verifier 8 cross-checks in-process 当 task_contract_path + task_report_path + shared_memory_path + commit_hash 4 路径全提供时 daemon 自跑 (verification_source='daemon-auto-verifier'), legacy verified=true 降级 'legacy-caller-claim'**; remaining: 完全无 hint 的 autonomous spawn / report-contract checker auto-invoke (wave22-02 已大幅推进, 但 caller 必须仍提供 4 路径才触发 daemon-internal verifier)."
      "Do not auto-apply LLM/inference proposals without explicit gate — wave 22-03 (commit 4b55cb4) 加 review LLM approve apply gate v1 (apply_llm_auto_approve + proposal_hash + caller_approved 4 opt-in + 6 道 gate); wave 22-04 (commit fee6567) 加 persisted plan inference apply v2 (persist_inference + caller_approved + proposal_hash 4 opt-in + plan_insert(version=max+1) + plan_supersede(old) 真改 plan.sexp_text); wave 22-05 (commit 162a303) 加 autonomous workstation true spawn v1 (auto_spawn + workstation_caller_approved + preflight_acceptable 4 opt-in + 12-rule gate matrix + mission_task_delegate substrate **绝不 claude -p**); wave 22-06 (commit 2423d4b) 加 distill chain policy auto-sonnet v2 (auto_sonnet_policy=safe_after_rules **policy 选择即 attestation**, dual opt-in 移除); 4 路 LLM/inference 通道全部进入 'caller explicit opt-in + 6/12-rule gate + deterministic SHA-256 hash + structured fail-fast errors' 模式. 仍未实现: 完全 LLM 自主无任何 caller opt-in / Sonnet 真无任何 attestation."
      "Do not enable hooks default-on real install — wave 21-01 hooks installer 是 opt-in repo-local only; **wave 22-01 (commit 49555c4) 加 default-on doctor v2** (install-missiond-hooks.mjs default mode = --check 只读 doctor, --install 仍唯一 mutation; renderer renderHooksDoctorPreflight() 块在 commit section 上方提示 caller 跑 --install); 但 git config core.hooksPath .githooks 默认仍未启用 — caller 必须显式跑 --install 才生效; enforce-by-default real install 仍 future."
-     "Do not use router recommendation as runtime replacement — wave 24 router-policy / indexer / CLI / mission_plan surface and wave 25 evaluator/report/trace-index confidence loop are advisory dry-run only; runtime_replacement=false, dry_run_only=true, and applied=false are hard boundaries."
+     "Do not use router recommendation as runtime replacement — wave 24 router-policy / indexer / CLI / mission_plan surface, wave 25 evaluator/report/trace-index confidence loop, and wave 26 backend-readiness/apply-blocker loop are advisory dry-run only; runtime_replacement=false, dry_run_only=true, applied=false, and current-default-not-apply-eligible are hard boundaries."
      "Do not start frontend Lisp in this wave (continue postpone)."
      "Do not interpret arbitrary Common Lisp; this is MissionD data Lisp only."])
 
@@ -342,5 +425,6 @@
      "Auto-seed shared-memory ledger claim entry on parallel workstation spawn (wave22-05 真 spawn 已落, ledger seed 仍 future)."
      "DONE wave24-01..06 — router-policy dry-run chain: schema/checker/seed + trace corpus indexer + recommendation CLI + mission_plan dry-run surface + renderer advisory block + full-chain smoke; no runtime backend replacement."
      "DONE wave25-01..05 — router-policy measurement loop: corpus evaluator (67 real tasks), report-contract seven router fields, mission_plan trace-index confidence path, renderer recommend command, and CLI/Rust parity smoke; no runtime backend replacement."
+     "DONE wave26-01..06 — router backend readiness loop: backend registry schema/seed/checker, Node/Rust readiness annotations, report/renderer readiness fields, and 5-layer smoke; seed registry real corpus apply_eligible_count=0; no runtime backend replacement."
      "After backend loop stabilizes, reuse the same contract style for timeline-edit operations."
      "Frontend Lisp 仍 postpone (本 wave 不开)."]))

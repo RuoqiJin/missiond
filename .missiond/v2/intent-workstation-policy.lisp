@@ -310,7 +310,7 @@
   ;; ──────────────────────────────────────────────────────────
   (trace-derived-router-policy
     :desc "基于 session-trace 的后续 LLM router / backend selection 草案 — 用真实执行轨迹压缩 ClaudeCode 步数, 但本 wave 不替换 ClaudeCode"
-    :status "code-aligned partial — wave 24 已完成 advisory dry-run 链路; wave 25 已完成 measurable dry-run loop (corpus evaluator + report fields + mission_plan trace-index confidence + renderer command + smoke parity); runtime router replacement 未 code-aligned"
+    :status "code-aligned partial — wave 24 已完成 advisory dry-run 链路; wave 25 已完成 measurable dry-run loop; wave 26 已完成 backend readiness/apply-blocker loop (registry + Node/Rust readiness + report/renderer + smoke); runtime router replacement 未 code-aligned"
     :truth-sources ["session-trace.lisp (append-only factual telemetry)"
                     "task-report.lisp + shared-memory.lisp + scoped commit hash"
                     "mission_execution companion log / evidence sidecar"]
@@ -384,7 +384,38 @@
        (measurement-smoke-v1
          :status code-aligned
          :contract "pins CLI/Rust parity at rich trace threshold >=5 plus dry_run_only/applied/runtime_replacement invariants")]
+    :wave-26-readiness-loop
+      [(backend-registry-v1
+         :status code-aligned
+         :files [".missiond/tasks/schema/router-backend-registry-v1.lisp"
+                 ".missiond/router/router-backend-registry-v1.lisp"
+                 "scripts/check-router-backend-registry.mjs"]
+         :contract "5 backend enum aligned with router-policy v1; claudecode current-default; non-claudecode backends advisory-only/unavailable; current-default is not apply-eligible")
+       (node-readiness-annotations-v1
+         :status code-aligned
+         :files ["scripts/recommend-task-backend.mjs"
+                 "scripts/evaluate-router-policy-corpus.mjs"]
+         :contract "--backend-registry adds readiness/apply blockers; 7-condition gate; real corpus 75 tasks apply_eligible_count=0")
+       (plan-readiness-surface-v1
+         :status code-aligned-partial
+         :files ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+                 "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+         :contract "router_backend_registry_path optional; 6-condition Rust gate; off/default remains no-I/O and byte-identical")
+       (report-readiness-fields-v0
+         :status code-aligned
+         :files [".missiond/tasks/schema/report-contract-v1.lisp"
+                 "scripts/check-task-report.mjs"]
+         :contract "five optional readiness fields; literal bools and blocker vector validated")
+       (renderer-readiness-context-v1
+         :status code-aligned
+         :file "scripts/render-claudecode-task.mjs"
+         :contract "renders check-router-backend-registry + --backend-registry command; explicit MUST NOT switch backend")
+       (readiness-smoke-v1
+         :status code-aligned
+         :contract "5-layer smoke pins 9 invariants, including current-default != apply-eligible and no shell/LLM/git/network")]
     :runtime-boundary ["current MissionD still dispatches through existing workstation/plan substrates"
                        "recommendation block is advisory evidence for humans / future policy"
                        "wave25 confidence can raise dry-run confidence from measured trace evidence, but cannot apply backend routing"
+                       "wave26 router_apply_eligible is readiness metadata only; no runtime consumer applies it"
+                       "current-default backend status is intentionally insufficient for apply eligibility; a future backend must opt into runtime-ready explicitly"
                        "runtime replacement of ClaudeCode or mission_task_delegate is pending explicit policy wave"]))

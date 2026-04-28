@@ -20,7 +20,7 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — pillar code-truth registry; v1.6 (wave 25) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-25 全部 task (含 wave 23 session-trace v1 / wave 24 router-policy dry-run chain / wave 25 router measurement loop); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
+      :desc "判真索引 — pillar code-truth registry; v1.7 (wave 26) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-26 全部 task (含 wave 23 session-trace v1 / wave 24 router-policy dry-run chain / wave 25 router measurement loop / wave 26 router backend readiness loop); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
     (session-trace-v1
       :desc "wave 23 — .missiond/tasks/**/session-trace.lisp append-only factual telemetry; schema/checker/analyzer code-aligned; :session-trace-writable default false opt-in"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.session-trace-v1"
@@ -29,7 +29,7 @@
       :analyzer "scripts/analyze-session-trace.mjs"
       :status code-aligned-partial)
     (trace-derived-router-policy
-      :desc "wave 23 Codex architecture draft → wave 24 advisory dry-run implementation → wave 25 measurable dry-run loop; aggregated traces feed router-policy v1 / recommendation CLI / mission_plan trace-index confidence; no runtime router replacement yet"
+      :desc "wave 23 Codex architecture draft → wave 24 advisory dry-run implementation → wave 25 measurable dry-run loop → wave 26 backend readiness/apply-blocker loop; aggregated traces feed router-policy v1 / recommendation CLI / mission_plan trace-index confidence and readiness metadata; no runtime router replacement yet"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry worker.section.trace-derived-router-policy"
       :status code-aligned-partial)
     (router-policy-v1
@@ -40,18 +40,28 @@
       :checker "scripts/check-router-policy.mjs"
       :status code-aligned)
     (router-recommendation-dry-run
-      :desc "wave 24 tasks 02-06 + wave 25 tasks 01-05 — trace corpus index + deterministic recommendation CLI + corpus evaluator + report fields + mission_plan router_policy_mode=dry_run / router_policy_trace_index_path + renderer advisory command + smoke parity; applied=false and no backend replacement"
+      :desc "wave 24 tasks 02-06 + wave 25 tasks 01-05 + wave 26 tasks 01-06 — trace corpus index + deterministic recommendation CLI + corpus evaluator + backend readiness registry + report fields + mission_plan router_policy_mode=dry_run / router_policy_trace_index_path / router_backend_registry_path + renderer advisory command + smoke parity; applied=false and no backend replacement"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.router-recommendation-cli-v0 / tools.surface.plan-router-policy-dry-run-v0"
       :indexer "scripts/build-session-trace-index.mjs"
       :cli "scripts/recommend-task-backend.mjs"
       :evaluator "scripts/evaluate-router-policy-corpus.mjs"
+      :backend-registry ".missiond/router/router-backend-registry-v1.lisp"
       :plan-handler "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
       :mcp-schema "crates/missiond-mcp/src/tools/knowledge/plan.rs"
       :status code-aligned-partial)
     (router-policy-measurement-loop
-      :desc "wave 25 — measurable router dry-run loop: evaluate 67-task corpus, record seven optional report fields, score confidence from trace-index, and pin CLI/Rust parity at rich evidence threshold >=5"
+      :desc "wave 25 — measurable router dry-run loop: evaluate 67-task corpus, record seven optional report fields, score confidence from trace-index, and pin CLI/Rust parity at rich evidence threshold >=5; wave 26 evaluator corpus now 75 tasks with readiness aggregation"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.router-policy-corpus-evaluator-v0 / tools.surface.plan-router-policy-trace-index-confidence-v1 / intent-layer.unified-entry-pipeline.router-policy-measurement-smoke-v1"
       :evaluator "scripts/evaluate-router-policy-corpus.mjs"
+      :report-schema ".missiond/tasks/schema/report-contract-v1.lisp"
+      :report-checker "scripts/check-task-report.mjs"
+      :status code-aligned-partial)
+    (router-backend-readiness-loop
+      :desc "wave 26 — backend readiness/apply-blocker loop: registry schema/seed/checker, Node/Rust readiness annotations, report/renderer readiness fields, and 5-layer smoke; current-default is not apply-eligible and seed real corpus apply_eligible_count=0"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.router-backend-registry-v1 / tools.surface.plan-router-backend-readiness-v1 / intent-layer.unified-entry-pipeline.router-readiness-smoke-v1"
+      :schema ".missiond/tasks/schema/router-backend-registry-v1.lisp"
+      :seed ".missiond/router/router-backend-registry-v1.lisp"
+      :checker "scripts/check-router-backend-registry.mjs"
       :report-schema ".missiond/tasks/schema/report-contract-v1.lisp"
       :report-checker "scripts/check-task-report.mjs"
       :status code-aligned-partial)

@@ -166,7 +166,7 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v1.6 — wave 25 router-policy measurement loop layered on wave 24 dry-run recommendation chain"
+    :version "v1.7 — wave 26 router backend readiness loop layered on wave 25 measurement loop"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
     :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
@@ -3644,6 +3644,118 @@
         :new-status code-aligned-partial
         :note-extension "wave 25 turns advisory router policy from static dry-run into measurable dry-run: real corpus evaluator (67 tasks) + trace-index confidence path + report echo fields. It still forbids runtime replacement; runtime_replacement=false / dry_run_only=true / applied=false remain hard boundaries.")
 
+      ;; ── 区域 89 · router backend readiness loop (wave 26 tasks 01-06) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-backend-registry-v1"
+        :title "router backend readiness registry v1 — backend runtime readiness and apply blockers"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-backend-registry-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/router-backend-registry-v1.lisp"
+           ".missiond/router/router-backend-registry-v1.lisp"
+           "scripts/check-router-backend-registry.mjs"]
+        :cross-ref ["intent-layer.machine-contract.router-policy-v1"
+                    "worker.section.trace-derived-router-policy"]
+        :wave "26 task 01 (commit 2ac6a5b)"
+        :note "Adds schema + seed + checker for 5 backend ids aligned with router-policy v1: claudecode / missiond-llm-router / deterministic-checker / patch-worker / verifier-worker. Readiness statuses: current-default / advisory-only / runtime-ready / unavailable plus unknown sentinel for consumers. Seed marks claudecode current-default runtime_allowed=true, non-claudecode backends advisory-only/unavailable, and no backend as runtime-ready; checker has 19 fixtures across 13 categories.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-recommendation-readiness-v1"
+        :title "router recommendation readiness annotations v1 — Node CLI apply blockers"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-recommendation-readiness-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/recommend-task-backend.mjs"
+           "scripts/evaluate-router-policy-corpus.mjs"
+           "scripts/check-router-backend-registry.mjs"]
+        :cross-ref ["intent-layer.machine-contract.router-backend-registry-v1"
+                    "intent-layer.machine-contract.router-policy-corpus-evaluator-v0"
+                    "intent-layer.machine-contract.router-recommendation-cli-v0"]
+        :wave "26 task 02 (commit ad8ec04)"
+        :note "recommend/evaluate CLIs accept --backend-registry and add backend_readiness_status / backend_runtime_allowed / router_apply_eligible / router_apply_blockers / backend_registry_path. Node gate has 7 conditions (policy dry-run invariants split, status=computed, high confidence, backend present, runtime_allowed=true, readiness_status=runtime-ready, no blockers). Real corpus: 75 tasks; by_backend claudecode=54 / deterministic-checker=16 / verifier-worker=5; by_backend_readiness current-default=54 / advisory-only=21; apply_eligible_count=0.")
+
+      (section-entry
+        :section-id "tools.surface.plan-router-backend-readiness-v1"
+        :title "mission_plan router_backend_registry_path — dry-run backend readiness surface"
+        :source-file ".missiond/v2/intent-tools.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_plan :: router backend readiness"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["tools.surface.plan-router-policy-dry-run-v0"
+                    "tools.surface.plan-router-policy-trace-index-confidence-v1"
+                    "intent-layer.machine-contract.router-backend-registry-v1"]
+        :wave "26 task 03 (commit fcd937a)"
+        :note "mission_plan execute adds optional router_backend_registry_path, read only under router_policy_mode=dry_run. Response fields: backend_registry_path / backend_registry_status / backend_readiness_status / backend_runtime_allowed / router_apply_eligible / router_apply_blockers. Rust gate has 6 conditions (status=computed, confidence=high, backend in registry, runtime_allowed=true, readiness_status=runtime-ready, blockers empty). Off/default with both registry and trace-index paths remains byte-identical and performs no file I/O; applied remains literal false.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.router-readiness-report-fields-v0"
+        :title "report-contract router readiness fields — apply blocker evidence"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: router-readiness-report-fields-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/report-contract-v1.lisp"
+           "scripts/check-task-report.mjs"]
+        :cross-ref ["intent-layer.machine-contract.router-recommendation-report-fields-v0"
+                    "intent-layer.machine-contract.router-recommendation-readiness-v1"]
+        :wave "26 task 04 (commit 44ddf9d)"
+        :note "report-contract v1 adds five optional flat fields: router_backend_readiness_status, router_backend_runtime_allowed, router_apply_eligible, router_apply_blockers, router_backend_registry_path. Checker fixtures 23→31 after smoke; rejects invalid readiness enum, string booleans, absolute registry path, and empty blocker strings. Legacy reports remain valid.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.renderer-router-readiness-context-v1"
+        :title "renderer router readiness context — backend-registry command and MUST NOT switch backend"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: renderer-router-readiness-context-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/render-claudecode-task.mjs"
+           ".missiond/tasks/schema/task-contract-v1.lisp"]
+        :cross-ref ["intent-layer.machine-contract.renderer-router-recommendation-command-v1"
+                    "intent-layer.machine-contract.router-backend-registry-v1"
+                    "intent-layer.machine-contract.router-readiness-report-fields-v0"]
+        :wave "26 task 05 (commit 43df6230)"
+        :note "task contract gains optional :router-backend-registry-path / :router_backend_registry_path. Renderer auto-detects .missiond/router/router-backend-registry-v1.lisp, emits check-router-backend-registry command, appends --backend-registry to recommend-task-backend when registry resolves, and always renders an explicit MUST NOT switch backend bullet. Renderer still emits text only and never shells out.")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.router-readiness-smoke-v1"
+        :title "router readiness smoke v1 — 5-layer readiness/apply-blocker invariant suite"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: router-readiness-smoke-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/recommend-task-backend.mjs"
+           "scripts/evaluate-router-policy-corpus.mjs"
+           "scripts/check-task-report.mjs"
+           "scripts/render-claudecode-task.mjs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.machine-contract.router-backend-registry-v1"
+                    "intent-layer.machine-contract.router-recommendation-readiness-v1"
+                    "tools.surface.plan-router-backend-readiness-v1"]
+        :wave "26 task 06 (commit 4bfa710)"
+        :note "5-layer smoke pins 9 invariants: router-policy dry-run invariants, applied=false ownership, apply_eligible only for runtime-ready (current-default blocked), real-corpus seed apply_eligible_count=0, CLI/Rust parity for seed current-default registry, off/default no-I/O byte shape, renderer advisory/dry-run/MUST NOT text, report checker strict literals, and zero shell/LLM/git/network in active readiness paths. Daemon tests 1659→1661; mcp 17 unchanged.")
+
+      (status-upgrade
+        :section-id "worker.section.trace-derived-router-policy"
+        :prev-status code-aligned-partial
+        :new-status code-aligned-partial
+        :note-extension "wave 26 tasks 01-06 add backend readiness/apply-blocker metadata on top of the measurable dry-run loop. Seed registry keeps apply_eligible_count=0 across the real corpus and treats current-default as insufficient for apply eligibility. Runtime backend replacement remains pending.")
+
+      (status-upgrade
+        :section-id "intent-layer.machine-contract.trace-derived-router-policy"
+        :prev-status code-aligned-partial
+        :new-status code-aligned-partial
+        :note-extension "wave 26 introduces router-backend-registry v1 and Node/Rust readiness annotations. router_apply_eligible is advisory metadata only; no runtime consumer applies it, and applied=false remains pinned.")
+
       ;; ── 区域 90 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
       ;; 注: section-id 已存在 (区域 36 / wave-19-backfill / wave-20-backfill / wave-21-backfill), 本 entry 不新增 anchor; 仅在 wave-22-backfill 块内
       ;;     声明 note 扩展 (hooks default-on doctor v2 + daemon-internal auto-run-verifier 8 cross-checks)
@@ -3656,6 +3768,7 @@
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
       :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 / ExecutionEvent dispatch metadata v1 / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade; v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade; v1.2 (wave 21 task 09) 回填 hooks-path installer v1 / task-run verifier v1 / execution report-verifier integration v1 / autonomous workstation LLM proposal v0 / plan inference apply gate v1 / LLM auto-approve proposal v0 / sonnet distill chain auto-apply v1 / machine-contract autonomous loop smoke v3 共 +8 entry + 2 status-upgrade; v1.3 (wave 22 task 08) 回填 explicit-gate-promotion + auto-verifier + smoke v4 共 +7 entry + 1 status-upgrade; v1.4 (wave 23 Codex) 回填 session-trace / trace analyzer / router draft 共 +4 entry; v1.5 (wave 24 Codex) 回填 router-policy dry-run chain 共 +6 entry + 2 status-upgrade; **v1.6 (wave 25 Codex) 回填 router-policy measurement loop 共 +5 entry + 2 status-upgrade**. 仍有以下未细化项, 等后续 wave 再补"
+      :latest-backfill "v1.7 (wave 26 Codex) 回填 router backend readiness loop 共 +6 entry + 2 status-upgrade; reason 文本保留历史串, 本字段记录最新收口"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"

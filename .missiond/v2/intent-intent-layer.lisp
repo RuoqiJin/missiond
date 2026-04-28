@@ -25,6 +25,11 @@
      "mission_plan execute 新增 router_policy_trace_index_path, 只在 dry_run mode 读取; used/missing/unreadable/malformed 都是 non-fatal evidence surface"
      "renderer 输出 recommend-task-backend 命令与 MAY report-field 指引, 但 Markdown 仍非 SSOT 且不切换 backend"
      "frontend Lisp 仍 postpone; 本波只补 router measurement / report / plan surface / renderer advisory"]
+  :wave-26-status-summary
+    ["machine-contract 新增 router-backend-registry v1 + readiness annotations: 5 backend enum, readiness current-default/advisory-only/runtime-ready/unavailable, unknown sentinel, apply blockers"
+     "mission_plan execute 新增 router_backend_registry_path, 只在 router_policy_mode=dry_run 读取; off/default 即使带 registry+trace-index 路径也不 I/O"
+     "report-contract / renderer 增 readiness 字段与 check-router-backend-registry / --backend-registry 上下文, 但 Markdown 仍非 SSOT 且明确 MUST NOT switch backend"
+     "frontend Lisp 与 runtime backend replacement 仍 postpone; 本波只补 router readiness / apply-blocker evidence loop"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar intent-layer (v0.4.17+ 已有详细占位)"

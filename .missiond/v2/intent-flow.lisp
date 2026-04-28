@@ -25,6 +25,11 @@
      "trace-index 只提高 dry-run confidence, 不改变 flow dispatch; mode=off/default 仍保持旧 shape 且不读文件"
      "report-contract router 字段是 completion evidence, 不是 routing command"
      "runtime router replacement / automatic backend selection 仍 pending, 后续必须单独 policy wave"]
+  :wave-26-status-summary
+    ["router dry-run chain 已加 backend readiness/apply-blocker loop: backend registry → recommendation readiness → mission_plan readiness → report/renderer readiness → 5-layer smoke"
+     "router_apply_eligible 是 dry-run metadata, 不改变 flow dispatch; current-default backend status 明确不足以触发 apply eligibility"
+     "seed registry real corpus 75 tasks apply_eligible_count=0; runtime-ready 必须由 future backend 显式 opt-in"
+     "runtime router replacement / automatic backend selection 仍 pending, 后续必须单独 runtime policy wave"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"
