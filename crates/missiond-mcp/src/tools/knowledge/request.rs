@@ -17,11 +17,15 @@ pub fn definitions() -> Vec<ToolDefinition> {
          ask_question | approve_plan | reject_plan | execute_plan along with the request_id and an \
          optional note. mission_request resolves the persisted directive/plan ref from explicit args \
          (approved_directive_id / directive_id + directive_version, approved_plan_id / plan_id) or \
-         from the request-local intent-alignment.lisp / plan.lisp; missing refs return a structured \
-         blocked response with next_action instead of fabricating an id. approve_intent delegates to \
-         mission_directive(action=approve), then on successful approval immediately runs unified_entry \
+         from the request-local intent-alignment.lisp / plan.lisp or prior request-local review \
+         events; missing refs return a structured blocked response with next_action instead of fabricating \
+         an id. approve_intent delegates to \
+         mission_directive(action=approve), creates a hidden BoardTask anchor when no board_task_id \
+         is supplied, then on successful approval immediately runs unified_entry \
          plan-authoring and projects request-local plan.lisp for the same request; approve_plan \
-         delegates to mission_plan(action=approve) and never sets execute=true; execute_plan requires \
+         delegates to mission_plan(action=approve), and when only request-local plan.lisp exists it first \
+         materializes that Lisp into a draft Plan row, reusing plan.lisp's BoardTask anchor when present \
+         or creating a hidden anchor only if needed; approve_plan never sets execute=true; execute_plan requires \
          execute=true (or response=execute_plan) and routes through the existing mission_plan execute \
          path via unified_entry. reject_intent / \
          reject_plan / ask_question never mutate directive/plan approval state and only append a \
@@ -37,8 +41,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
          { status: ok|blocked, action: respond, mode, request_id, request_path, artifact_paths, \
          artifact_exists, respond_result: { decision, outcome: recorded|dispatched|blocked, \
          event_path, event_seq, event_sha256, event_bytes, execute, next_action, directive_id?, \
-         directive_version?, plan_id?, inner_action?, blocked_reason?, note? }, review_packet, \
-         next_action, v3_contract, projection?, pipeline_result? }. review_packet is a pure projection of \
+         directive_version?, plan_id?, inner_action?, blocked_reason?, note?, board_task_materialization?, \
+         plan_materialization? }, review_packet, \
+         next_action, v3_contract, projection?, board_task_materialization?, plan_materialization?, pipeline_result? }. review_packet is a pure projection of \
          request-local artifact existence + the latest projection target — the caller decides \
          whether to approve via mission_directive/mission_plan; mission_request never silently \
          approves or dispatches.",
@@ -61,7 +66,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                         "reject_plan",
                         "execute_plan"
                     ],
-                    "description": "[respond] review decision — approve_intent dispatches to mission_directive approve and then unified_entry plan-authoring to project request-local plan.lisp; approve_plan dispatches to mission_plan approve (never execute); execute_plan requires execute=true and routes through mission_plan execute; reject_intent/reject_plan/ask_question only append a request-local review event"
+                    "description": "[respond] review decision — approve_intent dispatches to mission_directive approve, creates a hidden BoardTask anchor if no board_task_id is supplied, and then unified_entry plan-authoring projects request-local plan.lisp; approve_plan dispatches to mission_plan approve and materializes request-local plan.lisp into a draft Plan row when no plan_id exists, reusing plan.lisp's BoardTask anchor when present (never execute); execute_plan requires execute=true and routes through mission_plan execute, resolving plan_id from explicit args, plan.lisp, or a prior approve_plan event; reject_intent/reject_plan/ask_question only append a request-local review event"
                 },
                 "decision": {
                     "type": "string",
@@ -135,11 +140,11 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 },
                 "board_task_id": {
                     "type": "string",
-                    "description": "[advance plan-authoring|respond approve_intent] board task anchor for mission_plan compile. respond approve_intent defaults it to request_id for request-local dry-run plan projection when omitted."
+                    "description": "[advance plan-authoring|respond approve_intent] board task anchor for mission_plan compile. respond approve_intent may omit this; MissionD creates a hidden request-local BoardTask anchor."
                 },
                 "approved_plan_id": {
                     "type": "string",
-                    "description": "[advance execute|respond approve_plan/reject_plan/execute_plan] approved plan UUID"
+                    "description": "[advance execute|respond approve_plan/reject_plan/execute_plan] approved plan UUID. respond approve_plan may omit this when request-local plan.lisp exists; MissionD materializes it before approval."
                 },
                 "plan_id": {
                     "type": "string",

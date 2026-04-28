@@ -20,6 +20,7 @@
 use anyhow::Result;
 use chrono::{SecondsFormat, Utc};
 use missiond_core::util::safe_byte_truncate;
+use missiond_core::types::{CreateBoardTaskInput, PlanStatus};
 use missiond_mcp::tools::{error_codes, ToolContent, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
@@ -454,19 +455,41 @@ fn extract_directive_ref_from_artifact(text: &str) -> Option<DirectiveRef> {
     Some(DirectiveRef { id, version })
 }
 
-fn resolve_plan_ref(args: &Value, plan_text: Option<&str>) -> Option<PlanRef> {
+fn resolve_plan_ref(
+    args: &Value,
+    plan_text: Option<&str>,
+    event_texts: &[String],
+) -> Option<PlanRef> {
     if let Some(id) =
         nonblank(args.get("approved_plan_id")).or_else(|| nonblank(args.get("plan_id")))
     {
         return Some(PlanRef { id });
     }
-    plan_text.and_then(extract_plan_ref_from_artifact)
+    plan_text
+        .and_then(extract_plan_ref_from_artifact)
+        .or_else(|| extract_latest_plan_ref_from_events(event_texts))
 }
 
 fn extract_plan_ref_from_artifact(text: &str) -> Option<PlanRef> {
     extract_lisp_keyword_string(text, "plan_id")
         .or_else(|| extract_lisp_keyword_string(text, "id"))
         .map(|id| PlanRef { id })
+}
+
+fn extract_latest_plan_ref_from_events(event_texts: &[String]) -> Option<PlanRef> {
+    event_texts
+        .iter()
+        .rev()
+        .find_map(|text| extract_lisp_keyword_string(text, "plan_id").map(|id| PlanRef { id }))
+}
+
+fn read_event_texts(events_dir: &Path, filenames: &[String]) -> Vec<String> {
+    let mut names = filenames.to_vec();
+    names.sort();
+    names
+        .into_iter()
+        .filter_map(|name| std::fs::read_to_string(events_dir.join(name)).ok())
+        .collect()
 }
 
 /// Build the plan-authoring continuation for response=approve_intent.
@@ -511,6 +534,144 @@ fn build_respond_plan_compile_args(
         }
     }
     Value::Object(out)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct BoardTaskMaterialization {
+    board_task_id: String,
+    board_task_created: bool,
+}
+
+fn board_task_materialization_to_json(m: &BoardTaskMaterialization) -> Value {
+    json!({
+        "board_task_id": m.board_task_id,
+        "board_task_created": m.board_task_created,
+        "source": "request-local review adapter",
+    })
+}
+
+async fn ensure_request_board_task(
+    state: &AppState,
+    args: &Value,
+    request_id: &str,
+    paths: &RequestPaths,
+) -> Result<BoardTaskMaterialization> {
+    if let Some(id) = nonblank(args.get("board_task_id")) {
+        let task = state
+            .store
+            .get_board_task(&id)
+            .await
+            .map_err(|e| anyhow::anyhow!("DB error: {}", e))?
+            .ok_or_else(|| anyhow::anyhow!("board_task `{}` not found", id))?;
+        return Ok(BoardTaskMaterialization {
+            board_task_id: task.id.to_string(),
+            board_task_created: false,
+        });
+    }
+
+    let project = nonblank(args.get("project")).or_else(|| nonblank(args.get("target_project")));
+    let input = CreateBoardTaskInput {
+        title: format!("Mission request {} plan", request_id),
+        description: Some(format!(
+            "Hidden anchor for request-local plan materialized from {}.",
+            path_json(&paths.plan)
+        )),
+        priority: Some("medium".into()),
+        category: Some("dev".into()),
+        project,
+        hidden: Some(true),
+        context_intent: Some("code".into()),
+        ..Default::default()
+    };
+    let task = state
+        .store
+        .create_board_task(&input)
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
+
+    Ok(BoardTaskMaterialization {
+        board_task_id: task.id.to_string(),
+        board_task_created: true,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PlanMaterialization {
+    plan_ref: PlanRef,
+    board_task_id: String,
+    version: i32,
+    sexp_hash: String,
+    board_task_created: bool,
+}
+
+fn plan_materialization_to_json(m: &PlanMaterialization) -> Value {
+    json!({
+        "plan_id": m.plan_ref.id,
+        "board_task_id": m.board_task_id,
+        "version": m.version,
+        "sexp_hash": m.sexp_hash,
+        "board_task_created": m.board_task_created,
+        "source": "request-local plan.lisp",
+    })
+}
+
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+async fn materialize_request_plan(
+    state: &AppState,
+    args: &Value,
+    request_id: &str,
+    paths: &RequestPaths,
+    plan_text: &str,
+) -> Result<PlanMaterialization> {
+    let mut anchor_args = args.clone();
+    if nonblank(args.get("board_task_id")).is_none() {
+        if let Some(board_task_id) = extract_lisp_keyword_string(plan_text, "board_task_id") {
+            if let Some(obj) = anchor_args.as_object_mut() {
+                obj.insert("board_task_id".into(), json!(board_task_id));
+            }
+        }
+    }
+    let anchor = ensure_request_board_task(state, &anchor_args, request_id, paths).await?;
+
+    let existing = state
+        .store
+        .plan_list_by_task(&anchor.board_task_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
+    let version = existing.iter().map(|p| p.version).max().unwrap_or(0) + 1;
+    let source_directive_id = extract_lisp_keyword_string(plan_text, "directive_id")
+        .and_then(|id| uuid::Uuid::parse_str(&id).ok());
+    let sexp_hash = sha256_hex(plan_text);
+    let plan_id = state
+        .store
+        .plan_insert(
+            &anchor.board_task_id,
+            source_directive_id,
+            version,
+            plan_text,
+            &sexp_hash,
+            PlanStatus::Draft,
+            None,
+            Some("mission_request request-local plan.lisp"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("DB error: {}", e))?;
+
+    Ok(PlanMaterialization {
+        plan_ref: PlanRef {
+            id: plan_id.to_string(),
+        },
+        board_task_id: anchor.board_task_id,
+        version,
+        sexp_hash,
+        board_task_created: anchor.board_task_created,
+    })
 }
 
 /// Pure event-sequence allocator. The initial `request_received` event
@@ -703,13 +864,15 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let intent_text = std::fs::read_to_string(&paths.intent_alignment).ok();
     let plan_text = std::fs::read_to_string(&paths.plan).ok();
+    let event_filenames = list_event_filenames(&paths.events_dir);
+    let event_texts = read_event_texts(&paths.events_dir, &event_filenames);
     let directive_ref = if decision.requires_directive_ref() {
         resolve_directive_ref(args, intent_text.as_deref())
     } else {
         None
     };
-    let plan_ref = if decision.requires_plan_ref() {
-        resolve_plan_ref(args, plan_text.as_deref())
+    let mut plan_ref = if decision.requires_plan_ref() {
+        resolve_plan_ref(args, plan_text.as_deref(), &event_texts)
     } else {
         None
     };
@@ -737,6 +900,8 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     let mut blocked_reason: Option<String> = None;
     let mut inner_action: Option<&'static str> = None;
     let mut effective_execute = false;
+    let mut board_task_materialization: Option<BoardTaskMaterialization> = None;
+    let mut plan_materialization: Option<PlanMaterialization> = None;
 
     if !request_exists {
         outcome = RespondOutcome::Blocked;
@@ -753,10 +918,29 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
         );
     }
 
+    if outcome != RespondOutcome::Blocked
+        && matches!(decision, RespondDecision::ApprovePlan)
+        && plan_ref.is_none()
+    {
+        match plan_text.as_deref() {
+            Some(text) => match materialize_request_plan(state, args, &request_id, &paths, text).await {
+                Ok(materialized) => {
+                    plan_ref = Some(materialized.plan_ref.clone());
+                    plan_materialization = Some(materialized);
+                }
+                Err(e) => {
+                    outcome = RespondOutcome::Blocked;
+                    blocked_reason = Some(format!("failed to materialize request-local plan.lisp: {:#}", e));
+                }
+            },
+            None => {}
+        }
+    }
+
     if outcome != RespondOutcome::Blocked && decision.requires_plan_ref() && plan_ref.is_none() {
         outcome = RespondOutcome::Blocked;
         blocked_reason = Some(
-            "plan ref missing; pass approved_plan_id (or plan_id), or wait for plan.lisp to carry a persisted ref".into(),
+            "plan ref missing; pass approved_plan_id (or plan_id), approve request-local plan.lisp first, or wait for a prior approve_plan review event to carry a persisted ref".into(),
         );
     }
 
@@ -774,7 +958,7 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     }
 
-    let allocated_seq = next_event_seq(&list_event_filenames(&paths.events_dir));
+    let allocated_seq = next_event_seq(&event_filenames);
     let event_path = event_path_for_seq(&paths.events_dir, allocated_seq);
     let created_at = now_rfc3339();
 
@@ -803,26 +987,65 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
                     inner_is_error = true;
                     inner_action = Some("mission_directive::approve");
                 } else {
-                    let plan_args = build_respond_plan_compile_args(args, d, &request_id);
-                    let plan_inner = super::unified_entry::run_pipeline(state, plan_args).await?;
-                    let plan_is_error = plan_inner.is_error.unwrap_or(false);
-                    let projection = run_projection(&plan_inner, Some(&paths), overwrite, true);
-                    let projection_json = projection_to_json(&projection);
-                    let projection_failed = projection.status != ProjectionStatus::Written;
+                    match ensure_request_board_task(state, args, &request_id, &paths).await {
+                        Ok(anchor) => {
+                            let mut plan_args =
+                                build_respond_plan_compile_args(args, d, &request_id);
+                            if let Some(obj) = plan_args.as_object_mut() {
+                                obj.insert(
+                                    "board_task_id".into(),
+                                    json!(anchor.board_task_id.clone()),
+                                );
+                            }
+                            if let Some(obj) = combined.as_object_mut() {
+                                obj.insert(
+                                    "plan_anchor".into(),
+                                    board_task_materialization_to_json(&anchor),
+                                );
+                            }
+                            board_task_materialization = Some(anchor);
 
-                    if let Some(obj) = combined.as_object_mut() {
-                        obj.insert("plan_compile".into(), tool_result_payload(&plan_inner));
-                        obj.insert("projection".into(), projection_json.clone());
+                            let plan_inner =
+                                super::unified_entry::run_pipeline(state, plan_args).await?;
+                            let plan_is_error = plan_inner.is_error.unwrap_or(false);
+                            let projection =
+                                run_projection(&plan_inner, Some(&paths), overwrite, true);
+                            let projection_json = projection_to_json(&projection);
+                            let projection_failed = projection.status != ProjectionStatus::Written;
+
+                            if let Some(obj) = combined.as_object_mut() {
+                                obj.insert("plan_compile".into(), tool_result_payload(&plan_inner));
+                                obj.insert("projection".into(), projection_json.clone());
+                            }
+                            projection_payload = Some(projection_json);
+                            inner_is_error = plan_is_error || projection_failed;
+                            if projection_failed && blocked_reason.is_none() {
+                                blocked_reason = Some(format!(
+                                    "plan.lisp projection did not complete (status={})",
+                                    projection.status.wire()
+                                ));
+                            }
+                            inner_action =
+                                Some("mission_directive::approve+unified_entry::plan_compile");
+                        }
+                        Err(e) => {
+                            inner_is_error = true;
+                            blocked_reason = Some(format!(
+                                "failed to prepare request-local BoardTask anchor: {:#}",
+                                e
+                            ));
+                            if let Some(obj) = combined.as_object_mut() {
+                                obj.insert(
+                                    "plan_anchor".into(),
+                                    json!({
+                                        "status": "error",
+                                        "reason": format!("{:#}", e),
+                                    }),
+                                );
+                            }
+                            inner_action = Some("mission_directive::approve+board_task_anchor");
+                        }
                     }
-                    projection_payload = Some(projection_json);
-                    inner_is_error = plan_is_error || projection_failed;
-                    if projection_failed && blocked_reason.is_none() {
-                        blocked_reason = Some(format!(
-                            "plan.lisp projection did not complete (status={})",
-                            projection.status.wire()
-                        ));
-                    }
-                    inner_action = Some("mission_directive::approve+unified_entry::plan_compile");
                 }
                 inner_payload = Some(combined);
             }
@@ -936,6 +1159,17 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     if let Some(p) = plan_ref.as_ref() {
         respond_result.insert("plan_id".into(), json!(p.id));
     }
+    if let Some(b) = board_task_materialization.as_ref() {
+        respond_result.insert("board_task_materialized".into(), json!(b.board_task_created));
+        respond_result.insert(
+            "board_task_materialization".into(),
+            board_task_materialization_to_json(b),
+        );
+    }
+    if let Some(m) = plan_materialization.as_ref() {
+        respond_result.insert("plan_materialized".into(), json!(true));
+        respond_result.insert("plan_materialization".into(), plan_materialization_to_json(m));
+    }
     if let Some(inner) = inner_action {
         respond_result.insert("inner_action".into(), json!(inner));
     }
@@ -974,6 +1208,19 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     if let Some(projection) = projection_payload {
         if let Some(obj) = response.as_object_mut() {
             obj.insert("projection".into(), projection);
+        }
+    }
+    if let Some(m) = plan_materialization.as_ref() {
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert("plan_materialization".into(), plan_materialization_to_json(m));
+        }
+    }
+    if let Some(b) = board_task_materialization.as_ref() {
+        if let Some(obj) = response.as_object_mut() {
+            obj.insert(
+                "board_task_materialization".into(),
+                board_task_materialization_to_json(b),
+            );
         }
     }
 
@@ -2630,17 +2877,44 @@ mod tests {
         // Explicit arg wins.
         let args = json!({ "approved_plan_id": "explicit-plan" });
         let resolved =
-            resolve_plan_ref(&args, Some("(plan :plan_id \"artifact-plan\")"))
+            resolve_plan_ref(&args, Some("(plan :plan_id \"artifact-plan\")"), &[])
                 .expect("plan ref");
         assert_eq!(resolved.id, "explicit-plan");
         // Falls back to artifact when args missing.
         let resolved =
-            resolve_plan_ref(&json!({}), Some("(plan :plan_id \"artifact-plan\")"))
+            resolve_plan_ref(&json!({}), Some("(plan :plan_id \"artifact-plan\")"), &[])
                 .expect("plan ref");
         assert_eq!(resolved.id, "artifact-plan");
         // Blocked when both missing.
-        assert!(resolve_plan_ref(&json!({}), Some("(plan :goal :ship)")).is_none());
-        assert!(resolve_plan_ref(&json!({}), None).is_none());
+        assert!(resolve_plan_ref(&json!({}), Some("(plan :goal :ship)"), &[]).is_none());
+        assert!(resolve_plan_ref(&json!({}), None, &[]).is_none());
+    }
+
+    #[test]
+    fn resolve_plan_ref_falls_back_to_latest_review_event() {
+        let events = vec![
+            "(event :plan_id \"old-plan\")".to_string(),
+            "(event :decision :approve_plan :plan_id \"new-plan\")".to_string(),
+        ];
+        let resolved = resolve_plan_ref(&json!({}), Some("(plan :goal :ship)"), &events)
+            .expect("event ref");
+        assert_eq!(resolved.id, "new-plan");
+    }
+
+    #[test]
+    fn plan_materialization_json_exposes_ref_and_anchor() {
+        let m = PlanMaterialization {
+            plan_ref: PlanRef { id: "p1".into() },
+            board_task_id: "b1".into(),
+            version: 2,
+            sexp_hash: "abc".into(),
+            board_task_created: true,
+        };
+        let v = plan_materialization_to_json(&m);
+        assert_eq!(v["plan_id"], "p1");
+        assert_eq!(v["board_task_id"], "b1");
+        assert_eq!(v["version"], 2);
+        assert_eq!(v["board_task_created"], true);
     }
 
     #[test]
