@@ -4,7 +4,7 @@
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave36
   :created-at "2026-04-28T22:56:00+08:00"
-  :sequence 2
+  :sequence 3
 
   (lifecycle-event
     :id wave36-lifecycle-bootstrap-start-001
@@ -29,4 +29,15 @@
     :at "2026-04-28T14:55:47Z"
     :touched [".missiond/claudecode/wave36-shared-preamble.md"]
     :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads."
-    :legacy_trace_id wave36-trace-bootstrap-read-001))
+    :legacy_trace_id wave36-trace-bootstrap-read-001)
+
+  (lifecycle-event
+    :id wave36-01-mission-request-review-response-v0-dispatch-003
+    :task wave36-01-mission-request-review-response-v0
+    :actor_role orchestrator
+    :event_kind dispatch
+    :commit_role none
+    :seq 3
+    :at "2026-04-28T14:56:40Z"
+    :touched [".missiond/claudecode/wave36-01-mission-request-review-response-v0.md" ".missiond/tasks/wave36/manifest.lisp"]
+    :summary "Dispatch wave36-01-mission-request-review-response-v0: hard dependencies satisfied."))
