@@ -175,8 +175,21 @@ function reportFromForms(forms, file) {
   const taskId = keywordPropText(props, ':task_id');
   const status = keywordPropText(props, ':status');
   const commitHash = keywordPropText(props, ':commit_hash');
+  const agentCommitHash = keywordPropText(props, ':agent_commit_hash');
+  const finalCommitHash = keywordPropText(props, ':final_commit_hash');
+  const verifiedCommitHash = keywordPropText(props, ':verified_commit_hash');
   const filesChanged = nodeToStringArray(props[':files_changed']?.value);
-  return { id, file, taskId, status, commitHash, filesChanged };
+  return {
+    id,
+    file,
+    taskId,
+    status,
+    commitHash,
+    agentCommitHash,
+    finalCommitHash,
+    verifiedCommitHash,
+    filesChanged,
+  };
 }
 
 // --- Shared-memory loading ------------------------------------------------

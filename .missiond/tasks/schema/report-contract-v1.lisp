@@ -11,7 +11,7 @@
 
 (report-contract-schema missiond.report-contract.v1
   :version "v1"
-  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp); wave25-02 added optional router-recommendation fields (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) — flat surface, mirrors the wave24-04 daemon dry-run block, additive-only, recommendation is NEVER authoritative; wave26-04 added optional router-readiness fields (:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path) — flat surface, mirrors the wave26-02/03 backend readiness annotations, additive-only, runtime_allowed/apply_eligible MUST be literal atom booleans; wave27-04 added optional router-dispatch-descriptor fields (:router_dispatch_descriptor_path :router_dispatch_descriptor_status :router_dispatch_backend :router_dispatch_eligible :router_dispatch_no_execution :router_dispatch_blockers) — flat surface, mirrors the wave27-01 missiond.router-dispatch-descriptor.v1 head plus the wave27-02 builder output, additive-only, eligible MUST be literal atom true|false, no_execution MUST be literal atom true (false AND strings rejected — cross-wave invariant)"
+  :status "code-aligned — checker scripts/check-task-report.mjs; full-run verifier scripts/verify-task-run.mjs; wave23-02 added optional worker-explanation fields (:time_sinks :major_decisions :unexpected_work :blockers :trace_refs) — prose only, structural validation, never SSOT for facts (facts live in session-trace.lisp); wave25-02 added optional router-recommendation fields (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) — flat surface, mirrors the wave24-04 daemon dry-run block, additive-only, recommendation is NEVER authoritative; wave26-04 added optional router-readiness fields (:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path) — flat surface, mirrors the wave26-02/03 backend readiness annotations, additive-only, runtime_allowed/apply_eligible MUST be literal atom booleans; wave27-04 added optional router-dispatch-descriptor fields (:router_dispatch_descriptor_path :router_dispatch_descriptor_status :router_dispatch_backend :router_dispatch_eligible :router_dispatch_no_execution :router_dispatch_blockers) — flat surface, mirrors the wave27-01 missiond.router-dispatch-descriptor.v1 head plus the wave27-02 builder output, additive-only, eligible MUST be literal atom true|false, no_execution MUST be literal atom true (false AND strings rejected — cross-wave invariant); wave29 prep adds optional commit-lineage fields (:agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches) so parent hotfixes can be recorded without amending worker commits; final/verified hashes must equal :commit_hash when present"
   :checker "scripts/check-task-report.mjs"
   :run-verifier "scripts/verify-task-run.mjs"
 
@@ -57,9 +57,14 @@
      ;;   :router_dispatch_no_execution  — literal atom true ONLY (false AND
      ;;                                    strings rejected — the descriptor
      ;;                                    layer is locked no-execution).
-     :router_dispatch_descriptor_path :router_dispatch_descriptor_status
-     :router_dispatch_backend :router_dispatch_eligible
-     :router_dispatch_no_execution :router_dispatch_blockers])
+    :router_dispatch_descriptor_path :router_dispatch_descriptor_status
+    :router_dispatch_backend :router_dispatch_eligible
+    :router_dispatch_no_execution :router_dispatch_blockers
+    ;; wave29 prep: parent-hotfix / commit-lineage fields. :commit_hash stays
+    ;; the final effective commit so legacy readers still verify the final
+    ;; tree; these optional fields preserve the worker commit and hotfix trace.
+    :agent_commit_hash :final_commit_hash :verified_commit_hash
+    :parent_patches])
 
   (field-contract
     (:schema "must equal missiond.report-contract.v1")
@@ -150,7 +155,15 @@
       "Cross-wave invariant: MUST be the literal atom true when present (the literal atom false AND any string form are rejected). Mirrors the wave27-01 :no_execution invariant — recording a descriptor never asserts a runtime backend swap happened, only that the handoff fact was captured.")
     (:router_dispatch_blockers
       "Optional. wave27-04 router-dispatch-descriptor surface."
-      "Vector of non-empty strings; each entry names a concrete reason the descriptor's dispatch handoff is blocked / advisory only. Mirrors the wave27-01 :blockers vector and the wave27-02 builder splice for absent / invalid / registry_missing / non-eligible outcomes."))
+      "Vector of non-empty strings; each entry names a concrete reason the descriptor's dispatch handoff is blocked / advisory only. Mirrors the wave27-01 :blockers vector and the wave27-02 builder splice for absent / invalid / registry_missing / non-eligible outcomes.")
+    (:agent_commit_hash
+      "Optional. Git SHA string for the worker's original commit when a parent/orchestrator hotfix creates a later final commit.")
+    (:final_commit_hash
+      "Optional. Git SHA string for the final effective commit. When present it MUST equal :commit_hash so legacy readers still see the final commit.")
+    (:verified_commit_hash
+      "Optional. Git SHA string for the commit whose acceptance/scope verification was rerun. When present it MUST equal :commit_hash.")
+    (:parent_patches
+      "Optional. Vector of property lists, each (:commit <sha> :kind <string/atom> :reason <string> :files [repo-relative paths...]). Used for parent hotfixes such as lint/import/format cleanup; checker requires non-empty files and repo-relative paths."))
 
   (status-contract
     :allowed [draft in-progress done blocked rejected]
@@ -191,6 +204,9 @@
        ":router_dispatch_eligible not the literal atom true or false (cross-wave invariant — strings are rejected)"
        ":router_dispatch_no_execution not the literal atom true (cross-wave invariant — false AND strings are rejected)"
        ":router_dispatch_blockers not a vector of non-empty strings"
-       "absolute or ~/.. paths inside :router_dispatch_descriptor_path"]
+       "absolute or ~/.. paths inside :router_dispatch_descriptor_path"
+       ":agent_commit_hash / :final_commit_hash / :verified_commit_hash malformed"
+       ":final_commit_hash or :verified_commit_hash present but not equal to :commit_hash"
+       ":parent_patches entry missing :commit / :kind / :reason / non-empty :files"]
     :non-goal
       "checker does NOT execute the acceptance commands; it only validates structure. Worker-explanation fields are prose-only — they are validated structurally but their content is never treated as ground truth. Router-recommendation, router-readiness, and router-dispatch-descriptor fields are observational — the recorded recommendation / readiness / descriptor signals are NEVER promoted to authoritative dispatch by the checker."))

@@ -172,6 +172,7 @@ function validateTask(file, task, diagnostics) {
   }
 
   validateDispatchMetadata(file, task, props, diagnostics);
+  validateNavigationMetadata(file, task, props, diagnostics);
 
   validateCommit(file, task, props[':commit']?.value, diagnostics);
 }
@@ -197,6 +198,28 @@ function validateDispatchMetadata(file, task, props, diagnostics) {
     if (value != null && !/^[1-9][0-9]*$/.test(value)) {
       addError(diagnostics, file, props[key].value.loc, `${key} must be a positive integer atom`);
     }
+  }
+}
+
+function validateNavigationMetadata(file, task, props, diagnostics) {
+  for (const key of [':context-atlas-path', ':pattern-card-path']) {
+    validateRepoRelativePathField(file, task, props[key]?.value, key, diagnostics);
+  }
+}
+
+function validateRepoRelativePathField(file, task, node, fieldName, diagnostics) {
+  if (node == null) return;
+  const text = nodeText(node);
+  if (text == null || text.trim() === '') {
+    addError(diagnostics, file, node.loc ?? task.loc, `${fieldName} must be a non-empty repo-relative path string`);
+    return;
+  }
+  if (path.isAbsolute(text) || text.startsWith('~')) {
+    addError(diagnostics, file, node.loc ?? task.loc, `${fieldName} must be repo-relative, got "${text}"`);
+    return;
+  }
+  if (text.split(/[\\/]/).some((segment) => segment === '..')) {
+    addError(diagnostics, file, node.loc ?? task.loc, `${fieldName} must not contain ".." traversal, got "${text}"`);
   }
 }
 
@@ -297,6 +320,23 @@ function runFixtures() {
       ok: true,
     },
     {
+      name: 'valid navigation metadata',
+      source: `(task wave29-01
+        :schema "missiond.task-contract.v1"
+        :title "Navigation metadata"
+        :kind code-alignment
+        :status ready
+        :owner "claudecode"
+        :context-atlas-path ".missiond/context/plan-rs.atlas.lisp"
+        :pattern-card-path ".missiond/patterns/schema-checker.pattern.lisp"
+        :goal "metadata"
+        :write-scope ["scripts/x.mjs"]
+        :must-not-touch []
+        :acceptance ["git diff --check"]
+        :commit (:required true :message "test: metadata" :scope-check write-scope-only))`,
+      ok: true,
+    },
+    {
       name: 'invalid verification tier',
       source: `(task wave28-02
         :schema "missiond.task-contract.v1"
@@ -321,6 +361,22 @@ function runFixtures() {
         :status ready
         :owner "claudecode"
         :heartbeat-minutes 0
+        :goal "bad"
+        :write-scope ["scripts/x.mjs"]
+        :must-not-touch []
+        :acceptance ["git diff --check"]
+        :commit (:required true :message "test: bad" :scope-check write-scope-only))`,
+      ok: false,
+    },
+    {
+      name: 'invalid context atlas path traversal',
+      source: `(task wave29-02
+        :schema "missiond.task-contract.v1"
+        :title "Bad navigation"
+        :kind code-alignment
+        :status ready
+        :owner "claudecode"
+        :context-atlas-path "../outside.atlas.lisp"
         :goal "bad"
         :write-scope ["scripts/x.mjs"]
         :must-not-touch []

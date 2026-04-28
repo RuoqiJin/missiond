@@ -145,6 +145,8 @@ export function loadSingleTask(file) {
     sessionTraceWritable: keywordPropBool(props, ':session-trace-writable') === true,
     routerPolicyPath: keywordPropText(props, ':router-policy-path') ?? null,
     routerBackendRegistryPath: keywordPropText(props, ':router-backend-registry-path') ?? null,
+    contextAtlasPath: keywordPropText(props, ':context-atlas-path') ?? null,
+    patternCardPath: keywordPropText(props, ':pattern-card-path') ?? null,
     verificationTier: keywordPropText(props, ':verification-tier') ?? null,
     dispatchGroup: keywordPropText(props, ':dispatch-group') ?? null,
     estimatedMinutes: keywordPropText(props, ':estimated-minutes') ?? null,
@@ -270,6 +272,8 @@ export function renderTask(task, sourcePath, options = {}) {
     lines.push(`- session_trace: \`${sessionTracePath}\``);
     lines.push(`- session_trace_writable: \`${task.sessionTraceWritable ? 'true' : 'false'}\``);
   }
+  if (task.contextAtlasPath) lines.push(`- context_atlas: \`${task.contextAtlasPath}\``);
+  if (task.patternCardPath) lines.push(`- pattern_card: \`${task.patternCardPath}\``);
   lines.push('');
   if (task.dispatchStrategy === 'agent-team') {
     lines.push('## Dispatch Note');
@@ -277,6 +281,7 @@ export function renderTask(task, sourcePath, options = {}) {
     lines.push('使用 agent-team提高效率');
     lines.push('');
   }
+  renderNavigationContext(lines, task);
   lines.push('## Goal');
   lines.push('');
   lines.push(task.goal || '(no goal supplied)');
@@ -354,7 +359,10 @@ function renderThinTask(task, sourcePath, options = {}) {
   if (sessionTracePath) lines.push(`- session_trace: \`${sessionTracePath}\` (${task.sessionTraceWritable ? 'writable' : 'read-only'})`);
   if (routerPolicyPath) lines.push(`- router_policy: \`${routerPolicyPath}\` (advisory / dry-run only)`);
   if (routerBackendRegistryPath) lines.push(`- router_backend_registry: \`${routerBackendRegistryPath}\` (MUST NOT switch backend)`);
+  if (task.contextAtlasPath) lines.push(`- context_atlas: \`${task.contextAtlasPath}\``);
+  if (task.patternCardPath) lines.push(`- pattern_card: \`${task.patternCardPath}\``);
   lines.push('');
+  renderNavigationContext(lines, task);
   lines.push('## Goal');
   lines.push('');
   lines.push(task.goal || '(no goal supplied)');
@@ -371,6 +379,9 @@ function renderThinTask(task, sourcePath, options = {}) {
     lines.push('Use the repository shared-memory, report, session-trace, hook, commit, and verifier protocol for this wave.');
   }
   lines.push('- Task-specific scope and acceptance above override generic guidance.');
+  if (task.contextAtlasPath || task.patternCardPath) {
+    lines.push('- Load the context atlas / pattern card before broad repository search; use their anchors to reduce navigation misses.');
+  }
   lines.push('- Append coordination facts to shared memory when present; write the report contract when the task completes.');
   if (task.heartbeatMinutes) {
     lines.push(`- If work is still active after ${task.heartbeatMinutes} minutes without a completion, append a heartbeat/observation entry or report a blocker.`);
@@ -401,6 +412,20 @@ function renderThinTask(task, sourcePath, options = {}) {
   return `${lines.join('\n')}\n`;
 }
 
+function renderNavigationContext(lines, task) {
+  if (!task.contextAtlasPath && !task.patternCardPath) return;
+  lines.push('## Context Navigation');
+  lines.push('');
+  if (task.contextAtlasPath) {
+    lines.push(`- Read context atlas first: \`${task.contextAtlasPath}\`.`);
+  }
+  if (task.patternCardPath) {
+    lines.push(`- Follow implementation pattern card: \`${task.patternCardPath}\`.`);
+  }
+  lines.push('- Use atlas grep anchors and pattern-card conventions before falling back to broad scans.');
+  lines.push('');
+}
+
 export function renderSharedPreamble() {
   const lines = [];
   lines.push('# MissionD ClaudeCode Shared Preamble');
@@ -429,6 +454,7 @@ export function renderSharedPreamble() {
   lines.push('## Session Trace');
   lines.push('');
   lines.push('- Treat `session-trace.lisp` as factual telemetry, not prose notes.');
+  lines.push('- When this task is trace-writable, append a read/observation event after loading the shared preamble so preamble usage is auditable.');
   lines.push('- Write trace entries only when the task contract says `:session-trace-writable true`; otherwise read it only.');
   lines.push('');
   lines.push('## Router Context');
@@ -1007,7 +1033,7 @@ function runFixtures() {
     run: () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave28-thin-render-'));
       const tmpTask = path.join(tmpDir, 'wave28-01-thin-render-fixture.lisp');
-      const lisp = `(task wave28-01-thin-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Thin render fixture"\n  :kind code-alignment\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "fresh-code-alignment"\n  :verification-tier smoke\n  :dispatch-group "A"\n  :estimated-minutes 25\n  :heartbeat-minutes 10\n  :goal "Render a thin brief"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements ["Use thin mode"]\n  :acceptance ["true"]\n  :commit (:required true :message "test: thin render" :scope-check write-scope-only)\n  :report ["Commit hash."])\n`;
+      const lisp = `(task wave28-01-thin-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Thin render fixture"\n  :kind code-alignment\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "fresh-code-alignment"\n  :verification-tier smoke\n  :dispatch-group "A"\n  :estimated-minutes 25\n  :heartbeat-minutes 10\n  :context-atlas-path ".missiond/context/plan-rs.atlas.lisp"\n  :pattern-card-path ".missiond/patterns/schema-checker.pattern.lisp"\n  :goal "Render a thin brief"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements ["Use thin mode"]\n  :acceptance ["true"]\n  :commit (:required true :message "test: thin render" :scope-check write-scope-only)\n  :report ["Commit hash."])\n`;
       try {
         fs.writeFileSync(tmpTask, lisp, 'utf8');
         const task = loadSingleTask(tmpTask);
@@ -1020,6 +1046,9 @@ function runFixtures() {
           '.missiond/claudecode/wave28-shared-preamble.md',
           'verification_tier',
           'heartbeat_minutes',
+          'context_atlas',
+          'pattern_card',
+          '## Context Navigation',
           'node scripts/task-scope-guard.mjs',
           'node scripts/verify-task-contract.mjs',
         ];
@@ -1035,7 +1064,7 @@ function runFixtures() {
           }
         }
         const preamble = renderSharedPreamble();
-        for (const literal of ['# MissionD ClaudeCode Shared Preamble', '## Shared Memory', '## Report Contract', '## Commit Protocol']) {
+        for (const literal of ['# MissionD ClaudeCode Shared Preamble', '## Shared Memory', '## Report Contract', '## Commit Protocol', 'shared preamble so preamble usage is auditable']) {
           if (!preamble.includes(literal)) {
             throw new Error(`wave28 preamble invariant: missing '${literal}'`);
           }

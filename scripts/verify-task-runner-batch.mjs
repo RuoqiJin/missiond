@@ -309,13 +309,23 @@ export function verifyNode(node, manifest, loaders) {
   // not fail — the report side is authoritative; the memory hash is
   // advisory.
   const memoryHash = extractCommitHashFromText(completion.summary);
-  if (memoryHash && report.commitHash && !commitHashesAgreeLocal(memoryHash, report.commitHash)) {
+  const reportLineageHashes = [
+    report.commitHash,
+    report.agentCommitHash,
+    report.finalCommitHash,
+    report.verifiedCommitHash,
+  ].filter(Boolean);
+  if (
+    memoryHash &&
+    reportLineageHashes.length > 0 &&
+    !reportLineageHashes.some((hash) => commitHashesAgreeLocal(memoryHash, hash))
+  ) {
     return {
       task_id: taskId,
       status: 'failed_contract_verification',
       reason:
-        `commit hash mismatch — report :commit_hash ${JSON.stringify(report.commitHash)} ` +
-        `does not agree with shared-memory completion summary hash ${JSON.stringify(memoryHash)}`,
+        `commit hash mismatch — report lineage hashes ${JSON.stringify(reportLineageHashes)} ` +
+        `do not agree with shared-memory completion summary hash ${JSON.stringify(memoryHash)}`,
       paths,
       commit_hash: report.commitHash,
       memory_commit_hash: memoryHash,
@@ -326,15 +336,16 @@ export function verifyNode(node, manifest, loaders) {
   // available). In dry-fixture mode readCommitAt returns a synthetic
   // commitInfo so the same code path runs without git.
   let commitInfo;
+  const verificationHash = report.verifiedCommitHash ?? report.finalCommitHash ?? report.commitHash;
   try {
-    commitInfo = loaders.readCommitAt(report.commitHash);
+    commitInfo = loaders.readCommitAt(verificationHash);
   } catch (err) {
     return {
       task_id: taskId,
       status: 'failed_contract_verification',
-      reason: `failed to read git commit ${report.commitHash}: ${err?.message ?? err}`,
+      reason: `failed to read git commit ${verificationHash}: ${err?.message ?? err}`,
       paths,
-      commit_hash: report.commitHash,
+      commit_hash: verificationHash,
     };
   }
 

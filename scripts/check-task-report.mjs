@@ -458,6 +458,71 @@ function validateReport(file, report, diagnostics) {
     props[':router_dispatch_blockers']?.value,
     diagnostics,
   );
+
+  // wave29-prep: optional commit-lineage fields. These keep parent hotfixes
+  // auditable without amending the worker's original commit. :commit_hash
+  // remains the final report hash; :agent_commit_hash preserves the worker's
+  // first commit; :final_commit_hash / :verified_commit_hash must agree with
+  // :commit_hash when present.
+  validateCommitLineage(file, report, props, commitHash, diagnostics);
+}
+
+function validateCommitLineage(file, report, props, commitHash, diagnostics) {
+  const agentHash = keywordPropText(props, ':agent_commit_hash');
+  const finalHash = keywordPropText(props, ':final_commit_hash');
+  const verifiedHash = keywordPropText(props, ':verified_commit_hash');
+
+  for (const [field, value] of [
+    [':agent_commit_hash', agentHash],
+    [':final_commit_hash', finalHash],
+    [':verified_commit_hash', verifiedHash],
+  ]) {
+    if (props[field] && (!value || !/^[0-9a-f]{7,40}$/i.test(value))) {
+      addError(diagnostics, file, props[field].value.loc, `${field} must be a git SHA string when present`);
+    }
+  }
+
+  if (finalHash && commitHash && finalHash !== commitHash) {
+    addError(diagnostics, file, props[':final_commit_hash'].value.loc, ':final_commit_hash must equal :commit_hash when present');
+  }
+  if (verifiedHash && commitHash && verifiedHash !== commitHash) {
+    addError(diagnostics, file, props[':verified_commit_hash'].value.loc, ':verified_commit_hash must equal :commit_hash when present');
+  }
+
+  const patches = props[':parent_patches']?.value;
+  if (patches == null) return;
+  if (!isList(patches)) {
+    addError(diagnostics, file, patches.loc ?? report.loc, ':parent_patches must be a vector/list when present');
+    return;
+  }
+  for (const patch of patches.children) {
+    if (!isList(patch)) {
+      addError(diagnostics, file, patch.loc ?? patches.loc, ':parent_patches entries must be property lists');
+      continue;
+    }
+    const patchProps = readKeywordProps(patch, { start: 0 });
+    const patchCommit = keywordPropText(patchProps, ':commit');
+    const patchKind = keywordPropText(patchProps, ':kind');
+    const patchReason = keywordPropText(patchProps, ':reason');
+    const patchFiles = nodeToStringArray(patchProps[':files']?.value);
+    if (!patchCommit || !/^[0-9a-f]{7,40}$/i.test(patchCommit)) {
+      addError(diagnostics, file, patchProps[':commit']?.value?.loc ?? patch.loc, ':parent_patches entry requires :commit git SHA string');
+    }
+    if (!patchKind || patchKind.trim() === '') {
+      addError(diagnostics, file, patchProps[':kind']?.value?.loc ?? patch.loc, ':parent_patches entry requires non-empty :kind');
+    }
+    if (!patchReason || patchReason.trim() === '') {
+      addError(diagnostics, file, patchProps[':reason']?.value?.loc ?? patch.loc, ':parent_patches entry requires non-empty :reason');
+    }
+    if (!patchProps[':files']?.value || !isList(patchProps[':files'].value) || patchFiles.length === 0) {
+      addError(diagnostics, file, patchProps[':files']?.value?.loc ?? patch.loc, ':parent_patches entry requires non-empty :files vector');
+    }
+    for (const p of patchFiles) {
+      if (path.isAbsolute(p) || p.startsWith('~') || p.split(/[\\/]/).some((segment) => segment === '..')) {
+        addError(diagnostics, file, patchProps[':files']?.value?.loc ?? patch.loc, `:parent_patches :files paths must be repo-relative, got "${p}"`);
+      }
+    }
+  }
 }
 
 // wave26-04 helper: STRICT literal-atom validator that accepts either
@@ -1542,6 +1607,55 @@ function runFixtures() {
            "router_confidence below high"
            "registry readiness=current-default does NOT satisfy the wave26-03 6-condition gate"])`,
       ok: true,
+    },
+    {
+      name: 'wave29-prep valid commit lineage with parent hotfix',
+      source: `(report wave29-prep-commit-lineage-ok
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-prep-commit-lineage-ok"
+        :status done
+        :commit_hash "302330a"
+        :agent_commit_hash "954116e"
+        :final_commit_hash "302330a"
+        :verified_commit_hash "302330a"
+        :parent_patches
+          [(:commit "302330a"
+            :kind lint-cleanup
+            :reason "TS6133 unused parameter cleanup"
+            :files ["scripts/plan-task-runner.mjs"])]
+        :files_changed ["scripts/plan-task-runner.mjs"]
+        :acceptance_results
+          [(:command "node scripts/plan-task-runner.mjs --dry-fixture" :exit_code 0 :ok true)])`,
+      ok: true,
+    },
+    {
+      name: 'wave29-prep final commit hash must match commit_hash',
+      source: `(report wave29-prep-commit-lineage-mismatch
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-prep-commit-lineage-mismatch"
+        :status done
+        :commit_hash "302330a"
+        :final_commit_hash "954116e"
+        :files_changed ["scripts/plan-task-runner.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:final_commit_hash must equal :commit_hash/,
+    },
+    {
+      name: 'wave29-prep parent patch requires files',
+      source: `(report wave29-prep-parent-patch-files
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-prep-parent-patch-files"
+        :status done
+        :commit_hash "302330a"
+        :parent_patches
+          [(:commit "302330a" :kind lint-cleanup :reason "cleanup" :files [])]
+        :files_changed ["scripts/plan-task-runner.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:parent_patches entry requires non-empty :files vector/,
     },
   ];
 
