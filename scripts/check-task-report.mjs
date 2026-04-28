@@ -1510,6 +1510,39 @@ function runFixtures() {
       ok: false,
       expects: /:router_dispatch_descriptor_path must be repo-relative/,
     },
+    // wave27-06 cross-layer smoke: pin a positive report carrying ALL 6
+    // wave27-04 dispatch-descriptor fields populated cleanly. Mirrors the
+    // shape a wave27-06+ task report would carry when an upstream task
+    // ran the wave27-02 build CLI to produce a descriptor and the worker
+    // copied the resolved path + status + projection into the report.
+    // The cross-wave invariant we re-pin: :router_dispatch_no_execution
+    // is the literal atom `true` (never the string "true"); rejection
+    // of those mutations is already covered by the wave27-04 negatives
+    // above. This positive fixture keeps the happy-path discoverable
+    // under a wave27-06 grep.
+    {
+      name: 'wave27-06-report-full-6-field-descriptor-block-accepted',
+      source: `(report wave27-06-smoke-report-full-descriptor
+        :schema "missiond.report-contract.v1"
+        :task_id "wave27-06-smoke-report-full-descriptor"
+        :status done
+        :commit_hash "abc1234"
+        :files_changed ["scripts/x.mjs"
+                        "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
+        :acceptance_results
+          [(:command "node scripts/check-router-dispatch-descriptor.mjs --dry-fixture" :exit_code 0 :ok true)
+           (:command "node scripts/build-router-dispatch-descriptor.mjs --dry-fixture" :exit_code 0 :ok true)]
+        :router_dispatch_descriptor_path "tmp/wave27-06-dispatch-descriptor.lisp"
+        :router_dispatch_descriptor_status "built"
+        :router_dispatch_backend "claudecode"
+        :router_dispatch_eligible false
+        :router_dispatch_no_execution true
+        :router_dispatch_blockers
+          ["claudecode is the live runtime today; explicit runtime-ready opt-in required upstream"
+           "router_confidence below high"
+           "registry readiness=current-default does NOT satisfy the wave26-03 6-condition gate"])`,
+      ok: true,
+    },
   ];
 
   let failed = 0;

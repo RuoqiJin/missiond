@@ -914,6 +914,115 @@ async function runFixtures(json = false) {
         mustEqual('lock.no_execution', d.no_execution, true);
       },
     },
+    // wave27-06 cross-layer smoke fixtures: prove the seed registry path
+    // (claudecode current-default) yields router_apply_eligible=false while
+    // a synthetic runtime-ready registry yields router_apply_eligible=true,
+    // and BOTH paths still emit no_execution=true / runtime_replacement=false
+    // / dry_run_only=true (cross-wave invariant 5: eligibility flipping does
+    // NOT promote the descriptor to a runtime apply signal).
+    {
+      name: 'wave27-06-build-seed-yields-eligible-false-no-execution-true',
+      category: 'wave27-06-cross-wave-invariant',
+      run: () => {
+        const task = parseTaskFromString(taskDocs());
+        const policy = parsePolicyFromString(seedPolicy());
+        const registry = parseRegistryFromString(seedRegistry());
+        const recommendation = recommend({
+          task,
+          policy,
+          traceIndex: null,
+          taskPath: '<fx>/task.lisp',
+          policyPath: '<fx>/policy.lisp',
+        });
+        const d = buildDescriptor({
+          task,
+          policy,
+          recommendation,
+          registry,
+          registryError: null,
+          registryPath: '/abs/.missiond/router/router-backend-registry-v1.lisp',
+          policyPath: '/abs/.missiond/router/router-policy-v1.lisp',
+          traceIndexPath: null,
+          cwd: '/abs',
+        });
+        // Seed registry: claudecode is current-default. The wave26-03 gate
+        // requires runtime-ready (current-default alone is NEVER sufficient),
+        // so apply_eligible MUST be false.
+        mustEqual('w27-06-seed.recommended_backend', d.recommended_backend, 'claudecode');
+        mustEqual('w27-06-seed.readiness', d.backend_readiness_status, 'current-default');
+        mustEqual('w27-06-seed.eligible', d.router_apply_eligible, false);
+        if (d.router_apply_blockers.length === 0) {
+          throw new Error('wave27-06: seed registry MUST emit at least one blocker');
+        }
+        // Cross-wave invariants (1, 2, 3) — locked literals MUST hold.
+        mustEqual('w27-06-seed.dry_run_only', d.dry_run_only, true);
+        mustEqual('w27-06-seed.runtime_replacement', d.runtime_replacement, false);
+        mustEqual('w27-06-seed.no_execution', d.no_execution, true);
+        // Schema-level validation — fresh descriptor MUST round-trip.
+        const errs = validateDescriptorObject(d);
+        if (errs.length !== 0) {
+          throw new Error(
+            `wave27-06: seed-registry descriptor failed schema: ${errs.join('; ')}`,
+          );
+        }
+      },
+    },
+    {
+      name: 'wave27-06-build-runtime-ready-yields-eligible-true-no-execution-true',
+      category: 'wave27-06-cross-wave-invariant',
+      run: () => {
+        // Synthetic runtime-ready registry — verifier-worker promoted to
+        // runtime-ready + runtime_allowed=true + zero blockers. Combined
+        // with a high-confidence trace index this trips the wave26-03
+        // 6-condition gate -> apply_eligible=true. The cross-wave
+        // invariant we pin: dry_run_only / runtime_replacement /
+        // no_execution stay literal even when eligible flips to true.
+        const task = parseTaskFromString(taskCheckerScript());
+        const policy = parsePolicyFromString(policyWithCheckerRule());
+        const registry = parseRegistryFromString(registryWithRuntimeReady());
+        const recommendation = recommend({
+          task,
+          policy,
+          traceIndex: synthesizeTraceIndex({
+            task: task.id,
+            backend: 'verifier-worker',
+            taskEvents: 6,
+            backendEvents: 6,
+          }),
+          taskPath: '<fx>/task.lisp',
+          policyPath: '<fx>/policy.lisp',
+        });
+        const d = buildDescriptor({
+          task,
+          policy,
+          recommendation,
+          registry,
+          registryError: null,
+          registryPath: '/abs/.missiond/router/router-backend-registry-v1.lisp',
+          policyPath: '/abs/.missiond/router/router-policy-v1.lisp',
+          traceIndexPath: null,
+          cwd: '/abs',
+        });
+        mustEqual('w27-06-rr.recommended_backend', d.recommended_backend, 'verifier-worker');
+        mustEqual('w27-06-rr.confidence', d.router_confidence, 'high');
+        mustEqual('w27-06-rr.readiness', d.backend_readiness_status, 'runtime-ready');
+        mustEqual('w27-06-rr.runtime_allowed', d.backend_runtime_allowed, true);
+        mustEqual('w27-06-rr.eligible', d.router_apply_eligible, true);
+        mustEqual('w27-06-rr.blockers.length', d.router_apply_blockers.length, 0);
+        // Cross-wave invariants (1, 2, 3) — STILL locked even when
+        // eligible=true. This is the core wave27-06 promise (invariant 5).
+        mustEqual('w27-06-rr.dry_run_only', d.dry_run_only, true);
+        mustEqual('w27-06-rr.runtime_replacement', d.runtime_replacement, false);
+        mustEqual('w27-06-rr.no_execution', d.no_execution, true);
+        // Schema-level validation.
+        const errs = validateDescriptorObject(d);
+        if (errs.length !== 0) {
+          throw new Error(
+            `wave27-06: runtime-ready descriptor failed schema: ${errs.join('; ')}`,
+          );
+        }
+      },
+    },
     {
       name: 'edge-relative-path-roundtrip',
       category: 'paths',

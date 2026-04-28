@@ -1189,6 +1189,113 @@ function runFixtures(json = false) {
         :source_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
       ok: false,
     },
+    // wave27-06 cross-layer smoke fixtures: pin the wave27 cross-wave
+    // invariants under recognizable names. These overlap with the wave27-01
+    // fixtures by design — the wave27-06 names exist so a future bisect
+    // (or downstream audit) can grep for the wave27-06 literal and confirm
+    // the smoke layer is still asserting the invariant chain end-to-end.
+    {
+      name: 'wave27-06-valid-blocked-seed-descriptor',
+      category: 'wave27-06-cross-wave-invariant',
+      source: `(router-dispatch-descriptor wave27-06-blocked-seed
+        :schema "${SCHEMA}"
+        :task_id "wave99-06-smoke-blocked"
+        :recommended_backend claudecode
+        :router_confidence low
+        :backend_readiness_status current-default
+        :backend_runtime_allowed true
+        :router_apply_eligible false
+        :router_apply_blockers ["claudecode is the live runtime today; explicit runtime-ready opt-in required upstream"
+                                "router_confidence below high"
+                                "registry readiness=current-default does NOT satisfy the wave26-03 6-condition gate"]
+        :dry_run_only true
+        :runtime_replacement false
+        :no_execution true
+        :source_recommendation_schema "missiond.router-recommendation.v0"
+        :source_policy_path ".missiond/router/router-policy-v1.lisp"
+        :source_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
+      ok: true,
+    },
+    {
+      name: 'wave27-06-valid-runtime-ready-eligible-descriptor',
+      category: 'wave27-06-cross-wave-invariant',
+      source: `(router-dispatch-descriptor wave27-06-eligible-rr
+        :schema "${SCHEMA}"
+        :task_id "wave99-06-smoke-eligible"
+        :recommended_backend verifier-worker
+        :router_confidence high
+        :backend_readiness_status runtime-ready
+        :backend_runtime_allowed true
+        :router_apply_eligible true
+        :router_apply_blockers []
+        :dry_run_only true
+        :runtime_replacement false
+        :no_execution true
+        :source_recommendation_schema "missiond.router-recommendation.v0"
+        :source_policy_path ".missiond/router/router-policy-v1.lisp"
+        :source_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
+      ok: true,
+    },
+    {
+      name: 'wave27-06-no-execution-false-rejected',
+      category: 'wave27-06-cross-wave-invariant',
+      source: `(router-dispatch-descriptor wave27-06-noexec-false
+        :schema "${SCHEMA}"
+        :task_id "wave99-06-smoke-noexec-false"
+        :recommended_backend claudecode
+        :router_confidence high
+        :backend_readiness_status current-default
+        :backend_runtime_allowed true
+        :router_apply_eligible false
+        :router_apply_blockers ["wave27-06: no_execution literal MUST be true; descriptor recording NEVER asserts a runtime backend swap"]
+        :dry_run_only true
+        :runtime_replacement false
+        :no_execution false
+        :source_recommendation_schema "missiond.router-recommendation.v0"
+        :source_policy_path ".missiond/router/router-policy-v1.lisp"
+        :source_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
+      ok: false,
+    },
+    {
+      name: 'wave27-06-runtime-replacement-true-rejected',
+      category: 'wave27-06-cross-wave-invariant',
+      source: `(router-dispatch-descriptor wave27-06-replace-true
+        :schema "${SCHEMA}"
+        :task_id "wave99-06-smoke-replace-true"
+        :recommended_backend claudecode
+        :router_confidence high
+        :backend_readiness_status current-default
+        :backend_runtime_allowed true
+        :router_apply_eligible false
+        :router_apply_blockers ["wave27-06: runtime_replacement literal MUST be false; the descriptor never authorizes runtime backend swap"]
+        :dry_run_only true
+        :runtime_replacement true
+        :no_execution true
+        :source_recommendation_schema "missiond.router-recommendation.v0"
+        :source_policy_path ".missiond/router/router-policy-v1.lisp"
+        :source_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
+      ok: false,
+    },
+    {
+      name: 'wave27-06-current-default-eligible-rejected',
+      category: 'wave27-06-cross-wave-invariant',
+      source: `(router-dispatch-descriptor wave27-06-cd-eligible
+        :schema "${SCHEMA}"
+        :task_id "wave99-06-smoke-cd-eligible"
+        :recommended_backend claudecode
+        :router_confidence high
+        :backend_readiness_status current-default
+        :backend_runtime_allowed true
+        :router_apply_eligible true
+        :router_apply_blockers []
+        :dry_run_only true
+        :runtime_replacement false
+        :no_execution true
+        :source_recommendation_schema "missiond.router-recommendation.v0"
+        :source_policy_path ".missiond/router/router-policy-v1.lisp"
+        :source_backend_registry_path ".missiond/router/router-backend-registry-v1.lisp")`,
+      ok: false,
+    },
   ];
 
   let failed = 0;

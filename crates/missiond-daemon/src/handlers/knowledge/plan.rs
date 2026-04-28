@@ -21678,4 +21678,299 @@ mod tests {
         let _ = std::fs::remove_file(&trace);
         let _ = std::fs::remove_file(&registry);
     }
+
+    /// wave27-06 cross-layer smoke: in ONE exhaustive test, re-pin EVERY
+    /// wave27 cross-wave invariant exercised by the daemon dispatch
+    /// descriptor surface. This is the single attribution point for a
+    /// future bisect — if the wave27 invariant chain regresses on the
+    /// daemon side, this test fails and `git log -S
+    /// router_dispatch_descriptor_smoke_pins_wave27_invariants` lands
+    /// the search on this file.
+    ///
+    /// Invariants asserted:
+    ///   1. dry_run_only literal Value::Bool(true) — wave27-03
+    ///   2. runtime_replacement literal Value::Bool(false) — wave27-03
+    ///   3. no_execution literal Value::Bool(true) — wave27-03 / wave27-04
+    ///   4. With seed registry (claudecode current-default) +
+    ///      router_dispatch_descriptor=true:
+    ///        a. router_apply_eligible Value::Bool(false)
+    ///        b. router_apply_blockers non-empty
+    ///   5. Dispatch-shaping fields (target_tool / target_source /
+    ///      dispatch_strategy / dispatch_strategy_source / next_call /
+    ///      execute_mode / runner_status) byte-identical with vs
+    ///      without router_dispatch_descriptor=true (re-pin of the
+    ///      wave24-04 invariant under the wave27 surface)
+    ///   6. wave27-03 self-audit: plan.rs source carries NO new
+    ///      shell-out / spawn / git mutation / network / LLM client in
+    ///      the active code (assembled forbidden-pattern table from
+    ///      string parts so this audit body does NOT self-trip on the
+    ///      patterns it scans for — wave24-06 / wave25-05 / wave26-06
+    ///      lesson).
+    #[test]
+    fn router_dispatch_descriptor_smoke_pins_wave27_invariants() {
+        // ---- Part 1: descriptor invariants under seed (current-default) ----
+        let policy = write_temp_docs_policy("w27-06-smoke-seed");
+        let trace = write_temp_trace_index("w27-06-smoke-seed", 8, 0);
+        let registry_body =
+            registry_body_single("claudecode", "current-default", true, &[]);
+        let registry = write_temp_registry("w27-06-smoke-seed", &registry_body);
+        let plan = fixture_plan("(plan)");
+        let resolved = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+
+        let args = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "router_dispatch_descriptor": true,
+            "kind": "docs",
+        });
+        let mode = parse_router_policy_mode(&args).unwrap();
+        let result = attach_router_recommendation_block(
+            fixture_bridge_result(),
+            mode,
+            &args,
+            &resolved,
+            &plan,
+        );
+        let v = parse_payload(&result);
+        let block = &v["router_recommendation"];
+        let descriptor = &block["router_dispatch_descriptor"];
+        assert!(
+            descriptor.is_object(),
+            "wave27-06 invariant: descriptor body MUST be present (got `{}`)",
+            descriptor
+        );
+
+        // wave27-06 invariants 1-3: locked literal Bools (NOT strings,
+        // NOT computed). The is_boolean() asserts also catch the
+        // pathological case where a future projector mutation turns
+        // these into "true"/"false" strings while still passing
+        // assert_eq! on the JSON layer.
+        assert_eq!(
+            descriptor["dry_run_only"],
+            Value::Bool(true),
+            "wave27-06 invariant 1: dry_run_only must be literal Value::Bool(true)"
+        );
+        assert!(
+            descriptor["dry_run_only"].is_boolean(),
+            "wave27-06 invariant 1: dry_run_only must be a JSON bool, never a string"
+        );
+        assert_eq!(
+            descriptor["runtime_replacement"],
+            Value::Bool(false),
+            "wave27-06 invariant 2: runtime_replacement must be literal Value::Bool(false)"
+        );
+        assert!(
+            descriptor["runtime_replacement"].is_boolean(),
+            "wave27-06 invariant 2: runtime_replacement must be a JSON bool, never a string"
+        );
+        assert_eq!(
+            descriptor["no_execution"],
+            Value::Bool(true),
+            "wave27-06 invariant 3: no_execution must be literal Value::Bool(true)"
+        );
+        assert!(
+            descriptor["no_execution"].is_boolean(),
+            "wave27-06 invariant 3: no_execution must be a JSON bool, never a string"
+        );
+
+        // wave27-06 invariant 4: seed registry (claudecode current-default)
+        // is NEVER apply-eligible. The wave26-03 6-condition gate requires
+        // an explicit runtime-ready opt-in upstream; current-default alone
+        // is rejected.
+        assert_eq!(
+            descriptor["router_apply_eligible"],
+            Value::Bool(false),
+            "wave27-06 invariant 4a: seed registry (claudecode current-default) MUST yield apply_eligible=false"
+        );
+        let blockers = descriptor["router_apply_blockers"]
+            .as_array()
+            .expect("wave27-06: router_apply_blockers MUST be a JSON array");
+        assert!(
+            !blockers.is_empty(),
+            "wave27-06 invariant 4b: eligible=false MUST list at least one blocker (got {:?})",
+            blockers
+        );
+
+        // ---- Part 2: dispatch byte-identical with vs without descriptor ----
+        let plan2 = fixture_plan("(plan)");
+        let resolved2 = fixture_resolved("mission_task_delegate", "fresh-code-alignment");
+        let args_no_desc = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "kind": "docs",
+        });
+        let mode_no_desc = parse_router_policy_mode(&args_no_desc).unwrap();
+        let result_no_desc = attach_router_recommendation_block(
+            action_execute_bridge(&plan2, &resolved2),
+            mode_no_desc,
+            &args_no_desc,
+            &resolved2,
+            &plan2,
+        );
+        let args_with_desc = json!({
+            "router_policy_mode": "dry_run",
+            "router_policy_path": policy.to_str().unwrap(),
+            "router_policy_trace_index_path": trace.to_str().unwrap(),
+            "router_backend_registry_path": registry.to_str().unwrap(),
+            "router_dispatch_descriptor": true,
+            "kind": "docs",
+        });
+        let mode_with_desc = parse_router_policy_mode(&args_with_desc).unwrap();
+        let result_with_desc = attach_router_recommendation_block(
+            action_execute_bridge(&plan2, &resolved2),
+            mode_with_desc,
+            &args_with_desc,
+            &resolved2,
+            &plan2,
+        );
+        let v_no = parse_payload(&result_no_desc);
+        let v_with = parse_payload(&result_with_desc);
+        for field in [
+            "target_tool",
+            "target_source",
+            "dispatch_strategy",
+            "dispatch_strategy_source",
+            "next_call",
+            "execute_mode",
+            "runner_status",
+        ] {
+            assert_eq!(
+                v_no[field], v_with[field],
+                "wave27-06 invariant 5: dispatch field `{}` MUST be byte-identical with vs without router_dispatch_descriptor=true",
+                field
+            );
+        }
+
+        // ---- Part 3: self-audit on plan.rs active source ----
+        // Read the on-disk plan.rs and assert NO new shell-out / spawn /
+        // git mutation / network / LLM client landed in the active code
+        // (i.e. outside line + block comments and string literals). The
+        // forbidden-pattern table is assembled from string parts so this
+        // audit does NOT self-trip on the patterns it is scanning for.
+        // wave24-06 / wave25-05 / wave26-06 lesson: a literal regex like
+        // `child_process` would match this very test body.
+        let plan_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/handlers/knowledge/plan.rs");
+        let src = std::fs::read_to_string(&plan_path)
+            .expect("wave27-06: plan.rs must be readable from CARGO_MANIFEST_DIR");
+        let stripped = strip_rust_comments_and_strings(&src);
+        // Tokens are assembled at runtime so this audit body's source code
+        // does NOT contain the literal forbidden strings (wave24-06 /
+        // wave25-05 / wave26-06 lesson). Variable names also stay clear of
+        // the literals so the stripped source (which keeps identifier
+        // names) does not self-trip the regex.
+        let t_cp = String::from("child") + "_" + "process";
+        let t_spawn = String::from("\\bspawn") + "\\(";
+        let t_spawnblock = String::from("\\bspawn") + "_blocking\\(";
+        let t_tproc = String::from("tokio") + "::process";
+        let t_stdcmd = String::from("std::process::") + "Command";
+        let t_rq = String::from("re") + "qwest::";
+        let t_hyperc = String::from("\\bhy") + "per::";
+        let t_oa = String::from("op") + "enai";
+        let t_an = String::from("anth") + "ropic";
+        let t_git = String::from("\\bgit ") + "(?:add|commit|push|reset|checkout|rm)";
+        let t_libgit = String::from("g") + "it2::Repository::open";
+        let forbidden = [
+            t_cp.as_str(),
+            t_spawn.as_str(),
+            t_spawnblock.as_str(),
+            t_tproc.as_str(),
+            t_stdcmd.as_str(),
+            t_rq.as_str(),
+            t_hyperc.as_str(),
+            t_oa.as_str(),
+            t_an.as_str(),
+            t_git.as_str(),
+            t_libgit.as_str(),
+        ];
+        for pat in forbidden {
+            let re = regex::Regex::new(pat).expect("wave27-06: audit pattern compiles");
+            if re.is_match(&stripped) {
+                panic!(
+                    "wave27-06 invariant 6: forbidden audit pattern `{}` found in plan.rs active source",
+                    pat
+                );
+            }
+        }
+
+        let _ = std::fs::remove_file(&policy);
+        let _ = std::fs::remove_file(&trace);
+        let _ = std::fs::remove_file(&registry);
+    }
+
+    /// wave27-06 helper: strip line comments, block comments, and string
+    /// literals from a Rust source so the self-audit grep does NOT
+    /// match patterns mentioned in commentary or in the forbidden-pattern
+    /// table itself. Mirrors the JS-side stripper used by the renderer
+    /// self-audit (wave26-06 + wave27-05) but adapted for Rust syntax.
+    /// This is a heuristic (it does not handle every macro shape), but
+    /// it is sufficient for active-code sniffing — the test PANICS on
+    /// any match, so the bias is conservative.
+    fn strip_rust_comments_and_strings(src: &str) -> String {
+        let mut out = String::with_capacity(src.len());
+        let bytes = src.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() {
+            let c = bytes[i];
+            // Block comment /* ... */ — handles nested /* */ one level
+            // deep (Rust supports nesting; we do best-effort).
+            if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'*' {
+                let mut depth = 1usize;
+                i += 2;
+                while i < bytes.len() && depth > 0 {
+                    if i + 1 < bytes.len() && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+                        depth += 1;
+                        i += 2;
+                    } else if i + 1 < bytes.len() && bytes[i] == b'*' && bytes[i + 1] == b'/' {
+                        depth -= 1;
+                        i += 2;
+                    } else {
+                        i += 1;
+                    }
+                }
+                continue;
+            }
+            // Line comment // ... \n
+            if c == b'/' && i + 1 < bytes.len() && bytes[i + 1] == b'/' {
+                while i < bytes.len() && bytes[i] != b'\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            // String literal "..." — handles \" escape. Does NOT
+            // attempt raw strings r#"..."# (good enough for sniffing).
+            if c == b'"' {
+                i += 1;
+                while i < bytes.len() {
+                    let d = bytes[i];
+                    if d == b'\\' && i + 1 < bytes.len() {
+                        i += 2;
+                        continue;
+                    }
+                    if d == b'"' {
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+                continue;
+            }
+            // Char literal '..' — minimal handling; skip apostrophe runs
+            // to avoid eating identifiers like 'static lifetime.
+            if c == b'\'' {
+                // Conservative: keep the apostrophe so we don't accidentally
+                // chew lifetime annotations into something pattern-matching.
+                out.push(c as char);
+                i += 1;
+                continue;
+            }
+            out.push(c as char);
+            i += 1;
+        }
+        out
+    }
 }

@@ -778,6 +778,51 @@ function runFixtures() {
       }
     },
   });
+  // wave27-06 cross-layer smoke: pin the FULL set of literals the
+  // wave27 renderer surface MUST emit when both router-policy AND
+  // backend-registry resolve. Same loadSingleTask + renderTask code
+  // path as wave26-06 / wave27-05; the wave27-06 distinction is
+  // exhaustive: 6 patterns asserted in one fixture so a future
+  // regression on ANY of them surfaces immediately under a
+  // wave27-06 grep. Patterns: 'advisory' / 'dry-run only' /
+  // 'no execution' / 'MUST NOT switch backend' /
+  // 'build-router-dispatch-descriptor' /
+  // 'check-router-dispatch-descriptor'.
+  fixtures.push({
+    name: 'wave27-06-renderer-literals: rendered brief carries advisory + dry-run only + no execution + MUST NOT switch backend + build-router-dispatch-descriptor + check-router-dispatch-descriptor',
+    category: 'wave27-06-renderer-literals',
+    run: () => {
+      const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave27-06-render-'));
+      const tmpTask = path.join(tmpDir, 'wave27-06-render-fixture.lisp');
+      const lisp = `(task wave27-06-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Render fixture"\n  :kind smoke\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "manual"\n  :goal "Render fixture goal"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements []\n  :acceptance ["true"]\n  :router-policy-path ".missiond/router/router-policy-v1.lisp"\n  :router-backend-registry-path ".missiond/router/router-backend-registry-v1.lisp"\n  :commit (:required false :scope-check none)\n  :report ["Commit hash."])\n`;
+      try {
+        fs.writeFileSync(tmpTask, lisp, 'utf8');
+        const task = loadSingleTask(tmpTask);
+        const markdown = renderTask(task, tmpTask);
+        // The wave27-06 invariant — every literal listed below MUST be
+        // present in the rendered brief. If any is missing the smoke
+        // fails loudly with the missing token name so a regression is
+        // attributable to the exact layer that dropped it.
+        const required = [
+          'advisory',
+          'dry-run only',
+          'no execution',
+          'MUST NOT switch backend',
+          'build-router-dispatch-descriptor',
+          'check-router-dispatch-descriptor',
+        ];
+        for (const literal of required) {
+          if (!markdown.includes(literal)) {
+            throw new Error(
+              `wave27-06 invariant: rendered brief missing required literal '${literal}'`,
+            );
+          }
+        }
+      } finally {
+        fs.rmSync(tmpDir, { recursive: true, force: true });
+      }
+    },
+  });
 
   let failed = 0;
   const categories = new Set();
