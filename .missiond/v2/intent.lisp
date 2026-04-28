@@ -20,7 +20,7 @@
   ;; ── 2026-04-21 系统级导航资产 (开 pillar refactor 前必读) ──
   (navigation-assets
     (source-of-truth-index "intent-pillar-source-index.lisp"
-      :desc "判真索引 — pillar code-truth registry; v1.8 (wave 27) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-27 全部 task (含 wave 23 session-trace v1 / wave 24 router-policy dry-run chain / wave 25 router measurement loop / wave 26 router backend readiness loop / wave 27 router dispatch descriptor loop); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
+      :desc "判真索引 — pillar code-truth registry; v1.9 (wave 28) 已覆盖 7 pillar baseline + 7 高变动语义区 + wave 13-28 全部 task (含 wave 23 session-trace v1 / wave 24 router-policy dry-run chain / wave 25 router measurement loop / wave 26 router backend readiness loop / wave 27 router dispatch descriptor loop / wave 28 productive-only task-runner loop); 主 Lisp 压缩/拆分 cross-ref 锚点统一走这里")
     (session-trace-v1
       :desc "wave 23 — .missiond/tasks/**/session-trace.lisp append-only factual telemetry; schema/checker/analyzer code-aligned; :session-trace-writable default false opt-in"
       :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.session-trace-v1"
@@ -73,6 +73,15 @@
       :cli "scripts/build-router-dispatch-descriptor.mjs"
       :report-schema ".missiond/tasks/schema/report-contract-v1.lisp"
       :report-checker "scripts/check-task-report.mjs"
+      :status code-aligned-partial)
+    (task-runner-productive-dispatch-loop
+      :desc "wave 28 — productive-only task-runner loop: manifest schema/checker, deterministic plan CLI, thin brief + shared preamble batch renderer, mission_plan task_runner_mode dry-run surface, batch verifier, and 5-layer smoke; archive/backfill/index are orchestrator-owned, not ClaudeCode worker tasks"
+      :anchor ".missiond/v2/intent-pillar-source-index.lisp :: section-entry intent-layer.machine-contract.task-runner-manifest-v1 / tools.surface.plan-task-runner-dry-run-v0 / intent-layer.unified-entry-pipeline.task-runner-loop-smoke-v0"
+      :schema ".missiond/tasks/schema/task-runner-manifest-v1.lisp"
+      :checker "scripts/check-task-runner-manifest.mjs"
+      :planner "scripts/plan-task-runner.mjs"
+      :brief-renderer "scripts/render-wave-briefs.mjs"
+      :batch-verifier "scripts/verify-task-runner-batch.mjs"
       :status code-aligned-partial)
     (drift-audit "drift-audit-2026-04-21.md"
       :desc "跨 pillar 代码 snapshot — worker/engine/infra footprint + bootstrap count + zombie + 跨 pillar 表 caller 精确数字")

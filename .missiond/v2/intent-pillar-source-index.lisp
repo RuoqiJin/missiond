@@ -166,7 +166,7 @@
   ;; ──────────────────────────────────────────────────
   (source-index v2
     :scope "missiond-v2"
-    :version "v1.8 — wave 27 router dispatch descriptor handoff layered on wave 26 readiness loop"
+    :version "v1.9 — wave 28 productive-only task-runner manifest + thin brief dispatch loop"
     :status-taxonomy-ref "architecture-dsl.lisp :: status-taxonomy"
     :section-id-policy-ref "architecture-dsl.lisp :: section-id-policy"
     :section-entry-extended-ref "architecture-dsl.lisp :: section-entry-extended (wave 12 task 06)"
@@ -3867,7 +3867,117 @@
         :new-status code-aligned-partial
         :note-extension "wave 27 adds router-dispatch-descriptor v1, build CLI, mission_plan descriptor surface, report fields, renderer context, and smoke. Descriptor facts are advisory/no-execution evidence only; runtime_replacement=false, dry_run_only=true, no_execution=true, and applied=false remain pinned.")
 
-      ;; ── 区域 91 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
+      ;; ── 区域 91 · task-runner productive-only dispatch loop (wave 28 tasks 01-06) ──
+      (section-entry
+        :section-id "intent-layer.machine-contract.task-runner-manifest-v1"
+        :title "task-runner manifest v1 — productive-only wave dispatch manifest"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: task-runner-manifest-v1"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          [".missiond/tasks/schema/task-runner-manifest-v1.lisp"
+           "scripts/check-task-runner-manifest.mjs"]
+        :cross-ref ["intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.machine-contract.shared-memory-v1"
+                    "intent-layer.machine-contract.session-trace-v1"]
+        :wave "28 task 01 (commit 145645c)"
+        :note "schema missiond.task-runner-manifest.v1 + checker. The manifest records wave id, brief_mode, shared_preamble_path, productive_only, nodes, dependencies, verification_tier, dispatch_group, estimated_minutes, heartbeat_minutes, and write_scope. Default overlap_policy=reject catches same-group write-scope overlap; productive_only true rejects archive/backfill/index worker nodes.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.task-runner-plan-cli-v0"
+        :title "task-runner plan CLI v0 — deterministic batch planner over manifests"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: task-runner-plan-cli-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/plan-task-runner.mjs"
+           "scripts/check-task-runner-manifest.mjs"]
+        :cross-ref ["intent-layer.machine-contract.task-runner-manifest-v1"]
+        :wave "28 task 02 (commits 954116e + 302330a parent hotfix)"
+        :note "CLI emits schema missiond.task-runner-plan.v0 as deterministic JSON or Lisp. It computes topological batches partitioned by dispatch_group, critical_path_minutes, total_estimated_minutes, max_parallel_width, verification_tier_counts, and overlap_diagnostics. It is read-only and uses no shell/git/network/LLM. Parent hotfix 302330a cleared a TS6133 unused parameter after agent commit 954116e, exposing the need for report commit-lineage fields.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.thin-brief-shared-preamble-v0"
+        :title "thin brief + shared preamble renderer v0"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: thin-brief-shared-preamble-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/render-claudecode-task.mjs"
+           "scripts/render-wave-briefs.mjs"
+           ".missiond/tasks/schema/task-contract-v1.lisp"]
+        :cross-ref ["intent-layer.machine-contract.task-contract-v1"
+                    "intent-layer.machine-contract.task-runner-manifest-v1"]
+        :wave "28 task 03 (commit c4a9850)"
+        :note "render-claudecode-task.mjs supports --brief-mode full|thin|preamble and exports loadSingleTask/renderTask/renderSharedPreamble/deriveSharedPreamblePath for in-process callers. render-wave-briefs.mjs consumes a manifest, emits one shared preamble plus thin worker briefs, and refuses to render archive/backfill/index pseudo nodes.")
+
+      (section-entry
+        :section-id "tools.surface.plan-task-runner-dry-run-v0"
+        :title "mission_plan task_runner_mode dry-run surface v0"
+        :source-file ".missiond/v2/intent-tools.lisp"
+        :local-path "pillar tools :: section mcp-surface-lifecycle :: implemented-surface mission_plan :: task-runner dry-run"
+        :status code-aligned-partial
+        :compression-safe? false
+        :implements
+          ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+           "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.machine-contract.task-runner-manifest-v1"
+                    "intent-layer.machine-contract.task-runner-plan-cli-v0"]
+        :wave "28 task 04 (commit dde6f61)"
+        :note "mission_plan execute adds task_runner_mode=off|dry_run and task_runner_manifest_path. Mode off is byte-identical even with bogus router/runner paths; dry_run reads the manifest and emits the same plan semantics as the Node planner. applied=false is pinned, and no execution/spawn/git/network/LLM occurs.")
+
+      (section-entry
+        :section-id "intent-layer.machine-contract.task-runner-batch-verifier-v0"
+        :title "task-runner batch verifier v0 — manifest to report/memory/commit join"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section machine-contract-layer :: task-runner-batch-verifier-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/verify-task-runner-batch.mjs"
+           "scripts/verify-task-run.mjs"]
+        :cross-ref ["intent-layer.machine-contract.task-runner-manifest-v1"
+                    "intent-layer.machine-contract.report-contract-v1"
+                    "intent-layer.machine-contract.shared-memory-v1"]
+        :wave "28 task 05 (commit fe70a5f)"
+        :note "Batch verifier joins manifest nodes to on-disk task contracts, reports, shared-memory completions, and verify-task-run output. It skips archive/backfill/index pseudo nodes because those are orchestrator-owned. It supports skipped_nodes and partial aggregate states for manifests that include pseudo nodes or incomplete evidence.")
+
+      (section-entry
+        :section-id "intent-layer.unified-entry-pipeline.task-runner-loop-smoke-v0"
+        :title "task-runner loop smoke v0 — five-layer productive-only invariant suite"
+        :source-file ".missiond/v2/intent-machine-contract.lisp"
+        :local-path "pillar intent-layer :: section unified-entry-pipeline :: task-runner-loop-smoke-v0"
+        :status code-aligned
+        :compression-safe? false
+        :implements
+          ["scripts/check-task-runner-manifest.mjs"
+           "scripts/plan-task-runner.mjs"
+           "scripts/render-wave-briefs.mjs"
+           "scripts/verify-task-runner-batch.mjs"
+           "crates/missiond-daemon/src/handlers/knowledge/plan.rs"]
+        :cross-ref ["intent-layer.machine-contract.task-runner-manifest-v1"
+                    "intent-layer.machine-contract.task-runner-plan-cli-v0"
+                    "tools.surface.plan-task-runner-dry-run-v0"
+                    "intent-layer.machine-contract.task-runner-batch-verifier-v0"]
+        :wave "28 task 06 (commit 4717713)"
+        :note "5-layer smoke spreads regression checks to the nearest owner: manifest checker fixtures, planner determinism/critical-path fixtures, renderer heartbeat/pseudo-node skip fixtures, batch verifier aggregate fixtures, and Rust task_runner dry-run smoke. It found and fixed a diamond-DAG critical_path expectation (100 not 75) and proves CLI/Rust semantics agree while no execution occurs.")
+
+      (status-upgrade
+        :section-id "intent-layer.machine-contract.task-contract-v1"
+        :prev-status code-aligned
+        :new-status code-aligned
+        :note-extension "wave 28 adds dispatch-efficiency metadata to task-contract v1: :verification-tier, :dispatch-group, :estimated-minutes, and :heartbeat-minutes. Renderer supports thin briefs plus shared preamble so the Markdown view no longer repeats shared-memory/report/session-trace/router/hook/commit boilerplate in every worker brief.")
+
+      (status-upgrade
+        :section-id "intent-layer.machine-contract.task-contract-renderer-v1"
+        :prev-status code-aligned
+        :new-status code-aligned
+        :note-extension "wave 28 task 03 upgrades the renderer from single-task Markdown generation to reusable in-process helpers plus batch rendering from task-runner manifests. full|thin|preamble modes preserve legacy full briefs while enabling productive-only dispatch waves.")
+
+      ;; ── 区域 92 · machine-contract task-contract-v1 status note extension (wave 22 task 01/02 加 hooks default-on doctor + daemon-internal auto-verifier) ──
       ;; 注: section-id 已存在 (区域 36 / wave-19-backfill / wave-20-backfill / wave-21-backfill), 本 entry 不新增 anchor; 仅在 wave-22-backfill 块内
       ;;     声明 note 扩展 (hooks default-on doctor v2 + daemon-internal auto-run-verifier 8 cross-checks)
       (status-upgrade
@@ -3878,8 +3988,8 @@
 
     ;; ── 已声明但本次未细化的 section, 后续再补 ──
     (deferred-coverage
-      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 / ExecutionEvent dispatch metadata v1 / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade; v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade; v1.2 (wave 21 task 09) 回填 hooks-path installer v1 / task-run verifier v1 / execution report-verifier integration v1 / autonomous workstation LLM proposal v0 / plan inference apply gate v1 / LLM auto-approve proposal v0 / sonnet distill chain auto-apply v1 / machine-contract autonomous loop smoke v3 共 +8 entry + 2 status-upgrade; v1.3 (wave 22 task 08) 回填 explicit-gate-promotion + auto-verifier + smoke v4 共 +7 entry + 1 status-upgrade; v1.4 (wave 23 Codex) 回填 session-trace / trace analyzer / router draft 共 +4 entry; v1.5 (wave 24 Codex) 回填 router-policy dry-run chain 共 +6 entry + 2 status-upgrade; v1.6 (wave 25 Codex) 回填 router-policy measurement loop 共 +5 entry + 2 status-upgrade; v1.7 (wave 26 Codex) 回填 router backend readiness loop 共 +6 entry + 2 status-upgrade; **v1.8 (wave 27 Codex) 回填 router dispatch descriptor handoff loop 共 +6 entry + 2 status-upgrade**. 仍有以下未细化项, 等后续 wave 再补"
-      :latest-backfill "v1.8 (wave 27 Codex) 回填 router dispatch descriptor handoff loop 共 +6 entry + 2 status-upgrade; reason 文本保留历史串, 本字段记录最新收口"
+      :reason "v0.2 baseline 覆盖 7 pillar 顶层; v0.3 (wave 12 task 06) 扩了 7 高变动语义区; v0.4 (wave 13 task 04) 回填 evidence-collector / PLAN DAG runtime v2 / unified-entry pipeline v0 共 +11 entry; v0.5 (wave 14 task 07) 回填 file-first writer integration / PlanNodeStateChanged + live EventRef / review-gate auto-create v1 / unified-entry v1 / source-index checker R015+R016 共 +13 entry; v0.6 (wave 15 task 06) 回填 extensible domain count test / L2 shard split executed / shard-aware checker R017+R018 + auto-discovery / review-gate resolution v0 / workstation dispatch v0 共 +5 entry; v0.7 (wave 16 task 09) 回填 workflow review-resolution / review-gate listener / workstation auto-inference v1 / plan paused 7th + review-gate question-event trigger / plan retry policy v0 / scoped commit enforce v0 / evidence subscriber 三档 / unified-entry e2e smoke 共 +6 entry; v0.8 (wave 17 task 09) 回填 paused-resume hook v0 / claim-lease v0 + Claimed 第 8 态 / acceptance evaluator v0 三模式 / rollback policy v0 三模式 + 5 safety gates / finalize+distill trigger v0 / event-log query path v0 三档 resolver / workstation scoped-commit brief default v1 / unified-entry paused-resume e2e smoke 共 +7 entry; v0.9 (wave 18 task 10) 回填 event-log query API v1 / ExecutionEvent dispatch metadata v1 / cross-node acceptance fan-in v0 / cascade rollback v0 / cross-plan distill chain v0 / autonomous PLAN field inference v0 deterministic / review automation policy v0 / scoped-commit worktree preflight v0 / unified-entry autonomous loop smoke v1 共 +9 entry; v1.0 (wave 19 task 12) 回填 task-verifier v1 / report-contract v1 / shared-memory v1 / renderer dispatch brief v1 / plan task-contract emitter v0 / workstation task-contract consumer v0 / execution task-contract completion verification v0 / cross-plan distill auto-chain v1 / forward compensate ref v0 / Opened dispatch metadata NO-OP 注解 共 +9 entry + 1 status-upgrade; v1.1 (wave 20 task 10) 回填 task-scope-index-guard v1 / renderer scoped-commit guard v2 / execution preflight contract scope v1 / machine-driven dispatch v0 / unified-entry machine loop smoke v2 / cross-plan distill auto-trigger v1 / LLM-augmented plan inference v0 sonnet_suggest / review auto-answer policy v0 / ExecutionEvent legacy metadata sweep v0 共 +9 entry + 3 status-upgrade; v1.2 (wave 21 task 09) 回填 hooks-path installer v1 / task-run verifier v1 / execution report-verifier integration v1 / autonomous workstation LLM proposal v0 / plan inference apply gate v1 / LLM auto-approve proposal v0 / sonnet distill chain auto-apply v1 / machine-contract autonomous loop smoke v3 共 +8 entry + 2 status-upgrade; v1.3 (wave 22 task 08) 回填 explicit-gate-promotion + auto-verifier + smoke v4 共 +7 entry + 1 status-upgrade; v1.4 (wave 23 Codex) 回填 session-trace / trace analyzer / router draft 共 +4 entry; v1.5 (wave 24 Codex) 回填 router-policy dry-run chain 共 +6 entry + 2 status-upgrade; v1.6 (wave 25 Codex) 回填 router-policy measurement loop 共 +5 entry + 2 status-upgrade; v1.7 (wave 26 Codex) 回填 router backend readiness loop 共 +6 entry + 2 status-upgrade; v1.8 (wave 27 Codex) 回填 router dispatch descriptor handoff loop 共 +6 entry + 2 status-upgrade; **v1.9 (wave 28 Codex) 回填 productive-only task-runner manifest / thin brief / dry-run / verifier loop 共 +6 entry + 2 status-upgrade**. 仍有以下未细化项, 等后续 wave 再补"
+      :latest-backfill "v1.9 (wave 28 Codex) 回填 productive-only task-runner manifest + thin brief dispatch loop 共 +6 entry + 2 status-upgrade; reason 文本保留历史串, 本字段记录最新收口"
       :scope-deferred
         ["pillar memory 内 cross-cutting / pillar-interfaces 的 5 surface 矩阵"
          "pillar worker section workers 内 19 worker 的 per-worker entry"

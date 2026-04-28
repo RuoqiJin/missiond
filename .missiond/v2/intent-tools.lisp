@@ -38,6 +38,11 @@
      "router_recommendation 可附 router_dispatch_descriptor 或 descriptor_status=registry_missing; descriptor 内三锁定布尔为 JSON bool, 不为字符串"
      "report-contract 增六个 descriptor 字段, checker 严格 enum / repo-relative path / literal true / blocker vector; 不新增 MCP tool"
      "renderer 增 build-router-dispatch-descriptor + check-router-dispatch-descriptor 管道命令文本, 明确 no execution / MUST NOT switch backend; MCP tool count 仍 83 不变"]
+  :wave-28-status-summary
+    ["mission_plan execute 增加 task_runner_mode=off|dry_run 与 task_runner_manifest_path; absent/off 保持旧响应形状且不读 manifest"
+     "task_runner_mode=dry_run 返回 task-runner plan block, Rust 语义与 scripts/plan-task-runner.mjs 对齐; applied=false 仍为字面量"
+     "scripts/render-wave-briefs.mjs + scripts/verify-task-runner-batch.mjs 作为外部 read-only runner 工具上线; 不新增 MCP tool"
+     "thin brief/shared preamble 降低 ClaudeCode worker 的重复协议负担, 但 Markdown 仍只是 task-contract/manifest 的人类视图"]
 
   :actual-state-sources
     [".missiond/intent-mcp-defs.lisp (schema SSOT, 24 mcp-module, 详细 input/returns)"

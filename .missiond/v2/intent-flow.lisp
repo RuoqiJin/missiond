@@ -34,6 +34,11 @@
     ["router dry-run chain 已加 dispatch descriptor handoff loop: descriptor schema → build CLI → mission_plan descriptor surface → report/renderer descriptor evidence → 5-layer smoke"
      "descriptor 把 recommendation + readiness 投影成机器可验收 S-expression, 但 no_execution=true / runtime_replacement=false 仍硬边界"
      "descriptor 是执行前交接记录, 不是 workflow dispatch stage; runtime router replacement 仍 pending, 后续必须单独 runtime policy wave"]
+  :wave-28-status-summary
+    ["task-runner productive-only loop 已 code-aligned partial: task-runner manifest → deterministic planner → thin brief batch renderer → mission_plan dry-run surface → batch verifier → cross-layer smoke"
+     "flow 层新增的是 orchestration metadata / dry-run planning stage, 不是 runtime execution stage; applied=false / no execution 仍硬边界"
+     "archive/backfill/parallel-index worker 从 flow 中移出, 由 orchestrator/Codex 直接处理; ClaudeCode worker 只接 productive task"
+     "Group barrier 暴露临界路径空窗; 后续需 ready-queue / phase barrier / verification receipt 去重"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar flow (最详细, 已有 catalog + stages)"

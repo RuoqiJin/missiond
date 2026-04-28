@@ -23,6 +23,11 @@
   :router-dispatch-descriptor-schema ".missiond/tasks/schema/router-dispatch-descriptor-v1.lisp"
   :router-dispatch-descriptor-checker "scripts/check-router-dispatch-descriptor.mjs"
   :router-dispatch-descriptor-cli "scripts/build-router-dispatch-descriptor.mjs"
+  :task-runner-manifest-schema ".missiond/tasks/schema/task-runner-manifest-v1.lisp"
+  :task-runner-manifest-checker "scripts/check-task-runner-manifest.mjs"
+  :task-runner-plan-cli "scripts/plan-task-runner.mjs"
+  :wave-brief-batch-renderer "scripts/render-wave-briefs.mjs"
+  :task-runner-batch-verifier "scripts/verify-task-runner-batch.mjs"
   :trace-corpus-indexer "scripts/build-session-trace-index.mjs"
   :renderer "scripts/render-claudecode-task.mjs"
   :wave-23-status-summary
@@ -55,6 +60,14 @@
      "mission_plan descriptor dry-run surface code-aligned-partial (wave 27 task 03 commit 6e4f14d); router_dispatch_descriptor optional bool only splices advisory descriptor evidence under router_policy_mode=dry_run"
      "report/renderer descriptor fields code-aligned (wave 27 tasks 04/05 commits afb5ffb/17cb401); report gains six optional descriptor fields, renderer emits build/check commands only when policy and registry resolve"
      "router dispatch descriptor smoke code-aligned (wave 27 task 06 commit 7f65f05); 5-layer smoke pins descriptor schema/CLI/Rust/report/renderer invariants; descriptor remains no-execution handoff, not runtime backend replacement"]
+  :wave-28-status-summary
+    ["task-runner manifest schema/checker code-aligned (wave 28 task 01 commit 145645c); manifest records productive-only wave nodes, dependency edges, dispatch_group, verification_tier, estimate/heartbeat minutes, and write-scope overlap policy; archive/backfill/index categories are structurally rejected when :productive_only true"
+     "task-runner plan CLI code-aligned (wave 28 task 02 commits 954116e + parent hotfix 302330a); emits deterministic batches, critical_path_minutes, verification_tier_counts, and overlap diagnostics; no shell/git/network/LLM; parent hotfix exposed the need for commit-lineage reporting"
+     "thin brief + shared preamble + batch renderer code-aligned (wave 28 task 03 commit c4a9850); render-claudecode-task.mjs exports renderer helpers and supports brief-mode full|thin|preamble, while render-wave-briefs.mjs emits productive-only worker briefs from a manifest"
+     "mission_plan task_runner_mode dry-run surface code-aligned-partial (wave 28 task 04 commit dde6f61); task_runner_manifest_path is read only in dry_run, task_runner_mode=off remains byte-identical with bogus router/runner paths, and applied=false is pinned"
+     "task-runner batch verifier code-aligned (wave 28 task 05 commit fe70a5f); joins manifest nodes to task contracts, reports, shared-memory completions, and verify-task-run output; pseudo archive/backfill/index nodes are skipped because they are orchestrator-owned"
+     "task-runner loop smoke code-aligned (wave 28 task 06 commit 4717713); 5-layer smoke pins manifest checker, planner, renderer, batch verifier, and Rust dry-run invariants; daemon tests 1667→1681 and Node fixtures 20/12/9/8→22/13/11/9 prove productive-only and no-execution semantics across layers"
+     "process result: wave 28 removed archive/backfill/parallel-index worker tasks; orchestrator owns archive/backfill, worker briefs are thin views, shared preamble is read once, and dispatch-plan/manifest carry scheduling facts for MissionD runner evolution"]
 
   (purpose
     "S-expressions carry machine boundaries: ownership, dependencies, acceptance, commit policy, review gate, rollback, evidence."
@@ -82,7 +95,10 @@
       :machine-contract "records explainable backend recommendations derived from task contract shape and trace corpus; must declare :dry-run-only true and :runtime-replacement false")
     (task-lisp
       :role "dispatch contract"
-      :machine-contract "records write-scope, must-not-touch, dependencies, acceptance commands, commit scope-check, report fields"))
+      :machine-contract "records write-scope, must-not-touch, dependencies, acceptance commands, commit scope-check, report fields")
+    (task-runner-manifest-lisp
+      :role "wave dispatch manifest"
+      :machine-contract "records productive task nodes, dependency DAG, dispatch groups, verification tiers, estimates, heartbeat policy, shared preamble path, and write-scope overlap policy; archive/backfill/index stay orchestrator-owned"))
 
   (pipeline
     (s1-author-task-contract
@@ -93,7 +109,13 @@
       :input "task.lisp"
       :output ".missiond/claudecode/<task-id>.md"
       :command "node scripts/render-claudecode-task.mjs <task.lisp>"
-      :note "renderer refuses overwrite unless --force")
+      :note "renderer refuses overwrite unless --force; wave 28 adds --brief-mode full|thin|preamble so shared boilerplate can be emitted once per wave")
+    (s2b-render-wave-brief-batch
+      :input "task-runner-manifest.lisp + task.lisp files"
+      :output ".missiond/claudecode/<wave>-shared-preamble.md + thin worker briefs"
+      :command "node scripts/render-wave-briefs.mjs --manifest <manifest.lisp>"
+      :status "code-aligned (wave 28 task 03)"
+      :rule "productive_only manifests must not render archive/backfill/index worker briefs")
     (s3-dispatch
       :input "rendered Markdown + machine contract id"
       :substrate "resident-lisp / fresh-code-alignment / agent-team / workstation-dispatch"
@@ -121,7 +143,13 @@
       :command "node scripts/build-session-trace-index.mjs <trace-root> && node scripts/recommend-task-backend.mjs --task <task.lisp> --policy .missiond/router/router-policy-v1.lisp --trace-index <index.json>"
       :status "code-aligned partial (wave 24 task 01-06 + wave 25 task 01-05 measurement loop)"
       :rule "advisory only: dry_run_only=true, applied=false, runtime_replacement=false; plan.rs dry-run surface never switches backend"
-      :measurement "wave 25 adds corpus evaluator + report fields + trace-index confidence scoring + CLI/Rust parity smoke; measurement may raise confidence, never applies routing"))
+      :measurement "wave 25 adds corpus evaluator + report fields + trace-index confidence scoring + CLI/Rust parity smoke; measurement may raise confidence, never applies routing")
+    (s8-task-runner-dry-run
+      :input "task-runner-manifest.lisp"
+      :output "task-runner plan JSON/Lisp + optional mission_plan dry-run response + batch verification summary"
+      :command "node scripts/plan-task-runner.mjs --manifest <manifest.lisp> && node scripts/verify-task-runner-batch.mjs --manifest <manifest.lisp>"
+      :status "code-aligned partial (wave 28 task 01-06)"
+      :rule "no execution: dry-run/verification surfaces never spawn ClaudeCode, never switch backend, never mutate git, and skip orchestrator-owned pseudo nodes"))
 
   (task-report-v1
     :required-fields [:task_id :status :commit_hash :files_changed :acceptance_results :scope_deviations :notes]

@@ -35,6 +35,11 @@
      "mission_plan execute 新增 router_dispatch_descriptor bool, 只在 router_policy_mode=dry_run 下返回 no-execution handoff descriptor"
      "descriptor 是 ephemeral 生成物, 不新增静态 :router-dispatch-descriptor-path task 字段, 避免 stale-by-design"
      "frontend Lisp 与 runtime backend replacement 仍 postpone; 本波只补 router dispatch descriptor handoff loop"]
+  :wave-28-status-summary
+    ["machine-contract 新增 task-runner manifest v1: productive_only、dispatch_group、verification_tier、estimated_minutes、heartbeat_minutes、write_scope overlap policy 成为机器可检字段"
+     "renderer/brief 进入 thin+preamble 模式: task Lisp/manifest 仍是 SSOT, Markdown 只保留任务特异信息 + shared preamble 指针"
+     "mission_plan task_runner_mode=dry_run 把 manifest planner 暴露给现有 surface, 但不执行、不 spawn、不切 backend"
+     "下一步效率主线: context-atlas / pattern-card / commit-lineage / verification receipt / ready-queue 调度; frontend Lisp 仍 postpone"]
 
   :actual-state-sources
     [".missiond/v2/intent.lisp :: pillar intent-layer (v0.4.17+ 已有详细占位)"
