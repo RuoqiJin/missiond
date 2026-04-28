@@ -807,13 +807,13 @@ fn next_action_for(decision: RespondDecision, outcome: RespondOutcome) -> &'stat
             "plan approved; call mission_request respond with response=execute_plan + execute=true to dispatch the plan"
         }
         (RespondDecision::ExecutePlan, RespondOutcome::Dispatched) => {
-            "plan execute requested; mission_plan execute path runs via the existing approved-plan flow"
+            "plan execute requested; observe execution status through mission_request status and task receipts"
         }
         (RespondDecision::RejectIntent, RespondOutcome::Recorded) => {
-            "rejection recorded; revise the message and call mission_request start/advance again"
+            "rejection recorded; revise the message and call mission_request start again"
         }
         (RespondDecision::RejectPlan, RespondOutcome::Recorded) => {
-            "rejection recorded; revise the plan and call mission_request advance, or use mission_plan with explicit review_decision=rejected"
+            "rejection recorded; revise the plan source and call mission_request advance or start again"
         }
         (RespondDecision::AskQuestion, RespondOutcome::Recorded) => {
             "question recorded; wait for follow-up answer, then call mission_request respond again"
@@ -1280,7 +1280,7 @@ fn wrap_pipeline_result(
             }
         },
         "next_step": if mode == RequestMode::HumanInteractive {
-            "review the returned intent/plan artifact, approve through mission_directive or mission_plan, then call mission_request(action=advance)"
+            "review the returned intent/plan artifact, then answer through mission_request(action=respond)"
         } else {
             "trusted-agent mode may continue with mission_request(action=advance) only when policy gates allow it"
         }
@@ -1917,18 +1917,18 @@ fn classify_review_state(
 fn review_state_messages(state: ReviewState) -> (&'static str, &'static str, bool) {
     match state {
         ReviewState::ExecuteRequested => (
-            "Plan execution requested; mission_plan execute path runs via the existing approved-plan flow.",
-            "mission_plan execute path runs via the existing approved-plan flow",
+            "Plan execution requested; observe execution status through MissionD.",
+            "observe execution status through mission_request status and task receipts",
             true,
         ),
         ReviewState::AwaitingPlanApproval => (
-            "Review plan.lisp and approve via mission_plan, then call mission_request advance with execute=true.",
-            "approve plan via mission_plan, then call mission_request advance with execute=true",
+            "Review plan.lisp, then answer through mission_request respond with approve_plan, reject_plan, or ask_question.",
+            "call mission_request respond with response=approve_plan, reject_plan, or ask_question",
             false,
         ),
         ReviewState::AwaitingIntentApproval => (
-            "Review intent-alignment.lisp and approve via mission_directive, then call mission_request advance.",
-            "approve intent via mission_directive, then call mission_request advance",
+            "Review intent-alignment.lisp, then answer through mission_request respond with approve_intent, reject_intent, or ask_question.",
+            "call mission_request respond with response=approve_intent, reject_intent, or ask_question",
             false,
         ),
         ReviewState::IntentDrafting => (
@@ -2520,6 +2520,10 @@ mod tests {
         assert_eq!(packet["artifact_kind"], "intent_alignment");
         assert_eq!(packet["artifact_exists"], true);
         assert_eq!(packet["execute_allowed"], false);
+        assert_eq!(
+            packet["next_action"],
+            "call mission_request respond with response=approve_intent, reject_intent, or ask_question"
+        );
         assert!(packet["artifact_path"]
             .as_str()
             .unwrap()
@@ -2552,6 +2556,10 @@ mod tests {
         assert_eq!(packet["state"], "awaiting_plan_approval");
         assert_eq!(packet["artifact_kind"], "plan");
         assert_eq!(packet["execute_allowed"], false);
+        assert_eq!(
+            packet["next_action"],
+            "call mission_request respond with response=approve_plan, reject_plan, or ask_question"
+        );
     }
 
     #[test]
@@ -2572,6 +2580,10 @@ mod tests {
         let packet = derive_review_packet(&inputs, no_read);
         assert_eq!(packet["state"], "execute_requested");
         assert_eq!(packet["execute_allowed"], true);
+        assert_eq!(
+            packet["next_action"],
+            "observe execution status through mission_request status and task receipts"
+        );
         assert_eq!(packet["allowed_responses"][0], "observe");
     }
 

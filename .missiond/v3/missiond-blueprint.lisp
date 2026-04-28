@@ -114,19 +114,19 @@
            :when "plan.lisp exists and execute was not explicitly requested"
            :state :awaiting_plan_approval
            :artifact_kind :plan
-           :next_action "approve plan via mission_plan, then call mission_request advance with execute=true"
+           :next_action "call mission_request respond with response=approve_plan / reject_plan / ask_question; execute later via response=execute_plan + execute=true"
            :execute_allowed false)
          (rule plan-present-execute-requested
            :when "plan.lisp exists and execute=true was passed on this call"
            :state :execute_requested
            :artifact_kind :plan
-           :next_action "mission_plan execute path will run via the existing approved-plan flow"
+           :next_action "observe execution status through mission_request status and task receipts"
            :execute_allowed true)
          (rule intent-only-present
            :when "intent-alignment.lisp exists and plan.lisp does not"
            :state :awaiting_intent_approval
            :artifact_kind :intent_alignment
-           :next_action "approve intent via mission_directive, then call mission_request advance"
+           :next_action "call mission_request respond with response=approve_intent / reject_intent / ask_question"
            :execute_allowed false)
          (rule intent-drafting
            :when "neither intent-alignment.lisp nor plan.lisp exists, but projection just wrote one (target=intent_alignment|plan)"

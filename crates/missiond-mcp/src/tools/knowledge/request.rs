@@ -44,8 +44,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          directive_version?, plan_id?, inner_action?, blocked_reason?, note?, board_task_materialization?, \
          plan_materialization? }, review_packet, \
          next_action, v3_contract, projection?, board_task_materialization?, plan_materialization?, pipeline_result? }. review_packet is a pure projection of \
-         request-local artifact existence + the latest projection target — the caller decides \
-         whether to approve via mission_directive/mission_plan; mission_request never silently \
+         request-local artifact existence + the latest projection target — the caller answers \
+         review packets through mission_request(action=respond); mission_request never silently \
          approves or dispatches.",
         json!({
             "type": "object",
