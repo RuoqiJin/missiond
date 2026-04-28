@@ -966,6 +966,27 @@ fn build_properties() -> Value {
         "[execute] (wave-27 / task 03) OPTIONAL bool. Default absent ⇒ no descriptor block emitted (response byte-identical to wave-26 baseline). When `true` AND `router_policy_mode=\"dry_run\"`, the recommendation block additionally carries either (a) a structured `router_dispatch_descriptor` sub-object with the wave27-01 schema fields (`schema=\"missiond.router-dispatch-descriptor.v1\"`, `task_id` from the plan's `board_task_id`, `recommended_backend`, `router_confidence`, `backend_readiness_status`, `backend_runtime_allowed`, `router_apply_eligible`, `router_apply_blockers`, `source_recommendation_schema=\"missiond.router-recommendation.v0\"`, `source_policy_path` echoing `router_policy_path`, `source_backend_registry_path` echoing `router_backend_registry_path`) plus the three LOCKED literal-bool invariants (`dry_run_only=true`, `runtime_replacement=false`, `no_execution=true` — all hard-coded `Value::Bool`, never strings, never computed) when a registry path was supplied AND its lookup produced a backend match; OR (b) a top-level `descriptor_status=\"registry_missing\"` field on the recommendation block (descriptor body OMITTED) when no `router_backend_registry_path` was supplied. The descriptor is purely an advisory handoff — dispatch is NEVER altered, `applied=false` remains the hard-coded literal it has been since wave24-04, and the recommendation continues to be dry-run only. When `router_policy_mode=\"off\"` (default), the arg is IGNORED — no descriptor is emitted, no extra file I/O happens, the response stays byte-identical to the wave-15..23 baseline. Anything other than the JSON literals `true` / `false` is treated as absent.",
     ));
 
+    // wave-28 / task 04 — task-runner manifest dry-run surface. Mirrors the
+    // wave28-02 Node CLI (scripts/plan-task-runner.mjs) output keys
+    // (schema / wave / productive_only / batches / critical_path_minutes /
+    // total_estimated_minutes / verification_tier_counts / overlap_diagnostics)
+    // but is implemented as a pure Rust manifest reader + projector. dry-run
+    // only and no execution: the surface is INFORMATIONAL — no worker is
+    // spawned, no Node is shelled out, no git mutates, and `applied=false`
+    // is hard-coded. Off/default mode is byte-identical with NO file I/O
+    // even when a manifest path is supplied (the Off branch in
+    // `attach_task_runner_block` early-returns before any read).
+    p.insert("task_runner_mode".into(), prop_enum(
+        "string",
+        "[execute] (wave-28 / task 04) task-runner manifest dry-run mode. `off` (default) emits NO task_runner block — response byte-identical to wave-15..27 baseline; `task_runner_manifest_path` is IGNORED (no file I/O happens even if supplied). `dry_run` reads the manifest at `task_runner_manifest_path` via `std::fs::read_to_string` + a minimal in-Rust subset of the wave28-01 schema parser and emits a `task_runner` block with manifest_status / wave / productive_only / batches / critical_path_minutes / total_estimated_minutes / verification_tier_counts / overlap_diagnostics / applied=false (hard-coded literal). `apply` / `auto` / unknown strings / non-string values reject with structured `INVALID_PARAM` BEFORE plan lookup — dry-run only and no execution surface. NO worker spawn, NO Node shell-out, NO git mutation, NO mission_task_delegate invocation. Manifest read failure (missing / unreadable / malformed) surfaces a non-fatal `task_runner_warning` field plus `manifest_status` ∈ {missing, unreadable, malformed}; dispatch always continues.",
+        &["off", "dry_run"],
+    ));
+
+    p.insert("task_runner_manifest_path".into(), prop(
+        "string",
+        "[execute] (wave-28 / task 04) OPTIONAL repo-relative or absolute path to a wave28-01 task-runner manifest (`missiond.task-runner-manifest.v1`) consumed ONLY when `task_runner_mode=\"dry_run\"`. The daemon reads the file via `std::fs::read_to_string` + a minimal in-Rust Lisp subset parser sufficient to project wave / productive_only / each node's task_id / depends_on / dispatch_group / verification_tier / estimated_minutes / write_scope. dry-run only and no execution: the read produces a deterministic `task_runner` block (batches via topological grouping by depth + dispatch_group, critical-path minutes, verification-tier counts, same-group write-scope overlap diagnostics). `applied=false` is hard-coded literal. When `task_runner_mode=\"off\"` (the default), this arg is IGNORED — no file I/O happens. Manifest issues are non-fatal: missing path → `manifest_status=\"missing\"`; I/O error → `manifest_status=\"unreadable\"`; parse error / wrong shape → `manifest_status=\"malformed\"`. Each degraded variant additionally surfaces `task_runner_warning`. Dispatch is NEVER failed by manifest issues.",
+    ));
+
     Value::Object(p)
 }
 
