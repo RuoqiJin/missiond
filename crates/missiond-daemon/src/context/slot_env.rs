@@ -1,10 +1,9 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use anyhow::{Context, Result};
+use serde_json::{json, Value};
 use tracing::{debug, info, warn};
-
-use crate::state::AppState;
-use std::path::Path;
 
 // @beacon: slot
 pub(crate) async fn build_slot_tracking_env(
@@ -44,8 +43,183 @@ pub(crate) async fn build_slot_tracking_env(
         "MISSIOND_SESSION_FILE".to_string(),
         session_file.to_string_lossy().to_string(),
     );
+    extra_env.insert(
+        "MISSION_IPC_ENDPOINT".to_string(),
+        crate::helpers::ipc_endpoint_from_env(),
+    );
 
     (extra_env, session_file)
+}
+
+const SESSION_REGISTER_HOOK: &str = "bash ~/.claude/hooks/missiond-session-register.sh";
+const CONTEXT_INJECT_HOOK: &str = "bash ~/.claude/hooks/missiond-context-inject-v2.sh";
+
+/// Keep Claude Code's project-local settings aligned with the slot tracking
+/// contract. This avoids mutating global `~/.claude/settings.json`, while still
+/// making project-bound MissionD workstations load the SessionStart UUID hook
+/// before the PTY process starts.
+pub(crate) fn sync_slot_hooks_to_local_settings(cwd: &Path) {
+    match sync_slot_hooks_inner(cwd) {
+        Ok(true) => info!(
+            cwd = %cwd.display(),
+            "Synced MissionD Claude hooks to project-local settings"
+        ),
+        Ok(false) => debug!(
+            cwd = %cwd.display(),
+            "MissionD Claude hooks already present in project-local settings"
+        ),
+        Err(e) => warn!(
+            cwd = %cwd.display(),
+            error = %e,
+            "Failed to sync MissionD Claude hooks to project-local settings"
+        ),
+    }
+}
+
+fn sync_slot_hooks_inner(cwd: &Path) -> Result<bool> {
+    let claude_dir = cwd.join(".claude");
+    std::fs::create_dir_all(&claude_dir)
+        .with_context(|| format!("create_dir_all {}", claude_dir.display()))?;
+    let settings_path = claude_dir.join("settings.local.json");
+
+    let mut root: Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path)
+            .with_context(|| format!("read {}", settings_path.display()))?;
+        if content.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&content).unwrap_or_else(|e| {
+                warn!(
+                    path = %settings_path.display(),
+                    error = %e,
+                    "Existing settings.local.json malformed; overwriting"
+                );
+                json!({})
+            })
+        }
+    } else {
+        json!({})
+    };
+    if !root.is_object() {
+        root = json!({});
+    }
+
+    let mut changed = false;
+    changed |= ensure_hook_command(
+        &mut root,
+        "SessionStart",
+        Some("startup"),
+        SESSION_REGISTER_HOOK,
+    );
+    changed |= ensure_hook_command(
+        &mut root,
+        "SessionStart",
+        Some("resume"),
+        SESSION_REGISTER_HOOK,
+    );
+    changed |= ensure_hook_command(&mut root, "UserPromptSubmit", None, CONTEXT_INJECT_HOOK);
+
+    if !changed {
+        return Ok(false);
+    }
+
+    let serialized = serde_json::to_string_pretty(&root)?;
+    let tmp = settings_path.with_extension("json.tmp");
+    std::fs::write(&tmp, serialized).with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::rename(&tmp, &settings_path)
+        .with_context(|| format!("rename {} -> {}", tmp.display(), settings_path.display()))?;
+
+    Ok(true)
+}
+
+fn ensure_hook_command(
+    root: &mut Value,
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+) -> bool {
+    let root_obj = root.as_object_mut().expect("root normalized to object");
+    let hooks = root_obj.entry("hooks").or_insert_with(|| json!({}));
+    if !hooks.is_object() {
+        *hooks = json!({});
+    }
+    let hooks_obj = hooks.as_object_mut().unwrap();
+    let event_value = hooks_obj
+        .entry(event.to_string())
+        .or_insert_with(|| json!([]));
+    if !event_value.is_array() {
+        *event_value = json!([]);
+    }
+    let entries = event_value.as_array_mut().unwrap();
+
+    for entry in entries.iter_mut() {
+        if !entry_matches(entry, matcher) {
+            continue;
+        }
+        if hook_entry_has_command(entry, command) {
+            return false;
+        }
+        let hooks_list = entry
+            .as_object_mut()
+            .expect("hook entry object checked by entry_matches")
+            .entry("hooks")
+            .or_insert_with(|| json!([]));
+        if !hooks_list.is_array() {
+            *hooks_list = json!([]);
+        }
+        hooks_list
+            .as_array_mut()
+            .unwrap()
+            .push(hook_command(command));
+        return true;
+    }
+
+    let mut entry = json!({ "hooks": [hook_command(command)] });
+    if let Some(matcher) = matcher {
+        entry["matcher"] = json!(matcher);
+    }
+    entries.push(entry);
+    true
+}
+
+fn entry_matches(entry: &mut Value, matcher: Option<&str>) -> bool {
+    let Some(obj) = entry.as_object() else {
+        return false;
+    };
+    match matcher {
+        Some(matcher) => obj.get("matcher").and_then(Value::as_str) == Some(matcher),
+        None => !obj.contains_key("matcher"),
+    }
+}
+
+fn hook_entry_has_command(entry: &Value, command: &str) -> bool {
+    entry
+        .get("hooks")
+        .and_then(Value::as_array)
+        .map(|hooks| {
+            hooks.iter().any(|hook| {
+                hook.get("command").and_then(Value::as_str) == Some(command)
+                    || hook
+                        .get("command")
+                        .and_then(Value::as_str)
+                        .map(|existing| {
+                            existing.contains("missiond-session-register.sh")
+                                && command.contains("missiond-session-register.sh")
+                                || existing.contains("missiond-context-inject")
+                                    && command.contains("missiond-context-inject")
+                        })
+                        .unwrap_or(false)
+            })
+        })
+        .unwrap_or(false)
+}
+
+fn hook_command(command: &str) -> Value {
+    json!({
+        "type": "command",
+        "command": command,
+        "timeout": 5
+    })
 }
 
 /// Resolve dynamic references in env values.
@@ -210,8 +384,12 @@ pub(crate) async fn capture_slot_session_uuid(
                     updated.slot_id = Some(slot_id.to_string());
                     updated.source = "pty_jsonl".to_string();
                     let category: Option<String> = None;
-                    updated.conversation_type =
-                        missiond_core::db::derive_conversation_type(category.as_deref(), Some(slot_id), &session_uuid, &conv.source);
+                    updated.conversation_type = missiond_core::db::derive_conversation_type(
+                        category.as_deref(),
+                        Some(slot_id),
+                        &session_uuid,
+                        &conv.source,
+                    );
                     let _ = store.upsert_conversation(&updated).await;
                     info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");
                 }
@@ -223,5 +401,95 @@ pub(crate) async fn capture_slot_session_uuid(
                 "Failed to capture session UUID - hook may not be installed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn build_slot_tracking_env_includes_hook_runtime_env() {
+        let (env, session_file) = build_slot_tracking_env("slot-dyn-test", None).await;
+
+        assert_eq!(env["MISSIOND_SLOT_ID"], "slot-dyn-test");
+        assert_eq!(
+            env["MISSIOND_SESSION_FILE"],
+            session_file.to_string_lossy().to_string()
+        );
+        assert!(env["MISSION_IPC_ENDPOINT"].ends_with("missiond.sock"));
+    }
+
+    #[test]
+    fn sync_slot_hooks_creates_project_local_hooks() {
+        let dir = tempdir().unwrap();
+
+        let changed = sync_slot_hooks_inner(dir.path()).unwrap();
+
+        assert!(changed);
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        let v: Value = serde_json::from_str(&content).unwrap();
+        let startup = &v["hooks"]["SessionStart"][0];
+        assert_eq!(startup["matcher"], "startup");
+        assert_eq!(startup["hooks"][0]["command"], SESSION_REGISTER_HOOK);
+        let resume = &v["hooks"]["SessionStart"][1];
+        assert_eq!(resume["matcher"], "resume");
+        assert_eq!(resume["hooks"][0]["command"], SESSION_REGISTER_HOOK);
+        assert_eq!(
+            v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
+            CONTEXT_INJECT_HOOK
+        );
+    }
+
+    #[test]
+    fn sync_slot_hooks_preserves_permissions_and_dedups() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        let settings = json!({
+            "permissions": {
+                "allow": ["Read"]
+            },
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "matcher": "startup",
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": SESSION_REGISTER_HOOK,
+                                "timeout": 5
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            dir.path().join(".claude/settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        assert!(sync_slot_hooks_inner(dir.path()).unwrap());
+        assert!(!sync_slot_hooks_inner(dir.path()).unwrap());
+
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        let v: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(v["permissions"]["allow"][0], "Read");
+        let session_start = v["hooks"]["SessionStart"].as_array().unwrap();
+        let startup_count = session_start
+            .iter()
+            .filter(|entry| entry["matcher"] == "startup")
+            .count();
+        assert_eq!(startup_count, 1);
+        let register_count = session_start
+            .iter()
+            .flat_map(|entry| entry["hooks"].as_array().into_iter().flatten())
+            .filter(|hook| hook["command"] == SESSION_REGISTER_HOOK)
+            .count();
+        assert_eq!(register_count, 2);
     }
 }

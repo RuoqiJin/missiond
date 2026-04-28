@@ -495,6 +495,7 @@
            "cc_controller::spawn_and_register"]
         :pipeline
                   [(step perm-inject    "从 learned_permissions.yaml 读 global+role+project+slot union → settings.local.json")
+                   (step hook-sync      "项目本地 .claude/settings.local.json 幂等写入 MissionD SessionStart/UserPromptSubmit hooks；不改全局 ~/.claude/settings.json")
                    (step tracking-env   "注入 session tracking 环境变量")
                    (step pty-spawn      "实际调 PTYManager.spawn (唯一落点)")
                    (step uuid-capture   "捕获 session UUID, 归入 slot_sessions 表")
@@ -970,7 +971,8 @@
         :entry-components ["crates/missiond-daemon/src/context/slot_env.rs"])
       (logic-core
         (step s1 "slot_env.rs 收集 role / cwd / project / session tracking file / secret resolve")
-        (step s2 "归一成 slot 可直接消费的 env var + prompt 前置元信息")
+        (step s1b "slot_env::sync_slot_hooks_to_local_settings 在项目本地 settings.local.json 保证 session-register + context-prefetch hooks；保留 existing permissions/hooks, dedup, atomic write")
+        (step s2 "归一成 slot 可直接消费的 env var + prompt 前置元信息；tracking env 包含 MISSIOND_SLOT_ID / MISSIOND_SESSION_FILE / MISSION_IPC_ENDPOINT，供 SessionStart 与 UserPromptSubmit hook 稳定回连 daemon")
         (step s3 "结果返回给 context_pipeline"))
       (egress
         :writes []

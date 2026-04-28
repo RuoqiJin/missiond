@@ -1,4 +1,6 @@
-use crate::context::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
+use crate::context::slot_env::{
+    build_slot_tracking_env, capture_slot_session_uuid, sync_slot_hooks_to_local_settings,
+};
 use anyhow::{anyhow, Result};
 use missiond_core::db::traits::MissionStore;
 use missiond_core::pty::{PTYAgentInfo, PTYManager};
@@ -59,9 +61,9 @@ pub async fn spawn_tracked_slot(
         let cwd_str = cwd.display().to_string();
         let resolved = {
             let reg = project_registry.read().await;
-            reg.resolve(&cwd_str).map(|s| s.to_string()).and_then(|id| {
-                reg.get(&id).map(|p| (id, PathBuf::from(&p.path)))
-            })
+            reg.resolve(&cwd_str)
+                .map(|s| s.to_string())
+                .and_then(|id| reg.get(&id).map(|p| (id, PathBuf::from(&p.path))))
         };
         match resolved {
             Some((project_id, root)) if root != cwd => {
@@ -121,6 +123,9 @@ pub async fn spawn_tracked_slot(
             Some(pty_slot.id.as_str()),
             learned,
         );
+    }
+    if let Some(cwd) = pty_slot.cwd.as_deref() {
+        sync_slot_hooks_to_local_settings(cwd);
     }
 
     // 1. Automatically build tracking environment and session file path
