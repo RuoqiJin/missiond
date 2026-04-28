@@ -1312,6 +1312,10 @@ fn wrap_pipeline_result(
     });
     if let Some(obj) = response.as_object_mut() {
         obj.insert("inner_is_error".into(), json!(inner_is_error));
+        if let Some(paths) = request_paths {
+            obj.insert("artifact_paths".into(), build_artifact_paths_json(paths));
+            obj.insert("artifact_exists".into(), build_artifact_existence(paths));
+        }
         if let Some(packet) = review_packet {
             obj.insert("review_packet".into(), packet);
         }
@@ -2382,6 +2386,33 @@ mod tests {
             }
             other => panic!("expected Write, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn wrap_pipeline_result_exposes_request_local_artifacts_top_level() {
+        let paths = request_paths_for(Path::new("/repo"), "req-wrap");
+        let inner = ToolResult::json_pretty(&json!({
+            "compiled_sexp_preview": "(directive-draft :status :draft)",
+        }));
+        let result = wrap_pipeline_result(
+            "start",
+            RequestMode::HumanInteractive,
+            json!({ "request_id": "req-wrap" }),
+            ProjectionOutcome::skipped(ProjectionStatus::SkippedNoSexp, Some("intent_alignment")),
+            Some(&paths),
+            false,
+            inner,
+        );
+        let payload = tool_result_payload(&result);
+        assert_eq!(
+            payload["artifact_paths"]["intent_alignment"],
+            "/repo/.missiond/requests/req-wrap/intent-alignment.lisp"
+        );
+        assert_eq!(payload["artifact_exists"]["intent_alignment"], false);
+        assert_eq!(
+            payload["review_packet"]["artifact_path"],
+            payload["artifact_paths"]["intent_alignment"]
+        );
     }
 
     #[test]

@@ -113,6 +113,7 @@
       :fields [:state :artifact_kind :artifact_path :artifact_exists
                :artifact_preview :prompt :allowed_responses :next_action
                :execute_allowed]
+      :response-rule "start/advance/status/respond expose request-local :artifact_paths + :artifact_exists at the top level whenever a request_id can be resolved; callers do not need to inspect legacy pipeline file paths or nested wrappers to locate Lisp artifacts."
       :states [:received :intent_drafting :awaiting_intent_approval
                :awaiting_plan_approval :awaiting_execution :execute_requested]
       :state-derivation
