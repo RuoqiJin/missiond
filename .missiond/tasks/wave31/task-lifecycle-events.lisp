@@ -2,7 +2,7 @@
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave31
   :created-at "2026-04-28T11:22:52Z"
-  :sequence 4
+  :sequence 5
 
 
   (lifecycle-event
@@ -50,4 +50,15 @@
     :seq 4
     :at "2026-04-28T11:55:53Z"
     :touched [".missiond/tasks/wave31/task-lifecycle-events.lisp"]
-    :summary "cancelled wrong-model ClaudeCode dispatch; Sonnet slot was terminated before worker commit"))
+    :summary "cancelled wrong-model ClaudeCode dispatch; Sonnet slot was terminated before worker commit")
+
+  (lifecycle-event
+    :id wave31-01-mission-request-local-projections-v0-dispatch-005
+    :task wave31-01-mission-request-local-projections-v0
+    :actor_role codex-orchestrator
+    :event_kind dispatch
+    :commit_role none
+    :seq 5
+    :at "2026-04-28T11:56:50Z"
+    :touched [".missiond/claudecode/wave31-01-mission-request-local-projections-v0.md" ".missiond/tasks/wave31/manifest.lisp"]
+    :summary "Dispatch wave31-01-mission-request-local-projections-v0: hard dependencies satisfied."))
