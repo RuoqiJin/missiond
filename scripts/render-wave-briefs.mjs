@@ -71,7 +71,10 @@ Cross-wave invariants:
     render-claudecode-task.mjs --brief-mode full directly.
 `;
 
-const FORBIDDEN_ID_SUBSTRINGS = ['-archive-', '-backfill-', '-index', 'lisp-backfill'];
+// Exported so scripts/prepare-task-runner-wave.mjs (wave29-03) can reuse the
+// exact same defense-in-depth substring set without forking the constant.
+// Pure data; mutating it is a contract break for downstream callers.
+export const FORBIDDEN_ID_SUBSTRINGS = ['-archive-', '-backfill-', '-index', 'lisp-backfill'];
 
 function main() {
   const args = process.argv.slice(2);
@@ -134,7 +137,14 @@ function main() {
 //     .missiond/claudecode/<task-id>.md (deterministic; same manifest =>
 //     same paths). When the brief already exists and `force` is false, the
 //     existing file is left untouched.
-function renderManifest({ manifestPath, cwd, force }) {
+//
+// wave29-03: exported as a named export so scripts/prepare-task-runner-wave.mjs
+// can reuse the exact same renderer in-process (NEVER shells out). The CLI
+// entry point above continues to call this function locally; behavior and
+// return shape are unchanged from wave28-03 — this is purely a surface
+// addition so the wave29 prep CLI can layer report-skeleton + bootstrap
+// shared-memory/session-trace generation on top of the same renderer.
+export function renderManifest({ manifestPath, cwd, force }) {
   if (!fs.existsSync(manifestPath)) {
     fail(`manifest file does not exist: ${manifestPath}`);
   }
