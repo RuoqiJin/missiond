@@ -38,7 +38,7 @@ class TerminalErrorBoundary extends Component<
 // --- Terminal Inner ---
 function TerminalInner({ slotId }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<import('xterm').Terminal | null>(null);
+  const termRef = useRef<import('@xterm/xterm').Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const reconnectAttemptRef = useRef(0);
@@ -68,11 +68,11 @@ function TerminalInner({ slotId }: TerminalProps) {
       if (disposed) return;
 
       const [{ Terminal }, { FitAddon }] = await Promise.all([
-        import('xterm'),
+        import('@xterm/xterm'),
         import('@xterm/addon-fit'),
       ]);
       // CSS import - ignore TS error for CSS module
-      try { await import('xterm/css/xterm.css' as string); } catch { /* bundled separately */ }
+      try { await import('@xterm/xterm/css/xterm.css' as string); } catch { /* bundled separately */ }
 
       if (disposed) return;
 
@@ -182,7 +182,7 @@ function TerminalInner({ slotId }: TerminalProps) {
     }
   }
 
-  function scheduleReconnect(term: import('xterm').Terminal, slot: string) {
+  function scheduleReconnect(term: import('@xterm/xterm').Terminal, slot: string) {
     clearReconnectTimer();
     const attempt = reconnectAttemptRef.current;
     // Exponential backoff: 1s, 2s, 4s, 8s, max 15s
@@ -194,31 +194,31 @@ function TerminalInner({ slotId }: TerminalProps) {
   }
 
   /** Check if terminal container has dimensions (safe to write) */
-  function isTermReady(term: import('xterm').Terminal): boolean {
+  function isTermReady(term: import('@xterm/xterm').Terminal): boolean {
     const el = containerRef.current;
     return !!(el && el.clientWidth > 0 && el.clientHeight > 0 && (term as any)._core);
   }
 
   /** Safe write — skip if container has no dimensions to avoid xterm runtime error */
-  function safeWrite(term: import('xterm').Terminal, data: string) {
+  function safeWrite(term: import('@xterm/xterm').Terminal, data: string) {
     try {
       if (isTermReady(term)) term.write(data);
     } catch { /* swallow dimensions error */ }
   }
 
-  function safeWriteln(term: import('xterm').Terminal, data: string) {
+  function safeWriteln(term: import('@xterm/xterm').Terminal, data: string) {
     try {
       if (isTermReady(term)) term.writeln(data);
     } catch { /* swallow dimensions error */ }
   }
 
-  function safeClear(term: import('xterm').Terminal) {
+  function safeClear(term: import('@xterm/xterm').Terminal) {
     try {
       if (isTermReady(term)) term.clear();
     } catch { /* swallow dimensions error */ }
   }
 
-  function connectWs(term: import('xterm').Terminal, slot: string) {
+  function connectWs(term: import('@xterm/xterm').Terminal, slot: string) {
     if (wsRef.current?.readyState === WebSocket.OPEN ||
         wsRef.current?.readyState === WebSocket.CONNECTING) return;
 
