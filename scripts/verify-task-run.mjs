@@ -179,6 +179,12 @@ function reportFromForms(forms, file) {
   const finalCommitHash = keywordPropText(props, ':final_commit_hash');
   const verifiedCommitHash = keywordPropText(props, ':verified_commit_hash');
   const filesChanged = nodeToStringArray(props[':files_changed']?.value);
+  // wave29-04: extract :parent_patches structured entries so verifyRun can
+  // (a) accept any lineage hash as "matched" against the resolved git
+  // commit, and (b) surface the structured lineage in the JSON output.
+  // Each entry projects to a flat shape so JSON consumers get the same
+  // keys without having to walk the Lisp tree themselves.
+  const parentPatches = parseParentPatches(props[':parent_patches']?.value);
   return {
     id,
     file,
@@ -188,8 +194,25 @@ function reportFromForms(forms, file) {
     agentCommitHash,
     finalCommitHash,
     verifiedCommitHash,
+    parentPatches,
     filesChanged,
   };
+}
+
+function parseParentPatches(node) {
+  if (node == null || !isList(node)) return [];
+  const out = [];
+  for (const entry of node.children) {
+    if (!isList(entry)) continue;
+    const ep = readKeywordProps(entry, { start: 0 });
+    out.push({
+      commit: keywordPropText(ep, ':commit') ?? null,
+      kind: keywordPropText(ep, ':kind') ?? null,
+      reason: keywordPropText(ep, ':reason') ?? null,
+      files: ep[':files'] ? nodeToStringArray(ep[':files'].value) : [],
+    });
+  }
+  return out;
 }
 
 // --- Shared-memory loading ------------------------------------------------
@@ -373,19 +396,51 @@ export function verifyRun({
     );
   }
 
-  // Check 3: report :commit_hash matches resolved commit (full or prefix).
-  const commitMatch = commitHashMatches(report.commitHash, commitInfo.hash);
+  // Check 3: report commit lineage matches resolved commit.
+  //
+  // wave29-04: accept ANY hash carried in the report's commit lineage as a
+  // "matched" commit against the resolved git commit. The lineage is the
+  // ordered tuple (commit_hash, agent_commit_hash, parent_patches[*].commit).
+  // Acceptance is read-only — the verifier still emits the resolved
+  // (final/verified) git hash as the authoritative commit, and a separate
+  // lineage_match field tells callers WHICH lineage role matched. This lets
+  // operators verify a worker commit OR a parent hotfix commit OR an
+  // intermediate parent patch commit, while always reporting the canonical
+  // resolved hash. Reports without lineage fields fall back to the original
+  // wave21 single-hash check (commit_hash only).
+  const lineageEntries = buildLineageEntries(report);
+  const matchedLineage = lineageEntries.find((entry) =>
+    commitHashMatches(entry.hash, commitInfo.hash),
+  );
+  const commitMatch = Boolean(matchedLineage);
   checks.report_commit_hash = {
     ok: commitMatch,
     expected_full: commitInfo.hash,
     got: report.commitHash,
+    lineage_match: matchedLineage
+      ? { role: matchedLineage.role, hash: matchedLineage.hash, index: matchedLineage.index ?? null }
+      : null,
   };
   if (!commitMatch) {
+    const lineageJson = JSON.stringify(lineageEntries.map((e) => ({ role: e.role, hash: e.hash })));
     errors.push(
       `report :commit_hash mismatch — resolved commit is ${commitInfo.hash}, ` +
-      `report has ${JSON.stringify(report.commitHash)}`,
+      `report lineage ${lineageJson} carries no matching hash`,
     );
   }
+  // Always surface the structured lineage so JSON consumers can audit which
+  // hashes the report carried, regardless of which one matched.
+  checks.report_commit_lineage = {
+    agent_commit_hash: report.agentCommitHash ?? null,
+    final_commit_hash: report.finalCommitHash ?? null,
+    verified_commit_hash: report.verifiedCommitHash ?? null,
+    parent_patches: (report.parentPatches ?? []).map((p) => ({
+      commit: p.commit,
+      kind: p.kind,
+      reason: p.reason,
+      files: p.files,
+    })),
+  };
 
   // Check 4: report :status (informational; done is the contracted happy path).
   if (report.status && report.status !== 'done') {
@@ -562,6 +617,31 @@ function commitHashMatches(reported, full) {
   if (r === f) return true;
   if (r.length >= 7 && /^[0-9a-f]+$/.test(r) && f.startsWith(r)) return true;
   return false;
+}
+
+// wave29-04 helper: enumerate the report's commit lineage in a stable
+// canonical order so verifyRun can accept any of them as a "matched" commit
+// while still reporting which role matched. Order: commit_hash (final),
+// agent_commit_hash (worker), parent_patches[*].commit (intermediate). The
+// caller filters out null entries; entries are de-duplicated by hash so the
+// report-vs-git check does not pay for re-comparing the same hash twice.
+function buildLineageEntries(report) {
+  const seen = new Set();
+  const out = [];
+  const push = (role, hash, index = null) => {
+    if (typeof hash !== 'string' || hash.trim() === '') return;
+    const key = hash.trim().toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ role, hash, index });
+  };
+  push('commit_hash', report.commitHash);
+  push('agent_commit_hash', report.agentCommitHash);
+  const patches = report.parentPatches ?? [];
+  for (let i = 0; i < patches.length; i++) {
+    push('parent_patch', patches[i].commit, i);
+  }
+  return out;
 }
 
 // --- Output ---------------------------------------------------------------
@@ -1199,6 +1279,131 @@ function runFixtures({ json }) {
       expectOk: true,
       expectWarning: /commit_hash cross-check skipped/,
     },
+
+    // ---------- wave29-04 lineage fixtures ----------
+    // Pin the wave28-02 hotfix exemplar shape: worker commit 954116e then
+    // parent lint-cleanup commit 302330a. The resolved git commit in this
+    // fixture is the FINAL commit; the report's :commit_hash also matches
+    // the final commit, while :agent_commit_hash carries the worker hash
+    // and :parent_patches[0].commit carries the final commit (matching the
+    // wave28-02 on-disk report shape that wave29-04 hardens).
+    {
+      name: 'wave29-04 lineage pass: report :commit_hash + agent + parent_patches all aligned to final',
+      contract: loadContractFromSource(baseTaskSource, '<fx-lin-pass-task>'),
+      contractFile: '<fx-lin-pass-task>',
+      report: loadReportFromSource(
+        `(report wave21-99-fixture
+          :schema "missiond.report-contract.v1"
+          :task_id "wave21-99-fixture"
+          :status done
+          :commit_hash "abc1234"
+          :agent_commit_hash "deadbee0001"
+          :parent_patches
+            [(:commit "abc1234"
+              :kind lint-cleanup
+              :reason "TS6133 cleanup"
+              :files ["scripts/verify-task-run.mjs"])]
+          :files_changed ["scripts/verify-task-run.mjs"]
+          :acceptance_results
+            [(:command "node scripts/verify-task-run.mjs --dry-fixture" :exit_code 0 :ok true)])`,
+        '<fx-lin-pass-report>',
+      ),
+      reportFile: '<fx-lin-pass-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-lin-pass-ledger>'),
+      ledgerFile: '<fx-lin-pass-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      expectOk: true,
+    },
+    // Worker-only verification: resolved git commit is the WORKER commit
+    // (deadbee...), report :commit_hash points at the FINAL hash but
+    // :agent_commit_hash carries the worker hash. The lineage-aware match
+    // accepts the worker commit as a valid lineage hit; verifier still
+    // emits the resolved hash as authoritative.
+    {
+      name: 'wave29-04 lineage pass: agent_commit_hash matches resolved (worker) commit',
+      contract: loadContractFromSource(baseTaskSource, '<fx-lin-agent-task>'),
+      contractFile: '<fx-lin-agent-task>',
+      report: loadReportFromSource(
+        `(report wave21-99-fixture
+          :schema "missiond.report-contract.v1"
+          :task_id "wave21-99-fixture"
+          :status done
+          :commit_hash "feedbabe"
+          :agent_commit_hash "deadbee0001"
+          :parent_patches
+            [(:commit "feedbabe"
+              :kind lint-cleanup
+              :reason "post-worker hotfix"
+              :files ["scripts/verify-task-run.mjs"])]
+          :files_changed ["scripts/verify-task-run.mjs"]
+          :acceptance_results
+            [(:command "node scripts/verify-task-run.mjs --dry-fixture" :exit_code 0 :ok true)])`,
+        '<fx-lin-agent-report>',
+      ),
+      reportFile: '<fx-lin-agent-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-lin-agent-ledger>'),
+      ledgerFile: '<fx-lin-agent-ledger>',
+      ledgerStatus: 'present',
+      // Resolved commit is the WORKER commit (deadbee...), not the final.
+      commitInfo: {
+        hash: 'deadbee00011234567890abcdef1234567890abcd',
+        message: baseCommit.message,
+        files: baseCommit.files,
+      },
+      expectOk: true,
+    },
+    // Negative: resolved commit is NEITHER the report's commit_hash NOR any
+    // lineage hash. The error message MUST mention "report lineage" so the
+    // failure is debuggable.
+    {
+      name: 'wave29-04 lineage fail: resolved commit not in any lineage hash',
+      contract: loadContractFromSource(baseTaskSource, '<fx-lin-miss-task>'),
+      contractFile: '<fx-lin-miss-task>',
+      report: loadReportFromSource(
+        `(report wave21-99-fixture
+          :schema "missiond.report-contract.v1"
+          :task_id "wave21-99-fixture"
+          :status done
+          :commit_hash "abc1234"
+          :agent_commit_hash "deadbee"
+          :parent_patches
+            [(:commit "abc1234"
+              :kind lint-cleanup
+              :reason "x"
+              :files ["scripts/verify-task-run.mjs"])]
+          :files_changed ["scripts/verify-task-run.mjs"]
+          :acceptance_results
+            [(:command "true" :exit_code 0 :ok true)])`,
+        '<fx-lin-miss-report>',
+      ),
+      reportFile: '<fx-lin-miss-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-lin-miss-ledger>'),
+      ledgerFile: '<fx-lin-miss-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: {
+        hash: 'cafebabe000011223344556677889900aabbccdd',
+        message: baseCommit.message,
+        files: baseCommit.files,
+      },
+      expectOk: false,
+      expectError: /report lineage .* carries no matching hash/,
+    },
+    // Backward-compat: a report WITHOUT any lineage fields still verifies
+    // green when :commit_hash matches resolved git commit. The lineage
+    // entries collapse to a single role=commit_hash entry.
+    {
+      name: 'wave29-04 lineage pass: legacy report (no lineage fields) matches via commit_hash',
+      contract: loadContractFromSource(baseTaskSource, '<fx-lin-legacy-task>'),
+      contractFile: '<fx-lin-legacy-task>',
+      report: loadReportFromSource(baseReportSource, '<fx-lin-legacy-report>'),
+      reportFile: '<fx-lin-legacy-report>',
+      ledger: loadLedgerFromSource(baseLedgerSource, '<fx-lin-legacy-ledger>'),
+      ledgerFile: '<fx-lin-legacy-ledger>',
+      ledgerStatus: 'present',
+      commitInfo: baseCommit,
+      expectOk: true,
+    },
   ];
 
   // Helper-level sanity check on commitHashMatches.
@@ -1224,6 +1429,26 @@ function runFixtures({ json }) {
     ['notHex!', 'abc1234567890', false],
   ];
 
+  // wave29-04 helper-level sanity check on buildLineageEntries: confirms
+  // the canonical role ordering (commit_hash → agent_commit_hash →
+  // parent_patches[*].commit) plus de-duplication when the same hash
+  // appears in multiple roles. Each case is [report-shape, expected-roles].
+  const lineageCases = [
+    [{ commitHash: 'abc1234' }, ['commit_hash']],
+    [{ commitHash: 'abc1234', agentCommitHash: 'deadbee' }, ['commit_hash', 'agent_commit_hash']],
+    [
+      { commitHash: 'abc1234', agentCommitHash: 'deadbee', parentPatches: [{ commit: 'cafebab' }] },
+      ['commit_hash', 'agent_commit_hash', 'parent_patch'],
+    ],
+    [
+      // De-dup: when commit_hash and the trailing parent_patch share the
+      // same hash, only the first occurrence (commit_hash) is emitted.
+      { commitHash: 'abc1234', parentPatches: [{ commit: 'abc1234' }] },
+      ['commit_hash'],
+    ],
+    [{}, []], // legacy report: no hashes at all → empty lineage
+  ];
+
   const failures = [];
   for (const [reported, full, expected] of helperCases) {
     const got = commitHashMatches(reported, full);
@@ -1235,6 +1460,18 @@ function runFixtures({ json }) {
     const got = commitHashesAgree(a, b);
     if (got !== expected) {
       failures.push({ kind: 'helper-agree', case: `${a} ~ ${b}`, expected, got });
+    }
+  }
+  for (const [report, expectedRoles] of lineageCases) {
+    const got = buildLineageEntries(report).map((e) => e.role);
+    const ok = got.length === expectedRoles.length && got.every((r, i) => r === expectedRoles[i]);
+    if (!ok) {
+      failures.push({
+        kind: 'helper-lineage',
+        case: JSON.stringify(report),
+        expected: expectedRoles,
+        got,
+      });
     }
   }
 
@@ -1278,7 +1515,7 @@ function runFixtures({ json }) {
   }
 
   const ok = failures.length === 0;
-  const totalHelpers = helperCases.length + agreeCases.length;
+  const totalHelpers = helperCases.length + agreeCases.length + lineageCases.length;
   if (json) {
     console.log(
       JSON.stringify(
@@ -1287,6 +1524,7 @@ function runFixtures({ json }) {
           fixtures: fixtures.map((fx) => fx.name),
           helperCases: helperCases.length,
           agreeCases: agreeCases.length,
+          lineageCases: lineageCases.length,
           failures,
         },
         null,
@@ -1352,4 +1590,4 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
   }
 }
 
-export { commitHashMatches, commitHashesAgree };
+export { commitHashMatches, commitHashesAgree, buildLineageEntries };

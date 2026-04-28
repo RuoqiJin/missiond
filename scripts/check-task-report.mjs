@@ -74,6 +74,24 @@ const ALLOWED_ROUTER_DISPATCH_STATUS = new Set([
   'blocked',
 ]);
 
+// wave29-04: parent-patch :kind enum. Mirrors the report-contract schema
+// declaration; bare-atom or string forms accepted for ergonomics, but the
+// content MUST be one of these five canonical kinds. Adding a new kind is a
+// schema change — do not silently widen here.
+const ALLOWED_PARENT_PATCH_KINDS = new Set([
+  'lint-cleanup',
+  'doc-fix',
+  'test-fix',
+  'scope-trim',
+  'hotfix-other',
+]);
+
+// wave29-04: hex commit-hash format. Repo policy is permissive on length
+// (>=7 short SHA up to 64-char SHA-256) but strict on character class
+// (lowercase or uppercase hex only). The validator rejects empty strings,
+// non-hex characters, and lengths outside [7, 64].
+const COMMIT_HASH_REGEX = /^[0-9a-f]{7,64}$/i;
+
 function main() {
   const args = process.argv.slice(2);
   let all = false;
@@ -467,6 +485,23 @@ function validateReport(file, report, diagnostics) {
   validateCommitLineage(file, report, props, commitHash, diagnostics);
 }
 
+// wave29-04 helper: hex prefix-match between two SHA strings, mirroring the
+// wave23-03 commitHashesAgree contract — the shorter side must be >= 7 hex
+// chars and a prefix of the longer. Used to detect "final-hash drift" where
+// :commit_hash and the trailing :parent_patches[-1].commit disagree.
+function shaPrefixAgrees(a, b) {
+  if (typeof a !== 'string' || typeof b !== 'string') return false;
+  const ax = a.trim().toLowerCase();
+  const bx = b.trim().toLowerCase();
+  if (ax.length === 0 || bx.length === 0) return false;
+  if (!/^[0-9a-f]+$/.test(ax) || !/^[0-9a-f]+$/.test(bx)) return false;
+  if (ax === bx) return true;
+  const longer = ax.length >= bx.length ? ax : bx;
+  const shorter = ax.length >= bx.length ? bx : ax;
+  if (shorter.length >= 7 && longer.startsWith(shorter)) return true;
+  return false;
+}
+
 function validateCommitLineage(file, report, props, commitHash, diagnostics) {
   const agentHash = keywordPropText(props, ':agent_commit_hash');
   const finalHash = keywordPropText(props, ':final_commit_hash');
@@ -477,27 +512,53 @@ function validateCommitLineage(file, report, props, commitHash, diagnostics) {
     [':final_commit_hash', finalHash],
     [':verified_commit_hash', verifiedHash],
   ]) {
-    if (props[field] && (!value || !/^[0-9a-f]{7,40}$/i.test(value))) {
-      addError(diagnostics, file, props[field].value.loc, `${field} must be a git SHA string when present`);
+    if (props[field] && (!value || !COMMIT_HASH_REGEX.test(value))) {
+      addError(
+        diagnostics,
+        file,
+        props[field].value.loc,
+        `${field} must be a hex git SHA string (>=7 and <=64 chars) when present`,
+      );
     }
   }
 
   if (finalHash && commitHash && finalHash !== commitHash) {
-    addError(diagnostics, file, props[':final_commit_hash'].value.loc, ':final_commit_hash must equal :commit_hash when present');
+    addError(
+      diagnostics,
+      file,
+      props[':final_commit_hash'].value.loc,
+      ':final_commit_hash must equal :commit_hash when present',
+    );
   }
   if (verifiedHash && commitHash && verifiedHash !== commitHash) {
-    addError(diagnostics, file, props[':verified_commit_hash'].value.loc, ':verified_commit_hash must equal :commit_hash when present');
+    addError(
+      diagnostics,
+      file,
+      props[':verified_commit_hash'].value.loc,
+      ':verified_commit_hash must equal :commit_hash when present',
+    );
   }
 
   const patches = props[':parent_patches']?.value;
   if (patches == null) return;
   if (!isList(patches)) {
-    addError(diagnostics, file, patches.loc ?? report.loc, ':parent_patches must be a vector/list when present');
+    addError(
+      diagnostics,
+      file,
+      patches.loc ?? report.loc,
+      ':parent_patches must be a vector/list when present',
+    );
     return;
   }
+  let lastPatchCommit = null;
   for (const patch of patches.children) {
     if (!isList(patch)) {
-      addError(diagnostics, file, patch.loc ?? patches.loc, ':parent_patches entries must be property lists');
+      addError(
+        diagnostics,
+        file,
+        patch.loc ?? patches.loc,
+        ':parent_patches entries must be property lists',
+      );
       continue;
     }
     const patchProps = readKeywordProps(patch, { start: 0 });
@@ -505,23 +566,72 @@ function validateCommitLineage(file, report, props, commitHash, diagnostics) {
     const patchKind = keywordPropText(patchProps, ':kind');
     const patchReason = keywordPropText(patchProps, ':reason');
     const patchFiles = nodeToStringArray(patchProps[':files']?.value);
-    if (!patchCommit || !/^[0-9a-f]{7,40}$/i.test(patchCommit)) {
-      addError(diagnostics, file, patchProps[':commit']?.value?.loc ?? patch.loc, ':parent_patches entry requires :commit git SHA string');
+    if (!patchCommit || !COMMIT_HASH_REGEX.test(patchCommit)) {
+      addError(
+        diagnostics,
+        file,
+        patchProps[':commit']?.value?.loc ?? patch.loc,
+        ':parent_patches entry requires :commit hex SHA string (>=7 and <=64 chars)',
+      );
     }
     if (!patchKind || patchKind.trim() === '') {
-      addError(diagnostics, file, patchProps[':kind']?.value?.loc ?? patch.loc, ':parent_patches entry requires non-empty :kind');
+      addError(
+        diagnostics,
+        file,
+        patchProps[':kind']?.value?.loc ?? patch.loc,
+        ':parent_patches entry requires non-empty :kind',
+      );
+    } else if (!ALLOWED_PARENT_PATCH_KINDS.has(patchKind)) {
+      addError(
+        diagnostics,
+        file,
+        patchProps[':kind']?.value?.loc ?? patch.loc,
+        `:parent_patches :kind must be one of {${[...ALLOWED_PARENT_PATCH_KINDS].join(', ')}}, got "${patchKind}"`,
+      );
     }
     if (!patchReason || patchReason.trim() === '') {
-      addError(diagnostics, file, patchProps[':reason']?.value?.loc ?? patch.loc, ':parent_patches entry requires non-empty :reason');
+      addError(
+        diagnostics,
+        file,
+        patchProps[':reason']?.value?.loc ?? patch.loc,
+        ':parent_patches entry requires non-empty :reason',
+      );
     }
     if (!patchProps[':files']?.value || !isList(patchProps[':files'].value) || patchFiles.length === 0) {
-      addError(diagnostics, file, patchProps[':files']?.value?.loc ?? patch.loc, ':parent_patches entry requires non-empty :files vector');
+      addError(
+        diagnostics,
+        file,
+        patchProps[':files']?.value?.loc ?? patch.loc,
+        ':parent_patches entry requires non-empty :files vector',
+      );
     }
     for (const p of patchFiles) {
       if (path.isAbsolute(p) || p.startsWith('~') || p.split(/[\\/]/).some((segment) => segment === '..')) {
-        addError(diagnostics, file, patchProps[':files']?.value?.loc ?? patch.loc, `:parent_patches :files paths must be repo-relative, got "${p}"`);
+        addError(
+          diagnostics,
+          file,
+          patchProps[':files']?.value?.loc ?? patch.loc,
+          `:parent_patches :files paths must be repo-relative, got "${p}"`,
+        );
       }
     }
+    if (patchCommit) lastPatchCommit = patchCommit;
+  }
+
+  // wave29-04 final-hash drift rule: when :commit_hash AND the trailing
+  // :parent_patches[-1].commit are both supplied, they MUST hex-prefix-agree.
+  // The wave28-02 lineage exemplar populates report :commit_hash with the
+  // post-hotfix final commit; the last :parent_patches entry should be that
+  // same final commit (the worker's original commit lives in
+  // :agent_commit_hash, NOT in :parent_patches). If they disagree the
+  // report's "final" claim is internally inconsistent.
+  if (commitHash && lastPatchCommit && !shaPrefixAgrees(commitHash, lastPatchCommit)) {
+    addError(
+      diagnostics,
+      file,
+      props[':parent_patches'].value.loc ?? report.loc,
+      `:parent_patches last entry :commit "${lastPatchCommit}" does not agree with report :commit_hash "${commitHash}" — final-hash drift`,
+    );
   }
 }
 
@@ -1656,6 +1766,113 @@ function runFixtures() {
           [(:command "echo ok" :exit_code 0 :ok true)])`,
       ok: false,
       expects: /:parent_patches entry requires non-empty :files vector/,
+    },
+    // wave29-04 hardening fixtures. Pin the wave28-02 hotfix exemplar
+    // (worker commit 954116e513c5 followed by parent lint-cleanup commit
+    // 302330a) plus four negative cases covering the new v1 invariants.
+    {
+      name: 'wave29-04 wave28-02 lineage exemplar (worker 954116e513c5 + parent lint-cleanup 302330a)',
+      source: `(report wave29-04-wave28-02-lineage-pass
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-04-wave28-02-lineage-pass"
+        :status done
+        :commit_hash "302330a"
+        :agent_commit_hash "954116e513c5"
+        :final_commit_hash "302330a"
+        :verified_commit_hash "302330a"
+        :parent_patches
+          [(:commit "302330a"
+            :kind lint-cleanup
+            :reason "Parent hotfix marked unused findCycle first parameter as _allNodes to clear TS6133 after the worker commit."
+            :files ["scripts/plan-task-runner.mjs"])]
+        :files_changed ["scripts/plan-task-runner.mjs"]
+        :acceptance_results
+          [(:command "node scripts/plan-task-runner.mjs --dry-fixture" :exit_code 0 :ok true)])`,
+      ok: true,
+    },
+    {
+      name: 'wave29-04 fail-missing-commit (parent patch entry omits :commit)',
+      source: `(report wave29-04-parent-missing-commit
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-04-parent-missing-commit"
+        :status done
+        :commit_hash "302330a"
+        :parent_patches
+          [(:kind lint-cleanup :reason "no commit" :files ["scripts/x.mjs"])]
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:parent_patches entry requires :commit hex SHA string/,
+    },
+    {
+      name: 'wave29-04 fail-malformed-hash (non-hex chars in :agent_commit_hash)',
+      source: `(report wave29-04-agent-malformed
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-04-agent-malformed"
+        :status done
+        :commit_hash "302330a"
+        :agent_commit_hash "not-a-sha-zzz"
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:agent_commit_hash must be a hex git SHA string/,
+    },
+    {
+      name: 'wave29-04 fail-drift (commit_hash and last parent patch commit disagree)',
+      source: `(report wave29-04-final-drift
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-04-final-drift"
+        :status done
+        :commit_hash "302330a"
+        :agent_commit_hash "954116e"
+        :parent_patches
+          [(:commit "deadbee"
+            :kind lint-cleanup
+            :reason "drifted final hash"
+            :files ["scripts/x.mjs"])]
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /final-hash drift/,
+    },
+    {
+      name: 'wave29-04 fail-bad-files-path (parent patch :files contains absolute path)',
+      source: `(report wave29-04-parent-bad-files
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-04-parent-bad-files"
+        :status done
+        :commit_hash "302330a"
+        :parent_patches
+          [(:commit "302330a"
+            :kind lint-cleanup
+            :reason "abs path leak"
+            :files ["/etc/passwd"])]
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:parent_patches :files paths must be repo-relative/,
+    },
+    {
+      name: 'wave29-04 fail-bad-kind (parent patch :kind not in enum)',
+      source: `(report wave29-04-parent-bad-kind
+        :schema "missiond.report-contract.v1"
+        :task_id "wave29-04-parent-bad-kind"
+        :status done
+        :commit_hash "302330a"
+        :parent_patches
+          [(:commit "302330a"
+            :kind unknown-kind
+            :reason "wrong kind"
+            :files ["scripts/x.mjs"])]
+        :files_changed ["scripts/x.mjs"]
+        :acceptance_results
+          [(:command "echo ok" :exit_code 0 :ok true)])`,
+      ok: false,
+      expects: /:parent_patches :kind must be one of/,
     },
   ];
 

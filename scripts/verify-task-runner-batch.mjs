@@ -197,6 +197,27 @@ function commitHashesAgreeLocal(a, b) {
   return false;
 }
 
+// wave29-04: enumerate every commit hash carried by the report's lineage
+// fields. Order: commit_hash, agent_commit_hash, final_commit_hash,
+// verified_commit_hash, then each :parent_patches entry's :commit. Empty
+// strings are filtered. The batch verifier uses this to accept memory
+// completion summaries that mention EITHER the final commit OR the agent
+// commit OR an intermediate parent-patch commit — some completions are
+// written post-worker-commit but pre-hotfix and so quote the worker hash.
+// Exported for fixture coverage and downstream tooling reuse.
+export function collectReportLineageHashes(report) {
+  const flat = [
+    report.commitHash,
+    report.agentCommitHash,
+    report.finalCommitHash,
+    report.verifiedCommitHash,
+  ];
+  const fromPatches = (report.parentPatches ?? []).map((p) => p.commit);
+  return [...flat, ...fromPatches].filter(
+    (hash) => typeof hash === 'string' && hash.trim() !== '',
+  );
+}
+
 // --- Per-node verification (pure) -----------------------------------------
 
 // Verify a single productive node against its evidence. All filesystem and
@@ -302,19 +323,19 @@ export function verifyNode(node, manifest, loaders) {
     };
   }
 
-  // Step 5: cross-check report :commit_hash against the hash embedded in the
-  // matching shared-memory completion :summary (wave28 convention surfaces
-  // the commit there). When neither side has a hash, the wave23-03 verifier
-  // will catch the missing-hash case. When only one side has a hash we do
-  // not fail — the report side is authoritative; the memory hash is
-  // advisory.
+  // Step 5: cross-check report commit lineage against the hash embedded in
+  // the matching shared-memory completion :summary. wave29-04 widens the
+  // accepted lineage from the four flat commit-hash fields to include every
+  // (parent_patches[i].commit) entry too — some completion summaries are
+  // written post-worker-commit but pre-hotfix and so quote the worker /
+  // intermediate hash. The verifier still resolves to the FINAL hash for
+  // the canonical result row (Step 6); this step only decides whether the
+  // memory hash is consistent with SOME role in the lineage. When neither
+  // side has a hash, the wave23-03 verifier catches the missing-hash case.
+  // When only one side has a hash we do not fail — the report side is
+  // authoritative; the memory hash is advisory.
   const memoryHash = extractCommitHashFromText(completion.summary);
-  const reportLineageHashes = [
-    report.commitHash,
-    report.agentCommitHash,
-    report.finalCommitHash,
-    report.verifiedCommitHash,
-  ].filter(Boolean);
+  const reportLineageHashes = collectReportLineageHashes(report);
   if (
     memoryHash &&
     reportLineageHashes.length > 0 &&
@@ -333,8 +354,12 @@ export function verifyNode(node, manifest, loaders) {
   }
 
   // Step 6: wave23-03 verifyRun against the actual git commit (when
-  // available). In dry-fixture mode readCommitAt returns a synthetic
-  // commitInfo so the same code path runs without git.
+  // available). The verification hash is always resolved to the FINAL
+  // commit (verified > final > commit_hash), even when the memory summary
+  // referenced an earlier hash in the lineage — the verified result row
+  // points at the final/verified hash by contract. In dry-fixture mode
+  // readCommitAt returns a synthetic commitInfo so the same code path runs
+  // without git.
   let commitInfo;
   const verificationHash = report.verifiedCommitHash ?? report.finalCommitHash ?? report.commitHash;
   try {
@@ -647,13 +672,36 @@ function buildContractSource({
   );
 }
 
-function buildReportSource({ id, commitHash, files = ['scripts/foo.mjs'], status = 'done' }) {
+function buildReportSource({
+  id,
+  commitHash,
+  files = ['scripts/foo.mjs'],
+  status = 'done',
+  agentCommitHash = null,
+  parentPatches = null,
+}) {
+  const agentLine = agentCommitHash
+    ? `  :agent_commit_hash "${agentCommitHash}"\n`
+    : '';
+  const patchesLine = parentPatches
+    ? `  :parent_patches\n    [${parentPatches
+        .map(
+          (p) =>
+            `(:commit "${p.commit}"\n` +
+            `      :kind ${p.kind}\n` +
+            `      :reason "${p.reason}"\n` +
+            `      :files [${p.files.map((f) => `"${f}"`).join(' ')}])`,
+        )
+        .join('\n     ')}]\n`
+    : '';
   return (
     `(report ${id}\n` +
     `  :schema "missiond.report-contract.v1"\n` +
     `  :task_id "${id}"\n` +
     `  :status ${status}\n` +
     `  :commit_hash "${commitHash}"\n` +
+    agentLine +
+    patchesLine +
     `  :files_changed [${files.map((f) => `"${f}"`).join(' ')}]\n` +
     `  :acceptance_results [(:command "true" :exit_code 0 :ok true)])`
   );
@@ -1149,6 +1197,151 @@ function runFixtures({ json }) {
       failed_contract_verifications: [],
       // skipped_nodes is sorted lexicographically by the verifier.
       skipped_nodes: ['wave99-50-helper', 'wave99-99-archive-prior-task-docs'],
+    },
+  });
+
+  // ---------------------------------------------------------------------
+  // wave29-04 lineage fixtures — pin parent-hotfix lineage acceptance.
+  // The wave28-02 case (worker commit 954116e then parent lint-cleanup
+  // commit 302330a) must verify when the memory completion summary cites
+  // EITHER the worker commit OR the final commit. The verified row should
+  // always point at the final commit (the verification hash resolves to
+  // the FINAL commit by contract).
+  // ---------------------------------------------------------------------
+  const lineageManifest = {
+    ...greenManifest,
+    id: 'm-wave29-04-lineage',
+    nodes: [
+      {
+        task_id: 'wave99-01-foo',
+        depends_on: [],
+        verification_tier: 'local',
+        dispatch_group: 'A',
+        estimated_minutes: 30,
+        heartbeat_minutes: 10,
+        write_scope: ['scripts/foo.mjs'],
+        notes: null,
+        owner: null,
+        kind: null,
+        loc: null,
+      },
+    ],
+  };
+  const lineageContracts = {
+    '.missiond/tasks/wave99/wave99-01-foo.lisp': loadContractFromSourceShim(
+      buildContractSource({ id: 'wave99-01-foo', message: 'feat(tasks): fixture' }),
+    ),
+  };
+  // Report mirrors the wave28-02 lineage shape: final commit is "302330a",
+  // worker commit is "954116e", :parent_patches[0].commit = final.
+  const lineageReports = {
+    '.missiond/tasks/wave99/reports/wave99-01-foo.report.lisp': loadReportFromSource(
+      buildReportSource({
+        id: 'wave99-01-foo',
+        commitHash: '302330a',
+        agentCommitHash: '954116e',
+        parentPatches: [
+          {
+            commit: '302330a',
+            kind: 'lint-cleanup',
+            reason: 'TS6133 unused parameter cleanup',
+            files: ['scripts/foo.mjs'],
+          },
+        ],
+      }),
+      '<fx-lin-final-report>',
+    ),
+  };
+  const lineageCommits = {
+    '302330a': syntheticCommit('302330a'),
+  };
+  // wave29-04 case A: memory completion summary mentions the FINAL commit.
+  fixtures.push({
+    name: 'wave29-04 lineage pass: memory summary cites final commit (302330a)',
+    manifest: lineageManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest-lineage.lisp',
+    loaders: syntheticLoaders({
+      contracts: lineageContracts,
+      reports: lineageReports,
+      ledgers: {
+        '.missiond/tasks/wave99/shared-memory.lisp': loadLedgerFromSource(
+          buildLedgerSource('wave99', [
+            { task: 'wave99-01-foo', summary: 'done at commit 302330a (post-hotfix)' },
+          ]),
+          '<fx-lin-mem-final>',
+        ),
+      },
+      commits: lineageCommits,
+    }),
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 1,
+      total_nodes: 1,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications: [],
+      skipped_nodes: [],
+    },
+  });
+  // wave29-04 case B: memory completion summary mentions the WORKER commit
+  // (some completions are written post-worker-commit but pre-hotfix). The
+  // verifier MUST accept this; the verified row still points at the final
+  // commit. This is the load-bearing requirement #4 from the contract.
+  fixtures.push({
+    name: 'wave29-04 lineage pass: memory summary cites worker commit (954116e), verified row resolves to final',
+    manifest: lineageManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest-lineage.lisp',
+    loaders: syntheticLoaders({
+      contracts: lineageContracts,
+      reports: lineageReports,
+      ledgers: {
+        '.missiond/tasks/wave99/shared-memory.lisp': loadLedgerFromSource(
+          buildLedgerSource('wave99', [
+            { task: 'wave99-01-foo', summary: 'done at commit 954116e (pre-hotfix)' },
+          ]),
+          '<fx-lin-mem-agent>',
+        ),
+      },
+      commits: lineageCommits,
+    }),
+    expect: {
+      aggregate_status: STATUS_ALL_GREEN,
+      verified_nodes: 1,
+      total_nodes: 1,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications: [],
+      skipped_nodes: [],
+    },
+  });
+  // wave29-04 case C: memory completion summary mentions a hash NOT in the
+  // lineage. MUST fail with the structured commit-hash-mismatch error.
+  fixtures.push({
+    name: 'wave29-04 lineage fail: memory summary cites hash outside lineage',
+    manifest: lineageManifest,
+    manifestPath: '.missiond/tasks/wave99/manifest-lineage.lisp',
+    loaders: syntheticLoaders({
+      contracts: lineageContracts,
+      reports: lineageReports,
+      ledgers: {
+        '.missiond/tasks/wave99/shared-memory.lisp': loadLedgerFromSource(
+          buildLedgerSource('wave99', [
+            { task: 'wave99-01-foo', summary: 'done at commit cafe123 (typo)' },
+          ]),
+          '<fx-lin-mem-bad>',
+        ),
+      },
+      commits: lineageCommits,
+    }),
+    expect: {
+      aggregate_status: STATUS_FAILED,
+      verified_nodes: 0,
+      total_nodes: 1,
+      missing_reports: [],
+      missing_memory_completions: [],
+      failed_contract_verifications_task_ids: ['wave99-01-foo'],
+      failed_contract_verifications_reason_match: /commit hash mismatch/,
+      skipped_nodes: [],
     },
   });
 

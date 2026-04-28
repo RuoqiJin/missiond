@@ -157,13 +157,19 @@
       "Optional. wave27-04 router-dispatch-descriptor surface."
       "Vector of non-empty strings; each entry names a concrete reason the descriptor's dispatch handoff is blocked / advisory only. Mirrors the wave27-01 :blockers vector and the wave27-02 builder splice for absent / invalid / registry_missing / non-eligible outcomes.")
     (:agent_commit_hash
-      "Optional. Git SHA string for the worker's original commit when a parent/orchestrator hotfix creates a later final commit.")
+      "Optional. Git SHA string for the worker's original commit when a parent/orchestrator hotfix creates a later final commit. Hex string >= 7 and <= 64 chars; observational, never authoritative for dispatch.")
     (:final_commit_hash
       "Optional. Git SHA string for the final effective commit. When present it MUST equal :commit_hash so legacy readers still see the final commit.")
     (:verified_commit_hash
       "Optional. Git SHA string for the commit whose acceptance/scope verification was rerun. When present it MUST equal :commit_hash.")
     (:parent_patches
-      "Optional. Vector of property lists, each (:commit <sha> :kind <string/atom> :reason <string> :files [repo-relative paths...]). Used for parent hotfixes such as lint/import/format cleanup; checker requires non-empty files and repo-relative paths."))
+      "Optional. Vector of property lists, each (parent-patch :commit <sha> :kind <atom> :reason <string> :files [repo-relative paths...])."
+      "Cross-wave invariants enforced structurally:"
+      "  :commit          — hex string >= 7 and <= 64 chars (mirrors :agent_commit_hash)."
+      "  :kind            — atom enum, one of: lint-cleanup | doc-fix | test-fix | scope-trim | hotfix-other."
+      "  :reason          — non-empty string (human-readable why)."
+      "  :files           — non-empty vector of repo-relative paths (no leading '/' or '~', no '..' traversal)."
+      "  Final-hash drift — when :commit_hash and the LAST :parent_patches entry's :commit are both present, they MUST agree (hex prefix-match >= 7 chars). Worker commit before any patches is recorded in :agent_commit_hash; the final :commit_hash should equal the most recent parent patch commit."))
 
   (status-contract
     :allowed [draft in-progress done blocked rejected]
@@ -205,8 +211,11 @@
        ":router_dispatch_no_execution not the literal atom true (cross-wave invariant — false AND strings are rejected)"
        ":router_dispatch_blockers not a vector of non-empty strings"
        "absolute or ~/.. paths inside :router_dispatch_descriptor_path"
-       ":agent_commit_hash / :final_commit_hash / :verified_commit_hash malformed"
+       ":agent_commit_hash / :final_commit_hash / :verified_commit_hash malformed (hex string >= 7 and <= 64 chars)"
        ":final_commit_hash or :verified_commit_hash present but not equal to :commit_hash"
-       ":parent_patches entry missing :commit / :kind / :reason / non-empty :files"]
+       ":parent_patches entry missing :commit / :kind / :reason / non-empty :files"
+       ":parent_patches :kind not in {lint-cleanup, doc-fix, test-fix, scope-trim, hotfix-other}"
+       ":parent_patches entry :files contains absolute / ~ / .. path"
+       ":parent_patches last entry :commit and report :commit_hash present but disagree (final-hash drift)"]
     :non-goal
       "checker does NOT execute the acceptance commands; it only validates structure. Worker-explanation fields are prose-only — they are validated structurally but their content is never treated as ground truth. Router-recommendation, router-readiness, and router-dispatch-descriptor fields are observational — the recorded recommendation / readiness / descriptor signals are NEVER promoted to authoritative dispatch by the checker."))
