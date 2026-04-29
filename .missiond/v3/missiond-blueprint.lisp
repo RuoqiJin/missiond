@@ -436,5 +436,6 @@
              "node scripts/check-v3-workflow-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
+             "node scripts/check-v3-request-flow-smoke.mjs"
              "node scripts/check-v3-code-isomorphism-complete.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))

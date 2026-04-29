@@ -46,6 +46,10 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-workflow-isomorphism.mjs',
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
+  // Cross-surface request-flow smoke; aggregates the user-facing
+  // request -> intent -> plan -> execute-review path declared in
+  // unified-entry/review-packet/review-response. See wave42-01.
+  'scripts/check-v3-request-flow-smoke.mjs',
 ];
 
 const usage = `Usage:
