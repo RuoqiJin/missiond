@@ -8,9 +8,12 @@ use crate::state::AppState;
 use super::claim_lease::{parse_claims, scopes_overlap_pure};
 use super::completion_audit::collect_string_list;
 use super::log_surface::{
-    append_session_trace_event, companion_path, project_or_target_project, read_log_file,
-    require_str, resolve_project_root, resolve_session_trace_path, resolve_trace_task_id, LogFile,
-    TraceEvent, TraceKind,
+    companion_path, project_or_target_project, read_log_file, require_str, resolve_project_root,
+    LogFile,
+};
+use super::session_trace::{
+    append_session_trace_event, resolve_session_trace_path, resolve_trace_task_id, TraceEvent,
+    TraceKind,
 };
 
 // ───────────────────────────────────────────────────────────────────────

@@ -35,6 +35,7 @@ mod completion_audit;
 mod completion_gates;
 mod log_surface;
 mod preflight;
+mod session_trace;
 mod task_verifier;
 
 #[cfg(test)]
@@ -59,12 +60,10 @@ use self::log_surface::{
 };
 #[cfg(test)]
 use self::log_surface::{
-    allocate_id, append_session_trace_event, append_to_block, build_opened_event,
-    is_valid_trace_id, lisp_quote_string, normalize_dispatch_strategy, now_iso, parse_kv_pairs,
-    project_or_target_project, read_dispatch_metadata_from_log, render_canonical_template,
-    render_trace_event, resolve_session_trace_path, resolve_trace_task_id, sanitize_trace_backend,
-    scan_max_id, scan_max_trace_seq, sexp, Counter, DispatchMeta, LogFile, TraceEvent, TraceKind,
-    TraceWarning, DEFAULT_DISPATCH_STRATEGY,
+    allocate_id, append_to_block, build_opened_event, lisp_quote_string,
+    normalize_dispatch_strategy, now_iso, parse_kv_pairs, project_or_target_project,
+    read_dispatch_metadata_from_log, render_canonical_template, scan_max_id, sexp, Counter,
+    DispatchMeta, LogFile, DEFAULT_DISPATCH_STRATEGY,
 };
 use self::preflight::action_preflight_commit;
 #[cfg(test)]
@@ -72,6 +71,12 @@ use self::preflight::{
     build_contract_scope_summary, build_preflight_summary, collect_all_claim_scopes,
     collect_specific_claim_scope, evaluate_task_contract_for_preflight, parse_porcelain_status,
     pattern_matches_path, PorcelainEntry,
+};
+#[cfg(test)]
+use self::session_trace::{
+    append_session_trace_event, is_valid_trace_id, render_trace_event, resolve_session_trace_path,
+    resolve_trace_task_id, sanitize_trace_backend, scan_max_trace_seq, TraceEvent, TraceKind,
+    TraceWarning,
 };
 #[cfg(test)]
 use self::task_verifier::{

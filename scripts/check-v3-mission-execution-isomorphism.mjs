@@ -9,7 +9,9 @@ const usage = `Usage:
 
 Checks the V3 mission_execution Lisp/code isomorphism contract. The large
 agent_execution.rs runtime is deliberately split into three V3 surfaces:
-  - mission_execution-log: companion log, action routing, event projection, trace append
+  - mission_execution-log: companion log, action routing, event projection
+  - agent_execution/session_trace.rs: optional task session-trace projection
+    used by the mission_execution-log and completion-audit surfaces
   - mission_execution-claim-lease: claim/heartbeat/release and scope conflict rules
   - mission_execution-completion-audit: completion metadata, scoped commit audit,
     task contract verification, auto-verifier, repair, and audit
@@ -26,6 +28,8 @@ const DEFAULT_FILES = {
   daemon: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   tests: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  sessionTrace:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   completionAudit:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
@@ -42,7 +46,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['COMPANION_DIR', 'emit_execution_event', 'append_session_trace_event'],
+    noteNeedles: ['COMPANION_DIR', 'emit_execution_event', 'agent_execution/session_trace.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -59,6 +63,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_gates.rs',
@@ -84,6 +89,7 @@ const DAEMON_NEEDLES = [
   '"repair" => action_repair',
   '"preflight_commit" => action_preflight_commit',
   'mod log_surface',
+  'mod session_trace',
   'mod claim_lease',
   'mod completion_audit',
   'mod completion_gates',
@@ -92,6 +98,7 @@ const DAEMON_NEEDLES = [
   '#[cfg(test)]',
   'mod tests;',
   'use self::log_surface::{',
+  'use self::session_trace',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
   'use self::preflight::action_preflight_commit',
@@ -143,13 +150,20 @@ const LOG_SURFACE_NEEDLES = [
   'pub(super) fn build_opened_event',
   'pub(super) struct DispatchMeta',
   'pub(super) fn read_dispatch_metadata_from_log',
+];
+
+const SESSION_TRACE_NEEDLES = [
+  'const TRACE_ID_RE',
   'pub(super) enum TraceKind',
   'pub(super) struct TraceEvent',
   'pub(super) enum TraceWarning',
+  'pub(super) fn is_valid_trace_id',
   'pub(super) fn append_session_trace_event',
   'pub(super) fn resolve_session_trace_path',
   'pub(super) fn resolve_trace_task_id',
   'pub(super) fn sanitize_trace_backend',
+  'pub(super) fn render_trace_event',
+  'pub(super) fn scan_max_trace_seq',
 ];
 
 const CLAIM_LEASE_NEEDLES = [
@@ -305,6 +319,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.daemon, sources.daemon, DAEMON_NEEDLES);
   requireAll(diagnostics, files.tests, sources.tests, TESTS_NEEDLES);
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
+  requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
   requireAll(
     diagnostics,
@@ -349,6 +364,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.daemon]: buildGoodDaemon(),
     [DEFAULT_FILES.tests]: buildGoodTests(),
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
+    [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
     [DEFAULT_FILES.completionAudit]: buildGoodCompletionAudit(),
     [DEFAULT_FILES.completionGates]: buildGoodCompletionGates(),
@@ -375,14 +391,14 @@ function runFixtures(json) {
       },
     },
     {
-      name: 'fail: companion log note loses trace append anchor',
+      name: 'fail: companion log note loses session-trace module anchor',
       expectOk: false,
-      expectMessage: /append_session_trace_event/,
+      expectMessage: /agent_execution\/session_trace\.rs/,
       files: {
         ...goodFiles,
         [DEFAULT_FILES.blueprint]: goodFiles[DEFAULT_FILES.blueprint].replace(
-          'append_session_trace_event',
-          'trace_append_GHOST',
+          'agent_execution/session_trace.rs',
+          'agent_execution/session_trace_GHOST.rs',
         ),
       },
     },
@@ -465,8 +481,9 @@ function buildGoodBlueprint() {
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "COMPANION_DIR .missiond/v2 is the durable log root; action routing, emit_execution_event, DispatchMeta, and append_session_trace_event keep log writes, live events, and optional task traces aligned.")
+	      :note "COMPANION_DIR .missiond/v2 is the durable log root; action routing, emit_execution_event, DispatchMeta, and agent_execution/session_trace.rs keep log writes, live events, and optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -507,6 +524,7 @@ function buildGoodDaemon() {
   }
 }
 mod log_surface;
+mod session_trace;
 mod claim_lease;
 mod completion_audit;
 mod completion_gates;
@@ -518,6 +536,7 @@ use self::log_surface::{
   build_opened_event, emit_execution_event, normalize_dispatch_strategy,
   read_dispatch_metadata_from_log,
 };
+use self::session_trace::{append_session_trace_event};
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
 use self::preflight::action_preflight_commit;
@@ -571,13 +590,21 @@ pub(super) async fn emit_execution_event() {}
 pub(super) fn build_opened_event() {}
 pub(super) struct DispatchMeta {}
 pub(super) fn read_dispatch_metadata_from_log() {}
+`;
+}
+
+function buildGoodSessionTrace() {
+  return `const TRACE_ID_RE: &str = "^[a-z0-9][a-z0-9._-]*$";
 pub(super) enum TraceKind {}
 pub(super) struct TraceEvent {}
 pub(super) enum TraceWarning {}
+pub(super) fn is_valid_trace_id() {}
 pub(super) fn append_session_trace_event() {}
 pub(super) fn resolve_session_trace_path() {}
 pub(super) fn resolve_trace_task_id() {}
 pub(super) fn sanitize_trace_backend() {}
+pub(super) fn render_trace_event() {}
+pub(super) fn scan_max_trace_seq() {}
 `;
 }
 
