@@ -18,6 +18,10 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   daemon: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
+  logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
+  completionAudit:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
 };
 
@@ -41,6 +45,9 @@ const SURFACES = [
 const BLUEPRINT_NEEDLES = [
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
   'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
   AGGREGATE_COMMAND,
 ];
@@ -68,23 +75,45 @@ const DAEMON_NEEDLES = [
   'fn read_dispatch_metadata_from_log',
   'enum TraceKind',
   'fn append_session_trace_event',
-  'const DEFAULT_LEASE_SECS: i64 = 1800',
-  'const MAX_LEASE_SECS: i64 = 24 * 3600',
+  'mod log_surface',
+  'mod claim_lease',
+  'mod completion_audit',
+  'use self::log_surface::normalize_dispatch_strategy',
+  'pub(super) use self::claim_lease::scopes_overlap_pure',
+  'use self::completion_audit',
   'fn parse_claims',
-  'pub(super) fn scopes_overlap_pure',
   'async fn action_claim',
   'async fn action_heartbeat',
   'async fn action_release',
-  'const VALID_COMMIT_STATUSES',
-  'const VALID_VERIFIER_STATUSES',
-  'const VALID_TASK_RUN_VERIFIER_STATUSES',
-  'const FINDING_SCOPED_COMMIT_VIOLATION',
   'fn enforce_scoped_commit_completion',
   'fn enforce_task_contract_completion',
   'fn enforce_verified_completion',
   'fn auto_run_task_run_verifier',
   'fn build_preflight_summary',
   'async fn action_preflight_commit',
+];
+
+const LOG_SURFACE_NEEDLES = [
+  'const VALID_DISPATCH_STRATEGIES',
+  'const DEFAULT_DISPATCH_STRATEGY',
+  'pub(super) fn normalize_dispatch_strategy',
+];
+
+const CLAIM_LEASE_NEEDLES = [
+  'pub(super) const DEFAULT_LEASE_SECS: i64 = 1800',
+  'pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600',
+  'pub(super) fn scopes_overlap',
+  'pub(in crate::handlers::knowledge) fn scopes_overlap_pure',
+];
+
+const COMPLETION_AUDIT_NEEDLES = [
+  'const VALID_COMMIT_STATUSES',
+  'const VALID_VERIFIER_STATUSES',
+  'const VALID_TASK_RUN_VERIFIER_STATUSES',
+  'const FINDING_SCOPED_COMMIT_VIOLATION',
+  'pub(super) fn normalize_commit_status',
+  'pub(super) fn normalize_verifier_status',
+  'pub(super) fn normalize_task_run_verifier_status',
 ];
 
 const MCP_NEEDLES = [
@@ -164,6 +193,14 @@ function checkFiles(root, files) {
   }
   requireAll(diagnostics, files.blueprint, sources.blueprint, BLUEPRINT_NEEDLES);
   requireAll(diagnostics, files.daemon, sources.daemon, DAEMON_NEEDLES);
+  requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
+  requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
+  requireAll(
+    diagnostics,
+    files.completionAudit,
+    sources.completionAudit,
+    COMPLETION_AUDIT_NEEDLES,
+  );
   requireAll(diagnostics, files.mcp, sources.mcp, MCP_NEEDLES);
   return diagnostics;
 }
@@ -196,6 +233,9 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.daemon]: buildGoodDaemon(),
+    [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
+    [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
+    [DEFAULT_FILES.completionAudit]: buildGoodCompletionAudit(),
     [DEFAULT_FILES.mcp]: buildGoodMcp(),
   };
   const cases = [
@@ -303,19 +343,22 @@ function buildGoodBlueprint() {
   return `(missiond-blueprint
   (implementation-map
     (surface mission_execution-log
-      :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
-             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-      :note "COMPANION_DIR .missiond/v2 is the durable log root; action routing, emit_execution_event, DispatchMeta, and append_session_trace_event keep log writes, live events, and optional task traces aligned.")
-    (surface mission_execution-claim-lease
-      :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
-             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-      :note "DEFAULT_LEASE_SECS and MAX_LEASE_SECS bound action_claim and action_heartbeat; action_release closes claims; scopes_overlap_pure is the shared conflict predicate.")
-    (surface mission_execution-completion-audit
-      :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
-             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
+	      :status "code-aligned"
+	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
+	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
+	      :note "COMPANION_DIR .missiond/v2 is the durable log root; action routing, emit_execution_event, DispatchMeta, and append_session_trace_event keep log writes, live events, and optional task traces aligned.")
+	    (surface mission_execution-claim-lease
+	      :status "code-aligned"
+	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs"
+	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
+	      :note "DEFAULT_LEASE_SECS and MAX_LEASE_SECS bound action_claim and action_heartbeat; action_release closes claims; scopes_overlap_pure is the shared conflict predicate.")
+	    (surface mission_execution-completion-audit
+	      :status "code-aligned"
+	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs"
+	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
       :note "VALID_COMMIT_STATUSES, verifier status enums, enforce_scoped_commit_completion, enforce_task_contract_completion, auto_run_task_run_verifier, repair, audit, and preflight_commit form the completion durability gate."))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
@@ -340,12 +383,12 @@ function buildGoodDaemon() {
   }
 }
 const COMPANION_DIR: &str = ".missiond/v2";
-const DEFAULT_LEASE_SECS: i64 = 1800;
-const MAX_LEASE_SECS: i64 = 24 * 3600;
-const VALID_COMMIT_STATUSES: &[&str] = &[];
-const VALID_VERIFIER_STATUSES: &[&str] = &[];
-const VALID_TASK_RUN_VERIFIER_STATUSES: &[&str] = &[];
-const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
+mod log_surface;
+mod claim_lease;
+mod completion_audit;
+use self::log_surface::normalize_dispatch_strategy;
+pub(super) use self::claim_lease::scopes_overlap_pure;
+use self::completion_audit::{};
 async fn emit_execution_event() {}
 fn build_opened_event() {}
 fn read_dispatch_metadata_from_log() {}
@@ -354,7 +397,6 @@ fn write_log_file() {}
 enum TraceKind {}
 fn append_session_trace_event() {}
 fn parse_claims() {}
-pub(super) fn scopes_overlap_pure() {}
 async fn action_claim() {}
 async fn action_heartbeat() {}
 async fn action_release() {}
@@ -364,6 +406,32 @@ fn enforce_verified_completion() {}
 fn auto_run_task_run_verifier() {}
 fn build_preflight_summary() {}
 async fn action_preflight_commit() {}
+`;
+}
+
+function buildGoodLogSurface() {
+  return `const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
+const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
+pub(super) fn normalize_dispatch_strategy() {}
+`;
+}
+
+function buildGoodClaimLease() {
+  return `pub(super) const DEFAULT_LEASE_SECS: i64 = 1800;
+pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600;
+pub(super) fn scopes_overlap() {}
+pub(in crate::handlers::knowledge) fn scopes_overlap_pure() {}
+`;
+}
+
+function buildGoodCompletionAudit() {
+  return `const VALID_COMMIT_STATUSES: &[&str] = &[];
+const VALID_VERIFIER_STATUSES: &[&str] = &[];
+const VALID_TASK_RUN_VERIFIER_STATUSES: &[&str] = &[];
+const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
+pub(super) fn normalize_commit_status() {}
+pub(super) fn normalize_verifier_status() {}
+pub(super) fn normalize_task_run_verifier_status() {}
 `;
 }
 

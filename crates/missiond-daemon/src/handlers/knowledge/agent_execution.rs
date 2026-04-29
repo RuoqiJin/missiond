@@ -29,6 +29,22 @@ use tracing::warn;
 
 use crate::state::AppState;
 
+mod claim_lease;
+mod completion_audit;
+mod log_surface;
+
+pub(super) use self::claim_lease::scopes_overlap_pure;
+use self::claim_lease::{scopes_overlap, DEFAULT_LEASE_SECS, MAX_LEASE_SECS};
+use self::completion_audit::{
+    normalize_commit_status, normalize_task_run_verifier_status, normalize_verifier_status,
+    FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
+    FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
+    VALID_VERIFIER_STATUSES,
+};
+use self::log_surface::normalize_dispatch_strategy;
+#[cfg(test)]
+use self::log_surface::DEFAULT_DISPATCH_STRATEGY;
+
 /// Forward an `ExecutionEvent` to the v2 bus and log (but never propagate)
 /// publish failures. Companion-log writes are already durable on disk; the
 /// bus event is a live projection.
@@ -118,141 +134,6 @@ fn read_dispatch_metadata_from_log(file: &LogFile) -> DispatchMeta {
 }
 
 const COMPANION_DIR: &str = ".missiond/v2";
-const DEFAULT_LEASE_SECS: i64 = 1800;
-const MAX_LEASE_SECS: i64 = 24 * 3600;
-
-/// Canonical workstation-dispatch strategies surfaced by intent-tools.lisp ::
-/// implemented-surface mission_execution :: :workstation-dispatch-record. Kept
-/// in sync with `plan.rs::VALID_DISPATCH_STRATEGIES`; unknown / empty inputs
-/// normalize to `DEFAULT_DISPATCH_STRATEGY` so legacy callers keep working.
-const VALID_DISPATCH_STRATEGIES: &[&str] = &[
-    "resident-lisp",
-    "fresh-code-alignment",
-    "agent-team",
-    "mixed",
-    "prompt-fallback",
-    "unknown",
-];
-const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
-
-/// Canonical scoped-commit handoff statuses surfaced by intent-memory.lisp ::
-/// helper agent-execution-coordination :: shared-memory-slots :: completions
-/// :commit-status-values "[not-required pending committed blocked skipped]".
-/// Used both to validate `mission_execution(action=complete, commit_status=…)`
-/// arguments and to drive the audit checks for the durability plane.
-const VALID_COMMIT_STATUSES: &[&str] = &[
-    "not-required",
-    "pending",
-    "committed",
-    "blocked",
-    "skipped",
-];
-
-/// Audit finding kinds emitted by the scoped-commit handoff checks. Kept as
-/// `&'static str` constants so test assertions can pin the exact wire form
-/// without spelling them out repeatedly. Names mirror the scoped-commit
-/// contract terminology (intent-memory.lisp :: scoped-commit-contract +
-/// intent-flow.lisp :: F-scoped-commit-handoff :: failure-modes).
-const FINDING_COMMIT_STATUS_NO_HASH: &str = "commit-status-without-hash";
-const FINDING_COMMIT_BLOCKED_NO_BLOCKER: &str = "commit-status-blocked-without-blocker";
-const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
-
-/// Canonical verifier-status values surfaced by wave19-02 / wave19-08 ::
-/// task-contract completion metadata. The writer agent runs the verifier
-/// out-of-process (typically `node scripts/verify-task-contract.mjs`) and
-/// reports the outcome verbatim. The daemon never runs the verifier
-/// itself — `verifier_status` is purely caller-supplied metadata.
-///
-/// `passed` — verifier exited 0; `failed` — verifier reported errors;
-/// `skipped` — verifier intentionally not run (read-only completion);
-/// `unknown` — caller could not determine the outcome.
-const VALID_VERIFIER_STATUSES: &[&str] = &["passed", "failed", "skipped", "unknown"];
-
-/// Canonical task-run verifier-status values surfaced by wave21-03 ::
-/// task-run verification metadata. Distinct slot from `verifier_status`
-/// (which is the wave19-08 task-contract verifier outcome) so callers
-/// can record both signals on the same completion: contract-shape
-/// verification (verify-task-contract.mjs) vs. end-to-end task-run
-/// verification (verify-task-run.mjs from wave21-02 — task contract +
-/// report + shared-memory completion + commit scope all proven in one
-/// pass). The daemon never spawns Node here either; the writer reports
-/// the outcome verbatim and (under wave22-02) the daemon ALSO runs an
-/// in-process auto-verifier when all four of `task_contract_path`,
-/// `task_report_path`, `shared_memory_path`, and `commit_hash` are
-/// supplied — the daemon-computed verdict wins on the response while
-/// the caller-supplied label persists in the companion log.
-const VALID_TASK_RUN_VERIFIER_STATUSES: &[&str] =
-    &["passed", "failed", "skipped", "unknown"];
-
-/// Normalize an optional dispatch strategy string against the canonical set.
-/// Unknown / empty values fall back to `DEFAULT_DISPATCH_STRATEGY` (`"unknown"`)
-/// without erroring; we never hard-fail open() on a strategy mismatch because
-/// upstream dispatchers may legitimately surface novel labels we then audit.
-fn normalize_dispatch_strategy(raw: Option<&str>) -> &'static str {
-    let v = raw.unwrap_or("").trim();
-    if v.is_empty() {
-        return DEFAULT_DISPATCH_STRATEGY;
-    }
-    for &known in VALID_DISPATCH_STRATEGIES {
-        if known == v {
-            return known;
-        }
-    }
-    DEFAULT_DISPATCH_STRATEGY
-}
-
-/// Return the canonical form of a `commit_status` value if recognised.
-/// Unlike `normalize_dispatch_strategy`, an unknown value yields `None` so
-/// the caller can hard-fail with a structured `INVALID_PARAM`. Per
-/// intent-memory.lisp :: completions :commit-status-values these are the
-/// only legal labels; we refuse to silently coerce typos because audit
-/// invariants downstream key off the exact string.
-fn normalize_commit_status(raw: &str) -> Option<&'static str> {
-    let v = raw.trim();
-    if v.is_empty() {
-        return None;
-    }
-    for &known in VALID_COMMIT_STATUSES {
-        if known == v {
-            return Some(known);
-        }
-    }
-    None
-}
-
-/// Same canonicalize-or-reject contract as `normalize_commit_status`,
-/// but for the wave19-08 verifier-status enum. Unknown labels return
-/// `None` so `action_complete` can hard-fail with `INVALID_PARAM` —
-/// audit / dashboard consumers downstream key off the exact string.
-fn normalize_verifier_status(raw: &str) -> Option<&'static str> {
-    let v = raw.trim();
-    if v.is_empty() {
-        return None;
-    }
-    for &known in VALID_VERIFIER_STATUSES {
-        if known == v {
-            return Some(known);
-        }
-    }
-    None
-}
-
-/// Same canonicalize-or-reject contract as `normalize_verifier_status`
-/// but for the wave21-03 task-run verifier-status enum. Unknown labels
-/// return `None` so `action_complete` can hard-fail with `INVALID_PARAM`
-/// before any file mutation.
-fn normalize_task_run_verifier_status(raw: &str) -> Option<&'static str> {
-    let v = raw.trim();
-    if v.is_empty() {
-        return None;
-    }
-    for &known in VALID_TASK_RUN_VERIFIER_STATUSES {
-        if known == v {
-            return Some(known);
-        }
-    }
-    None
-}
 
 /// Pull a `[string]` argument off `args[key]` and return it as a `Vec<String>`.
 /// Returns `None` if the key is absent so callers can distinguish "field was
@@ -397,12 +278,10 @@ fn project_or_target_project(args: &Value) -> Option<&str> {
 
 fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
     args.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
-        ToolResult::structured_error(
-            ToolError::new(
-                error_codes::MISSING_PARAM,
-                format!("missing required param `{}`", key),
-            ),
-        )
+        ToolResult::structured_error(ToolError::new(
+            error_codes::MISSING_PARAM,
+            format!("missing required param `{}`", key),
+        ))
     })
 }
 
@@ -467,7 +346,10 @@ mod sexp {
     }
 
     pub fn parse(src: &str) -> Result<Vec<Node>> {
-        let mut p = Parser { src: src.as_bytes(), i: 0 };
+        let mut p = Parser {
+            src: src.as_bytes(),
+            i: 0,
+        };
         let mut out = Vec::new();
         loop {
             p.skip_ws_and_comments();
@@ -656,12 +538,12 @@ mod sexp {
                             Some((open, _)) if open == want => {}
                             Some((open, pos)) => {
                                 return Err(anyhow!(
-                                    "mismatched delimiter at byte {}: '{}' closes '{}' opened at {}",
-                                    i,
-                                    c as char,
-                                    open as char,
-                                    pos
-                                ))
+                                "mismatched delimiter at byte {}: '{}' closes '{}' opened at {}",
+                                i,
+                                c as char,
+                                open as char,
+                                pos
+                            ))
                             }
                             None => {
                                 return Err(anyhow!(
@@ -711,16 +593,9 @@ impl LogFile {
         let forms = sexp::parse(&text)?;
         let root_idx = forms
             .iter()
-            .position(|n| {
-                matches!(
-                    n.head_atom(),
-                    Some("execution-log") | Some("execution")
-                )
-            })
+            .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
             .ok_or_else(|| {
-                anyhow!(
-                    "no (execution-log ...) or (execution ...) top-level form in companion log"
-                )
+                anyhow!("no (execution-log ...) or (execution ...) top-level form in companion log")
             })?;
         Ok(Self {
             src: text,
@@ -900,9 +775,7 @@ fn is_valid_trace_id(s: &str) -> bool {
     if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
         return false;
     }
-    chars.all(|c| {
-        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-'
-    })
+    chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-')
 }
 
 /// Slugify a free-form backend / agent name into something matching
@@ -917,12 +790,7 @@ fn sanitize_trace_backend(raw: &str) -> String {
     for c in trimmed.chars() {
         if c.is_ascii_uppercase() {
             out.push(c.to_ascii_lowercase());
-        } else if c.is_ascii_lowercase()
-            || c.is_ascii_digit()
-            || c == '.'
-            || c == '_'
-            || c == '-'
-        {
+        } else if c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '_' || c == '-' {
             out.push(c);
         } else if c == ' ' || c == '/' || c == ':' {
             out.push('-');
@@ -1019,7 +887,10 @@ fn scan_max_trace_seq(forms: &[sexp::Node]) -> u64 {
 /// Append a single trace event to `path`. Best-effort: any failure
 /// returns `Err(TraceWarning)` and the caller MUST surface the warning
 /// without aborting the primary action result.
-fn append_session_trace_event(path: &Path, ev: &TraceEvent) -> std::result::Result<(), TraceWarning> {
+fn append_session_trace_event(
+    path: &Path,
+    ev: &TraceEvent,
+) -> std::result::Result<(), TraceWarning> {
     if !is_valid_trace_id(&ev.task) {
         return Err(TraceWarning::InvalidTaskId(ev.task.clone()));
     }
@@ -1029,16 +900,13 @@ fn append_session_trace_event(path: &Path, ev: &TraceEvent) -> std::result::Resu
     if !path.exists() {
         return Err(TraceWarning::MissingFile(path.display().to_string()));
     }
-    let src =
-        std::fs::read_to_string(path).map_err(|e| TraceWarning::Io(e.to_string()))?;
+    let src = std::fs::read_to_string(path).map_err(|e| TraceWarning::Io(e.to_string()))?;
     let forms = sexp::parse(&src).map_err(|e| TraceWarning::Malformed(e.to_string()))?;
     let trace_form = forms
         .iter()
         .find(|n| n.head_atom() == Some("session-trace"))
         .ok_or_else(|| {
-            TraceWarning::Malformed(
-                "no (session-trace ...) top-level form".to_string(),
-            )
+            TraceWarning::Malformed("no (session-trace ...) top-level form".to_string())
         })?;
     let seq = scan_max_trace_seq(&forms) + 1;
     let at = now_iso();
@@ -1061,7 +929,9 @@ fn append_session_trace_event(path: &Path, ev: &TraceEvent) -> std::result::Resu
     // Trim trailing whitespace before the close so the appended entry sits
     // at a consistent indent (one entry per line block, mirrors the seed
     // file shape).
-    let trimmed = new_body.trim_end_matches(|c: char| c == ' ' || c == '\t').to_string();
+    let trimmed = new_body
+        .trim_end_matches(|c: char| c == ' ' || c == '\t')
+        .to_string();
     new_body = trimmed;
     new_body.push_str(&entry);
     new_body.push('\n');
@@ -1286,9 +1156,14 @@ fn allocate_id(file: &mut LogFile, counter: Counter) -> Result<String> {
                 )
             })?;
         let value_text = file.src[vstart..vend].trim();
-        let n: u32 = value_text
-            .parse()
-            .map_err(|e| anyhow!("id-counters `:{}` not an integer: {} ({})", counter.key(), value_text, e))?;
+        let n: u32 = value_text.parse().map_err(|e| {
+            anyhow!(
+                "id-counters `:{}` not an integer: {} ({})",
+                counter.key(),
+                value_text,
+                e
+            )
+        })?;
         let id = format!("{}{:03}", counter.prefix(), n);
         let next = n + 1;
         let new_value = next.to_string();
@@ -1301,12 +1176,7 @@ fn allocate_id(file: &mut LogFile, counter: Counter) -> Result<String> {
         let forms = sexp::parse(&file.src)?;
         let root_idx = forms
             .iter()
-            .position(|n| {
-                matches!(
-                    n.head_atom(),
-                    Some("execution-log") | Some("execution")
-                )
-            })
+            .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
             .ok_or_else(|| anyhow!("execution-log root vanished after counter bump"))?;
         file.forms = forms;
         file.root_idx = root_idx;
@@ -1490,7 +1360,10 @@ fn parse_claims(file: &LogFile) -> Vec<ClaimRecord> {
         let head = child.head_atom().unwrap_or("");
         let kvs = parse_kv_pairs(&file.src, child.children());
         // Two flavors: head is the id, or `:id <ID>` is inline.
-        let id = if head.starts_with(['C', 'c']) && head.len() > 1 && head[1..].chars().all(|c| c.is_ascii_digit()) {
+        let id = if head.starts_with(['C', 'c'])
+            && head.len() > 1
+            && head[1..].chars().all(|c| c.is_ascii_digit())
+        {
             head.to_string()
         } else if let Some(v) = kvs.get("id").or_else(|| kvs.get("claim-id")).cloned() {
             v.trim().to_string()
@@ -1527,26 +1400,9 @@ fn parse_claims(file: &LogFile) -> Vec<ClaimRecord> {
 
 fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
     let t = s.trim().trim_matches('"');
-    DateTime::parse_from_rfc3339(t).ok().map(|d| d.with_timezone(&Utc))
-}
-
-fn scopes_overlap(a: &str, b: &str) -> bool {
-    scopes_overlap_pure(a, b)
-}
-
-/// wave-17 / task 02 — pure scope-overlap predicate exposed to the
-/// PLAN DAG scheduler so claim-lease conflict detection reuses the
-/// exact semantics established by wave12-01 (this module's
-/// `action_claim`) and wave16-06 (`enforce_scoped_commit_completion`).
-/// Same prefix-match contract: empty strings never overlap; strings
-/// match if they are equal OR one is a prefix of the other. Keeping
-/// the function here (and re-exporting it) prevents semantic drift
-/// across the three call sites.
-pub(super) fn scopes_overlap_pure(a: &str, b: &str) -> bool {
-    if a.is_empty() || b.is_empty() {
-        return false;
-    }
-    a == b || a.starts_with(b) || b.starts_with(a)
+    DateTime::parse_from_rfc3339(t)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1777,10 +1633,7 @@ fn summarize_durability(records: &[CompletionRecord]) -> Value {
     if unknown_count > 0 {
         by_status_json.insert("unknown".to_string(), json!(unknown_count));
     }
-    let latest_status = records
-        .iter()
-        .rev()
-        .find_map(|r| r.commit_status.clone());
+    let latest_status = records.iter().rev().find_map(|r| r.commit_status.clone());
     let latest_hash = records.iter().rev().find_map(|r| r.commit_hash.clone());
     json!({
         "completion_count": total,
@@ -1831,9 +1684,8 @@ async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .unwrap_or("unknown");
 
-    let dispatch_strategy = normalize_dispatch_strategy(
-        args.get("dispatch_strategy").and_then(|v| v.as_str()),
-    );
+    let dispatch_strategy =
+        normalize_dispatch_strategy(args.get("dispatch_strategy").and_then(|v| v.as_str()));
     let target_project = args
         .get("target_project")
         .and_then(|v| v.as_str())
@@ -2133,8 +1985,8 @@ async fn action_claim(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     let claim_id = allocate_id(&mut file, Counter::Claim)?;
     let acquired = now_iso();
-    let expires = (now + chrono::Duration::seconds(lease_secs))
-        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    let expires =
+        (now + chrono::Duration::seconds(lease_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
     let entry = format!(
         "    ({id}\n      :claimer {claimer}\n      :scope {scope}\n      :phase {phase}\n      :acquired-at {acquired}\n      :lease-expires-at {expires}\n      :heartbeat-at {acquired}\n      :status \"active\")",
         id = claim_id,
@@ -2209,8 +2061,11 @@ async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> 
         Some(n) => n.clone(),
         None => {
             return Ok(ToolResult::structured_error(
-                ToolError::new(error_codes::NOT_FOUND, format!("claim {} not found", claim_id))
-                    .with_suggestion("use action=status to list active claims"),
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("claim {} not found", claim_id),
+                )
+                .with_suggestion("use action=status to list active claims"),
             ))
         }
     };
@@ -2233,10 +2088,15 @@ async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> 
 
     let now = Utc::now();
     let now_s = now.to_rfc3339_opts(SecondsFormat::Secs, true);
-    let expires = (now + chrono::Duration::seconds(lease_secs))
-        .to_rfc3339_opts(SecondsFormat::Secs, true);
+    let expires =
+        (now + chrono::Duration::seconds(lease_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
 
-    update_kv_in_node(&mut file, &claim_node, "heartbeat-at", &lisp_quote_string(&now_s))?;
+    update_kv_in_node(
+        &mut file,
+        &claim_node,
+        "heartbeat-at",
+        &lisp_quote_string(&now_s),
+    )?;
     let claim_node2 = find_claim_node(&file, claim_id)
         .cloned()
         .ok_or_else(|| anyhow!("claim node vanished after heartbeat update"))?;
@@ -2302,8 +2162,11 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
         Some(n) => n.clone(),
         None => {
             return Ok(ToolResult::structured_error(
-                ToolError::new(error_codes::NOT_FOUND, format!("claim {} not found", claim_id))
-                    .with_suggestion("use action=status to list active claims"),
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("claim {} not found", claim_id),
+                )
+                .with_suggestion("use action=status to list active claims"),
             ))
         }
     };
@@ -2325,16 +2188,31 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
 
     let now = now_iso();
-    update_kv_in_node(&mut file, &claim_node, "released-at", &lisp_quote_string(&now))?;
+    update_kv_in_node(
+        &mut file,
+        &claim_node,
+        "released-at",
+        &lisp_quote_string(&now),
+    )?;
     let claim_node2 = find_claim_node(&file, claim_id)
         .cloned()
         .ok_or_else(|| anyhow!("claim node vanished after release update"))?;
-    update_kv_in_node(&mut file, &claim_node2, "status", &lisp_quote_string("released"))?;
+    update_kv_in_node(
+        &mut file,
+        &claim_node2,
+        "status",
+        &lisp_quote_string("released"),
+    )?;
     if !summary.is_empty() {
         let claim_node3 = find_claim_node(&file, claim_id)
             .cloned()
             .ok_or_else(|| anyhow!("claim node vanished after status update"))?;
-        update_kv_in_node(&mut file, &claim_node3, "summary", &lisp_quote_string(summary))?;
+        update_kv_in_node(
+            &mut file,
+            &claim_node3,
+            "summary",
+            &lisp_quote_string(summary),
+        )?;
     }
     touch_last_updated(&mut file)?;
     write_log_file(&path, &file)?;
@@ -2389,7 +2267,12 @@ fn find_claim_node<'a>(file: &'a LogFile, claim_id: &str) -> Option<&'a Node> {
 
 /// Update or insert `:key value` inside the given node. The node must be a
 /// list; insertion happens just before the closing paren.
-fn update_kv_in_node(file: &mut LogFile, node: &Node, key: &str, new_value_lit: &str) -> Result<()> {
+fn update_kv_in_node(
+    file: &mut LogFile,
+    node: &Node,
+    key: &str,
+    new_value_lit: &str,
+) -> Result<()> {
     if let Some((kstart, vstart, vend)) = locate_kv_value(&file.src, node, key) {
         let _ = kstart;
         let mut new_src = String::with_capacity(file.src.len());
@@ -2437,7 +2320,10 @@ async fn action_deviate(state: &AppState, args: &Value) -> Result<ToolResult> {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let approved_by = args.get("approved_by").and_then(|v| v.as_str()).unwrap_or("auto");
+    let approved_by = args
+        .get("approved_by")
+        .and_then(|v| v.as_str())
+        .unwrap_or("auto");
     let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
 
     let root = resolve_project_root(state, project_or_target_project(args)).await?;
@@ -2673,9 +2559,7 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
                             VALID_COMMIT_STATUSES, s
                         ),
                     )
-                    .with_suggestion(
-                        "see intent-memory.lisp :: completions :commit-status-values",
-                    ),
+                    .with_suggestion("see intent-memory.lisp :: completions :commit-status-values"),
                 ));
             }
         },
@@ -3200,9 +3084,7 @@ async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
                     // checker requires `[0-9a-f]{4,64}` — drop anything
                     // shorter / non-hex so we don't fail validation.
                     .filter(|s| {
-                        s.len() >= 4
-                            && s.len() <= 64
-                            && s.chars().all(|c| c.is_ascii_hexdigit())
+                        s.len() >= 4 && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit())
                     });
                 let report_path_for_trace = args
                     .get("task_report_path")
@@ -3695,10 +3577,7 @@ fn check_id_monotonic(file: &LogFile, counter: Counter, findings: &mut Vec<Value
                 .filter(|s| s.starts_with(prefix))
         };
         if let Some(idtxt) = id_str {
-            let num: u32 = idtxt
-                .trim_start_matches(prefix)
-                .parse()
-                .unwrap_or(0);
+            let num: u32 = idtxt.trim_start_matches(prefix).parse().unwrap_or(0);
             if seen.contains(&num) {
                 duplicates.push(idtxt);
             } else {
@@ -3733,11 +3612,7 @@ fn check_id_monotonic(file: &LogFile, counter: Counter, findings: &mut Vec<Value
 /// All three are `error`-severity to match the existing audit invariants
 /// (duplicate-id / claim-overlap), so the audit `ok=false` flips and
 /// downstream consumers can gate on the same boolean.
-fn audit_scoped_commit_handoff(
-    file: &LogFile,
-    claims: &[ClaimRecord],
-    findings: &mut Vec<Value>,
-) {
+fn audit_scoped_commit_handoff(file: &LogFile, claims: &[ClaimRecord], findings: &mut Vec<Value>) {
     let completions = parse_completions(file);
     if completions.is_empty() {
         return;
@@ -3855,9 +3730,7 @@ fn enforce_scoped_commit_completion(
     commit_status: Option<&str>,
     commit_blocker: Option<&str>,
 ) -> std::result::Result<Value, ToolResult> {
-    if commit_status == Some("committed")
-        && commit_hash.map(|s| s.is_empty()).unwrap_or(true)
-    {
+    if commit_status == Some("committed") && commit_hash.map(|s| s.is_empty()).unwrap_or(true) {
         return Err(ToolResult::structured_error(
             ToolError::new(
                 "COMMIT_HASH_REQUIRED",
@@ -3869,9 +3742,7 @@ fn enforce_scoped_commit_completion(
         ));
     }
 
-    if commit_status == Some("blocked")
-        && commit_blocker.map(|s| s.is_empty()).unwrap_or(true)
-    {
+    if commit_status == Some("blocked") && commit_blocker.map(|s| s.is_empty()).unwrap_or(true) {
         return Err(ToolResult::structured_error(
             ToolError::new(
                 "COMMIT_BLOCKER_REQUIRED",
@@ -4336,15 +4207,13 @@ fn enforce_verified_completion(
             ));
         }
         None => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_MALFORMED",
-                    format!(
-                        "task_report_path `{}` has no `:schema` field",
-                        report_resolved.display()
-                    ),
+            return Err(ToolResult::structured_error(ToolError::new(
+                "TASK_REPORT_MALFORMED",
+                format!(
+                    "task_report_path `{}` has no `:schema` field",
+                    report_resolved.display()
                 ),
-            ));
+            )));
         }
     }
 
@@ -4360,28 +4229,24 @@ fn enforce_verified_completion(
     let contract_text = match std::fs::read_to_string(&contract_resolved) {
         Ok(s) => s,
         Err(e) => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_CONTRACT_REQUIRED",
-                    format!(
-                        "task_contract_path `{}` is not readable: {}",
-                        contract_resolved.display(),
-                        e
-                    ),
+            return Err(ToolResult::structured_error(ToolError::new(
+                "TASK_CONTRACT_REQUIRED",
+                format!(
+                    "task_contract_path `{}` is not readable: {}",
+                    contract_resolved.display(),
+                    e
                 ),
-            ));
+            )));
         }
     };
     let contract_id = read_task_contract_id(&contract_text).ok_or_else(|| {
-        ToolResult::structured_error(
-            ToolError::new(
-                "TASK_CONTRACT_MALFORMED",
-                format!(
-                    "task_contract_path `{}` is not a `(task <id> ...)` form",
-                    contract_resolved.display()
-                ),
+        ToolResult::structured_error(ToolError::new(
+            "TASK_CONTRACT_MALFORMED",
+            format!(
+                "task_contract_path `{}` is not a `(task <id> ...)` form",
+                contract_resolved.display()
             ),
-        )
+        ))
     })?;
 
     if let Some(report_task_id) = report.task_id.as_deref() {
@@ -4403,15 +4268,13 @@ fn enforce_verified_completion(
             ));
         }
     } else {
-        return Err(ToolResult::structured_error(
-            ToolError::new(
-                "TASK_REPORT_MALFORMED",
-                format!(
-                    "task_report_path `{}` is missing required `:task_id` field",
-                    report_resolved.display()
-                ),
+        return Err(ToolResult::structured_error(ToolError::new(
+            "TASK_REPORT_MALFORMED",
+            format!(
+                "task_report_path `{}` is missing required `:task_id` field",
+                report_resolved.display()
             ),
-        ));
+        )));
     }
 
     if let Some(report_hash) = report.commit_hash.as_deref() {
@@ -4438,15 +4301,13 @@ fn enforce_verified_completion(
             ));
         }
     } else {
-        return Err(ToolResult::structured_error(
-            ToolError::new(
-                "TASK_REPORT_MALFORMED",
-                format!(
-                    "task_report_path `{}` is missing required `:commit_hash` field",
-                    report_resolved.display()
-                ),
+        return Err(ToolResult::structured_error(ToolError::new(
+            "TASK_REPORT_MALFORMED",
+            format!(
+                "task_report_path `{}` is missing required `:commit_hash` field",
+                report_resolved.display()
             ),
-        ));
+        )));
     }
 
     Ok(json!({
@@ -4567,28 +4428,24 @@ fn auto_run_task_run_verifier(
     let contract_text = match std::fs::read_to_string(&contract_resolved) {
         Ok(s) => s,
         Err(e) => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_CONTRACT_REQUIRED",
-                    format!(
-                        "task_contract_path `{}` became unreadable mid-verification: {}",
-                        contract_resolved.display(),
-                        e
-                    ),
+            return Err(ToolResult::structured_error(ToolError::new(
+                "TASK_CONTRACT_REQUIRED",
+                format!(
+                    "task_contract_path `{}` became unreadable mid-verification: {}",
+                    contract_resolved.display(),
+                    e
                 ),
-            ));
+            )));
         }
     };
     let contract_id = read_task_contract_id(&contract_text).ok_or_else(|| {
-        ToolResult::structured_error(
-            ToolError::new(
-                "TASK_CONTRACT_MALFORMED",
-                format!(
-                    "task_contract_path `{}` is not a `(task <id> ...)` form",
-                    contract_resolved.display()
-                ),
+        ToolResult::structured_error(ToolError::new(
+            "TASK_CONTRACT_MALFORMED",
+            format!(
+                "task_contract_path `{}` is not a `(task <id> ...)` form",
+                contract_resolved.display()
             ),
-        )
+        ))
     })?;
 
     // (2) Resolve + load the report-contract. Mirrors the wave21-03
@@ -4651,15 +4508,13 @@ fn auto_run_task_run_verifier(
             ));
         }
         None => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_MALFORMED",
-                    format!(
-                        "task_report_path `{}` has no `:schema` field",
-                        report_resolved.display()
-                    ),
+            return Err(ToolResult::structured_error(ToolError::new(
+                "TASK_REPORT_MALFORMED",
+                format!(
+                    "task_report_path `{}` has no `:schema` field",
+                    report_resolved.display()
                 ),
-            ));
+            )));
         }
     }
     match report.task_id.as_deref() {
@@ -4682,15 +4537,13 @@ fn auto_run_task_run_verifier(
             ));
         }
         None => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_MALFORMED",
-                    format!(
-                        "task_report_path `{}` is missing required `:task_id` field",
-                        report_resolved.display()
-                    ),
+            return Err(ToolResult::structured_error(ToolError::new(
+                "TASK_REPORT_MALFORMED",
+                format!(
+                    "task_report_path `{}` is missing required `:task_id` field",
+                    report_resolved.display()
                 ),
-            ));
+            )));
         }
     }
     // commit_hash overlap: full equality OR either side a prefix of the
@@ -4719,15 +4572,13 @@ fn auto_run_task_run_verifier(
             }
         }
         None => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_MALFORMED",
-                    format!(
-                        "task_report_path `{}` is missing required `:commit_hash` field",
-                        report_resolved.display()
-                    ),
+            return Err(ToolResult::structured_error(ToolError::new(
+                "TASK_REPORT_MALFORMED",
+                format!(
+                    "task_report_path `{}` is missing required `:commit_hash` field",
+                    report_resolved.display()
                 ),
-            ));
+            )));
         }
     }
 
@@ -4930,14 +4781,15 @@ async fn action_repair(state: &AppState, args: &Value) -> Result<ToolResult> {
         Ok(s) => s,
         Err(r) => return Ok(r),
     };
-    let mode = args.get("mode").and_then(|v| v.as_str()).unwrap_or("dry_run");
+    let mode = args
+        .get("mode")
+        .and_then(|v| v.as_str())
+        .unwrap_or("dry_run");
     if mode != "dry_run" && mode != "apply" {
-        return Ok(ToolResult::structured_error(
-            ToolError::new(
-                error_codes::INVALID_PARAM,
-                format!("repair mode must be `dry_run` or `apply`, got `{}`", mode),
-            ),
-        ));
+        return Ok(ToolResult::structured_error(ToolError::new(
+            error_codes::INVALID_PARAM,
+            format!("repair mode must be `dry_run` or `apply`, got `{}`", mode),
+        )));
     }
 
     let root = resolve_project_root(state, project_or_target_project(args)).await?;
@@ -5289,9 +5141,7 @@ fn parse_porcelain_status(text: &str) -> Vec<PorcelainEntry> {
         let rest = &raw[3..];
         // Rename / copy pairs separate `OLD -> NEW`; we pin the new
         // path because that is what lives on disk after `git add`.
-        let path = if (index_status == 'R' || index_status == 'C')
-            && rest.contains(" -> ")
-        {
+        let path = if (index_status == 'R' || index_status == 'C') && rest.contains(" -> ") {
             // unwrap is safe because contains() returned true.
             rest.split(" -> ").nth(1).unwrap().to_string()
         } else {
@@ -5427,7 +5277,10 @@ fn glob_to_regex(pattern: &str) -> regex::Regex {
         } else if c == '?' {
             out.push_str("[^/]");
             i += 1;
-        } else if matches!(c, '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' | '\\') {
+        } else if matches!(
+            c,
+            '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' | '\\'
+        ) {
             out.push('\\');
             out.push(c);
             i += 1;
@@ -5472,7 +5325,11 @@ fn build_contract_scope_summary(
 ) -> Value {
     let staged_forbidden: Vec<String> = staged_files
         .iter()
-        .filter(|p| must_not_touch.iter().any(|pat| pattern_matches_path(p, pat)))
+        .filter(|p| {
+            must_not_touch
+                .iter()
+                .any(|pat| pattern_matches_path(p, pat))
+        })
         .cloned()
         .collect();
     let staged_out_of_scope: Vec<String> = staged_files
@@ -5509,7 +5366,8 @@ fn build_contract_scope_summary(
     } else if staged_files.is_empty() {
         "no staged files in scope yet — `git add` your write-scope edits".to_string()
     } else {
-        "staged set respects :write-scope and :must-not-touch — proceed with scoped `git commit`".to_string()
+        "staged set respects :write-scope and :must-not-touch — proceed with scoped `git commit`"
+            .to_string()
     };
 
     json!({
@@ -5536,12 +5394,7 @@ fn evaluate_task_contract_for_preflight(
     task_contract_path: &str,
     staged_files: &[String],
     changed_files: &[String],
-) -> (
-    &'static str,
-    Option<Value>,
-    Option<String>,
-    Option<String>,
-) {
+) -> (&'static str, Option<Value>, Option<String>, Option<String>) {
     let raw = std::path::Path::new(task_contract_path);
     let resolved: PathBuf = if raw.is_absolute() {
         raw.to_path_buf()
@@ -5687,7 +5540,8 @@ fn build_preflight_summary(
     } else if staged_files.is_empty() && changed_files.is_empty() {
         "worktree clean — nothing to commit".to_string()
     } else if staged_files.is_empty() {
-        "stage the in-scope edits with `git add <paths>` then re-run preflight before committing".to_string()
+        "stage the in-scope edits with `git add <paths>` then re-run preflight before committing"
+            .to_string()
     } else {
         "in-scope changes detected — run scoped `git commit`, then call `action=complete` with `enforce_scoped_commit=true`".to_string()
     };
@@ -5786,12 +5640,10 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
             let canon_abs = match abs.canonicalize() {
                 Ok(p) => p,
                 Err(e) => {
-                    return Ok(ToolResult::structured_error(
-                        ToolError::new(
-                            error_codes::INVALID_PARAM,
-                            format!("cwd `{}` does not exist or is not accessible: {}", cwd, e),
-                        ),
-                    ));
+                    return Ok(ToolResult::structured_error(ToolError::new(
+                        error_codes::INVALID_PARAM,
+                        format!("cwd `{}` does not exist or is not accessible: {}", cwd, e),
+                    )));
                 }
             };
             if !canon_abs.starts_with(&canon_root) {
@@ -5828,11 +5680,7 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
             return Ok(ToolResult::structured_error(
                 ToolError::new(
                     error_codes::NOT_FOUND,
-                    format!(
-                        "companion log {} not readable: {}",
-                        path.display(),
-                        e
-                    ),
+                    format!("companion log {} not readable: {}", path.display(), e),
                 )
                 .with_suggestion("confirm execution_id matches a previously opened companion log"),
             ));
@@ -5842,7 +5690,12 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
     // Resolve which claim scope(s) we audit against. Default = union of
     // all claim scopes; explicit `claim_id` narrows to a single scope so
     // the writer can preflight against the exact claim it just acquired.
-    let claim_scopes = if let Some(cid) = args.get("claim_id").and_then(|v| v.as_str()).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    let claim_scopes = if let Some(cid) = args
+        .get("claim_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         match collect_specific_claim_scope(&file, cid) {
             Ok(scopes) => scopes,
             Err(err) => return Ok(err),
@@ -5988,10 +5841,7 @@ async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolR
     if let Some(trace_path) = resolve_session_trace_path(args, &root) {
         match resolve_trace_task_id(args, &root, execution_id) {
             Some(task_id) => {
-                let ok_flag = summary
-                    .get("ok")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
+                let ok_flag = summary.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
                 let staged_count = summary
                     .get("staged_files")
                     .and_then(|v| v.as_array())
@@ -6055,15 +5905,8 @@ mod tests {
 
     #[test]
     fn template_parses_and_balances() {
-        let body = render_canonical_template(
-            "e",
-            "p",
-            "s",
-            "o",
-            DEFAULT_DISPATCH_STRATEGY,
-            None,
-            None,
-        );
+        let body =
+            render_canonical_template("e", "p", "s", "o", DEFAULT_DISPATCH_STRATEGY, None, None);
         sexp::check_balance(&body).expect("balanced");
         LogFile::parse(body).expect("parse");
     }
@@ -6073,13 +5916,22 @@ mod tests {
         assert_eq!(normalize_dispatch_strategy(None), "unknown");
         assert_eq!(normalize_dispatch_strategy(Some("")), "unknown");
         assert_eq!(normalize_dispatch_strategy(Some("   ")), "unknown");
-        assert_eq!(normalize_dispatch_strategy(Some("not-a-real-mode")), "unknown");
+        assert_eq!(
+            normalize_dispatch_strategy(Some("not-a-real-mode")),
+            "unknown"
+        );
         assert_eq!(
             normalize_dispatch_strategy(Some("fresh-code-alignment")),
             "fresh-code-alignment"
         );
-        assert_eq!(normalize_dispatch_strategy(Some("agent-team")), "agent-team");
-        assert_eq!(normalize_dispatch_strategy(Some("resident-lisp")), "resident-lisp");
+        assert_eq!(
+            normalize_dispatch_strategy(Some("agent-team")),
+            "agent-team"
+        );
+        assert_eq!(
+            normalize_dispatch_strategy(Some("resident-lisp")),
+            "resident-lisp"
+        );
     }
 
     #[test]
@@ -6211,7 +6063,8 @@ mod tests {
 
     #[test]
     fn scan_max_id_handles_legacy_format() {
-        let body = "(execution-log\n  (deviations\n    (D001 :phase \"a\")\n    (D004 :phase \"b\")))\n";
+        let body =
+            "(execution-log\n  (deviations\n    (D001 :phase \"a\")\n    (D004 :phase \"b\")))\n";
         let file = LogFile::parse(body.to_string()).unwrap();
         assert_eq!(scan_max_id(&file, Counter::Deviation), 4);
     }
@@ -6292,7 +6145,10 @@ mod tests {
                 requested_cwd,
                 ..
             } => {
-                assert_eq!(dispatch_strategy.as_deref(), Some(DEFAULT_DISPATCH_STRATEGY));
+                assert_eq!(
+                    dispatch_strategy.as_deref(),
+                    Some(DEFAULT_DISPATCH_STRATEGY)
+                );
                 assert!(target_project.is_none());
                 assert!(requested_cwd.is_none());
             }
@@ -6330,7 +6186,10 @@ mod tests {
         );
         let file = LogFile::parse(body).expect("parse");
         let meta = read_dispatch_metadata_from_log(&file);
-        assert_eq!(meta.dispatch_strategy.as_deref(), Some("fresh-code-alignment"));
+        assert_eq!(
+            meta.dispatch_strategy.as_deref(),
+            Some("fresh-code-alignment")
+        );
         assert_eq!(meta.target_project.as_deref(), Some("missiond"));
         assert_eq!(
             meta.requested_cwd.as_deref(),
@@ -6398,8 +6257,14 @@ mod tests {
         let file = LogFile::parse(body.to_string()).expect("parse");
         let meta = read_dispatch_metadata_from_log(&file);
         assert_eq!(meta.dispatch_strategy.as_deref(), Some("agent-team"));
-        assert!(meta.target_project.is_none(), "empty target_project must collapse to None");
-        assert!(meta.requested_cwd.is_none(), "whitespace requested_cwd must collapse to None");
+        assert!(
+            meta.target_project.is_none(),
+            "empty target_project must collapse to None"
+        );
+        assert!(
+            meta.requested_cwd.is_none(),
+            "whitespace requested_cwd must collapse to None"
+        );
     }
 
     /// The canonical companion log written by `render_canonical_template`
@@ -6550,7 +6415,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Heartbeat").and_then(|v| v.as_object()).unwrap();
         assert_eq!(p.len(), 8);
         assert_full_dispatch_trio(p);
@@ -6570,7 +6436,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Heartbeat").and_then(|v| v.as_object()).unwrap();
         assert_eq!(p.len(), 5);
         assert_no_dispatch_trio(p);
@@ -6590,7 +6457,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Released").and_then(|v| v.as_object()).unwrap();
         assert_eq!(p.len(), 8);
         assert_full_dispatch_trio(p);
@@ -6610,7 +6478,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Released").and_then(|v| v.as_object()).unwrap();
         // Released always carries the `summary` key (Option<String>
         // without skip-serializing) so the legacy shape is 5 fields.
@@ -6631,8 +6500,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("DeviationRecorded").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("DeviationRecorded")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 7);
         assert_full_dispatch_trio(p);
     }
@@ -6650,8 +6523,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("DeviationRecorded").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("DeviationRecorded")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 4);
         assert_no_dispatch_trio(p);
     }
@@ -6669,8 +6546,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("DecisionRecorded").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("DecisionRecorded")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 7);
         assert_full_dispatch_trio(p);
     }
@@ -6688,8 +6569,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("DecisionRecorded").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("DecisionRecorded")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 4);
         assert_no_dispatch_trio(p);
     }
@@ -6707,8 +6592,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("IssueRecorded").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("IssueRecorded")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 7);
         assert_full_dispatch_trio(p);
     }
@@ -6726,8 +6615,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("IssueRecorded").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("IssueRecorded")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 4);
         assert_no_dispatch_trio(p);
     }
@@ -6745,7 +6638,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Audited").and_then(|v| v.as_object()).unwrap();
         assert_eq!(p.len(), 7);
         assert_full_dispatch_trio(p);
@@ -6764,7 +6658,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Audited").and_then(|v| v.as_object()).unwrap();
         assert_eq!(p.len(), 4);
         assert_no_dispatch_trio(p);
@@ -6782,7 +6677,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Repaired").and_then(|v| v.as_object()).unwrap();
         assert_eq!(p.len(), 6);
         assert_full_dispatch_trio(p);
@@ -6800,7 +6696,8 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
         let p = parsed.get("Repaired").and_then(|v| v.as_object()).unwrap();
         assert_eq!(p.len(), 3);
         assert_no_dispatch_trio(p);
@@ -6819,8 +6716,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("StaleClaim").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("StaleClaim")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 7);
         assert_full_dispatch_trio(p);
     }
@@ -6838,8 +6739,12 @@ mod tests {
             target_project: dm.target_project,
             requested_cwd: dm.requested_cwd,
         };
-        let parsed: serde_json::Value = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        let p = parsed.get("StaleClaim").and_then(|v| v.as_object()).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
+        let p = parsed
+            .get("StaleClaim")
+            .and_then(|v| v.as_object())
+            .unwrap();
         assert_eq!(p.len(), 4);
         assert_no_dispatch_trio(p);
     }
@@ -6964,7 +6869,10 @@ mod tests {
             c.changed_files.as_deref(),
             Some(&["src/a.rs".to_string(), "src/b.rs".to_string()][..])
         );
-        assert_eq!(c.staged_files.as_deref(), Some(&["src/a.rs".to_string()][..]));
+        assert_eq!(
+            c.staged_files.as_deref(),
+            Some(&["src/a.rs".to_string()][..])
+        );
         assert_eq!(c.commit_hash.as_deref(), Some("abc1234"));
         assert_eq!(c.commit_status.as_deref(), Some("committed"));
         // Empty blocker collapses to `None` so audit does not key off
@@ -7049,10 +6957,7 @@ mod tests {
             .iter()
             .find(|f| f.get("kind").and_then(|v| v.as_str()) == Some(FINDING_COMMIT_STATUS_NO_HASH))
             .unwrap();
-        assert_eq!(
-            f.get("severity").and_then(|v| v.as_str()),
-            Some("error")
-        );
+        assert_eq!(f.get("severity").and_then(|v| v.as_str()), Some("error"));
     }
 
     /// Audit must flag a completion whose commit_status="blocked" lacks a
@@ -7071,8 +6976,10 @@ mod tests {
         let claims = parse_claims(&file);
         let mut findings = Vec::new();
         audit_scoped_commit_handoff(&file, &claims, &mut findings);
-        assert!(findings.iter().any(|f| f.get("kind").and_then(|v| v.as_str())
-            == Some(FINDING_COMMIT_BLOCKED_NO_BLOCKER)));
+        assert!(findings
+            .iter()
+            .any(|f| f.get("kind").and_then(|v| v.as_str())
+                == Some(FINDING_COMMIT_BLOCKED_NO_BLOCKER)));
     }
 
     /// Audit must flag staged_files paths that escape every recorded
@@ -7096,7 +7003,9 @@ mod tests {
         audit_scoped_commit_handoff(&file, &claims, &mut findings);
         let violation = findings
             .iter()
-            .find(|f| f.get("kind").and_then(|v| v.as_str()) == Some(FINDING_SCOPED_COMMIT_VIOLATION))
+            .find(|f| {
+                f.get("kind").and_then(|v| v.as_str()) == Some(FINDING_SCOPED_COMMIT_VIOLATION)
+            })
             .expect("scoped-commit-violation finding required");
         let staged = violation
             .get("staged_files")
@@ -7159,11 +7068,11 @@ mod tests {
     #[test]
     fn summarize_durability_handles_empty_and_mixed() {
         let v = summarize_durability(&[]);
-        assert_eq!(
-            v.get("completion_count").and_then(|x| x.as_i64()),
-            Some(0)
-        );
-        assert!(v.get("latest_commit_status").map(|x| x.is_null()).unwrap_or(false));
+        assert_eq!(v.get("completion_count").and_then(|x| x.as_i64()), Some(0));
+        assert!(v
+            .get("latest_commit_status")
+            .map(|x| x.is_null())
+            .unwrap_or(false));
 
         let records = vec![
             CompletionRecord {
@@ -7363,9 +7272,7 @@ mod tests {
             .get("claim_scopes")
             .and_then(|v| v.as_array())
             .expect("claim_scopes array");
-        assert!(scopes
-            .iter()
-            .any(|v| v.as_str() == Some("crates/foo/")));
+        assert!(scopes.iter().any(|v| v.as_str() == Some("crates/foo/")));
     }
 
     /// Empty staged_files + enforce_scoped_commit=true must still pass
@@ -7376,13 +7283,8 @@ mod tests {
     #[test]
     fn enforce_accepts_empty_staged_files() {
         let file = fresh_file_with_claim();
-        let res = enforce_scoped_commit_completion(
-            &file,
-            Some(&[]),
-            None,
-            Some("not-required"),
-            None,
-        );
+        let res =
+            enforce_scoped_commit_completion(&file, Some(&[]), None, Some("not-required"), None);
         let summary = res.expect("read-only completion must pass");
         assert_eq!(
             summary.get("staged_files_checked").and_then(|v| v.as_u64()),
@@ -7410,13 +7312,7 @@ mod tests {
         // path. We assert the helper rejects it to make the contrast
         // explicit.
         let file = fresh_file_with_claim();
-        let res = enforce_scoped_commit_completion(
-            &file,
-            None,
-            None,
-            Some("committed"),
-            None,
-        );
+        let res = enforce_scoped_commit_completion(&file, None, None, Some("committed"), None);
         assert_eq!(
             extract_error_code(&res.expect_err("opt-in path rejects")).as_deref(),
             Some("COMMIT_HASH_REQUIRED"),
@@ -7710,8 +7606,8 @@ mod tests {
     #[test]
     fn preflight_unknown_claim_id_rejects() {
         let file = fresh_file();
-        let err = collect_specific_claim_scope(&file, "C999")
-            .expect_err("unknown claim id must reject");
+        let err =
+            collect_specific_claim_scope(&file, "C999").expect_err("unknown claim id must reject");
         assert_eq!(extract_error_code(&err).as_deref(), Some("NOT_FOUND"));
     }
 
@@ -8043,7 +7939,10 @@ mod tests {
             "scripts/**",
         ));
         // `*` does not cross `/`.
-        assert!(pattern_matches_path(".missiond/v2/foo.lisp", ".missiond/v2/*.lisp"));
+        assert!(pattern_matches_path(
+            ".missiond/v2/foo.lisp",
+            ".missiond/v2/*.lisp"
+        ));
         assert!(!pattern_matches_path(
             ".missiond/v2/sub/foo.lisp",
             ".missiond/v2/*.lisp",
@@ -8086,18 +7985,33 @@ mod tests {
         let summary =
             build_contract_scope_summary(&staged, &changed, &write_scope, &must_not_touch);
         assert_eq!(
-            summary.get("staged_out_of_scope").and_then(|v| v.as_array()).unwrap().len(),
+            summary
+                .get("staged_out_of_scope")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
             0,
         );
         assert_eq!(
-            summary.get("staged_forbidden").and_then(|v| v.as_array()).unwrap().len(),
+            summary
+                .get("staged_forbidden")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
             0,
         );
         assert_eq!(
-            summary.get("unstaged_in_scope").and_then(|v| v.as_array()).unwrap().len(),
+            summary
+                .get("unstaged_in_scope")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
             0,
         );
-        let next = summary.get("next_step").and_then(|v| v.as_str()).unwrap_or("");
+        let next = summary
+            .get("next_step")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             next.contains("respects :write-scope"),
             "next_step should confirm clean state, got: {}",
@@ -8116,9 +8030,8 @@ mod tests {
             "scripts/render-claudecode-task.mjs".to_string(),
         ];
         let changed = staged.clone();
-        let write_scope = vec![
-            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
-        ];
+        let write_scope =
+            vec!["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string()];
         let must_not_touch = vec!["scripts/**".to_string()];
         let summary =
             build_contract_scope_summary(&staged, &changed, &write_scope, &must_not_touch);
@@ -8139,7 +8052,10 @@ mod tests {
             .filter_map(|v| v.as_str())
             .collect();
         assert_eq!(oos, vec!["scripts/render-claudecode-task.mjs"]);
-        let next = summary.get("next_step").and_then(|v| v.as_str()).unwrap_or("");
+        let next = summary
+            .get("next_step")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             next.contains("must-not-touch"),
             "next_step should mention must-not-touch, got: {}",
@@ -8153,20 +8069,21 @@ mod tests {
     /// can distinguish "out of declared scope" from "explicitly off-limits".
     #[test]
     fn contract_scope_summary_flags_out_of_scope_without_forbidden() {
-        let staged = vec![
-            "crates/missiond-core/src/event/events/execution.rs".to_string(),
-        ];
+        let staged = vec!["crates/missiond-core/src/event/events/execution.rs".to_string()];
         let changed = staged.clone();
-        let write_scope = vec![
-            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
-        ];
+        let write_scope =
+            vec!["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string()];
         // execution.rs is in must-not-touch for wave20-03 but for this
         // test we leave it empty so we get a pure "out-of-scope" signal.
         let must_not_touch: Vec<String> = vec![];
         let summary =
             build_contract_scope_summary(&staged, &changed, &write_scope, &must_not_touch);
         assert_eq!(
-            summary.get("staged_forbidden").and_then(|v| v.as_array()).unwrap().len(),
+            summary
+                .get("staged_forbidden")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
             0,
         );
         let oos: Vec<&str> = summary
@@ -8176,7 +8093,10 @@ mod tests {
             .iter()
             .filter_map(|v| v.as_str())
             .collect();
-        assert_eq!(oos, vec!["crates/missiond-core/src/event/events/execution.rs"]);
+        assert_eq!(
+            oos,
+            vec!["crates/missiond-core/src/event/events/execution.rs"]
+        );
     }
 
     /// Unstaged-but-in-scope: a file the writer edited but forgot to
@@ -8185,9 +8105,8 @@ mod tests {
     /// `staged_forbidden`.
     #[test]
     fn contract_scope_summary_flags_unstaged_in_scope_drift() {
-        let staged = vec![
-            "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
-        ];
+        let staged =
+            vec!["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string()];
         let changed = vec![
             "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs".to_string(),
@@ -8209,10 +8128,17 @@ mod tests {
             vec!["crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"],
         );
         assert_eq!(
-            summary.get("staged_out_of_scope").and_then(|v| v.as_array()).unwrap().len(),
+            summary
+                .get("staged_out_of_scope")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
             0,
         );
-        let next = summary.get("next_step").and_then(|v| v.as_str()).unwrap_or("");
+        let next = summary
+            .get("next_step")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         assert!(
             next.contains("stage the in-scope edits"),
             "next_step should suggest staging, got: {}",
@@ -8261,7 +8187,11 @@ mod tests {
         );
         let scope = summary.expect("loaded path must produce summary");
         assert_eq!(
-            scope.get("staged_out_of_scope").and_then(|v| v.as_array()).unwrap().len(),
+            scope
+                .get("staged_out_of_scope")
+                .and_then(|v| v.as_array())
+                .unwrap()
+                .len(),
             0,
         );
     }
@@ -8272,17 +8202,20 @@ mod tests {
     #[test]
     fn evaluate_contract_for_preflight_missing_file_returns_status() {
         let dir = tempfile::tempdir().expect("tempdir");
-        let (status, summary, resolved_path, failure) = evaluate_task_contract_for_preflight(
-            dir.path(),
-            "tasks/does-not-exist.lisp",
-            &[],
-            &[],
-        );
+        let (status, summary, resolved_path, failure) =
+            evaluate_task_contract_for_preflight(dir.path(), "tasks/does-not-exist.lisp", &[], &[]);
         assert_eq!(status, "missing");
-        assert!(summary.is_none(), "missing file must not yield a scope summary");
+        assert!(
+            summary.is_none(),
+            "missing file must not yield a scope summary"
+        );
         assert!(resolved_path.is_some());
         let msg = failure.expect("missing file must produce failure message");
-        assert!(msg.contains("not readable"), "msg should describe IO failure, got: {}", msg);
+        assert!(
+            msg.contains("not readable"),
+            "msg should describe IO failure, got: {}",
+            msg
+        );
     }
 
     /// Loader malformed-file path: returns `task_contract_status="malformed"`
@@ -8426,7 +8359,8 @@ mod tests {
     /// the report `:task_id`.
     #[test]
     fn read_task_contract_id_extracts_head_symbol() {
-        let body = r#"(task wave21-03-test-contract :schema "missiond.task-contract.v1" :goal "x")"#;
+        let body =
+            r#"(task wave21-03-test-contract :schema "missiond.task-contract.v1" :goal "x")"#;
         assert_eq!(
             read_task_contract_id(body).as_deref(),
             Some("wave21-03-test-contract"),
@@ -8691,9 +8625,15 @@ mod tests {
             .get("checked")
             .and_then(|v| v.as_array())
             .expect("checked");
-        assert!(checked.iter().any(|v| v.as_str() == Some("preconditions_present")));
-        assert!(checked.iter().any(|v| v.as_str() == Some("task_report_loadable")));
-        assert!(checked.iter().any(|v| v.as_str() == Some("task_report_schema")));
+        assert!(checked
+            .iter()
+            .any(|v| v.as_str() == Some("preconditions_present")));
+        assert!(checked
+            .iter()
+            .any(|v| v.as_str() == Some("task_report_loadable")));
+        assert!(checked
+            .iter()
+            .any(|v| v.as_str() == Some("task_report_schema")));
         assert!(checked
             .iter()
             .any(|v| v.as_str() == Some("task_id_matches_contract")));
@@ -8742,8 +8682,8 @@ mod tests {
     #[test]
     fn daemon_never_invokes_mutating_git() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");
-        let path = std::path::Path::new(manifest_dir)
-            .join("src/handlers/knowledge/agent_execution.rs");
+        let path =
+            std::path::Path::new(manifest_dir).join("src/handlers/knowledge/agent_execution.rs");
         let src = std::fs::read_to_string(&path).expect("read self");
         let needle = format!("Command::new({}git{})", '"', '"');
         let command_git = src.matches(needle.as_str()).count();
@@ -9333,12 +9273,8 @@ mod tests {
     /// the script-side checker.
     #[test]
     fn shared_memory_projector_extracts_required_fields() {
-        let summary =
-            read_shared_memory_ledger(WAVE22_02_SMOKE_MEMORY_BODY).expect("must parse");
-        assert_eq!(
-            summary.schema.as_deref(),
-            Some("missiond.shared-memory.v1"),
-        );
+        let summary = read_shared_memory_ledger(WAVE22_02_SMOKE_MEMORY_BODY).expect("must parse");
+        assert_eq!(summary.schema.as_deref(), Some("missiond.shared-memory.v1"),);
         assert!(
             summary
                 .completion_tasks
@@ -9639,7 +9575,9 @@ mod tests {
             report_path: Some(".missiond/tasks/wave23/reports/x.report.lisp".to_string()),
         };
         let rendered = render_trace_event(42, "2026-04-28T01:00:00Z", &ev);
-        assert!(rendered.contains(":id wave23-04-execution-session-trace-integration-v0-complete-42"));
+        assert!(
+            rendered.contains(":id wave23-04-execution-session-trace-integration-v0-complete-42")
+        );
         assert!(rendered.contains(":seq 42"));
         assert!(rendered.contains(":at \"2026-04-28T01:00:00Z\""));
         assert!(rendered.contains(":task wave23-04-execution-session-trace-integration-v0"));
@@ -9671,9 +9609,7 @@ mod tests {
         let forms = sexp::parse(&after).expect("parse");
         assert_eq!(scan_max_trace_seq(&forms), 2);
         // The new entry's id reflects the seq.
-        assert!(after.contains(
-            ":id wave23-04-execution-session-trace-integration-v0-dispatch-2"
-        ));
+        assert!(after.contains(":id wave23-04-execution-session-trace-integration-v0-dispatch-2"));
         // Required fields the checker enforces are all present.
         assert!(after.contains(":kind dispatch"));
         assert!(after.contains(":backend claudecode"));
@@ -9686,9 +9622,13 @@ mod tests {
         let path = write_trace_seed(dir.path(), "session-trace.lisp");
         let task = "wave23-04-execution-session-trace-integration-v0".to_string();
         let backend = "claudecode".to_string();
-        for (i, kind) in [TraceKind::Dispatch, TraceKind::Observation, TraceKind::Complete]
-            .iter()
-            .enumerate()
+        for (i, kind) in [
+            TraceKind::Dispatch,
+            TraceKind::Observation,
+            TraceKind::Complete,
+        ]
+        .iter()
+        .enumerate()
         {
             let ev = TraceEvent {
                 task: task.clone(),
@@ -9734,7 +9674,12 @@ mod tests {
         let mut sorted = ids.clone();
         sorted.sort();
         sorted.dedup();
-        assert_eq!(sorted.len(), 4, "ids must be unique across appends: {:?}", ids);
+        assert_eq!(
+            sorted.len(),
+            4,
+            "ids must be unique across appends: {:?}",
+            ids
+        );
     }
 
     #[test]
@@ -9854,7 +9799,9 @@ mod tests {
             kind: TraceKind::Complete,
             summary: "complete recorded".to_string(),
             agent: None,
-            files: Some(vec!["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string()]),
+            files: Some(vec![
+                "crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs".to_string(),
+            ]),
             commit_hash: Some("deadbeef".to_string()),
             report_path: Some(".missiond/tasks/wave23/reports/wave23-04.report.lisp".to_string()),
         };
@@ -9872,7 +9819,11 @@ mod tests {
             .iter()
             .filter(|f| f.head_atom() == Some("session-trace"))
             .collect();
-        assert_eq!(trace_forms.len(), 1, "must remain a single session-trace form");
+        assert_eq!(
+            trace_forms.len(),
+            1,
+            "must remain a single session-trace form"
+        );
         let event_count = trace_forms[0]
             .children()
             .iter()
