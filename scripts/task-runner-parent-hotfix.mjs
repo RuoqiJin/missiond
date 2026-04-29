@@ -13,13 +13,16 @@ import {
   buildParentPatch,
   finalizeReportFile,
   finalizeReportSource,
+  writeRequestFinalReportFile,
 } from './task-runner-finalize-report.mjs';
 
 const usage = `Usage:
   node scripts/task-runner-parent-hotfix.mjs --report <worker.report.lisp> \\
     --task <task-id> --agent-commit <sha> --parent-commit <sha> \\
     --kind <lint-cleanup|doc-fix|test-fix|scope-trim|hotfix-other> \\
-    --reason <text> --file <repo-path>... [--write-report <path>] [--json]
+    --reason <text> --file <repo-path>... [--write-report <path>] \\
+    [--request-id <request-id> --request-reports-dir <dir>] \\
+    [--verification-receipt <receipt-id-or-path>] [--json]
   node scripts/task-runner-parent-hotfix.mjs --dry-fixture [--json]
 
 Plans the parent/orchestrator side of a post-worker hotfix. It records the
@@ -45,6 +48,9 @@ function parseArgs(argv) {
     reason: null,
     files: [],
     acceptanceCommands: [],
+    requestId: null,
+    requestReportsDir: null,
+    verificationReceipts: [],
     writeReport: null,
     json: false,
     dryFixture: false,
@@ -90,6 +96,18 @@ function parseArgs(argv) {
       opts.acceptanceCommands.push(argv[++i] ?? fail('--acceptance-command requires a value'));
     } else if (arg.startsWith('--acceptance-command=')) {
       opts.acceptanceCommands.push(arg.slice('--acceptance-command='.length));
+    } else if (arg === '--request-id') {
+      opts.requestId = argv[++i] ?? fail('--request-id requires a value');
+    } else if (arg.startsWith('--request-id=')) {
+      opts.requestId = arg.slice('--request-id='.length);
+    } else if (arg === '--request-reports-dir') {
+      opts.requestReportsDir = argv[++i] ?? fail('--request-reports-dir requires a value');
+    } else if (arg.startsWith('--request-reports-dir=')) {
+      opts.requestReportsDir = arg.slice('--request-reports-dir='.length);
+    } else if (arg === '--verification-receipt') {
+      opts.verificationReceipts.push(argv[++i] ?? fail('--verification-receipt requires a value'));
+    } else if (arg.startsWith('--verification-receipt=')) {
+      opts.verificationReceipts.push(arg.slice('--verification-receipt='.length));
     } else if (arg === '--write-report') {
       opts.writeReport = argv[++i] ?? fail('--write-report requires a value');
     } else if (arg.startsWith('--write-report=')) {
@@ -187,8 +205,26 @@ function runCli() {
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, plan.finalized_report_source);
   }
+  let requestFinalReport = null;
+  if (opts.requestId || opts.requestReportsDir) {
+    if (!opts.requestId) fail('--request-id is required with --request-reports-dir');
+    if (!opts.requestReportsDir) fail('--request-reports-dir is required with --request-id');
+    requestFinalReport = writeRequestFinalReportFile({
+      report: plan.finalized_report,
+      requestId: opts.requestId,
+      requestReportsDir: opts.requestReportsDir,
+      verificationReceipts: opts.verificationReceipts,
+    });
+  }
   if (opts.json) {
-    console.log(JSON.stringify({ ...plan, wrote: opts.writeReport ?? null }, null, 2));
+    console.log(JSON.stringify({
+      ...plan,
+      wrote: opts.writeReport ?? null,
+      request_final_report: requestFinalReport ? {
+        path: requestFinalReport.path,
+        source: requestFinalReport.source,
+      } : null,
+    }, null, 2));
   } else {
     process.stdout.write(plan.finalized_report_source);
   }
@@ -236,6 +272,13 @@ function runFixtures() {
       writeReport: finalPath,
     });
     fs.writeFileSync(finalPath, filePlan.finalized_report_source);
+    const requestFinal = writeRequestFinalReportFile({
+      report: filePlan.finalized_report,
+      requestId: 'req-wave29-03',
+      requestReportsDir: path.join(tmp, 'requests', 'req-wave29-03', 'reports'),
+      verificationReceipts: ['req-wave29-03-d842b1d-smoke'],
+    });
+    assert(fs.existsSync(requestFinal.path), 'request-local final report should be written');
     const reread = finalizeReportFile(finalPath, {
       agentCommit: 'd36de80',
       finalCommit: 'd842b1d',

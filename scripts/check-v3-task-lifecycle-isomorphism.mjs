@@ -12,6 +12,7 @@ Checks the V3 task-runner lifecycle Lisp/code isomorphism contract:
   - lifecycle events are validated before append/projection.
   - append-event owns cooperative sequence allocation and atomic ledger writes.
   - append-event can project request-local one-event files when request ids are supplied.
+  - finalizer can project request-local final.lisp reports when request ids are supplied.
   - parent-hotfix and final-report projection preserve lineage fields.
   - scheduler and batch verifier consume lifecycle/finalization projections.
 `;
@@ -97,7 +98,9 @@ function checkFiles(root, files) {
     'scripts/verify-task-runner-batch.mjs',
     'task-scoped compatibility lifecycle ledger',
     '.missiond/requests/<request_id>/events/<seq>.event.lisp',
+    '.missiond/requests/<request_id>/reports/final.lisp',
     'request-local one-event files',
+    'request-local final-report',
     'task-runner-append-event is the only cooperative mutation helper',
     'node scripts/check-v3-task-lifecycle-isomorphism.mjs',
   ]);
@@ -141,6 +144,12 @@ function checkFiles(root, files) {
     ':verified_commit_hash',
     ':parent_patches',
     'renderFinalReport',
+    'REQUEST_FINAL_REPORT_SCHEMA',
+    '--request-id',
+    '--request-reports-dir',
+    'renderRequestFinalReport',
+    'validateRequestFinalReportSource',
+    'writeRequestFinalReportFile',
   ]);
 
   requireAll(diagnostics, files.parentHotfix, sources.parentHotfix, [
@@ -148,6 +157,8 @@ function checkFiles(root, files) {
     "kind: 'parent_hotfix'",
     "mutation_mode: opts.writeReport ? 'write-report' : 'read-only'",
     'finalized_report_source',
+    'request_final_report',
+    '--request-reports-dir',
     '--write-report',
   ]);
 
@@ -207,7 +218,7 @@ function buildFixture() {
              "scripts/task-runner-parent-hotfix.mjs"
              "scripts/project-task-lifecycle-ledger.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; task-runner-append-event is the only cooperative mutation helper"))
+      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; task-runner-append-event is the only cooperative mutation helper"))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.lifecycleChecker, `
@@ -236,12 +247,16 @@ export function finalizeReportObject() {}
 const a = 'at least one parent patch is required';
 const b = 'trailing parent patch commit';
 const c = ':agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches';
-function renderFinalReport() {}`);
+function renderFinalReport() {}
+const s = 'REQUEST_FINAL_REPORT_SCHEMA --request-id --request-reports-dir';
+function renderRequestFinalReport() {}
+function validateRequestFinalReportSource() {}
+function writeRequestFinalReportFile() {}`);
   writeFixture(root, DEFAULT_FILES.parentHotfix, `
 import {} from './task-runner-finalize-report.mjs';
 const event = { kind: 'parent_hotfix' };
 const mode = "mutation_mode: opts.writeReport ? 'write-report' : 'read-only'";
-const a = 'finalized_report_source --write-report';`);
+const a = 'finalized_report_source request_final_report --request-reports-dir --write-report';`);
   writeFixture(root, DEFAULT_FILES.projector, `
 if (event.event_kind === 'parent_hotfix') {}
 if (event.event_kind === 'finalized_report') {}

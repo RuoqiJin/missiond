@@ -10,13 +10,23 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { loadReport, loadReportFromSource } from './verify-task-run.mjs';
+import {
+  head,
+  isList,
+  keywordPropText,
+  nodeToStringArray,
+  parseLisp,
+  readKeywordProps,
+} from './lib/missiond_lisp.mjs';
 
 const usage = `Usage:
   node scripts/task-runner-finalize-report.mjs --report <report.lisp> \\
     --agent-commit <sha> --final-commit <sha> [--verified-commit <sha>] \\
     --parent-patch-commit <sha> --parent-patch-kind <kind> \\
     --parent-patch-reason <text> --parent-patch-file <repo-path>... \\
-    [--acceptance-command <cmd>] [--write <path>] [--json]
+    [--acceptance-command <cmd>] [--write <path>] \\
+    [--request-id <request-id> --request-reports-dir <dir>] \\
+    [--verification-receipt <receipt-id-or-path>] [--json]
   node scripts/task-runner-finalize-report.mjs --dry-fixture [--json]
 
 Projects parent/orchestrator hotfix facts into a finalized report-contract v1
@@ -27,6 +37,7 @@ No git mutation, no git inspection, no spawn, no network, no LLM.
 `;
 
 export const REPORT_SCHEMA = 'missiond.report-contract.v1';
+export const REQUEST_FINAL_REPORT_SCHEMA = 'missiond.final-report.v1';
 export const ALLOWED_PARENT_PATCH_KINDS = new Set([
   'lint-cleanup',
   'doc-fix',
@@ -53,6 +64,9 @@ function parseArgs(argv) {
     parentPatchReason: null,
     parentPatchFiles: [],
     acceptanceCommands: [],
+    requestId: null,
+    requestReportsDir: null,
+    verificationReceipts: [],
     write: null,
     json: false,
     dryFixture: false,
@@ -102,6 +116,18 @@ function parseArgs(argv) {
       opts.acceptanceCommands.push(argv[++i] ?? fail('--acceptance-command requires a value'));
     } else if (arg.startsWith('--acceptance-command=')) {
       opts.acceptanceCommands.push(arg.slice('--acceptance-command='.length));
+    } else if (arg === '--request-id') {
+      opts.requestId = argv[++i] ?? fail('--request-id requires a value');
+    } else if (arg.startsWith('--request-id=')) {
+      opts.requestId = arg.slice('--request-id='.length);
+    } else if (arg === '--request-reports-dir') {
+      opts.requestReportsDir = argv[++i] ?? fail('--request-reports-dir requires a value');
+    } else if (arg.startsWith('--request-reports-dir=')) {
+      opts.requestReportsDir = arg.slice('--request-reports-dir='.length);
+    } else if (arg === '--verification-receipt') {
+      opts.verificationReceipts.push(argv[++i] ?? fail('--verification-receipt requires a value'));
+    } else if (arg.startsWith('--verification-receipt=')) {
+      opts.verificationReceipts.push(arg.slice('--verification-receipt='.length));
     } else if (arg === '--write') {
       opts.write = argv[++i] ?? fail('--write requires a value');
     } else if (arg.startsWith('--write=')) {
@@ -140,6 +166,28 @@ function ensureRepoRelativePath(value, field) {
     throw new Error(`${field} entries must be repo-relative paths, got ${JSON.stringify(value)}`);
   }
   return p;
+}
+
+function ensureRequestId(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error('request id must be a non-empty string');
+  }
+  const requestId = value.trim();
+  if (!/^[a-zA-Z0-9][a-zA-Z0-9._:-]*$/.test(requestId)) {
+    throw new Error(`request id ${JSON.stringify(value)} must be a stable symbol/string token`);
+  }
+  return requestId;
+}
+
+function ensureReceiptRef(value) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(':verification_receipts entries must be non-empty strings');
+  }
+  const ref = value.trim();
+  if (path.isAbsolute(ref) || ref.startsWith('~') || ref.split(/[\\/]/).some((part) => part === '..')) {
+    throw new Error(`:verification_receipts entries must be ids or repo-relative paths, got ${JSON.stringify(value)}`);
+  }
+  return ref;
 }
 
 function uniqueSorted(values) {
@@ -304,6 +352,117 @@ export function renderFinalReport(report) {
     ${renderAcceptanceResults(report.acceptanceResults)})\n`;
 }
 
+export function renderRequestFinalReport(report, opts = {}) {
+  const requestId = ensureRequestId(opts.requestId);
+  const receipts = uniqueSorted((opts.verificationReceipts ?? []).map(ensureReceiptRef));
+  const reportState = report.status === 'done' ? 'finalized' : report.status;
+  const outcome = typeof opts.outcome === 'string' && opts.outcome.trim() !== ''
+    ? opts.outcome.trim()
+    : (report.status === 'done' ? 'done' : report.status);
+
+  return `(final-report ${lispString(`${requestId}-final`)}
+  :schema ${lispString(REQUEST_FINAL_REPORT_SCHEMA)}
+  :request_id ${lispString(requestId)}
+  :task_id ${lispString(report.taskId)}
+  :report_state ${reportState}
+  :agent_commit_hash ${lispString(report.agentCommitHash)}
+  :final_commit_hash ${lispString(report.finalCommitHash)}
+  :verified_commit_hash ${lispString(report.verifiedCommitHash)}
+  :verification_receipts ${renderStringVector(receipts)}
+  :parent_patches
+    ${renderParentPatches(report.parentPatches)}
+  :outcome ${lispString(outcome)}
+  :files_changed ${renderStringVector(report.filesChanged)}
+  :acceptance_results
+    ${renderAcceptanceResults(report.acceptanceResults)})\n`;
+}
+
+export function validateRequestFinalReportSource(source, file = '<request-final-report>') {
+  const diagnostics = [];
+  let forms;
+  try {
+    forms = parseLisp(source, file);
+  } catch (err) {
+    return [`${err.line ?? 1}:${err.column ?? 1}: ${err.message}`];
+  }
+  const reports = forms.filter((form) => isList(form) && head(form) === 'final-report');
+  if (reports.length !== 1) {
+    diagnostics.push(`expected exactly one (final-report ...) form, got ${reports.length}`);
+    return diagnostics;
+  }
+  const report = reports[0];
+  const props = readKeywordProps(report, { start: 2 });
+  const required = [
+    ':schema',
+    ':request_id',
+    ':report_state',
+    ':final_commit_hash',
+    ':verification_receipts',
+    ':parent_patches',
+    ':outcome',
+  ];
+  for (const field of required) {
+    if (!props[field]) diagnostics.push(`missing required field ${field}`);
+  }
+  if (keywordPropText(props, ':schema') !== REQUEST_FINAL_REPORT_SCHEMA) {
+    diagnostics.push(`:schema must be ${JSON.stringify(REQUEST_FINAL_REPORT_SCHEMA)}`);
+  }
+  const requestId = keywordPropText(props, ':request_id');
+  if (!requestId || requestId.trim() === '') diagnostics.push(':request_id must be non-empty');
+  const state = keywordPropText(props, ':report_state');
+  if (!['draft', 'finalized', 'blocked', 'failed', 'done'].includes(state)) {
+    diagnostics.push(':report_state must be draft|finalized|blocked|failed|done');
+  }
+  const finalCommit = keywordPropText(props, ':final_commit_hash');
+  if (!finalCommit || !SHA_RE.test(finalCommit.trim())) {
+    diagnostics.push(':final_commit_hash must be a hex git SHA string (>=7 and <=64 chars)');
+  }
+  const receipts = nodeToStringArray(props[':verification_receipts']?.value);
+  for (const receipt of receipts) {
+    try {
+      ensureReceiptRef(receipt);
+    } catch (err) {
+      diagnostics.push(err.message);
+    }
+  }
+  if (!props[':parent_patches']?.value || !isList(props[':parent_patches'].value)) {
+    diagnostics.push(':parent_patches must be a list/vector');
+  }
+  if (!keywordPropText(props, ':outcome')) diagnostics.push(':outcome must be non-empty');
+  return diagnostics;
+}
+
+export function writeRequestFinalReportFile({
+  report,
+  requestId,
+  requestReportsDir,
+  verificationReceipts = [],
+  outcome = null,
+}) {
+  if (!requestReportsDir || typeof requestReportsDir !== 'string') {
+    throw new Error('requestReportsDir is required to write a request-local final report');
+  }
+  const source = renderRequestFinalReport(report, {
+    requestId,
+    verificationReceipts,
+    outcome,
+  });
+  const diagnostics = validateRequestFinalReportSource(source);
+  if (diagnostics.length > 0) {
+    throw new Error(`generated request-local final report failed validation: ${diagnostics.join('; ')}`);
+  }
+  const dir = path.resolve(requestReportsDir);
+  const target = path.join(dir, 'final.lisp');
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = path.join(dir, `.final.lisp.tmp-${process.pid}-${Date.now()}`);
+  fs.writeFileSync(tmp, source, { flag: 'wx' });
+  fs.renameSync(tmp, target);
+  return {
+    path: target,
+    source,
+  };
+}
+
 function cliOptionsToFinalizeOptions(opts) {
   const parentPatches = [
     buildParentPatch({
@@ -336,10 +495,25 @@ function runCli() {
     fs.mkdirSync(path.dirname(path.resolve(opts.write)), { recursive: true });
     fs.writeFileSync(opts.write, result.source);
   }
+  let requestFinalReport = null;
+  if (opts.requestId || opts.requestReportsDir) {
+    if (!opts.requestId) fail('--request-id is required with --request-reports-dir');
+    if (!opts.requestReportsDir) fail('--request-reports-dir is required with --request-id');
+    requestFinalReport = writeRequestFinalReportFile({
+      report: result.report,
+      requestId: opts.requestId,
+      requestReportsDir: opts.requestReportsDir,
+      verificationReceipts: opts.verificationReceipts,
+    });
+  }
   if (opts.json) {
     console.log(JSON.stringify({
       ok: true,
       wrote: opts.write ?? null,
+      request_final_report: requestFinalReport ? {
+        path: requestFinalReport.path,
+        schema: REQUEST_FINAL_REPORT_SCHEMA,
+      } : null,
       report: result.report,
     }, null, 2));
   } else {
@@ -380,6 +554,28 @@ function runFixtures() {
   assert(finalized.report.parentPatches[0].commit === 'd842b1d', 'parent patch commit should be recorded');
   loadReportFromSource(finalized.source, '<finalized-wave29-03>');
 
+  const requestFinal = renderRequestFinalReport(finalized.report, {
+    requestId: 'req-wave29-03',
+    verificationReceipts: ['.missiond/requests/req-wave29-03/receipts/d842b1d.lisp'],
+  });
+  let requestFinalErrors = validateRequestFinalReportSource(requestFinal, '<request-final>');
+  assert(requestFinalErrors.length === 0, `request-local final report should validate: ${requestFinalErrors.join('; ')}`);
+
+  const tmp = fs.mkdtempSync(path.join(process.cwd(), '.tmp-final-report-'));
+  try {
+    const wrote = writeRequestFinalReportFile({
+      report: finalized.report,
+      requestId: 'req-wave29-03',
+      requestReportsDir: path.join(tmp, 'requests', 'req-wave29-03', 'reports'),
+      verificationReceipts: ['req-wave29-03-d842b1d-smoke'],
+    });
+    assert(wrote.path.endsWith(path.join('reports', 'final.lisp')), 'request-local final path should be reports/final.lisp');
+    requestFinalErrors = validateRequestFinalReportSource(fs.readFileSync(wrote.path, 'utf8'), wrote.path);
+    assert(requestFinalErrors.length === 0, 'written request-local final report should validate');
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+
   let rejected = false;
   try {
     finalizeReportSource(workerDraft, {
@@ -418,7 +614,7 @@ function runFixtures() {
   }
   assert(rejected, 'final commit must agree with trailing parent patch');
 
-  return { ok: true, cases: 3 };
+  return { ok: true, cases: 4 };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
