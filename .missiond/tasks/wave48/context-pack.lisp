@@ -3,7 +3,7 @@
   :wave wave48
   :purpose "Parallel context investigation before code-shard implementation for dynamic slot restart recovery."
   :write-model append-only
-  :sequence 10
+  :sequence 11
 
   (observation :id wave48-context-bootstrap-001
     :agent codex-parent
@@ -96,4 +96,13 @@
     :summary "Hypothetical 'clear assignees on dynamic-slot terminate' shard would touch reap_expired_dynamic_slots (autopilot.rs:1505-1532), the spawn-failed branch (compute_slot.rs:463-466) and the user-terminated branch (compute_slot.rs:509-521) plus a new BoardStore::clear_assignees_for_slot call in db/pg/board.rs. That write-scope overlaps wave48-01-shard-clear-stale-dyn-pin (autopilot.rs + db/pg/board.rs) and adds compute_slot.rs which wave48-01 explicitly excludes via its must-not-touch list. Two shards mutating autopilot.rs in parallel is a hard merge conflict and a checker-isomorphism risk. Resolution: do NOT spawn this shard. wave48-01's dispatch-side existence check (state.mission.get_slot(id) + clear_board_task_assignee) covers the same dangling-pin condition for both restart-wipe AND TTL-reap (see observation wave48-02-obs-ttl-same-trap), so the centralised dispatch-time fix is strictly preferred over a multi-site terminate-time cleanup."
     :files ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs" "crates/missiond-daemon/src/handlers/compute/compute_slot.rs" "crates/missiond-core/src/db/pg/board.rs"]
     :shards [clear-stale-dyn-pin terminate-side-cleanup-hypothetical])
+
+  (integration-plan :id wave48-integration-plan-001
+    :agent codex-integrator
+    :seq 11
+    :at "2026-04-29T06:26:39Z"
+    :summary "Accepted wave48 shards after parallel investigation. Group A has landed: clear-stale-dyn-pin plus blueprint-checker-pin in commit 5c3f30d3. Group B remains: recovery-smoke should add an opt-in restart-during-dispatch smoke without touching crates or V3 blueprint/checker files."
+    :files [".missiond/tasks/wave48/context-pack.lisp" "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs" "scripts/check-v3-request-flow-smoke.mjs"]
+    :accepted-shards [clear-stale-dyn-pin blueprint-checker-pin recovery-smoke]
+    :dispatch-groups [A B])
 )
