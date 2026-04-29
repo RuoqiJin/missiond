@@ -1,7 +1,8 @@
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use super::{parse_kv_pairs, sexp, LogFile};
+use super::log_surface::{sexp, LogFile};
+use super::parse_kv_pairs;
 
 /// Canonical scoped-commit handoff statuses surfaced by intent-memory.lisp ::
 /// helper agent-execution-coordination :: shared-memory-slots :: completions

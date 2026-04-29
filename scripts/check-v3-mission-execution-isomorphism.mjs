@@ -90,6 +90,8 @@ const DAEMON_NEEDLES = [
 const LOG_SURFACE_NEEDLES = [
   'const VALID_DISPATCH_STRATEGIES',
   'const DEFAULT_DISPATCH_STRATEGY',
+  'pub(super) mod sexp',
+  'pub(super) struct LogFile',
   'pub(super) fn normalize_dispatch_strategy',
   'pub(super) async fn emit_execution_event',
   'pub(super) fn build_opened_event',
@@ -422,6 +424,8 @@ async fn action_preflight_commit() {}
 function buildGoodLogSurface() {
   return `const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
 const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
+pub(super) mod sexp {}
+pub(super) struct LogFile {}
 pub(super) fn normalize_dispatch_strategy() {}
 pub(super) async fn emit_execution_event() {}
 pub(super) fn build_opened_event() {}
