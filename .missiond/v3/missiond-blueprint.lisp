@@ -534,6 +534,13 @@
              "scripts/check-v3-unified-entry-isomorphism.mjs"]
       :note "unified-entry-runtime is the daemon-local substrate for F-intent-alignment-plan-execution-loop; mission_request is the user-facing review-packet/respond adapter, while unified_entry.rs owns the staged runtime bridge. The wire stage vocabulary is s1_message_intake, s3_alignment_review_gate, s4_plan_authoring, s5_plan_review_gate, and s6_execution_runner; run_pipeline dispatches to run_directive_compile_stage, run_plan_compile_stage, and run_plan_execute_stage, then decorate stamps pipeline_stage, flow_ref, artifact_refs, and next_step on responses. ArtifactScope projects Directive, Plan, and Execution artifact refs so mission_request can show request-local intent-alignment.lisp / plan.lisp state without reimplementing the routing. This surface composes mission_request, mission_directive, mission_plan, and mission_workflow into the same Lisp flow instead of letting each caller invent an independent request/directive/plan/workflow path.")
 
+    (surface file-artifacts
+      :status "code-aligned"
+      :implements [file-artifacts request-local-artifacts compat-artifact-paths]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
+             "scripts/check-v3-file-artifacts-isomorphism.mjs"]
+      :note "file-artifacts is the shared writer layer for file-first Lisp artifacts. ArtifactKind covers IntentAlignment, Plan, and Workflow; artifact_path maps stable compat path roots .missiond/alignment, .missiond/plans, and .missiond/workflows, while mission_request and task-runner surfaces layer request-local artifact projection under .missiond/requests/<request_id>/ on top. atomic_write_artifact and unique_temp_path_in_dir provide the temp-file + fsync + rename discipline; attempt_artifact_write with WriterContext returns AttemptOutcome::Written, ResolveFailed, or WriteFailed so DB/file partial states stay visible. The invariant is no partial writes: failed writes must not leak partial bytes, and callers must surface write_failed / partial status rather than pretending the Lisp artifact is authoritative.")
+
     (surface mission_directive
       :status "code-aligned"
       :implements [intent-alignment alignment-review-gate]
@@ -653,6 +660,7 @@
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"
+             "node scripts/check-v3-file-artifacts-isomorphism.mjs"
              "node scripts/check-v3-intent-alignment-isomorphism.mjs"
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
              "node scripts/check-v3-workflow-isomorphism.mjs"
