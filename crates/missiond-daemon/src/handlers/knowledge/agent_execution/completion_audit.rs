@@ -2,7 +2,6 @@ use anyhow::Result;
 use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
-use std::path::Path;
 
 use crate::state::AppState;
 
@@ -12,16 +11,13 @@ use super::completion_records::{
     normalize_verifier_status, render_string_list, VALID_COMMIT_STATUSES,
     VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
 };
+use super::completion_trace::append_completion_trace_if_requested;
 use super::log_store::{
     allocate_id, append_to_block, companion_path, lisp_quote_string, now_iso,
     project_or_target_project, read_log_file, require_str, resolve_project_root,
     touch_last_updated, write_log_file, Counter,
 };
 use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
-use super::session_trace::{
-    append_session_trace_event, resolve_session_trace_path, resolve_trace_task_id,
-    sanitize_trace_backend, TraceEvent, TraceKind,
-};
 use super::task_verifier::auto_run_task_run_verifier;
 
 pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -574,81 +570,15 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
         response["verified_validation"] = scope_summary;
     }
 
-    // wave23-04 — opt-in session-trace append. Records `complete` or
-    // `failure` depending on the verifier verdict resolved above. The
-    // entry mirrors the durable companion-log completion: it carries the
-    // commit hash, report path, and changed-file list so future
-    // analyzers can correlate completions with their durable artifacts
-    // without re-reading the .missiond/v2/<exec>.lisp companion.
-    if let Some(trace_path) = resolve_session_trace_path(args, &root) {
-        match resolve_trace_task_id(args, &root, execution_id) {
-            Some(task_id) => {
-                // Failure when caller-supplied OR daemon-computed verifier
-                // status resolved to "failed". Otherwise treat the
-                // completion as a success-shaped event.
-                let final_verifier_status = response
-                    .get("verifier_status")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let kind = match final_verifier_status.as_deref() {
-                    Some("failed") => TraceKind::Failure,
-                    _ => TraceKind::Complete,
-                };
-                let backend = sanitize_trace_backend(agent);
-                // Re-read the commit / report / file metadata from args
-                // since the local bindings above were consumed by the
-                // response builder.
-                let commit_hash_for_trace = args
-                    .get("commit_hash")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    // checker requires `[0-9a-f]{4,64}` — drop anything
-                    // shorter / non-hex so we don't fail validation.
-                    .filter(|s| {
-                        s.len() >= 4 && s.len() <= 64 && s.chars().all(|c| c.is_ascii_hexdigit())
-                    });
-                let report_path_for_trace = args
-                    .get("task_report_path")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    // checker rejects absolute report paths.
-                    .filter(|s| !Path::new(s).is_absolute());
-                let files_for_trace = collect_string_list(args, "changed_files")
-                    .or_else(|| collect_string_list(args, "staged_files"))
-                    .map(|v| {
-                        v.into_iter()
-                            // strip absolute paths — checker rejects them
-                            .filter(|p| !Path::new(p).is_absolute())
-                            .collect::<Vec<_>>()
-                    })
-                    .filter(|v: &Vec<String>| !v.is_empty());
-                let ev = TraceEvent {
-                    task: task_id,
-                    backend,
-                    kind,
-                    summary: format!(
-                        "mission_execution(action=complete) phase={} agent={} completion_id={}",
-                        phase, agent, id
-                    ),
-                    agent: None,
-                    files: files_for_trace,
-                    commit_hash: commit_hash_for_trace,
-                    report_path: report_path_for_trace,
-                };
-                if let Err(w) = append_session_trace_event(&trace_path, &ev) {
-                    response["trace_warning"] = json!(w.to_string());
-                }
-            }
-            None => {
-                response["trace_warning"] = json!(format!(
-                    "session_trace_path supplied but execution_id `{}` is not a valid trace task id and no task_contract_path was provided",
-                    execution_id
-                ));
-            }
-        }
-    }
+    append_completion_trace_if_requested(
+        args,
+        &root,
+        execution_id,
+        phase,
+        agent,
+        &id,
+        &mut response,
+    );
 
     Ok(ToolResult::json_pretty(&response))
 }

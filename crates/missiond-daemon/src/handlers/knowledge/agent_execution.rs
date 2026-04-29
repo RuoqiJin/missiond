@@ -35,6 +35,7 @@ mod completion_audit;
 mod completion_gates;
 mod completion_maintenance;
 mod completion_records;
+mod completion_trace;
 mod lisp_syntax;
 mod log_governance;
 mod log_status;
