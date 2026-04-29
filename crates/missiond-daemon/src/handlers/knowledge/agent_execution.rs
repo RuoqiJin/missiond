@@ -19,7 +19,7 @@
 //! durable-write semantics.
 
 use anyhow::{anyhow, Result};
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::{SecondsFormat, Utc};
 use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
@@ -33,7 +33,10 @@ mod completion_audit;
 mod log_surface;
 
 pub(super) use self::claim_lease::scopes_overlap_pure;
-use self::claim_lease::{scopes_overlap, DEFAULT_LEASE_SECS, MAX_LEASE_SECS};
+use self::claim_lease::{
+    find_claim_node, parse_claims, parse_iso, scopes_overlap, ClaimRecord, DEFAULT_LEASE_SECS,
+    MAX_LEASE_SECS,
+};
 use self::completion_audit::{
     normalize_commit_status, normalize_task_run_verifier_status, normalize_verifier_status,
     FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
@@ -929,76 +932,6 @@ fn read_log_file(path: &Path) -> Result<LogFile> {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// claim helpers
-// ───────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-struct ClaimRecord {
-    id: String,
-    claimer: String,
-    scope: String,
-    phase: Option<String>,
-    lease_expires_at: Option<String>,
-    heartbeat_at: Option<String>,
-    status: String,
-}
-
-fn parse_claims(file: &LogFile) -> Vec<ClaimRecord> {
-    let block = match file.find_block("claims") {
-        Some(b) => b,
-        None => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for child in block.children().iter().skip(1) {
-        let head = child.head_atom().unwrap_or("");
-        let kvs = parse_kv_pairs(&file.src, child.children());
-        // Two flavors: head is the id, or `:id <ID>` is inline.
-        let id = if head.starts_with(['C', 'c'])
-            && head.len() > 1
-            && head[1..].chars().all(|c| c.is_ascii_digit())
-        {
-            head.to_string()
-        } else if let Some(v) = kvs.get("id").or_else(|| kvs.get("claim-id")).cloned() {
-            v.trim().to_string()
-        } else {
-            // Legacy unnumbered claim — keep but with synthetic id.
-            format!("claim@{}", child.start)
-        };
-        let status = kvs
-            .get("status")
-            .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_else(|| {
-                if kvs.get("released-at").is_some() {
-                    "released".to_string()
-                } else {
-                    "active".to_string()
-                }
-            });
-        out.push(ClaimRecord {
-            id,
-            claimer: kvs
-                .get("claimer")
-                .or_else(|| kvs.get("agent"))
-                .cloned()
-                .unwrap_or_default(),
-            scope: kvs.get("scope").cloned().unwrap_or_default(),
-            phase: kvs.get("phase").cloned(),
-            lease_expires_at: kvs.get("lease-expires-at").cloned(),
-            heartbeat_at: kvs.get("heartbeat-at").cloned(),
-            status,
-        });
-    }
-    out
-}
-
-fn parse_iso(s: &str) -> Option<DateTime<Utc>> {
-    let t = s.trim().trim_matches('"');
-    DateTime::parse_from_rfc3339(t)
-        .ok()
-        .map(|d| d.with_timezone(&Utc))
-}
-
-// ───────────────────────────────────────────────────────────────────────
 // completion record + durability projection
 // ───────────────────────────────────────────────────────────────────────
 
@@ -1840,22 +1773,6 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
         "released_at": now,
         "summary": summary,
     })))
-}
-
-fn find_claim_node<'a>(file: &'a LogFile, claim_id: &str) -> Option<&'a Node> {
-    let block = file.find_block("claims")?;
-    for child in block.children().iter().skip(1) {
-        if child.head_atom() == Some(claim_id) {
-            return Some(child);
-        }
-        let kvs = parse_kv_pairs(&file.src, child.children());
-        if let Some(id) = kvs.get("id").or_else(|| kvs.get("claim-id")) {
-            if id.trim().trim_matches('"') == claim_id {
-                return Some(child);
-            }
-        }
-    }
-    None
 }
 
 /// Update or insert `:key value` inside the given node. The node must be a

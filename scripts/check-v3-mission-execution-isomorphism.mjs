@@ -76,7 +76,6 @@ const DAEMON_NEEDLES = [
   'use self::log_surface::{',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
-  'fn parse_claims',
   'async fn action_claim',
   'async fn action_heartbeat',
   'async fn action_release',
@@ -110,6 +109,10 @@ const CLAIM_LEASE_NEEDLES = [
   'pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600',
   'pub(super) fn scopes_overlap',
   'pub(in crate::handlers::knowledge) fn scopes_overlap_pure',
+  'pub(super) struct ClaimRecord',
+  'pub(super) fn parse_claims',
+  'pub(super) fn parse_iso',
+  'pub(super) fn find_claim_node',
 ];
 
 const COMPLETION_AUDIT_NEEDLES = [
@@ -400,7 +403,6 @@ pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
 fn read_log_file() {}
 fn write_log_file() {}
-fn parse_claims() {}
 async fn action_claim() {}
 async fn action_heartbeat() {}
 async fn action_release() {}
@@ -436,6 +438,10 @@ function buildGoodClaimLease() {
 pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600;
 pub(super) fn scopes_overlap() {}
 pub(in crate::handlers::knowledge) fn scopes_overlap_pure() {}
+pub(super) struct ClaimRecord {}
+pub(super) fn parse_claims() {}
+pub(super) fn parse_iso() {}
+pub(super) fn find_claim_node() {}
 `;
 }
 
