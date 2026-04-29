@@ -5,7 +5,7 @@
   :schema "missiond.report-contract.v1"
   :task_id "wave51-01-autopilot-concurrent-slot-dispatch-v0"
   :status done
-  :commit_hash "2d988fc5"
+  :commit_hash "80b41e22"
   :files_changed
     ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
      ".missiond/v3/missiond-blueprint.lisp"
