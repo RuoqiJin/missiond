@@ -1163,6 +1163,7 @@
 	      :status "code-aligned"
 	      :implements [execution-lifecycle execution-event-bus session-trace]
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
 	             "scripts/check-v3-mission-execution-isomorphism.mjs"]
@@ -1172,6 +1173,7 @@
 	      :status "code-aligned"
 	      :implements [execution-claim-lease scoped-write-gate]
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
 	             "scripts/check-v3-mission-execution-isomorphism.mjs"]
@@ -1181,6 +1183,7 @@
 	      :status "code-aligned"
 	      :implements [execution-completion scoped-commit-handoff task-run-auto-verifier]
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
 	             "scripts/check-v3-mission-execution-isomorphism.mjs"]

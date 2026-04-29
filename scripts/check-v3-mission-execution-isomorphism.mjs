@@ -18,6 +18,7 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   daemon: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
+  tests: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   completionAudit:
@@ -45,6 +46,7 @@ const SURFACES = [
 const BLUEPRINT_NEEDLES = [
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
@@ -70,9 +72,19 @@ const DAEMON_NEEDLES = [
   'mod log_surface',
   'mod claim_lease',
   'mod completion_audit',
+  '#[cfg(test)]',
+  'mod tests;',
   'use self::log_surface::{',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
+];
+
+const TESTS_NEEDLES = [
+  'use super::*;',
+  'fn template_parses_and_balances',
+  'fn complete_writes_each_commit_status_value',
+  'fn audit_flags_scoped_commit_violation',
+  'fn resolve_trace_task_id_falls_back_to_execution_id',
 ];
 
 const LOG_SURFACE_NEEDLES = [
@@ -254,6 +266,7 @@ function checkFiles(root, files) {
   }
   requireAll(diagnostics, files.blueprint, sources.blueprint, BLUEPRINT_NEEDLES);
   requireAll(diagnostics, files.daemon, sources.daemon, DAEMON_NEEDLES);
+  requireAll(diagnostics, files.tests, sources.tests, TESTS_NEEDLES);
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
   requireAll(
@@ -294,6 +307,7 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.daemon]: buildGoodDaemon(),
+    [DEFAULT_FILES.tests]: buildGoodTests(),
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
     [DEFAULT_FILES.completionAudit]: buildGoodCompletionAudit(),
@@ -406,18 +420,21 @@ function buildGoodBlueprint() {
     (surface mission_execution-log
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
 	      :note "COMPANION_DIR .missiond/v2 is the durable log root; action routing, emit_execution_event, DispatchMeta, and append_session_trace_event keep log writes, live events, and optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
 	      :note "DEFAULT_LEASE_SECS and MAX_LEASE_SECS bound action_claim and action_heartbeat; action_release closes claims; scopes_overlap_pure is the shared conflict predicate.")
 	    (surface mission_execution-completion-audit
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
       :note "VALID_COMMIT_STATUSES, verifier status enums, enforce_scoped_commit_completion, enforce_task_contract_completion, auto_run_task_run_verifier, repair, audit, and preflight_commit form the completion durability gate."))
@@ -446,12 +463,23 @@ function buildGoodDaemon() {
 mod log_surface;
 mod claim_lease;
 mod completion_audit;
+#[cfg(test)]
+mod tests;
 use self::log_surface::{
   build_opened_event, emit_execution_event, normalize_dispatch_strategy,
   read_dispatch_metadata_from_log,
 };
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
+`;
+}
+
+function buildGoodTests() {
+  return `use super::*;
+fn template_parses_and_balances() {}
+fn complete_writes_each_commit_status_value() {}
+fn audit_flags_scoped_commit_violation() {}
+fn resolve_trace_task_id_falls_back_to_execution_id() {}
 `;
 }
 
