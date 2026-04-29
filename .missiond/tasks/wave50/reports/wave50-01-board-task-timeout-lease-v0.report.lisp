@@ -5,7 +5,7 @@
   :schema "missiond.report-contract.v1"
   :task_id "wave50-01-board-task-timeout-lease-v0"
   :status done
-  :commit_hash "PENDING"
+  :commit_hash "236d7581"
   :files_changed
     ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
      ".missiond/v3/missiond-blueprint.lisp"
