@@ -13,7 +13,8 @@
 // The aggregate covers exactly these implementation surfaces unless the
 // blueprint explicitly changes the V3 surface set:
 //   mission_request, mission_directive, mission_plan, mission_workflow,
-//   task-runner-cli, source-hygiene, context-pack, workstation-config, ops-infra.
+//   review-gate, task-runner-cli, source-hygiene, context-pack,
+//   workstation-config, mission_board, ops-infra.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -35,10 +36,12 @@ export const EXPECTED_SURFACES = [
   'mission_directive',
   'mission_plan',
   'mission_workflow',
+  'review-gate',
   'task-runner-cli',
   'source-hygiene',
   'context-pack',
   'workstation-config',
+  'mission_board',
   'ops-infra',
 ];
 
@@ -47,10 +50,12 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-intent-alignment-isomorphism.mjs',
   'scripts/check-v3-plan-execution-isomorphism.mjs',
   'scripts/check-v3-workflow-isomorphism.mjs',
+  'scripts/check-v3-review-gate-isomorphism.mjs',
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
   'scripts/check-v3-source-hygiene-isomorphism.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
+  'scripts/check-v3-board-isomorphism.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
@@ -385,6 +390,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface review-gate
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface task-runner-cli
       :status "code-aligned"
       :code ["a"]
@@ -401,6 +410,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface mission_board
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface ops-infra
       :status "code-aligned"
       :code ["a"]
@@ -408,7 +421,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all nine surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all eleven surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -448,6 +461,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface review-gate
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface task-runner-cli
       :status "code-aligned"
       :code ["a"]
@@ -457,6 +474,14 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface workstation-config
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface mission_board
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface ops-infra
       :status "code-aligned"
       :code ["a"]
       :note "n"))

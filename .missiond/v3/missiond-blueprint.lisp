@@ -548,6 +548,19 @@
              "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
       :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules and validates balanced workflow_sexp before persisting a Workflow row. distill persist+write_file writes an enriched V3 workflow artifact with :workflow_id, :source_plans, :match_rules, :steps, :status, and :body workflow_sexp under ArtifactKind::Workflow at .missiond/workflows/<topic>.lisp, preserving partial-on-file-failure semantics. compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp or workflow_path, then deterministic mode validates Lisp and emits executable YAML through the same workflow surface; its persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp so .missiond/workflows/<topic>.lisp is the same enriched V3 workflow artifact shape — :workflow_id stamped with the generated methodology flow_id, :source_plans [], :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id / source_path / generated_at, :steps extracted from the methodology body, :status compiled (or compiled_review_required when no steps), and :body containing the methodology Lisp body — instead of canonicalizing the raw methodology source. The methodology branch still has no Workflow DB row (no workflow_id UUID, no schema migration); only the file projection is upgraded so reviewers see the same Lisp truth shape as distill. run_methodology dispatches that compiled YAML. Review gates remain receipt-only, and auto_sonnet_policy={off|safe_after_rules|dry_run} is a closed enum.")
 
+    (surface review-gate
+      :status "code-aligned"
+      :implements [alignment-review-gate plan-review-gate workflow-review-gate two-gate-default]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+             "crates/missiond-mcp/src/tools/knowledge/directive.rs"
+             "crates/missiond-mcp/src/tools/knowledge/plan.rs"
+             "crates/missiond-mcp/src/tools/knowledge/workflow.rs"
+             "scripts/check-v3-review-gate-isomorphism.mjs"]
+      :note "review-gate is the shared event-bus review layer behind alignment-review-gate, plan-review-gate, workflow review, and the V3 two-gate-default axiom. review_gate.rs owns ReviewGatePolicy manual | emit_question | off and ReviewDecision approved | rejected | needs_changes; parse_review_gate_policy / parse_compile_review_gate normalize caller inputs, apply_compile_review_gates fans out to maybe_emit_review_question_created or auto_emit_review_question_after_artifact_write, and maybe_emit_review_question_resolved records explicit review decisions. The gate must never auto-approve intent or plan, never wait for a human in the primary compile/approve path, and never roll back a committed DB/file artifact because the bus failed; failures surface review_question_warning with deterministic review_question_id so callers can retry or resolve manually. directive.rs, plan.rs, and workflow.rs are the only callers for these gate helpers and their MCP schemas expose review_gate_policy plus review_question_id / review_decision so the Lisp-level review packet can stay a pure request-local projection.")
+
     (surface task-runner-cli
       :status "code-aligned"
       :implements [execution-lifecycle verification-receipt final-report]
@@ -597,6 +610,17 @@
              "crates/missiond-mcp/src/tools/compute/task_delegate.rs"]
       :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. compute_slot objective is metadata only; direct warmup requires explicit initial_prompt, and delegated task_delegate auto-provision still carries suppress_initial_prompt=true. spawn_tracked_slot now syncs MissionD Claude hooks project-locally via slot_env::sync_slot_hooks_to_local_settings, preserving permissions and existing hooks while adding SessionStart session-register + UserPromptSubmit context-prefetch before PTY start; build_slot_tracking_env injects MISSION_IPC_ENDPOINT so hooks reconnect to the active daemon instead of relying on stale global defaults. Autopilot pty.send budget, smart-watchdog idle-recovery threshold, and Autopilot BoardTask claim lease are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs / derive_board_task_lease_secs in autopilot.rs. The fixed 20-minute claim lease is gone; the lease now equals idle_watchdog_threshold_secs so the watchdog cannot reclaim a slot whose claim is still legitimately ticking inside its declared timeout. Autopilot prompt assembly projects the V3 prompt-tool-contract via build_base_prompt (objective dedupe) and append_board_task_id_suffix (conditional board self-close); the prompt no longer hardcodes mission_board_update / mission_board_note_add as unconditional must-calls. The V3 execution-ownership rule for delegated BoardTasks projects to: compute_slot::effective_initial_prompt + explicit initial_prompt + suppress_initial_prompt arg (delegated path starts the slot idle), task_delegate::auto_provision_slot create_args carrying suppress_initial_prompt=true, and autopilot dispatch_board_tasks holding an OwnedSlotDispatchGuard across state.pty.send + post-send tail inside a tokio::task::JoinSet send-task so different-slot sends run concurrently within a single dispatch tick while same-slot exclusion still covers the full close-owner / KB-feedback / deploy-review sequence, with decide_close_action preserving Done self-close and Blocked question states. Restart recovery clears stale slot-dyn-* BoardTask assignee pins via BoardStore::clear_board_task_assignee before normal no-assignee routing resumes.")
 
+    (surface mission_board
+      :status "code-aligned"
+      :implements [mission-board board-task-lifecycle board-claim-lease]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/board.rs"
+             "crates/missiond-core/src/types/board.rs"
+             "crates/missiond-core/src/db/traits.rs"
+             "crates/missiond-core/src/db/pg/board.rs"
+             "crates/missiond-mcp/src/tools/knowledge/board.rs"
+             "scripts/check-v3-board-isomorphism.mjs"]
+      :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp, while the daemon handler records session-task bindings, publishes BoardEvent created/updated/status_changed facts, and routes create/update/claim/note/retry operations through BoardStore. BoardTaskStatus is the closed persisted status vocabulary (open/running/verifying/done/blocked/failed/skipped); BoardTask carries assignee, auto_execute, depends_on, claim_executor_id, claim_executor_type, claimed_at, lease_expires_at, timeout_secs, and notes_count so Autopilot, workstation dispatch, and humans observe the same row. BoardStore is the single trait boundary for BoardTask CRUD, atomic claim_board_task, open-only clear_board_task_assignee, release_board_claims_by_executor, recover_stale_running_tasks, clear_dangling_dynamic_slot_assignees, set_board_task_lease, list_autopilot_tasks, dependency checks, retry, notes, and BoardTask-with-context queries. PgMissionStore pins the concurrency semantics: claim_board_task updates only rows with status='open' and claim_executor_id IS NULL, release only resets running rows for the executor, clear_board_task_assignee only clears the expected assignee while the task is still open, stale recovery honors lease_expires_at first and falls back to timeout_secs, clear_dangling_dynamic_slot_assignees targets only assignee LIKE 'slot-dyn-%' with no active dynamic slot, and list_autopilot_tasks orders assigned tasks first before order_idx. This surface is intentionally separate from workstation-config: workstation-config owns slot/model/prompt dispatch, mission_board owns the durable BoardTask row and claim/lease/retry/note semantics those dispatchers mutate.")
+
     (surface ops-infra
       :status "code-aligned"
       :implements [ops-infra]
@@ -615,10 +639,12 @@
              "node scripts/check-v3-intent-alignment-isomorphism.mjs"
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
              "node scripts/check-v3-workflow-isomorphism.mjs"
+             "node scripts/check-v3-review-gate-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
+             "node scripts/check-v3-board-isomorphism.mjs"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"
              "node scripts/check-v3-request-flow-smoke.mjs"
              "node scripts/check-v3-code-isomorphism-complete.mjs"]
