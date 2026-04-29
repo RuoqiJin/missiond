@@ -84,6 +84,8 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'workstation-config',
+    '(surface workstation-config',
+    ':status "code-aligned"',
     'coding-default-opus-4-7',
     ':effective-model "Opus 4.7 with 1M context"',
     ':spawn-model-arg nil',
@@ -223,6 +225,10 @@ function buildFixture() {
     (execution-ownership delegated-boardtask
       :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
       :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"))
+  (implementation-map
+    (surface workstation-config
+      :status "code-aligned"
+      :note "fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-config-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.computeSlot, `

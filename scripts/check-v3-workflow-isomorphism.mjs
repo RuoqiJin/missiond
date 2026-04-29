@@ -82,7 +82,7 @@ function checkFiles(root, files) {
     ':writer workflow-distiller',
     ':required [:workflow_id :source_plans :match_rules :steps :status]',
     '(surface mission_workflow',
-    ':status "code-aligned-partial"',
+    ':status "code-aligned"',
     'distill dry_run emits workflow-draft Lisp',
     'sonnet distiller requires JSON workflow_sexp + object match_rules',
     'distill persist+write_file writes an enriched V3 workflow artifact',
@@ -200,7 +200,7 @@ function buildFixture() {
       :required [:workflow_id :source_plans :match_rules :steps :status]))
   (implementation-map
     (surface mission_workflow
-      :status "code-aligned-partial"
+      :status "code-aligned"
       :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);

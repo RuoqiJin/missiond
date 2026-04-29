@@ -81,7 +81,7 @@ function checkFiles(root, files) {
     ':compat-path ".missiond/alignment/<topic>/intent-alignment.lisp"',
     'intent-alignment files MUST carry :directive_id + :version',
     '(surface mission_directive',
-    ':status "code-aligned-partial"',
+    ':status "code-aligned"',
     'dry_run emits a deterministic directive-draft Lisp artifact',
     'sonnet output is accepted only when it is one balanced Lisp s-expression',
     'ArtifactKind::IntentAlignment',
@@ -151,7 +151,7 @@ function buildFixture() {
       :materialization-rule "intent-alignment files MUST carry :directive_id + :version"))
   (implementation-map
     (surface mission_directive
-      :status "code-aligned-partial"
+      :status "code-aligned"
       :note "dry_run emits a deterministic directive-draft Lisp artifact; sonnet output is accepted only when it is one balanced Lisp s-expression; ArtifactKind::IntentAlignment"))
   (compression-contract
     :checks ["node scripts/check-v3-intent-alignment-isomorphism.mjs"]))`);

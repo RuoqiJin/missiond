@@ -79,7 +79,7 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     '(surface mission_plan',
-    ':status "code-aligned-partial"',
+    ':status "code-aligned"',
     'compiler_mode=dry_run must still emit executable routing hints in Lisp',
     ':default-target mission_task_delegate',
     'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
@@ -177,7 +177,7 @@ function buildFixture() {
       :materialization-rule "plan artifact MUST be amended with :plan_id + :version + :board_task_id"))
   (implementation-map
     (surface mission_plan
-      :status "code-aligned-partial"
+      :status "code-aligned"
       :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);

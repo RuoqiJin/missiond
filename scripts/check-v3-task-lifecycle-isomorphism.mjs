@@ -101,7 +101,7 @@ function checkFiles(root, files) {
     'event-sourced-runtime',
     'parent-hotfix-finalization',
     'surface task-runner-cli',
-    'code-aligned-partial',
+    ':status "code-aligned"',
     'scripts/check-task-lifecycle-events.mjs',
     'scripts/task-runner-append-event.mjs',
     'scripts/task-runner-finalize-report.mjs',
@@ -333,7 +333,7 @@ function buildFixture() {
     (policy parent-hotfix-finalization))
   (implementation-map
     (surface task-runner-cli
-      :status "code-aligned-partial"
+      :status "code-aligned"
       :code ["scripts/check-task-lifecycle-events.mjs"
              "scripts/task-runner-append-event.mjs"
              "scripts/task-runner-finalize-report.mjs"

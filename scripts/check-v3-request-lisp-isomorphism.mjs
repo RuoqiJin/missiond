@@ -78,6 +78,8 @@ function checkFiles(root, files) {
   requireText(diagnostics, files.blueprint, sources.blueprint, 'intent-alignment files MUST carry :directive_id + :version');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'plan artifact MUST be amended with :plan_id + :version + :board_task_id');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'start/advance/status/respond expose request-local :artifact_paths');
+  requireText(diagnostics, files.blueprint, sources.blueprint, '(surface mission_request');
+  requireText(diagnostics, files.blueprint, sources.blueprint, ':status "code-aligned"');
 
   requireText(diagnostics, files.directiveHandler, sources.directiveHandler, 'fn enrich_persisted_directive_sexp');
   requireText(diagnostics, files.directiveHandler, sources.directiveHandler, 'payload["compiled_sexp_preview"] = json!(persisted_preview_sexp)');
@@ -111,7 +113,11 @@ function buildFixture() {
       :materialization-rule "plan artifact MUST be amended with :plan_id + :version + :board_task_id"))
   (unified-entry
     (review-packet
-      :response-rule "start/advance/status/respond expose request-local :artifact_paths")))`);
+      :response-rule "start/advance/status/respond expose request-local :artifact_paths"))
+  (implementation-map
+    (surface mission_request
+      :status "code-aligned"
+      :note "fixture")))`);
   writeFixture(root, DEFAULT_FILES.directiveHandler, `
 fn enrich_persisted_directive_sexp() {}
 payload["compiled_sexp_preview"] = json!(persisted_preview_sexp);
