@@ -36,17 +36,16 @@ mod log_surface;
 
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::claim_lease::{
-    action_claim, action_heartbeat, action_release, find_claim_node, parse_claims, parse_iso,
-    scopes_overlap,
+    action_claim, action_heartbeat, action_release, parse_claims, parse_iso, scopes_overlap,
 };
 use self::completion_audit::{
-    audit_scoped_commit_handoff, auto_run_task_run_verifier, build_preflight_summary,
-    check_id_monotonic, collect_all_claim_scopes, collect_specific_claim_scope,
-    enforce_scoped_commit_completion, enforce_task_contract_completion,
-    evaluate_task_contract_for_preflight, normalize_commit_status,
-    normalize_task_run_verifier_status, normalize_verifier_status, parse_completions,
-    parse_porcelain_status, run_git_status, summarize_durability, VALID_COMMIT_STATUSES,
-    VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
+    action_repair, audit_scoped_commit_handoff, auto_run_task_run_verifier,
+    build_preflight_summary, check_id_monotonic, collect_all_claim_scopes,
+    collect_specific_claim_scope, enforce_scoped_commit_completion,
+    enforce_task_contract_completion, evaluate_task_contract_for_preflight,
+    normalize_commit_status, normalize_task_run_verifier_status, normalize_verifier_status,
+    parse_completions, parse_porcelain_status, run_git_status, summarize_durability,
+    VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
 };
 #[cfg(test)]
 use self::completion_audit::{
@@ -57,17 +56,17 @@ use self::completion_audit::{
 };
 use self::log_surface::{
     allocate_id, append_session_trace_event, append_to_block, build_opened_event, companion_path,
-    emit_execution_event, insert_id_counters_block, json_strip_quotes, lisp_quote_string,
-    list_block_summaries, normalize_dispatch_strategy, now_iso, parse_kv_pairs,
-    project_or_target_project, read_dispatch_metadata_from_log, read_log_file,
-    render_canonical_template, require_str, resolve_project_root, resolve_session_trace_path,
-    resolve_trace_task_id, sanitize_trace_backend, scan_max_id, sexp, touch_last_updated,
-    update_kv_in_node, write_log_file, Counter, LogFile, TraceEvent, TraceKind, COMPANION_DIR,
+    emit_execution_event, json_strip_quotes, lisp_quote_string, list_block_summaries,
+    normalize_dispatch_strategy, now_iso, parse_kv_pairs, project_or_target_project,
+    read_dispatch_metadata_from_log, read_log_file, render_canonical_template, require_str,
+    resolve_project_root, resolve_session_trace_path, resolve_trace_task_id,
+    sanitize_trace_backend, sexp, touch_last_updated, write_log_file, Counter, LogFile, TraceEvent,
+    TraceKind, COMPANION_DIR,
 };
 #[cfg(test)]
 use self::log_surface::{
-    is_valid_trace_id, render_trace_event, scan_max_trace_seq, DispatchMeta, TraceWarning,
-    DEFAULT_DISPATCH_STRATEGY,
+    is_valid_trace_id, render_trace_event, scan_max_id, scan_max_trace_seq, DispatchMeta,
+    TraceWarning, DEFAULT_DISPATCH_STRATEGY,
 };
 
 /// Pull a `[string]` argument off `args[key]` and return it as a `Vec<String>`.
@@ -1627,227 +1626,6 @@ async fn action_audit(state: &AppState, args: &Value) -> Result<ToolResult> {
         "ok": ok,
         "findings": findings,
     })))
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// action: repair — dry-run by default; structural fixes only
-// ───────────────────────────────────────────────────────────────────────
-
-async fn action_repair(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let execution_id = match require_str(args, "execution_id") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let mode = args
-        .get("mode")
-        .and_then(|v| v.as_str())
-        .unwrap_or("dry_run");
-    if mode != "dry_run" && mode != "apply" {
-        return Ok(ToolResult::structured_error(ToolError::new(
-            error_codes::INVALID_PARAM,
-            format!("repair mode must be `dry_run` or `apply`, got `{}`", mode),
-        )));
-    }
-
-    let root = resolve_project_root(state, project_or_target_project(args)).await?;
-    let path = companion_path(&root, execution_id);
-    let raw = std::fs::read_to_string(&path)?;
-    let mut file = LogFile::parse(raw)?;
-
-    let mut actions: Vec<Value> = Vec::new();
-
-    // 1) Synthesize missing id-counters with values derived from scan_max_id.
-    if file.find_block("id-counters").is_none() {
-        let claim_n = scan_max_id(&file, Counter::Claim) + 1;
-        let dev_n = scan_max_id(&file, Counter::Deviation) + 1;
-        let dec_n = scan_max_id(&file, Counter::Decision) + 1;
-        let issue_n = scan_max_id(&file, Counter::Issue) + 1;
-        let comp_n = scan_max_id(&file, Counter::Completion) + 1;
-        actions.push(json!({
-            "kind": "synthesize-id-counters",
-            "next_claim_id": claim_n,
-            "next_deviation_id": dev_n,
-            "next_decision_id": dec_n,
-            "next_issue_id": issue_n,
-            "next_completion_id": comp_n,
-        }));
-        if mode == "apply" {
-            insert_id_counters_block(&mut file, claim_n, dev_n, dec_n, issue_n, comp_n)?;
-        }
-    }
-
-    // 2) Mark stale claims (lease expired, no release).
-    let claims = parse_claims(&file);
-    let now = Utc::now();
-    let mut stale_ids = Vec::new();
-    for c in &claims {
-        if c.status != "active" {
-            continue;
-        }
-        if let Some(exp) = c.lease_expires_at.as_deref().and_then(parse_iso) {
-            if exp < now {
-                stale_ids.push(c.id.clone());
-            }
-        }
-    }
-    for id in &stale_ids {
-        actions.push(json!({
-            "kind": "mark-stale-claim",
-            "claim_id": id,
-        }));
-        if mode == "apply" {
-            if let Some(node) = find_claim_node(&file, id).cloned() {
-                update_kv_in_node(&mut file, &node, "status", &lisp_quote_string("stale"))?;
-            }
-        }
-    }
-
-    // 3) Rebuild derived-indexes if it exists; otherwise leave alone (the
-    //    block is cache, not truth — status action recomputes anyway).
-    if file.find_block("derived-indexes").is_some() {
-        actions.push(json!({
-            "kind": "rebuild-derived-indexes",
-            "note": "regenerating from durable slots"
-        }));
-        if mode == "apply" {
-            rebuild_derived_indexes(&mut file)?;
-        }
-    }
-
-    if mode == "apply" && !actions.is_empty() {
-        touch_last_updated(&mut file)?;
-        write_log_file(&path, &file)?;
-    }
-
-    // Wave 20 / Task 09 — surface the workstation-dispatch trio on
-    // repair events. The same `file` handle is current after any
-    // apply-mode mutations above, so the meta block we observe is the
-    // post-write authoritative state.
-    let meta = read_dispatch_metadata_from_log(&file);
-    emit_execution_event(
-        state,
-        ExecutionEvent::Repaired {
-            execution_id: execution_id.to_string(),
-            applied: mode == "apply",
-            action_count: actions.len() as u32,
-            dispatch_strategy: meta.dispatch_strategy,
-            target_project: meta.target_project,
-            requested_cwd: meta.requested_cwd,
-        },
-    )
-    .await;
-
-    Ok(ToolResult::json_pretty(&json!({
-        "execution_id": execution_id,
-        "path": path.display().to_string(),
-        "mode": mode,
-        "actions": actions,
-        "applied": mode == "apply",
-    })))
-}
-
-fn rebuild_derived_indexes(file: &mut LogFile) -> Result<()> {
-    let claims = parse_claims(file);
-    let now = Utc::now();
-    let active_ids: Vec<String> = claims
-        .iter()
-        .filter(|c| {
-            c.status == "active"
-                && c.lease_expires_at
-                    .as_deref()
-                    .and_then(parse_iso)
-                    .map(|exp| exp >= now)
-                    .unwrap_or(true)
-        })
-        .map(|c| c.id.clone())
-        .collect();
-
-    let open_issue_ids = list_block_summaries(file, "issues", |kvs, head| {
-        let status = kvs
-            .get("status")
-            .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_else(|| "open".to_string());
-        if status == "resolved" || status == "closed" {
-            None
-        } else {
-            Some(Value::String(head.to_string()))
-        }
-    });
-
-    let unresolved_dev_ids = list_block_summaries(file, "deviations", |kvs, head| {
-        let status = kvs
-            .get("status")
-            .map(|s| s.trim_matches('"').to_string())
-            .unwrap_or_else(|| "open".to_string());
-        if status == "resolved" || status == "closed" {
-            None
-        } else {
-            Some(Value::String(head.to_string()))
-        }
-    });
-
-    let latest_decisions = list_block_summaries(file, "decisions", |_kvs, head| {
-        Some(Value::String(head.to_string()))
-    });
-    let completed_phases = list_block_summaries(file, "completions", |kvs, _head| {
-        Some(Value::String(
-            kvs.get("phase")
-                .map(|s| s.trim_matches('"').to_string())
-                .unwrap_or_default(),
-        ))
-    });
-
-    let render_list = |items: &[Value]| -> String {
-        let parts: Vec<String> = items
-            .iter()
-            .filter_map(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(lisp_quote_string)
-            .collect();
-        if parts.is_empty() {
-            "()".to_string()
-        } else {
-            format!("({})", parts.join(" "))
-        }
-    };
-
-    let block = match file.find_block("derived-indexes").cloned() {
-        Some(b) => b,
-        None => return Ok(()),
-    };
-    let active_lit = render_list(
-        &active_ids
-            .iter()
-            .map(|s| Value::String(s.clone()))
-            .collect::<Vec<_>>(),
-    );
-    let issues_lit = render_list(&open_issue_ids);
-    let dev_lit = render_list(&unresolved_dev_ids);
-    let dec_lit = render_list(&latest_decisions);
-    let phases_lit = render_list(&completed_phases);
-
-    update_kv_in_node(file, &block, "active-claims", &active_lit)?;
-    let block2 = file
-        .find_block("derived-indexes")
-        .cloned()
-        .ok_or_else(|| anyhow!("derived-indexes vanished"))?;
-    update_kv_in_node(file, &block2, "open-issues", &issues_lit)?;
-    let block3 = file
-        .find_block("derived-indexes")
-        .cloned()
-        .ok_or_else(|| anyhow!("derived-indexes vanished"))?;
-    update_kv_in_node(file, &block3, "unresolved-deviations", &dev_lit)?;
-    let block4 = file
-        .find_block("derived-indexes")
-        .cloned()
-        .ok_or_else(|| anyhow!("derived-indexes vanished"))?;
-    update_kv_in_node(file, &block4, "latest-decisions", &dec_lit)?;
-    let block5 = file
-        .find_block("derived-indexes")
-        .cloned()
-        .ok_or_else(|| anyhow!("derived-indexes vanished"))?;
-    update_kv_in_node(file, &block5, "completed-phases", &phases_lit)?;
-    Ok(())
 }
 
 async fn action_preflight_commit(state: &AppState, args: &Value) -> Result<ToolResult> {
