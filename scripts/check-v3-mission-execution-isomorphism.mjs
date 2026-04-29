@@ -80,7 +80,6 @@ const DAEMON_NEEDLES = [
   'fn enforce_scoped_commit_completion',
   'fn enforce_task_contract_completion',
   'fn enforce_verified_completion',
-  'fn auto_run_task_run_verifier',
   'fn build_preflight_summary',
   'async fn action_preflight_commit',
 ];
@@ -142,6 +141,10 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) struct ReportSummary',
   'pub(super) fn read_report_summary',
   'pub(super) fn read_task_contract_id',
+  'pub(super) fn auto_run_task_run_verifier',
+  'pub(super) struct SharedMemorySummary',
+  'pub(super) fn read_shared_memory_ledger',
+  'pub(super) fn read_completion_task_id',
 ];
 
 const MCP_NEEDLES = [
@@ -426,7 +429,6 @@ async fn action_release() {}
 fn enforce_scoped_commit_completion() {}
 fn enforce_task_contract_completion() {}
 fn enforce_verified_completion() {}
-fn auto_run_task_run_verifier() {}
 fn build_preflight_summary() {}
 async fn action_preflight_commit() {}
 `;
@@ -491,6 +493,10 @@ pub(super) fn parse_string_list() {}
 pub(super) struct ReportSummary {}
 pub(super) fn read_report_summary() {}
 pub(super) fn read_task_contract_id() {}
+pub(super) fn auto_run_task_run_verifier() {}
+pub(super) struct SharedMemorySummary {}
+pub(super) fn read_shared_memory_ledger() {}
+pub(super) fn read_completion_task_id() {}
 `;
 }
 
