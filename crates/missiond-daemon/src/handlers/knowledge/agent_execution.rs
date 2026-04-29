@@ -18,15 +18,15 @@
 //! are logged but never abort the action — observability must never break
 //! durable-write semantics.
 
-use anyhow::{anyhow, Result};
+use anyhow::Result;
+#[cfg(test)]
 use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
-use serde_json::{json, Value};
-use std::collections::HashMap;
 #[cfg(test)]
-use std::path::Path;
+use serde_json::json;
+use serde_json::Value;
 #[cfg(test)]
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use crate::state::AppState;
 
@@ -34,11 +34,12 @@ mod claim_lease;
 mod completion_audit;
 mod log_surface;
 
+#[cfg(test)]
+use self::claim_lease::parse_claims;
 pub(super) use self::claim_lease::scopes_overlap_pure;
-use self::claim_lease::{action_claim, action_heartbeat, action_release, parse_claims};
+use self::claim_lease::{action_claim, action_heartbeat, action_release};
 use self::completion_audit::{
-    action_audit, action_complete, action_preflight_commit, action_repair, parse_completions,
-    summarize_durability,
+    action_audit, action_complete, action_preflight_commit, action_repair,
 };
 #[cfg(test)]
 use self::completion_audit::{
@@ -46,24 +47,23 @@ use self::completion_audit::{
     build_preflight_summary, collect_all_claim_scopes, collect_specific_claim_scope,
     collect_string_list, enforce_scoped_commit_completion, enforce_task_contract_completion,
     enforce_verified_completion, evaluate_task_contract_for_preflight, normalize_commit_status,
-    normalize_task_run_verifier_status, normalize_verifier_status, parse_porcelain_status,
-    parse_string_list, pattern_matches_path, read_report_summary, read_shared_memory_ledger,
-    read_task_contract_id, render_string_list, CompletionRecord, PorcelainEntry,
-    FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
-    FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
-    VALID_VERIFIER_STATUSES,
+    normalize_task_run_verifier_status, normalize_verifier_status, parse_completions,
+    parse_porcelain_status, parse_string_list, pattern_matches_path, read_report_summary,
+    read_shared_memory_ledger, read_task_contract_id, render_string_list, summarize_durability,
+    CompletionRecord, PorcelainEntry, FINDING_COMMIT_BLOCKED_NO_BLOCKER,
+    FINDING_COMMIT_STATUS_NO_HASH, FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES,
+    VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
 };
 use self::log_surface::{
-    action_status, allocate_id, append_session_trace_event, append_to_block, build_opened_event,
-    companion_path, emit_execution_event, lisp_quote_string, normalize_dispatch_strategy, now_iso,
-    parse_kv_pairs, project_or_target_project, read_dispatch_metadata_from_log, read_log_file,
-    render_canonical_template, require_str, resolve_project_root, resolve_session_trace_path,
-    resolve_trace_task_id, sanitize_trace_backend, sexp, touch_last_updated, write_log_file,
-    Counter, TraceEvent, TraceKind, COMPANION_DIR,
+    action_decide, action_deviate, action_issue, action_list, action_open, action_status,
 };
 #[cfg(test)]
 use self::log_surface::{
-    is_valid_trace_id, render_trace_event, scan_max_id, scan_max_trace_seq, DispatchMeta, LogFile,
+    allocate_id, append_session_trace_event, append_to_block, build_opened_event,
+    is_valid_trace_id, lisp_quote_string, normalize_dispatch_strategy, now_iso, parse_kv_pairs,
+    project_or_target_project, read_dispatch_metadata_from_log, render_canonical_template,
+    render_trace_event, resolve_session_trace_path, resolve_trace_task_id, sanitize_trace_backend,
+    scan_max_id, scan_max_trace_seq, sexp, Counter, DispatchMeta, LogFile, TraceEvent, TraceKind,
     TraceWarning, DEFAULT_DISPATCH_STRATEGY,
 };
 
@@ -108,476 +108,6 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         )),
     }
 }
-
-// ───────────────────────────────────────────────────────────────────────
-// action: open
-// ───────────────────────────────────────────────────────────────────────
-
-async fn action_open(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let execution_id = match require_str(args, "execution_id") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let parent_design = match require_str(args, "parent_design") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let scope = match require_str(args, "scope") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let owner = args
-        .get("owner")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
-
-    let dispatch_strategy =
-        normalize_dispatch_strategy(args.get("dispatch_strategy").and_then(|v| v.as_str()));
-    let target_project = args
-        .get("target_project")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-    let requested_cwd = args
-        .get("requested_cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-
-    let root = resolve_project_root(state, project_or_target_project(args)).await?;
-    let path = companion_path(&root, execution_id);
-
-    if path.exists() {
-        return Ok(ToolResult::structured_error(
-            ToolError::new(
-                "EXECUTION_EXISTS",
-                format!("companion log already exists at {}", path.display()),
-            )
-            .with_suggestion("use action=status to inspect, or pick a different execution_id"),
-        ));
-    }
-
-    let body = render_canonical_template(
-        execution_id,
-        parent_design,
-        scope,
-        owner,
-        dispatch_strategy,
-        target_project,
-        requested_cwd,
-    );
-    sexp::check_balance(&body).map_err(|e| anyhow!("template paren balance broken: {}", e))?;
-    if let Some(p) = path.parent() {
-        std::fs::create_dir_all(p)?;
-    }
-    std::fs::write(&path, body.as_bytes())?;
-
-    // intent-worker.lisp :: claudecode-workstation-orchestration ::
-    // execution-strategy-record asks for dispatch metadata to be surfaced on
-    // the live ExecutionEvent::Opened projection alongside the durable
-    // companion-log meta block. The companion log remains the source of
-    // truth (per planned-event-extensions :: ExecutionEvent :: rationale);
-    // these optional fields are skipped on serialize when absent so legacy
-    // Opened consumers stay byte-identical.
-    let event = build_opened_event(
-        execution_id,
-        parent_design,
-        scope,
-        owner,
-        path.display().to_string(),
-        dispatch_strategy,
-        target_project,
-        requested_cwd,
-    );
-    emit_execution_event(state, event).await;
-
-    let mut response = json!({
-        "status": "opened",
-        "execution_id": execution_id,
-        "path": path.display().to_string(),
-        "parent_design": parent_design,
-        "scope": scope,
-        "owner": owner,
-        "dispatch_strategy": dispatch_strategy,
-    });
-    if let Some(tp) = target_project {
-        response["target_project"] = json!(tp);
-    }
-    if let Some(cwd) = requested_cwd {
-        response["requested_cwd"] = json!(cwd);
-    }
-
-    // wave23-04 — opt-in session-trace append. When the caller threads
-    // `session_trace_path` we emit a `dispatch` event capturing this
-    // open as the first fact in the task's trace. Best-effort: failures
-    // surface as `trace_warning` without aborting the open result.
-    if let Some(trace_path) = resolve_session_trace_path(args, &root) {
-        match resolve_trace_task_id(args, &root, execution_id) {
-            Some(task_id) => {
-                let backend = sanitize_trace_backend(owner);
-                let ev = TraceEvent {
-                    task: task_id,
-                    backend,
-                    kind: TraceKind::Dispatch,
-                    summary: format!(
-                        "mission_execution(action=open) execution_id={} parent_design={} dispatch_strategy={}",
-                        execution_id, parent_design, dispatch_strategy
-                    ),
-                    agent: None,
-                    files: None,
-                    commit_hash: None,
-                    report_path: None,
-                };
-                if let Err(w) = append_session_trace_event(&trace_path, &ev) {
-                    response["trace_warning"] = json!(w.to_string());
-                }
-            }
-            None => {
-                response["trace_warning"] = json!(format!(
-                    "session_trace_path supplied but execution_id `{}` is not a valid trace task id and no task_contract_path was provided",
-                    execution_id
-                ));
-            }
-        }
-    }
-
-    Ok(ToolResult::json_pretty(&response))
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// action: list
-// ───────────────────────────────────────────────────────────────────────
-
-async fn action_list(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let parent_filter = args.get("parent_design").and_then(|v| v.as_str());
-    let status_filter = args.get("status").and_then(|v| v.as_str());
-    let scope_prefix = args.get("scope_prefix").and_then(|v| v.as_str());
-    let limit = args
-        .get("limit")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(50)
-        .clamp(1, 500) as usize;
-
-    let root = resolve_project_root(state, project_or_target_project(args)).await?;
-    let dir = root.join(COMPANION_DIR);
-    let mut summaries: Vec<Value> = Vec::new();
-    if !dir.exists() {
-        return Ok(ToolResult::json_pretty(&json!({
-            "executions": [],
-            "hint": format!("no {} directory under {}", COMPANION_DIR, root.display()),
-        })));
-    }
-
-    for entry in std::fs::read_dir(&dir)? {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        let path = entry.path();
-        if path.extension().and_then(|s| s.to_str()) != Some("lisp") {
-            continue;
-        }
-        let name = path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or_default()
-            .to_string();
-        let file = match read_log_file(&path) {
-            Ok(f) => f,
-            Err(_) => continue, // skip non-execution lisps
-        };
-        let meta = match file.find_block("meta") {
-            Some(m) => parse_kv_pairs(&file.src, m.children()),
-            None => HashMap::new(),
-        };
-        let parent = meta
-            .get("parent-design")
-            .or_else(|| meta.get("parent_design"))
-            .or_else(|| meta.get("parent"))
-            .cloned()
-            .unwrap_or_default();
-        let status = meta
-            .get("status")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let scope = meta.get("scope").cloned().unwrap_or_default();
-        // Workstation-dispatch metadata; legacy logs may omit it. Empty
-        // string preserves a stable column shape for dashboards while
-        // signalling "no record" cheaply.
-        let dispatch = meta
-            .get("dispatch-strategy")
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .unwrap_or_default();
-        let target_project = meta
-            .get("target-project")
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .filter(|s| !s.is_empty());
-
-        if let Some(pf) = parent_filter {
-            if !parent.contains(pf) {
-                continue;
-            }
-        }
-        if let Some(sf) = status_filter {
-            if !status.contains(sf) {
-                continue;
-            }
-        }
-        if let Some(sp) = scope_prefix {
-            if !scope.starts_with(sp) {
-                continue;
-            }
-        }
-
-        let claims = parse_claims(&file);
-        let active = claims.iter().filter(|c| c.status == "active").count();
-        // Surface a thin durability snapshot per execution so dashboards can
-        // tell at a glance whether scoped commits are flowing. Full per-row
-        // details still live behind `mission_execution(action=status)` —
-        // here we only carry counts + the latest commit_status to keep the
-        // list payload small (intent-memory.lisp :: helper agent-execution-
-        // coordination :: scoped-commit-contract :: invariants :inv-7).
-        let completions = parse_completions(&file);
-        let durability = summarize_durability(&completions);
-        let mut row = json!({
-            "execution_id": name,
-            "path": path.display().to_string(),
-            "parent_design": parent.trim_matches('"'),
-            "status": status.trim_matches('"'),
-            "scope": scope.trim_matches('"'),
-            "active_claims": active,
-            "claim_count": claims.len(),
-            "dispatch_strategy": dispatch,
-            "durability": durability,
-        });
-        if let Some(tp) = target_project {
-            row["target_project"] = json!(tp);
-        }
-        summaries.push(row);
-        if summaries.len() >= limit {
-            break;
-        }
-    }
-
-    summaries.sort_by(|a, b| {
-        a["execution_id"]
-            .as_str()
-            .unwrap_or("")
-            .cmp(b["execution_id"].as_str().unwrap_or(""))
-    });
-
-    Ok(ToolResult::json_pretty(&json!({
-        "executions": summaries,
-        "count": summaries.len(),
-    })))
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// action: deviate / decide / issue / complete
-// ───────────────────────────────────────────────────────────────────────
-
-async fn action_deviate(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let execution_id = match require_str(args, "execution_id") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let lisp_said = match require_str(args, "lisp_said") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let actually_found = match require_str(args, "actually_found") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let reason = match require_str(args, "reason") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let approved_by = args
-        .get("approved_by")
-        .and_then(|v| v.as_str())
-        .unwrap_or("auto");
-    let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
-
-    let root = resolve_project_root(state, project_or_target_project(args)).await?;
-    let path = companion_path(&root, execution_id);
-    let mut file = read_log_file(&path)?;
-    let id = allocate_id(&mut file, Counter::Deviation)?;
-    let date = now_iso();
-    let entry = format!(
-        "    ({id}\n      :phase {phase}\n      :date {date}\n      :lisp-said {lisp_said}\n      :actually-found {actually_found}\n      :reason {reason}\n      :approved-by {approved_by}\n      :status \"open\")",
-        id = id,
-        phase = lisp_quote_string(phase),
-        date = lisp_quote_string(&date),
-        lisp_said = lisp_quote_string(lisp_said),
-        actually_found = lisp_quote_string(actually_found),
-        reason = lisp_quote_string(reason),
-        approved_by = lisp_quote_string(approved_by),
-    );
-    append_to_block(&mut file, "deviations", &entry)?;
-    touch_last_updated(&mut file)?;
-    write_log_file(&path, &file)?;
-
-    // Wave 20 / Task 09 — surface the workstation-dispatch trio so a
-    // deviation observer can route on dispatch context without re-loading
-    // the companion log. Read from the post-write `file` handle.
-    let meta = read_dispatch_metadata_from_log(&file);
-    emit_execution_event(
-        state,
-        ExecutionEvent::DeviationRecorded {
-            execution_id: execution_id.to_string(),
-            deviation_id: id.clone(),
-            phase: phase.to_string(),
-            approved_by: approved_by.to_string(),
-            dispatch_strategy: meta.dispatch_strategy,
-            target_project: meta.target_project,
-            requested_cwd: meta.requested_cwd,
-        },
-    )
-    .await;
-
-    Ok(ToolResult::json_pretty(&json!({
-        "status": "recorded",
-        "deviation_id": id,
-        "phase": phase,
-        "approved_by": approved_by,
-    })))
-}
-
-async fn action_decide(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let execution_id = match require_str(args, "execution_id") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let context = match require_str(args, "context") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let chosen = match require_str(args, "chosen") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let rationale = match require_str(args, "rationale") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let decided_by = match require_str(args, "decided_by") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let options = args.get("options").and_then(|v| v.as_str()).unwrap_or("");
-
-    let root = resolve_project_root(state, project_or_target_project(args)).await?;
-    let path = companion_path(&root, execution_id);
-    let mut file = read_log_file(&path)?;
-    let id = allocate_id(&mut file, Counter::Decision)?;
-    let date = now_iso();
-    let entry = format!(
-        "    ({id}\n      :context {context}\n      :options {options}\n      :chosen {chosen}\n      :rationale {rationale}\n      :decided-by {decided_by}\n      :at {date})",
-        id = id,
-        context = lisp_quote_string(context),
-        options = lisp_quote_string(options),
-        chosen = lisp_quote_string(chosen),
-        rationale = lisp_quote_string(rationale),
-        decided_by = lisp_quote_string(decided_by),
-        date = lisp_quote_string(&date),
-    );
-    append_to_block(&mut file, "decisions", &entry)?;
-    touch_last_updated(&mut file)?;
-    write_log_file(&path, &file)?;
-
-    // Wave 20 / Task 09 — surface the workstation-dispatch trio so a
-    // decision observer can route on dispatch context without re-loading
-    // the companion log. Read from the post-write `file` handle.
-    let meta = read_dispatch_metadata_from_log(&file);
-    emit_execution_event(
-        state,
-        ExecutionEvent::DecisionRecorded {
-            execution_id: execution_id.to_string(),
-            decision_id: id.clone(),
-            decided_by: decided_by.to_string(),
-            at: date.clone(),
-            dispatch_strategy: meta.dispatch_strategy,
-            target_project: meta.target_project,
-            requested_cwd: meta.requested_cwd,
-        },
-    )
-    .await;
-
-    Ok(ToolResult::json_pretty(&json!({
-        "status": "recorded",
-        "decision_id": id,
-        "decided_by": decided_by,
-        "at": date,
-    })))
-}
-
-async fn action_issue(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let execution_id = match require_str(args, "execution_id") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let severity = args
-        .get("severity")
-        .and_then(|v| v.as_str())
-        .unwrap_or("medium");
-    let desc = match require_str(args, "desc") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let resolution_path = args
-        .get("resolution_path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let owner = args.get("owner").and_then(|v| v.as_str()).unwrap_or("");
-
-    let root = resolve_project_root(state, project_or_target_project(args)).await?;
-    let path = companion_path(&root, execution_id);
-    let mut file = read_log_file(&path)?;
-    let id = allocate_id(&mut file, Counter::Issue)?;
-    let date = now_iso();
-    let entry = format!(
-        "    ({id}\n      :severity {severity}\n      :desc {desc}\n      :resolution-path {res}\n      :owner {owner}\n      :at {date}\n      :status \"open\")",
-        id = id,
-        severity = lisp_quote_string(severity),
-        desc = lisp_quote_string(desc),
-        res = lisp_quote_string(resolution_path),
-        owner = lisp_quote_string(owner),
-        date = lisp_quote_string(&date),
-    );
-    append_to_block(&mut file, "issues", &entry)?;
-    touch_last_updated(&mut file)?;
-    write_log_file(&path, &file)?;
-
-    // Wave 20 / Task 09 — surface the workstation-dispatch trio so an
-    // issue observer can route on dispatch context without re-loading
-    // the companion log. Read from the post-write `file` handle.
-    let meta = read_dispatch_metadata_from_log(&file);
-    emit_execution_event(
-        state,
-        ExecutionEvent::IssueRecorded {
-            execution_id: execution_id.to_string(),
-            issue_id: id.clone(),
-            severity: severity.to_string(),
-            owner: owner.to_string(),
-            dispatch_strategy: meta.dispatch_strategy,
-            target_project: meta.target_project,
-            requested_cwd: meta.requested_cwd,
-        },
-    )
-    .await;
-
-    Ok(ToolResult::json_pretty(&json!({
-        "status": "recorded",
-        "issue_id": id,
-        "severity": severity,
-        "owner": owner,
-    })))
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// action: status — meta + active claims + open issues + unresolved deviations
-// ───────────────────────────────────────────────────────────────────────
 
 // ───────────────────────────────────────────────────────────────────────
 // tests — exercise the parser, ID allocation, and round-trip on a
