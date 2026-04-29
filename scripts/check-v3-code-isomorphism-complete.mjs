@@ -13,7 +13,7 @@
 // The aggregate covers exactly these implementation surfaces unless the
 // blueprint explicitly changes the V3 surface set:
 //   mission_request, mission_directive, mission_plan, mission_workflow,
-//   task-runner-cli, workstation-config.
+//   task-runner-cli, context-pack, workstation-config.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -36,6 +36,7 @@ export const EXPECTED_SURFACES = [
   'mission_plan',
   'mission_workflow',
   'task-runner-cli',
+  'context-pack',
   'workstation-config',
 ];
 
@@ -45,6 +46,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-plan-execution-isomorphism.mjs',
   'scripts/check-v3-workflow-isomorphism.mjs',
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
+  'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
@@ -383,6 +385,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface context-pack
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface workstation-config
       :status "code-aligned"
       :code ["a"]
@@ -390,7 +396,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all six surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all seven surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });

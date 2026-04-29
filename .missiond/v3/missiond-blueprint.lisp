@@ -81,6 +81,15 @@
       :required [:event_id :request_id :kind :actor :time :payload :idempotency_key]
       :invariant "one event per file; append API owns sequence allocation")
 
+    (artifact context-pack
+      :schema "missiond.context-pack.v1"
+      :path ".missiond/tasks/<wave>/context-pack.lisp"
+      :ssot true
+      :writer context-pack-append
+      :required [:schema :wave :purpose :write-model :sequence]
+      :entries [claim observation anchor shard-proposal conflict integration-plan]
+      :invariant "multi-agent append-only context ledger: every writer owns only its entry id/seq; integration-plan is a later projection over accepted-shards and dispatch-groups, not a rewrite of prior observations")
+
     (artifact final-report
       :schema "missiond.final-report.v1"
       :path ".missiond/requests/<request_id>/reports/final.lisp"
@@ -389,6 +398,23 @@
     (policy verification-reuse
       :rule "Receipts may cover later states only when commit prefix, file set, tier, and exit_code rules pass."))
 
+  (multi-agent-context-pack
+    :desc "Parallel investigation and shard planning as a Lisp-owned append-only context bus."
+    :schema "missiond.context-pack.v1"
+    :write-model "multi-agent append-only"
+    :entry-heads [claim observation anchor shard-proposal conflict integration-plan]
+    :mutation-owner "append helper / writer-specific entry only; no worker rewrites prior entries"
+    :merge-owner "orchestrator or context-integrator appends a single integration-plan after reading proposals"
+    :flow [parallel-claims parallel-observations shard-proposals conflict-notes integration-plan dispatch-shards]
+    :invariants
+      ["Context investigators MAY run concurrently and append claim/observation/anchor/shard-proposal/conflict entries to the same context-pack.lisp."
+       "Every entry MUST carry :id :agent :seq :at; :seq is strictly increasing and allocated by the append path, not guessed from stale reads."
+       "shard-proposal entries MUST declare :shard :owner :write-scope :acceptance so code workers can execute without re-deriving architecture."
+       "integration-plan MUST cite accepted-shards and dispatch-groups; accepted shard write-scope entries MUST NOT overlap unless a later conflict entry explicitly routes that hotspot to a single owner."
+       "Context pack writers produce evidence and proposals only; code implementation happens in later shard tasks with disjoint write scopes."
+       "Shared-memory remains coarse lifecycle memory; context-pack is the high-density planning surface that turns concurrent investigation into implementable shards."]
+    :checker "node scripts/check-context-pack.mjs")
+
   (workstation-config
     :desc "Lisp-owned workstation spawn policy; runtime slot config is a projection, not an independent default."
     :config-fields [:template :model_profile :model :cwd :project_root :mcp_config :ttl :permission_mode]
@@ -494,6 +520,14 @@
              "scripts/verify-task-runner-batch.mjs"]
       :note "Task-scoped lifecycle events are first-class one-event files: the primary task-scoped path is .missiond/tasks/<wave>/events/<seq>.event.lisp (one lifecycle-event form per file, schema=missiond.task-lifecycle-event.v1, validated by check-task-lifecycle-events as standalone task-scoped event files), and task-runner-append-event allocates the next numeric file under a directory lock, validates the candidate bytes, and atomically creates them via fs.openSync(file, 'wx') when --events-dir is supplied. The legacy task-scoped task-lifecycle-events.lisp ledger is now a compatibility projection/input only: existing --ledger callers keep working unchanged, and task-runner-wave-state reads conventional task-scoped event files when present and falls back to the legacy ledger for historical waves, deduping by event id when both inputs exist. task-runner-append-event can ALSO project each append into request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp when request-id/request-events-dir are supplied; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args through their real dispatch-event paths, via task-runner-next-action, instead of leaving them as append-helper-only knobs. task-runner-finalize-report can project the same finalized lineage into the V3 request-local final-report artifact at .missiond/requests/<request_id>/reports/final.lisp when request-id/request-reports-dir are supplied; the legacy report-contract remains the compatibility report. check-verification-receipt can project a single receipt into the V3 request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp when request-id/request-receipts-dir are supplied through renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile; the writer rejects malformed request_id, malformed receipt_id, absolute or .. paths inside the resolved target, and invalid receipt objects (validateReceiptObject), validates the rendered Lisp bytes through the existing structural checker before atomic create-only rename, and refuses to overwrite an unrelated receipt file unless mode=replace and the on-disk bytes already equal the candidate; legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs for readVerificationReceiptFile and verify-task-runner-batch --receipts. task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files: it uses a sibling lock, rereads under lock, validates the candidate ledger or standalone event bytes, then atomically renames/creates outputs. task-runner-next-action prioritizes finalize_report before dispatch_task and emits dispatch events through appendLifecycleEvent. task-runner-parent-hotfix is read-only by default and projects parent patches through task-runner-finalize-report, preserving worker commit as :agent_commit_hash while :commit_hash/:final_commit_hash/:verified_commit_hash move to the final commit, and can also write the V3 request-local final-report projection. parent-hotfix finalization is a sparse Lisp projection over the worker report: task-runner-finalize-report parses the worker report's keyword/value pairs and re-emits them as-is, patching only the lineage fields (:status :commit_hash :agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches plus the unioned :files_changed) while preserving optional report-contract fields the worker already wrote (:notes :verification_tier :time_sinks :major_decisions :unexpected_work :blockers :trace_refs router-recommendation / router-readiness / router-dispatch-descriptor / verification-receipts and any additive optional fields). :acceptance_results is preserved by default; --acceptance-command appends new entries rather than replacing the worker block unless an explicit replacement opt is supplied. project-task-lifecycle-ledger backfills shared-memory/session-trace compatibility facts from lifecycle events. verify-task-runner-batch imports lifecycle validation, append-event, and parent-hotfix projections so batch smoke covers the task-scoped event files, the legacy ledger compatibility, the final-report, and the receipt path.")
 
+    (surface context-pack
+      :status "code-aligned"
+      :implements [multi-agent-context-pack]
+      :code ["scripts/check-context-pack.mjs"
+             "scripts/context-pack-append.mjs"
+             "scripts/check-v3-context-pack-isomorphism.mjs"]
+      :note "Context-pack is the V3 high-density planning surface for parallel investigation: multiple agents append claim/observation/anchor/shard-proposal/conflict entries to .missiond/tasks/<wave>/context-pack.lisp, while an orchestrator/integrator later appends integration-plan with accepted-shards and dispatch-groups. The structure deliberately mirrors the proven shared-memory append-only pattern but raises the semantics from lifecycle notes to implementable shard planning. scripts/context-pack-append.mjs is the cooperative mutation path: it creates a missing pack when wave/purpose are supplied, takes a sibling lock, allocates the next :seq, injects :at, validates candidate bytes, and atomically renames. scripts/check-context-pack.mjs validates missiond.context-pack.v1 headers, unique ids, strictly increasing seq, ISO timestamps, repo-relative paths, shard-proposal owner/write-scope/acceptance, integration-plan accepted-shard references, and accepted shard write-scope non-overlap. Code workers should consume the finalized integration-plan and avoid re-deriving architecture; context investigators may run concurrently because they never rewrite prior entries.")
+
     (surface workstation-config
       :status "code-aligned"
       :implements [workstation-config]
@@ -517,6 +551,7 @@
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
              "node scripts/check-v3-workflow-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
+             "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
              "node scripts/check-v3-request-flow-smoke.mjs"
              "node scripts/check-v3-code-isomorphism-complete.mjs"]
