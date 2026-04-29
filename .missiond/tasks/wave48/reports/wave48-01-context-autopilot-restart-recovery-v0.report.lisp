@@ -1,12 +1,31 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 48 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave48-01-context-autopilot-restart-recovery-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave48-01-context-autopilot-restart-recovery-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "3fa07f60525f"
+  :files_changed
+    [".missiond/tasks/wave48/context-pack.lisp"
+     ".missiond/tasks/wave48/shared-memory.lisp"
+     ".missiond/tasks/wave48/session-trace.lisp"
+     ".missiond/tasks/wave48/reports/wave48-01-context-autopilot-restart-recovery-v0.report.lisp"]
+  :acceptance_results
+    [(:command "node scripts/check-context-pack.mjs .missiond/tasks/wave48/context-pack.lisp"
+              :exit_code 0 :ok true
+              :note "1 pack, 4 entries (bootstrap observation + 2 new observations + 1 shard-proposal). Strictly increasing :seq, unique :id, repo-relative paths, shard-proposal owner/write-scope/acceptance all present.")
+     (:command "node scripts/check-task-report.mjs .missiond/tasks/wave48/reports/wave48-01-context-autopilot-restart-recovery-v0.report.lisp"
+              :exit_code 0 :ok true
+              :note "Report contract v1 validation passed.")
+     (:command "git diff --check -- .missiond/tasks/wave48/context-pack.lisp .missiond/tasks/wave48/reports/wave48-01-context-autopilot-restart-recovery-v0.report.lisp"
+              :exit_code 0 :ok true
+              :note "No whitespace errors in the two append-only artifacts.")
+     (:command "node scripts/check-task-memory.mjs .missiond/tasks/wave48/shared-memory.lisp"
+              :exit_code 0 :ok true
+              :note "Shared-memory ledger v1 validation passed (4 entries: 2 bootstrap + claim + observation).")
+     (:command "node scripts/check-session-trace.mjs .missiond/tasks/wave48/session-trace.lisp"
+              :exit_code 0 :ok true
+              :note "Session-trace v1 validation passed (5 events: 3 bootstrap + 2 read-pin events).")]
+  :notes "Investigation summary — dynamic-slot restart-recovery failure path identified.\n\n## Failure path\n\n1. mission_task_delegate auto-provisions a dynamic slot when no idle slot matches: `auto_provision_slot` returns the new dyn-slot id (task_delegate.rs:163-181) and that id is persisted as `BoardTask.assignee` (task_delegate.rs:217-221) so Autopilot will execute the task on the warmed slot.\n2. The dyn slot is registered in two places at create time: DB via `store.create_dynamic_slot` and runtime via `state.mission.register_dynamic_slot(slot_config)` (compute_slot.rs:382-387). The runtime registration is the only call site outside reaping/termination — there is no startup hydration path.\n3. On daemon restart, main.rs:252-269 (Phase 6.7) unconditionally iterates `list_dynamic_slots(active)` and calls `terminate_dynamic_slot(reason='daemon_restart')` for each. Comment: \"Re-registering them creates zombie slots (DB active, process dead). Clean slate is safer.\" SlotManager rebuilds only from yaml, so dyn-slot ids are absent from `state.mission.list_slots()`.\n4. main.rs:246 then calls `recover_stale_running_tasks(0)` which resets `status='open'`, `claim_executor_id=NULL`, `lease_expires_at=NULL`, `claimed_at=NULL` — but never touches `assignee` (board.rs:630-666). The dead pin survives.\n5. Autopilot tick → `dispatch_board_tasks` reads `task.assignee=Some(dead_id)` and uses it directly without an existence check (autopilot.rs:471-503); only the None branch falls into the dynamic-coder selection loop.\n6. `ensure_autopilot_pty` (flow_engine.rs:485-602) runs `state.mission.list_slots().find(|s| s.config.id == slot_id)` → `None` → records '❌ Slot `{}` 不存在' note + `increment_board_task_retry` (flow_engine.rs:554-602). After `max_retries` the task is marked `status='failed'` permanently; no Inbox alert, no Jarvis notification at this branch.\n\nNet effect: every BoardTask that was delegated via auto-provision (the common code/research path) is silently burned to `failed` by the next few autopilot ticks after a daemon restart, even though the system has live coder slots ready to absorb the work.\n\n## Context-pack entries appended\n\nVia `scripts/context-pack-append.mjs --pack .missiond/tasks/wave48/context-pack.lisp`:\n- observation seq 2 — `wave48-01-obs-restart-wipes-dyn-slot` — daemon restart wipes both the runtime SlotManager registration and the DB `dynamic_slots` row.\n- observation seq 3 — `wave48-01-obs-dispatch-trusts-stale-pin` — autopilot dispatch trusts `task.assignee` without an existence check; `recover_stale_running_tasks` never clears `assignee`.\n- shard-proposal seq 4 — `wave48-01-shard-clear-stale-dyn-pin` — implementation shard for the next code task.\n\n## Recommended implementation write-scope and acceptance commands (from shard-proposal)\n\n- shard: `clear-stale-dyn-pin`\n- owner: `claudecode`\n- write-scope:\n  - `crates/missiond-daemon/src/engine/intent_engine/autopilot.rs`\n  - `crates/missiond-core/src/db/traits.rs`\n  - `crates/missiond-core/src/db/pg/board.rs`\n- must-not-touch: `crates/missiond-daemon/src/handlers/compute/**`, `main.rs`, `flow_engine.rs`, blueprint, scripts, packages, this wave's manifest/contracts/atlas/cards.\n- acceptance:\n  - `cargo check -p missiond-daemon`\n  - `cargo test -p missiond-daemon --lib engine::intent_engine::autopilot`\n  - `cargo test -p missiond-core --lib db::pg::board`\n\n## Implementation sketch (for the future code shard, not committed here)\n\n1. New trait method `BoardStore::clear_board_task_assignee(task_id, expected_assignee) -> rows_affected`. PG impl: `UPDATE board_tasks SET assignee = NULL, updated_at = $1 WHERE id = $2 AND status = 'open' AND assignee = $3` — idempotent CAS so a concurrent legitimate re-pin cannot be clobbered.\n2. In `dispatch_board_tasks` (autopilot.rs:469+), at the top of the per-task loop, when `task.assignee = Some(id)`: probe `state.mission.get_slot(&id)`. If `None`, also probe `state.store.get_dynamic_slot(&id)` (or equivalent) to confirm the row is gone/terminated. When both confirm absence, call `clear_board_task_assignee`, append a board-task note ('🔄 Pinned slot `{}` 在重启后已不可用，已解除 pin 等待重新调度'), and `continue` — the next tick will dispatch via the existing None-branch idle-coder selector. This converts a permanent-failure cohort into a transient one without touching the 'clean slate' restart policy.\n\n## Commit hash convention\n\n:commit_hash here pins `3fa07f60525f` — the parent substrate commit at task-start time (HEAD before this scoped commit). The wave48-01 task is a context-pack investigation only; it produces no implementation commit, so referring to the substrate anchor is the most honest answer to 'commit hash' for this report. The actual recording commit (this commit) will follow."
+  :verification_tier local)
