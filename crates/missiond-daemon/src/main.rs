@@ -268,6 +268,23 @@ async fn main() -> Result<()> {
         Err(e) => warn!(error = %e, "Failed to cleanup dynamic slots on startup"),
     }
 
+    // Phase 6.8: Clear BoardTask `assignee` pointers that reference dynamic
+    // slots which are no longer active. After Phase 6.7 terminates active
+    // dynamic slots (clean slate on restart), or after dynamic_slots rows
+    // have been GC'd, any BoardTask whose assignee still names a `slot-dyn-*`
+    // ghost makes autopilot keep trying to dispatch to a slot that no longer
+    // exists. The status side is handled by Phase 6.4
+    // (recover_stale_running_tasks); this complements it by clearing the
+    // assignee field recover intentionally leaves alone.
+    match store.clear_dangling_dynamic_slot_assignees().await {
+        Ok(n) if n > 0 => info!(
+            count = n,
+            "Cleared dangling BoardTask assignees pointing to terminated dynamic slots"
+        ),
+        Err(e) => warn!(error = %e, "Failed to clear dangling slot-dyn assignees"),
+        _ => {}
+    }
+
     // PTY manager setup
     let pty = Arc::new(PTYManager::new(logs_dir.clone()));
     pty.set_permission_policy(Arc::new(PermissionAdapter {
