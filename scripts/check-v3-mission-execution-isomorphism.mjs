@@ -77,9 +77,6 @@ const DAEMON_NEEDLES = [
   'async fn action_claim',
   'async fn action_heartbeat',
   'async fn action_release',
-  'fn enforce_scoped_commit_completion',
-  'fn enforce_task_contract_completion',
-  'fn enforce_verified_completion',
   'async fn action_preflight_commit',
 ];
 
@@ -136,6 +133,11 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) struct CompletionRecord',
   'pub(super) fn parse_completions',
   'pub(super) fn summarize_durability',
+  'pub(super) fn check_id_monotonic',
+  'pub(super) fn audit_scoped_commit_handoff',
+  'pub(super) fn enforce_scoped_commit_completion',
+  'pub(super) fn enforce_task_contract_completion',
+  'pub(super) fn enforce_verified_completion',
   'pub(super) fn parse_string_list',
   'pub(super) struct ReportSummary',
   'pub(super) fn read_report_summary',
@@ -434,9 +436,6 @@ use self::completion_audit::{};
 async fn action_claim() {}
 async fn action_heartbeat() {}
 async fn action_release() {}
-fn enforce_scoped_commit_completion() {}
-fn enforce_task_contract_completion() {}
-fn enforce_verified_completion() {}
 async fn action_preflight_commit() {}
 `;
 }
@@ -496,6 +495,11 @@ pub(super) fn normalize_task_run_verifier_status() {}
 pub(super) struct CompletionRecord {}
 pub(super) fn parse_completions() {}
 pub(super) fn summarize_durability() {}
+pub(super) fn check_id_monotonic() {}
+pub(super) fn audit_scoped_commit_handoff() {}
+pub(super) fn enforce_scoped_commit_completion() {}
+pub(super) fn enforce_task_contract_completion() {}
+pub(super) fn enforce_verified_completion() {}
 pub(super) fn parse_string_list() {}
 pub(super) struct ReportSummary {}
 pub(super) fn read_report_summary() {}
