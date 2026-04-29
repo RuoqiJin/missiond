@@ -1,12 +1,39 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 52 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave52-01-contract-artifact-validation-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave52-01-contract-artifact-validation-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "c389e442"
+  :files_changed
+    ["scripts/verify-task-contract.mjs"
+     ".missiond/v3/missiond-blueprint.lisp"
+     "scripts/check-v3-task-lifecycle-isomorphism.mjs"
+     ".missiond/tasks/wave52/shared-memory.lisp"
+     ".missiond/tasks/wave52/session-trace.lisp"
+     ".missiond/tasks/wave52/reports/wave52-01-contract-artifact-validation-v0.report.lisp"]
+  :acceptance_results
+    [(:command "node scripts/verify-task-contract.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "10 fixtures + 6 helper cases + 3 artifact-plan cases + 1 artifact-checker case all pass; the artifact-plan cases cover write-scope-driven planning, commit-only artifact discovery, and glob/non-known-pattern rejection, and the artifact-checker case proves an invalid session-trace :kind acceptance is rejected through scripts/check-session-trace.mjs without git access.")
+     (:command "node scripts/check-v3-task-lifecycle-isomorphism.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "Synthetic blueprint + contractVerifier fixture mirrors the new requireAll pins (verify-task-contract.mjs in :code, ARTIFACT_RULES, planArtifactValidation, validateCommitArtifacts, git show <commit>:<path>, invalid session-trace :kind acceptance regression).")
+     (:command "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
+              :exit_code 0 :ok true
+              :note "Live V3 task-lifecycle Lisp/code isomorphism check passes: blueprint surface task-runner-cli now pins the verify-task-contract artifact-validation invariant text, and the new contractVerifier requireAll block matches the implementation.")
+     (:command "node scripts/check-v3-code-isomorphism-complete.mjs"
+              :exit_code 0 :ok true
+              :note "Aggregate V3 gate still green: 7 surfaces graduated, 8 per-surface checkers passed.")
+     (:command "if node scripts/verify-task-contract.mjs --commit=7f462d17 .missiond/tasks/wave51/wave51-01-autopilot-concurrent-slot-dispatch-v0.lisp >/tmp/wave52-invalid-trace.out 2>&1; then cat /tmp/wave52-invalid-trace.out; exit 1; else rg \"session-trace|acceptance|artifact\" /tmp/wave52-invalid-trace.out; fi"
+              :exit_code 0 :ok true
+              :note "Wave51 worker commit 7f462d17 now FAILS with: artifact .missiond/tasks/wave51/session-trace.lisp (session-trace) failed validation at commit 7f462d1789fa via scripts/check-session-trace.mjs / event :kind \"acceptance\" must be one of dispatch|start|read|edit|command|test|commit|complete|failure|retry|observation. The failure is on the artifact bytes from that commit's tree, not on commit message or scope, exactly as the wave52 integration plan required.")
+     (:command "node scripts/check-task-report.mjs .missiond/tasks/wave52/reports/wave52-01-contract-artifact-validation-v0.report.lisp"
+              :exit_code 0 :ok true
+              :note "Filled in pre-commit; commit_hash placeholder c389e442 (wave52 prep commit) is replaced post-commit by a parent-hotfix step using the same lineage projection wave51 used.")
+     (:command "git diff --check -- scripts/verify-task-contract.mjs .missiond/v3/missiond-blueprint.lisp scripts/check-v3-task-lifecycle-isomorphism.mjs .missiond/tasks/wave52/reports/wave52-01-contract-artifact-validation-v0.report.lisp"
+              :exit_code 0 :ok true
+              :note "No whitespace errors in the wave52-01 write scope.")]
+  :notes "Implements wave52-shard-contract-artifact-validation (the single accepted shard in wave52-integration-plan-001 dispatch-group A).\n\nArtifact discovery (planArtifactValidation, pure):\n  - The plan candidates are the union of contract.writeScope and commitInfo.files, deduped, with first-match semantics over a fixed ARTIFACT_RULES table. Glob entries from :write-scope (e.g. .missiond/tasks/wave99/events/**) are skipped at planning so we never spawn a checker against a literal glob string. The five rules pin the four checker scripts to repo-relative path patterns under .missiond/tasks/<wave>/: session-trace.lisp -> scripts/check-session-trace.mjs, shared-memory.lisp -> scripts/check-task-memory.mjs, task-lifecycle-events.lisp + events/<seq>.event.lisp -> scripts/check-task-lifecycle-events.mjs, reports/<id>.report.lisp -> scripts/check-task-report.mjs.\n  - Pulling from :write-scope (not just commitInfo.files) is critical for catching the wave51 pattern: the worker's later parent-hotfix commit may only modify the report, but the contract still declares session-trace.lisp as a write-scope artifact, and validating those bytes at the worker-tree-of-record exposes the invalid :kind acceptance even after the working tree was repaired.\n\nCommit-byte materialization (validateCommitArtifacts, CLI-side):\n  - Spawns `git show <commit>:<path>` (read-only; matches the existing readCommit posture: no git add/commit/reset/checkout/stash/push/merge/rebase). When git show exits non-zero the artifact is recorded as skipped with reason 'missing-in-commit' rather than treated as a failure — a worker who legitimately did not produce a session-trace.lisp at that point in history must still be able to verify.\n  - Materializes each artifact's bytes into a per-run fs.mkdtempSync directory under os.tmpdir() preserving the repo-relative path. This matters for events/<seq>.event.lisp because check-task-lifecycle-events.mjs's parseTaskEventFileSeq parses the basename and rejects mismatched :seq.\n  - Spawns the bound checker with `node <checker> <tmp-path>` and treats non-zero exit as an error whose message names the artifact path, rule, commit-short-hash, checker, and the checker's stdout/stderr (indented two spaces) so the verifier failure points the operator straight at the bad bytes. The temp tree is rmrf'd in a finally block.\n\nPure-core preserved:\n  - verifyContract(contract, commitInfo) is unchanged; verify-task-run.mjs and verify-task-runner-batch.mjs still get the existing pure result and never gain hidden disk or child-process side effects.\n  - The CLI main() runs verifyContract first, then invokes validateCommitArtifacts and merges errors/warnings. The artifacts plan/checked/skipped vectors are surfaced in --json output for downstream tooling.\n\nFixture coverage (--dry-fixture):\n  - 10 existing verifyContract fixtures (commit subject / scope / forbidden / glob) still pass without modification.\n  - 3 new artifact-plan fixtures: (1) a contract whose :write-scope lists every known artifact path emits all five plan entries in declared order, (2) when the contract trims session-trace from :write-scope but the commit modifies it the plan still picks it up via commitInfo.files, (3) glob :write-scope entries (.missiond/tasks/wave99/events/**) and unrelated paths (scripts/*, README.md) produce no plan entries.\n  - 1 artifact-checker fixture (runArtifactPlanWithBytes harness): writes an invalid session-trace bytes string with :kind acceptance into a temp file (no git access) and spawns scripts/check-session-trace.mjs against it, asserting the failure surfaces session-trace/acceptance text.\n\nLive negative regression:\n  - The acceptance command `node scripts/verify-task-contract.mjs --commit=7f462d17 .missiond/tasks/wave51/wave51-01-autopilot-concurrent-slot-dispatch-v0.lisp` MUST fail; the failing artifact and rule are pinned with `rg \"session-trace|acceptance|artifact\" /tmp/wave52-invalid-trace.out` so a future regression that hides the defect on commit-message or scope-only checks fails the gate instead of silently passing.\n\nV3 invariant pins:\n  - .missiond/v3/missiond-blueprint.lisp surface task-runner-cli :code now lists scripts/verify-task-contract.mjs alongside the lifecycle/append-event/finalizer/parent-hotfix scripts. The :note paragraph appends an artifact-validator clause that names the four known artifact path patterns -> checker bindings, the planArtifactValidation/validateCommitArtifacts split, the git-show materialization rule, the unchanged pure verifyContract API, and the dry-fixture + invalid-session-trace regression coverage.\n  - scripts/check-v3-task-lifecycle-isomorphism.mjs adds DEFAULT_FILES.contractVerifier and a new requireAll block on verify-task-contract.mjs (ARTIFACT_RULES, planArtifactValidation, validateCommitArtifacts, the four checker bindings, spawnSync('git', ['show'..., fs.mkdtempSync, runArtifactPlanWithBytes, the invalid-:kind-acceptance comment), plus blueprint requireAll lines for the new artifact-validator pins. The --dry-fixture branch synthesizes a matching contractVerifier fixture so the dry path keeps tracking the live invariant text.\n\nScope-clean: only the six declared write-scope paths are modified."
+  :verification_tier local)

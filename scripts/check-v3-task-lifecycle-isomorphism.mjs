@@ -37,6 +37,7 @@ const DEFAULT_FILES = {
   submitDispatch: 'scripts/task-runner-submit-dispatch.mjs',
   waveState: 'scripts/task-runner-wave-state.mjs',
   receiptChecker: 'scripts/check-verification-receipt.mjs',
+  contractVerifier: 'scripts/verify-task-contract.mjs',
   batchVerifier: 'scripts/verify-task-runner-batch.mjs',
 };
 
@@ -129,6 +130,17 @@ function checkFiles(root, files) {
     'parent-hotfix finalization is a sparse Lisp projection over the worker report',
     ':acceptance_results is preserved by default',
     'node scripts/check-v3-task-lifecycle-isomorphism.mjs',
+    'scripts/verify-task-contract.mjs',
+    'verify-task-contract is the commit-snapshot artifact validator',
+    '.missiond/tasks/<wave>/session-trace.lisp -> check-session-trace',
+    '.missiond/tasks/<wave>/shared-memory.lisp -> check-task-memory',
+    '.missiond/tasks/<wave>/events/*.event.lisp -> check-task-lifecycle-events',
+    '.missiond/tasks/<wave>/reports/*.report.lisp -> check-task-report',
+    'planArtifactValidation',
+    'validateCommitArtifacts',
+    'git show <commit>:<path>',
+    'pure verifyContract(contract, commitInfo) API stays unchanged',
+    'invalid session-trace bytes regression',
   ]);
 
   requireAll(diagnostics, files.lifecycleChecker, sources.lifecycleChecker, [
@@ -298,6 +310,22 @@ function checkFiles(root, files) {
     'append rather than replace',
   ]);
 
+  requireAll(diagnostics, files.contractVerifier, sources.contractVerifier, [
+    'export const ARTIFACT_RULES',
+    'export function planArtifactValidation',
+    'export function validateCommitArtifacts',
+    'export function verifyContract',
+    'export function readCommit',
+    "checker: 'scripts/check-session-trace.mjs'",
+    "checker: 'scripts/check-task-memory.mjs'",
+    "checker: 'scripts/check-task-lifecycle-events.mjs'",
+    "checker: 'scripts/check-task-report.mjs'",
+    "spawnSync('git', ['show'",
+    'fs.mkdtempSync',
+    'runArtifactPlanWithBytes',
+    'invalid session-trace :kind acceptance',
+  ]);
+
   requireAll(diagnostics, files.batchVerifier, sources.batchVerifier, [
     "from './check-task-lifecycle-events.mjs'",
     "from './task-runner-append-event.mjs'",
@@ -342,8 +370,9 @@ function buildFixture() {
              "scripts/task-runner-dispatch.mjs"
              "scripts/task-runner-submit-dispatch.mjs"
              "scripts/check-verification-receipt.mjs"
+             "scripts/verify-task-contract.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "Task-scoped lifecycle events are first-class one-event files at .missiond/tasks/<wave>/events/<seq>.event.lisp; the task-lifecycle-events.lisp ledger is now a compatibility projection/input. request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files. parent-hotfix finalization is a sparse Lisp projection over the worker report; :acceptance_results is preserved by default."))
+      :note "Task-scoped lifecycle events are first-class one-event files at .missiond/tasks/<wave>/events/<seq>.event.lisp; the task-lifecycle-events.lisp ledger is now a compatibility projection/input. request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files. parent-hotfix finalization is a sparse Lisp projection over the worker report; :acceptance_results is preserved by default. verify-task-contract is the commit-snapshot artifact validator: planArtifactValidation discovers known Lisp artifact paths (.missiond/tasks/<wave>/session-trace.lisp -> check-session-trace, .missiond/tasks/<wave>/shared-memory.lisp -> check-task-memory, .missiond/tasks/<wave>/events/*.event.lisp -> check-task-lifecycle-events, .missiond/tasks/<wave>/reports/*.report.lisp -> check-task-report) and validateCommitArtifacts materializes their bytes via git show <commit>:<path> through the per-artifact checkers. The pure verifyContract(contract, commitInfo) API stays unchanged for importers; --dry-fixture exercises the planning logic plus an invalid session-trace bytes regression."))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.lifecycleSchema, `
@@ -459,6 +488,23 @@ appendLifecycleEvent({});
 planParentHotfixFromSource('');
 writeRequestVerificationReceiptFile({});
 const smoke = 'lifecycle receipt finalized-report smoke task-scoped events-dir';`);
+  writeFixture(root, DEFAULT_FILES.contractVerifier, `
+export const ARTIFACT_RULES = [
+  { checker: 'scripts/check-session-trace.mjs' },
+  { checker: 'scripts/check-task-memory.mjs' },
+  { checker: 'scripts/check-task-lifecycle-events.mjs' },
+  { checker: 'scripts/check-task-report.mjs' },
+];
+export function planArtifactValidation() {}
+export function validateCommitArtifacts() {}
+export function verifyContract() {}
+export function readCommit() {}
+function fxBytes() {
+  spawnSync('git', ['show', '<hash>:<path>']);
+  fs.mkdtempSync('/tmp/x');
+  return runArtifactPlanWithBytes([], {});
+}
+const fx = 'invalid session-trace :kind acceptance';`);
   return root;
 }
 
