@@ -147,6 +147,7 @@ export function loadSingleTask(file) {
     routerBackendRegistryPath: keywordPropText(props, ':router-backend-registry-path') ?? null,
     contextAtlasPath: keywordPropText(props, ':context-atlas-path') ?? null,
     patternCardPath: keywordPropText(props, ':pattern-card-path') ?? null,
+    contextPackPath: keywordPropText(props, ':context-pack-path') ?? null,
     verificationTier: keywordPropText(props, ':verification-tier') ?? null,
     dispatchGroup: keywordPropText(props, ':dispatch-group') ?? null,
     estimatedMinutes: keywordPropText(props, ':estimated-minutes') ?? null,
@@ -274,6 +275,7 @@ export function renderTask(task, sourcePath, options = {}) {
   }
   if (task.contextAtlasPath) lines.push(`- context_atlas: \`${task.contextAtlasPath}\``);
   if (task.patternCardPath) lines.push(`- pattern_card: \`${task.patternCardPath}\``);
+  if (task.contextPackPath) lines.push(`- context_pack: \`${task.contextPackPath}\``);
   lines.push('');
   if (task.dispatchStrategy === 'agent-team') {
     lines.push('## Dispatch Note');
@@ -361,6 +363,7 @@ function renderThinTask(task, sourcePath, options = {}) {
   if (routerBackendRegistryPath) lines.push(`- router_backend_registry: \`${routerBackendRegistryPath}\` (MUST NOT switch backend)`);
   if (task.contextAtlasPath) lines.push(`- context_atlas: \`${task.contextAtlasPath}\``);
   if (task.patternCardPath) lines.push(`- pattern_card: \`${task.patternCardPath}\``);
+  if (task.contextPackPath) lines.push(`- context_pack: \`${task.contextPackPath}\``);
   lines.push('');
   renderNavigationContext(lines, task);
   lines.push('## Goal');
@@ -379,8 +382,8 @@ function renderThinTask(task, sourcePath, options = {}) {
     lines.push('Use the repository shared-memory, report, session-trace, hook, commit, and verifier protocol for this wave.');
   }
   lines.push('- Task-specific scope and acceptance above override generic guidance.');
-  if (task.contextAtlasPath || task.patternCardPath) {
-    lines.push('- Load the context atlas / pattern card before broad repository search; use their anchors to reduce navigation misses.');
+  if (task.contextAtlasPath || task.patternCardPath || task.contextPackPath) {
+    lines.push('- Load declared context surfaces before broad repository search; use atlas/card anchors and the latest context-pack integration-plan to reduce navigation misses.');
   }
   lines.push('- Append coordination facts to shared memory when present; write the report contract when the task completes.');
   if (task.heartbeatMinutes) {
@@ -413,7 +416,7 @@ function renderThinTask(task, sourcePath, options = {}) {
 }
 
 function renderNavigationContext(lines, task) {
-  if (!task.contextAtlasPath && !task.patternCardPath) return;
+  if (!task.contextAtlasPath && !task.patternCardPath && !task.contextPackPath) return;
   lines.push('## Context Navigation');
   lines.push('');
   if (task.contextAtlasPath) {
@@ -422,7 +425,11 @@ function renderNavigationContext(lines, task) {
   if (task.patternCardPath) {
     lines.push(`- Follow implementation pattern card: \`${task.patternCardPath}\`.`);
   }
-  lines.push('- Use atlas grep anchors and pattern-card conventions before falling back to broad scans.');
+  if (task.contextPackPath) {
+    lines.push(`- Read context-pack integration-plan before implementation: \`${task.contextPackPath}\`.`);
+    lines.push('- Treat accepted shards and mapped dispatch groups as the shard authority; do not re-derive architecture from older observations.');
+  }
+  lines.push('- Use declared context anchors and shard boundaries before falling back to broad scans.');
   lines.push('');
 }
 
@@ -1033,7 +1040,7 @@ function runFixtures() {
     run: () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wave28-thin-render-'));
       const tmpTask = path.join(tmpDir, 'wave28-01-thin-render-fixture.lisp');
-      const lisp = `(task wave28-01-thin-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Thin render fixture"\n  :kind code-alignment\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "fresh-code-alignment"\n  :verification-tier smoke\n  :dispatch-group "A"\n  :estimated-minutes 25\n  :heartbeat-minutes 10\n  :context-atlas-path ".missiond/context/plan-rs.atlas.lisp"\n  :pattern-card-path ".missiond/patterns/schema-checker.pattern.lisp"\n  :goal "Render a thin brief"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements ["Use thin mode"]\n  :acceptance ["true"]\n  :commit (:required true :message "test: thin render" :scope-check write-scope-only)\n  :report ["Commit hash."])\n`;
+      const lisp = `(task wave28-01-thin-render-fixture\n  :schema "missiond.task-contract.v1"\n  :title "Thin render fixture"\n  :kind code-alignment\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "fresh-code-alignment"\n  :verification-tier smoke\n  :dispatch-group "A"\n  :estimated-minutes 25\n  :heartbeat-minutes 10\n  :context-atlas-path ".missiond/context/plan-rs.atlas.lisp"\n  :pattern-card-path ".missiond/patterns/schema-checker.pattern.lisp"\n  :context-pack-path ".missiond/tasks/wave28/context-pack.lisp"\n  :goal "Render a thin brief"\n  :write-scope ["scripts/x.mjs"]\n  :must-not-touch []\n  :requirements ["Use thin mode"]\n  :acceptance ["true"]\n  :commit (:required true :message "test: thin render" :scope-check write-scope-only)\n  :report ["Commit hash."])\n`;
       try {
         fs.writeFileSync(tmpTask, lisp, 'utf8');
         const task = loadSingleTask(tmpTask);
@@ -1048,7 +1055,9 @@ function runFixtures() {
           'heartbeat_minutes',
           'context_atlas',
           'pattern_card',
+          'context_pack',
           '## Context Navigation',
+          'integration-plan',
           'node scripts/task-scope-guard.mjs',
           'node scripts/verify-task-contract.mjs',
         ];

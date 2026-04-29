@@ -18,6 +18,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   checker: 'scripts/check-context-pack.mjs',
   appender: 'scripts/context-pack-append.mjs',
+  compiler: 'scripts/context-pack-compile-shards.mjs',
 };
 
 function main() {
@@ -42,7 +43,7 @@ function main() {
   const repoRoot = dryFixture ? buildFixture() : process.cwd();
   const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
   if (diagnostics.length === 0) {
-    for (const script of [DEFAULT_FILES.checker, DEFAULT_FILES.appender]) {
+    for (const script of [DEFAULT_FILES.checker, DEFAULT_FILES.appender, DEFAULT_FILES.compiler]) {
       const proc = spawnSync(process.execPath, [path.join(repoRoot, script), '--dry-fixture'], {
         cwd: repoRoot,
         encoding: 'utf8',
@@ -97,10 +98,14 @@ function checkFiles(root, files) {
     'integration-plan',
     'accepted-shards',
     'dispatch-groups',
+    'context-pack-compile-shards',
+    'two-stage',
+    'code workers consume',
     '(surface context-pack',
     ':status "code-aligned"',
     'scripts/check-context-pack.mjs',
     'scripts/context-pack-append.mjs',
+    'scripts/context-pack-compile-shards.mjs',
     'node scripts/check-v3-context-pack-isomorphism.mjs',
   ]);
 
@@ -115,6 +120,8 @@ function checkFiles(root, files) {
     'append-only',
     'accepted shards',
     'write-scope',
+    'must-not-touch',
+    '(group :id A :shards [alpha beta])',
     'runFixtures',
   ]);
 
@@ -126,6 +133,16 @@ function checkFiles(root, files) {
     'spliceBeforeFinalParen',
     'context-pack-append OK',
     '--pack <context-pack.lisp>',
+    '--dispatch-group-shards',
+  ]);
+
+  requireAll(diagnostics, files.compiler, sources.compiler, [
+    'compileContextPackSource',
+    'dispatchable_groups',
+    'group_mode',
+    'mapped',
+    'names_only',
+    'context-pack shard compile OK',
   ]);
 
   return diagnostics;
@@ -151,17 +168,19 @@ function buildFixture() {
   (multi-agent-context-pack
     :write-model "multi-agent append-only"
     :entries [claim observation anchor shard-proposal conflict integration-plan]
-    :merge "accepted-shards become dispatch-groups")
+    :merge "two-stage: investigators append proposals; code workers consume integration-plan accepted-shards and dispatch-groups via context-pack-compile-shards")
   (implementation-map
     (surface context-pack
       :status "code-aligned"
       :code ["scripts/check-context-pack.mjs"
-             "scripts/context-pack-append.mjs"]
+             "scripts/context-pack-append.mjs"
+             "scripts/context-pack-compile-shards.mjs"]
       :note "fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-context-pack-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.checker, fs.readFileSync(DEFAULT_FILES.checker, 'utf8'));
   writeFixture(root, DEFAULT_FILES.appender, fs.readFileSync(DEFAULT_FILES.appender, 'utf8'));
+  writeFixture(root, DEFAULT_FILES.compiler, fs.readFileSync(DEFAULT_FILES.compiler, 'utf8'));
   writeFixture(root, 'scripts/lib/missiond_lisp.mjs', fs.readFileSync('scripts/lib/missiond_lisp.mjs', 'utf8'));
   return root;
 }

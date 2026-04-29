@@ -19,7 +19,8 @@ const usage = `Usage:
     [--wave <wave> --purpose <text>] [--summary <text>] [--task <id>]
     [--files <paths>] [--touched <paths>]
     [--shard <name> --owner <worker> --write-scope <paths> --acceptance <commands>]
-    [--accepted-shards <names> --dispatch-groups <groups>] [--shards <names>]
+    [--accepted-shards <names> --dispatch-groups <groups>] [--dispatch-group-shards <group:shard+shard,...>]
+    [--shards <names>]
     [--now <iso>] [--json] [--dry-fixture]
 
 Atomically appends one entry to a MissionD context-pack v1 file:
@@ -81,6 +82,7 @@ function parseArgs(args) {
     acceptance: [],
     acceptedShards: [],
     dispatchGroups: [],
+    dispatchGroupShards: [],
     shards: [],
     now: null,
     json: false,
@@ -112,6 +114,7 @@ function parseArgs(args) {
     else if (arg === '--acceptance') opts.acceptance.push(...splitList(need(args, ++i, arg)));
     else if (arg === '--accepted-shards') opts.acceptedShards.push(...splitList(need(args, ++i, arg)));
     else if (arg === '--dispatch-groups') opts.dispatchGroups.push(...splitList(need(args, ++i, arg)));
+    else if (arg === '--dispatch-group-shards') opts.dispatchGroupShards.push(...parseDispatchGroupShards(need(args, ++i, arg)));
     else if (arg === '--shards') opts.shards.push(...splitList(need(args, ++i, arg)));
     else if (arg === '--now') opts.now = need(args, ++i, arg);
     else fail(`unknown argument: ${arg}`);
@@ -191,9 +194,20 @@ function renderEntry(opts) {
   pushVector(fields, ':must-not-touch', opts.mustNotTouch);
   pushVector(fields, ':acceptance', opts.acceptance);
   pushVector(fields, ':accepted-shards', opts.acceptedShards, { atoms: true });
-  pushVector(fields, ':dispatch-groups', opts.dispatchGroups, { atoms: true });
+  pushDispatchGroups(fields, opts);
   pushVector(fields, ':shards', opts.shards, { atoms: true });
   return `  (${opts.kind} ${fields.join('\n    ')})`;
+}
+
+function pushDispatchGroups(fields, opts) {
+  if (opts.dispatchGroupShards?.length > 0) {
+    const rendered = opts.dispatchGroupShards
+      .map((group) => `(group :id ${group.id} :shards [${group.shards.join(' ')}])`)
+      .join(' ');
+    fields.push(`:dispatch-groups [${rendered}]`);
+    return;
+  }
+  pushVector(fields, ':dispatch-groups', opts.dispatchGroups, { atoms: true });
 }
 
 function pushVector(fields, key, values, { atoms = false } = {}) {
@@ -245,6 +259,22 @@ function splitList(value) {
     .filter(Boolean);
 }
 
+function parseDispatchGroupShards(value) {
+  return splitList(value).map((spec) => {
+    const match = spec.match(/^([^:=]+)[:=](.+)$/);
+    if (!match) fail(`--dispatch-group-shards entry must look like A:alpha+beta, got ${JSON.stringify(spec)}`);
+    const id = match[1].trim();
+    const shards = match[2]
+      .split(/[+|]/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+    if (!id || shards.length === 0) {
+      fail(`--dispatch-group-shards entry must include a group id and at least one shard, got ${JSON.stringify(spec)}`);
+    }
+    return { id, shards };
+  });
+}
+
 function quote(value) {
   return JSON.stringify(String(value));
 }
@@ -288,6 +318,7 @@ async function runFixtures() {
       shard: 'alpha',
       owner: 'worker-a',
       writeScope: ['a.rs'],
+      mustNotTouch: ['b.rs'],
       acceptance: ['cargo test -p a'],
       now: '2026-04-29T00:00:01Z',
     }),
@@ -299,7 +330,7 @@ async function runFixtures() {
       id: 'wave99-i3',
       agent: 'integrator',
       acceptedShards: ['alpha'],
-      dispatchGroups: ['A'],
+      dispatchGroupShards: [{ id: 'A', shards: ['alpha'] }],
       now: '2026-04-29T00:00:02Z',
     }),
   );

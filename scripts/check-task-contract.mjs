@@ -202,7 +202,7 @@ function validateDispatchMetadata(file, task, props, diagnostics) {
 }
 
 function validateNavigationMetadata(file, task, props, diagnostics) {
-  for (const key of [':context-atlas-path', ':pattern-card-path']) {
+  for (const key of [':context-atlas-path', ':pattern-card-path', ':context-pack-path']) {
     validateRepoRelativePathField(file, task, props[key]?.value, key, diagnostics);
   }
 }
@@ -329,6 +329,7 @@ function runFixtures() {
         :owner "claudecode"
         :context-atlas-path ".missiond/context/plan-rs.atlas.lisp"
         :pattern-card-path ".missiond/patterns/schema-checker.pattern.lisp"
+        :context-pack-path ".missiond/tasks/wave19/context-pack.lisp"
         :goal "metadata"
         :write-scope ["scripts/x.mjs"]
         :must-not-touch []

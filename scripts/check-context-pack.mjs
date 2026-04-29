@@ -37,6 +37,8 @@ Checks MissionD context-pack v1 Lisp records:
   - validates entry heads: claim, observation, anchor, shard-proposal, conflict, integration-plan
   - enforces unique :id, strictly increasing :seq, ISO timestamps, and repo-relative paths
   - validates shard proposals and the final integration-plan references accepted shard names
+  - optionally validates mapped dispatch groups:
+      :dispatch-groups [(group :id A :shards [alpha beta]) ...]
 
 Use --dry-fixture to run self-contained pass/fail fixtures.
 `;
@@ -211,6 +213,7 @@ function validatePack(file, pack, diagnostics) {
       const shard = requirePresent(diagnostics, file, entryProps, ':shard');
       requirePresent(diagnostics, file, entryProps, ':owner');
       requireNonEmptyVector(diagnostics, file, entryProps, ':write-scope');
+      requireNonEmptyVector(diagnostics, file, entryProps, ':must-not-touch');
       requireNonEmptyVector(diagnostics, file, entryProps, ':acceptance');
       if (shard) {
         const scope = nodeToStringArray(entryProps[':write-scope']?.value).map(normalizeRepoPath);
@@ -224,8 +227,20 @@ function validatePack(file, pack, diagnostics) {
       }
     } else if (entryHead === 'integration-plan') {
       const accepted = requireNonEmptyVector(diagnostics, file, entryProps, ':accepted-shards');
-      requireNonEmptyVector(diagnostics, file, entryProps, ':dispatch-groups');
+      const dispatchGroups = validateDispatchGroups(
+        diagnostics,
+        file,
+        entryProps[':dispatch-groups']?.value,
+        accepted,
+      );
       validateAcceptedShards(diagnostics, file, accepted, entryProps[':accepted-shards']?.value?.loc, shardScopes, shardLocs);
+      validateMappedDispatchCoverage(
+        diagnostics,
+        file,
+        dispatchGroups,
+        accepted,
+        entryProps[':dispatch-groups']?.value?.loc ?? entry.loc,
+      );
     }
   }
 
@@ -242,6 +257,76 @@ function validatePack(file, pack, diagnostics) {
   }
 
   return entries.length;
+}
+
+function validateDispatchGroups(diagnostics, file, node, accepted) {
+  if (!node || !isList(node) || node.children.length === 0) {
+    addError(diagnostics, file, node?.loc ?? { line: 1, column: 1 }, ':dispatch-groups must be a non-empty vector');
+    return [];
+  }
+  const groups = [];
+  const seen = new Set();
+  for (const child of node.children) {
+    const atom = nodeText(child);
+    if (atom != null && atom !== '') {
+      addDispatchGroup(diagnostics, file, groups, seen, child.loc, { id: atom, shards: [] });
+      continue;
+    }
+    if (isList(child) && head(child) === 'group') {
+      const props = readKeywordProps(child, { start: 1 });
+      const id = requirePresent(diagnostics, file, props, ':id');
+      const shards = requireNonEmptyVector(diagnostics, file, props, ':shards');
+      addDispatchGroup(diagnostics, file, groups, seen, child.loc, { id, shards });
+      continue;
+    }
+    addError(diagnostics, file, child.loc, ':dispatch-groups entries must be group ids or (group :id <id> :shards [...])');
+  }
+
+  const mapped = groups.filter((g) => g.shards.length > 0);
+  if (mapped.length > 0 && mapped.length !== groups.length) {
+    addError(diagnostics, file, node.loc, ':dispatch-groups must not mix bare group ids with mapped (group ...) entries');
+  }
+  for (const group of mapped) {
+    for (const shard of group.shards) {
+      if (!accepted.includes(shard)) {
+        addError(diagnostics, file, node.loc, `dispatch group "${group.id}" references shard "${shard}" not present in :accepted-shards`);
+      }
+    }
+  }
+  return groups;
+}
+
+function addDispatchGroup(diagnostics, file, groups, seen, loc, group) {
+  if (!group.id || !/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(group.id)) {
+    addError(diagnostics, file, loc, ':dispatch-groups group id must be a compact id');
+    return;
+  }
+  if (seen.has(group.id)) {
+    addError(diagnostics, file, loc, `duplicate dispatch group "${group.id}"`);
+    return;
+  }
+  seen.add(group.id);
+  groups.push(group);
+}
+
+function validateMappedDispatchCoverage(diagnostics, file, groups, accepted, loc) {
+  const mapped = groups.filter((g) => g.shards.length > 0);
+  if (mapped.length === 0) return;
+  const seen = new Map();
+  for (const group of mapped) {
+    for (const shard of group.shards) {
+      if (seen.has(shard)) {
+        addError(diagnostics, file, loc, `accepted shard "${shard}" appears in multiple dispatch groups (${seen.get(shard)}, ${group.id})`);
+      } else {
+        seen.set(shard, group.id);
+      }
+    }
+  }
+  for (const shard of accepted) {
+    if (!seen.has(shard)) {
+      addError(diagnostics, file, loc, `accepted shard "${shard}" is not assigned to any mapped dispatch group`);
+    }
+  }
 }
 
 function validateAcceptedShards(diagnostics, file, accepted, loc, shardScopes, shardLocs) {
@@ -366,9 +451,22 @@ function runFixtures() {
   (claim :id wave99-c1 :agent context-a :seq 1 :at "2026-04-29T00:00:00Z" :summary "claim")
   (observation :id wave99-o2 :agent context-a :seq 2 :at "2026-04-29T00:00:01Z" :files ["a.rs"] :summary "finding")
   (anchor :id wave99-a3 :agent context-b :seq 3 :at "2026-04-29T00:00:02Z" :files ["b.rs"] :summary "anchor")
-  (shard-proposal :id wave99-s4 :agent context-a :seq 4 :at "2026-04-29T00:00:03Z" :shard rust-a :owner worker-a :write-scope ["a.rs"] :acceptance ["cargo test -p x"])
-  (shard-proposal :id wave99-s5 :agent context-b :seq 5 :at "2026-04-29T00:00:04Z" :shard rust-b :owner worker-b :write-scope ["b.rs"] :acceptance ["cargo test -p y"])
+  (shard-proposal :id wave99-s4 :agent context-a :seq 4 :at "2026-04-29T00:00:03Z" :shard rust-a :owner worker-a :write-scope ["a.rs"] :must-not-touch ["b.rs"] :acceptance ["cargo test -p x"])
+  (shard-proposal :id wave99-s5 :agent context-b :seq 5 :at "2026-04-29T00:00:04Z" :shard rust-b :owner worker-b :write-scope ["b.rs"] :must-not-touch ["a.rs"] :acceptance ["cargo test -p y"])
   (integration-plan :id wave99-i6 :agent integrator :seq 6 :at "2026-04-29T00:00:05Z" :accepted-shards [rust-a rust-b] :dispatch-groups [A]))`,
+    },
+    {
+      name: 'pass: mapped dispatch groups cover accepted shards',
+      ok: true,
+      source: `(context-pack wave99-context
+  :schema "missiond.context-pack.v1"
+  :wave wave99
+  :purpose "Mapped dispatch groups."
+  :write-model append-only
+  :sequence 3
+  (shard-proposal :id wave99-s1 :agent context-a :seq 1 :at "2026-04-29T00:00:00Z" :shard alpha :owner worker-a :write-scope ["a.rs"] :must-not-touch ["b.rs"] :acceptance ["true"])
+  (shard-proposal :id wave99-s2 :agent context-b :seq 2 :at "2026-04-29T00:00:01Z" :shard beta :owner worker-b :write-scope ["b.rs"] :must-not-touch ["a.rs"] :acceptance ["true"])
+  (integration-plan :id wave99-i3 :agent integrator :seq 3 :at "2026-04-29T00:00:02Z" :accepted-shards [alpha beta] :dispatch-groups [(group :id A :shards [alpha]) (group :id B :shards [beta])]))`,
     },
     {
       name: 'fail: duplicate seq rejected',
@@ -393,9 +491,19 @@ function runFixtures() {
       expect: /overlap/,
       source: `(context-pack bad
   :schema "missiond.context-pack.v1" :wave wave99 :purpose "bad" :write-model append-only :sequence 3
-  (shard-proposal :id s1 :agent a :seq 1 :at "2026-04-29T00:00:00Z" :shard one :owner w1 :write-scope ["crates/x"] :acceptance ["true"])
-  (shard-proposal :id s2 :agent b :seq 2 :at "2026-04-29T00:00:01Z" :shard two :owner w2 :write-scope ["crates/x/src/lib.rs"] :acceptance ["true"])
+  (shard-proposal :id s1 :agent a :seq 1 :at "2026-04-29T00:00:00Z" :shard one :owner w1 :write-scope ["crates/x"] :must-not-touch ["b.rs"] :acceptance ["true"])
+  (shard-proposal :id s2 :agent b :seq 2 :at "2026-04-29T00:00:01Z" :shard two :owner w2 :write-scope ["crates/x/src/lib.rs"] :must-not-touch ["a.rs"] :acceptance ["true"])
   (integration-plan :id i :agent z :seq 3 :at "2026-04-29T00:00:02Z" :accepted-shards [one two] :dispatch-groups [A]))`,
+    },
+    {
+      name: 'fail: mapped dispatch groups must cover every accepted shard',
+      ok: false,
+      expect: /not assigned/,
+      source: `(context-pack bad
+  :schema "missiond.context-pack.v1" :wave wave99 :purpose "bad" :write-model append-only :sequence 3
+  (shard-proposal :id s1 :agent a :seq 1 :at "2026-04-29T00:00:00Z" :shard one :owner w1 :write-scope ["a.rs"] :must-not-touch ["b.rs"] :acceptance ["true"])
+  (shard-proposal :id s2 :agent b :seq 2 :at "2026-04-29T00:00:01Z" :shard two :owner w2 :write-scope ["b.rs"] :must-not-touch ["a.rs"] :acceptance ["true"])
+  (integration-plan :id i :agent z :seq 3 :at "2026-04-29T00:00:02Z" :accepted-shards [one two] :dispatch-groups [(group :id A :shards [one])]))`,
     },
   ];
 

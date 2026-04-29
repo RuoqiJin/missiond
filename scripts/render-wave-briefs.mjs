@@ -717,7 +717,7 @@ async function runFixtures() {
 
   // wave29-07 cross-layer smoke (layer G): pin the navigation-context
   // anchors. When a task contract declares `:context-atlas-path` AND
-  // `:pattern-card-path`, the thin brief MUST mention BOTH paths so a
+  // `:pattern-card-path`, and `:context-pack-path`, the thin brief MUST mention all paths so a
   // worker reading only the brief still has stable navigation anchors.
   // This is the layer-G pin: a regression that strips the navigation
   // section from the thin brief surfaces here, near the renderer
@@ -731,9 +731,10 @@ async function runFixtures() {
         const taskId = 'wave99-01-foo';
         const atlasPath = '.missiond/tasks/wave99/context-atlas.lisp';
         const cardPath = '.missiond/tasks/wave99/pattern-cards.lisp';
+        const packPath = '.missiond/tasks/wave99/context-pack.lisp';
         // Hand-craft a task contract with both navigation fields so the
         // renderer's renderNavigationContext path fires.
-        const contract = `(task ${taskId}\n  :schema "missiond.task-contract.v1"\n  :title "Synthetic ${taskId}"\n  :kind code-alignment\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "fresh-code-alignment"\n  :verification-tier local\n  :dispatch-group "A"\n  :estimated-minutes 25\n  :heartbeat-minutes 10\n  :context-atlas-path "${atlasPath}"\n  :pattern-card-path "${cardPath}"\n  :goal "Synthetic ${taskId} goal."\n  :write-scope ["scripts/${taskId}.mjs"]\n  :must-not-touch []\n  :requirements ["Run renderer."]\n  :acceptance ["true"]\n  :commit (:required true :message "test: ${taskId}" :scope-check write-scope-only)\n  :report ["Commit hash."])\n`;
+        const contract = `(task ${taskId}\n  :schema "missiond.task-contract.v1"\n  :title "Synthetic ${taskId}"\n  :kind code-alignment\n  :status ready\n  :owner "claudecode"\n  :dispatch-strategy "fresh-code-alignment"\n  :verification-tier local\n  :dispatch-group "A"\n  :estimated-minutes 25\n  :heartbeat-minutes 10\n  :context-atlas-path "${atlasPath}"\n  :pattern-card-path "${cardPath}"\n  :context-pack-path "${packPath}"\n  :goal "Synthetic ${taskId} goal."\n  :write-scope ["scripts/${taskId}.mjs"]\n  :must-not-touch []\n  :requirements ["Run renderer."]\n  :acceptance ["true"]\n  :commit (:required true :message "test: ${taskId}" :scope-check write-scope-only)\n  :report ["Commit hash."])\n`;
         fs.writeFileSync(path.join(env.tasksDir, `${taskId}.lisp`), contract);
         const manifest = `(task-runner-manifest m-wave99-anchors\n  :schema "missiond.task-runner-manifest.v1"\n  :wave wave99\n  :brief_mode thin\n  :shared_preamble_path ".missiond/claudecode/wave99-shared-preamble.md"\n  :productive_only true\n  (node :task_id ${taskId}\n        :depends_on []\n        :verification_tier local\n        :dispatch_group A\n        :estimated_minutes 25\n        :heartbeat_minutes 10\n        :write_scope ["scripts/${taskId}.mjs"]))\n`;
         fs.writeFileSync(env.manifestPath, manifest);
@@ -756,6 +757,14 @@ async function runFixtures() {
           throw new Error(
             `wave29-07 layer G: thin brief MUST mention pattern_card_path "${cardPath}"`,
           );
+        }
+        if (!brief.includes(packPath)) {
+          throw new Error(
+            `wave29-07 layer G: thin brief MUST mention context_pack_path "${packPath}"`,
+          );
+        }
+        if (!brief.includes('accepted shards')) {
+          throw new Error('wave29-07 layer G: thin brief MUST tell workers to treat context-pack accepted shards as authority');
         }
         if (!brief.includes('## Context Navigation')) {
           throw new Error(

@@ -399,19 +399,26 @@
       :rule "Receipts may cover later states only when commit prefix, file set, tier, and exit_code rules pass."))
 
   (multi-agent-context-pack
-    :desc "Parallel investigation and shard planning as a Lisp-owned append-only context bus."
+    :desc "Two-stage parallel investigation and shard implementation as a Lisp-owned append-only context bus."
     :schema "missiond.context-pack.v1"
     :write-model "multi-agent append-only"
     :entry-heads [claim observation anchor shard-proposal conflict integration-plan]
     :mutation-owner "append helper / writer-specific entry only; no worker rewrites prior entries"
     :merge-owner "orchestrator or context-integrator appends a single integration-plan after reading proposals"
-    :flow [parallel-claims parallel-observations shard-proposals conflict-notes integration-plan dispatch-shards]
+    :flow [parallel-claims parallel-observations shard-proposals conflict-notes integration-plan compile-shards dispatch-code-workers verify-and-finalize]
+    :roles
+      ((context-investigator :writes [claim observation anchor shard-proposal conflict] :forbidden [code-edits commits])
+       (context-integrator :writes [integration-plan] :reads [shard-proposal conflict])
+       (code-worker :reads [integration-plan accepted-shards dispatch-groups] :writes [declared-shard-write-scope report commit])
+       (parent-verifier :writes [verification-receipt final-report parent-patches]))
     :invariants
       ["Context investigators MAY run concurrently and append claim/observation/anchor/shard-proposal/conflict entries to the same context-pack.lisp."
        "Every entry MUST carry :id :agent :seq :at; :seq is strictly increasing and allocated by the append path, not guessed from stale reads."
-       "shard-proposal entries MUST declare :shard :owner :write-scope :acceptance so code workers can execute without re-deriving architecture."
-       "integration-plan MUST cite accepted-shards and dispatch-groups; accepted shard write-scope entries MUST NOT overlap unless a later conflict entry explicitly routes that hotspot to a single owner."
+       "shard-proposal entries MUST declare :shard :owner :write-scope :must-not-touch :acceptance so code workers can execute without re-deriving architecture."
+       "integration-plan MUST cite accepted-shards and dispatch-groups; mapped dispatch groups SHOULD use (group :id <id> :shards [...]) so orchestration can compile code-worker waves without narrative parsing."
+       "Accepted shard write-scope entries MUST NOT overlap unless a later conflict entry explicitly routes that hotspot to a single owner."
        "Context pack writers produce evidence and proposals only; code implementation happens in later shard tasks with disjoint write scopes."
+       "code workers consume the latest integration-plan through context-pack-compile-shards; they do not reinterpret investigator observations as authority."
        "Shared-memory remains coarse lifecycle memory; context-pack is the high-density planning surface that turns concurrent investigation into implementable shards."]
     :checker "node scripts/check-context-pack.mjs")
 
@@ -527,8 +534,9 @@
       :implements [multi-agent-context-pack]
       :code ["scripts/check-context-pack.mjs"
              "scripts/context-pack-append.mjs"
+             "scripts/context-pack-compile-shards.mjs"
              "scripts/check-v3-context-pack-isomorphism.mjs"]
-      :note "Context-pack is the V3 high-density planning surface for parallel investigation: multiple agents append claim/observation/anchor/shard-proposal/conflict entries to .missiond/tasks/<wave>/context-pack.lisp, while an orchestrator/integrator later appends integration-plan with accepted-shards and dispatch-groups. The structure deliberately mirrors the proven shared-memory append-only pattern but raises the semantics from lifecycle notes to implementable shard planning. scripts/context-pack-append.mjs is the cooperative mutation path: it creates a missing pack when wave/purpose are supplied, takes a sibling lock, allocates the next :seq, injects :at, validates candidate bytes, and atomically renames. scripts/check-context-pack.mjs validates missiond.context-pack.v1 headers, unique ids, strictly increasing seq, ISO timestamps, repo-relative paths, shard-proposal owner/write-scope/acceptance, integration-plan accepted-shard references, and accepted shard write-scope non-overlap. Code workers should consume the finalized integration-plan and avoid re-deriving architecture; context investigators may run concurrently because they never rewrite prior entries.")
+      :note "Context-pack is the V3 high-density planning surface for two-stage parallel work: context investigators append claim/observation/anchor/shard-proposal/conflict entries to .missiond/tasks/<wave>/context-pack.lisp without code edits, then an orchestrator/integrator appends integration-plan with accepted-shards and dispatch-groups. Mapped dispatch groups use (group :id <id> :shards [...]) so scripts/context-pack-compile-shards.mjs can project the Lisp plan into dispatchable_groups for code workers; legacy bare group ids remain names_only for older packs. The structure deliberately mirrors the proven shared-memory append-only pattern but raises the semantics from lifecycle notes to implementable shard planning. scripts/context-pack-append.mjs is the cooperative mutation path: it creates a missing pack when wave/purpose are supplied, takes a sibling lock, allocates the next :seq, injects :at, validates candidate bytes, and atomically renames, including --dispatch-group-shards for mapped integration plans. scripts/check-context-pack.mjs validates missiond.context-pack.v1 headers, unique ids, strictly increasing seq, ISO timestamps, repo-relative paths, shard-proposal owner/write-scope/must-not-touch/acceptance, integration-plan accepted-shard references, mapped dispatch coverage, and accepted shard write-scope non-overlap. Code workers consume the finalized integration-plan and avoid re-deriving architecture; context investigators may run concurrently because they never rewrite prior entries.")
 
     (surface workstation-config
       :status "code-aligned"
