@@ -6,7 +6,7 @@
 
 (task-lifecycle-event-schema missiond.task-lifecycle-event.v1
   :version "v1"
-  :status "code-aligned -- checker scripts/check-task-lifecycle-events.mjs; append helper scripts/task-runner-append-event.mjs; projection helper scripts/project-task-lifecycle-ledger.mjs; wave31 adds cancelled lifecycle facts for wrong-dispatch rollback"
+  :status "code-aligned -- checker scripts/check-task-lifecycle-events.mjs; append helper scripts/task-runner-append-event.mjs; projection helper scripts/project-task-lifecycle-ledger.mjs; wave31 adds cancelled lifecycle facts for wrong-dispatch rollback; wave39 promotes task-scoped one-event files as the primary path while the legacy ledger remains a compatibility projection/input"
   :checker "scripts/check-task-lifecycle-events.mjs"
   :append-helper "scripts/task-runner-append-event.mjs"
   :projector "scripts/project-task-lifecycle-ledger.mjs"
@@ -15,6 +15,37 @@
     "Record task dispatches, claims, trace starts, reads, worker commits, parent hotfixes, finalized reports, verification receipts, completions, cancellations, and issues as durable lifecycle facts."
     "Give cooperating workers and orchestrator tools one append helper so seq/id allocation is centralized instead of copied into ad hoc edits."
     "Project current shared-memory/session-trace facts from this ledger during migration.")
+
+  (accepted-shapes
+    "Two task-scoped Lisp shapes are accepted by the checker and writers."
+    (shape standalone-task-event-file
+      :primary true
+      :file ".missiond/tasks/<wave>/events/<seq>.event.lisp"
+      :form (lifecycle-event
+              :schema "missiond.task-lifecycle-event.v1"
+              :wave <wave-id>
+              :id <event-id>
+              :task <task-id>
+              :actor_role <role>
+              :event_kind <kind>
+              :commit_role <role>
+              :seq <monotonic-int>
+              :at <iso8601>
+              :touched [<repo-relative-path> ...]
+              :summary <text>
+              <optional-fields...>)
+      :note "One lifecycle-event form per file; the standalone task-scoped form carries :schema=missiond.task-lifecycle-event.v1 and :wave so the file can be validated in isolation. Files are numeric-sequenced (000001.event.lisp, 000002.event.lisp, ...). When a directory of these files is checked together, the checker enforces unique :id and strictly-increasing :seq across the whole directory.")
+    (shape legacy-task-lifecycle-event-log
+      :primary false
+      :compatibility true
+      :file ".missiond/tasks/<wave>/task-lifecycle-events.lisp"
+      :form (task-lifecycle-event-log <ledger-id>
+              :schema "missiond.task-lifecycle-event.v1"
+              :wave <wave-id>
+              :created-at <iso8601>
+              :sequence <monotonic-int>
+              <lifecycle-event> ...)
+      :note "Legacy single-file ledger; remains a compatibility projection/input. Existing --ledger callers continue to work; new dispatch code should prefer --events-dir."))
 
   (file-shape
     :file ".missiond/tasks/<wave>/task-lifecycle-events.lisp"
@@ -73,6 +104,7 @@
 
   (concurrency-contract
     "scripts/task-runner-append-event.mjs uses a sibling .lock file with exclusive create, validates the ledger after every append, writes a temp file, then atomically renames it over the ledger."
+    "For standalone task-scoped event files, scripts/task-runner-append-event.mjs locks the events directory via a sibling .lock file, allocates the next numeric sequence under the lock, validates the candidate event bytes through scripts/check-task-lifecycle-events.mjs, and creates the final file via fs.openSync(file, 'wx') so two cooperating writers cannot overwrite the same numeric file."
     "This serializes cooperating local filesystem writers. It cannot protect against tools that ignore the lock, non-atomic network filesystems, or manual edits performed while the lock exists.")
 
   (projection-contract

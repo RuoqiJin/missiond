@@ -2044,6 +2044,37 @@ function runFixtures({ json }) {
       if (!lifecycle.ok || lifecycle.events !== 1) {
         throw new Error('wave30-05 lifecycle event append did not validate');
       }
+
+      // wave39-01 cross-layer smoke: project the same parent-hotfix event
+      // into a task-scoped events-dir using the new --events-dir append mode
+      // and revalidate it through the same checker. Additive only — does
+      // not change the default verifyManifest JSON shape.
+      const taskEventsDir = path.join(tmp, 'events');
+      const taskScopedAppend = appendLifecycleEvent({
+        eventsDir: taskEventsDir,
+        task: smokeTask,
+        eventKind: 'parent_hotfix',
+        actorRole: 'parent',
+        commitRole: 'parent_hotfix',
+        commitHash: finalCommit,
+        touched: ['scripts/foo.mjs'],
+        summary: 'Wave39 task-scoped events-dir parent hotfix',
+        reportPath: '.missiond/tasks/wave99/reports/wave99-04-lifecycle.report.lisp',
+        receiptPath: '.missiond/tasks/wave99/receipts/wave99-04-lifecycle.receipt.lisp',
+        at: '2026-04-28T00:00:30Z',
+        wave: 'wave99',
+      });
+      if (!taskScopedAppend.eventFile?.endsWith('000001.event.lisp')) {
+        throw new Error(
+          `wave39-01 task-scoped events-dir smoke expected 000001.event.lisp, got ${taskScopedAppend.eventFile}`,
+        );
+      }
+      const taskScopedCheck = validateLifecycleEventFiles([taskScopedAppend.eventFile]);
+      if (!taskScopedCheck.ok || taskScopedCheck.task_event_files !== 1) {
+        throw new Error(
+          `wave39-01 task-scoped events-dir smoke failed validation: ${taskScopedCheck.diagnostics.map((d) => d.message).join('; ')}`,
+        );
+      }
     } finally {
       fs.rmSync(tmp, { recursive: true, force: true });
     }

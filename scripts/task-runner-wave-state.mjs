@@ -19,7 +19,18 @@ import {
   planFromManifestObject,
 } from './plan-task-runner.mjs';
 import { loadReport } from './verify-task-run.mjs';
-import { readLifecycleEventLogs } from './check-task-lifecycle-events.mjs';
+import {
+  eventFromNode,
+  readLifecycleEventLogs,
+  validateLifecycleEventFiles,
+} from './check-task-lifecycle-events.mjs';
+import {
+  head,
+  isList,
+  keywordPropText,
+  readKeywordProps,
+  readLispFile,
+} from './lib/missiond_lisp.mjs';
 import {
   isReceiptReusable,
   readVerificationReceiptFile,
@@ -28,8 +39,8 @@ import {
 
 const usage = `Usage:
   node scripts/task-runner-wave-state.mjs --manifest <manifest.lisp>
-    [--lifecycle <task-lifecycle-events.lisp>] [--receipts <receipts.lisp>]
-    [--repo <repo-root>] [--json]
+    [--lifecycle <task-lifecycle-events.lisp>] [--events-dir <task-events-dir>]
+    [--receipts <receipts.lisp>] [--repo <repo-root>] [--json]
   node scripts/task-runner-wave-state.mjs --dry-fixture [--json]
 
 Projects manifest + finalized reports + optional lifecycle events + optional
@@ -39,7 +50,11 @@ verification receipts into a deterministic orchestration state:
 Read-only by construction: no git, no spawn, no network, no LLM, no writes.
 
 When --lifecycle is omitted, the projector reads the conventional
-.missiond/tasks/<wave>/task-lifecycle-events.lisp path if it exists.
+.missiond/tasks/<wave>/task-lifecycle-events.lisp path if it exists. When
+--events-dir is omitted, the projector also reads the conventional
+.missiond/tasks/<wave>/events/ directory if it exists. If both inputs are
+present, lifecycle events are deduplicated by :id (event files take
+precedence over the ledger compatibility projection).
 `;
 
 export const WAVE_STATE_SCHEMA = 'missiond.task-runner-wave-state.v0';
@@ -53,6 +68,7 @@ function parseArgs(argv) {
   const opts = {
     manifest: null,
     lifecycle: null,
+    eventsDir: null,
     receipts: null,
     repo: process.cwd(),
     json: false,
@@ -75,6 +91,10 @@ function parseArgs(argv) {
       opts.lifecycle = argv[++i] ?? fail('--lifecycle requires a value');
     } else if (arg.startsWith('--lifecycle=')) {
       opts.lifecycle = arg.slice('--lifecycle='.length);
+    } else if (arg === '--events-dir') {
+      opts.eventsDir = argv[++i] ?? fail('--events-dir requires a value');
+    } else if (arg.startsWith('--events-dir=')) {
+      opts.eventsDir = arg.slice('--events-dir='.length);
     } else if (arg === '--receipts') {
       opts.receipts = argv[++i] ?? fail('--receipts requires a value');
     } else if (arg.startsWith('--receipts=')) {
@@ -94,6 +114,7 @@ export function projectWaveStateFromFiles({
   manifestPath,
   repoRoot = process.cwd(),
   lifecyclePath = null,
+  eventsDirPath = null,
   receiptsPath = null,
 }) {
   const repo = path.resolve(repoRoot);
@@ -111,15 +132,25 @@ export function projectWaveStateFromFiles({
   const effectiveLifecyclePath = lifecyclePath ?? defaultLifecyclePath(manifest.wave);
   const lifecycleAbs = path.resolve(repo, effectiveLifecyclePath);
   const lifecycleUsedPath = fs.existsSync(lifecycleAbs) ? toRepoRelative(lifecycleAbs, repo) : null;
+  const effectiveEventsDirPath = eventsDirPath ?? defaultEventsDirPath(manifest.wave);
+  const eventsDirAbs = path.resolve(repo, effectiveEventsDirPath);
+  const eventsDirUsedPath =
+    fs.existsSync(eventsDirAbs) && fs.statSync(eventsDirAbs).isDirectory()
+      ? toRepoRelative(eventsDirAbs, repo)
+      : null;
   const receiptsAbs = receiptsPath ? path.resolve(repo, receiptsPath) : null;
   const receiptsUsedPath = receiptsAbs && fs.existsSync(receiptsAbs) ? toRepoRelative(receiptsAbs, repo) : null;
-  const events = readOptionalLifecycleEvents(effectiveLifecyclePath, repo);
+  const events = mergeLifecycleEvents(
+    readOptionalTaskScopedEventFiles(effectiveEventsDirPath, repo),
+    readOptionalLifecycleEvents(effectiveLifecyclePath, repo),
+  );
   const receipts = readOptionalReceipts(receiptsPath, repo);
 
   return projectWaveState({
     manifest,
     manifestPath: toRepoRelative(manifestAbs, repo),
     lifecyclePath: lifecycleUsedPath,
+    eventsDirPath: eventsDirUsedPath,
     receiptsPath: receiptsUsedPath,
     repoRoot: repo,
     events,
@@ -131,6 +162,7 @@ export function projectWaveState({
   manifest,
   manifestPath = '<memory>',
   lifecyclePath = null,
+  eventsDirPath = null,
   receiptsPath = null,
   repoRoot = process.cwd(),
   events = [],
@@ -246,6 +278,7 @@ export function projectWaveState({
     schema: WAVE_STATE_SCHEMA,
     manifest_path: manifestPath,
     lifecycle_path: lifecyclePath,
+    events_dir_path: eventsDirPath,
     receipts_path: receiptsPath,
     wave: manifest.wave,
     counts,
@@ -312,6 +345,57 @@ function readOptionalLifecycleEvents(lifecyclePath, repoRoot) {
   return readLifecycleEventLogs(abs).flatMap((log) => log.events);
 }
 
+function readOptionalTaskScopedEventFiles(eventsDirPath, repoRoot) {
+  if (!eventsDirPath) return [];
+  const abs = path.resolve(repoRoot, eventsDirPath);
+  if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) return [];
+  const files = [];
+  for (const name of fs.readdirSync(abs)) {
+    if (!/\.event\.lisp$/.test(name) || name.startsWith('.')) continue;
+    files.push(path.join(abs, name));
+  }
+  if (files.length === 0) return [];
+  files.sort((a, b) => a.localeCompare(b));
+  const validation = validateLifecycleEventFiles(files);
+  if (!validation.ok) {
+    throw new Error(
+      `task-scoped lifecycle event files in ${eventsDirPath} failed validation: ${validation.diagnostics.map((d) => d.message).join('; ')}`,
+    );
+  }
+  const events = [];
+  for (const file of files) {
+    const forms = readLispFile(file);
+    for (const form of forms) {
+      if (!isList(form) || head(form) !== 'lifecycle-event') continue;
+      const props = readKeywordProps(form, { start: 1 });
+      const schema = keywordPropText(props, ':schema');
+      if (schema !== 'missiond.task-lifecycle-event.v1') continue;
+      events.push(eventFromNode(form));
+    }
+  }
+  return events;
+}
+
+function mergeLifecycleEvents(eventFileEvents, ledgerEvents) {
+  if (eventFileEvents.length === 0) return ledgerEvents;
+  const seen = new Set();
+  const merged = [];
+  for (const event of eventFileEvents) {
+    if (event.id && !seen.has(event.id)) {
+      seen.add(event.id);
+      merged.push(event);
+    }
+  }
+  for (const event of ledgerEvents) {
+    if (event.id && !seen.has(event.id)) {
+      seen.add(event.id);
+      merged.push(event);
+    }
+  }
+  merged.sort((a, b) => (a.seq ?? 0) - (b.seq ?? 0));
+  return merged;
+}
+
 function readOptionalReceipts(receiptsPath, repoRoot) {
   if (!receiptsPath) return [];
   const abs = path.resolve(repoRoot, receiptsPath);
@@ -347,6 +431,10 @@ function reportPathFor(wave, taskId) {
 
 function defaultLifecyclePath(wave) {
   return path.posix.join('.missiond', 'tasks', wave, 'task-lifecycle-events.lisp');
+}
+
+function defaultEventsDirPath(wave) {
+  return path.posix.join('.missiond', 'tasks', wave, 'events');
 }
 
 function finalReportHash(report) {
@@ -441,6 +529,7 @@ function main() {
       manifestPath: opts.manifest,
       repoRoot: opts.repo,
       lifecyclePath: opts.lifecycle,
+      eventsDirPath: opts.eventsDir,
       receiptsPath: opts.receipts,
     });
     if (opts.json) {
@@ -636,7 +725,68 @@ function runFixtures() {
       'auto-detected worker_commit should require finalization',
     );
 
-    return { ok: true, cases: 3 };
+    // Task-scoped events dir is auto-detected and merged with the legacy
+    // ledger without double-counting events that share the same :id.
+    const eventsDir = path.join(tmp, '.missiond/tasks/wave99/events');
+    fs.mkdirSync(eventsDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(eventsDir, '000001.event.lisp'),
+      `(lifecycle-event
+  :schema "missiond.task-lifecycle-event.v1"
+  :wave wave99
+  :id wave99-01-root-worker-commit-001
+  :task wave99-01-root
+  :actor_role worker
+  :event_kind worker_commit
+  :commit_role worker
+  :seq 1
+  :at "2026-04-28T00:00:00Z"
+  :touched ["scripts/root.mjs"]
+  :summary "worker committed without finalized report"
+  :commit_hash abc1234)
+`,
+    );
+    fs.writeFileSync(
+      path.join(eventsDir, '000002.event.lisp'),
+      `(lifecycle-event
+  :schema "missiond.task-lifecycle-event.v1"
+  :wave wave99
+  :id wave99-01-root-parent-hotfix-002
+  :task wave99-01-root
+  :actor_role parent
+  :event_kind parent_hotfix
+  :commit_role parent_hotfix
+  :seq 2
+  :at "2026-04-28T00:01:00Z"
+  :touched ["scripts/root.mjs"]
+  :summary "parent hotfix"
+  :commit_hash abc5678)
+`,
+    );
+    const merged = projectWaveStateFromFiles({
+      manifestPath: manifestFile,
+      repoRoot: tmp,
+    });
+    assert(
+      merged.events_dir_path === '.missiond/tasks/wave99/events',
+      'default events dir should be auto-detected',
+    );
+    const root = merged.tasks.find((t) => t.task_id === 'wave99-01-root');
+    assert(root, 'root task should appear in projection');
+    assert(
+      root.lifecycle_event_count === 2,
+      `event-file + ledger merge should dedup the shared event id, expected lifecycle_event_count=2 got ${root.lifecycle_event_count}`,
+    );
+    assert(
+      root.latest_parent_hotfix_hash === 'abc5678',
+      'merged events should expose the parent hotfix hash from the standalone event file',
+    );
+    assert(
+      merged.needs_finalization.includes('wave99-01-root'),
+      'parent_hotfix from event file should still require finalization',
+    );
+
+    return { ok: true, cases: 4 };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }

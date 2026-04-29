@@ -15,14 +15,22 @@ import {
 } from './lib/missiond_lisp.mjs';
 
 const usage = `Usage:
-  node scripts/check-task-lifecycle-events.mjs [--json] [--dry-fixture] <ledger.lisp...>
+  node scripts/check-task-lifecycle-events.mjs [--json] [--dry-fixture]
+    [--events-dir <dir>] <ledger.lisp...>
 
-Checks MissionD task lifecycle event logs:
-  - validates (task-lifecycle-event-log ...) header shape
-  - validates each (lifecycle-event ...) entry
+Checks MissionD task lifecycle event logs and event files:
+  - validates (task-lifecycle-event-log ...) header shape (legacy ledger)
+  - validates each (lifecycle-event ...) entry inside a ledger
+  - validates standalone task-scoped (lifecycle-event ...) event files
+    at .missiond/tasks/<wave>/events/<seq>.event.lisp
+  - validates request-local (lifecycle-event ...) event files
   - enforces unique ids, strictly increasing :seq, ISO timestamps,
     known event kinds, known commit roles, commit hash format,
     task id shape, and repo-relative touched/report/receipt paths
+  - when a directory of standalone task-scoped event files is checked
+    together (via --events-dir or by passing multiple files in the
+    same directory), rejects duplicate :id and duplicate or
+    non-monotonic :seq across the whole directory
 
 Use --dry-fixture to run self-contained pass/fail fixtures.
 `;
@@ -97,8 +105,10 @@ function main() {
   let json = false;
   let dryFixture = false;
   const inputs = [];
+  const eventsDirs = [];
 
-  for (const arg of args) {
+  for (let i = 0; i < args.length; i += 1) {
+    const arg = args[i];
     if (arg === '-h' || arg === '--help') {
       console.log(usage);
       process.exit(0);
@@ -106,6 +116,15 @@ function main() {
       json = true;
     } else if (arg === '--dry-fixture') {
       dryFixture = true;
+    } else if (arg === '--events-dir') {
+      const value = args[++i];
+      if (!value) {
+        console.error('--events-dir requires a value');
+        process.exit(2);
+      }
+      eventsDirs.push(value);
+    } else if (arg.startsWith('--events-dir=')) {
+      eventsDirs.push(arg.slice('--events-dir='.length));
     } else {
       inputs.push(arg);
     }
@@ -114,6 +133,18 @@ function main() {
   if (dryFixture) {
     runFixtures(json);
     return;
+  }
+
+  for (const dir of eventsDirs) {
+    const abs = path.resolve(process.cwd(), dir);
+    if (!fs.existsSync(abs) || !fs.statSync(abs).isDirectory()) {
+      console.error(`--events-dir ${dir} is not a directory`);
+      process.exit(2);
+    }
+    for (const name of fs.readdirSync(abs)) {
+      if (!/\.event\.lisp$/.test(name) || name.startsWith('.')) continue;
+      inputs.push(path.join(abs, name));
+    }
   }
 
   if (inputs.length === 0) {
@@ -126,7 +157,7 @@ function main() {
     console.log(JSON.stringify(result, null, 2));
   } else if (result.ok) {
     console.log(
-      `task-lifecycle-events check OK (${result.ledgers} ledger${result.ledgers === 1 ? '' : 's'}, ${result.events} event${result.events === 1 ? '' : 's'})`,
+      `task-lifecycle-events check OK (${result.ledgers} ledger${result.ledgers === 1 ? '' : 's'}, ${result.events} event${result.events === 1 ? '' : 's'}, ${result.task_event_files ?? 0} task-scoped event file${(result.task_event_files ?? 0) === 1 ? '' : 's'})`,
     );
   } else {
     for (const d of result.diagnostics) {
@@ -144,6 +175,8 @@ export function validateLifecycleEventFiles(files) {
   let ledgers = 0;
   let events = 0;
   let requestEvents = 0;
+  let taskEventFiles = 0;
+  const taskEventsByDir = new Map();
   for (const file of [...new Set(files)]) {
     let forms;
     try {
@@ -163,9 +196,56 @@ export function validateLifecycleEventFiles(files) {
       if (head(form) === LOG_HEAD) {
         ledgers += 1;
         events += validateLifecycleEventLog(file, form, diagnostics);
-      } else if (head(form) === EVENT_HEAD && isRequestLifecycleEventForm(form)) {
-        requestEvents += 1;
-        validateRequestLifecycleEventFile(file, form, diagnostics);
+      } else if (head(form) === EVENT_HEAD) {
+        const props = readKeywordProps(form, { start: 1 });
+        const schema = keywordPropText(props, ':schema');
+        if (schema === REQUEST_EVENT_SCHEMA) {
+          requestEvents += 1;
+          validateRequestLifecycleEventFile(file, form, diagnostics);
+        } else {
+          taskEventFiles += 1;
+          const event = validateTaskScopedLifecycleEventFile(file, form, diagnostics);
+          if (event) {
+            const dir = path.dirname(path.resolve(file));
+            const bucket = taskEventsByDir.get(dir) ?? [];
+            bucket.push({ file, event, loc: form.loc ?? { line: 1, column: 1 } });
+            taskEventsByDir.set(dir, bucket);
+          }
+        }
+      }
+    }
+  }
+  for (const bucket of taskEventsByDir.values()) {
+    if (bucket.length < 2) continue;
+    bucket.sort((a, b) => a.file.localeCompare(b.file));
+    const seenIds = new Map();
+    let lastSeq = null;
+    let lastFile = null;
+    for (const entry of bucket) {
+      const { file, event, loc } = entry;
+      if (event.id) {
+        if (seenIds.has(event.id)) {
+          addError(
+            diagnostics,
+            file,
+            loc,
+            `duplicate task-scoped event :id "${event.id}" (also in ${seenIds.get(event.id)})`,
+          );
+        } else {
+          seenIds.set(event.id, file);
+        }
+      }
+      if (Number.isInteger(event.seq)) {
+        if (lastSeq != null && event.seq <= lastSeq) {
+          addError(
+            diagnostics,
+            file,
+            loc,
+            `task-scoped event :seq ${event.seq} must be strictly greater than previous task-scoped :seq ${lastSeq} (in ${lastFile})`,
+          );
+        }
+        lastSeq = event.seq;
+        lastFile = file;
       }
     }
   }
@@ -175,13 +255,169 @@ export function validateLifecycleEventFiles(files) {
     ledgers,
     events,
     request_events: requestEvents,
+    task_event_files: taskEventFiles,
     diagnostics,
   };
 }
 
-function isRequestLifecycleEventForm(form) {
-  const props = readKeywordProps(form, { start: 1 });
-  return keywordPropText(props, ':schema') === REQUEST_EVENT_SCHEMA;
+const TASK_EVENT_FILE_REQUIRED_FIELDS = [
+  ':schema',
+  ':wave',
+  ':id',
+  ':task',
+  ':actor_role',
+  ':event_kind',
+  ':commit_role',
+  ':seq',
+  ':at',
+  ':touched',
+  ':summary',
+];
+const TASK_EVENT_FILE_ALLOWED_FIELDS = new Set([
+  ...TASK_EVENT_FILE_REQUIRED_FIELDS,
+  ...OPTIONAL_EVENT_FIELDS,
+]);
+
+export function validateTaskScopedLifecycleEventFile(file, node, diagnostics) {
+  const props = readKeywordProps(node, { start: 1 });
+  for (const field of TASK_EVENT_FILE_REQUIRED_FIELDS) {
+    if (!props[field]) {
+      addError(
+        diagnostics,
+        file,
+        node.loc,
+        `(${EVENT_HEAD} ...) standalone task-scoped event file missing required field ${field}`,
+      );
+    }
+  }
+  for (const key of Object.keys(props)) {
+    if (!TASK_EVENT_FILE_ALLOWED_FIELDS.has(key)) {
+      addError(
+        diagnostics,
+        file,
+        props[key].keyNode.loc,
+        `unknown task-scoped lifecycle event field ${key}`,
+      );
+    }
+  }
+
+  const schema = keywordPropText(props, ':schema');
+  if (schema !== SCHEMA) {
+    addError(
+      diagnostics,
+      file,
+      props[':schema']?.value?.loc ?? node.loc,
+      `:schema must be "${SCHEMA}" for standalone task-scoped event files, got ${JSON.stringify(schema)}`,
+    );
+    return null;
+  }
+
+  const wave = keywordPropText(props, ':wave');
+  if (wave && !ID_RE.test(wave)) {
+    addError(
+      diagnostics,
+      file,
+      props[':wave']?.value?.loc ?? node.loc,
+      `:wave "${wave}" must match ${ID_RE}`,
+    );
+  }
+
+  const event = eventFromNode(node);
+  validateIdField(file, props, ':id', event.id, 'event id', diagnostics);
+  validateIdField(file, props, ':task', event.task, 'task id', diagnostics);
+  validateIdField(file, props, ':actor_role', event.actor_role, 'actor_role', diagnostics);
+  validateOptionalIdField(file, props, ':legacy_memory_id', event.legacy_memory_id, diagnostics);
+  validateOptionalIdField(file, props, ':legacy_trace_id', event.legacy_trace_id, diagnostics);
+
+  if (event.event_kind && !EVENT_KINDS.has(event.event_kind)) {
+    addError(
+      diagnostics,
+      file,
+      props[':event_kind']?.value?.loc ?? node.loc,
+      `unknown :event_kind "${event.event_kind}"; expected one of ${[...EVENT_KINDS].join('|')}`,
+    );
+  }
+  if (event.commit_role && !COMMIT_ROLES.has(event.commit_role)) {
+    addError(
+      diagnostics,
+      file,
+      props[':commit_role']?.value?.loc ?? node.loc,
+      `unknown :commit_role "${event.commit_role}"; expected one of ${[...COMMIT_ROLES].join('|')}`,
+    );
+  }
+  if (event.seq == null || !Number.isInteger(event.seq) || event.seq < 1) {
+    addError(
+      diagnostics,
+      file,
+      props[':seq']?.value?.loc ?? node.loc,
+      ':seq must be a positive integer',
+    );
+  }
+  if (event.at && !ISO8601_RE.test(event.at)) {
+    addError(
+      diagnostics,
+      file,
+      props[':at']?.value?.loc ?? node.loc,
+      `:at "${event.at}" must be ISO-8601 with timezone`,
+    );
+  }
+  if (event.summary == null || event.summary.trim() === '') {
+    addError(
+      diagnostics,
+      file,
+      props[':summary']?.value?.loc ?? node.loc,
+      ':summary must be a non-empty string or atom',
+    );
+  }
+  if (!props[':touched']?.value || !isList(props[':touched'].value)) {
+    addError(
+      diagnostics,
+      file,
+      props[':touched']?.value?.loc ?? node.loc,
+      ':touched must be a vector/list, even when empty',
+    );
+  }
+  for (const touched of event.touched) {
+    validateRepoRelativePath(
+      file,
+      props[':touched']?.value?.loc ?? node.loc,
+      touched,
+      ':touched',
+      diagnostics,
+    );
+  }
+  if (event.report_path) {
+    validateRepoRelativePath(file, props[':report_path'].value.loc, event.report_path, ':report_path', diagnostics);
+  }
+  if (event.receipt_path) {
+    validateRepoRelativePath(file, props[':receipt_path'].value.loc, event.receipt_path, ':receipt_path', diagnostics);
+  }
+  if (event.commit_hash && !COMMIT_HASH_RE.test(event.commit_hash)) {
+    addError(
+      diagnostics,
+      file,
+      props[':commit_hash'].value.loc,
+      `:commit_hash "${event.commit_hash}" must match ${COMMIT_HASH_RE}`,
+    );
+  }
+
+  const expectedFromName = parseTaskEventFileSeq(file);
+  if (expectedFromName != null && Number.isInteger(event.seq) && expectedFromName !== event.seq) {
+    addError(
+      diagnostics,
+      file,
+      props[':seq']?.value?.loc ?? node.loc,
+      `:seq ${event.seq} does not match numeric file name ${path.basename(file)} (expected ${expectedFromName})`,
+    );
+  }
+
+  return { ...event, schema, wave };
+}
+
+function parseTaskEventFileSeq(file) {
+  const match = path.basename(file).match(/^(\d+)\.event\.lisp$/);
+  if (!match) return null;
+  return Number.parseInt(match[1], 10);
 }
 
 export function parseLifecycleEventLogsFromText(source, file = '<memory>') {
@@ -433,6 +669,33 @@ export function renderLifecycleEvent(event) {
   return lines.join('\n');
 }
 
+export function renderTaskScopedLifecycleEventFile({ wave, event }) {
+  const touched = renderVector(event.touched ?? []);
+  const lines = [
+    `(${EVENT_HEAD}`,
+    `  :schema "${SCHEMA}"`,
+    `  :wave ${wave}`,
+    `  :id ${event.id}`,
+    `  :task ${event.task}`,
+    `  :actor_role ${event.actor_role}`,
+    `  :event_kind ${event.event_kind}`,
+    `  :commit_role ${event.commit_role ?? 'none'}`,
+    `  :seq ${event.seq}`,
+    `  :at "${event.at}"`,
+    `  :touched ${touched}`,
+    `  :summary ${quoteString(event.summary ?? '')}`,
+  ];
+  if (event.commit_hash) lines.push(`  :commit_hash ${event.commit_hash}`);
+  if (event.report_path) lines.push(`  :report_path "${event.report_path}"`);
+  if (event.receipt_path) lines.push(`  :receipt_path "${event.receipt_path}"`);
+  if (event.refs?.length) lines.push(`  :refs ${renderAtomVector(event.refs)}`);
+  if (event.legacy_memory_id) lines.push(`  :legacy_memory_id ${event.legacy_memory_id}`);
+  if (event.legacy_trace_id) lines.push(`  :legacy_trace_id ${event.legacy_trace_id}`);
+  lines[lines.length - 1] += ')';
+  lines.push('');
+  return lines.join('\n');
+}
+
 export function renderLifecycleEventLog({ id, wave, createdAt, sequence = 0, events = [] }) {
   const body = [
     `(${LOG_HEAD} ${id}`,
@@ -642,9 +905,94 @@ function runFixtures(json) {
       ok: false,
     });
 
+    const validStandalone = renderTaskScopedLifecycleEventFile({
+      wave: 'wave99',
+      event: {
+        id: 'wave99-01-dispatch-001',
+        task: 'wave99-01-demo',
+        actor_role: 'orchestrator',
+        event_kind: 'dispatch',
+        commit_role: 'none',
+        seq: 1,
+        at: '2026-04-28T00:00:01Z',
+        touched: ['.missiond/claudecode/wave99-01-demo.md'],
+        summary: 'dispatched task',
+      },
+    });
+    cases.push({
+      name: 'valid-task-scoped-standalone-event-file',
+      source: validStandalone,
+      filename: '000001.event.lisp',
+      ok: true,
+    });
+    cases.push({
+      name: 'task-scoped-standalone-rejects-missing-wave',
+      source: validStandalone.replace(/:wave wave99\n/, ''),
+      filename: '000001.event.lisp',
+      ok: false,
+    });
+    cases.push({
+      name: 'task-scoped-standalone-rejects-bad-commit-hash',
+      source: renderTaskScopedLifecycleEventFile({
+        wave: 'wave99',
+        event: {
+          id: 'wave99-01-commit-001',
+          task: 'wave99-01-demo',
+          actor_role: 'worker',
+          event_kind: 'worker_commit',
+          commit_role: 'worker',
+          seq: 1,
+          at: '2026-04-28T00:00:01Z',
+          touched: ['scripts/demo.mjs'],
+          summary: 'worker commit',
+          commit_hash: 'zzzzzzz',
+        },
+      }),
+      filename: '000001.event.lisp',
+      ok: false,
+    });
+    cases.push({
+      name: 'task-scoped-standalone-rejects-absolute-path',
+      source: renderTaskScopedLifecycleEventFile({
+        wave: 'wave99',
+        event: {
+          id: 'wave99-01-read-001',
+          task: 'wave99-01-demo',
+          actor_role: 'worker',
+          event_kind: 'read',
+          commit_role: 'none',
+          seq: 1,
+          at: '2026-04-28T00:00:01Z',
+          touched: ['/tmp/demo.mjs'],
+          summary: 'read files',
+        },
+      }),
+      filename: '000001.event.lisp',
+      ok: false,
+    });
+    cases.push({
+      name: 'task-scoped-standalone-rejects-mismatched-filename-seq',
+      source: renderTaskScopedLifecycleEventFile({
+        wave: 'wave99',
+        event: {
+          id: 'wave99-01-read-001',
+          task: 'wave99-01-demo',
+          actor_role: 'worker',
+          event_kind: 'read',
+          commit_role: 'none',
+          seq: 7,
+          at: '2026-04-28T00:00:01Z',
+          touched: [],
+          summary: 'read files',
+        },
+      }),
+      filename: '000001.event.lisp',
+      ok: false,
+    });
+
     let failed = 0;
     for (const c of cases) {
-      const file = path.join(tmp, `${c.name}.lisp`);
+      const file = path.join(tmp, c.filename ?? `${c.name}.lisp`);
       fs.writeFileSync(file, c.source);
       const result = validateLifecycleEventFiles([file]);
       if (result.ok !== c.ok) {
@@ -652,7 +1000,112 @@ function runFixtures(json) {
         console.error(`fixture failed: ${c.name}: expected ok=${c.ok}, got ok=${result.ok}`);
         for (const d of result.diagnostics) console.error(`  ${d.message}`);
       }
+      fs.rmSync(file, { force: true });
     }
+
+    // Directory-mode fixtures: duplicate :id, non-monotonic :seq across files.
+    const dirOk = path.join(tmp, 'dir-ok');
+    fs.mkdirSync(dirOk, { recursive: true });
+    fs.writeFileSync(path.join(dirOk, '000001.event.lisp'), renderTaskScopedLifecycleEventFile({
+      wave: 'wave99',
+      event: {
+        id: 'wave99-01-dispatch-001',
+        task: 'wave99-01-demo',
+        actor_role: 'orchestrator',
+        event_kind: 'dispatch',
+        commit_role: 'none',
+        seq: 1,
+        at: '2026-04-28T00:00:01Z',
+        touched: [],
+        summary: 'dispatched task',
+      },
+    }));
+    fs.writeFileSync(path.join(dirOk, '000002.event.lisp'), renderTaskScopedLifecycleEventFile({
+      wave: 'wave99',
+      event: {
+        id: 'wave99-01-claim-002',
+        task: 'wave99-01-demo',
+        actor_role: 'worker',
+        event_kind: 'claim',
+        commit_role: 'none',
+        seq: 2,
+        at: '2026-04-28T00:00:02Z',
+        touched: [],
+        summary: 'claimed task',
+      },
+    }));
+    const okDirResult = validateLifecycleEventFiles([
+      path.join(dirOk, '000001.event.lisp'),
+      path.join(dirOk, '000002.event.lisp'),
+    ]);
+    if (!okDirResult.ok || okDirResult.task_event_files !== 2) {
+      failed += 1;
+      console.error(`fixture failed: dir-ok-task-scoped: expected ok with 2 files, got ${JSON.stringify(okDirResult.diagnostics)}`);
+    }
+    cases.push({ name: 'dir-ok-task-scoped' });
+
+    const dirDup = path.join(tmp, 'dir-dup');
+    fs.mkdirSync(dirDup, { recursive: true });
+    fs.writeFileSync(path.join(dirDup, '000001.event.lisp'), renderTaskScopedLifecycleEventFile({
+      wave: 'wave99',
+      event: {
+        id: 'wave99-01-dispatch-001',
+        task: 'wave99-01-demo',
+        actor_role: 'orchestrator',
+        event_kind: 'dispatch',
+        commit_role: 'none',
+        seq: 1,
+        at: '2026-04-28T00:00:01Z',
+        touched: [],
+        summary: 'first',
+      },
+    }));
+    fs.writeFileSync(path.join(dirDup, '000002.event.lisp'), renderTaskScopedLifecycleEventFile({
+      wave: 'wave99',
+      event: {
+        id: 'wave99-01-dispatch-001',
+        task: 'wave99-01-demo',
+        actor_role: 'worker',
+        event_kind: 'claim',
+        commit_role: 'none',
+        seq: 2,
+        at: '2026-04-28T00:00:02Z',
+        touched: [],
+        summary: 'duplicate id across dir',
+      },
+    }));
+    const dupDirResult = validateLifecycleEventFiles([
+      path.join(dirDup, '000001.event.lisp'),
+      path.join(dirDup, '000002.event.lisp'),
+    ]);
+    if (dupDirResult.ok) {
+      failed += 1;
+      console.error('fixture failed: dir-duplicate-id-task-scoped: expected NOT ok');
+    }
+    cases.push({ name: 'dir-duplicate-id-task-scoped' });
+
+    const dirNonMono = path.join(tmp, 'dir-non-mono');
+    fs.mkdirSync(dirNonMono, { recursive: true });
+    fs.writeFileSync(path.join(dirNonMono, '000001.event.lisp'), renderTaskScopedLifecycleEventFile({
+      wave: 'wave99',
+      event: {
+        id: 'wave99-01-dispatch-001',
+        task: 'wave99-01-demo',
+        actor_role: 'orchestrator',
+        event_kind: 'dispatch',
+        commit_role: 'none',
+        seq: 5,
+        at: '2026-04-28T00:00:01Z',
+        touched: [],
+        summary: 'mismatched filename seq',
+      },
+    }));
+    const monoResult = validateLifecycleEventFiles([path.join(dirNonMono, '000001.event.lisp')]);
+    if (monoResult.ok) {
+      failed += 1;
+      console.error('fixture failed: filename-seq-mismatch-task-scoped: expected NOT ok');
+    }
+    cases.push({ name: 'filename-seq-mismatch-task-scoped' });
     if (failed > 0) {
       console.error(`task-lifecycle-events fixtures FAILED -- ${failed} of ${cases.length}`);
       process.exit(1);

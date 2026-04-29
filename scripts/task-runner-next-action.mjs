@@ -18,7 +18,8 @@ const NEXT_ACTION_SCHEMA = 'missiond.task-runner-next-action.v0';
 
 const usage = `Usage:
   node scripts/task-runner-next-action.mjs --manifest <manifest.lisp>
-    [--lifecycle <task-lifecycle-events.lisp>] [--receipts <receipts.lisp>]
+    [--lifecycle <task-lifecycle-events.lisp>] [--events-dir <task-events-dir>]
+    [--receipts <receipts.lisp>]
     [--repo <repo-root>] [--action runnable|all|dispatch_task|finalize_report|wait_for_hard_deps]
     [--limit <n|all>] [--actor-role <role>] [--emit-dispatch-events] [--json]
     [--request-id <request-id> --request-events-dir <dir>]
@@ -44,6 +45,7 @@ function parseArgs(argv) {
   const opts = {
     manifest: null,
     lifecycle: null,
+    eventsDir: null,
     receipts: null,
     repo: process.cwd(),
     action: 'runnable',
@@ -74,6 +76,10 @@ function parseArgs(argv) {
       opts.lifecycle = argv[++i] ?? fail('--lifecycle requires a value');
     } else if (arg.startsWith('--lifecycle=')) {
       opts.lifecycle = arg.slice('--lifecycle='.length);
+    } else if (arg === '--events-dir') {
+      opts.eventsDir = argv[++i] ?? fail('--events-dir requires a value');
+    } else if (arg.startsWith('--events-dir=')) {
+      opts.eventsDir = arg.slice('--events-dir='.length);
     } else if (arg === '--receipts') {
       opts.receipts = argv[++i] ?? fail('--receipts requires a value');
     } else if (arg.startsWith('--receipts=')) {
@@ -113,6 +119,7 @@ export function runNextAction({
   manifestPath,
   repoRoot = process.cwd(),
   lifecyclePath = null,
+  eventsDirPath = null,
   receiptsPath = null,
   action = 'runnable',
   limit = 'all',
@@ -129,11 +136,13 @@ export function runNextAction({
     manifestPath,
     repoRoot: repo,
     lifecyclePath,
+    eventsDirPath,
     receiptsPath,
   });
   const selectedActions = selectNextActions(before, { action, limit });
   const selectedKinds = [...new Set(selectedActions.map((a) => a.action))].sort();
   const lifecycleTarget = before.lifecycle_path ?? defaultLifecyclePath(before.wave);
+  const eventsDirTarget = eventsDirPath ?? before.events_dir_path ?? defaultEventsDirPath(before.wave);
   const result = {
     ok: true,
     schema: NEXT_ACTION_SCHEMA,
@@ -143,6 +152,7 @@ export function runNextAction({
     wave: before.wave,
     manifest_path: before.manifest_path,
     lifecycle_path: lifecycleTarget,
+    events_dir_path: eventsDirTarget,
     counts: before.counts,
     selected_count: selectedActions.length,
     selected_actions: selectedActions,
@@ -171,6 +181,7 @@ export function runNextAction({
     actions: selectedActions,
     repoRoot: repo,
     lifecyclePath: lifecycleTarget,
+    eventsDirPath: eventsDirTarget,
     manifestPath: before.manifest_path,
     actorRole,
     requestId,
@@ -182,6 +193,7 @@ export function runNextAction({
     manifestPath,
     repoRoot: repo,
     lifecyclePath: lifecycleTarget,
+    eventsDirPath: eventsDirTarget,
     receiptsPath,
   });
   result.after_counts = after.counts;
@@ -218,6 +230,7 @@ export function emitDispatchEventsForActions({
   actions,
   repoRoot,
   lifecyclePath,
+  eventsDirPath = null,
   manifestPath,
   actorRole,
   requestId = null,
@@ -225,12 +238,14 @@ export function emitDispatchEventsForActions({
   nowIso,
   wave,
 }) {
-  const ledgerPath = path.resolve(repoRoot, lifecyclePath);
+  const ledgerPath = lifecyclePath ? path.resolve(repoRoot, lifecyclePath) : null;
+  const eventsDir = eventsDirPath ? path.resolve(repoRoot, eventsDirPath) : null;
   const appended = [];
   for (const action of actions) {
     const touched = uniqueSorted([manifestPath, action.brief_path].filter(Boolean));
     const appendResult = appendLifecycleEvent({
       ledgerPath,
+      eventsDir,
       task: action.task_id,
       eventKind: 'dispatch',
       actorRole,
@@ -243,6 +258,9 @@ export function emitDispatchEventsForActions({
       requestEventsDir,
     });
     const event = { ...appendResult.event };
+    if (appendResult.eventFile) {
+      event.event_file = toRepoRelative(appendResult.eventFile, repoRoot);
+    }
     if (appendResult.requestEventPath) {
       event.request_event_path = toRepoRelative(appendResult.requestEventPath, repoRoot);
     }
@@ -262,6 +280,10 @@ function parseLimit(value, fallback) {
 
 function defaultLifecyclePath(wave) {
   return path.posix.join('.missiond', 'tasks', wave, 'task-lifecycle-events.lisp');
+}
+
+function defaultEventsDirPath(wave) {
+  return path.posix.join('.missiond', 'tasks', wave, 'events');
 }
 
 function validateRequestProjectionArgs(requestId, requestEventsDir) {
@@ -298,6 +320,7 @@ function main() {
       manifestPath: opts.manifest,
       repoRoot: opts.repo,
       lifecyclePath: opts.lifecycle,
+      eventsDirPath: opts.eventsDir,
       receiptsPath: opts.receipts,
       action: opts.action,
       limit: opts.limit,
@@ -353,6 +376,14 @@ function runFixtures() {
     assert(
       emitted.appended_events.every((event) => event.request_event_path?.includes('/events/')),
       'dispatch events should project request-local event files when request args are supplied',
+    );
+    assert(
+      emitted.appended_events.every((event) => event.event_file?.endsWith('.event.lisp')),
+      'dispatch events should also write task-scoped one-event files via the auto-detected events-dir',
+    );
+    assert(
+      emitted.events_dir_path === '.missiond/tasks/wave99/events',
+      'next-action should expose the resolved task-scoped events_dir_path',
     );
     assert(emitted.after_counts.running === 2, 'dispatch events should move selected tasks to running');
     assert(emitted.after_counts.dispatchable === 0, 'emitted tasks should not remain dispatchable');

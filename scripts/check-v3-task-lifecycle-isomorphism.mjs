@@ -25,6 +25,7 @@ Checks the V3 task-runner lifecycle Lisp/code isomorphism contract:
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  lifecycleSchema: '.missiond/tasks/schema/task-lifecycle-event-v1.lisp',
   lifecycleChecker: 'scripts/check-task-lifecycle-events.mjs',
   appendEvent: 'scripts/task-runner-append-event.mjs',
   finalizer: 'scripts/task-runner-finalize-report.mjs',
@@ -33,6 +34,7 @@ const DEFAULT_FILES = {
   nextAction: 'scripts/task-runner-next-action.mjs',
   dispatch: 'scripts/task-runner-dispatch.mjs',
   submitDispatch: 'scripts/task-runner-submit-dispatch.mjs',
+  waveState: 'scripts/task-runner-wave-state.mjs',
   receiptChecker: 'scripts/check-verification-receipt.mjs',
   batchVerifier: 'scripts/verify-task-runner-batch.mjs',
 };
@@ -108,7 +110,9 @@ function checkFiles(root, files) {
     'scripts/task-runner-submit-dispatch.mjs',
     'scripts/check-verification-receipt.mjs',
     'scripts/verify-task-runner-batch.mjs',
-    'task-scoped compatibility lifecycle ledger',
+    'Task-scoped lifecycle events are first-class one-event files',
+    '.missiond/tasks/<wave>/events/<seq>.event.lisp',
+    'task-lifecycle-events.lisp ledger is now a compatibility projection/input',
     '.missiond/requests/<request_id>/events/<seq>.event.lisp',
     '.missiond/requests/<request_id>/reports/final.lisp',
     '.missiond/requests/<request_id>/receipts/<receipt_id>.lisp',
@@ -119,8 +123,8 @@ function checkFiles(root, files) {
     'validateRequestVerificationReceiptSource',
     'writeRequestVerificationReceiptFile',
     'legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs',
-    'task-runner-dispatch and task-runner-submit-dispatch pass request-local lifecycle projection args',
-    'task-runner-append-event is the only cooperative mutation helper',
+    'task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args',
+    'task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files',
     'node scripts/check-v3-task-lifecycle-isomorphism.mjs',
   ]);
 
@@ -128,6 +132,9 @@ function checkFiles(root, files) {
     'missiond.task-lifecycle-event.v1',
     'missiond.lifecycle-event.v1',
     'validateRequestLifecycleEventFile',
+    'validateTaskScopedLifecycleEventFile',
+    'renderTaskScopedLifecycleEventFile',
+    '--events-dir',
     'parent_hotfix',
     'finalized_report',
     'receipt',
@@ -146,12 +153,19 @@ function checkFiles(root, files) {
     'validateLifecycleEventFiles([tmp])',
     'fs.renameSync(tmp, ledgerPath)',
     'renderLifecycleEventLog',
+    'renderTaskScopedLifecycleEventFile',
+    'appendLifecycleEventToEventsDir',
+    'scanTaskScopedEventDirMaxSeq',
+    'appendLedgerCompatProjection',
+    '--events-dir',
+    "fs.openSync(eventFile, 'wx')",
     '--request-id',
     '--request-events-dir',
     'writeRequestLifecycleEventFile',
     'renderRequestLifecycleEventFile',
     'request-local projection',
     'concurrent child appends',
+    'task-scoped events-dir',
   ]);
 
   requireAll(diagnostics, files.finalizer, sources.finalizer, [
@@ -196,28 +210,37 @@ function checkFiles(root, files) {
     'finalizers.length > 0',
     'emitDispatchEventsForActions',
     'appendLifecycleEvent({',
+    '--events-dir',
     '--request-events-dir',
+    'eventsDirPath',
     'requestEventsDir',
     'request_event_path',
+    'event_file',
   ]);
 
   requireAll(diagnostics, files.dispatch, sources.dispatch, [
     "from './task-runner-next-action.mjs'",
     'runDispatch',
+    '--events-dir',
     '--request-id',
     '--request-events-dir',
+    'eventsDirPath',
     'requestEventsDir',
     'request_event_path',
+    'events_dir_path',
   ]);
 
   requireAll(diagnostics, files.submitDispatch, sources.submitDispatch, [
     "from './task-runner-dispatch.mjs'",
     "from './task-runner-next-action.mjs'",
     'submitDispatch',
+    '--events-dir',
     '--request-id',
     '--request-events-dir',
+    'eventsDirPath',
     'requestEventsDir',
     'request_event_path',
+    'events_dir_path',
   ]);
 
   requireAll(diagnostics, files.receiptChecker, sources.receiptChecker, [
@@ -236,6 +259,25 @@ function checkFiles(root, files) {
     'wave37-01-request-projection-writer',
   ]);
 
+  requireAll(diagnostics, files.waveState, sources.waveState, [
+    "from './check-task-lifecycle-events.mjs'",
+    'defaultEventsDirPath',
+    'readOptionalTaskScopedEventFiles',
+    'mergeLifecycleEvents',
+    '--events-dir',
+    'events_dir_path',
+    'lifecycle_event_count',
+  ]);
+
+  requireAll(diagnostics, files.lifecycleSchema, sources.lifecycleSchema, [
+    'missiond.task-lifecycle-event.v1',
+    'standalone-task-event-file',
+    'legacy-task-lifecycle-event-log',
+    '.missiond/tasks/<wave>/events/<seq>.event.lisp',
+    '.missiond/tasks/<wave>/task-lifecycle-events.lisp',
+    'compatibility projection/input',
+  ]);
+
   requireAll(diagnostics, files.batchVerifier, sources.batchVerifier, [
     "from './check-task-lifecycle-events.mjs'",
     "from './task-runner-append-event.mjs'",
@@ -246,6 +288,7 @@ function checkFiles(root, files) {
     'planParentHotfixFromSource',
     'writeRequestVerificationReceiptFile',
     'lifecycle receipt finalized-report smoke',
+    'task-scoped events-dir',
   ]);
 
   return diagnostics;
@@ -280,13 +323,23 @@ function buildFixture() {
              "scripts/task-runner-submit-dispatch.mjs"
              "scripts/check-verification-receipt.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper"))
+      :note "Task-scoped lifecycle events are first-class one-event files at .missiond/tasks/<wave>/events/<seq>.event.lisp; the task-lifecycle-events.lisp ledger is now a compatibility projection/input. request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files"))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
+  writeFixture(root, DEFAULT_FILES.lifecycleSchema, `
+(task-lifecycle-event-schema missiond.task-lifecycle-event.v1
+  :file ".missiond/tasks/<wave>/events/<seq>.event.lisp"
+  :legacy ".missiond/tasks/<wave>/task-lifecycle-events.lisp"
+  :note "compatibility projection/input"
+  :shape-primary standalone-task-event-file
+  :shape-legacy legacy-task-lifecycle-event-log)`);
   writeFixture(root, DEFAULT_FILES.lifecycleChecker, `
 const SCHEMA = 'missiond.task-lifecycle-event.v1';
 const REQUEST_EVENT_SCHEMA = 'missiond.lifecycle-event.v1';
 function validateRequestLifecycleEventFile() {}
+function validateTaskScopedLifecycleEventFile() {}
+function renderTaskScopedLifecycleEventFile() {}
+const args = '--events-dir';
 const EVENT_KINDS = ['parent_hotfix', 'finalized_report', 'receipt', 'completion'];
 const COMMIT_HASH_RE = /x/;
 function isRepoRelativePath() {}
@@ -296,14 +349,19 @@ const usage = '--dry-fixture';`);
 import {} from './check-task-lifecycle-events.mjs';
 function withLedgerLock() {}
 fs.openSync(lockPath, 'wx');
+fs.openSync(eventFile, 'wx');
 nextSeq(log.events);
 validateLifecycleEventFiles([tmp]);
 fs.renameSync(tmp, ledgerPath);
 renderLifecycleEventLog({});
-const args = '--request-id --request-events-dir';
+function renderTaskScopedLifecycleEventFile() {}
+function appendLifecycleEventToEventsDir() {}
+function scanTaskScopedEventDirMaxSeq() {}
+function appendLedgerCompatProjection() {}
+const args = '--events-dir --request-id --request-events-dir';
 function writeRequestLifecycleEventFile() {}
 function renderRequestLifecycleEventFile() {}
-const msg = 'request-local projection concurrent child appends';`);
+const msg = 'request-local projection concurrent child appends task-scoped events-dir';`);
   writeFixture(root, DEFAULT_FILES.finalizer, `
 export function finalizeReportObject() {}
 const a = 'at least one parent patch is required';
@@ -331,19 +389,26 @@ import {} from './task-runner-append-event.mjs';
 if (a.action === 'finalize_report') {}
 if (finalizers.length > 0) {}
 function emitDispatchEventsForActions() { appendLifecycleEvent({}); }
-const args = '--request-events-dir';
-const a = 'requestEventsDir request_event_path';`);
+const args = '--events-dir --request-events-dir';
+const a = 'eventsDirPath requestEventsDir request_event_path event_file';`);
   writeFixture(root, DEFAULT_FILES.dispatch, `
 import {} from './task-runner-next-action.mjs';
 function runDispatch() {}
-const args = '--request-id --request-events-dir';
-const a = 'requestEventsDir request_event_path';`);
+const args = '--events-dir --request-id --request-events-dir';
+const a = 'eventsDirPath requestEventsDir request_event_path events_dir_path';`);
   writeFixture(root, DEFAULT_FILES.submitDispatch, `
 import {} from './task-runner-dispatch.mjs';
 import {} from './task-runner-next-action.mjs';
 function submitDispatch() {}
-const args = '--request-id --request-events-dir';
-const a = 'requestEventsDir request_event_path';`);
+const args = '--events-dir --request-id --request-events-dir';
+const a = 'eventsDirPath requestEventsDir request_event_path events_dir_path';`);
+  writeFixture(root, DEFAULT_FILES.waveState, `
+import {} from './check-task-lifecycle-events.mjs';
+function defaultEventsDirPath() {}
+function readOptionalTaskScopedEventFiles() {}
+function mergeLifecycleEvents() {}
+const args = '--events-dir';
+const a = 'events_dir_path lifecycle_event_count';`);
   writeFixture(root, DEFAULT_FILES.receiptChecker, `
 export const SCHEMA = 'missiond.verification-receipt.v1';
 export const REQUEST_RECEIPT_SCHEMA = SCHEMA;
@@ -368,7 +433,7 @@ validateLifecycleEventFiles([]);
 appendLifecycleEvent({});
 planParentHotfixFromSource('');
 writeRequestVerificationReceiptFile({});
-const smoke = 'lifecycle receipt finalized-report smoke';`);
+const smoke = 'lifecycle receipt finalized-report smoke task-scoped events-dir';`);
   return root;
 }
 

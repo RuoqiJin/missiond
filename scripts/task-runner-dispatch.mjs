@@ -17,7 +17,8 @@ const DISPATCH_SCHEMA = 'missiond.task-runner-dispatch.v0';
 
 const usage = `Usage:
   node scripts/task-runner-dispatch.mjs --manifest <manifest.lisp>
-    [--lifecycle <task-lifecycle-events.lisp>] [--receipts <receipts.lisp>]
+    [--lifecycle <task-lifecycle-events.lisp>] [--events-dir <task-events-dir>]
+    [--receipts <receipts.lisp>]
     [--repo <repo-root>] [--max-parallel <n|all>] [--actor-role <role>]
     [--request-id <request-id> --request-events-dir <dir>]
     [--allow-missing-briefs] [--emit-dispatch-events] [--json]
@@ -43,6 +44,7 @@ function parseArgs(argv) {
   const opts = {
     manifest: null,
     lifecycle: null,
+    eventsDir: null,
     receipts: null,
     repo: process.cwd(),
     maxParallel: 'all',
@@ -75,6 +77,10 @@ function parseArgs(argv) {
       opts.lifecycle = argv[++i] ?? fail('--lifecycle requires a value');
     } else if (arg.startsWith('--lifecycle=')) {
       opts.lifecycle = arg.slice('--lifecycle='.length);
+    } else if (arg === '--events-dir') {
+      opts.eventsDir = argv[++i] ?? fail('--events-dir requires a value');
+    } else if (arg.startsWith('--events-dir=')) {
+      opts.eventsDir = arg.slice('--events-dir='.length);
     } else if (arg === '--receipts') {
       opts.receipts = argv[++i] ?? fail('--receipts requires a value');
     } else if (arg.startsWith('--receipts=')) {
@@ -110,6 +116,7 @@ export function runDispatch({
   manifestPath,
   repoRoot = process.cwd(),
   lifecyclePath = null,
+  eventsDirPath = null,
   receiptsPath = null,
   maxParallel = 'all',
   actorRole = 'orchestrator',
@@ -124,6 +131,7 @@ export function runDispatch({
     manifestPath,
     repoRoot: repo,
     lifecyclePath,
+    eventsDirPath,
     receiptsPath,
     action: 'runnable',
     limit: maxParallel,
@@ -161,6 +169,7 @@ export function runDispatch({
     wave: before.wave,
     manifest_path: before.manifest_path,
     lifecycle_path: before.lifecycle_path,
+    events_dir_path: before.events_dir_path,
     max_parallel: maxParallel,
     status: computeStatus({ blockers, dispatchActions, missingBriefs, allowMissingBriefs }),
     counts: before.counts,
@@ -185,6 +194,7 @@ export function runDispatch({
     manifestPath,
     repoRoot: repo,
     lifecyclePath,
+    eventsDirPath,
     receiptsPath,
     action: 'dispatch_task',
     limit: maxParallel,
@@ -302,6 +312,7 @@ function main() {
       manifestPath: opts.manifest,
       repoRoot: opts.repo,
       lifecyclePath: opts.lifecycle,
+      eventsDirPath: opts.eventsDir,
       receiptsPath: opts.receipts,
       maxParallel: opts.maxParallel,
       actorRole: opts.actorRole,
@@ -365,6 +376,14 @@ function runFixtures() {
     assert(
       emitted.appended_events[0].request_event_path?.endsWith('000001.event.lisp'),
       'emit mode should write request-local dispatch event when request args are supplied',
+    );
+    assert(
+      emitted.appended_events[0].event_file?.endsWith('.event.lisp'),
+      'emit mode should also write task-scoped one-event file via the auto-detected events-dir',
+    );
+    assert(
+      emitted.events_dir_path === '.missiond/tasks/wave99/events',
+      'dispatch should expose the resolved task-scoped events_dir_path',
     );
     assert(emitted.after_running.length === 1, 'after projection should mark one task running');
 

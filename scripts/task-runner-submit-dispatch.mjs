@@ -20,7 +20,8 @@ const JSONRPC_VERSION = '2.0';
 
 const usage = `Usage:
   node scripts/task-runner-submit-dispatch.mjs --manifest <manifest.lisp>
-    [--lifecycle <task-lifecycle-events.lisp>] [--receipts <receipts.lisp>]
+    [--lifecycle <task-lifecycle-events.lisp>] [--events-dir <task-events-dir>]
+    [--receipts <receipts.lisp>]
     [--repo <repo-root>] [--max-parallel <n|all>] [--endpoint <ipc>]
     [--session-id <id>] [--actor-role <role>] [--allow-missing-briefs]
     [--request-id <request-id> --request-events-dir <dir>]
@@ -41,6 +42,7 @@ function parseArgs(argv) {
   const opts = {
     manifest: null,
     lifecycle: null,
+    eventsDir: null,
     receipts: null,
     repo: process.cwd(),
     maxParallel: 'all',
@@ -75,6 +77,10 @@ function parseArgs(argv) {
       opts.lifecycle = argv[++i] ?? fail('--lifecycle requires a value');
     } else if (arg.startsWith('--lifecycle=')) {
       opts.lifecycle = arg.slice('--lifecycle='.length);
+    } else if (arg === '--events-dir') {
+      opts.eventsDir = argv[++i] ?? fail('--events-dir requires a value');
+    } else if (arg.startsWith('--events-dir=')) {
+      opts.eventsDir = arg.slice('--events-dir='.length);
     } else if (arg === '--receipts') {
       opts.receipts = argv[++i] ?? fail('--receipts requires a value');
     } else if (arg.startsWith('--receipts=')) {
@@ -118,6 +124,7 @@ export async function submitDispatch({
   manifestPath,
   repoRoot = process.cwd(),
   lifecyclePath = null,
+  eventsDirPath = null,
   receiptsPath = null,
   maxParallel = 'all',
   endpoint = defaultEndpoint(),
@@ -135,6 +142,7 @@ export async function submitDispatch({
     manifestPath,
     repoRoot: repo,
     lifecyclePath,
+    eventsDirPath,
     receiptsPath,
     maxParallel,
     actorRole,
@@ -153,6 +161,7 @@ export async function submitDispatch({
     wave: descriptor.wave,
     manifest_path: descriptor.manifest_path,
     lifecycle_path: descriptor.lifecycle_path,
+    events_dir_path: descriptor.events_dir_path,
     dispatch_status: descriptor.status,
     delegate_call_count: descriptor.delegate_call_count,
     submitted_count: 0,
@@ -191,6 +200,7 @@ export async function submitDispatch({
       actions: successfulActions,
       repoRoot: repo,
       lifecyclePath: descriptor.lifecycle_path,
+      eventsDirPath: descriptor.events_dir_path,
       manifestPath: descriptor.manifest_path,
       actorRole,
       requestId,
@@ -202,6 +212,7 @@ export async function submitDispatch({
       manifestPath,
       repoRoot: repo,
       lifecyclePath: descriptor.lifecycle_path,
+      eventsDirPath: descriptor.events_dir_path,
       receiptsPath,
     });
     result.after_counts = after.counts;
@@ -314,6 +325,7 @@ function main() {
     manifestPath: opts.manifest,
     repoRoot: opts.repo,
     lifecyclePath: opts.lifecycle,
+    eventsDirPath: opts.eventsDir,
     receiptsPath: opts.receipts,
     maxParallel: opts.maxParallel,
     endpoint: opts.endpoint,
@@ -385,6 +397,14 @@ async function submitDispatchFixtures() {
     assert(
       applied.appended_events[0].request_event_path?.endsWith('000001.event.lisp'),
       'successful submission should project request-local dispatch event when request args are supplied',
+    );
+    assert(
+      applied.appended_events[0].event_file?.endsWith('.event.lisp'),
+      'successful submission should also write task-scoped one-event file via auto-detected events-dir',
+    );
+    assert(
+      applied.events_dir_path === '.missiond/tasks/wave99/events',
+      'submit-dispatch should expose the resolved task-scoped events_dir_path',
     );
     assert(applied.after_running.length === 1, 'after projection should show one running task');
 
