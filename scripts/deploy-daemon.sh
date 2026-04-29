@@ -24,6 +24,9 @@
 #                           default: com.missiond.daemon
 #   MISSIOND_DEPLOY_TIMEOUT   socket-readiness timeout (seconds)
 #                           default: 30
+#   MISSIOND_DEPLOY_SMOKE_TIMEOUT
+#                           IPC smoke retry timeout after socket readiness
+#                           default: 30
 #
 # Exits:
 #   0  success
@@ -59,6 +62,7 @@ BIN_PATH="${MISSIOND_BIN_PATH:-${HOME}/.xjp-mission/missiond}"
 SOCK_PATH="${MISSIOND_SOCKET_PATH:-${HOME}/.missiond/missiond.sock}"
 LABEL="${MISSIOND_LAUNCHCTL_LABEL:-com.missiond.daemon}"
 TIMEOUT="${MISSIOND_DEPLOY_TIMEOUT:-30}"
+SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
@@ -198,10 +202,24 @@ EOF
   # Send a minimal initialize + tools/call to the IPC. We don't run a full
   # MCP exchange — we just want to know: does the IPC respond?
   log "smoke: $MCP < initialize"
-  RESP=$(run_mcp_initialize_smoke 2>&1 | tail -3 || true)
-  if echo "$RESP" | grep -q '"protocolVersion"'; then
-    log "smoke: IPC responded OK"
-  else
+  SMOKE_START_TS=$(date +%s)
+  RESP=""
+  while true; do
+    RESP=$(run_mcp_initialize_smoke 2>&1 | tail -3 || true)
+    if echo "$RESP" | grep -q '"protocolVersion"'; then
+      log "smoke: IPC responded OK"
+      break
+    fi
+
+    ELAPSED=$(( $(date +%s) - SMOKE_START_TS ))
+    if [ "$ELAPSED" -ge "$SMOKE_TIMEOUT" ]; then
+      break
+    fi
+    log "smoke: IPC not ready yet; retrying..."
+    sleep 1
+  done
+
+  if ! echo "$RESP" | grep -q '"protocolVersion"'; then
     log "smoke: IPC did not respond cleanly — output below"
     echo "$RESP" | sed 's/^/[smoke] /' >&2
     if [ -n "${BACKUP_PATH:-}" ] && [ -f "$BACKUP_PATH" ]; then
