@@ -5,7 +5,7 @@
   :schema "missiond.report-contract.v1"
   :task_id "wave49-01-request-flow-restart-recovery-smoke-v0"
   :status done
-  :commit_hash "PENDING"
+  :commit_hash "b22410b4"
   :files_changed
     ["scripts/check-v3-request-flow-smoke.mjs"
      ".missiond/tasks/wave49/shared-memory.lisp"
