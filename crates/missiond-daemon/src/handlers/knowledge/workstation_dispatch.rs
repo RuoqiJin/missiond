@@ -43,9 +43,7 @@ use serde_json::{json, Value};
 use crate::slot_orchestrator::project_root::resolve_target_project_root;
 use crate::state::AppState;
 
-use super::evidence_collector::{
-    self, AppendOutcome, EventRef, EvidenceEntry,
-};
+use super::evidence_collector::{self, AppendOutcome, EventRef, EvidenceEntry};
 use super::plan::{tool_result_payload, AGENT_TEAM_OBJECTIVE_HINT};
 
 /// Default commit policy when none is provided. Matches the wave-12 scoped
@@ -227,505 +225,14 @@ impl WorkstationDispatchHints {
     }
 }
 
-// ── wave-19 / task 07 — narrow task-contract v1 parser ─────────────────
-//
-// Scope rule: this parser ONLY extracts the fields workstation_dispatch
-// actually consumes (objective / scope / owned-files / forbidden-files /
-// acceptance / commit policy / dispatch strategy / target / target-project
-// / requested-cwd). It is NOT a general-purpose Lisp reader — the
-// authoritative checker lives at scripts/check-task-contract.mjs and is
-// the gate for any new field. Adding a field here without first teaching
-// the checker would break the SSOT invariant.
-//
-// Why a hand-rolled tokeniser instead of pulling in a Lisp crate:
-//   * The daemon already deliberately avoids a Lisp dependency (see
-//     handlers/comm/capability_usage.rs which uses regexes for the same
-//     reason — keeps the fail-mode surface narrow and the dependency tree
-//     clean for the embedded-runtime build).
-//   * The contract emitter (plan.rs::build_task_contract_lisp) only ever
-//     produces strings, bracketed string lists, bare symbols (kind/status
-//     values), and one nested property list (`:commit (...)`). The
-//     tokeniser below covers exactly that surface.
-//   * Comment lines start with `;;` and end at end-of-line.
-//   * Strings are double-quoted with `\"` and `\\` escapes.
-//
-// Failure mode: any structural error (unbalanced parens, EOF inside a
-// string, missing `:schema`, schema mismatch, unexpected token shape) is
-// surfaced as `TaskContractParseError` and caught by the dispatch layer
-// which converts it into `SafeDescriptorReason::MalformedTaskContract`.
-// The parser NEVER guesses or recovers — fail-fast over silent salvage.
+mod descriptor;
 
-/// Narrow projection of task-contract v1 holding only the fields
-/// `workstation_dispatch` consumes. New fields land here only after the
-/// authoritative checker (scripts/check-task-contract.mjs) is taught
-/// about them. The unused fields (kind, status, owner, etc.) are not
-/// stripped — see `read_optional_string`.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(crate) struct ParsedTaskContract {
-    pub schema: String,
-    pub goal: String,
-    pub scope: Option<String>,
-    pub write_scope: Vec<String>,
-    pub must_not_touch: Vec<String>,
-    pub acceptance: Vec<String>,
-    pub commit_policy: Option<String>,
-    pub dispatch_strategy: Option<String>,
-    pub target_project: Option<String>,
-    pub requested_cwd: Option<String>,
-    pub target: Option<String>,
-    /// wave-23 / task 05 — optional session-trace ledger path. Mirrors
-    /// the `:session-trace-path` field emitted by
-    /// `plan::build_task_contract_lisp` so the dispatch overlay can
-    /// re-derive the path when only the contract is supplied (caller
-    /// dropped the explicit arg).
-    pub session_trace_path: Option<String>,
-}
-
-/// Typed parser/loader failure. Each variant maps deterministically to a
-/// `SafeDescriptorReason::MalformedTaskContract` reason string.
-#[derive(Debug, Clone)]
-pub(crate) enum TaskContractParseError {
-    /// IO failure reading the file (missing / permission / etc.).
-    Io(String),
-    /// The file content failed structural parsing (lex / paren balance /
-    /// EOF inside string).
-    Lex(String),
-    /// The top-level form is not `(task <id> ...)`.
-    NotATaskForm(String),
-    /// `:schema` is missing or not equal to `missiond.task-contract.v1`.
-    SchemaMismatch(String),
-    /// A required field (`:goal`) is missing or blank.
-    MissingRequired(&'static str),
-    /// A field has the wrong type (e.g. `:goal "..."` is not a string).
-    FieldShape { field: &'static str, detail: String },
-}
-
-impl TaskContractParseError {
-    pub(crate) fn reason(&self) -> String {
-        match self {
-            TaskContractParseError::Io(e) => format!("io: {}", e),
-            TaskContractParseError::Lex(e) => format!("lex: {}", e),
-            TaskContractParseError::NotATaskForm(s) => {
-                format!("not a `(task ...)` form: {}", s)
-            }
-            TaskContractParseError::SchemaMismatch(found) => format!(
-                "schema mismatch — expected `missiond.task-contract.v1`, got `{}`",
-                found
-            ),
-            TaskContractParseError::MissingRequired(field) => {
-                format!("missing required field `{}`", field)
-            }
-            TaskContractParseError::FieldShape { field, detail } => {
-                format!("field `{}` has wrong shape: {}", field, detail)
-            }
-        }
-    }
-}
-
-/// One element of the small parse tree. Bracketed `[..]` and parens `(..)`
-/// are not distinguished here — the contract emitter uses `[...]` for
-/// vectors and `(...)` for the top form + `:commit` plist; both shapes
-/// flatten into a `List` and the field reader differentiates by context.
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum SExp {
-    /// Bare symbol (e.g. `task`, `code-alignment`, `write-scope-only`,
-    /// `true`). Includes leading `:` keywords as their own variant below.
-    Symbol(String),
-    /// Property keyword (`:schema`, `:goal`, ...). Stored without the
-    /// leading colon for ergonomic matching.
-    Keyword(String),
-    /// String literal (post-unescape).
-    String(String),
-    /// Compound — both `(...)` and `[...]` flatten here.
-    List(Vec<SExp>),
-}
-
-/// Tokenise + parse a single top-level form. The contract emitter only
-/// ever writes one form per file, so we accept exactly one and reject
-/// trailing junk.
-fn parse_one_top_form(src: &str) -> Result<SExp, TaskContractParseError> {
-    let tokens = lex_tokens(src)?;
-    let mut iter = tokens.into_iter().peekable();
-    let form = parse_form(&mut iter)?;
-    // Skip whitespace tokens — the lexer already drops them; remaining
-    // iter must be empty.
-    if iter.peek().is_some() {
-        return Err(TaskContractParseError::Lex(
-            "trailing tokens after top-level form".to_string(),
-        ));
-    }
-    Ok(form)
-}
-
-/// Internal lexer token. We collapse `(`/`[` into `Open` and `)`/`]`
-/// into `Close` because the contract grammar does not need the
-/// distinction (see `SExp::List`).
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum Tok {
-    Open,
-    Close,
-    Symbol(String),
-    Keyword(String),
-    String(String),
-}
-
-fn lex_tokens(src: &str) -> Result<Vec<Tok>, TaskContractParseError> {
-    let mut out: Vec<Tok> = Vec::new();
-    let bytes = src.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        let b = bytes[i];
-        // Skip whitespace.
-        if matches!(b, b' ' | b'\t' | b'\r' | b'\n') {
-            i += 1;
-            continue;
-        }
-        // Comment: `;;` (single `;` is also tolerated) → skip to EOL.
-        if b == b';' {
-            while i < bytes.len() && bytes[i] != b'\n' {
-                i += 1;
-            }
-            continue;
-        }
-        // Bracket / paren.
-        if b == b'(' || b == b'[' {
-            out.push(Tok::Open);
-            i += 1;
-            continue;
-        }
-        if b == b')' || b == b']' {
-            out.push(Tok::Close);
-            i += 1;
-            continue;
-        }
-        // String literal.
-        if b == b'"' {
-            i += 1;
-            let mut buf = String::new();
-            let mut closed = false;
-            while i < bytes.len() {
-                let c = bytes[i];
-                if c == b'\\' {
-                    if i + 1 >= bytes.len() {
-                        break;
-                    }
-                    let next = bytes[i + 1];
-                    match next {
-                        b'\\' => buf.push('\\'),
-                        b'"' => buf.push('"'),
-                        b'n' => buf.push('\n'),
-                        b't' => buf.push('\t'),
-                        b'r' => buf.push('\r'),
-                        // Unknown escape → keep the next byte verbatim so
-                        // `\?` round-trips. Conservative; matches the
-                        // emitter's tolerance.
-                        other => buf.push(other as char),
-                    }
-                    i += 2;
-                    continue;
-                }
-                if c == b'"' {
-                    closed = true;
-                    i += 1;
-                    break;
-                }
-                // UTF-8 safe: re-walk via str slicing instead of byte cast.
-                // We grow `buf` one char at a time using char_indices below.
-                // To avoid double-walking, fall back to a per-char loop here.
-                // For ASCII (which `lisp_escape_string` guarantees for the
-                // structural bytes), the cast is safe; non-ASCII bytes flow
-                // through the str-slice branch.
-                if c.is_ascii() {
-                    buf.push(c as char);
-                    i += 1;
-                } else {
-                    // Find the next char boundary in the original `&str`.
-                    let rest = &src[i..];
-                    if let Some(ch) = rest.chars().next() {
-                        buf.push(ch);
-                        i += ch.len_utf8();
-                    } else {
-                        break;
-                    }
-                }
-            }
-            if !closed {
-                return Err(TaskContractParseError::Lex(
-                    "unterminated string literal".to_string(),
-                ));
-            }
-            out.push(Tok::String(buf));
-            continue;
-        }
-        // Atom (symbol or keyword). Read until whitespace / paren.
-        let start = i;
-        while i < bytes.len() {
-            let c = bytes[i];
-            if matches!(
-                c,
-                b' ' | b'\t' | b'\r' | b'\n' | b'(' | b')' | b'[' | b']' | b'"' | b';'
-            ) {
-                break;
-            }
-            i += 1;
-        }
-        let raw = &src[start..i];
-        if raw.is_empty() {
-            return Err(TaskContractParseError::Lex(format!(
-                "unexpected byte 0x{:02x} at offset {}",
-                b, start
-            )));
-        }
-        if let Some(stripped) = raw.strip_prefix(':') {
-            if stripped.is_empty() {
-                return Err(TaskContractParseError::Lex(
-                    "bare `:` is not a valid keyword".to_string(),
-                ));
-            }
-            out.push(Tok::Keyword(stripped.to_string()));
-        } else {
-            out.push(Tok::Symbol(raw.to_string()));
-        }
-    }
-    Ok(out)
-}
-
-fn parse_form(
-    iter: &mut std::iter::Peekable<std::vec::IntoIter<Tok>>,
-) -> Result<SExp, TaskContractParseError> {
-    let tok = iter
-        .next()
-        .ok_or_else(|| TaskContractParseError::Lex("unexpected EOF".to_string()))?;
-    match tok {
-        Tok::Open => {
-            let mut items: Vec<SExp> = Vec::new();
-            loop {
-                match iter.peek() {
-                    None => {
-                        return Err(TaskContractParseError::Lex(
-                            "unbalanced parens — EOF inside list".to_string(),
-                        ))
-                    }
-                    Some(Tok::Close) => {
-                        iter.next();
-                        return Ok(SExp::List(items));
-                    }
-                    _ => {
-                        items.push(parse_form(iter)?);
-                    }
-                }
-            }
-        }
-        Tok::Close => Err(TaskContractParseError::Lex(
-            "unexpected closing bracket".to_string(),
-        )),
-        Tok::Symbol(s) => Ok(SExp::Symbol(s)),
-        Tok::Keyword(k) => Ok(SExp::Keyword(k)),
-        Tok::String(s) => Ok(SExp::String(s)),
-    }
-}
-
-/// Walk the top-level `(task <id> :schema ... :goal ... ...)` form and
-/// project the narrow contract.
-fn project_contract(form: &SExp) -> Result<ParsedTaskContract, TaskContractParseError> {
-    let SExp::List(items) = form else {
-        return Err(TaskContractParseError::NotATaskForm(format!(
-            "top form is not a list: {:?}",
-            form
-        )));
-    };
-    // Expect: (task <id-symbol> :keyword <value> :keyword <value> ...)
-    let mut iter = items.iter();
-    let head = iter
-        .next()
-        .ok_or_else(|| TaskContractParseError::NotATaskForm("empty form".to_string()))?;
-    match head {
-        SExp::Symbol(s) if s == "task" => {}
-        other => {
-            return Err(TaskContractParseError::NotATaskForm(format!(
-                "expected leading `task` symbol, got {:?}",
-                other
-            )))
-        }
-    }
-    // Skip the task id (must be a bare symbol per the schema, but we
-    // accept anything non-keyword conservatively — the authoritative
-    // checker enforces shape).
-    let _id = iter
-        .next()
-        .ok_or_else(|| TaskContractParseError::NotATaskForm("missing task id".to_string()))?;
-
-    let mut out = ParsedTaskContract::default();
-    while let Some(tok) = iter.next() {
-        let SExp::Keyword(k) = tok else {
-            return Err(TaskContractParseError::Lex(format!(
-                "expected `:keyword` token in task body, got {:?}",
-                tok
-            )));
-        };
-        let val = iter.next().ok_or_else(|| TaskContractParseError::Lex(
-            format!("keyword `:{}` missing value", k),
-        ))?;
-        match k.as_str() {
-            "schema" => out.schema = require_string(val, "schema")?,
-            "goal" => out.goal = require_string(val, "goal")?,
-            "scope" => out.scope = Some(require_string(val, "scope")?),
-            "write-scope" => out.write_scope = require_string_list(val, "write-scope")?,
-            "must-not-touch" => {
-                out.must_not_touch = require_string_list(val, "must-not-touch")?
-            }
-            "acceptance" => out.acceptance = require_string_list(val, "acceptance")?,
-            "commit" => {
-                out.commit_policy = extract_commit_policy(val)?;
-            }
-            "dispatch-strategy" => {
-                out.dispatch_strategy = Some(require_string(val, "dispatch-strategy")?)
-            }
-            "target-project" => {
-                out.target_project = Some(require_string(val, "target-project")?)
-            }
-            "requested-cwd" => out.requested_cwd = Some(require_string(val, "requested-cwd")?),
-            "target" => out.target = Some(require_string(val, "target")?),
-            // wave-23 / task 05 — accept-and-store the optional session-trace
-            // ledger path so a contract-driven dispatch (machine mode) can
-            // re-derive the path even when the caller dropped the explicit
-            // arg. The kebab-case `:session-trace-path` keyword matches the
-            // emitter (`plan::build_task_contract_lisp`).
-            "session-trace-path" => {
-                out.session_trace_path = Some(require_string(val, "session-trace-path")?)
-            }
-            // Other v1 fields (kind / status / owner / depends-on / title /
-            // plan-id / node-id / report / requirements) are not consumed
-            // by workstation_dispatch — accept-and-ignore so the parser
-            // does not break when the emitter adds non-load-bearing
-            // metadata. Adding a field here MUST be paired with a checker
-            // update.
-            _ => {}
-        }
-    }
-
-    if out.schema.is_empty() {
-        return Err(TaskContractParseError::SchemaMismatch("(absent)".to_string()));
-    }
-    if out.schema != "missiond.task-contract.v1" {
-        return Err(TaskContractParseError::SchemaMismatch(out.schema.clone()));
-    }
-    if out.goal.trim().is_empty() {
-        return Err(TaskContractParseError::MissingRequired("goal"));
-    }
-    Ok(out)
-}
-
-fn require_string(val: &SExp, field: &'static str) -> Result<String, TaskContractParseError> {
-    match val {
-        SExp::String(s) => Ok(s.clone()),
-        other => Err(TaskContractParseError::FieldShape {
-            field,
-            detail: format!("expected string literal, got {:?}", other),
-        }),
-    }
-}
-
-fn require_string_list(
-    val: &SExp,
-    field: &'static str,
-) -> Result<Vec<String>, TaskContractParseError> {
-    match val {
-        SExp::List(items) => {
-            let mut out: Vec<String> = Vec::with_capacity(items.len());
-            for item in items {
-                match item {
-                    SExp::String(s) => out.push(s.clone()),
-                    other => {
-                        return Err(TaskContractParseError::FieldShape {
-                            field,
-                            detail: format!("non-string item in list: {:?}", other),
-                        })
-                    }
-                }
-            }
-            Ok(out)
-        }
-        other => Err(TaskContractParseError::FieldShape {
-            field,
-            detail: format!("expected list of strings, got {:?}", other),
-        }),
-    }
-}
-
-/// `(:required true :message "..." :scope-check write-scope-only :policy "scoped")`
-///
-/// We only need `:policy` for the workstation brief's commit policy
-/// surface. The other fields are validated by the authoritative checker;
-/// we tolerate missing `:policy` (returns `None`) so the brief defaults
-/// to `COMMIT_POLICY_SCOPED`.
-fn extract_commit_policy(val: &SExp) -> Result<Option<String>, TaskContractParseError> {
-    let SExp::List(items) = val else {
-        return Err(TaskContractParseError::FieldShape {
-            field: "commit",
-            detail: format!("expected property list, got {:?}", val),
-        });
-    };
-    let mut iter = items.iter().peekable();
-    while let Some(tok) = iter.next() {
-        let SExp::Keyword(k) = tok else { continue };
-        if k != "policy" {
-            // Skip the value of any non-`:policy` keyword — the structure
-            // is keyword-then-value, so consume one item.
-            let _ = iter.next();
-            continue;
-        }
-        let val = iter.next().ok_or_else(|| TaskContractParseError::FieldShape {
-            field: "commit",
-            detail: "`:policy` keyword missing value".to_string(),
-        })?;
-        return Ok(Some(require_string(val, "commit.policy")?));
-    }
-    Ok(None)
-}
-
-/// Pure parser entrypoint — exercised directly by the unit tests. The
-/// loader (`load_task_contract`) wraps this with file IO.
-pub(crate) fn parse_task_contract(
-    src: &str,
-) -> Result<ParsedTaskContract, TaskContractParseError> {
-    let form = parse_one_top_form(src)?;
-    project_contract(&form)
-}
-
-/// Loader — read the file then run `parse_task_contract`. Path is
-/// expected to be absolute (the dispatch caller already resolves
-/// `task_contract_path` against the project root before calling).
-pub(crate) fn load_task_contract(
-    path: &Path,
-) -> Result<ParsedTaskContract, TaskContractParseError> {
-    let bytes = std::fs::read_to_string(path)
-        .map_err(|e| TaskContractParseError::Io(format!("{}: {}", path.display(), e)))?;
-    parse_task_contract(&bytes)
-}
-
-/// Resolve a (possibly relative) `task_contract_path` against an
-/// already-resolved project root. The dispatch helper applies this AFTER
-/// `resolve_target_project_root` succeeds so a relative path always has
-/// a deterministic anchor — never the daemon's process cwd.
-fn resolve_contract_path(raw: &Path, project_root: &Path) -> PathBuf {
-    if raw.is_absolute() {
-        raw.to_path_buf()
-    } else {
-        project_root.join(raw)
-    }
-}
-
-/// wave-22 / task 05 — public re-export of `resolve_contract_path` so
-/// the auto-spawn gate caller (plan.rs) can pre-resolve a relative
-/// `task_contract_path` against the daemon's process cwd / configured
-/// project anchor BEFORE the substrate runs. The substrate path itself
-/// still re-resolves via `resolve_target_project_root` — this helper
-/// just lets the gate evaluator load + parse the contract early so
-/// `:write-scope` / `:must-not-touch` checks fire BEFORE any spawn.
-pub(crate) fn resolve_contract_path_public(raw: &Path, project_root: &Path) -> PathBuf {
-    resolve_contract_path(raw, project_root)
-}
+#[cfg(test)]
+pub(crate) use descriptor::parse_task_contract;
+use descriptor::resolve_contract_path;
+pub(crate) use descriptor::{
+    load_task_contract, resolve_contract_path_public, ParsedTaskContract, TaskContractParseError,
+};
 
 /// Whether the caller / plan opted into workstation-dispatch v0. This is
 /// the legacy back-compat helper kept so existing tests / callers keep
@@ -815,8 +322,12 @@ impl DispatchDecision {
 /// Strictly a sub-list of `VALID_DISPATCH_STRATEGIES` from plan.rs:
 /// `unknown` and `prompt-fallback` are intentionally excluded so a node
 /// without a real dispatch hint stays on the legacy plan-runner path.
-pub(crate) const INFERABLE_DISPATCH_STRATEGIES: &[&str] =
-    &["fresh-code-alignment", "resident-lisp", "agent-team", "mixed"];
+pub(crate) const INFERABLE_DISPATCH_STRATEGIES: &[&str] = &[
+    "fresh-code-alignment",
+    "resident-lisp",
+    "agent-team",
+    "mixed",
+];
 
 /// Hint context the inference engine reads. Only the conservative subset
 /// of fields that actually scope a workstation task — the fully merged
@@ -878,7 +389,9 @@ pub(crate) fn evaluate_dispatch_decision(
     if explicit == Some(false) {
         return DispatchDecision::off(
             WorkstationDispatchSource::Disabled,
-            Some("workstation_dispatch=false suppresses both opt-in and auto-inference".to_string()),
+            Some(
+                "workstation_dispatch=false suppresses both opt-in and auto-inference".to_string(),
+            ),
         );
     }
 
@@ -926,10 +439,7 @@ pub(crate) fn evaluate_dispatch_decision(
     }
 
     // c. Objective must be non-empty.
-    let has_objective = ctx
-        .objective
-        .map(|s| !s.trim().is_empty())
-        .unwrap_or(false);
+    let has_objective = ctx.objective.map(|s| !s.trim().is_empty()).unwrap_or(false);
     if !has_objective {
         return DispatchDecision::off(
             WorkstationDispatchSource::NotApplicable,
@@ -993,9 +503,7 @@ pub(crate) enum WorkstationDispatchOutcome {
         inner_payload: Value,
     },
     /// dry_run: brief built, nothing dispatched, no evidence written.
-    DryRun {
-        task_brief: String,
-    },
+    DryRun { task_brief: String },
     /// Pre-flight failed (project root unresolved, wrong target, etc).
     /// We refuse to dispatch and refuse to silently fall back to prompt
     /// mode — the descriptor explains why so the caller can fix and retry.
@@ -1039,12 +547,16 @@ impl SafeDescriptorReason {
     pub(crate) fn detail(&self) -> String {
         match self {
             SafeDescriptorReason::UnsupportedTarget(t) => {
-                format!("workstation-dispatch v0 only wraps `mission_task_delegate`, got `{}`", t)
+                format!(
+                    "workstation-dispatch v0 only wraps `mission_task_delegate`, got `{}`",
+                    t
+                )
             }
             SafeDescriptorReason::ProjectRootUnresolved(r) => r.clone(),
             SafeDescriptorReason::MissingObjective => {
                 "workstation-dispatch v0 requires either an explicit objective or a plan hint; \
-                 refusing to dispatch a content-free task brief".to_string()
+                 refusing to dispatch a content-free task brief"
+                    .to_string()
             }
             SafeDescriptorReason::MalformedTaskContract { path, reason } => {
                 format!(
@@ -1210,7 +722,12 @@ pub(crate) fn build_task_brief_with_source_and_trace(
     out.push_str("\n\n");
 
     // 2. Scope.
-    if let Some(scope) = hints.scope.as_deref().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+    if let Some(scope) = hints
+        .scope
+        .as_deref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+    {
         out.push_str("## Scope\n");
         out.push_str(scope);
         out.push_str("\n\n");
@@ -1254,12 +771,8 @@ pub(crate) fn build_task_brief_with_source_and_trace(
         .unwrap_or(COMMIT_POLICY_SCOPED);
     out.push_str("## Commit policy\n");
     out.push_str(&format!("- policy: {}\n", policy));
-    out.push_str(
-        "- do not stage or commit outside the owned files declared above\n",
-    );
-    out.push_str(
-        "- code tasks: produce a single scoped commit naming the owned files\n",
-    );
+    out.push_str("- do not stage or commit outside the owned files declared above\n");
+    out.push_str("- code tasks: produce a single scoped commit naming the owned files\n");
     out.push('\n');
 
     // 7. Completion handoff (scoped commit) — wave-17 / task 07.
@@ -1604,9 +1117,7 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
 
     // 5. dry_run: stop here, no dispatch, no evidence.
     if dry_run {
-        return WorkstationDispatchOutcome::DryRun {
-            task_brief: brief,
-        };
+        return WorkstationDispatchOutcome::DryRun { task_brief: brief };
     }
 
     // 6. Dispatch through the existing mission_task_delegate substrate.
@@ -1642,21 +1153,26 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
         inner_args["session_trace_path"] = json!(stp);
     }
 
-    let inner_result =
-        match super::super::compute::task_delegate::handle(state, "mission_task_delegate", inner_args).await {
-            Ok(r) => r,
-            Err(err) => {
-                // Hard error from the inner handler (panic-equivalent) —
-                // surface it as a safe descriptor so the caller can route.
-                return WorkstationDispatchOutcome::SafeDescriptor {
-                    reason: SafeDescriptorReason::ProjectRootUnresolved(format!(
-                        "mission_task_delegate handler raised: {}",
-                        err
-                    )),
-                    task_brief: Some(brief),
-                };
-            }
-        };
+    let inner_result = match super::super::compute::task_delegate::handle(
+        state,
+        "mission_task_delegate",
+        inner_args,
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(err) => {
+            // Hard error from the inner handler (panic-equivalent) —
+            // surface it as a safe descriptor so the caller can route.
+            return WorkstationDispatchOutcome::SafeDescriptor {
+                reason: SafeDescriptorReason::ProjectRootUnresolved(format!(
+                    "mission_task_delegate handler raised: {}",
+                    err
+                )),
+                task_brief: Some(brief),
+            };
+        }
+    };
     let inner_payload = tool_result_payload(&inner_result);
     let inner_is_error = inner_result.is_error.unwrap_or(false);
     if inner_is_error {
@@ -1677,15 +1193,24 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
          is the inner handler's responsibility — bus subscription is a future task",
     ))
     .with_extra("dispatch_strategy", json!(dispatch_strategy))
-    .with_extra("commit_policy", json!(hints
-        .commit_policy
-        .as_deref()
-        .unwrap_or(COMMIT_POLICY_SCOPED)))
+    .with_extra(
+        "commit_policy",
+        json!(hints
+            .commit_policy
+            .as_deref()
+            .unwrap_or(COMMIT_POLICY_SCOPED)),
+    )
     .with_extra("project_id", json!(resolution.project_id))
-    .with_extra("project_root", json!(resolution.project_root.to_string_lossy().to_string()))
+    .with_extra(
+        "project_root",
+        json!(resolution.project_root.to_string_lossy().to_string()),
+    )
     .with_extra("owned_files", json!(hints.owned_files.clone()))
     .with_extra("forbidden_files", json!(hints.forbidden_files.clone()))
-    .with_extra("acceptance_commands", json!(hints.acceptance_commands.clone()))
+    .with_extra(
+        "acceptance_commands",
+        json!(hints.acceptance_commands.clone()),
+    )
     .with_extra("task_brief_preview", json!(truncate_brief_preview(&brief)));
     // wave-19 / task 07 — when the dispatch flowed through a task-contract
     // v1 file, surface the source path on the evidence ledger so observers
@@ -1693,10 +1218,7 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
     // this annotation an audit could mistake a contract-flavoured brief
     // for a legacy natural-language brief; the field disambiguates.
     if let Some(p) = contract_source_path.as_deref() {
-        entry = entry.with_extra(
-            "task_contract_source_path",
-            json!(p.display().to_string()),
-        );
+        entry = entry.with_extra("task_contract_source_path", json!(p.display().to_string()));
     }
     if let Some(eds) = contract_dispatch_strategy.as_deref() {
         entry = entry.with_extra("contract_dispatch_strategy", json!(eds));
@@ -1753,7 +1275,10 @@ pub(crate) fn outcome_to_response_fields(
     dispatch_strategy: &str,
 ) -> Value {
     let mut m = serde_json::Map::new();
-    m.insert("workstation_dispatch_status".to_string(), json!(outcome.status()));
+    m.insert(
+        "workstation_dispatch_status".to_string(),
+        json!(outcome.status()),
+    );
     m.insert("dispatch_strategy".to_string(), json!(dispatch_strategy));
     // Wave-17 / Task 07 — every dispatch (live, dry-run, inner-error,
     // and safe-descriptor) carries the scoped-commit policy contract so
@@ -1792,10 +1317,7 @@ pub(crate) fn outcome_to_response_fields(
             // markdown brief. Absent on the legacy / rendered path so
             // the wire shape stays byte-compatible with wave-15..19.
             if let Some(p) = task_contract_source_path {
-                m.insert(
-                    "task_contract_source_path".to_string(),
-                    json!(p),
-                );
+                m.insert("task_contract_source_path".to_string(), json!(p));
             }
             if let Some(p) = evidence_path {
                 m.insert("evidence_path".to_string(), json!(p));
@@ -1817,10 +1339,7 @@ pub(crate) fn outcome_to_response_fields(
             // request-flow real-dispatch smoke) can pin a single stable
             // field name without parsing a nested struct.
             if let Some(id) = extract_inner_board_task_id(&inner_payload) {
-                m.insert(
-                    "delegated_board_task_id".to_string(),
-                    json!(id),
-                );
+                m.insert("delegated_board_task_id".to_string(), json!(id));
             }
             m.insert("inner_result".to_string(), inner_payload.clone());
         }
@@ -1841,7 +1360,10 @@ pub(crate) fn outcome_to_response_fields(
             );
         }
         WorkstationDispatchOutcome::SafeDescriptor { reason, task_brief } => {
-            m.insert("workstation_dispatch_reason".to_string(), json!(reason.detail()));
+            m.insert(
+                "workstation_dispatch_reason".to_string(),
+                json!(reason.detail()),
+            );
             if let Some(brief) = task_brief {
                 m.insert(
                     "task_brief_preview".to_string(),
@@ -1958,12 +1480,8 @@ fn collect_string_list(v: Option<&Value>) -> Vec<String> {
 
 /// Allowlisted workstation fields the LLM may propose. Mirrors the four
 /// core knobs the wave-15 dispatcher consumes when no PLAN hints exist.
-pub(crate) const WORKSTATION_PROPOSAL_FIELDS: &[&str] = &[
-    "target",
-    "dispatch_strategy",
-    "objective",
-    "scope",
-];
+pub(crate) const WORKSTATION_PROPOSAL_FIELDS: &[&str] =
+    &["target", "dispatch_strategy", "objective", "scope"];
 
 /// Hard cap on proposals so a runaway model can't blow the response payload.
 /// Four fields × one proposal each is the canonical case; cap at 6 leaves
@@ -1978,8 +1496,7 @@ const SONNET_WORKSTATION_PROPOSAL_MAX_TOKENS: u32 = 1024;
 /// Caller string surfaced to the LLM gateway logging. Distinct from
 /// `plan_field_inference` (wave-20 / task 07) so observers can tell the
 /// two passes apart on the trace surface.
-pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER: &str =
-    "workstation_dispatch_proposal";
+pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER: &str = "workstation_dispatch_proposal";
 
 /// Hard-coded model id for the response surface. Mirrors the literal used
 /// by `plan.rs::SONNET_COMPILER_MODEL`; we keep a local copy rather than
@@ -1987,14 +1504,21 @@ pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER: &str =
 const SONNET_WORKSTATION_PROPOSAL_MODEL: &str = "claude-sonnet";
 
 /// Allowlisted target values. Mirrors the wave-15 plan-runner whitelist.
-const PROPOSAL_VALID_TARGETS: &[&str] =
-    &["mission_execution", "mission_task_delegate", "mission_flow_run"];
+const PROPOSAL_VALID_TARGETS: &[&str] = &[
+    "mission_execution",
+    "mission_task_delegate",
+    "mission_flow_run",
+];
 
 /// Allowlisted dispatch strategies. Subset of `INFERABLE_DISPATCH_STRATEGIES`
 /// — `prompt-fallback` and `unknown` are deliberately NOT proposable
 /// because the conservative spawn surface refuses them.
-const PROPOSAL_VALID_STRATEGIES: &[&str] =
-    &["resident-lisp", "fresh-code-alignment", "agent-team", "mixed"];
+const PROPOSAL_VALID_STRATEGIES: &[&str] = &[
+    "resident-lisp",
+    "fresh-code-alignment",
+    "agent-team",
+    "mixed",
+];
 
 /// Wire status describing the outcome of the workstation-proposal pass.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2305,9 +1829,7 @@ pub(crate) fn build_workstation_proposal_prompt(
 /// top-level array (model sometimes elides the wrapper). Rejected
 /// proposals land on `parse_warnings[]` so the caller can audit what
 /// survived. Pure function — no IO.
-pub(crate) fn parse_workstation_proposals(
-    raw: &str,
-) -> (Vec<WorkstationProposal>, Vec<String>) {
+pub(crate) fn parse_workstation_proposals(raw: &str) -> (Vec<WorkstationProposal>, Vec<String>) {
     let mut warnings: Vec<String> = Vec::new();
     let trimmed = raw.trim();
     let trimmed = strip_proposal_code_fence(trimmed);
@@ -2330,9 +1852,7 @@ pub(crate) fn parse_workstation_proposals(
                 return (Vec::new(), warnings);
             }
             None => {
-                warnings.push(
-                    "LLM response object missing required `proposals` array".to_string(),
-                );
+                warnings.push("LLM response object missing required `proposals` array".to_string());
                 return (Vec::new(), warnings);
             }
         },
@@ -2345,8 +1865,7 @@ pub(crate) fn parse_workstation_proposals(
         }
     };
     let mut out: Vec<WorkstationProposal> = Vec::new();
-    let mut seen_fields: std::collections::HashSet<&'static str> =
-        std::collections::HashSet::new();
+    let mut seen_fields: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
     for (idx, raw) in raw_proposals.iter().enumerate() {
         if out.len() >= WORKSTATION_PROPOSAL_CAP {
             warnings.push(format!(
@@ -2434,10 +1953,7 @@ pub(crate) fn parse_workstation_proposals(
                 }
             },
             None => {
-                warnings.push(format!(
-                    "proposals[{}] missing required `confidence`",
-                    idx
-                ));
+                warnings.push(format!("proposals[{}] missing required `confidence`", idx));
                 continue;
             }
         };
@@ -2681,16 +2197,14 @@ pub(crate) async fn request_workstation_proposals(
 /// dashboards can grep for the load-bearing failure reason without
 /// inspecting the gate block. Mirrors the wave-22 / task 03 pattern
 /// (`APPLY_GATE_MISSING_PROPOSAL_HASH`).
-pub(crate) const AUTO_SPAWN_MISSING_PROPOSAL_HASH: &str =
-    "AUTO_SPAWN_MISSING_PROPOSAL_HASH";
+pub(crate) const AUTO_SPAWN_MISSING_PROPOSAL_HASH: &str = "AUTO_SPAWN_MISSING_PROPOSAL_HASH";
 
 /// Structured-error code returned when the caller-supplied
 /// `workstation_proposal_hash` does not match the bundle's deterministic
 /// hash. The strongest "the proposals you saw are not the proposals we
 /// have" signal — surfacing it BEFORE the spawn substrate runs is the
 /// contract's hard requirement.
-pub(crate) const AUTO_SPAWN_PROPOSAL_HASH_MISMATCH: &str =
-    "AUTO_SPAWN_PROPOSAL_HASH_MISMATCH";
+pub(crate) const AUTO_SPAWN_PROPOSAL_HASH_MISMATCH: &str = "AUTO_SPAWN_PROPOSAL_HASH_MISMATCH";
 
 /// Structured-error code returned when the caller flips `auto_spawn=true`
 /// but supplies a non-bool / non-string shape for the gate args. Caller
@@ -2778,12 +2292,8 @@ impl WorkstationAutoSpawnStatus {
             WorkstationAutoSpawnStatus::SkippedUnavailable => "skipped_unavailable",
             WorkstationAutoSpawnStatus::SkippedNoProposals => "skipped_no_proposals",
             WorkstationAutoSpawnStatus::SkippedUnsafeProposal => "skipped_unsafe_proposal",
-            WorkstationAutoSpawnStatus::SkippedConfidenceTooLow => {
-                "skipped_confidence_too_low"
-            }
-            WorkstationAutoSpawnStatus::SkippedCallerNotApproved => {
-                "skipped_caller_not_approved"
-            }
+            WorkstationAutoSpawnStatus::SkippedConfidenceTooLow => "skipped_confidence_too_low",
+            WorkstationAutoSpawnStatus::SkippedCallerNotApproved => "skipped_caller_not_approved",
             WorkstationAutoSpawnStatus::SkippedMissingTaskContractPath => {
                 "skipped_missing_task_contract_path"
             }
@@ -2797,12 +2307,8 @@ impl WorkstationAutoSpawnStatus {
             WorkstationAutoSpawnStatus::SkippedPreflightUnacceptable => {
                 "skipped_preflight_unacceptable"
             }
-            WorkstationAutoSpawnStatus::SkippedUnsupportedTarget => {
-                "skipped_unsupported_target"
-            }
-            WorkstationAutoSpawnStatus::SkippedSubstrateRefused => {
-                "skipped_substrate_refused"
-            }
+            WorkstationAutoSpawnStatus::SkippedUnsupportedTarget => "skipped_unsupported_target",
+            WorkstationAutoSpawnStatus::SkippedSubstrateRefused => "skipped_substrate_refused",
             WorkstationAutoSpawnStatus::SkippedSubstrateInnerError => {
                 "skipped_substrate_inner_error"
             }
@@ -3008,9 +2514,7 @@ pub(crate) fn parse_workstation_auto_spawn_input(
 /// surface the same value under `workstation_proposal_hash` on the
 /// `workstation_auto_spawn_gate` block so dashboards can
 /// `assert hash == derive(...)` directly.
-pub(crate) fn compute_workstation_proposal_hash(
-    bundle: &WorkstationProposalBundle,
-) -> String {
+pub(crate) fn compute_workstation_proposal_hash(bundle: &WorkstationProposalBundle) -> String {
     use sha2::{Digest, Sha256};
     let proposals: Vec<String> = bundle
         .proposals
@@ -3239,9 +2743,7 @@ pub(crate) fn evaluate_workstation_auto_spawn_gate(
             let hash = compute_workstation_proposal_hash(b);
             let status = match input.proposal_hash.as_deref() {
                 None => WorkstationProposalHashStatus::NotSupplied,
-                Some(s) if s.eq_ignore_ascii_case(&hash) => {
-                    WorkstationProposalHashStatus::Matches
-                }
+                Some(s) if s.eq_ignore_ascii_case(&hash) => WorkstationProposalHashStatus::Matches,
                 Some(_) => WorkstationProposalHashStatus::Mismatch,
             };
             (Some(hash), status)
@@ -3328,9 +2830,7 @@ pub(crate) fn evaluate_workstation_auto_spawn_gate(
         }
     }
     if bundle.proposals.is_empty() {
-        gate_results.push(
-            "rule:g2_bundle_status:suggested_but_empty (defensive)".to_string(),
-        );
+        gate_results.push("rule:g2_bundle_status:suggested_but_empty (defensive)".to_string());
         return mk_skip(
             WorkstationAutoSpawnStatus::SkippedNoProposals,
             gate_results,
@@ -3369,9 +2869,8 @@ pub(crate) fn evaluate_workstation_auto_spawn_gate(
         }
         WorkstationProposalHashStatus::NoProposalAvailable => {
             // Already handled by G2 above; defensive.
-            gate_results.push(
-                "rule:g3_proposal_hash:no_proposal_available (defensive)".to_string(),
-            );
+            gate_results
+                .push("rule:g3_proposal_hash:no_proposal_available (defensive)".to_string());
             return mk_skip(
                 WorkstationAutoSpawnStatus::SkippedNoProposals,
                 gate_results,
@@ -3521,12 +3020,7 @@ pub(crate) fn evaluate_workstation_auto_spawn_gate(
     let overlap: Vec<String> = contract
         .write_scope
         .iter()
-        .filter(|p| {
-            contract
-                .must_not_touch
-                .iter()
-                .any(|f| f.trim() == p.trim())
-        })
+        .filter(|p| contract.must_not_touch.iter().any(|f| f.trim() == p.trim()))
         .cloned()
         .collect();
     if !overlap.is_empty() {
@@ -3630,11 +3124,20 @@ mod tests {
     #[test]
     fn opt_in_requires_explicit_arg_or_plan_hint() {
         assert!(!opt_in_requested(&json!({}), false));
-        assert!(opt_in_requested(&json!({"workstation_dispatch": true}), false));
+        assert!(opt_in_requested(
+            &json!({"workstation_dispatch": true}),
+            false
+        ));
         assert!(opt_in_requested(&json!({}), true));
         // Random truthy fields do NOT count.
-        assert!(!opt_in_requested(&json!({"target": "mission_task_delegate"}), false));
-        assert!(!opt_in_requested(&json!({"workstation_dispatch": false}), false));
+        assert!(!opt_in_requested(
+            &json!({"target": "mission_task_delegate"}),
+            false
+        ));
+        assert!(!opt_in_requested(
+            &json!({"workstation_dispatch": false}),
+            false
+        ));
     }
 
     // ── wave-16 / task 03 — auto-inference decision tests ───────────────
@@ -3657,11 +3160,8 @@ mod tests {
     fn evaluate_decision_explicit_true_wins_even_without_scope_signal() {
         let mut ctx = ctx_all_pass();
         ctx.owned_files_present = false;
-        let decision = evaluate_dispatch_decision(
-            &json!({"workstation_dispatch": true}),
-            false,
-            &ctx,
-        );
+        let decision =
+            evaluate_dispatch_decision(&json!({"workstation_dispatch": true}), false, &ctx);
         assert_eq!(decision.source, WorkstationDispatchSource::ExplicitArg);
         assert!(decision.is_enabled());
     }
@@ -3676,7 +3176,10 @@ mod tests {
         );
         assert_eq!(decision.source, WorkstationDispatchSource::Disabled);
         assert!(!decision.is_enabled());
-        assert!(decision.reason.unwrap().contains("workstation_dispatch=false"));
+        assert!(decision
+            .reason
+            .unwrap()
+            .contains("workstation_dispatch=false"));
     }
 
     #[test]
@@ -3827,11 +3330,17 @@ mod tests {
     #[test]
     fn workstation_dispatch_source_string_pin() {
         // The five values are part of the response wire contract.
-        assert_eq!(WorkstationDispatchSource::ExplicitArg.as_str(), "explicit_arg");
+        assert_eq!(
+            WorkstationDispatchSource::ExplicitArg.as_str(),
+            "explicit_arg"
+        );
         assert_eq!(WorkstationDispatchSource::PlanHint.as_str(), "plan_hint");
         assert_eq!(WorkstationDispatchSource::Inferred.as_str(), "inferred");
         assert_eq!(WorkstationDispatchSource::Disabled.as_str(), "disabled");
-        assert_eq!(WorkstationDispatchSource::NotApplicable.as_str(), "not_applicable");
+        assert_eq!(
+            WorkstationDispatchSource::NotApplicable.as_str(),
+            "not_applicable"
+        );
     }
 
     /// End-to-end shape check: when auto-inference picks `agent-team`,
@@ -4067,7 +3576,10 @@ mod tests {
         assert_eq!(v["workstation_dispatch_status"], "dispatched");
         assert_eq!(v["dispatch_strategy"], "agent-team");
         assert_eq!(v["evidence_path"], "/tmp/sidecar.json");
-        assert!(v["task_brief_preview"].as_str().unwrap().contains("## Objective"));
+        assert!(v["task_brief_preview"]
+            .as_str()
+            .unwrap()
+            .contains("## Objective"));
         assert_eq!(v["inner_result"]["task_id"], "btk-9");
         assert_eq!(v["delegated_board_task_id"], "btk-9");
         // wave-20 / task 04 — legacy / rendered path leaves the
@@ -4128,13 +3640,14 @@ mod tests {
     #[test]
     fn outcome_to_response_safe_descriptor_carries_reason_detail() {
         let outcome = WorkstationDispatchOutcome::SafeDescriptor {
-            reason: SafeDescriptorReason::ProjectRootUnresolved(
-                "no signal".to_string(),
-            ),
+            reason: SafeDescriptorReason::ProjectRootUnresolved("no signal".to_string()),
             task_brief: None,
         };
         let v = outcome_to_response_fields(&outcome, "fresh-code-alignment");
-        assert_eq!(v["workstation_dispatch_status"], "skipped_project_root_unresolved");
+        assert_eq!(
+            v["workstation_dispatch_status"],
+            "skipped_project_root_unresolved"
+        );
         assert_eq!(v["workstation_dispatch_reason"], "no signal");
         // No inner_result on safe descriptors
         assert!(v.get("inner_result").is_none());
@@ -4180,9 +3693,7 @@ mod tests {
     /// other fields stay at their default constructions because we never
     /// invoke a code path that reads them in the safe-descriptor and
     /// resolver-only tests.
-    async fn fixture_state_with_registry(
-        reg: SharedProjectRegistry,
-    ) -> Option<AppState> {
+    async fn fixture_state_with_registry(reg: SharedProjectRegistry) -> Option<AppState> {
         // AppState construction is feature-gated and pulls in the full
         // daemon graph (DB, bus, slot dispatcher) — far heavier than this
         // unit-level test wants. We therefore exercise the resolver path
@@ -4559,7 +4070,10 @@ mod tests {
   :schema "missiond.task-contract.v1"
 )"#;
         let err = parse_task_contract(src).expect_err("must reject");
-        assert!(matches!(err, TaskContractParseError::MissingRequired("goal")));
+        assert!(matches!(
+            err,
+            TaskContractParseError::MissingRequired("goal")
+        ));
     }
 
     #[test]
@@ -4569,7 +4083,10 @@ mod tests {
   :goal "   "
 )"#;
         let err = parse_task_contract(src).expect_err("must reject");
-        assert!(matches!(err, TaskContractParseError::MissingRequired("goal")));
+        assert!(matches!(
+            err,
+            TaskContractParseError::MissingRequired("goal")
+        ));
     }
 
     #[test]
@@ -4837,14 +4354,12 @@ mod tests {
             ..Default::default()
         };
         let path = std::path::PathBuf::from("/tmp/contract.lisp");
-        let brief = build_task_brief_with_source(
-            &plan,
-            &hints,
-            "fresh-code-alignment",
-            Some(&path),
-        );
+        let brief =
+            build_task_brief_with_source(&plan, &hints, "fresh-code-alignment", Some(&path));
         assert_eq!(
-            brief.matches("## Completion handoff (scoped commit)").count(),
+            brief
+                .matches("## Completion handoff (scoped commit)")
+                .count(),
             1
         );
         // Code task kind still classified from owned_files presence.
@@ -4876,7 +4391,10 @@ mod tests {
             task_brief: None,
         };
         let v = outcome_to_response_fields(&outcome, "agent-team");
-        assert_eq!(v["workstation_dispatch_status"], "skipped_malformed_task_contract");
+        assert_eq!(
+            v["workstation_dispatch_status"],
+            "skipped_malformed_task_contract"
+        );
         assert!(v["workstation_dispatch_reason"]
             .as_str()
             .unwrap()
@@ -4952,10 +4470,7 @@ mod tests {
             WorkstationProposalStatus::Unavailable.as_wire(),
             "llm_unavailable"
         );
-        assert_eq!(
-            WorkstationProposalStatus::Suggested.as_wire(),
-            "suggested"
-        );
+        assert_eq!(WorkstationProposalStatus::Suggested.as_wire(), "suggested");
         assert_eq!(
             WorkstationProposalStatus::NoSuggestions.as_wire(),
             "no_suggestions"
@@ -4969,10 +4484,7 @@ mod tests {
     #[test]
     fn workstation_proposal_safety_status_wire_strings_pin() {
         // The four values land verbatim on every proposal entry.
-        assert_eq!(
-            WorkstationProposalSafetyStatus::Safe.as_wire(),
-            "safe"
-        );
+        assert_eq!(WorkstationProposalSafetyStatus::Safe.as_wire(), "safe");
         assert_eq!(
             WorkstationProposalSafetyStatus::AmbiguousValue.as_wire(),
             "ambiguous_value"
@@ -5021,14 +4533,15 @@ mod tests {
             b.request_caller.as_deref(),
             Some(SONNET_WORKSTATION_PROPOSAL_CALLER)
         );
-        assert!(b.model.is_none(), "unavailable bundle must not name a model");
+        assert!(
+            b.model.is_none(),
+            "unavailable bundle must not name a model"
+        );
     }
 
     #[test]
     fn workstation_proposal_bundle_plan_hints_present_carries_reason() {
-        let b = WorkstationProposalBundle::plan_hints_present(
-            "signals present: caller.objective",
-        );
+        let b = WorkstationProposalBundle::plan_hints_present("signals present: caller.objective");
         assert_eq!(b.status, WorkstationProposalStatus::PlanHintsPresent);
         assert!(b.proposals.is_empty());
         assert_eq!(
@@ -5074,7 +4587,10 @@ mod tests {
         assert_eq!(v["proposals"][0]["safety_status"], "safe");
         assert_eq!(v["model"], "claude-sonnet");
         assert_eq!(v["caller"], SONNET_WORKSTATION_PROPOSAL_CALLER);
-        assert_eq!(v["parse_warnings"][0], "proposals[2] field `foo` not in allowlist");
+        assert_eq!(
+            v["parse_warnings"][0],
+            "proposals[2] field `foo` not in allowlist"
+        );
         // The auto-spawn invariant is pinned on every bundle render.
         assert_eq!(v["auto_spawn"], json!(false));
     }
@@ -5150,8 +4666,7 @@ mod tests {
     #[test]
     fn build_workstation_proposal_prompt_embeds_plan_and_provenance() {
         let plan = "(plan :id \"p1\" :board-task-id \"btk-1\")";
-        let (system, user) =
-            build_workstation_proposal_prompt(plan, Some("directive/abc:1"));
+        let (system, user) = build_workstation_proposal_prompt(plan, Some("directive/abc:1"));
         // System prompt names the four allowlisted fields.
         for f in WORKSTATION_PROPOSAL_FIELDS {
             assert!(
@@ -5203,9 +4718,15 @@ mod tests {
         assert!(warnings.is_empty(), "warnings: {:?}", warnings);
         assert_eq!(proposals.len(), 2);
         assert_eq!(proposals[0].field, "target");
-        assert_eq!(proposals[0].safety_status, WorkstationProposalSafetyStatus::Safe);
+        assert_eq!(
+            proposals[0].safety_status,
+            WorkstationProposalSafetyStatus::Safe
+        );
         assert_eq!(proposals[1].field, "objective");
-        assert_eq!(proposals[1].safety_status, WorkstationProposalSafetyStatus::Safe);
+        assert_eq!(
+            proposals[1].safety_status,
+            WorkstationProposalSafetyStatus::Safe
+        );
     }
 
     #[test]
@@ -5637,7 +5158,9 @@ mod tests {
         );
         assert_eq!(
             hints.owned_files,
-            vec!["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs".to_string()],
+            vec![
+                "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs".to_string()
+            ],
             "contract :write-scope MUST replace caller stale owned_files"
         );
         assert_eq!(
@@ -5664,18 +5187,15 @@ mod tests {
         let contract_path = std::path::Path::new(
             "/tmp/missiond-wave21-08-smoke/.missiond/tasks/wave21/wave21-08-dispatch.lisp",
         );
-        let brief = build_task_brief_with_source(
-            &plan,
-            &hints,
-            "agent-team",
-            Some(contract_path),
-        );
+        let brief = build_task_brief_with_source(&plan, &hints, "agent-team", Some(contract_path));
         assert!(
             brief.contains("## Source contract"),
             "wave21-08 brief MUST carry the wave-19/07 source-contract preamble"
         );
         assert!(
-            brief.contains("/tmp/missiond-wave21-08-smoke/.missiond/tasks/wave21/wave21-08-dispatch.lisp"),
+            brief.contains(
+                "/tmp/missiond-wave21-08-smoke/.missiond/tasks/wave21/wave21-08-dispatch.lisp"
+            ),
             "wave21-08 brief preamble MUST name the on-disk contract path"
         );
         assert!(
@@ -5735,8 +5255,7 @@ mod tests {
             goal: "wave22-05 spawn smoke".to_string(),
             scope: Some("ship the gate".to_string()),
             write_scope: vec![
-                "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
-                    .to_string(),
+                "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs".to_string(),
                 "crates/missiond-daemon/src/handlers/knowledge/plan.rs".to_string(),
             ],
             must_not_touch: vec![".missiond/v2/intent-event-bus.lisp".to_string()],
@@ -5773,8 +5292,14 @@ mod tests {
         let cases = [
             (WorkstationAutoSpawnStatus::NotRequested, "not_requested"),
             (WorkstationAutoSpawnStatus::Spawned, "spawned"),
-            (WorkstationAutoSpawnStatus::SkippedUnavailable, "skipped_unavailable"),
-            (WorkstationAutoSpawnStatus::SkippedNoProposals, "skipped_no_proposals"),
+            (
+                WorkstationAutoSpawnStatus::SkippedUnavailable,
+                "skipped_unavailable",
+            ),
+            (
+                WorkstationAutoSpawnStatus::SkippedNoProposals,
+                "skipped_no_proposals",
+            ),
             (
                 WorkstationAutoSpawnStatus::SkippedUnsafeProposal,
                 "skipped_unsafe_proposal",
@@ -5829,16 +5354,26 @@ mod tests {
         assert!(WorkstationAutoSpawnStatus::Spawned.was_spawned());
         for (status, _) in cases {
             if !matches!(status, WorkstationAutoSpawnStatus::Spawned) {
-                assert!(!status.was_spawned(), "{:?} must not report spawned", status);
+                assert!(
+                    !status.was_spawned(),
+                    "{:?} must not report spawned",
+                    status
+                );
             }
         }
     }
 
     #[test]
     fn wave22_05_proposal_hash_status_wire_strings_pin() {
-        assert_eq!(WorkstationProposalHashStatus::NotSupplied.as_wire(), "not_supplied");
+        assert_eq!(
+            WorkstationProposalHashStatus::NotSupplied.as_wire(),
+            "not_supplied"
+        );
         assert_eq!(WorkstationProposalHashStatus::Matches.as_wire(), "matches");
-        assert_eq!(WorkstationProposalHashStatus::Mismatch.as_wire(), "mismatch");
+        assert_eq!(
+            WorkstationProposalHashStatus::Mismatch.as_wire(),
+            "mismatch"
+        );
         assert_eq!(
             WorkstationProposalHashStatus::NoProposalAvailable.as_wire(),
             "no_proposal_available"
@@ -5904,10 +5439,9 @@ mod tests {
 
     #[test]
     fn wave22_05_parse_input_rejects_string_true_for_caller_approved() {
-        let err = parse_workstation_auto_spawn_input(
-            &json!({"workstation_caller_approved": "true"}),
-        )
-        .expect_err("string \"true\" must fail-fast");
+        let err =
+            parse_workstation_auto_spawn_input(&json!({"workstation_caller_approved": "true"}))
+                .expect_err("string \"true\" must fail-fast");
         assert_eq!(err.0, AUTO_SPAWN_INVALID_PARAM);
         assert!(err.1.contains("workstation_caller_approved"));
     }
@@ -6020,13 +5554,22 @@ mod tests {
             outcome.gate_results
         );
         assert!(outcome.status.was_spawned());
-        assert_eq!(outcome.spawn_target.as_deref(), Some("mission_task_delegate"));
+        assert_eq!(
+            outcome.spawn_target.as_deref(),
+            Some("mission_task_delegate")
+        );
         assert_eq!(
             outcome.proposal_hash_status,
             WorkstationProposalHashStatus::Matches
         );
-        assert!(outcome.gate_results.iter().any(|s| s.contains("g12_spawn_target:mission_task_delegate")));
-        assert!(outcome.gate_results.iter().any(|s| s.contains("auto_spawn_gate_satisfied")));
+        assert!(outcome
+            .gate_results
+            .iter()
+            .any(|s| s.contains("g12_spawn_target:mission_task_delegate")));
+        assert!(outcome
+            .gate_results
+            .iter()
+            .any(|s| s.contains("auto_spawn_gate_satisfied")));
     }
 
     #[test]
@@ -6041,7 +5584,10 @@ mod tests {
             WorkstationAutoSpawnStatus::SkippedUnavailable
         );
         assert!(
-            outcome.gate_results.iter().any(|s| s.contains("llm_unavailable")),
+            outcome
+                .gate_results
+                .iter()
+                .any(|s| s.contains("llm_unavailable")),
             "unavailable reason MUST surface in gate_results: {:?}",
             outcome.gate_results
         );
@@ -6165,7 +5711,9 @@ mod tests {
         let bundle = fixture_spawnable_bundle();
         let mut contract = fixture_spawnable_contract();
         // Force overlap.
-        contract.must_not_touch.push(contract.write_scope[0].clone());
+        contract
+            .must_not_touch
+            .push(contract.write_scope[0].clone());
         let outcome =
             evaluate_workstation_auto_spawn_gate(&input, Some(&bundle), Some(&contract), None);
         assert_eq!(

@@ -14,7 +14,8 @@ WorkstationDispatchOutcome substrate that mission_plan execute_internal drives
 for both --execute-dry-run and --execute-real-dispatch smokes.
 
   - V3 blueprint declares (surface workstation-dispatch ...) with
-    :status "code-aligned" and :code naming workstation_dispatch.rs.
+    :status "code-aligned" and :code naming workstation_dispatch.rs plus
+    the physical descriptor split workstation_dispatch/descriptor.rs.
   - The surface note pins the substrate contract names that other surfaces
     rely on by string match:
       WorkstationDispatchOutcome / DryRun / Dispatched
@@ -32,6 +33,11 @@ for both --execute-dry-run and --execute-real-dispatch smokes.
       pub(crate) async fn run_workstation_dispatch_with_contract_and_trace
       pub(crate) fn outcome_to_response_fields
       fn extract_inner_board_task_id
+    while workstation_dispatch/descriptor.rs owns the task-contract v1
+    Lisp projection parser:
+      ParsedTaskContract / TaskContractParseError
+      parse_task_contract / load_task_contract
+      resolve_contract_path_public
     plus the deterministic status strings ("dispatched",
     "dry_run_no_dispatch", "inner_returned_error") that
     outcome_to_response_fields surfaces under "workstation_dispatch_status".
@@ -46,6 +52,8 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   workstationDispatch:
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
+  workstationDescriptor:
+    'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs',
   requestFlowSmoke: 'scripts/check-v3-request-flow-smoke.mjs',
 };
 
@@ -101,9 +109,12 @@ const BLUEPRINT_NEEDLES = [
   '(surface workstation-dispatch',
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs',
   'WorkstationDispatchOutcome',
   'DryRun',
   'Dispatched',
+  'ParsedTaskContract',
+  'parse_task_contract',
   'run_workstation_dispatch_with_contract_and_trace',
   'evaluate_dispatch_decision',
   'extract_inner_board_task_id',
@@ -126,6 +137,8 @@ const BLUEPRINT_SURFACE_BODY_ANCHORS = [
   'WorkstationDispatchOutcome',
   'DryRun',
   'Dispatched',
+  'ParsedTaskContract',
+  'parse_task_contract',
   'run_workstation_dispatch_with_contract_and_trace',
   'evaluate_dispatch_decision',
   'extract_inner_board_task_id',
@@ -133,6 +146,8 @@ const BLUEPRINT_SURFACE_BODY_ANCHORS = [
 ];
 
 const WORKSTATION_DISPATCH_RS_NEEDLES = [
+  'mod descriptor;',
+  'pub(crate) use descriptor::{',
   'pub(crate) enum WorkstationDispatchOutcome',
   'WorkstationDispatchOutcome::Dispatched',
   'WorkstationDispatchOutcome::DryRun',
@@ -152,6 +167,17 @@ const WORKSTATION_DISPATCH_RS_NEEDLES = [
   '"dry_run_no_dispatch"',
   '"inner_returned_error"',
   'mission_task_delegate',
+];
+
+const WORKSTATION_DESCRIPTOR_RS_NEEDLES = [
+  'pub(crate) struct ParsedTaskContract',
+  'pub(crate) enum TaskContractParseError',
+  'pub(crate) fn parse_task_contract',
+  'pub(crate) fn load_task_contract',
+  'pub(super) fn resolve_contract_path',
+  'pub(crate) fn resolve_contract_path_public',
+  'missiond.task-contract.v1',
+  'session-trace-path',
 ];
 
 const REQUEST_FLOW_SMOKE_NEEDLES = [
@@ -192,6 +218,12 @@ function checkFiles(root, files) {
     files.workstationDispatch,
     sources.workstationDispatch,
     WORKSTATION_DISPATCH_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.workstationDescriptor,
+    sources.workstationDescriptor,
+    WORKSTATION_DESCRIPTOR_RS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -264,6 +296,7 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.workstationDispatch]: buildGoodWorkstationDispatch(),
+    [DEFAULT_FILES.workstationDescriptor]: buildGoodWorkstationDescriptor(),
     [DEFAULT_FILES.requestFlowSmoke]: buildGoodRequestFlowSmoke(),
   };
   cases.push({
@@ -406,8 +439,9 @@ function buildGoodBlueprint() {
     (surface workstation-dispatch
       :status "code-aligned"
       :implements [workstation-dispatch-substrate execute-dry-run-smoke real-dispatch-smoke]
-      :code ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"]
-      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. evaluate_dispatch_decision is the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
+      :code ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs"]
+      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. evaluate_dispatch_decision is the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-dispatch-isomorphism.mjs"]))
 `;
@@ -415,6 +449,10 @@ function buildGoodBlueprint() {
 
 function buildGoodWorkstationDispatch() {
   return `// fixture
+mod descriptor;
+pub(crate) use descriptor::{
+    load_task_contract, resolve_contract_path_public, ParsedTaskContract, TaskContractParseError,
+};
 pub(crate) enum WorkstationDispatchOutcome {
     Dispatched { /* ... */ },
     InnerError { /* ... */ },
@@ -439,6 +477,24 @@ pub(crate) fn classify_task_kind() {}
 // Stable status values returned by WorkstationDispatchOutcome::status:
 //   "dispatched" "dry_run_no_dispatch" "inner_returned_error"
 // substrate only ever wraps mission_task_delegate
+`;
+}
+
+function buildGoodWorkstationDescriptor() {
+  return `// fixture
+pub(crate) struct ParsedTaskContract {
+    session_trace_path: Option<String>,
+}
+pub(crate) enum TaskContractParseError { MissingRequired(&'static str) }
+pub(crate) fn parse_task_contract(src: &str) -> Result<ParsedTaskContract, TaskContractParseError> {
+    let _schema = "missiond.task-contract.v1";
+    let _field = "session-trace-path";
+    let _ = src;
+    Ok(ParsedTaskContract { session_trace_path: None })
+}
+pub(crate) fn load_task_contract() {}
+pub(super) fn resolve_contract_path() {}
+pub(crate) fn resolve_contract_path_public() {}
 `;
 }
 
