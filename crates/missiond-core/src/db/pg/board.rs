@@ -684,6 +684,39 @@ impl BoardStore for PgMissionStore {
         Ok(count)
     }
 
+    async fn clear_dangling_dynamic_slot_assignees(&self) -> DbResult<usize> {
+        // Companion to recover_stale_running_tasks: clears the `assignee`
+        // pointer that recover intentionally leaves alone. Targets only
+        // dynamic slots (slot-dyn-*) — never touches static slot pins because
+        // those refer to long-lived configured slot ids that survive restart.
+        //
+        // NOT EXISTS catches both:
+        //   * dynamic_slots row exists but status != 'active' (terminated)
+        //   * dynamic_slots row was removed (GC'd) — no row to match
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE board_tasks
+             SET assignee = NULL, updated_at = $1
+             WHERE assignee LIKE 'slot-dyn-%'
+               AND NOT EXISTS (
+                 SELECT 1 FROM dynamic_slots
+                 WHERE id = board_tasks.assignee
+                   AND status = 'active'
+               )"
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        let count = result.rows_affected() as usize;
+        if count > 0 {
+            tracing::warn!(
+                count,
+                "Cleared BoardTask assignees pointing to terminated/missing dynamic slots"
+            );
+        }
+        Ok(count)
+    }
+
     async fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query(

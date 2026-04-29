@@ -389,6 +389,15 @@ pub trait BoardStore: Send + Sync {
     async fn clear_board_task_assignee(&self, task_id: &str, expected_assignee: &str) -> DbResult<usize>;
     async fn release_board_claims_by_executor(&self, executor_id: &str) -> DbResult<usize>;
     async fn recover_stale_running_tasks(&self, fallback_stale_minutes: i64) -> DbResult<usize>;
+    /// Null out `assignee` on board_tasks whose assignee references a
+    /// `slot-dyn-*` slot that is no longer `active` (terminated, or whose
+    /// dynamic_slots row has been removed). Used at daemon startup as a
+    /// companion to `recover_stale_running_tasks`: that function resets the
+    /// status / claim fields but intentionally preserves `assignee`, leaving
+    /// a dangling pointer that makes autopilot's per-slot dispatch path keep
+    /// trying to send to a slot that no longer exists. Returns the number of
+    /// rows whose assignee was cleared.
+    async fn clear_dangling_dynamic_slot_assignees(&self) -> DbResult<usize>;
     async fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> DbResult<usize>;
     async fn list_running_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>>;
     async fn list_autopilot_tasks(&self) -> DbResult<Vec<BoardTask>>;
