@@ -1,7 +1,8 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-use super::log_store::{lisp_quote_string, now_iso, sexp};
+use super::lisp_syntax as sexp;
+use super::log_store::{lisp_quote_string, now_iso};
 use super::task_verifier::read_task_contract_id;
 
 // ───────────────────────────────────────────────────────────────────────

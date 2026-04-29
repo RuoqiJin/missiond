@@ -3,7 +3,7 @@ use missiond_mcp::tools::{ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
-use super::log_store::sexp::{self, Node, NodeKind};
+use super::lisp_syntax::{self as sexp, Node, NodeKind};
 
 /// wave-21 / task 03 — minimal report-contract reader.
 ///

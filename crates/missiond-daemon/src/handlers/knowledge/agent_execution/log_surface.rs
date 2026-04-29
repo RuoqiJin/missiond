@@ -9,10 +9,11 @@ use tracing::warn;
 
 use super::claim_lease::{parse_claims, parse_iso};
 use super::completion_records::{parse_completions, summarize_durability};
+use super::lisp_syntax as sexp;
 use super::log_store::{
     allocate_id, append_to_block, companion_path, json_strip_quotes, lisp_quote_string,
     list_block_summaries, now_iso, parse_kv_pairs, project_or_target_project, read_log_file,
-    render_canonical_template, require_str, resolve_project_root, sexp, touch_last_updated,
+    render_canonical_template, require_str, resolve_project_root, touch_last_updated,
     write_log_file, Counter, LogFile, COMPANION_DIR,
 };
 use super::session_trace::{

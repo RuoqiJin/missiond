@@ -10,6 +10,8 @@ const usage = `Usage:
 Checks the V3 mission_execution Lisp/code isomorphism contract. The large
 agent_execution.rs runtime is deliberately split into three V3 surfaces:
   - mission_execution-log: companion log, action routing, event projection
+  - agent_execution/lisp_syntax.rs: shared S-expression parser and delimiter
+    checker used by all Lisp-backed mission_execution surfaces
   - agent_execution/session_trace.rs: optional task session-trace projection
     used by the mission_execution-log and completion-audit surfaces
   - mission_execution-claim-lease: claim/heartbeat/release and scope conflict rules
@@ -33,6 +35,7 @@ const DEFAULT_FILES = {
   tests: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   logStore: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
+  lispSyntax: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   sessionTrace:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
@@ -55,7 +58,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['agent_execution/log_store.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -73,6 +76,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
@@ -101,6 +105,7 @@ const DAEMON_NEEDLES = [
   '"repair" => action_repair',
   '"preflight_commit" => action_preflight_commit',
   'mod log_store',
+  'mod lisp_syntax',
   'mod log_surface',
   'mod session_trace',
   'mod claim_lease',
@@ -113,6 +118,7 @@ const DAEMON_NEEDLES = [
   '#[cfg(test)]',
   'mod tests;',
   'use self::log_store::{',
+  'use self::lisp_syntax',
   'use self::log_surface::{',
   'use self::session_trace',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
@@ -137,7 +143,6 @@ const LOG_STORE_NEEDLES = [
   'pub(super) fn companion_path',
   'pub(super) fn project_or_target_project',
   'pub(super) fn require_str',
-  'pub(super) mod sexp',
   'pub(super) struct LogFile',
   'pub(super) fn now_iso',
   'pub(super) fn parse_kv_pairs',
@@ -155,6 +160,18 @@ const LOG_STORE_NEEDLES = [
   'pub(super) fn touch_last_updated',
   'pub(super) fn write_log_file',
   'pub(super) fn read_log_file',
+];
+
+const LISP_SYNTAX_NEEDLES = [
+  'pub struct Node',
+  'pub enum NodeKind',
+  'pub fn parse',
+  'fn read_form',
+  'fn read_list',
+  'fn read_string',
+  'fn read_atom',
+  'fn skip_ws_and_comments',
+  'pub fn check_balance',
 ];
 
 const LOG_SURFACE_NEEDLES = [
@@ -349,6 +366,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.daemon, sources.daemon, DAEMON_NEEDLES);
   requireAll(diagnostics, files.tests, sources.tests, TESTS_NEEDLES);
   requireAll(diagnostics, files.logStore, sources.logStore, LOG_STORE_NEEDLES);
+  requireAll(diagnostics, files.lispSyntax, sources.lispSyntax, LISP_SYNTAX_NEEDLES);
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
   requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
@@ -407,6 +425,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.daemon]: buildGoodDaemon(),
     [DEFAULT_FILES.tests]: buildGoodTests(),
     [DEFAULT_FILES.logStore]: buildGoodLogStore(),
+    [DEFAULT_FILES.lispSyntax]: buildGoodLispSyntax(),
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
     [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
@@ -528,9 +547,10 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, sexp, ID counters, and Lisp read/write helpers authoritative; action routing, emit_execution_event, DispatchMeta, and agent_execution/session_trace.rs keep log writes, live events, and optional task traces aligned.")
+	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, ID counters, and Lisp read/write helpers authoritative; action routing, emit_execution_event, DispatchMeta, and agent_execution/session_trace.rs keep log writes, live events, and optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -573,6 +593,7 @@ function buildGoodDaemon() {
   }
 }
 mod log_store;
+mod lisp_syntax;
 mod log_surface;
 mod session_trace;
 mod claim_lease;
@@ -589,6 +610,7 @@ use self::log_surface::{
   read_dispatch_metadata_from_log,
 };
 use self::log_store::{LogFile};
+use self::lisp_syntax as sexp;
 use self::session_trace::{append_session_trace_event};
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{action_complete};
@@ -614,7 +636,6 @@ pub(super) async fn resolve_project_root() {}
 pub(super) fn companion_path() {}
 pub(super) fn project_or_target_project() {}
 pub(super) fn require_str() {}
-pub(super) mod sexp {}
 pub(super) struct LogFile {}
 pub(super) fn now_iso() {}
 pub(super) fn parse_kv_pairs() {}
@@ -632,6 +653,19 @@ pub(super) fn append_to_block() {}
 pub(super) fn touch_last_updated() {}
 pub(super) fn write_log_file() {}
 pub(super) fn read_log_file() {}
+`;
+}
+
+function buildGoodLispSyntax() {
+  return `pub struct Node {}
+pub enum NodeKind {}
+pub fn parse() {}
+fn read_form() {}
+fn read_list() {}
+fn read_string() {}
+fn read_atom() {}
+fn skip_ws_and_comments() {}
+pub fn check_balance() {}
 `;
 }
 
