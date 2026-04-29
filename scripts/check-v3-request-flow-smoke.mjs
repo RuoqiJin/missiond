@@ -410,7 +410,7 @@ export function buildRestartRecoveryPlan({
       preferred:
         'launchctl kickstart -k gui/$(id -u)/com.missiond.daemon  # graceful kill + supervised restart',
       fallback:
-        'pgrep -f \"^/.+/missiond( |$)\" | xargs -r kill -TERM  # send SIGTERM to missiond pid; launchd brings it back within a few seconds',
+        'pid=$(pgrep -f \"^/.+/missiond( |$)\" | head -1); test -n \"$pid\" && kill -TERM \"$pid\"  # macOS-compatible SIGTERM fallback; launchd brings it back within a few seconds',
     },
     expected_post_restart: {
       list_dynamic_slots_active_excludes: slotRef,
@@ -1282,6 +1282,15 @@ function runRestartRecoveryFixtures(diagnostics) {
   ) {
     planFails.push(
       `plan.parent_run_command.preferred should reference launchctl; got ${JSON.stringify(plan.parent_run_command?.preferred)}`,
+    );
+  }
+  if (
+    typeof plan.parent_run_command?.fallback !== 'string'
+    || !plan.parent_run_command.fallback.includes('pgrep')
+    || plan.parent_run_command.fallback.includes('xargs -r')
+  ) {
+    planFails.push(
+      `plan.parent_run_command.fallback should be macOS-compatible and avoid GNU xargs -r; got ${JSON.stringify(plan.parent_run_command?.fallback)}`,
     );
   }
   if (
