@@ -25,7 +25,6 @@ use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tracing::warn;
 
 use crate::state::AppState;
 
@@ -41,53 +40,9 @@ use self::completion_audit::{
     FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
     VALID_VERIFIER_STATUSES,
 };
-use self::log_surface::normalize_dispatch_strategy;
 #[cfg(test)]
 use self::log_surface::DEFAULT_DISPATCH_STRATEGY;
-
-/// Forward an `ExecutionEvent` to the v2 bus and log (but never propagate)
-/// publish failures. Companion-log writes are already durable on disk; the
-/// bus event is a live projection.
-async fn emit_execution_event(state: &AppState, ev: ExecutionEvent) {
-    if let Err(e) = state.bus.publish_execution(ev).await {
-        warn!(error = %e, "failed to publish ExecutionEvent (companion log already durable)");
-    }
-}
-
-/// Build an `ExecutionEvent::Opened` payload from the inputs `action_open`
-/// has already validated and normalized. Centralizing the construction
-/// keeps the dispatch-metadata mapping (intent-worker.lisp ::
-/// claudecode-workstation-orchestration :: execution-strategy-record)
-/// in one testable place — the runtime caller and the unit tests stay in
-/// lock-step on which open args land in which event slot.
-///
-/// `dispatch_strategy` always resolves to a canonical string via
-/// `normalize_dispatch_strategy`. We surface it on the event verbatim so
-/// downstream auditors observe the same label that lives in the companion
-/// log meta block. `target_project` / `requested_cwd` are forwarded only
-/// when the open args carry them — `Option::is_none` skip-serialize keeps
-/// the wire form byte-identical to the legacy 5-field shape otherwise.
-fn build_opened_event(
-    execution_id: &str,
-    parent_design: &str,
-    scope: &str,
-    owner: &str,
-    path: String,
-    dispatch_strategy: &str,
-    target_project: Option<&str>,
-    requested_cwd: Option<&str>,
-) -> ExecutionEvent {
-    ExecutionEvent::Opened {
-        execution_id: execution_id.to_string(),
-        parent_design: parent_design.to_string(),
-        scope: scope.to_string(),
-        owner: owner.to_string(),
-        path,
-        dispatch_strategy: Some(dispatch_strategy.to_string()),
-        target_project: target_project.map(|s| s.to_string()),
-        requested_cwd: requested_cwd.map(|s| s.to_string()),
-    }
-}
+use self::log_surface::{build_opened_event, emit_execution_event, normalize_dispatch_strategy};
 
 /// Single tuple of the workstation-dispatch trio surfaced on every
 /// `ExecutionEvent` variant that carries dispatch context. Sourced from the

@@ -70,15 +70,13 @@ const DAEMON_NEEDLES = [
   'const COMPANION_DIR: &str = ".missiond/v2"',
   'fn read_log_file',
   'fn write_log_file',
-  'async fn emit_execution_event',
-  'fn build_opened_event',
   'fn read_dispatch_metadata_from_log',
   'enum TraceKind',
   'fn append_session_trace_event',
   'mod log_surface',
   'mod claim_lease',
   'mod completion_audit',
-  'use self::log_surface::normalize_dispatch_strategy',
+  'use self::log_surface::{build_opened_event, emit_execution_event, normalize_dispatch_strategy}',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
   'fn parse_claims',
@@ -97,6 +95,8 @@ const LOG_SURFACE_NEEDLES = [
   'const VALID_DISPATCH_STRATEGIES',
   'const DEFAULT_DISPATCH_STRATEGY',
   'pub(super) fn normalize_dispatch_strategy',
+  'pub(super) async fn emit_execution_event',
+  'pub(super) fn build_opened_event',
 ];
 
 const CLAIM_LEASE_NEEDLES = [
@@ -386,11 +386,9 @@ const COMPANION_DIR: &str = ".missiond/v2";
 mod log_surface;
 mod claim_lease;
 mod completion_audit;
-use self::log_surface::normalize_dispatch_strategy;
+use self::log_surface::{build_opened_event, emit_execution_event, normalize_dispatch_strategy};
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
-async fn emit_execution_event() {}
-fn build_opened_event() {}
 fn read_dispatch_metadata_from_log() {}
 fn read_log_file() {}
 fn write_log_file() {}
@@ -413,6 +411,8 @@ function buildGoodLogSurface() {
   return `const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
 const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
 pub(super) fn normalize_dispatch_strategy() {}
+pub(super) async fn emit_execution_event() {}
+pub(super) fn build_opened_event() {}
 `;
 }
 
