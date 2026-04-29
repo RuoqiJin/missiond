@@ -23,6 +23,7 @@ const usage = `Usage:
     [--lifecycle <task-lifecycle-events.lisp>] [--receipts <receipts.lisp>]
     [--repo <repo-root>] [--max-parallel <n|all>] [--endpoint <ipc>]
     [--session-id <id>] [--actor-role <role>] [--allow-missing-briefs]
+    [--request-id <request-id> --request-events-dir <dir>]
     [--apply] [--json]
   node scripts/task-runner-submit-dispatch.mjs --dry-fixture [--json]
 
@@ -46,6 +47,8 @@ function parseArgs(argv) {
     endpoint: defaultEndpoint(),
     sessionId: defaultSessionId(),
     actorRole: 'orchestrator',
+    requestId: null,
+    requestEventsDir: null,
     allowMissingBriefs: false,
     apply: false,
     json: false,
@@ -96,6 +99,14 @@ function parseArgs(argv) {
       opts.actorRole = argv[++i] ?? fail('--actor-role requires a value');
     } else if (arg.startsWith('--actor-role=')) {
       opts.actorRole = arg.slice('--actor-role='.length);
+    } else if (arg === '--request-id') {
+      opts.requestId = argv[++i] ?? fail('--request-id requires a value');
+    } else if (arg.startsWith('--request-id=')) {
+      opts.requestId = arg.slice('--request-id='.length);
+    } else if (arg === '--request-events-dir') {
+      opts.requestEventsDir = argv[++i] ?? fail('--request-events-dir requires a value');
+    } else if (arg.startsWith('--request-events-dir=')) {
+      opts.requestEventsDir = arg.slice('--request-events-dir='.length);
     } else {
       fail(`unknown argument: ${arg}`);
     }
@@ -112,6 +123,8 @@ export async function submitDispatch({
   endpoint = defaultEndpoint(),
   sessionId = defaultSessionId(),
   actorRole = 'orchestrator',
+  requestId = null,
+  requestEventsDir = null,
   allowMissingBriefs = false,
   apply = false,
   callTool = null,
@@ -125,6 +138,8 @@ export async function submitDispatch({
     receiptsPath,
     maxParallel,
     actorRole,
+    requestId,
+    requestEventsDir,
     allowMissingBriefs,
     emitDispatchEvents: false,
     nowIso,
@@ -178,6 +193,8 @@ export async function submitDispatch({
       lifecyclePath: descriptor.lifecycle_path,
       manifestPath: descriptor.manifest_path,
       actorRole,
+      requestId,
+      requestEventsDir: requestEventsDir ? path.resolve(repo, requestEventsDir) : null,
       nowIso,
       wave: descriptor.wave,
     });
@@ -302,6 +319,8 @@ function main() {
     endpoint: opts.endpoint,
     sessionId: opts.sessionId,
     actorRole: opts.actorRole,
+    requestId: opts.requestId,
+    requestEventsDir: opts.requestEventsDir,
     allowMissingBriefs: opts.allowMissingBriefs,
     apply: opts.apply,
   }).then(
@@ -350,6 +369,8 @@ async function submitDispatchFixtures() {
       repoRoot: tmp,
       maxParallel: 1,
       apply: true,
+      requestId: 'req-wave99-submit',
+      requestEventsDir: '.missiond/requests/req-wave99-submit/events',
       callTool: async (name, args) => {
         calls.push({ name, args });
         return {
@@ -361,6 +382,10 @@ async function submitDispatchFixtures() {
     assert(calls.length === 1, 'apply should call one delegate payload');
     assert(applied.submitted_count === 1, 'apply should record one successful submission');
     assert(applied.appended_events.length === 1, 'successful submission should append dispatch event');
+    assert(
+      applied.appended_events[0].request_event_path?.endsWith('000001.event.lisp'),
+      'successful submission should project request-local dispatch event when request args are supplied',
+    );
     assert(applied.after_running.length === 1, 'after projection should show one running task');
 
     const partial = await submitDispatch({

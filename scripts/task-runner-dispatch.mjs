@@ -19,6 +19,7 @@ const usage = `Usage:
   node scripts/task-runner-dispatch.mjs --manifest <manifest.lisp>
     [--lifecycle <task-lifecycle-events.lisp>] [--receipts <receipts.lisp>]
     [--repo <repo-root>] [--max-parallel <n|all>] [--actor-role <role>]
+    [--request-id <request-id> --request-events-dir <dir>]
     [--allow-missing-briefs] [--emit-dispatch-events] [--json]
   node scripts/task-runner-dispatch.mjs --dry-fixture [--json]
 
@@ -46,6 +47,8 @@ function parseArgs(argv) {
     repo: process.cwd(),
     maxParallel: 'all',
     actorRole: 'orchestrator',
+    requestId: null,
+    requestEventsDir: null,
     allowMissingBriefs: false,
     emitDispatchEvents: false,
     json: false,
@@ -88,6 +91,14 @@ function parseArgs(argv) {
       opts.actorRole = argv[++i] ?? fail('--actor-role requires a value');
     } else if (arg.startsWith('--actor-role=')) {
       opts.actorRole = arg.slice('--actor-role='.length);
+    } else if (arg === '--request-id') {
+      opts.requestId = argv[++i] ?? fail('--request-id requires a value');
+    } else if (arg.startsWith('--request-id=')) {
+      opts.requestId = arg.slice('--request-id='.length);
+    } else if (arg === '--request-events-dir') {
+      opts.requestEventsDir = argv[++i] ?? fail('--request-events-dir requires a value');
+    } else if (arg.startsWith('--request-events-dir=')) {
+      opts.requestEventsDir = arg.slice('--request-events-dir='.length);
     } else {
       fail(`unknown argument: ${arg}`);
     }
@@ -102,6 +113,8 @@ export function runDispatch({
   receiptsPath = null,
   maxParallel = 'all',
   actorRole = 'orchestrator',
+  requestId = null,
+  requestEventsDir = null,
   allowMissingBriefs = false,
   emitDispatchEvents = false,
   nowIso = isoNow(),
@@ -115,6 +128,8 @@ export function runDispatch({
     action: 'runnable',
     limit: maxParallel,
     actorRole,
+    requestId,
+    requestEventsDir,
     emitDispatchEvents: false,
     nowIso,
   });
@@ -159,6 +174,10 @@ export function runDispatch({
     after_running: null,
     after_dispatchable: null,
   };
+  if (before.request_id || before.request_events_dir) {
+    result.request_id = before.request_id ?? null;
+    result.request_events_dir = before.request_events_dir ?? null;
+  }
 
   if (!emitDispatchEvents || delegateCalls.length === 0) return result;
 
@@ -170,6 +189,8 @@ export function runDispatch({
     action: 'dispatch_task',
     limit: maxParallel,
     actorRole,
+    requestId,
+    requestEventsDir,
     emitDispatchEvents: true,
     nowIso,
   });
@@ -284,6 +305,8 @@ function main() {
       receiptsPath: opts.receipts,
       maxParallel: opts.maxParallel,
       actorRole: opts.actorRole,
+      requestId: opts.requestId,
+      requestEventsDir: opts.requestEventsDir,
       allowMissingBriefs: opts.allowMissingBriefs,
       emitDispatchEvents: opts.emitDispatchEvents,
     });
@@ -333,10 +356,16 @@ function runFixtures() {
       manifestPath,
       repoRoot: tmp,
       maxParallel: 1,
+      requestId: 'req-wave99-dispatch',
+      requestEventsDir: '.missiond/requests/req-wave99-dispatch/events',
       emitDispatchEvents: true,
       nowIso: '2026-04-28T00:01:00Z',
     });
     assert(emitted.appended_events.length === 1, 'emit mode should append one dispatch event');
+    assert(
+      emitted.appended_events[0].request_event_path?.endsWith('000001.event.lisp'),
+      'emit mode should write request-local dispatch event when request args are supplied',
+    );
     assert(emitted.after_running.length === 1, 'after projection should mark one task running');
 
     const missingManifestPath = path.join(tmp, '.missiond/tasks/wave98/manifest.lisp');

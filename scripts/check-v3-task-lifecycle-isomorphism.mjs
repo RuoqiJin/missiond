@@ -13,6 +13,7 @@ Checks the V3 task-runner lifecycle Lisp/code isomorphism contract:
   - append-event owns cooperative sequence allocation and atomic ledger writes.
   - append-event can project request-local one-event files when request ids are supplied.
   - finalizer can project request-local final.lisp reports when request ids are supplied.
+  - dispatch/submit paths pass request-local lifecycle projection args into append-event.
   - parent-hotfix and final-report projection preserve lineage fields.
   - scheduler and batch verifier consume lifecycle/finalization projections.
 `;
@@ -25,6 +26,8 @@ const DEFAULT_FILES = {
   parentHotfix: 'scripts/task-runner-parent-hotfix.mjs',
   projector: 'scripts/project-task-lifecycle-ledger.mjs',
   nextAction: 'scripts/task-runner-next-action.mjs',
+  dispatch: 'scripts/task-runner-dispatch.mjs',
+  submitDispatch: 'scripts/task-runner-submit-dispatch.mjs',
   batchVerifier: 'scripts/verify-task-runner-batch.mjs',
 };
 
@@ -95,12 +98,15 @@ function checkFiles(root, files) {
     'scripts/task-runner-finalize-report.mjs',
     'scripts/task-runner-parent-hotfix.mjs',
     'scripts/project-task-lifecycle-ledger.mjs',
+    'scripts/task-runner-dispatch.mjs',
+    'scripts/task-runner-submit-dispatch.mjs',
     'scripts/verify-task-runner-batch.mjs',
     'task-scoped compatibility lifecycle ledger',
     '.missiond/requests/<request_id>/events/<seq>.event.lisp',
     '.missiond/requests/<request_id>/reports/final.lisp',
     'request-local one-event files',
     'request-local final-report',
+    'task-runner-dispatch and task-runner-submit-dispatch pass request-local lifecycle projection args',
     'task-runner-append-event is the only cooperative mutation helper',
     'node scripts/check-v3-task-lifecycle-isomorphism.mjs',
   ]);
@@ -177,6 +183,28 @@ function checkFiles(root, files) {
     'finalizers.length > 0',
     'emitDispatchEventsForActions',
     'appendLifecycleEvent({',
+    '--request-events-dir',
+    'requestEventsDir',
+    'request_event_path',
+  ]);
+
+  requireAll(diagnostics, files.dispatch, sources.dispatch, [
+    "from './task-runner-next-action.mjs'",
+    'runDispatch',
+    '--request-id',
+    '--request-events-dir',
+    'requestEventsDir',
+    'request_event_path',
+  ]);
+
+  requireAll(diagnostics, files.submitDispatch, sources.submitDispatch, [
+    "from './task-runner-dispatch.mjs'",
+    "from './task-runner-next-action.mjs'",
+    'submitDispatch',
+    '--request-id',
+    '--request-events-dir',
+    'requestEventsDir',
+    'request_event_path',
   ]);
 
   requireAll(diagnostics, files.batchVerifier, sources.batchVerifier, [
@@ -217,8 +245,10 @@ function buildFixture() {
              "scripts/task-runner-finalize-report.mjs"
              "scripts/task-runner-parent-hotfix.mjs"
              "scripts/project-task-lifecycle-ledger.mjs"
+             "scripts/task-runner-dispatch.mjs"
+             "scripts/task-runner-submit-dispatch.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; task-runner-append-event is the only cooperative mutation helper"))
+      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; task-runner-dispatch and task-runner-submit-dispatch pass request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper"))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.lifecycleChecker, `
@@ -268,7 +298,20 @@ existingIds.has(entry.id);`);
 import {} from './task-runner-append-event.mjs';
 if (a.action === 'finalize_report') {}
 if (finalizers.length > 0) {}
-function emitDispatchEventsForActions() { appendLifecycleEvent({}); }`);
+function emitDispatchEventsForActions() { appendLifecycleEvent({}); }
+const args = '--request-events-dir';
+const a = 'requestEventsDir request_event_path';`);
+  writeFixture(root, DEFAULT_FILES.dispatch, `
+import {} from './task-runner-next-action.mjs';
+function runDispatch() {}
+const args = '--request-id --request-events-dir';
+const a = 'requestEventsDir request_event_path';`);
+  writeFixture(root, DEFAULT_FILES.submitDispatch, `
+import {} from './task-runner-dispatch.mjs';
+import {} from './task-runner-next-action.mjs';
+function submitDispatch() {}
+const args = '--request-id --request-events-dir';
+const a = 'requestEventsDir request_event_path';`);
   writeFixture(root, DEFAULT_FILES.batchVerifier, `
 import {} from './check-task-lifecycle-events.mjs';
 import {} from './task-runner-append-event.mjs';

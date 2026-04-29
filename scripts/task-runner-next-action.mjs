@@ -21,6 +21,7 @@ const usage = `Usage:
     [--lifecycle <task-lifecycle-events.lisp>] [--receipts <receipts.lisp>]
     [--repo <repo-root>] [--action runnable|all|dispatch_task|finalize_report|wait_for_hard_deps]
     [--limit <n|all>] [--actor-role <role>] [--emit-dispatch-events] [--json]
+    [--request-id <request-id> --request-events-dir <dir>]
   node scripts/task-runner-next-action.mjs --dry-fixture [--json]
 
 Selects MissionD's next task-runner action from Lisp artifacts. Default action
@@ -48,6 +49,8 @@ function parseArgs(argv) {
     action: 'runnable',
     limit: 'all',
     actorRole: 'orchestrator',
+    requestId: null,
+    requestEventsDir: null,
     emitDispatchEvents: false,
     json: false,
     dryFixture: false,
@@ -91,6 +94,14 @@ function parseArgs(argv) {
       opts.actorRole = argv[++i] ?? fail('--actor-role requires a value');
     } else if (arg.startsWith('--actor-role=')) {
       opts.actorRole = arg.slice('--actor-role='.length);
+    } else if (arg === '--request-id') {
+      opts.requestId = argv[++i] ?? fail('--request-id requires a value');
+    } else if (arg.startsWith('--request-id=')) {
+      opts.requestId = arg.slice('--request-id='.length);
+    } else if (arg === '--request-events-dir') {
+      opts.requestEventsDir = argv[++i] ?? fail('--request-events-dir requires a value');
+    } else if (arg.startsWith('--request-events-dir=')) {
+      opts.requestEventsDir = arg.slice('--request-events-dir='.length);
     } else {
       fail(`unknown argument: ${arg}`);
     }
@@ -106,10 +117,14 @@ export function runNextAction({
   action = 'runnable',
   limit = 'all',
   actorRole = 'orchestrator',
+  requestId = null,
+  requestEventsDir = null,
   emitDispatchEvents = false,
   nowIso = isoNow(),
 }) {
   const repo = path.resolve(repoRoot);
+  validateRequestProjectionArgs(requestId, requestEventsDir);
+  const requestEventsTarget = requestEventsDir ? path.resolve(repo, requestEventsDir) : null;
   const before = projectWaveStateFromFiles({
     manifestPath,
     repoRoot: repo,
@@ -134,6 +149,12 @@ export function runNextAction({
     appended_events: [],
     after_counts: null,
   };
+  if (requestId || requestEventsTarget) {
+    result.request_id = requestId;
+    result.request_events_dir = requestEventsTarget
+      ? toRepoRelative(requestEventsTarget, repo)
+      : null;
+  }
 
   if (!emitDispatchEvents) return result;
 
@@ -152,6 +173,8 @@ export function runNextAction({
     lifecyclePath: lifecycleTarget,
     manifestPath: before.manifest_path,
     actorRole,
+    requestId,
+    requestEventsDir: requestEventsTarget,
     nowIso,
     wave: before.wave,
   });
@@ -197,6 +220,8 @@ export function emitDispatchEventsForActions({
   lifecyclePath,
   manifestPath,
   actorRole,
+  requestId = null,
+  requestEventsDir = null,
   nowIso,
   wave,
 }) {
@@ -204,7 +229,7 @@ export function emitDispatchEventsForActions({
   const appended = [];
   for (const action of actions) {
     const touched = uniqueSorted([manifestPath, action.brief_path].filter(Boolean));
-    const result = appendLifecycleEvent({
+    const appendResult = appendLifecycleEvent({
       ledgerPath,
       task: action.task_id,
       eventKind: 'dispatch',
@@ -214,8 +239,14 @@ export function emitDispatchEventsForActions({
       summary: `Dispatch ${action.task_id}: hard dependencies satisfied.`,
       at: nowIso,
       wave,
+      requestId,
+      requestEventsDir,
     });
-    appended.push(result.event);
+    const event = { ...appendResult.event };
+    if (appendResult.requestEventPath) {
+      event.request_event_path = toRepoRelative(appendResult.requestEventPath, repoRoot);
+    }
+    appended.push(event);
   }
   return appended;
 }
@@ -231,6 +262,18 @@ function parseLimit(value, fallback) {
 
 function defaultLifecyclePath(wave) {
   return path.posix.join('.missiond', 'tasks', wave, 'task-lifecycle-events.lisp');
+}
+
+function validateRequestProjectionArgs(requestId, requestEventsDir) {
+  if ((requestId && !requestEventsDir) || (!requestId && requestEventsDir)) {
+    throw new Error('--request-id and --request-events-dir must be supplied together');
+  }
+}
+
+function toRepoRelative(filePath, repoRoot) {
+  const rel = path.relative(path.resolve(repoRoot), path.resolve(filePath));
+  if (rel.startsWith('..') || path.isAbsolute(rel)) return filePath;
+  return rel.split(path.sep).join('/');
 }
 
 function uniqueSorted(values) {
@@ -259,6 +302,8 @@ function main() {
       action: opts.action,
       limit: opts.limit,
       actorRole: opts.actorRole,
+      requestId: opts.requestId,
+      requestEventsDir: opts.requestEventsDir,
       emitDispatchEvents: opts.emitDispatchEvents,
     });
     if (opts.json) {
@@ -300,9 +345,15 @@ function runFixtures() {
       repoRoot: tmp,
       action: 'dispatch_task',
       emitDispatchEvents: true,
+      requestId: 'req-wave99-next',
+      requestEventsDir: '.missiond/requests/req-wave99-next/events',
       nowIso: '2026-04-28T00:00:00Z',
     });
     assert(emitted.appended_events.length === 2, 'two dispatch events should append');
+    assert(
+      emitted.appended_events.every((event) => event.request_event_path?.includes('/events/')),
+      'dispatch events should project request-local event files when request args are supplied',
+    );
     assert(emitted.after_counts.running === 2, 'dispatch events should move selected tasks to running');
     assert(emitted.after_counts.dispatchable === 0, 'emitted tasks should not remain dispatchable');
 
