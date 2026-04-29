@@ -608,6 +608,25 @@ impl BoardStore for PgMissionStore {
         self.get_board_task(&full_id).await
     }
 
+    async fn clear_board_task_assignee(&self, task_id: &str, expected_assignee: &str) -> DbResult<usize> {
+        let full_id = match self.resolve_board_task_id(task_id).await? {
+            Some(fid) => fid,
+            None => return Ok(0),
+        };
+        let now = chrono::Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE board_tasks
+             SET assignee = NULL, updated_at = $1
+             WHERE id = $2 AND status = 'open' AND assignee = $3"
+        )
+        .bind(&now)
+        .bind(&full_id)
+        .bind(expected_assignee)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
     async fn release_board_claims_by_executor(&self, executor_id: &str) -> DbResult<usize> {
         let now = chrono::Utc::now().to_rfc3339();
         let result = sqlx::query(

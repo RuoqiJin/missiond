@@ -162,6 +162,18 @@ fn append_board_task_id_suffix(prompt: &str, task_id: &str) -> String {
     )
 }
 
+fn is_dynamic_slot_id(slot_id: &str) -> bool {
+    slot_id.starts_with("slot-dyn-")
+}
+
+fn should_clear_stale_dynamic_assignee(
+    slot_id: &str,
+    runtime_slot_exists: bool,
+    dynamic_slot_active: bool,
+) -> bool {
+    is_dynamic_slot_id(slot_id) && !runtime_slot_exists && !dynamic_slot_active
+}
+
 /// Notify Jarvis conversation when an async task fails.
 /// Extracts conversation_id from task metadata, writes error message, and emits event.
 async fn notify_jarvis_failure(
@@ -469,7 +481,76 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     for task in tasks {
         // Dynamic slot assignment: if assignee is None, find an idle coder slot
         let slot_id = match &task.assignee {
-            Some(id) => id.clone(),
+            Some(id) => {
+                let runtime_slot_exists = state.mission.get_slot(id).is_some();
+                let dynamic_slot_active = if is_dynamic_slot_id(id) {
+                    match state.store.get_dynamic_slot(id).await {
+                        Ok(Some(slot)) => slot.status == "active",
+                        Ok(None) => false,
+                        Err(e) => {
+                            warn!(
+                                task_id = %task.id,
+                                slot_id = %id,
+                                error = %e,
+                                "Autopilot: failed to inspect dynamic slot before honoring assignee"
+                            );
+                            true
+                        }
+                    }
+                } else {
+                    false
+                };
+
+                if should_clear_stale_dynamic_assignee(
+                    id,
+                    runtime_slot_exists,
+                    dynamic_slot_active,
+                ) {
+                    match state
+                        .store
+                        .clear_board_task_assignee(task.id.as_str(), id)
+                        .await
+                    {
+                        Ok(rows) if rows > 0 => {
+                            let _ = state
+                                .store
+                                .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                    task_id: task.id.to_string(),
+                                    content: format!(
+                                        "🔄 Pinned dynamic slot `{}` 在重启后已不可用，已解除 pin，等待重新调度。",
+                                        id
+                                    ),
+                                    note_type: Some("note".to_string()),
+                                    author: Some("autopilot".to_string()),
+                                })
+                                .await;
+                            info!(
+                                task_id = %task.id,
+                                slot_id = %id,
+                                "Autopilot: cleared stale dynamic slot assignee"
+                            );
+                        }
+                        Ok(_) => {
+                            debug!(
+                                task_id = %task.id,
+                                slot_id = %id,
+                                "Autopilot: stale dynamic slot assignee was already changed"
+                            );
+                        }
+                        Err(e) => {
+                            warn!(
+                                task_id = %task.id,
+                                slot_id = %id,
+                                error = %e,
+                                "Autopilot: failed to clear stale dynamic slot assignee"
+                            );
+                        }
+                    }
+                    continue;
+                }
+
+                id.clone()
+            }
             None => {
                 let mut candidate: Option<String> = None;
                 for slot in state.mission.list_slots() {
@@ -2162,6 +2243,39 @@ mod tests {
             suffix.contains("Autopilot/orchestrator"),
             "missing handover-to-orchestrator wording: {suffix}"
         );
+    }
+
+    // ── Dynamic slot stale-pin recovery ────────────────────────────────
+
+    #[test]
+    fn dynamic_slot_id_detection_is_prefix_based() {
+        assert!(is_dynamic_slot_id("slot-dyn-abc123"));
+        assert!(!is_dynamic_slot_id("slot-coder"));
+        assert!(!is_dynamic_slot_id("coder-dyn-abc123"));
+    }
+
+    #[test]
+    fn stale_dynamic_assignee_clears_only_dead_dynamic_pin() {
+        assert!(should_clear_stale_dynamic_assignee(
+            "slot-dyn-restarted",
+            false,
+            false
+        ));
+        assert!(!should_clear_stale_dynamic_assignee(
+            "slot-dyn-running",
+            true,
+            true
+        ));
+        assert!(!should_clear_stale_dynamic_assignee(
+            "slot-dyn-db-active",
+            false,
+            true
+        ));
+        assert!(!should_clear_stale_dynamic_assignee(
+            "static-coder",
+            false,
+            false
+        ));
     }
 }
 

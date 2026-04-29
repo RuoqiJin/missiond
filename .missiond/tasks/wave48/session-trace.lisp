@@ -4,7 +4,7 @@
   :schema "missiond.session-trace.v1"
   :wave wave48
   :created-at "2026-04-29T06:01:00Z"
-  :sequence 7
+  :sequence 8
 
   (trace-event
     :id wave48-bootstrap-start-001
@@ -94,4 +94,16 @@
     :files [".missiond/tasks/wave48/context-pack.lisp"
             ".missiond/tasks/wave48/shared-memory.lisp"
             ".missiond/tasks/wave48/reports/wave48-01-context-autopilot-restart-recovery-v0.report.lisp"]
-    :summary "Wave48-01 done: context-pack appended (2 observations + 1 shard-proposal), report status=done, all 5 acceptance commands passed."))
+    :summary "Wave48-01 done: context-pack appended (2 observations + 1 shard-proposal), report status=done, all 5 acceptance commands passed.")
+
+  (trace-event
+    :id wave48-02-completion-trace-002
+    :seq 8
+    :at "2026-04-29T07:00:00Z"
+    :task wave48-02-context-dispatch-shard-plan-v0
+    :backend claudecode
+    :kind observation
+    :files [".missiond/tasks/wave48/context-pack.lisp"
+            ".missiond/tasks/wave48/shared-memory.lisp"
+            ".missiond/tasks/wave48/reports/wave48-02-context-dispatch-shard-plan-v0.report.lisp"]
+    :summary "Wave48-02 done: context-pack appended (3 observations + 2 shard-proposals + 1 conflict, seqs 5-10), report status=done, all 3 acceptance commands passed. Shard split recommendation captured in report :notes."))

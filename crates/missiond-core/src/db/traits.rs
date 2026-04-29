@@ -386,6 +386,7 @@ pub trait BoardStore: Send + Sync {
 
     // -- board.rs: claiming & autopilot --
     async fn claim_board_task(&self, id: &str, executor_id: &str, executor_type: &str) -> DbResult<Option<BoardTask>>;
+    async fn clear_board_task_assignee(&self, task_id: &str, expected_assignee: &str) -> DbResult<usize>;
     async fn release_board_claims_by_executor(&self, executor_id: &str) -> DbResult<usize>;
     async fn recover_stale_running_tasks(&self, fallback_stale_minutes: i64) -> DbResult<usize>;
     async fn set_board_task_lease(&self, task_id: &str, lease_expires_at: &str) -> DbResult<usize>;

@@ -13,6 +13,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
   - delegated BoardTask auto-provision starts slots idle via suppress_initial_prompt.
   - project-local Claude hooks and MISSION_IPC_ENDPOINT are injected before PTY spawn.
   - Autopilot owns pty.send, close state, timeout budget, and dispatch guard.
+  - Autopilot clears stale slot-dyn-* assignee pins after daemon restart.
 `;
 
 const DEFAULT_FILES = {
@@ -98,6 +99,8 @@ function checkFiles(root, files) {
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
     'The per-slot dispatch guard MUST be held across the entire state.pty.send call',
+    'Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins',
+    'BoardStore::clear_board_task_assignee',
     'node scripts/check-v3-workstation-config-isomorphism.mjs',
   ]);
 
@@ -169,6 +172,9 @@ function checkFiles(root, files) {
     'fn build_base_prompt',
     'fn append_board_task_id_suffix',
     'fn decide_close_action',
+    'fn is_dynamic_slot_id',
+    'fn should_clear_stale_dynamic_assignee',
+    'clear_board_task_assignee(task.id.as_str(), id)',
     'state.slot_dispatch.try_acquire_guard(&slot_id)',
     'state.pty.send(&slot_id, &full_prompt, timeout_ms).await',
     'DispatchCloseAction::AlreadySelfClosed',
@@ -221,7 +227,9 @@ function buildFixture() {
        "Project-bound workstation spawn MUST sync MissionD Claude hooks"
        "MISSION_IPC_ENDPOINT"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs"
-       "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"])
+       "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"
+       "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
+       "BoardStore::clear_board_task_assignee"])
     (execution-ownership delegated-boardtask
       :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
       :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"))
@@ -279,6 +287,9 @@ fn idle_watchdog_threshold_secs() {}
 fn build_base_prompt() {}
 fn append_board_task_id_suffix() {}
 fn decide_close_action() {}
+fn is_dynamic_slot_id() {}
+fn should_clear_stale_dynamic_assignee() {}
+clear_board_task_assignee(task.id.as_str(), id);
 state.slot_dispatch.try_acquire_guard(&slot_id);
 state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
 DispatchCloseAction::AlreadySelfClosed;
