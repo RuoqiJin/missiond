@@ -564,6 +564,30 @@
              "scripts/check-v3-evidence-collector-isomorphism.mjs"]
       :note "EVIDENCE_SCHEMA_VERSION pins the evidence wire shape for verification-receipt consumers. EventRefStatus is the closed status enum live | log | unavailable describing whether an event ref is live from publish, recovered from the event log, or unavailable. EventRefProvenance is the closed provenance enum live | passive_cache | event_log_query | unavailable so consumers can distinguish immediate publish results, the bounded in-memory passive cache, and the bounded event_log_query recovery path. EVENT_REF_CACHE_CAP = 1024 fixes the passive cache capacity. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, keeping plan.rs compatibility while making the receipt payload Lisp-addressable.")
 
+    (surface mission_execution-log
+      :status "code-aligned"
+      :implements [execution-lifecycle execution-event-bus session-trace]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
+             "scripts/check-v3-mission-execution-isomorphism.mjs"]
+      :note "mission_execution-log is the durable companion-log and live-projection surface for mission_execution. COMPANION_DIR remains .missiond/v2 and LogFile/read_log_file/write_log_file keep the Lisp companion log authoritative. The handle action router owns open/list/status plus governance actions, build_opened_event and read_dispatch_metadata_from_log project dispatch_strategy / target_project / requested_cwd into ExecutionEvent, and emit_execution_event publishes only after durable writes succeed. append_session_trace_event is the optional task session-trace projection for open/preflight_commit/complete; trace write failures surface trace_warning and never abort the primary action.")
+
+    (surface mission_execution-claim-lease
+      :status "code-aligned"
+      :implements [execution-claim-lease scoped-write-gate]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
+             "scripts/check-v3-mission-execution-isomorphism.mjs"]
+      :note "mission_execution-claim-lease owns the conflict window around execution work. action_claim allocates C ids, DEFAULT_LEASE_SECS = 1800 and MAX_LEASE_SECS = 24 * 3600 clamp leases, action_heartbeat extends lease-expires-at, and action_release stamps released-at + status released. parse_claims reads active/released claims, and scopes_overlap_pure is the shared conflict predicate reused by the Plan DAG scheduler and scoped-commit checks so claim overlap, staged path checks, and released-claim handoff all use one rule.")
+
+    (surface mission_execution-completion-audit
+      :status "code-aligned"
+      :implements [execution-completion scoped-commit-handoff task-run-auto-verifier]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
+             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
+             "scripts/check-v3-mission-execution-isomorphism.mjs"]
+      :note "mission_execution-completion-audit owns the completion durability gate. action_complete records deviation/decision/issue/completion facts, VALID_COMMIT_STATUSES and verifier status enums reject unknown durability labels, enforce_scoped_commit_completion rejects commit-status-without-hash / commit-status-blocked-without-blocker / scoped-commit-violation cases, enforce_task_contract_completion and enforce_verified_completion bind report-contract and shared-memory evidence, auto_run_task_run_verifier is the read-only daemon auto-verifier, action_audit reports findings, action_repair marks stale claims, and preflight_commit/build_preflight_summary inspects git status without mutating git before a writer commits.")
+
     (surface mission_workflow
       :status "code-aligned"
       :implements [workflow workflow-distiller]
@@ -672,6 +696,7 @@
              "node scripts/check-v3-intent-alignment-isomorphism.mjs"
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
              "node scripts/check-v3-evidence-collector-isomorphism.mjs"
+             "node scripts/check-v3-mission-execution-isomorphism.mjs"
              "node scripts/check-v3-workflow-isomorphism.mjs"
              "node scripts/check-v3-review-gate-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
