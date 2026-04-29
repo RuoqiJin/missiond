@@ -12,6 +12,8 @@ Checks the V3 ops-infra Lisp/code isomorphism contract:
   - deploy-daemon keeps build, backup, codesign, kickstart, socket wait,
     bounded IPC smoke, and rollback semantics together.
   - cargo-fmt-touched formats only Rust files present in the current diff.
+  - cargo-fmt-touched skips only explicit missiond-rustfmt-exempt legacy
+    facades while V3 physical split is in progress.
 `;
 
 const DEFAULT_FILES = {
@@ -86,6 +88,7 @@ function checkFiles(root, files) {
     'IPC smoke MUST retry after socket readiness and then rollback on failure',
     'Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'Rust formatting MUST be scoped to Rust files touched in the current diff',
+    'missiond-rustfmt-exempt legacy-large-file facades',
     'rustfmt MUST run with skip_children=true',
     'node scripts/check-v3-ops-infra-isomorphism.mjs',
   ]);
@@ -129,6 +132,8 @@ function checkFiles(root, files) {
     'git diff --name-only --diff-filter=ACMR "${BRANCH}...HEAD"',
     "awk '/\\.rs$/ { print }'",
     'no Rust files in diff',
+    'missiond-rustfmt-exempt',
+    'skipped rustfmt-exempt legacy file(s)',
     'command -v rustfmt',
     '--config skip_children=true --check',
     'xargs rustfmt --edition "$EDITION" --config skip_children=true',
@@ -155,6 +160,7 @@ function buildFixture() {
        "IPC smoke MUST retry after socket readiness and then rollback on failure."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
        "Rust formatting MUST be scoped to Rust files touched in the current diff."
+       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
        "rustfmt MUST run with skip_children=true."])
   (implementation-map
     (surface ops-infra
@@ -199,6 +205,8 @@ git diff --cached --name-only --diff-filter=ACMR
 git diff --name-only --diff-filter=ACMR "\${BRANCH}...HEAD"
 awk '/\\.rs$/ { print }'
 no Rust files in diff
+missiond-rustfmt-exempt
+skipped rustfmt-exempt legacy file(s)
 command -v rustfmt
 --config skip_children=true --check
 xargs rustfmt --edition "$EDITION" --config skip_children=true

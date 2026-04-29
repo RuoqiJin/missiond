@@ -18,6 +18,7 @@ Checks the V3 plan.lisp execution isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
   unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -84,6 +85,7 @@ function checkFiles(root, files) {
     ':default-target mission_task_delegate',
     'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
+    'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'execute can derive target_source=plan_hint from plan.sexp_text',
     'DAG execution parses node-local Lisp hints',
     'node scripts/check-v3-plan-execution-isomorphism.mjs',
@@ -106,6 +108,18 @@ function checkFiles(root, files) {
     'target_source',
     'dispatch_strategy_source',
     'AGENT_TEAM_OBJECTIVE_HINT',
+  ]);
+
+  requireAll(diagnostics, files.planTaskRunnerAdapter, sources.planTaskRunnerAdapter, [
+    'pub(super) enum TaskRunnerMode',
+    'pub(super) fn parse_task_runner_mode',
+    'pub(super) fn attach_task_runner_block',
+    'fn build_runner_response_block',
+    'Value::Bool(false)',
+    'manifest_status',
+    'overlap_diagnostics',
+    'critical_path_minutes',
+    'verification_tier_counts',
   ]);
 
   requireAll(diagnostics, files.planDag, sources.planDag, [
@@ -178,7 +192,8 @@ function buildFixture() {
   (implementation-map
     (surface mission_plan
       :status "code-aligned"
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :code ["crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -201,6 +216,17 @@ let x = (t, "plan_hint");
 let target_source = "";
 let dispatch_strategy_source = "";
 const AGENT_TEAM_OBJECTIVE_HINT: &str = "";`);
+  writeFixture(root, DEFAULT_FILES.planTaskRunnerAdapter, `
+pub(super) enum TaskRunnerMode { Off, DryRun }
+pub(super) fn parse_task_runner_mode() {}
+pub(super) fn attach_task_runner_block() {}
+fn build_runner_response_block() {
+  Value::Bool(false);
+  "manifest_status";
+  "overlap_diagnostics";
+  "critical_path_minutes";
+  "verification_tier_counts";
+}`);
   writeFixture(root, DEFAULT_FILES.planDag, `
 fn parse_node_form() {
   match key.as_str() {

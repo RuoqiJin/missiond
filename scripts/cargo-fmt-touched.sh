@@ -63,9 +63,36 @@ esac
 
 # Keep only existing Rust files. (`--diff-filter=ACMR` already excludes deletes,
 # but a rename can leave the old path; the `-f` test handles that defensively.)
-RUST_FILES=$(printf '%s\n' "$FILES" \
+TOUCHED_RUST_FILES=$(printf '%s\n' "$FILES" \
   | awk '/\.rs$/ { print }' \
   | while read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)
+
+# A few very large legacy Rust files predate rustfmt. During the V3
+# physical split, touching one of those facades only to replace a module
+# body with `mod foo;` must not trigger a whole-file whitespace rewrite.
+# The exemption must be explicit in the file header so new modules and
+# normal Rust files still format through this scoped path.
+SKIPPED_FILES=$(printf '%s\n' "$TOUCHED_RUST_FILES" \
+  | while read -r f; do
+      [ -n "$f" ] || continue
+      if sed -n '1,20p' "$f" | grep -q 'missiond-rustfmt-exempt'; then
+        printf '%s\n' "$f"
+      fi
+    done)
+
+RUST_FILES=$(printf '%s\n' "$TOUCHED_RUST_FILES" \
+  | while read -r f; do
+      [ -n "$f" ] || continue
+      if sed -n '1,20p' "$f" | grep -q 'missiond-rustfmt-exempt'; then
+        continue
+      fi
+      printf '%s\n' "$f"
+    done)
+
+if [ -n "$SKIPPED_FILES" ]; then
+  echo "[fmt-touched] skipped rustfmt-exempt legacy file(s):"
+  printf '%s\n' "$SKIPPED_FILES" | sed 's/^/  /'
+fi
 
 if [ -z "$RUST_FILES" ]; then
   echo "[fmt-touched] no Rust files in diff — nothing to do."
