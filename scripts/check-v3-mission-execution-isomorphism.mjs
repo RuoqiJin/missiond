@@ -102,6 +102,7 @@ const LOG_SURFACE_NEEDLES = [
   'pub(super) fn write_log_file',
   'pub(super) fn read_log_file',
   'pub(super) fn normalize_dispatch_strategy',
+  'pub(super) async fn action_status',
   'pub(super) async fn emit_execution_event',
   'pub(super) fn build_opened_event',
   'pub(super) struct DispatchMeta',
@@ -476,6 +477,7 @@ pub(super) fn touch_last_updated() {}
 pub(super) fn write_log_file() {}
 pub(super) fn read_log_file() {}
 pub(super) fn normalize_dispatch_strategy() {}
+pub(super) async fn action_status() {}
 pub(super) async fn emit_execution_event() {}
 pub(super) fn build_opened_event() {}
 pub(super) struct DispatchMeta {}
