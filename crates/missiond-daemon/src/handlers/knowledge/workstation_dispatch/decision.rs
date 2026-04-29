@@ -4,6 +4,7 @@ use serde_json::Value;
 /// the legacy back-compat helper kept so existing tests / callers keep
 /// reading the same boolean. New code goes through `evaluate_dispatch_decision`
 /// so the response can surface the source + inference reason.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn opt_in_requested(args: &Value, plan_hint_workstation_dispatch: bool) -> bool {
     let arg_flag = args
         .get("workstation_dispatch")

@@ -72,6 +72,10 @@ const DEFAULT_FILES = {
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs',
   workstationBrief:
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs',
+  workstationProposal:
+    'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/proposal.rs',
+  workstationAutoSpawn:
+    'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn.rs',
   requestFlowSmoke: 'scripts/check-v3-request-flow-smoke.mjs',
 };
 
@@ -132,6 +136,8 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/proposal.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn.rs',
   'WorkstationDispatchOutcome',
   'DryRun',
   'Dispatched',
@@ -146,6 +152,10 @@ const BLUEPRINT_NEEDLES = [
   'run_workstation_dispatch_with_contract_and_trace',
   'classify_task_kind',
   'build_task_brief',
+  'WorkstationProposalBundle',
+  'request_workstation_proposals',
+  'WorkstationAutoSpawnGateOutcome',
+  'evaluate_workstation_auto_spawn_gate',
   'extract_inner_board_task_id',
   'workstation_dispatch_v0',
   'workstation_dispatch_status',
@@ -187,11 +197,15 @@ const WORKSTATION_DISPATCH_RS_NEEDLES = [
   'mod outcome;',
   'mod runner;',
   'mod brief;',
+  'mod proposal;',
+  'mod auto_spawn;',
   'pub(crate) use descriptor::{',
   'pub(crate) use decision::{',
   'pub(crate) use outcome::{',
   'pub(crate) use runner::{',
   'pub(crate) use brief::{',
+  'pub(crate) use proposal::{',
+  'pub(crate) use auto_spawn::{',
   'evaluate_dispatch_decision',
   'run_workstation_dispatch_with_contract_and_trace',
   'outcome_to_response_fields',
@@ -278,6 +292,49 @@ const WORKSTATION_BRIEF_RS_NEEDLES = [
   'COMMIT_POLICY_SCOPED',
 ];
 
+const WORKSTATION_PROPOSAL_RS_NEEDLES = [
+  'pub(crate) const WORKSTATION_PROPOSAL_FIELDS',
+  'pub(crate) const WORKSTATION_PROPOSAL_CAP',
+  'pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER',
+  'pub(crate) const PROPOSAL_VALID_TARGETS',
+  'pub(crate) const PROPOSAL_VALID_STRATEGIES',
+  'pub(crate) enum WorkstationProposalStatus',
+  'pub(crate) enum WorkstationProposalSafetyStatus',
+  'pub(crate) enum WorkstationProposalConfidence',
+  'pub(crate) struct WorkstationProposal',
+  'pub(crate) struct WorkstationProposalBundle',
+  'pub(crate) struct WorkstationProposalGate',
+  'pub(crate) fn build_workstation_proposal_prompt',
+  'pub(crate) fn parse_workstation_proposals',
+  'pub(crate) fn classify_proposal_safety',
+  'pub(crate) async fn request_workstation_proposals',
+  '"workstation_dispatch_proposal"',
+  '"applied": false',
+  '"auto_spawn": false',
+  'no fallback to claude -p',
+];
+
+const WORKSTATION_AUTO_SPAWN_RS_NEEDLES = [
+  'pub(crate) const AUTO_SPAWN_MISSING_PROPOSAL_HASH',
+  'pub(crate) const AUTO_SPAWN_PROPOSAL_HASH_MISMATCH',
+  'pub(crate) const AUTO_SPAWN_INVALID_PARAM',
+  'pub(crate) enum WorkstationAutoSpawnStatus',
+  'pub(crate) enum WorkstationProposalHashStatus',
+  'pub(crate) struct WorkstationAutoSpawnInput',
+  'pub(crate) fn parse_workstation_auto_spawn_input',
+  'pub(crate) fn compute_workstation_proposal_hash',
+  'pub(crate) struct WorkstationAutoSpawnGateOutcome',
+  'pub(crate) fn enforce_auto_spawn_preflight',
+  'pub(crate) fn evaluate_workstation_auto_spawn_gate',
+  'WorkstationAutoSpawnStatus::Spawned',
+  'WorkstationAutoSpawnStatus::SkippedUnavailable',
+  'WorkstationAutoSpawnStatus::SkippedSubstrateRefused',
+  'WorkstationProposalHashStatus::Matches',
+  'mission_task_delegate',
+  'task_contract_path',
+  'preflight_status_acceptable',
+];
+
 const REQUEST_FLOW_SMOKE_NEEDLES = [
   'workstation_dispatch_v0',
   'workstation_dispatch_status',
@@ -346,6 +403,18 @@ function checkFiles(root, files) {
     files.workstationBrief,
     sources.workstationBrief,
     WORKSTATION_BRIEF_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.workstationProposal,
+    sources.workstationProposal,
+    WORKSTATION_PROPOSAL_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.workstationAutoSpawn,
+    sources.workstationAutoSpawn,
+    WORKSTATION_AUTO_SPAWN_RS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -423,6 +492,8 @@ function runFixtures(json) {
     [DEFAULT_FILES.workstationOutcome]: buildGoodWorkstationOutcome(),
     [DEFAULT_FILES.workstationRunner]: buildGoodWorkstationRunner(),
     [DEFAULT_FILES.workstationBrief]: buildGoodWorkstationBrief(),
+    [DEFAULT_FILES.workstationProposal]: buildGoodWorkstationProposal(),
+    [DEFAULT_FILES.workstationAutoSpawn]: buildGoodWorkstationAutoSpawn(),
     [DEFAULT_FILES.requestFlowSmoke]: buildGoodRequestFlowSmoke(),
   };
   cases.push({
@@ -570,8 +641,10 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/decision.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs"]
-      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. workstation_dispatch/outcome.rs owns WorkstationDispatchOutcome, SafeDescriptorReason, and outcome_to_response_fields; WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/runner.rs owns run_workstation_dispatch / run_workstation_dispatch_with_contract / run_workstation_dispatch_with_contract_and_trace, the mission_task_delegate inner adapter, task_contract_source_path/session_trace_path threading, and the evidence sidecar append. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. workstation_dispatch/decision.rs owns InferenceContext and evaluate_dispatch_decision, the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). workstation_dispatch/brief.rs owns BriefTaskKind, classify_task_kind, and build_task_brief / build_task_brief_with_source / build_task_brief_with_source_and_trace, including the Completion handoff (scoped commit), Session trace block, and AGENT_TEAM_OBJECTIVE_HINT projection. extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
+             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/proposal.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn.rs"]
+      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. workstation_dispatch/outcome.rs owns WorkstationDispatchOutcome, SafeDescriptorReason, and outcome_to_response_fields; WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/runner.rs owns run_workstation_dispatch / run_workstation_dispatch_with_contract / run_workstation_dispatch_with_contract_and_trace, the mission_task_delegate inner adapter, task_contract_source_path/session_trace_path threading, and the evidence sidecar append. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. workstation_dispatch/decision.rs owns InferenceContext and evaluate_dispatch_decision, the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). workstation_dispatch/brief.rs owns BriefTaskKind, classify_task_kind, and build_task_brief / build_task_brief_with_source / build_task_brief_with_source_and_trace, including the Completion handoff (scoped commit), Session trace block, and AGENT_TEAM_OBJECTIVE_HINT projection. workstation_dispatch/proposal.rs owns WorkstationProposalBundle, request_workstation_proposals, parse_workstation_proposals, proposal safety/confidence enums, applied=false, auto_spawn=false, and the no fallback to claude -p invariant. workstation_dispatch/auto_spawn.rs owns WorkstationAutoSpawnGateOutcome, parse_workstation_auto_spawn_input, compute_workstation_proposal_hash, enforce_auto_spawn_preflight, and evaluate_workstation_auto_spawn_gate for the mission_task_delegate true-spawn gate. extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-dispatch-isomorphism.mjs"]))
 `;
@@ -584,6 +657,8 @@ mod decision;
 mod outcome;
 mod runner;
 mod brief;
+mod proposal;
+mod auto_spawn;
 pub(crate) use descriptor::{
     load_task_contract, resolve_contract_path_public, ParsedTaskContract, TaskContractParseError,
 };
@@ -602,6 +677,14 @@ pub(crate) use runner::{
 pub(crate) use brief::{
     build_task_brief, build_task_brief_with_source, build_task_brief_with_source_and_trace,
     classify_task_kind, BriefTaskKind,
+};
+pub(crate) use proposal::{
+    request_workstation_proposals, WorkstationProposalBundle, WorkstationProposalGate,
+};
+pub(crate) use auto_spawn::{
+    enforce_auto_spawn_preflight, evaluate_workstation_auto_spawn_gate,
+    parse_workstation_auto_spawn_input, WorkstationAutoSpawnGateOutcome, WorkstationAutoSpawnInput,
+    WorkstationAutoSpawnStatus,
 };
 // Stable wire field names projected by outcome_to_response_fields:
 //   "workstation_dispatch_status" "task_brief_preview"
@@ -688,6 +771,55 @@ pub(crate) fn build_task_brief() {
 pub(crate) fn build_task_brief_with_source() {}
 pub(crate) fn build_task_brief_with_source_and_trace() {
     let _ = "Session trace";
+}
+`;
+}
+
+function buildGoodWorkstationProposal() {
+  return `// fixture
+use serde_json::{json, Value};
+pub(crate) const WORKSTATION_PROPOSAL_FIELDS: &[&str] = &["target", "dispatch_strategy", "objective", "scope"];
+pub(crate) const WORKSTATION_PROPOSAL_CAP: usize = 6;
+pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER: &str = "workstation_dispatch_proposal";
+pub(crate) const PROPOSAL_VALID_TARGETS: &[&str] = &["mission_execution", "mission_task_delegate", "mission_flow_run"];
+pub(crate) const PROPOSAL_VALID_STRATEGIES: &[&str] = &["resident-lisp", "fresh-code-alignment", "agent-team", "mixed"];
+pub(crate) enum WorkstationProposalStatus { NotInvoked, Unavailable, Suggested, NoSuggestions, PlanHintsPresent }
+pub(crate) enum WorkstationProposalSafetyStatus { Safe, AmbiguousValue, UnsupportedTarget, InvalidStrategy }
+pub(crate) enum WorkstationProposalConfidence { High, Medium, Low }
+pub(crate) struct WorkstationProposal;
+pub(crate) struct WorkstationProposalBundle;
+pub(crate) struct WorkstationProposalGate<'a> { _x: &'a () }
+pub(crate) fn build_workstation_proposal_prompt() {}
+pub(crate) fn parse_workstation_proposals() {}
+pub(crate) fn classify_proposal_safety() {}
+pub(crate) async fn request_workstation_proposals() {
+    let _ = "applied\": false";
+    let _ = "auto_spawn\": false";
+    let _ = "no fallback to claude -p";
+}
+`;
+}
+
+function buildGoodWorkstationAutoSpawn() {
+  return `// fixture
+pub(crate) const AUTO_SPAWN_MISSING_PROPOSAL_HASH: &str = "AUTO_SPAWN_MISSING_PROPOSAL_HASH";
+pub(crate) const AUTO_SPAWN_PROPOSAL_HASH_MISMATCH: &str = "AUTO_SPAWN_PROPOSAL_HASH_MISMATCH";
+pub(crate) const AUTO_SPAWN_INVALID_PARAM: &str = "AUTO_SPAWN_INVALID_PARAM";
+pub(crate) enum WorkstationAutoSpawnStatus { Spawned, SkippedUnavailable, SkippedSubstrateRefused }
+pub(crate) enum WorkstationProposalHashStatus { Matches }
+pub(crate) struct WorkstationAutoSpawnInput;
+pub(crate) fn parse_workstation_auto_spawn_input() {}
+pub(crate) fn compute_workstation_proposal_hash() {}
+pub(crate) struct WorkstationAutoSpawnGateOutcome;
+pub(crate) fn enforce_auto_spawn_preflight() {}
+pub(crate) fn evaluate_workstation_auto_spawn_gate() {
+    let _ = "WorkstationAutoSpawnStatus::Spawned";
+    let _ = "WorkstationAutoSpawnStatus::SkippedUnavailable";
+    let _ = "WorkstationAutoSpawnStatus::SkippedSubstrateRefused";
+    let _ = "WorkstationProposalHashStatus::Matches";
+    let _ = "mission_task_delegate";
+    let _ = "task_contract_path";
+    let _ = "preflight_status_acceptable";
 }
 `;
 }
