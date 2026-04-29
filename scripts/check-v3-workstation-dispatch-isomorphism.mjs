@@ -76,6 +76,8 @@ const DEFAULT_FILES = {
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/proposal.rs',
   workstationAutoSpawn:
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn.rs',
+  workstationTests:
+    'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/tests.rs',
   requestFlowSmoke: 'scripts/check-v3-request-flow-smoke.mjs',
 };
 
@@ -138,6 +140,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/proposal.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/tests.rs',
   'WorkstationDispatchOutcome',
   'DryRun',
   'Dispatched',
@@ -199,6 +202,7 @@ const WORKSTATION_DISPATCH_RS_NEEDLES = [
   'mod brief;',
   'mod proposal;',
   'mod auto_spawn;',
+  'mod tests;',
   'pub(crate) use descriptor::{',
   'pub(crate) use decision::{',
   'pub(crate) use outcome::{',
@@ -335,6 +339,17 @@ const WORKSTATION_AUTO_SPAWN_RS_NEEDLES = [
   'preflight_status_acceptable',
 ];
 
+const WORKSTATION_TESTS_RS_NEEDLES = [
+  'fn fixture_plan',
+  'fn opt_in_requires_explicit_arg_or_plan_hint',
+  'fn build_task_brief_includes_canonical_sections_and_scoped_commit_reminder',
+  'fn parse_task_contract_extracts_every_consumed_field',
+  'fn parse_workstation_proposals_accepts_canonical_envelope',
+  'fn wave22_05_gate_happy_path_returns_spawned',
+  'fn smoke_wave22_07_workstation_auto_spawn_gate_rejects_missing_hash_accepts_fixture_hash',
+  'fn build_task_brief_with_source_and_trace_renders_session_trace_block_when_path_supplied',
+];
+
 const REQUEST_FLOW_SMOKE_NEEDLES = [
   'workstation_dispatch_v0',
   'workstation_dispatch_status',
@@ -418,6 +433,12 @@ function checkFiles(root, files) {
   );
   requireAll(
     diagnostics,
+    files.workstationTests,
+    sources.workstationTests,
+    WORKSTATION_TESTS_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
     files.requestFlowSmoke,
     sources.requestFlowSmoke,
     REQUEST_FLOW_SMOKE_NEEDLES,
@@ -494,6 +515,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.workstationBrief]: buildGoodWorkstationBrief(),
     [DEFAULT_FILES.workstationProposal]: buildGoodWorkstationProposal(),
     [DEFAULT_FILES.workstationAutoSpawn]: buildGoodWorkstationAutoSpawn(),
+    [DEFAULT_FILES.workstationTests]: buildGoodWorkstationTests(),
     [DEFAULT_FILES.requestFlowSmoke]: buildGoodRequestFlowSmoke(),
   };
   cases.push({
@@ -643,7 +665,8 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/runner.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/proposal.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn.rs"]
+             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/tests.rs"]
       :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. workstation_dispatch/outcome.rs owns WorkstationDispatchOutcome, SafeDescriptorReason, and outcome_to_response_fields; WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/runner.rs owns run_workstation_dispatch / run_workstation_dispatch_with_contract / run_workstation_dispatch_with_contract_and_trace, the mission_task_delegate inner adapter, task_contract_source_path/session_trace_path threading, and the evidence sidecar append. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. workstation_dispatch/decision.rs owns InferenceContext and evaluate_dispatch_decision, the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). workstation_dispatch/brief.rs owns BriefTaskKind, classify_task_kind, and build_task_brief / build_task_brief_with_source / build_task_brief_with_source_and_trace, including the Completion handoff (scoped commit), Session trace block, and AGENT_TEAM_OBJECTIVE_HINT projection. workstation_dispatch/proposal.rs owns WorkstationProposalBundle, request_workstation_proposals, parse_workstation_proposals, proposal safety/confidence enums, applied=false, auto_spawn=false, and the no fallback to claude -p invariant. workstation_dispatch/auto_spawn.rs owns WorkstationAutoSpawnGateOutcome, parse_workstation_auto_spawn_input, compute_workstation_proposal_hash, enforce_auto_spawn_preflight, and evaluate_workstation_auto_spawn_gate for the mission_task_delegate true-spawn gate. extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-dispatch-isomorphism.mjs"]))
@@ -659,6 +682,8 @@ mod runner;
 mod brief;
 mod proposal;
 mod auto_spawn;
+#[cfg(test)]
+mod tests;
 pub(crate) use descriptor::{
     load_task_contract, resolve_contract_path_public, ParsedTaskContract, TaskContractParseError,
 };
@@ -821,6 +846,19 @@ pub(crate) fn evaluate_workstation_auto_spawn_gate() {
     let _ = "task_contract_path";
     let _ = "preflight_status_acceptable";
 }
+`;
+}
+
+function buildGoodWorkstationTests() {
+  return `// fixture
+fn fixture_plan() {}
+fn opt_in_requires_explicit_arg_or_plan_hint() {}
+fn build_task_brief_includes_canonical_sections_and_scoped_commit_reminder() {}
+fn parse_task_contract_extracts_every_consumed_field() {}
+fn parse_workstation_proposals_accepts_canonical_envelope() {}
+fn wave22_05_gate_happy_path_returns_spawned() {}
+fn smoke_wave22_07_workstation_auto_spawn_gate_rejects_missing_hash_accepts_fixture_hash() {}
+fn build_task_brief_with_source_and_trace_renders_session_trace_block_when_path_supplied() {}
 `;
 }
 
