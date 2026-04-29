@@ -18,6 +18,7 @@ Checks the V3 plan.lisp execution isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  planExecuteHints: 'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
@@ -86,6 +87,7 @@ function checkFiles(root, files) {
     ':default-target mission_task_delegate',
     'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
+    'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'execute can derive target_source=plan_hint from plan.sexp_text',
@@ -102,13 +104,22 @@ function checkFiles(root, files) {
     'push_lisp_string_field(&mut out, "target", input.target);',
     'push_lisp_string_field(&mut out, "objective", input.objective);',
     'out.push_str("  :nodes\\n");',
-    'fn parse_plan_hints',
-    '"target" | "target-tool" | "tool"',
-    '"objective" => store_first(&mut h.objective, &value)',
     'parse_plan_hints(&plan.sexp_text)',
     '(t, "plan_hint")',
     'target_source',
     'dispatch_strategy_source',
+  ]);
+
+  requireAll(diagnostics, files.planExecuteHints, sources.planExecuteHints, [
+    'pub(crate) struct ParsedPlanHints',
+    'pub(crate) struct ResolvedExec',
+    'pub(crate) fn parse_plan_hints',
+    '"target" | "target-tool" | "tool"',
+    '"objective" => store_first(&mut h.objective, &value)',
+    'pub(crate) fn scan_keyword_pairs',
+    'pub(crate) fn normalize_target',
+    'pub(crate) fn canonicalize_strategy',
+    'pub(crate) fn resolve_dispatch_strategy',
     'AGENT_TEAM_OBJECTIVE_HINT',
   ]);
 
@@ -206,8 +217,9 @@ function buildFixture() {
     (surface mission_plan
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -228,7 +240,20 @@ fn parse_plan_hints() {
 parse_plan_hints(&plan.sexp_text);
 let x = (t, "plan_hint");
 let target_source = "";
-let dispatch_strategy_source = "";
+let dispatch_strategy_source = "";`);
+  writeFixture(root, DEFAULT_FILES.planExecuteHints, `
+pub(crate) struct ParsedPlanHints {}
+pub(crate) struct ResolvedExec {}
+pub(crate) fn parse_plan_hints() {
+  match key.as_str() {
+    "target" | "target-tool" | "tool" => {}
+    "objective" => store_first(&mut h.objective, &value)
+  }
+}
+pub(crate) fn scan_keyword_pairs() {}
+pub(crate) fn normalize_target() {}
+pub(crate) fn canonicalize_strategy() {}
+pub(crate) fn resolve_dispatch_strategy() {}
 const AGENT_TEAM_OBJECTIVE_HINT: &str = "";`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
 pub(super) enum RouterPolicyMode { Off, DryRun }
