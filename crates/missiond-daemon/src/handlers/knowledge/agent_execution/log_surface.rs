@@ -571,6 +571,79 @@ pub(super) fn update_kv_in_node(
     Ok(())
 }
 
+pub(super) fn list_block_summaries<F>(file: &LogFile, name: &str, mut f: F) -> Vec<Value>
+where
+    F: FnMut(&HashMap<String, String>, &str) -> Option<Value>,
+{
+    let block = match file.find_block(name) {
+        Some(b) => b,
+        None => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for child in block.children().iter().skip(1) {
+        let head = child.head_atom().unwrap_or("");
+        let kvs = parse_kv_pairs(&file.src, child.children());
+        if let Some(v) = f(&kvs, head) {
+            out.push(v);
+        }
+    }
+    out
+}
+
+pub(super) fn json_strip_quotes(map: HashMap<String, String>) -> Value {
+    let mut obj = serde_json::Map::new();
+    for (k, v) in map {
+        let trimmed = v.trim();
+        let unquoted = trimmed.trim_matches('"');
+        obj.insert(k, Value::String(unquoted.to_string()));
+    }
+    Value::Object(obj)
+}
+pub(super) fn insert_id_counters_block(
+    file: &mut LogFile,
+    claim_n: u32,
+    dev_n: u32,
+    dec_n: u32,
+    issue_n: u32,
+    comp_n: u32,
+) -> Result<()> {
+    // Insert just after the meta block if present; else at the start of the
+    // root form's body.
+    let insertion = format!(
+        "\n  (id-counters\n    :next-claim-id {claim_n}\n    :next-deviation-id {dev_n}\n    :next-decision-id {dec_n}\n    :next-issue-id {issue_n}\n    :next-completion-id {comp_n})\n",
+        claim_n = claim_n,
+        dev_n = dev_n,
+        dec_n = dec_n,
+        issue_n = issue_n,
+        comp_n = comp_n,
+    );
+    let pos = if let Some(meta) = file.find_block("meta") {
+        meta.end
+    } else {
+        // After the head atom of the root form.
+        let root = file.root();
+        let kids = root.children();
+        if let Some(first) = kids.first() {
+            first.end
+        } else {
+            root.end - 1
+        }
+    };
+    let mut new_src = String::with_capacity(file.src.len() + insertion.len());
+    new_src.push_str(&file.src[..pos]);
+    new_src.push_str(&insertion);
+    new_src.push_str(&file.src[pos..]);
+    file.src = new_src;
+    let forms = sexp::parse(&file.src)?;
+    let root_idx = forms
+        .iter()
+        .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
+        .ok_or_else(|| anyhow!("execution-log root vanished after id-counters insert"))?;
+    file.forms = forms;
+    file.root_idx = root_idx;
+    Ok(())
+}
+
 /// Allocate the next ID for `counter`. Returns the formatted id string and
 /// rewrites the source to bump the counter. If the id-counters block is
 /// missing, falls back to scanning existing entries for max+1 and synthesizes

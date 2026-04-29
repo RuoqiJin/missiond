@@ -92,6 +92,9 @@ const LOG_SURFACE_NEEDLES = [
   'pub(super) enum Counter',
   'pub(super) fn locate_kv_value',
   'pub(super) fn update_kv_in_node',
+  'pub(super) fn list_block_summaries',
+  'pub(super) fn json_strip_quotes',
+  'pub(super) fn insert_id_counters_block',
   'pub(super) fn allocate_id',
   'pub(super) fn scan_max_id',
   'pub(super) fn append_to_block',
@@ -453,6 +456,9 @@ pub(super) fn render_canonical_template() {}
 pub(super) enum Counter {}
 pub(super) fn locate_kv_value() {}
 pub(super) fn update_kv_in_node() {}
+pub(super) fn list_block_summaries() {}
+pub(super) fn json_strip_quotes() {}
+pub(super) fn insert_id_counters_block() {}
 pub(super) fn allocate_id() {}
 pub(super) fn scan_max_id() {}
 pub(super) fn append_to_block() {}

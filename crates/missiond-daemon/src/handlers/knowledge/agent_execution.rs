@@ -54,7 +54,8 @@ use self::completion_audit::{
 };
 use self::log_surface::{
     allocate_id, append_session_trace_event, append_to_block, build_opened_event,
-    emit_execution_event, lisp_quote_string, normalize_dispatch_strategy, now_iso, parse_kv_pairs,
+    emit_execution_event, insert_id_counters_block, json_strip_quotes, lisp_quote_string,
+    list_block_summaries, normalize_dispatch_strategy, now_iso, parse_kv_pairs,
     read_dispatch_metadata_from_log, read_log_file, render_canonical_template,
     resolve_session_trace_path, resolve_trace_task_id, sanitize_trace_backend, scan_max_id, sexp,
     touch_last_updated, update_kv_in_node, write_log_file, Counter, LogFile, TraceEvent, TraceKind,
@@ -1778,35 +1779,6 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
     })))
 }
 
-fn list_block_summaries<F>(file: &LogFile, name: &str, mut f: F) -> Vec<Value>
-where
-    F: FnMut(&HashMap<String, String>, &str) -> Option<Value>,
-{
-    let block = match file.find_block(name) {
-        Some(b) => b,
-        None => return Vec::new(),
-    };
-    let mut out = Vec::new();
-    for child in block.children().iter().skip(1) {
-        let head = child.head_atom().unwrap_or("");
-        let kvs = parse_kv_pairs(&file.src, child.children());
-        if let Some(v) = f(&kvs, head) {
-            out.push(v);
-        }
-    }
-    out
-}
-
-fn json_strip_quotes(map: HashMap<String, String>) -> Value {
-    let mut obj = serde_json::Map::new();
-    for (k, v) in map {
-        let trimmed = v.trim();
-        let unquoted = trimmed.trim_matches('"');
-        obj.insert(k, Value::String(unquoted.to_string()));
-    }
-    Value::Object(obj)
-}
-
 // ───────────────────────────────────────────────────────────────────────
 // action: audit — paren balance + ID monotonic + claim overlap + stale +
 //                 completion coverage + open-issue owners
@@ -2151,51 +2123,6 @@ async fn action_repair(state: &AppState, args: &Value) -> Result<ToolResult> {
         "actions": actions,
         "applied": mode == "apply",
     })))
-}
-
-fn insert_id_counters_block(
-    file: &mut LogFile,
-    claim_n: u32,
-    dev_n: u32,
-    dec_n: u32,
-    issue_n: u32,
-    comp_n: u32,
-) -> Result<()> {
-    // Insert just after the meta block if present; else at the start of the
-    // root form's body.
-    let insertion = format!(
-        "\n  (id-counters\n    :next-claim-id {claim_n}\n    :next-deviation-id {dev_n}\n    :next-decision-id {dec_n}\n    :next-issue-id {issue_n}\n    :next-completion-id {comp_n})\n",
-        claim_n = claim_n,
-        dev_n = dev_n,
-        dec_n = dec_n,
-        issue_n = issue_n,
-        comp_n = comp_n,
-    );
-    let pos = if let Some(meta) = file.find_block("meta") {
-        meta.end
-    } else {
-        // After the head atom of the root form.
-        let root = file.root();
-        let kids = root.children();
-        if let Some(first) = kids.first() {
-            first.end
-        } else {
-            root.end - 1
-        }
-    };
-    let mut new_src = String::with_capacity(file.src.len() + insertion.len());
-    new_src.push_str(&file.src[..pos]);
-    new_src.push_str(&insertion);
-    new_src.push_str(&file.src[pos..]);
-    file.src = new_src;
-    let forms = sexp::parse(&file.src)?;
-    let root_idx = forms
-        .iter()
-        .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
-        .ok_or_else(|| anyhow!("execution-log root vanished after id-counters insert"))?;
-    file.forms = forms;
-    file.root_idx = root_idx;
-    Ok(())
 }
 
 fn rebuild_derived_indexes(file: &mut LogFile) -> Result<()> {
