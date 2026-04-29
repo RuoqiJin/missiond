@@ -3006,12 +3006,25 @@ async fn action_compile_deterministic(
         "run_methodology(flow_id=<flow_id>, dry_run=true) to verify; dry_run=false to dispatch into mission_flow_run"
     );
 
-    // wave-14 :: file-first SSOT mirror. compile_methodology already reads
+    // wave-14/38 :: file-first SSOT mirror. compile_methodology already reads
     // the methodology lisp from `.missiond/workflows/<name>.lisp`, so the
     // file-first writer is only meaningful when the caller wants to
     // canonicalise / snapshot the source under a different topic, OR when
     // the caller passes overwrite_file=true to "re-emit" the same file.
     // Topic precedence: explicit `topic` arg > `name` arg > source stem.
+    //
+    // wave38-01 :: project the methodology compile as the same enriched V3
+    // workflow artifact shape distill writes (render_workflow_artifact_sexp).
+    // The methodology branch never produces a Workflow DB row, so :workflow_id
+    // is stamped with the generated `flow_id` (deterministic, derived from
+    // stem + output_flow_id) instead of a UUID; :source_plans stays empty;
+    // :match_rules carries source_kind/compiler/compiler_version/source_hash/
+    // flow_id/source_path/generated_at so reviewers can correlate the .lisp
+    // artifact with the generated YAML; :steps re-runs the same step
+    // extractor distill uses; :status is compiled (or compiled_review_required
+    // when the methodology has no executable steps); :body is the methodology
+    // Lisp body verbatim. Reviewers therefore see the V3 contract artifact,
+    // not a raw source mirror. No DB migration is introduced.
     let file_args = extract_workflow_file_args(args);
     let fallback_topic = args
         .get("name")
@@ -3023,7 +3036,27 @@ async fn action_compile_deterministic(
         .topic
         .map(|s| s.to_string())
         .unwrap_or_else(|| fallback_topic.clone());
-    maybe_write_workflow_artifact(state, &file_args, &mut payload, content, &fallback_topic).await;
+    let methodology_status = if review_required {
+        "compiled_review_required"
+    } else {
+        "compiled"
+    };
+    let methodology_match_rules = build_methodology_match_rules(&meta);
+    let methodology_artifact_sexp = render_workflow_artifact_sexp(
+        &meta.flow_id,
+        &[],
+        &methodology_match_rules,
+        methodology_status,
+        content,
+    );
+    maybe_write_workflow_artifact(
+        state,
+        &file_args,
+        &mut payload,
+        &methodology_artifact_sexp,
+        &fallback_topic,
+    )
+    .await;
 
     // wave-14 :: review-gate auto-create. compile_methodology has no
     // workflow_id (the methodology source predates any distilled row), so
@@ -3794,6 +3827,30 @@ async fn maybe_write_workflow_artifact(
     )
     .await;
     outcome.splice_into(payload);
+}
+
+/// wave38-01 :: methodology-compile match_rules builder.
+///
+/// compile_methodology has no Workflow DB row, so the enriched V3 workflow
+/// artifact written under `.missiond/workflows/<topic>.lisp` derives every
+/// stable ref from the deterministic `GeneratedMeta` (flow_id, source_hash,
+/// compiler version, source path, generated_at) plus a fixed `source_kind`
+/// = "methodology" / `compiler` = "deterministic-v0" pair so downstream
+/// readers can distinguish a methodology projection from a distill row even
+/// without consulting the DB. The shape mirrors what distill stores in
+/// `Workflow.match_rules`, so verify-task-runner-batch / planners read both
+/// projections through the same `:match_rules (…)` Lisp form.
+fn build_methodology_match_rules(meta: &GeneratedMeta) -> Value {
+    json!({
+        "source_kind": "methodology",
+        "compiler": "deterministic-v0",
+        "compiler_version": COMPILER_VERSION,
+        "compiler_status": meta.compiler_status,
+        "flow_id": meta.flow_id,
+        "source_hash": meta.source_hash,
+        "source_path": meta.source_path,
+        "generated_at": meta.generated_at,
+    })
 }
 
 fn render_workflow_artifact_sexp(
@@ -6582,6 +6639,122 @@ mod tests {
         assert!(artifact.contains(":steps [(:id \"inspect\""));
         assert!(artifact.contains(":status :distilled"));
         assert!(artifact.contains(":body (workflow demo"));
+    }
+
+    /// wave38-01 :: build_methodology_match_rules carries the deterministic
+    /// flow_id / source_hash / compiler metadata so reviewers can correlate
+    /// the .lisp artifact with the generated YAML even though the methodology
+    /// branch never produces a Workflow DB row. The shape is the same JSON
+    /// object distill stores in `Workflow.match_rules`, so both projections
+    /// flow through the same `:match_rules (…)` Lisp form.
+    #[test]
+    fn build_methodology_match_rules_includes_flow_id_and_source_hash() {
+        let meta = GeneratedMeta {
+            flow_id: "methodology-foo-v0".to_string(),
+            name: "methodology compile v0 — foo".to_string(),
+            source_path: ".missiond/workflows/foo.lisp".to_string(),
+            source_hash: "deadbeef".to_string(),
+            generated_at: "2026-04-29T03:00:00+00:00".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let rules = build_methodology_match_rules(&meta);
+        assert_eq!(rules["source_kind"], "methodology");
+        assert_eq!(rules["compiler"], "deterministic-v0");
+        assert_eq!(rules["compiler_version"], COMPILER_VERSION);
+        assert_eq!(rules["compiler_status"], COMPILER_STATUS_PREVIEW);
+        assert_eq!(rules["flow_id"], "methodology-foo-v0");
+        assert_eq!(rules["source_hash"], "deadbeef");
+        assert_eq!(rules["source_path"], ".missiond/workflows/foo.lisp");
+        assert_eq!(rules["generated_at"], "2026-04-29T03:00:00+00:00");
+    }
+
+    /// wave38-01 :: rendering a methodology compile through
+    /// `render_workflow_artifact_sexp` + `build_methodology_match_rules`
+    /// produces the same enriched V3 artifact shape distill writes — a
+    /// (workflow ...) form whose :workflow_id is the generated flow_id,
+    /// :source_plans is empty (no plan), :match_rules carries the
+    /// methodology metadata, :steps are extracted from the methodology body,
+    /// :status is `:compiled`, and :body is the methodology Lisp body. The
+    /// raw methodology source is preserved verbatim under :body, but it is
+    /// no longer the only thing on disk: reviewers see the V3 contract
+    /// envelope first.
+    #[test]
+    fn methodology_compile_renders_v3_workflow_artifact_not_raw_source() {
+        let body = "(methodology demo\n  (step warmup\n    :run \"echo hi\")\n  (step verify\n    :run \"echo bye\"))\n";
+        let meta = GeneratedMeta {
+            flow_id: "methodology-demo-v0".to_string(),
+            name: "methodology compile v0 — demo".to_string(),
+            source_path: ".missiond/workflows/demo.lisp".to_string(),
+            source_hash: "cafebabe".to_string(),
+            generated_at: "2026-04-29T03:00:00+00:00".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let rules = build_methodology_match_rules(&meta);
+        let artifact = render_workflow_artifact_sexp(
+            &meta.flow_id,
+            &[],
+            &rules,
+            "compiled",
+            body,
+        );
+
+        // Envelope is the V3 (workflow ...) form, not a bare methodology head.
+        assert!(
+            artifact.starts_with("(workflow\n"),
+            "methodology projection should be wrapped in the V3 (workflow ...) envelope, not raw source: {artifact}",
+        );
+        // wave38 contract refs: flow_id stamped as :workflow_id; empty source_plans.
+        assert!(artifact.contains(":workflow_id \"methodology-demo-v0\""));
+        assert!(artifact.contains(":source_plans []"));
+        // Methodology metadata flows through :match_rules so reviewers can
+        // correlate the .lisp with the generated YAML.
+        assert!(artifact.contains(":match_rules ("));
+        assert!(artifact.contains(":source_kind \"methodology\""));
+        assert!(artifact.contains(":compiler \"deterministic-v0\""));
+        assert!(artifact.contains(":source_hash \"cafebabe\""));
+        assert!(artifact.contains(":flow_id \"methodology-demo-v0\""));
+        // Steps are extracted from the methodology body itself, not invented.
+        assert!(artifact.contains(":steps [(:id \"warmup\""));
+        assert!(artifact.contains("(:id \"verify\""));
+        // Status reflects the deterministic compile.
+        assert!(artifact.contains(":status :compiled"));
+        // Body preserves the methodology source verbatim.
+        assert!(artifact.contains(":body (methodology demo"));
+        // Negative assertion: the projection MUST NOT be the raw source.
+        assert!(
+            artifact.trim() != body.trim(),
+            "methodology projection must differ from the raw source: {artifact}",
+        );
+    }
+
+    /// wave38-01 :: when the methodology has no executable `(step ...)` forms
+    /// the projection still publishes the V3 envelope but downgrades status
+    /// to `compiled_review_required`, matching the YAML compiler's review
+    /// gate. :steps is the empty vector — reviewers see the same `[]`
+    /// distill emits for a draft.
+    #[test]
+    fn methodology_compile_review_required_status_when_no_steps() {
+        let body = "(methodology empty\n  (principle no-fallback :rationale \"fail fast\"))\n";
+        let meta = GeneratedMeta {
+            flow_id: "methodology-empty-v0".to_string(),
+            name: "methodology compile v0 — empty".to_string(),
+            source_path: ".missiond/workflows/empty.lisp".to_string(),
+            source_hash: "feedface".to_string(),
+            generated_at: "2026-04-29T03:00:00+00:00".to_string(),
+            compiler_status: COMPILER_STATUS_PREVIEW.to_string(),
+        };
+        let rules = build_methodology_match_rules(&meta);
+        let artifact = render_workflow_artifact_sexp(
+            &meta.flow_id,
+            &[],
+            &rules,
+            "compiled_review_required",
+            body,
+        );
+        assert!(artifact.starts_with("(workflow\n"));
+        assert!(artifact.contains(":steps []"));
+        assert!(artifact.contains(":status :compiled_review_required"));
+        assert!(artifact.contains(":body (methodology empty"));
     }
 
     #[test]

@@ -88,6 +88,11 @@ function checkFiles(root, files) {
     'distill persist+write_file writes an enriched V3 workflow artifact',
     ':body workflow_sexp',
     'compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp',
+    'persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp',
+    'source_kind=methodology',
+    ':status compiled',
+    'no Workflow DB row',
+    'instead of canonicalizing the raw methodology source',
     'ArtifactKind::Workflow',
     'auto_sonnet_policy={off|safe_after_rules|dry_run}',
     'node scripts/check-v3-workflow-isomorphism.mjs',
@@ -129,6 +134,15 @@ function checkFiles(root, files) {
     ':match_rules',
     ':steps',
     ':body',
+    'fn build_methodology_match_rules',
+    '"source_kind": "methodology"',
+    '"compiler": "deterministic-v0"',
+    '"compiler_version": COMPILER_VERSION',
+    'methodology_match_rules = build_methodology_match_rules(&meta)',
+    'render_workflow_artifact_sexp(',
+    'methodology_compile_renders_v3_workflow_artifact_not_raw_source',
+    'methodology_compile_review_required_status_when_no_steps',
+    'build_methodology_match_rules_includes_flow_id_and_source_hash',
     'fn json_to_lisp',
     'fn render_workflow_steps',
     'parse_review_gate_policy(args)',
@@ -149,6 +163,9 @@ function checkFiles(root, files) {
     '&["dry_run", "deterministic"]',
     '"write_file"',
     'enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp',
+    'compile_methodology has no Workflow DB row',
+    'deterministic generated flow_id',
+    'source_kind=\\"methodology\\"',
     '"overwrite_file"',
     '"review_gate_policy"',
     '"review_automation_policy"',
@@ -184,7 +201,7 @@ function buildFixture() {
   (implementation-map
     (surface mission_workflow
       :status "code-aligned-partial"
-      :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}"))
+      :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
@@ -215,23 +232,35 @@ fn action_compile_dry_run() {}
 async fn action_compile_deterministic() {
   validate_methodology_source(content);
   extract_steps_with_lines(content);
+  let methodology_match_rules = build_methodology_match_rules(&meta);
+  render_workflow_artifact_sexp(&meta.flow_id, &[], &methodology_match_rules, "compiled", content);
 }
 async fn action_run_methodology() {}
 fn extract_workflow_file_args() {}
 ArtifactKind::Workflow;
 attempt_artifact_write();
 fn render_workflow_artifact_sexp() { ":workflow_id"; ":source_plans"; ":match_rules"; ":steps"; ":body"; }
+fn build_methodology_match_rules() {
+  "source_kind": "methodology";
+  "compiler": "deterministic-v0";
+  "compiler_version": COMPILER_VERSION;
+}
 fn json_to_lisp() {}
 fn render_workflow_steps() {}
 parse_review_gate_policy(args);
 apply_compile_review_gates();
-fn parse_auto_sonnet_policy() { "safe_after_rules"; }`);
+fn parse_auto_sonnet_policy() { "safe_after_rules"; }
+mod tests {
+  fn methodology_compile_renders_v3_workflow_artifact_not_raw_source() {}
+  fn methodology_compile_review_required_status_when_no_steps() {}
+  fn build_methodology_match_rules_includes_flow_id_and_source_hash() {}
+}`);
   writeFixture(root, DEFAULT_FILES.mcpWorkflow, `
 manager action — see Lisp implemented-surface mission_workflow
 "distill" "compile_methodology" "run_methodology" "resolve_review"
 "distill_mode" &["dry_run", "sonnet"]
 "compile_mode" &["dry_run", "deterministic"]
-"write_file" enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp
+"write_file" enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp; compile_methodology has no Workflow DB row and stamps :workflow_id with the deterministic generated flow_id, packing source_kind=\\"methodology\\" / compiler / compiler_version / source_hash / flow_id / source_path / generated_at into :match_rules
 "overwrite_file" "review_gate_policy" "review_automation_policy"
 "auto_sonnet_policy" &["off", "safe_after_rules", "dry_run"]
 Lisp 源: intent-flow.lisp`);
