@@ -12,9 +12,10 @@
 //
 // The aggregate covers exactly these implementation surfaces unless the
 // blueprint explicitly changes the V3 surface set:
-//   mission_request, mission_directive, mission_plan, mission_workflow,
-//   review-gate, task-runner-cli, source-hygiene, context-pack,
-//   workstation-config, workstation-dispatch, mission_board, ops-infra.
+//   mission_request, unified-entry-runtime, mission_directive, mission_plan,
+//   mission_workflow, review-gate, task-runner-cli, source-hygiene,
+//   context-pack, workstation-config, workstation-dispatch, mission_board,
+//   ops-infra.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -33,6 +34,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-code-isomorphism-complete.mjs';
 
 export const EXPECTED_SURFACES = [
   'mission_request',
+  'unified-entry-runtime',
   'mission_directive',
   'mission_plan',
   'mission_workflow',
@@ -48,6 +50,7 @@ export const EXPECTED_SURFACES = [
 
 export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-request-lisp-isomorphism.mjs',
+  'scripts/check-v3-unified-entry-isomorphism.mjs',
   'scripts/check-v3-intent-alignment-isomorphism.mjs',
   'scripts/check-v3-plan-execution-isomorphism.mjs',
   'scripts/check-v3-workflow-isomorphism.mjs',
@@ -380,6 +383,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface unified-entry-runtime
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface mission_directive
       :status "code-aligned"
       :code ["a"]
@@ -427,7 +434,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all twelve surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all thirteen surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -452,6 +459,10 @@ function runDryFixture(opts) {
   (policies)
   (implementation-map
     (surface mission_request
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface unified-entry-runtime
       :status "code-aligned"
       :code ["a"]
       :note "n")
