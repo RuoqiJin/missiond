@@ -59,6 +59,9 @@ export const PER_SURFACE_CHECKERS = [
   // Cross-surface IR check: each pillar owns functions, each function has
   // entry -> ordered core steps -> egress and maps back to one surface.
   'scripts/check-v3-pillar-flow-schema.mjs',
+  // Cross-surface historical/public coverage check: V2 effective design and
+  // every public MCP tool must have an explicit V3 destination.
+  'scripts/check-v3-v2-coverage.mjs',
   'scripts/check-v3-request-lisp-isomorphism.mjs',
   'scripts/check-v3-unified-entry-isomorphism.mjs',
   'scripts/check-v3-file-artifacts-isomorphism.mjs',

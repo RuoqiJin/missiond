@@ -518,6 +518,341 @@
              "scripts/cargo-fmt-touched.sh --check"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"])
 
+  (v2-convergence-map
+    :schema "missiond.v2-convergence-map.v1"
+    :status-enum [missing designed code-aligned runtime-projected]
+    :rule "V2 is historical evidence, not an implementation authority. Every effective V2 design item must name its V3 pillar/function/surface destination; :status missing is forbidden. designed means the V3 destination exists but the code is not yet physically/runtime aligned; code-aligned and runtime-projected must point at code-aligned implementation surfaces."
+
+    (v2-item intent-alignment-plan-execution-loop
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-flow.lisp :: F-intent-alignment-plan-execution-loop"
+      :v3-pillar request
+      :v3-function request-lifecycle
+      :surface mission_request
+      :note "The V2 user intent -> alignment -> plan -> execute loop is now the request-local mission_request review-packet/respond entry.")
+    (v2-item unified-entry-runtime-bridge
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: unified-entry-pipeline-v1"
+      :v3-pillar request
+      :v3-function unified-entry-runtime
+      :surface unified-entry-runtime
+      :note "V2 unified-entry run-pipeline helper is the daemon-local bridge behind mission_request.")
+    (v2-item file-first-artifacts
+      :status code-aligned
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: l2-shard-split-plan/intent-directive-artifacts"
+      :v3-pillar artifacts
+      :v3-function file-artifact-writer
+      :surface file-artifacts
+      :note "V2 file-first writer discipline is centralized as the V3 file-artifacts surface.")
+    (v2-item directive-alignment-authoring
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: directive-layer/action-instruction-actor"
+      :v3-pillar intent
+      :v3-function directive-authoring
+      :surface mission_directive
+      :note "V2 directive/alignment actor maps to mission_directive authoring plus review-gate emission.")
+    (v2-item plan-authoring-and-dag-runner
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: plan-dag-runtime-v2"
+      :v3-pillar plan
+      :v3-function plan-authoring-and-runner
+      :surface mission_plan
+      :note "V2 PLAN DAG runtime and plan compiler are the V3 mission_plan author/run surface.")
+    (v2-item evidence-collector-event-ref
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: evidence-collector-typed"
+      :v3-pillar verification
+      :v3-function evidence-collector
+      :surface evidence-collector
+      :note "V2 EvidenceEntry/event-ref design is pinned in the typed V3 evidence collector.")
+    (v2-item execution-log-governance
+      :status code-aligned
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: intent-execution-governance / F-execution-log-governance"
+      :v3-pillar execution
+      :v3-function execution-log
+      :surface mission_execution-log
+      :note "V2 companion log and execution event bus become the V3 mission_execution-log function.")
+    (v2-item execution-claim-lease
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-execution-governance.lisp :: claim lease"
+      :v3-pillar execution
+      :v3-function execution-claim-lease
+      :surface mission_execution-claim-lease
+      :note "V2 claim/heartbeat/release mechanics are explicit under the execution pillar.")
+    (v2-item scoped-commit-completion-audit
+      :status code-aligned
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: F-scoped-commit-handoff"
+      :v3-pillar execution
+      :v3-function execution-completion-audit
+      :surface mission_execution-completion-audit
+      :note "V2 scoped commit handoff and daemon verifier inputs converge into V3 completion audit.")
+    (v2-item workflow-distillation
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: workflow specs / F-methodology-to-executable-compile"
+      :v3-pillar workflow
+      :v3-function workflow-distillation
+      :surface mission_workflow
+      :note "V2 workflow/methodology distillation remains V3 mission_workflow.")
+    (v2-item review-gate-policy
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: review-gate-policy / review-gate-resolution-v0"
+      :v3-pillar review
+      :v3-function review-gate
+      :surface review-gate
+      :note "V2 review policy and explicit resolution bridge map to the V3 review-gate function.")
+    (v2-item productive-task-runner-loop
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: productive-task-runner-loop"
+      :v3-pillar task-runner
+      :v3-function task-runner-lifecycle
+      :surface task-runner-cli
+      :note "V2 wave/task lifecycle, receipts, reports, and parent hotfix finalization are the V3 task-runner surface.")
+    (v2-item source-hygiene-and-task-scope
+      :status code-aligned
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: R013/R014 scoped commit rules"
+      :v3-pillar source-control
+      :v3-function source-hygiene
+      :surface source-hygiene
+      :note "V2 source hygiene rules are executable in staged/source guard scripts and task-scope guard.")
+    (v2-item context-pack-two-stage-parallel-work
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: task-runner loop evidence + wave29 context-pack upgrade"
+      :v3-pillar coordination
+      :v3-function context-pack
+      :surface context-pack
+      :note "Shared-memory append practice is lifted into the V3 two-stage context-pack surface.")
+    (v2-item mission-board-coordination
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-flow.lisp :: board-task-main-lifecycle"
+      :v3-pillar coordination
+      :v3-function mission-board
+      :surface mission_board
+      :note "V2 board task lifecycle and claim mechanics converge into mission_board.")
+    (v2-item claudecode-workstation-config
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-worker.lisp :: claudecode-workstation-orchestration"
+      :v3-pillar workstation
+      :v3-function workstation-config
+      :surface workstation-config
+      :note "V2 workstation policy now has explicit V3 model/profile, timeout, prompt, ownership, and close-owner contracts.")
+    (v2-item workstation-dispatch-substrate
+      :status code-aligned
+      :v2-source ".missiond/v2/intent.lisp :: workstation-dispatch-v0"
+      :v3-pillar workstation
+      :v3-function workstation-dispatch
+      :surface workstation-dispatch
+      :note "V2 workstation dispatch opt-in/auto-inference becomes the V3 dispatch substrate.")
+    (v2-item ops-infra-deploy-format
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-system-layer.lisp :: infra/deploy/governance"
+      :v3-pillar operations
+      :v3-function ops-infra
+      :surface ops-infra
+      :note "Local deploy, smoke, and scoped formatting are code-aligned V3 operations.")
+    (v2-item knowledge-memory-and-kb
+      :status designed
+      :v2-source ".missiond/v2/intent.lisp :: memory/kb-manager"
+      :v3-pillar memory
+      :v3-function knowledge-memory
+      :surface memory-kb
+      :note "KB, beacon, memory, insight, and intent snapshot tools are visible in V3 but still need physical/runtime Lisp alignment.")
+    (v2-item project-registry
+      :status designed
+      :v2-source ".missiond/v2/intent-worker.lisp :: project-root-spawn-cwd / ProjectRegistry"
+      :v3-pillar memory
+      :v3-function project-registry
+      :surface project-registry
+      :note "Project root resolution and registry behavior are mapped for later runtime projection.")
+    (v2-item conversation-ingestion
+      :status designed
+      :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest / session organizer"
+      :v3-pillar communication
+      :v3-function conversation-ingestion
+      :surface conversation-ingestion
+      :note "Conversation, timeline, retrospective, and embedding ingestion remain designed V3 surfaces.")
+    (v2-item router-policy-dry-run-chain
+      :status designed
+      :v2-source ".missiond/v2/intent.lisp :: router-policy-v1 / router-backend-readiness-loop / router-dispatch-descriptor-loop"
+      :v3-pillar communication
+      :v3-function router-policy
+      :surface router-policy
+      :note "Router policy remains advisory/dry-run; V3 records the destination before any runtime replacement work.")
+    (v2-item question-incident-governance
+      :status designed
+      :v2-source ".missiond/v2/intent-worker.lisp :: system-support/incidents + question flow"
+      :v3-pillar communication
+      :v3-function incident-question-governance
+      :surface incident-governance
+      :note "Question, incident, LLM trace, Gemini auth, and decision stats are grouped for later convergence.")
+    (v2-item capability-governance
+      :status designed
+      :v2-source ".missiond/v2/intent-capability-governance.lisp"
+      :v3-pillar communication
+      :v3-function capability-governance
+      :surface capability-governance
+      :note "Capability usage, audit, and Codex ops are mapped but not yet physically same-shaped as V3.")
+    (v2-item compute-primitives
+      :status designed
+      :v2-source ".missiond/v2/intent-worker.lisp :: pty / llm / worker / engine runtime"
+      :v3-pillar worker-runtime
+      :v3-function compute-primitives
+      :surface compute-primitives
+      :note "PTY, job, flow, forge, cc, process, and low-level worker tools remain a designed runtime-primitives surface.")
+    (v2-item skill-runtime
+      :status designed
+      :v2-source ".missiond/v2/intent-worker.lisp :: skill workflow executor"
+      :v3-pillar worker-runtime
+      :v3-function skill-runtime
+      :surface skill-runtime
+      :note "Skill query/context/mutate/exec has a V3 destination before code split.")
+    (v2-item cascade-universe-governance
+      :status designed
+      :v2-source ".missiond/v2/intent-event-bus.lisp :: cascade/control tree"
+      :v3-pillar worker-runtime
+      :v3-function cascade-governance
+      :surface cascade-governance
+      :note "Universe graph and cascade tools are mapped as governance/runtime, not left as loose legacy tools.")
+    (v2-item sysinfra-control
+      :status designed
+      :v2-source ".missiond/v2/intent-system-layer.lisp :: system/sysinfra tools"
+      :v3-pillar operations
+      :v3-function sysinfra-control
+      :surface sysinfra-control
+      :note "Permission, power, daemon update, and global instruction tools are mapped for later V3 projection.")
+
+    (public-surface-map
+      :source-scan "crates/missiond-mcp/src/tools/**/*.rs"
+      :rule "Every ToolDefinition::new public MCP tool must appear in exactly one tool-group; code-aligned groups must point only at code-aligned implementation surfaces."
+      (tool-group request-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent.lisp :: unified-entry-pipeline"
+        :v3-pillar request
+        :v3-function request-lifecycle
+        :surface mission_request
+        :tools [mission_request])
+      (tool-group directive-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent.lisp :: directive-layer"
+        :v3-pillar intent
+        :v3-function directive-authoring
+        :surface mission_directive
+        :tools [mission_directive])
+      (tool-group plan-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent.lisp :: plan-runner"
+        :v3-pillar plan
+        :v3-function plan-authoring-and-runner
+        :surface mission_plan
+        :tools [mission_plan])
+      (tool-group workflow-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent.lisp :: workflow"
+        :v3-pillar workflow
+        :v3-function workflow-distillation
+        :surface mission_workflow
+        :tools [mission_workflow])
+      (tool-group execution-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent-execution-governance.lisp"
+        :v3-pillar execution
+        :v3-functions [execution-log execution-claim-lease execution-completion-audit]
+        :surfaces [mission_execution-log mission_execution-claim-lease mission_execution-completion-audit]
+        :tools [mission_execution])
+      (tool-group board-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent-flow.lisp :: board-task-main-lifecycle"
+        :v3-pillar coordination
+        :v3-function mission-board
+        :surface mission_board
+        :tools [mission_board_query mission_board_create mission_board_update mission_board_delete
+                mission_board_claim mission_board_note_add mission_board_decompose mission_board_retry
+                mission_submit_phase_result])
+      (tool-group workstation-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent-worker.lisp :: claudecode-workstation-orchestration"
+        :v3-pillar workstation
+        :v3-function workstation-config
+        :surface workstation-config
+        :tools [mission_compute_slot mission_task_delegate])
+      (tool-group compute-runtime-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-worker.lisp :: worker path runtime primitives"
+        :v3-pillar worker-runtime
+        :v3-function compute-primitives
+        :surface compute-primitives
+        :tools [mission_task_submit mission_task_query mission_task_cancel mission_job_poll mission_flow_run
+                mission_pty_spawn mission_pty_send mission_pty_read mission_pty_signal mission_pty_confirm
+                mission_pty_status mission_pty_screenshot mission_slots mission_slot_history mission_agent
+                mission_inbox mission_sonnet_process mission_minimax_process mission_cc_query mission_cc_swarm
+                mission_worker mission_control mission_pause mission_forge_build mission_forge_lint])
+      (tool-group knowledge-memory-tools
+        :status designed
+        :v2-source ".missiond/v2/intent.lisp :: memory/kb-manager"
+        :v3-pillar memory
+        :v3-function knowledge-memory
+        :surface memory-kb
+        :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon
+                mission_code_search mission_memory mission_insight mission_intent])
+      (tool-group project-registry-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-worker.lisp :: project registry"
+        :v3-pillar memory
+        :v3-function project-registry
+        :surface project-registry
+        :tools [mission_project])
+      (tool-group skill-runtime-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-worker.lisp :: skill workflow executor"
+        :v3-pillar worker-runtime
+        :v3-function skill-runtime
+        :surface skill-runtime
+        :tools [mission_skill_query mission_skill_context mission_skill_mutate mission_skill_exec])
+      (tool-group cascade-runtime-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-event-bus.lisp :: cascade"
+        :v3-pillar worker-runtime
+        :v3-function cascade-governance
+        :surface cascade-governance
+        :tools [mission_universe_graph mission_cascade_plan mission_cascade_trigger mission_cascade_lint])
+      (tool-group conversation-ingestion-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest"
+        :v3-pillar communication
+        :v3-function conversation-ingestion
+        :surface conversation-ingestion
+        :tools [mission_conversation_query mission_conversation_analyze mission_conversation_reconcile
+                mission_timeline mission_retrospective_manage mission_embedding_ops])
+      (tool-group router-policy-tools
+        :status designed
+        :v2-source ".missiond/v2/intent.lisp :: router-policy-v1"
+        :v3-pillar communication
+        :v3-function router-policy
+        :surface router-policy
+        :tools [mission_router_chat mission_router_chat_manage])
+      (tool-group question-incident-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-worker.lisp :: incident/question"
+        :v3-pillar communication
+        :v3-function incident-question-governance
+        :surface incident-governance
+        :tools [mission_question mission_llm_trace mission_decision_stats mission_gemini_auth mission_incident])
+      (tool-group capability-audit-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-capability-governance.lisp"
+        :v3-pillar communication
+        :v3-function capability-governance
+        :surface capability-governance
+        :tools [mission_capability_usage mission_audit mission_codex_ops])
+      (tool-group sysinfra-control-tools
+        :status designed
+        :v2-source ".missiond/v2/intent-system-layer.lisp :: sysinfra"
+        :v3-pillar operations
+        :v3-function sysinfra-control
+        :surface sysinfra-control
+        :tools [mission_infra_query mission_infra_ops mission_permission_query mission_permission_mutate
+                mission_power_control mission_sys_logs mission_sys_config mission_daemon_update
+                mission_global_instruction])))
+
   (pillar-flow-map
     :schema "missiond.pillar-flow-map.v1"
     :rule "Each pillar owns functions; each function declares entry -> ordered core steps -> egress, and each function maps back to exactly one implementation-map surface."
@@ -671,7 +1006,83 @@
                (step s3 :logic "project delegated_board_task_id and task_brief_preview without waiting for worker completion"))
         :egress [WorkstationDispatchOutcome task_brief_preview delegated_board_task_id]))
 
+    (pillar memory
+      (function knowledge-memory
+        :surface memory-kb
+        :entry [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
+        :core ((step s1 :logic "resolve project/global memory scope and normalize KB or intent query")
+               (step s2 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
+               (step s3 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
+        :egress [kb_result memory_projection search_hits insight_summary])
+      (function project-registry
+        :surface project-registry
+        :entry [mission_project ProjectRegistry.resolve]
+        :core ((step s1 :logic "resolve registered project root from explicit project_id, cwd, or target_project")
+               (step s2 :logic "reject ambiguous or outside-root runtime paths before workstation spawn")
+               (step s3 :logic "return project metadata usable by request, plan, context, and workstation surfaces"))
+        :egress [project_root project_id requested_cwd_policy]))
+
+    (pillar communication
+      (function conversation-ingestion
+        :surface conversation-ingestion
+        :entry [mission_conversation_query mission_conversation_analyze mission_conversation_reconcile mission_timeline mission_retrospective_manage mission_embedding_ops]
+        :core ((step s1 :logic "ingest or query conversation/session/timeline records by project scope")
+               (step s2 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
+               (step s3 :logic "surface durable facts for context assembly and later memory projection"))
+        :egress [conversation_rows timeline_events retrospective_result embedding_jobs])
+      (function router-policy
+        :surface router-policy
+        :entry [mission_router_chat mission_router_chat_manage router-policy-dry-run]
+        :core ((step s1 :logic "load advisory router policy, backend readiness, and dispatch descriptors")
+               (step s2 :logic "run recommendation or chat routing in dry-run/advisory mode unless an explicit later gate allows apply")
+               (step s3 :logic "emit measurable descriptors without replacing the runtime backend"))
+        :egress [router_recommendation backend_readiness dispatch_descriptor])
+      (function incident-question-governance
+        :surface incident-governance
+        :entry [mission_question mission_llm_trace mission_decision_stats mission_gemini_auth mission_incident]
+        :core ((step s1 :logic "record question, trace, decision, auth, or incident facts with deterministic ids")
+               (step s2 :logic "route blocked work to the human/orchestrator without mutating the primary artifact")
+               (step s3 :logic "return status and unblock hints to Autopilot or request-flow callers"))
+        :egress [question_id incident_record decision_stats unblock_hint])
+      (function capability-governance
+        :surface capability-governance
+        :entry [mission_capability_usage mission_audit mission_codex_ops]
+        :core ((step s1 :logic "record capability usage, audit facts, and Codex operation acknowledgements")
+               (step s2 :logic "bind evidence to plan/execution ids without becoming the primary execution gate")
+               (step s3 :logic "return traceable receipts for later learning and report finalization"))
+        :egress [capability_receipt audit_record codex_ops_result]))
+
+    (pillar worker-runtime
+      (function compute-primitives
+        :surface compute-primitives
+        :entry [mission_task_submit mission_task_query mission_task_cancel mission_job_poll mission_flow_run mission_pty_spawn mission_pty_send mission_pty_read mission_pty_signal mission_pty_confirm mission_pty_status mission_pty_screenshot mission_slots mission_slot_history mission_agent mission_inbox mission_sonnet_process mission_minimax_process mission_cc_query mission_cc_swarm mission_worker mission_control mission_pause mission_forge_build mission_forge_lint]
+        :core ((step s1 :logic "normalize low-level runtime requests into slot, job, task, PTY, flow, forge, or process operations")
+               (step s2 :logic "apply project-root, permission, timeout, and pause/control policies before side effects")
+               (step s3 :logic "return durable runtime handles and status without bypassing BoardTask or plan execution when a higher-level surface exists"))
+        :egress [runtime_handle job_status pty_snapshot flow_result forge_result])
+      (function skill-runtime
+        :surface skill-runtime
+        :entry [mission_skill_query mission_skill_context mission_skill_mutate mission_skill_exec]
+        :core ((step s1 :logic "resolve skill metadata and context through the skill registry")
+               (step s2 :logic "validate mutation or execution request against project and permission policy")
+               (step s3 :logic "return skill execution result or context bundle as a runtime receipt"))
+        :egress [skill_context skill_mutation skill_execution_receipt])
+      (function cascade-governance
+        :surface cascade-governance
+        :entry [mission_universe_graph mission_cascade_plan mission_cascade_trigger mission_cascade_lint]
+        :core ((step s1 :logic "read universe graph and cascade plan inputs")
+               (step s2 :logic "lint or trigger cascades through explicit control-tree/governance policy")
+               (step s3 :logic "return plan/lint/trigger result for orchestrator review"))
+        :egress [universe_graph cascade_plan cascade_lint cascade_trigger_result]))
+
     (pillar operations
+      (function sysinfra-control
+        :surface sysinfra-control
+        :entry [mission_infra_query mission_infra_ops mission_permission_query mission_permission_mutate mission_power_control mission_sys_logs mission_sys_config mission_daemon_update mission_global_instruction]
+        :core ((step s1 :logic "normalize sysinfra, permission, power, daemon, and global instruction operations")
+               (step s2 :logic "enforce explicit side-effect policy and keep operational state separate from request artifacts")
+               (step s3 :logic "return bounded operational status or mutation receipt"))
+        :egress [infra_result permission_receipt daemon_update_status global_instruction_state])
       (function ops-infra
         :surface ops-infra
         :entry [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
@@ -838,6 +1249,85 @@
              "scripts/check-v3-board-isomorphism.mjs"]
       :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp, while the daemon handler records session-task bindings, publishes BoardEvent created/updated/status_changed facts, and routes create/update/claim/note/retry operations through BoardStore. BoardTaskStatus is the closed persisted status vocabulary (open/running/verifying/done/blocked/failed/skipped); BoardTask carries assignee, auto_execute, depends_on, claim_executor_id, claim_executor_type, claimed_at, lease_expires_at, timeout_secs, and notes_count so Autopilot, workstation dispatch, and humans observe the same row. BoardStore is the single trait boundary for BoardTask CRUD, atomic claim_board_task, open-only clear_board_task_assignee, release_board_claims_by_executor, recover_stale_running_tasks, clear_dangling_dynamic_slot_assignees, set_board_task_lease, list_autopilot_tasks, dependency checks, retry, notes, and BoardTask-with-context queries. PgMissionStore pins the concurrency semantics: claim_board_task updates only rows with status='open' and claim_executor_id IS NULL, release only resets running rows for the executor, clear_board_task_assignee only clears the expected assignee while the task is still open, stale recovery honors lease_expires_at first and falls back to timeout_secs, clear_dangling_dynamic_slot_assignees targets only assignee LIKE 'slot-dyn-%' with no active dynamic slot, and list_autopilot_tasks orders assigned tasks first before order_idx. This surface is intentionally separate from workstation-config: workstation-config owns slot/model/prompt dispatch, mission_board owns the durable BoardTask row and claim/lease/retry/note semantics those dispatchers mutate.")
 
+    (surface memory-kb
+      :status "designed"
+      :implements [knowledge-memory kb-manager memory insight intent-snapshot]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/insight.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/intent.rs"
+             "crates/missiond-mcp/src/tools/knowledge/kb.rs"
+             "crates/missiond-mcp/src/tools/knowledge/memory.rs"
+             "crates/missiond-mcp/src/tools/knowledge/insight.rs"
+             "crates/missiond-mcp/src/tools/knowledge/intent.rs"]
+      :note "Designed V3 destination for the legacy memory/KB public tools. Code exists, but the Rust handlers are not yet physically split or runtime-projected from V3 Lisp, so this surface intentionally remains designed rather than code-aligned.")
+
+    (surface project-registry
+      :status "designed"
+      :implements [project-registry project-root-resolution]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/project.rs"
+             "crates/missiond-mcp/src/tools/knowledge/project.rs"]
+      :note "Designed V3 destination for project registry and root-resolution behavior inherited from V2. Later runtime projection should make project-root policy read the V3 contract instead of ad hoc handler defaults.")
+
+    (surface conversation-ingestion
+      :status "designed"
+      :implements [conversation-ingestion timeline retrospective embedding-ops]
+      :code ["crates/missiond-mcp/src/tools/comm/conversation.rs"
+             "crates/missiond-mcp/src/tools/comm/timeline.rs"]
+      :note "Designed V3 destination for conversation/session/timeline/retrospective/embedding public tools. The current code remains legacy-shaped and must be brought under Lisp artifact/event projection before graduation.")
+
+    (surface router-policy
+      :status "designed"
+      :implements [router-policy-dry-run router-backend-readiness router-dispatch-descriptor]
+      :code ["crates/missiond-mcp/src/tools/comm/router_chat.rs"
+             "scripts/check-router-policy.mjs"
+             "scripts/check-router-backend-registry.mjs"
+             "scripts/check-router-dispatch-descriptor.mjs"]
+      :note "Designed V3 destination for the V2 router-policy dry-run chain. This deliberately does not claim runtime backend replacement; it only prevents router public behavior from remaining unmapped.")
+
+    (surface incident-governance
+      :status "designed"
+      :implements [question incident llm-trace decision-stats auth]
+      :code ["crates/missiond-mcp/src/tools/comm/question.rs"]
+      :note "Designed V3 destination for question, incident, LLM trace, Gemini auth, and decision stats behavior. Later work should bind these facts into request-local events and BoardTask blocked/unblock flows.")
+
+    (surface capability-governance
+      :status "designed"
+      :implements [capability-usage audit codex-ops]
+      :code ["crates/missiond-mcp/src/tools/comm/capability_usage.rs"
+             "crates/missiond-mcp/src/tools/comm/audit.rs"
+             "crates/missiond-mcp/src/tools/comm/codex_ops.rs"]
+      :note "Designed V3 destination for capability usage, audit, and Codex ops surfaces. The V2 evidence philosophy is preserved, but the handlers are not yet Lisp-isomorphic.")
+
+    (surface compute-primitives
+      :status "designed"
+      :implements [pty task job flow-run process cc forge worker-control]
+      :code ["crates/missiond-daemon/src/handlers/compute"
+             "crates/missiond-mcp/src/tools/compute"]
+      :note "Designed V3 destination for low-level worker runtime primitives: PTY, task, job, flow_run, process, CC tasks, forge, pause/control, and model process tools. Higher-level MissionD work should enter through mission_request/mission_plan/mission_board; this surface exists so legacy compute tools have a visible convergence target.")
+
+    (surface skill-runtime
+      :status "designed"
+      :implements [skill-query skill-context skill-mutate skill-exec]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/skill.rs"
+             "crates/missiond-mcp/src/tools/knowledge/skill.rs"]
+      :note "Designed V3 destination for skill registry and skill execution behavior. It is mapped but not yet physically aligned to V3 pillar/function boundaries.")
+
+    (surface cascade-governance
+      :status "designed"
+      :implements [universe-graph cascade-plan cascade-trigger cascade-lint]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/cascade.rs"
+             "crates/missiond-mcp/src/tools/knowledge/cascade.rs"]
+      :note "Designed V3 destination for universe graph and cascade tools. This keeps cascade/control-tree behavior explicit while later waves decide the physical split.")
+
+    (surface sysinfra-control
+      :status "designed"
+      :implements [sysinfra permission power daemon-update global-instruction]
+      :code ["crates/missiond-mcp/src/tools/sysinfra"
+             "crates/missiond-mcp/src/tools/compute/slot.rs"
+             "crates/missiond-mcp/src/tools/compute/worker.rs"]
+      :note "Designed V3 destination for sysinfra MCP behavior not covered by ops-infra scripts: permissions, power, system logs/config, daemon update, global instruction, pause, and control. It remains designed until policy and runtime projection are Lisp-owned.")
+
     (surface ops-infra
       :status "code-aligned"
       :implements [ops-infra]
@@ -853,6 +1343,7 @@
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-pillar-flow-schema.mjs"
+             "node scripts/check-v3-v2-coverage.mjs"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"
              "node scripts/check-v3-file-artifacts-isomorphism.mjs"
