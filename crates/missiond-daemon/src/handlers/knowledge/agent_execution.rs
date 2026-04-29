@@ -36,6 +36,7 @@ mod completion_gates;
 mod completion_maintenance;
 mod completion_records;
 mod lisp_syntax;
+mod log_status;
 mod log_store;
 mod log_surface;
 mod preflight;
@@ -64,14 +65,13 @@ use self::completion_records::{
 };
 #[cfg(test)]
 use self::lisp_syntax as sexp;
+use self::log_status::action_status;
 #[cfg(test)]
 use self::log_store::{
     allocate_id, append_to_block, lisp_quote_string, now_iso, parse_kv_pairs,
     project_or_target_project, render_canonical_template, scan_max_id, Counter, LogFile,
 };
-use self::log_surface::{
-    action_decide, action_deviate, action_issue, action_list, action_open, action_status,
-};
+use self::log_surface::{action_decide, action_deviate, action_issue, action_list, action_open};
 #[cfg(test)]
 use self::log_surface::{
     build_opened_event, normalize_dispatch_strategy, read_dispatch_metadata_from_log, DispatchMeta,
