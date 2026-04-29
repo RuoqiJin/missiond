@@ -487,6 +487,22 @@
       :rationale
         "Wave33 evidence: a delegated BoardTask was sent twice — once via spawner.initial_prompt fire-and-forget, then again via Autopilot pty.send — and the slot's TextOutputEvent::Complete arrived without Autopilot transitioning the BoardTask to done. Single ownership of prompt+close eliminates the orphaned-task class entirely."))
 
+  (ops-infra
+    :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
+    :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
+    :invariants
+      ["Daemon redeploy MUST stay one command: build -> backup -> codesign -> atomic install -> launchctl kickstart -> socket wait -> IPC smoke."
+       "IPC smoke MUST retry after socket readiness and then rollback on failure; socket-bound is not enough evidence that the MCP initialize path is ready."
+       "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT so local launchd cold-start races do not force code edits."
+       "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
+       "Rust formatting MUST be scoped to Rust files touched in the current diff, including staged, unstaged, and branch-diff modes."
+       "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn untouched Rust modules."
+       "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."]
+    :checks ["bash -n scripts/deploy-daemon.sh"
+             "bash -n scripts/cargo-fmt-touched.sh"
+             "scripts/cargo-fmt-touched.sh --check"
+             "node scripts/check-v3-ops-infra-isomorphism.mjs"])
+
   (implementation-map
     (surface mission_request
       :status "code-aligned"
@@ -552,7 +568,15 @@
              "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-mcp/src/tools/compute/compute_slot.rs"
              "crates/missiond-mcp/src/tools/compute/task_delegate.rs"]
-      :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. compute_slot objective is metadata only; direct warmup requires explicit initial_prompt, and delegated task_delegate auto-provision still carries suppress_initial_prompt=true. spawn_tracked_slot now syncs MissionD Claude hooks project-locally via slot_env::sync_slot_hooks_to_local_settings, preserving permissions and existing hooks while adding SessionStart session-register + UserPromptSubmit context-prefetch before PTY start; build_slot_tracking_env injects MISSION_IPC_ENDPOINT so hooks reconnect to the active daemon instead of relying on stale global defaults. Autopilot pty.send budget, smart-watchdog idle-recovery threshold, and Autopilot BoardTask claim lease are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs / derive_board_task_lease_secs in autopilot.rs. The fixed 20-minute claim lease is gone; the lease now equals idle_watchdog_threshold_secs so the watchdog cannot reclaim a slot whose claim is still legitimately ticking inside its declared timeout. Autopilot prompt assembly projects the V3 prompt-tool-contract via build_base_prompt (objective dedupe) and append_board_task_id_suffix (conditional board self-close); the prompt no longer hardcodes mission_board_update / mission_board_note_add as unconditional must-calls. The V3 execution-ownership rule for delegated BoardTasks projects to: compute_slot::effective_initial_prompt + explicit initial_prompt + suppress_initial_prompt arg (delegated path starts the slot idle), task_delegate::auto_provision_slot create_args carrying suppress_initial_prompt=true, and autopilot dispatch_board_tasks holding an OwnedSlotDispatchGuard across state.pty.send + post-send tail inside a tokio::task::JoinSet send-task so different-slot sends run concurrently within a single dispatch tick while same-slot exclusion still covers the full close-owner / KB-feedback / deploy-review sequence, with decide_close_action preserving Done self-close and Blocked question states. Restart recovery clears stale slot-dyn-* BoardTask assignee pins via BoardStore::clear_board_task_assignee before normal no-assignee routing resumes."))
+      :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. compute_slot objective is metadata only; direct warmup requires explicit initial_prompt, and delegated task_delegate auto-provision still carries suppress_initial_prompt=true. spawn_tracked_slot now syncs MissionD Claude hooks project-locally via slot_env::sync_slot_hooks_to_local_settings, preserving permissions and existing hooks while adding SessionStart session-register + UserPromptSubmit context-prefetch before PTY start; build_slot_tracking_env injects MISSION_IPC_ENDPOINT so hooks reconnect to the active daemon instead of relying on stale global defaults. Autopilot pty.send budget, smart-watchdog idle-recovery threshold, and Autopilot BoardTask claim lease are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs / derive_board_task_lease_secs in autopilot.rs. The fixed 20-minute claim lease is gone; the lease now equals idle_watchdog_threshold_secs so the watchdog cannot reclaim a slot whose claim is still legitimately ticking inside its declared timeout. Autopilot prompt assembly projects the V3 prompt-tool-contract via build_base_prompt (objective dedupe) and append_board_task_id_suffix (conditional board self-close); the prompt no longer hardcodes mission_board_update / mission_board_note_add as unconditional must-calls. The V3 execution-ownership rule for delegated BoardTasks projects to: compute_slot::effective_initial_prompt + explicit initial_prompt + suppress_initial_prompt arg (delegated path starts the slot idle), task_delegate::auto_provision_slot create_args carrying suppress_initial_prompt=true, and autopilot dispatch_board_tasks holding an OwnedSlotDispatchGuard across state.pty.send + post-send tail inside a tokio::task::JoinSet send-task so different-slot sends run concurrently within a single dispatch tick while same-slot exclusion still covers the full close-owner / KB-feedback / deploy-review sequence, with decide_close_action preserving Done self-close and Blocked question states. Restart recovery clears stale slot-dyn-* BoardTask assignee pins via BoardStore::clear_board_task_assignee before normal no-assignee routing resumes.")
+
+    (surface ops-infra
+      :status "code-aligned"
+      :implements [ops-infra]
+      :code ["scripts/deploy-daemon.sh"
+             "scripts/cargo-fmt-touched.sh"
+             "scripts/check-v3-ops-infra-isomorphism.mjs"]
+      :note "deploy-daemon.sh is the canonical local redeploy path: it builds missiond-daemon, backs up the installed binary, codesigns a same-directory temp binary, atomically installs it, kickstarts launchd, waits for the IPC socket owner, then runs a bounded mission-mcp initialize smoke that supports timeout/gtimeout/perl alarm fallbacks and retries after socket readiness before rolling back on real smoke failure. cargo-fmt-touched.sh is the scoped Rust formatting path: it derives staged/unstaged/branch diff files through git diff --diff-filter=ACMR, filters existing .rs paths without failing on an empty set, and invokes rustfmt only on those files with skip_children=true so wave-local formatting cannot churn untouched Rust modules."))
 
   (compression-contract
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."
@@ -567,6 +591,7 @@
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
+             "node scripts/check-v3-ops-infra-isomorphism.mjs"
              "node scripts/check-v3-request-flow-smoke.mjs"
              "node scripts/check-v3-code-isomorphism-complete.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))

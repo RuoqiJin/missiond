@@ -13,7 +13,7 @@
 // The aggregate covers exactly these implementation surfaces unless the
 // blueprint explicitly changes the V3 surface set:
 //   mission_request, mission_directive, mission_plan, mission_workflow,
-//   task-runner-cli, context-pack, workstation-config.
+//   task-runner-cli, context-pack, workstation-config, ops-infra.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,6 +38,7 @@ export const EXPECTED_SURFACES = [
   'task-runner-cli',
   'context-pack',
   'workstation-config',
+  'ops-infra',
 ];
 
 export const PER_SURFACE_CHECKERS = [
@@ -48,6 +49,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
+  'scripts/check-v3-ops-infra-isomorphism.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
   // unified-entry/review-packet/review-response. See wave42-01.
@@ -392,11 +394,15 @@ function runDryFixture(opts) {
     (surface workstation-config
       :status "code-aligned"
       :code ["a"]
+      :note "n")
+    (surface ops-infra
+      :status "code-aligned"
+      :code ["a"]
       :note "n"))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all seven surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all eight surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -436,6 +442,14 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface task-runner-cli
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface context-pack
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface workstation-config
       :status "code-aligned"
       :code ["a"]
@@ -443,9 +457,9 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'missing-surface fixture: task-runner-cli absent fails the gate',
+    name: 'missing-surface fixture: ops-infra absent fails the gate',
     expectOk: false,
-    expectMessage: /missing required surface "task-runner-cli"/i,
+    expectMessage: /missing required surface "ops-infra"/i,
     source: missingSurfaceSource,
   });
 
