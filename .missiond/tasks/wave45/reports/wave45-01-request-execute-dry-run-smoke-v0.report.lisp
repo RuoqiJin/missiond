@@ -1,12 +1,50 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 45 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave45-01-request-execute-dry-run-smoke-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave45-01-request-execute-dry-run-smoke-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "26de862b5ed0"
+  :files_changed
+    [".missiond/v3/missiond-blueprint.lisp"
+     "scripts/check-v3-request-flow-smoke.mjs"]
+  :acceptance_results
+    [(:command "node scripts/check-v3-request-flow-smoke.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "Daemon-free fixture-only mode unchanged: 9 fixtures pass.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs"
+              :exit_code 0 :ok true
+              :note "Default static + fixture mode unchanged. Daemon-free.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs --live-ipc --request-id wave45-request-execute-dry-run-v0 --cleanup"
+              :exit_code 0 :ok true
+              :note "Default --live-ipc still stops at awaiting_execution: 4 steps OK (start, approve_intent, approve_plan, compat_write_audit). No execute_plan call. Wave44 compat audit still empty: new_alignment_subdirs=[] / new_plan_subdirs=[]. --cleanup removed only the request-local directory.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs --live-ipc --request-id wave45-request-execute-dry-run-v0-exec --cleanup --execute-dry-run"
+              :exit_code 0 :ok true
+              :note "5 steps OK including the new execute_plan_dry_run step: respond outcome=dispatched, inner_action=unified_entry::plan_execute, respond_result.execute=true, review_packet.state=execute_requested, allowed_responses=[observe], request-local execute_plan event 000004.event.lisp appended, and pipeline_result no-dispatch proof = (status=bridge_ready, runner_status=bridge_only). Compat audit still clean. --cleanup removed only the request-local directory.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs --live-ipc --request-id wave45-request-execute-dry-run-v0-json --cleanup --execute-dry-run --json"
+              :exit_code 0 :ok true
+              :note "Same 5-step path with --json output. live_ipc.execute_dry_run_requested=true; execute_plan_dry_run.no_dispatch_proof=true with pipeline_status=bridge_ready / pipeline_runner_status=bridge_only; legacy_compat_artifacts.new_alignment_subdirs=[] / new_plan_subdirs=[].")
+     (:command "node scripts/check-v3-code-isomorphism-complete.mjs"
+              :exit_code 0 :ok true
+              :note "Aggregate gate: 6 surfaces graduated + 7 per-surface checkers spawned. Smoke runs in default static + fixture mode without --live-ipc and without --execute-dry-run; aggregate stays daemon-free and non-executing.")
+     (:command "node scripts/check-lisp-blueprint-compression.mjs"
+              :exit_code 0 :ok true
+              :note "Blueprint compression contract still holds; new (execute-dry-run-smoke ...) sub-form is a sibling of (review-packet)/(review-response)/(tool-schema-contract)/(compat-writer-policy) under unified-entry; existing required sections + state-machines + surface IDs unchanged.")
+     (:command "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+              :exit_code 0 :ok true
+              :note "Architecture-lisp check OK on the updated blueprint.")
+     (:command "cargo test -p missiond-daemon handlers::knowledge::request::tests"
+              :exit_code 0 :ok true
+              :note "86 daemon request handler tests pass; no Rust changes were necessary because the existing request.rs ExecutePlan branch already forwards dry_run/execute_mode/target/objective/cwd to unified_entry::plan_execute, and unified_entry::build_plan_execute_args already forwards dry_run to mission_plan execute. Test count unchanged from wave44.")
+     (:command "cargo test -p missiond-mcp test_directive_plan_workflow_surfaces_registered"
+              :exit_code 0 :ok true
+              :note "MCP surfaces-registered smoke passes; mission_request schema unchanged (dry_run/execute/target/objective/cwd properties were already exposed since wave43).")
+     (:command "perl -ne 'exit 1 if /\\x00/' scripts/check-v3-request-flow-smoke.mjs .missiond/v3/missiond-blueprint.lisp crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs crates/missiond-daemon/src/handlers/knowledge/plan.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No NUL bytes in any of the six declared write-scope files.")
+     (:command "git diff --check -- scripts/check-v3-request-flow-smoke.mjs .missiond/v3/missiond-blueprint.lisp crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs crates/missiond-daemon/src/handlers/knowledge/plan.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No whitespace-error or conflict markers in the write-scope files.")]
+  :notes "Adds a deterministic, opt-in --execute-dry-run audit step to the V3 request-flow smoke that proves the final execute_plan transition without consuming a workstation slot.\n\nWhether Rust/MCP changed or why blueprint + checker were sufficient: only .missiond/v3/missiond-blueprint.lisp and scripts/check-v3-request-flow-smoke.mjs changed. The four Rust/MCP files in the write-scope (crates/missiond-daemon/src/handlers/knowledge/request.rs, .../unified_entry.rs, .../plan.rs, crates/missiond-mcp/src/tools/knowledge/request.rs) remain UNTOUCHED. Rationale: the live execute_plan path already worked on the running daemon when called with response=execute_plan, execute=true, dry_run=true. Surveyed evidence: (1) request.rs's RespondDecision::ExecutePlan branch (line ~1170) already forwards 'dry_run' along with target/execute_mode/scheduler_mode/dispatch_strategy/parallelism/objective/flow_id/project/cwd/target_project/review_question_id when building pipeline_args for unified_entry::run_pipeline. (2) unified_entry::build_plan_execute_args (line ~501) already includes 'dry_run' in its forward list to mission_plan execute. (3) plan.rs serves two equivalent no-dispatch shapes already: action_execute (bridge mode default) returns status=bridge_ready + runner_status=bridge_only with a next_call descriptor instead of dispatching; action_execute_internal with dry_run=true returns status=dry_run + runner_status=dry_run_no_dispatch with would_dispatch instead of dispatching. (4) MCP schema's mission_request already exposes dry_run, execute, execute_mode, target, objective as explicit properties since wave43. Per requirement #7 and pattern-card lisp-first-before-checker: when the JS checker plus blueprint can pin the invariant without code changes, leave Rust/MCP alone.\n\nDefault live IPC behavior versus --execute-dry-run behavior:\n  - Default --live-ipc: 4 steps. start -> approve_intent -> approve_plan -> compat_write_audit. After approve_plan the smoke STOPS at review_packet.state=awaiting_execution; execute_plan is never called. New execute_dry_run_requested field in the live_ipc summary is false. Wave44 compat_write_audit invariant still holds: new_alignment_subdirs=[] and new_plan_subdirs=[].\n  - --execute-dry-run: 5 steps. start -> approve_intent -> approve_plan -> execute_plan_dry_run -> compat_write_audit. After approve_plan the smoke calls mission_request action=respond response=execute_plan execute=true dry_run=true cwd=<repo> target=mission_task_delegate objective=<smoke objective>. The execute_plan_dry_run step asserts: respond_result.outcome=dispatched, respond_result.inner_action='unified_entry::plan_execute', respond_result.execute=true, review_packet.state=execute_requested, review_packet.execute_allowed=true, allowed_responses=['observe'] (single observe-only continuation), and a NEW request-local review event file appears under .missiond/requests/<request_id>/events/ whose body contains ':decision :execute_plan'. The pipeline_result is hydrated from request.rs::tool_result_payload (which already serde_json::from_str's the inner ToolResult text), so the smoke reads pipeline_result.status / pipeline_result.runner_status directly.\n\nThe exact no-dispatch proof observed in pipeline_result: against the daemon at HEAD, every --execute-dry-run run returned status='bridge_ready' + runner_status='bridge_only' (the bridge-mode default in plan.rs::action_execute, which emits a next_call descriptor without invoking the target tool). The smoke's no_dispatch_proof boolean accepts EITHER:\n  - bridge mode: status=bridge_ready AND runner_status=bridge_only, OR\n  - internal dry-run mode: status=dry_run AND runner_status=dry_run_no_dispatch.\nEither shape is sufficient evidence that no workstation slot was consumed. The blueprint's new (execute-dry-run-smoke ...) sub-form pins both shapes under :no-dispatch-proofs ((bridge :status \"bridge_ready\" :runner_status \"bridge_only\") (internal-dry-run :status \"dry_run\" :runner_status \"dry_run_no_dispatch\")) so a future flip of the daemon default from bridge to internal-dry-run still satisfies the contract.\n\nWhether any request-local or compatibility artifacts were left behind after --cleanup:\n  - Request-local: nothing left. The cleanup block runs after all assertions pass and removes .missiond/requests/<request_id>/ in full (defensive prefix check). Both --cleanup acceptance runs (wave45-request-execute-dry-run-v0 + -exec + -json) report cleanup.removed_path equal to the request directory; ls .missiond/requests/ shows no wave45-* dirs after the run.\n  - Compatibility: nothing leaked. compat_write_audit reports new_alignment_subdirs=[] and new_plan_subdirs=[] for every acceptance run. The wave44 invariant (default flow does not pass write_file=true) is preserved unchanged in --execute-dry-run mode; the execute_plan respond path inherits the same args-derived compat_write_requested boolean from normalize_start_args's wave44 helper.\n  - Database: per pattern-card request-local-cleanup-stays-narrow, DB rows (directives, plans, board_tasks) created by the live flow remain as audit records. cleanup.kept_db_rows documents this explicitly.\n\nAggregate gate stays daemon-free and non-executing: scripts/check-v3-code-isomorphism-complete.mjs continues to spawn check-v3-request-flow-smoke.mjs with no flags; PER_SURFACE_CHECKERS does not include --execute-dry-run or --live-ipc. The aggregate run ('7 per-surface checkers passed') confirms this.\n\nLisp-first ordering preserved: blueprint changed first. The new (execute-dry-run-smoke ...) sub-form lives under unified-entry as a sibling of review-packet/review-response/tool-schema-contract/compat-writer-policy and declares :rule, :audit-flag :--execute-dry-run, :respond-args ((:response :execute_plan)(:execute true)(:dry_run true)(:target :mission_task_delegate)), :asserts (the seven assertions the JS smoke runs), :no-dispatch-proofs (the two equivalent daemon shapes), :non-goal (default --live-ipc and aggregate gate stay non-executing), and :rationale (cite wave43/44 progress; this wave pins the last cross-surface invariant)."
+  :verification_tier smoke)
