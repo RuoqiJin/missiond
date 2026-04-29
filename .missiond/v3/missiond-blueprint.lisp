@@ -518,6 +518,168 @@
              "scripts/cargo-fmt-touched.sh --check"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"])
 
+  (pillar-flow-map
+    :schema "missiond.pillar-flow-map.v1"
+    :rule "Each pillar owns functions; each function declares entry -> ordered core steps -> egress, and each function maps back to exactly one implementation-map surface."
+    :function-shape "function must carry :surface, non-empty :entry, :core ((step s1 :logic ...) ...), and non-empty :egress."
+
+    (pillar request
+      (function request-lifecycle
+        :surface mission_request
+        :entry [mission_request.start mission_request.advance mission_request.status mission_request.respond]
+        :core ((step s1 :logic "persist request-local request.lisp and lifecycle event")
+               (step s2 :logic "project review_packet from request-local artifacts and latest review event")
+               (step s3 :logic "route respond actions through directive/plan gates without bypassing them")
+               (step s4 :logic "materialize directive_id / plan_id / board_task_id back into request-local Lisp"))
+        :egress [request-local-artifacts review_packet respond_result blocked_response])
+      (function unified-entry-runtime
+        :surface unified-entry-runtime
+        :entry [unified_entry.run_pipeline mission_request.advance]
+        :core ((step s1 :logic "normalize staged pipeline request")
+               (step s2 :logic "dispatch s1/s3/s4/s5/s6 stages to directive, plan, or execution handlers")
+               (step s3 :logic "decorate response with pipeline_stage, flow_ref, artifact_refs, and next_step"))
+        :egress [pipeline_response artifact_refs next_step]))
+
+    (pillar artifacts
+      (function file-artifact-writer
+        :surface file-artifacts
+        :entry [attempt_artifact_write atomic_write_artifact artifact_path]
+        :core ((step s1 :logic "resolve artifact kind to request-local or compatibility path")
+               (step s2 :logic "write through temp-file, fsync, and atomic rename discipline")
+               (step s3 :logic "return Written / ResolveFailed / WriteFailed without hiding partial states"))
+        :egress [artifact_path write_status write_failed_diagnostic]))
+
+    (pillar intent
+      (function directive-authoring
+        :surface mission_directive
+        :entry [mission_directive.compile mission_directive.approve]
+        :core ((step s1 :logic "compile deterministic draft or validate Sonnet Lisp")
+               (step s2 :logic "persist directive row and enrich Lisp with directive_id/version")
+               (step s3 :logic "emit alignment review gate without auto-approval"))
+        :egress [intent-alignment.lisp directive_row review_question_warning]))
+
+    (pillar plan
+      (function plan-authoring-and-runner
+        :surface mission_plan
+        :entry [mission_plan.compile mission_plan.approve mission_plan.execute]
+        :core ((step s1 :logic "compile executable plan-draft with target/objective/nodes hints")
+               (step s2 :logic "approve persisted plan only through plan-review gate")
+               (step s3 :logic "parse plan Lisp hints into DAG/internal dispatch arguments")
+               (step s4 :logic "forward execution to mission_execution, mission_task_delegate, or workflow substrate"))
+        :egress [plan.lisp plan_row execute_result task_brief]))
+
+    (pillar verification
+      (function evidence-collector
+        :surface evidence-collector
+        :entry [EvidenceEntry.append wrap_legacy_record_evidence EventRefResolver]
+        :core ((step s1 :logic "stamp schema_version/source/kind and preserve caller evidence")
+               (step s2 :logic "resolve execution event refs as live, passive_cache, event_log_query, or unavailable")
+               (step s3 :logic "append evidence sidecar without overwriting existing entries"))
+        :egress [verification-receipt evidence-sidecar event_ref_status]))
+
+    (pillar execution
+      (function execution-log
+        :surface mission_execution-log
+        :entry [mission_execution.open mission_execution.list mission_execution.status session_trace_path]
+        :core ((step s1 :logic "read/write companion log as durable Lisp source")
+               (step s2 :logic "route execution actions through the manager action table")
+               (step s3 :logic "publish ExecutionEvent only after durable write succeeds")
+               (step s4 :logic "optionally append structured session-trace event as best-effort projection"))
+        :egress [companion-log execution_event trace_warning status_summary])
+      (function execution-claim-lease
+        :surface mission_execution-claim-lease
+        :entry [mission_execution.claim mission_execution.heartbeat mission_execution.release]
+        :core ((step s1 :logic "allocate claim id and clamp lease window")
+               (step s2 :logic "reject overlapping active claims through scopes_overlap_pure")
+               (step s3 :logic "extend heartbeat lease or stamp released-at/status released"))
+        :egress [claim_record lease_expires_at released_claim conflict_error])
+      (function execution-completion-audit
+        :surface mission_execution-completion-audit
+        :entry [mission_execution.complete mission_execution.audit mission_execution.repair mission_execution.preflight_commit]
+        :core ((step s1 :logic "normalize commit and verifier status enums before mutation")
+               (step s2 :logic "enforce scoped commit and task contract completion invariants")
+               (step s3 :logic "run daemon auto-verifier when report/shared-memory/contract/commit inputs are present")
+               (step s4 :logic "preflight git status read-only and report out-of-scope drift"))
+        :egress [completion_record audit_findings preflight_summary repair_summary]))
+
+    (pillar workflow
+      (function workflow-distillation
+        :surface mission_workflow
+        :entry [mission_workflow.distill mission_workflow.compile_methodology mission_workflow.run_methodology]
+        :core ((step s1 :logic "validate workflow_sexp or methodology Lisp")
+               (step s2 :logic "persist/enrich workflow artifact with source_plans, match_rules, steps, status, and body")
+               (step s3 :logic "compile methodology into executable YAML without bypassing receipt-only gates"))
+        :egress [workflow.lisp workflow_row compiled_yaml run_result]))
+
+    (pillar review
+      (function review-gate
+        :surface review-gate
+        :entry [review_gate_policy review_decision review_question_id]
+        :core ((step s1 :logic "normalize manual / emit_question / off policy")
+               (step s2 :logic "emit created/resolved review events without blocking primary writes")
+               (step s3 :logic "surface deterministic warning ids on bus failure"))
+        :egress [review_event review_question_warning review_resolution]))
+
+    (pillar task-runner
+      (function task-runner-lifecycle
+        :surface task-runner-cli
+        :entry [task-runner-next-action task-runner-dispatch task-runner-finalize-report check-verification-receipt]
+        :core ((step s1 :logic "append one-event lifecycle files through cooperative lock/create-only writes")
+               (step s2 :logic "derive wave state and choose next runnable/finalization action")
+               (step s3 :logic "project final-report and verification-receipt into request-local artifacts")
+               (step s4 :logic "verify commit-snapshot artifacts against task contract write scope"))
+        :egress [lifecycle-event final-report verification-receipt dispatch_event]))
+
+    (pillar source-control
+      (function source-hygiene
+        :surface source-hygiene
+        :entry [check-staged-source-hygiene task-scope-guard pre-commit-hook]
+        :core ((step s1 :logic "inspect staged or supplied files without mutating git")
+               (step s2 :logic "reject raw NUL bytes and git diff whitespace errors")
+               (step s3 :logic "enforce task contract write-scope and must-not-touch patterns"))
+        :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status]))
+
+    (pillar coordination
+      (function context-pack
+        :surface context-pack
+        :entry [context-pack-append context-pack-compile-shards]
+        :core ((step s1 :logic "append claim/observation/anchor/shard-proposal/conflict entries with locked seq allocation")
+               (step s2 :logic "validate accepted shard references and non-overlap")
+               (step s3 :logic "compile integration-plan dispatch groups for code workers"))
+        :egress [context-pack.lisp dispatchable_groups accepted_shards])
+      (function mission-board
+        :surface mission_board
+        :entry [mission_board.create mission_board.claim mission_board.update mission_board.note_add]
+        :core ((step s1 :logic "persist BoardTask status, assignee, dependency, lease, and note state")
+               (step s2 :logic "claim only open unclaimed rows and recover stale running rows")
+               (step s3 :logic "publish BoardEvent projections for dashboards and autopilot"))
+        :egress [board_task board_event board_note autopilot_task_list]))
+
+    (pillar workstation
+      (function workstation-config
+        :surface workstation-config
+        :entry [mission_compute_slot mission_task_delegate autopilot.dispatch_board_tasks]
+        :core ((step s1 :logic "derive model/profile, slot env hooks, and suppress_initial_prompt ownership")
+               (step s2 :logic "project BoardTask timeout into pty send budget, watchdog, and claim lease")
+               (step s3 :logic "send BoardTask prompt through Autopilot-owned pty path with per-slot exclusion"))
+        :egress [dynamic_slot board_task_dispatch close_action kb_feedback])
+      (function workstation-dispatch
+        :surface workstation-dispatch
+        :entry [mission_plan.execute_internal run_workstation_dispatch_with_contract_and_trace]
+        :core ((step s1 :logic "build scoped task brief and dispatch descriptor")
+               (step s2 :logic "evaluate dry-run / dispatched / inner-error / safe-descriptor outcome")
+               (step s3 :logic "project delegated_board_task_id and task_brief_preview without waiting for worker completion"))
+        :egress [WorkstationDispatchOutcome task_brief_preview delegated_board_task_id]))
+
+    (pillar operations
+      (function ops-infra
+        :surface ops-infra
+        :entry [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
+        :core ((step s1 :logic "build, backup, codesign, install, kickstart, and smoke daemon as one command")
+               (step s2 :logic "retry IPC initialize smoke after socket readiness and rollback on real failure")
+               (step s3 :logic "format only Rust files touched in current diff with rustfmt skip_children"))
+        :egress [deployed-daemon rollback-result scoped-rustfmt-result])))
+
   (implementation-map
     (surface mission_request
       :status "code-aligned"
@@ -687,9 +849,10 @@
   (compression-contract
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."
     :v2 "Kept as historical source index, implementation status, and wave evidence."
-    :v3 "Small executable contracts only: request, artifact, state-machine, policy, implementation map."
+    :v3 "Small executable contracts only: request, artifact, state-machine, policy, pillar-flow-map, implementation map."
     :checks ["node scripts/check-lisp-blueprint-compression.mjs"
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+             "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"
              "node scripts/check-v3-file-artifacts-isomorphism.mjs"

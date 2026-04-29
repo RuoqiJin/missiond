@@ -56,6 +56,9 @@ export const EXPECTED_SURFACES = [
 ];
 
 export const PER_SURFACE_CHECKERS = [
+  // Cross-surface IR check: each pillar owns functions, each function has
+  // entry -> ordered core steps -> egress and maps back to one surface.
+  'scripts/check-v3-pillar-flow-schema.mjs',
   'scripts/check-v3-request-lisp-isomorphism.mjs',
   'scripts/check-v3-unified-entry-isomorphism.mjs',
   'scripts/check-v3-file-artifacts-isomorphism.mjs',
