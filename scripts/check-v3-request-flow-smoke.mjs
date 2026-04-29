@@ -33,12 +33,19 @@
 //          materialized ref keys, produces a "missing-persisted-ref"
 //          diagnostic so a malformed flow cannot silently advance.
 //
-// The checker never dispatches a workstation task. An optional --live-ipc
-// flag is reserved for future live verification but is gated behind a second
-// --confirm-execute flag and short-circuits before any real execution.
+// The default mode never dispatches a workstation task. An opt-in --live-ipc
+// mode (wave43-01) calls the running MissionD daemon through mission_request
+// over its tools/call IPC and drives the user-facing approval flow:
+//   start -> respond approve_intent -> respond approve_plan -> stop.
+// Live IPC stops at awaiting_execution and never calls execute_plan: the
+// point is to prove the execution gate, not to consume a workstation slot.
+// --confirm-execute is reserved as a future flag and is explicitly refused
+// here — workstation dispatch is not the responsibility of this checker.
 //
 // CLI: node scripts/check-v3-request-flow-smoke.mjs [--json] [--dry-fixture]
-//        [--blueprint <path>] [--repo <path>] [--live-ipc [--confirm-execute]]
+//        [--blueprint <path>] [--repo <path>]
+//        [--live-ipc [--endpoint <socket>] [--session-id <id>]
+//                    [--request-id <id>] [--cleanup] [--confirm-execute]]
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -50,6 +57,7 @@ import {
   parseLisp,
   readKeywordProps,
 } from './lib/missiond_lisp.mjs';
+import { callToolViaIpc } from './task-runner-submit-dispatch.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const REQUEST_HANDLER_PATH = 'crates/missiond-daemon/src/handlers/knowledge/request.rs';
@@ -84,7 +92,9 @@ export const EXPECTED_DECISIONS = [
 
 const usage = `Usage:
   node scripts/check-v3-request-flow-smoke.mjs [--json] [--dry-fixture]
-    [--blueprint <path>] [--repo <path>] [--live-ipc [--confirm-execute]]
+    [--blueprint <path>] [--repo <path>]
+    [--live-ipc [--endpoint <socket>] [--session-id <id>]
+                [--request-id <id>] [--cleanup] [--confirm-execute]]
 
 Cross-surface V3 request-flow smoke. By default, validates the V3 blueprint
 review-packet/review-response contract, pins the wire states/decisions in
@@ -100,13 +110,31 @@ Flags:
                     reads. Useful for CI hygiene checks.
   --blueprint <p>   Override the V3 blueprint path (default ${BLUEPRINT_PATH}).
   --repo <p>        Override the repo root (default $PWD).
-  --live-ipc        Reserved for future live verification of mission_request
-                    against a running daemon. Currently a no-op that exits
-                    success once it confirms no workstation dispatch happened.
-                    Requires --confirm-execute to do anything beyond the
-                    static + fixture pass; without it, a structured warning
-                    is reported and the run still completes via the default
-                    static + fixture pass.
+  --live-ipc        Opt-in: call a running MissionD daemon through
+                    mission_request tools/call IPC and drive
+                      start -> respond approve_intent -> respond approve_plan
+                    , stopping at awaiting_execution. Asserts that real
+                    request-local intent-alignment.lisp and plan.lisp
+                    artifacts are produced and that plan.lisp gets stamped
+                    with :plan_id / :version / :board_task_id by approve_plan.
+                    Never calls execute_plan; never consumes a workstation
+                    slot. Default static + fixture verification still runs.
+  --endpoint <p>    UNIX socket (or host:port) for the daemon. Defaults to
+                    \$MISSION_IPC_ENDPOINT, then \$MISSION_IPC_SOCKET, then
+                    \$HOME/.missiond/missiond.sock.
+  --session-id <id> Session id sent in tools/call _meta. Defaults to
+                    \$CLAUDE_SESSION_ID / \$SESSION_ID / a wave43-prefixed
+                    process-local id.
+  --request-id <id> Request id used for the live flow. Auto-generated with a
+                    wave43-live-ipc-smoke- prefix when omitted.
+  --cleanup         After successful validation, remove only
+                    .missiond/requests/<request_id>/ from disk. DB rows
+                    (directives, plans, board_tasks) created by the live
+                    flow remain as audit records.
+  --confirm-execute Reserved for future use. This checker explicitly refuses
+                    workstation dispatch; with --confirm-execute the run
+                    still stops at awaiting_execution and prints a notice
+                    pointing the user to mission_request directly.
 `;
 
 function fail(message) {
@@ -120,6 +148,10 @@ function parseArgs(argv) {
     dryFixture: false,
     liveIpc: false,
     confirmExecute: false,
+    cleanup: false,
+    endpoint: null,
+    sessionId: null,
+    requestId: null,
     blueprint: BLUEPRINT_PATH,
     repo: process.cwd(),
   };
@@ -136,6 +168,20 @@ function parseArgs(argv) {
       opts.liveIpc = true;
     } else if (arg === '--confirm-execute') {
       opts.confirmExecute = true;
+    } else if (arg === '--cleanup') {
+      opts.cleanup = true;
+    } else if (arg === '--endpoint') {
+      opts.endpoint = argv[++i] ?? fail('--endpoint requires a value');
+    } else if (arg.startsWith('--endpoint=')) {
+      opts.endpoint = arg.slice('--endpoint='.length);
+    } else if (arg === '--session-id') {
+      opts.sessionId = argv[++i] ?? fail('--session-id requires a value');
+    } else if (arg.startsWith('--session-id=')) {
+      opts.sessionId = arg.slice('--session-id='.length);
+    } else if (arg === '--request-id') {
+      opts.requestId = argv[++i] ?? fail('--request-id requires a value');
+    } else if (arg.startsWith('--request-id=')) {
+      opts.requestId = arg.slice('--request-id='.length);
     } else if (arg === '--blueprint') {
       opts.blueprint = argv[++i] ?? fail('--blueprint requires a value');
     } else if (arg.startsWith('--blueprint=')) {
@@ -149,6 +195,45 @@ function parseArgs(argv) {
     }
   }
   return opts;
+}
+
+function defaultIpcEndpoint() {
+  if (process.env.MISSION_IPC_ENDPOINT) return process.env.MISSION_IPC_ENDPOINT;
+  if (process.env.MISSION_IPC_SOCKET) return process.env.MISSION_IPC_SOCKET;
+  return path.join(os.homedir(), '.missiond', 'missiond.sock');
+}
+
+function defaultLiveSessionId() {
+  return (
+    process.env.CLAUDE_SESSION_ID
+    ?? process.env.SESSION_ID
+    ?? `wave43-live-ipc-smoke-${process.pid}`
+  );
+}
+
+function generateLiveRequestId() {
+  // Deterministic enough for human audit, unique enough to avoid collisions
+  // across rapid retries.
+  const stamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
+  return `wave43-live-ipc-smoke-${stamp}-${process.pid}`;
+}
+
+// Read the JSON payload out of an MCP tools/call response. The daemon emits
+// ToolResult { content: [{ type: 'text', text: <json> }], is_error? }; we
+// re-hydrate the inner object so callers can assert on review_packet etc.
+function parseToolResultPayload(toolResult, label) {
+  if (!toolResult || !Array.isArray(toolResult.content) || toolResult.content.length === 0) {
+    return { ok: false, payload: null, error: `${label}: tool result has no content` };
+  }
+  const first = toolResult.content[0];
+  const text = first?.text ?? '';
+  let payload = null;
+  try {
+    payload = JSON.parse(text);
+  } catch (err) {
+    return { ok: false, payload: null, error: `${label}: tool result is not JSON: ${err.message}` };
+  }
+  return { ok: true, payload, isError: toolResult.is_error === true };
 }
 
 // ── Blueprint structural validation ────────────────────────────────────
@@ -818,7 +903,7 @@ function runFixtures(diagnostics) {
 
 // ── main ───────────────────────────────────────────────────────────────
 
-function main() {
+async function main() {
   const opts = parseArgs(process.argv.slice(2));
   const diagnostics = [];
 
@@ -877,19 +962,41 @@ function main() {
 
   let liveIpcSummary = null;
   if (opts.liveIpc) {
-    liveIpcSummary = {
-      attempted: true,
-      executed: false,
-      reason: opts.confirmExecute
-        ? '--live-ipc --confirm-execute is reserved; this checker still refuses to dispatch a workstation slot. Use mission_request directly for a real flow.'
-        : '--live-ipc supplied without --confirm-execute; default smoke (static + fixtures) is the only verification performed.',
-    };
+    try {
+      liveIpcSummary = await runLiveIpcSmoke(opts);
+    } catch (err) {
+      liveIpcSummary = {
+        attempted: true,
+        ok: false,
+        error: err.message ?? String(err),
+        steps: [],
+      };
+    }
+    if (!liveIpcSummary.ok) {
+      diagnostics.push({
+        file: 'live-ipc',
+        message: `live IPC smoke FAILED: ${liveIpcSummary.error ?? 'see steps below'}`,
+      });
+      for (const step of liveIpcSummary.steps ?? []) {
+        if (!step.ok) {
+          diagnostics.push({
+            file: `live-ipc:${step.name}`,
+            message: step.error ?? 'step failed',
+          });
+        }
+      }
+    }
   }
 
   const ok = diagnostics.length === 0;
+  let modeLabel;
+  if (opts.dryFixture) modeLabel = 'dry-fixture';
+  else if (opts.liveIpc) modeLabel = 'static+fixture+live-ipc';
+  else modeLabel = 'static+fixture';
+
   const result = {
     ok,
-    mode: opts.dryFixture ? 'dry-fixture' : 'static+fixture',
+    mode: modeLabel,
     blueprint: opts.blueprint,
     expected_states: EXPECTED_STATES,
     expected_rules: EXPECTED_RULE_HEADS,
@@ -903,8 +1010,11 @@ function main() {
   if (opts.json) {
     console.log(JSON.stringify(result, null, 2));
   } else if (ok) {
+    const liveTag = liveIpcSummary
+      ? `, live-ipc ${liveIpcSummary.steps?.length ?? 0} steps OK on request_id=${liveIpcSummary.request_id}`
+      : '';
     console.log(
-      `v3 request-flow smoke OK (${result.mode}, ${fxSummary.totalCases} fixtures, ${EXPECTED_STATES.length} states, ${EXPECTED_DECISIONS.length} decisions)`,
+      `v3 request-flow smoke OK (${result.mode}, ${fxSummary.totalCases} fixtures, ${EXPECTED_STATES.length} states, ${EXPECTED_DECISIONS.length} decisions${liveTag})`,
     );
   } else {
     for (const d of diagnostics) {
@@ -915,6 +1025,307 @@ function main() {
   process.exit(ok ? 0 : 1);
 }
 
+// ── Live IPC smoke ─────────────────────────────────────────────────────
+//
+// Drives the real V3 mission_request flow against a running daemon:
+//   1. action=start with compiler_mode=dry_run, persist=true, write_request_file=true,
+//      review_gate_policy=manual. Asserts request.lisp + intent-alignment.lisp exist
+//      and review_packet.state = "awaiting_intent_approval".
+//   2. action=respond response=approve_intent. Asserts plan.lisp exists, contains
+//      executable routing hints (:nodes/:target/:objective), and review_packet.state =
+//      "awaiting_plan_approval".
+//   3. action=respond response=approve_plan. Asserts plan.lisp now contains
+//      :plan_id/:version/:board_task_id (post-approval write-back) and
+//      review_packet.state = "awaiting_execution" with execute_allowed=true and
+//      execute_plan in allowed_responses.
+//
+// Stops there. Never calls execute_plan; never dispatches a workstation slot.
+async function runLiveIpcSmoke(opts) {
+  const endpoint = opts.endpoint || defaultIpcEndpoint();
+  const sessionId = opts.sessionId || defaultLiveSessionId();
+  const requestId = opts.requestId || generateLiveRequestId();
+  const repoRoot = path.resolve(opts.repo);
+  const requestDir = path.join(repoRoot, '.missiond', 'requests', requestId);
+  const requestPath = path.join(requestDir, 'request.lisp');
+  const intentPath = path.join(requestDir, 'intent-alignment.lisp');
+  const planPath = path.join(requestDir, 'plan.lisp');
+
+  const summary = {
+    attempted: true,
+    ok: false,
+    endpoint,
+    session_id: sessionId,
+    request_id: requestId,
+    project_root: repoRoot,
+    request_dir: requestDir,
+    confirm_execute_refused: !!opts.confirmExecute,
+    confirm_execute_notice: opts.confirmExecute
+      ? '--confirm-execute is reserved; this checker still refuses to dispatch a workstation slot. Drive mission_request directly to execute.'
+      : null,
+    steps: [],
+    cleanup: { requested: !!opts.cleanup, removed_path: null, kept_db_rows: 'directives, plans, board_tasks rows created during the live flow remain as audit records — only the request-local Lisp directory is cleaned up.' },
+    error: null,
+  };
+
+  const callTool = (name, args) => callToolViaIpc({
+    endpoint,
+    sessionId,
+    name,
+    arguments: args,
+    timeoutMs: 60_000,
+  });
+
+  // ── Step 1: action=start ─────────────────────────────────────────────
+  const startArgs = {
+    action: 'start',
+    request_id: requestId,
+    message: 'wave43-live-ipc-smoke: prove the V3 request-flow execution gate without dispatching a workstation slot.',
+    mode: 'human_interactive',
+    cwd: repoRoot,
+    compiler_mode: 'dry_run',
+    persist: true,
+    write_request_file: true,
+    write_file: true,
+    overwrite_file: true,
+    review_gate_policy: 'manual',
+    target: 'mission_task_delegate',
+    objective: 'wave43-live-ipc-smoke harmless objective; no workstation dispatch.',
+  };
+
+  let startStep = { name: 'start', ok: false };
+  try {
+    const startRaw = await callTool('mission_request', startArgs);
+    const parsed = parseToolResultPayload(startRaw, 'start');
+    if (!parsed.ok) {
+      startStep.error = parsed.error;
+      summary.steps.push(startStep);
+      summary.error = parsed.error;
+      return summary;
+    }
+    if (parsed.isError) {
+      startStep.error = `start returned is_error=true: ${JSON.stringify(parsed.payload)}`;
+      summary.steps.push(startStep);
+      summary.error = startStep.error;
+      return summary;
+    }
+    const requestExists = fs.existsSync(requestPath);
+    const intentExists = fs.existsSync(intentPath);
+    const reviewPacket = parsed.payload?.review_packet ?? null;
+    startStep = {
+      name: 'start',
+      ok: false,
+      request_path: requestPath,
+      intent_path: intentPath,
+      request_exists: requestExists,
+      intent_exists: intentExists,
+      review_packet_state: reviewPacket?.state ?? null,
+      review_packet_artifact_kind: reviewPacket?.artifact_kind ?? null,
+      review_packet_execute_allowed: reviewPacket?.execute_allowed ?? null,
+      payload_status: parsed.payload?.status ?? null,
+    };
+    const fails = [];
+    if (!requestExists) fails.push(`request.lisp absent at ${requestPath}`);
+    if (!intentExists) fails.push(`intent-alignment.lisp absent at ${intentPath}`);
+    if (reviewPacket?.state !== 'awaiting_intent_approval') {
+      fails.push(`expected review_packet.state=awaiting_intent_approval, got ${JSON.stringify(reviewPacket?.state)}`);
+    }
+    if (fails.length === 0) {
+      startStep.ok = true;
+    } else {
+      startStep.error = fails.join('; ');
+    }
+    summary.steps.push(startStep);
+    if (!startStep.ok) {
+      summary.error = startStep.error;
+      return summary;
+    }
+  } catch (err) {
+    startStep.error = err.message ?? String(err);
+    summary.steps.push(startStep);
+    summary.error = startStep.error;
+    return summary;
+  }
+
+  // ── Step 2: action=respond response=approve_intent ──────────────────
+  let approveIntentStep = { name: 'approve_intent', ok: false };
+  try {
+    const respondRaw = await callTool('mission_request', {
+      action: 'respond',
+      request_id: requestId,
+      response: 'approve_intent',
+      cwd: repoRoot,
+      compiler_mode: 'dry_run',
+      persist: true,
+      write_file: true,
+      overwrite_file: true,
+      review_gate_policy: 'manual',
+      target: 'mission_task_delegate',
+      objective: 'wave43-live-ipc-smoke plan-authoring; no workstation dispatch.',
+    });
+    const parsed = parseToolResultPayload(respondRaw, 'approve_intent');
+    if (!parsed.ok) {
+      approveIntentStep.error = parsed.error;
+      summary.steps.push(approveIntentStep);
+      summary.error = parsed.error;
+      return summary;
+    }
+    if (parsed.isError) {
+      approveIntentStep.error = `approve_intent returned is_error=true: ${JSON.stringify(parsed.payload?.respond_result ?? parsed.payload).slice(0, 600)}`;
+      summary.steps.push(approveIntentStep);
+      summary.error = approveIntentStep.error;
+      return summary;
+    }
+    const planExists = fs.existsSync(planPath);
+    let planText = '';
+    if (planExists) planText = fs.readFileSync(planPath, 'utf8');
+    const reviewPacket = parsed.payload?.review_packet ?? null;
+    const respondResult = parsed.payload?.respond_result ?? null;
+    const planHasNodes = planText.includes(':nodes');
+    const planHasTarget = planText.includes(':target');
+    const planHasObjective = planText.includes(':objective');
+    approveIntentStep = {
+      name: 'approve_intent',
+      ok: false,
+      respond_outcome: respondResult?.outcome ?? null,
+      respond_inner_action: respondResult?.inner_action ?? null,
+      plan_path: planPath,
+      plan_exists: planExists,
+      plan_has_target: planHasTarget,
+      plan_has_objective: planHasObjective,
+      plan_has_nodes: planHasNodes,
+      review_packet_state: reviewPacket?.state ?? null,
+      review_packet_artifact_kind: reviewPacket?.artifact_kind ?? null,
+      review_packet_execute_allowed: reviewPacket?.execute_allowed ?? null,
+    };
+    const fails = [];
+    if (respondResult?.outcome !== 'dispatched') {
+      fails.push(`expected approve_intent outcome=dispatched, got ${JSON.stringify(respondResult?.outcome)}; blocked_reason=${JSON.stringify(respondResult?.blocked_reason)}`);
+    }
+    if (!planExists) fails.push(`plan.lisp absent at ${planPath} after approve_intent`);
+    if (planExists && !(planHasNodes || planHasTarget || planHasObjective)) {
+      fails.push('plan.lisp lacks executable routing hints (:nodes / :target / :objective)');
+    }
+    if (reviewPacket?.state !== 'awaiting_plan_approval') {
+      fails.push(`expected review_packet.state=awaiting_plan_approval, got ${JSON.stringify(reviewPacket?.state)}`);
+    }
+    if (fails.length === 0) {
+      approveIntentStep.ok = true;
+    } else {
+      approveIntentStep.error = fails.join('; ');
+    }
+    summary.steps.push(approveIntentStep);
+    if (!approveIntentStep.ok) {
+      summary.error = approveIntentStep.error;
+      return summary;
+    }
+  } catch (err) {
+    approveIntentStep.error = err.message ?? String(err);
+    summary.steps.push(approveIntentStep);
+    summary.error = approveIntentStep.error;
+    return summary;
+  }
+
+  // ── Step 3: action=respond response=approve_plan ────────────────────
+  let approvePlanStep = { name: 'approve_plan', ok: false };
+  try {
+    const respondRaw = await callTool('mission_request', {
+      action: 'respond',
+      request_id: requestId,
+      response: 'approve_plan',
+      cwd: repoRoot,
+    });
+    const parsed = parseToolResultPayload(respondRaw, 'approve_plan');
+    if (!parsed.ok) {
+      approvePlanStep.error = parsed.error;
+      summary.steps.push(approvePlanStep);
+      summary.error = parsed.error;
+      return summary;
+    }
+    if (parsed.isError) {
+      approvePlanStep.error = `approve_plan returned is_error=true: ${JSON.stringify(parsed.payload?.respond_result ?? parsed.payload).slice(0, 600)}`;
+      summary.steps.push(approvePlanStep);
+      summary.error = approvePlanStep.error;
+      return summary;
+    }
+    const planText = fs.existsSync(planPath) ? fs.readFileSync(planPath, 'utf8') : '';
+    const planId = extractLispKeywordString(planText, 'plan_id');
+    const boardTaskId = extractLispKeywordString(planText, 'board_task_id');
+    const versionMatch = planText.match(/:version\s+(\d+)/);
+    const reviewPacket = parsed.payload?.review_packet ?? null;
+    const respondResult = parsed.payload?.respond_result ?? null;
+    const allowed = Array.isArray(reviewPacket?.allowed_responses)
+      ? reviewPacket.allowed_responses
+      : [];
+    approvePlanStep = {
+      name: 'approve_plan',
+      ok: false,
+      respond_outcome: respondResult?.outcome ?? null,
+      respond_inner_action: respondResult?.inner_action ?? null,
+      plan_materialized: respondResult?.plan_materialized ?? false,
+      plan_id: planId,
+      plan_version: versionMatch ? Number.parseInt(versionMatch[1], 10) : null,
+      plan_board_task_id: boardTaskId,
+      review_packet_state: reviewPacket?.state ?? null,
+      review_packet_execute_allowed: reviewPacket?.execute_allowed ?? null,
+      allowed_responses: allowed,
+    };
+    const fails = [];
+    if (respondResult?.outcome !== 'dispatched') {
+      fails.push(`expected approve_plan outcome=dispatched, got ${JSON.stringify(respondResult?.outcome)}; blocked_reason=${JSON.stringify(respondResult?.blocked_reason)}`);
+    }
+    if (!planId) fails.push('plan.lisp missing :plan_id stamp after approve_plan');
+    if (!boardTaskId) fails.push('plan.lisp missing :board_task_id stamp after approve_plan');
+    if (!versionMatch) fails.push('plan.lisp missing :version stamp after approve_plan');
+    if (reviewPacket?.state !== 'awaiting_execution') {
+      fails.push(`expected review_packet.state=awaiting_execution, got ${JSON.stringify(reviewPacket?.state)}`);
+    }
+    if (reviewPacket?.execute_allowed !== true) {
+      fails.push(`expected review_packet.execute_allowed=true, got ${JSON.stringify(reviewPacket?.execute_allowed)}`);
+    }
+    if (!allowed.includes('execute_plan')) {
+      fails.push(`expected allowed_responses to include execute_plan, got ${JSON.stringify(allowed)}`);
+    }
+    if (fails.length === 0) {
+      approvePlanStep.ok = true;
+    } else {
+      approvePlanStep.error = fails.join('; ');
+    }
+    summary.steps.push(approvePlanStep);
+    if (!approvePlanStep.ok) {
+      summary.error = approvePlanStep.error;
+      return summary;
+    }
+  } catch (err) {
+    approvePlanStep.error = err.message ?? String(err);
+    summary.steps.push(approvePlanStep);
+    summary.error = approvePlanStep.error;
+    return summary;
+  }
+
+  summary.ok = true;
+
+  // ── Optional cleanup: remove only the request-local directory ───────
+  if (opts.cleanup) {
+    try {
+      // Defensive: only remove inside <repo>/.missiond/requests/.
+      const expectedPrefix = path.join(repoRoot, '.missiond', 'requests') + path.sep;
+      if (!requestDir.startsWith(expectedPrefix)) {
+        summary.cleanup.error = `refused to remove ${requestDir}; outside expected prefix`;
+      } else if (fs.existsSync(requestDir)) {
+        fs.rmSync(requestDir, { recursive: true, force: true });
+        summary.cleanup.removed_path = requestDir;
+      }
+    } catch (err) {
+      summary.cleanup.error = err.message ?? String(err);
+    }
+  }
+
+  return summary;
+}
+
 if (import.meta.url === `file://${process.argv[1]}`) {
-  main();
+  main().catch((err) => {
+    console.error(err.stack || err.message || String(err));
+    process.exit(1);
+  });
 }
