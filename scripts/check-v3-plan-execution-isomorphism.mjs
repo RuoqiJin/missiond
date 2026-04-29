@@ -31,6 +31,7 @@ const DEFAULT_FILES = {
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
+  planDagParser: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser.rs',
   planDagAcceptance: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/acceptance.rs',
   planDagClaimLease: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs',
   planDagRollback: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs',
@@ -117,6 +118,7 @@ function checkFiles(root, files) {
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade',
+    'plan_dag/parser.rs owns the DAG parser/validator core',
     'plan_dag/tests.rs does the same for the DAG scheduler regression suite',
     'plan_dag/rollback.rs owns the DAG rollback/cascade core',
     'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
@@ -300,14 +302,6 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.planDag, sources.planDag, [
-    'fn parse_node_form',
-    '"target" | "target-tool" | "tool"',
-    '"objective" => set_first(&mut objective, &value)',
-    '"timeout-ms" | "timeout_ms"',
-    '"target-project" | "target_project" | "project"',
-    '"requested-cwd" | "requested_cwd" | "cwd"',
-    '"acceptance-commands" | "acceptance_commands"',
-    '"workstation-dispatch" | "workstation_dispatch"',
     'run_workstation_dispatch',
     'mod acceptance;',
     'use acceptance::{',
@@ -319,6 +313,9 @@ function checkFiles(root, files) {
     'pub(super) use resume::action_execute_resume;',
     'pub(super) use resume::validate_resume_request;',
     'pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};',
+    'mod parser;',
+    'pub(super) use parser::{DagNode, ParsedDag};',
+    'use parser::{build_validated_dag, ReviewGateKind, FAILURE_POLICY_FAIL_FAST};',
     'mod projection;',
     'use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};',
     'mod scheduler;',
@@ -330,6 +327,32 @@ function checkFiles(root, files) {
     'use finalization::{',
     '#[cfg(test)]',
     'mod tests;',
+  ]);
+
+  requireAll(diagnostics, files.planDagParser, sources.planDagParser, [
+    'pub(in crate::handlers::knowledge) struct DagNode',
+    'pub(super) enum ReviewGateKind',
+    'pub(in crate::handlers::knowledge) struct ParsedDag',
+    'pub(super) enum DagBuildError',
+    'pub(super) fn build_validated_dag',
+    'pub(super) fn parse_plan_dag',
+    'fn scan_top_level_forms',
+    'fn parse_node_form',
+    '"target" | "target-tool" | "tool"',
+    '"objective" => set_first(&mut objective, &value)',
+    '"timeout-ms" | "timeout_ms"',
+    '"target-project" | "target_project" | "project"',
+    '"requested-cwd" | "requested_cwd" | "cwd"',
+    '"acceptance-commands" | "acceptance_commands"',
+    '"workstation-dispatch" | "workstation_dispatch"',
+    'fn scan_keyword_pairs',
+    'fn kahn_topo_sort',
+    'pub(super) const MAX_NODE_ATTEMPTS_CAP',
+    'pub(super) const MAX_RETRY_DELAY_MS',
+    'pub(super) fn acceptance_mode_kind',
+    'pub(super) fn has_acceptance_fan_in',
+    'AcceptanceRequires::parse',
+    'RollbackCascadeMode::parse',
   ]);
 
   requireAll(diagnostics, files.planDagAcceptance, sources.planDagAcceptance, [
@@ -437,6 +460,7 @@ function checkFiles(root, files) {
     'use super::claim_lease::*;',
     'use super::finalization::*;',
     'use super::mode::*;',
+    'use super::parser::*;',
     'use super::projection::*;',
     'use super::resume::*;',
     'use super::rollback::*;',
@@ -517,6 +541,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/acceptance.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs"
@@ -526,7 +551,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -725,6 +750,9 @@ use rollback::{
     run_cascade_rollback, run_rollback, RollbackCascadeMode, RollbackEvaluation, RollbackPolicy,
     RollbackStatus,
 };
+mod parser;
+pub(super) use parser::{DagNode, ParsedDag};
+use parser::{build_validated_dag, ReviewGateKind, FAILURE_POLICY_FAIL_FAST};
 mod resume;
 pub(super) use resume::action_execute_resume;
 #[cfg(test)]
@@ -747,6 +775,37 @@ use finalization::{
 };
 #[cfg(test)]
 mod tests;`);
+  writeFixture(root, DEFAULT_FILES.planDagParser, `
+pub(super) const MAX_NODE_ATTEMPTS_CAP: u32 = 3;
+pub(super) const MAX_RETRY_DELAY_MS: u64 = 60000;
+pub(in crate::handlers::knowledge) struct DagNode;
+impl DagNode {
+  pub(super) fn acceptance_mode_kind() {}
+  pub(super) fn has_acceptance_fan_in() {}
+}
+pub(super) enum ReviewGateKind { None }
+pub(in crate::handlers::knowledge) struct ParsedDag;
+pub(super) enum DagBuildError { NoNodes }
+pub(super) fn build_validated_dag() {
+  AcceptanceRequires::parse();
+  RollbackCascadeMode::parse();
+}
+pub(super) fn parse_plan_dag() {}
+fn scan_top_level_forms() {}
+fn parse_node_form() {
+  match key.as_str() {
+    "target" | "target-tool" | "tool" => {}
+    "objective" => set_first(&mut objective, &value)
+    "timeout-ms" | "timeout_ms" => {}
+    "target-project" | "target_project" | "project" => {}
+    "requested-cwd" | "requested_cwd" | "cwd" => {}
+    "acceptance-commands" | "acceptance_commands" => {}
+    "workstation-dispatch" | "workstation_dispatch" => {}
+  }
+}
+fn scan_keyword_pairs() {}
+fn kahn_topo_sort() {}
+`);
   writeFixture(root, DEFAULT_FILES.planDagAcceptance, `
 pub(super) enum AcceptanceMode { InnerStatus }
 pub(super) enum AcceptanceRequires { AllSucceeded }
@@ -854,6 +913,7 @@ use super::acceptance::*;
 use super::claim_lease::*;
 use super::finalization::*;
 use super::mode::*;
+use super::parser::*;
 use super::projection::*;
 use super::resume::*;
 use super::rollback::*;

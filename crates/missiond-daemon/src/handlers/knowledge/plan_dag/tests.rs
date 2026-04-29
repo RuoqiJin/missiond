@@ -2,6 +2,7 @@ use super::acceptance::*;
 use super::claim_lease::*;
 use super::finalization::*;
 use super::mode::*;
+use super::parser::*;
 use super::projection::*;
 use super::resume::*;
 use super::rollback::*;
@@ -10,6 +11,7 @@ use super::*;
 use chrono::TimeZone;
 use chrono::Utc;
 use missiond_core::types::PlanStatus;
+use missiond_mcp::tools::error_codes;
 use uuid::Uuid;
 
 fn fixture_plan(sexp: &str) -> Plan {
