@@ -1,12 +1,46 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 43 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave43-01-v3-request-live-ipc-smoke-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave43-01-v3-request-live-ipc-smoke-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "7e8516d33a46"
+  :files_changed
+    ["scripts/check-v3-request-flow-smoke.mjs"]
+  :acceptance_results
+    [(:command "node scripts/check-v3-request-flow-smoke.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "Daemon-free fixture-only mode unchanged from wave42-01: 9 fixtures pass.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs"
+              :exit_code 0 :ok true
+              :note "Default static + fixture mode unchanged from wave42-01: blueprint review-packet/review-response parse, request handler + MCP wire-string pinning, 9 fixtures. Still daemon-free.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs --live-ipc --request-id wave43-live-ipc-smoke-v0 --cleanup"
+              :exit_code 0 :ok true
+              :note "Live IPC smoke called the running MissionD daemon over /Users/jinchen/.missiond/missiond.sock. Three steps OK: (1) action=start with mode=human_interactive, compiler_mode=dry_run, persist=true, write_request_file=true, write_file=true, overwrite_file=true, review_gate_policy=manual, target=mission_task_delegate, harmless objective produced request.lisp + intent-alignment.lisp and review_packet.state=awaiting_intent_approval; (2) action=respond response=approve_intent dispatched mission_directive::approve+unified_entry::plan_compile, plan.lisp written with :nodes/:target/:objective hints, review_packet.state=awaiting_plan_approval; (3) action=respond response=approve_plan dispatched mission_plan::approve, plan.lisp materialized with :plan_id (UUID), :version (2), :board_task_id (UUID), review_packet.state=awaiting_execution + execute_allowed=true + allowed_responses=[execute_plan, ask_question]. --cleanup removed only the request-local directory.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs --live-ipc --request-id wave43-live-ipc-smoke-v0-json --cleanup --json"
+              :exit_code 0 :ok true
+              :note "Same three-step live IPC path with --json output; structured live_ipc summary includes endpoint, session_id, request_id, project_root, request_dir, per-step assertions (request_exists/intent_exists/plan_has_nodes/plan_has_target/plan_has_objective, plan_id/plan_version/plan_board_task_id, review_packet state + execute_allowed + allowed_responses), and cleanup.removed_path. Cleanup removes only the request-local directory; DB rows remain as audit records.")
+     (:command "node scripts/check-v3-code-isomorphism-complete.mjs"
+              :exit_code 0 :ok true
+              :note "Aggregate gate: 6 graduated surfaces validated + 7 per-surface checkers spawned. The aggregate path runs check-v3-request-flow-smoke.mjs in default static + fixture mode (no --live-ipc), so the aggregate stays deterministic and daemon-free.")
+     (:command "node scripts/check-lisp-blueprint-compression.mjs"
+              :exit_code 0 :ok true
+              :note "Blueprint compression contract still holds; no changes to v1 manifest or v3 section structure.")
+     (:command "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+              :exit_code 0 :ok true
+              :note "Architecture-lisp check OK on the unchanged blueprint.")
+     (:command "cargo test -p missiond-daemon handlers::knowledge::request::tests"
+              :exit_code 0 :ok true
+              :note "79 daemon request handler tests pass (1727 filtered out). No Rust changes were necessary: live IPC exposed no drift between the V3 blueprint contract and the request.rs implementation.")
+     (:command "cargo test -p missiond-mcp test_directive_plan_workflow_surfaces_registered"
+              :exit_code 0 :ok true
+              :note "MCP surfaces-registered smoke passes; mission_request schema unchanged.")
+     (:command "perl -ne 'exit 1 if /\\x00/' scripts/check-v3-request-flow-smoke.mjs .missiond/v3/missiond-blueprint.lisp crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No NUL bytes in any of the four declared write-scope files.")
+     (:command "git diff --check -- scripts/check-v3-request-flow-smoke.mjs .missiond/v3/missiond-blueprint.lisp crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No whitespace-error or conflict markers in the write-scope files.")]
+  :notes "Adds an opt-in --live-ipc mode to scripts/check-v3-request-flow-smoke.mjs that drives the user-facing V3 request flow through a running MissionD daemon. The wave42-01 default + --dry-fixture behavior is preserved unchanged so the aggregate gate stays deterministic and daemon-free.\n\nLive IPC call sequence and validated artifacts/states (per pattern-card opt-in-live-ipc-only + stop-before-execution):\n  Step 1 — mission_request action=start.\n    Args: request_id (caller-supplied or auto wave43-live-ipc-smoke-<stamp>-<pid>), message (harmless objective), mode=human_interactive, cwd=<repo root>, compiler_mode=dry_run, persist=true, write_request_file=true, write_file=true, overwrite_file=true, review_gate_policy=manual, target=mission_task_delegate, objective.\n    Asserts: request.lisp exists at .missiond/requests/<rid>/request.lisp; intent-alignment.lisp exists at .missiond/requests/<rid>/intent-alignment.lisp; review_packet.state=awaiting_intent_approval.\n  Step 2 — mission_request action=respond response=approve_intent.\n    Asserts: respond_result.outcome=dispatched (not blocked); inner_action=mission_directive::approve+unified_entry::plan_compile; plan.lisp exists; plan.lisp contains executable routing hints (at least one of :nodes / :target / :objective; in practice the dry_run scaffold writes all three); review_packet.state=awaiting_plan_approval.\n  Step 3 — mission_request action=respond response=approve_plan.\n    Asserts: respond_result.outcome=dispatched; inner_action=mission_plan::approve; plan.lisp post-approval write-back stamped with :plan_id (parsed via shared extractLispKeywordString), :version (\\d+), :board_task_id (lisp string); review_packet.state=awaiting_execution; review_packet.execute_allowed=true; review_packet.allowed_responses contains 'execute_plan'.\n  Stop. The checker never calls response=execute_plan; the point is to prove the execution gate, not consume a workstation slot. --confirm-execute is reserved as an explicit guardrail flag; the checker still refuses workstation dispatch and points the user to mission_request directly when it is supplied.\n\nLisp/code drift found: none. The live IPC sequence ran end-to-end on /Users/jinchen/.missiond/missiond.sock against the daemon at HEAD: every assertion passed on the first try. plan.lisp received executable :target/:objective/:nodes hints from the dry_run plan compile; approve_plan's materialization stamped :plan_id (UUID), :version (2), :board_task_id (UUID) back into request-local plan.lisp via enrich_materialized_plan_lisp, exactly as the V3 blueprint's plan :materialization-rule promises; review_packet derivation in derive_review_packet returned the awaiting_execution state plus execute_plan in allowed_responses, exactly as the review-packet :state-derivation rules and review-response :decisions list demand. Therefore no edits to .missiond/v3/missiond-blueprint.lisp or crates/missiond-daemon/src/handlers/knowledge/request.rs or crates/missiond-mcp/src/tools/knowledge/request.rs were required (per requirement #8 and pattern-card lisp-first-gap-fix).\n\nSide effects and cleanup behavior (per pattern-card bounded-live-side-effects):\n  - Filesystem (request-local): .missiond/requests/<request_id>/{request.lisp, intent-alignment.lisp, plan.lisp, events/} are created during the live flow. With --cleanup the checker removes only that request-local directory after all assertions pass, with a defensive prefix check (refuses to remove anything outside <repo>/.missiond/requests/). Without --cleanup, the directory is left in place for human audit.\n  - Filesystem (compatibility writers): the brief requires write_file=true on the start call, which fires the directive + plan compatibility writers — these write to .missiond/alignment/<topic>/intent-alignment.lisp and .missiond/plans/<plan_id>/PLAN.lisp respectively. These paths are NOT cleaned up by --cleanup (the pattern card explicitly limits cleanup to the request-local directory) and are not tracked in git, so they accumulate as audit records in the working tree until the operator removes them. The smoke checker does not emit additional content there beyond what the daemon's existing compat-writers already produce.\n  - Database: each invocation creates one directive (intent-alignment), one plan (with :version 2 — version 1 is the dry_run scaffold, version 2 is the post-approval materialized draft), and one BoardTask anchor. These rows remain as audit records — only the request-local Lisp directory is cleaned up. The JSON summary's cleanup.kept_db_rows field documents this explicitly.\n  - IPC: the checker reuses scripts/task-runner-submit-dispatch.mjs's exported callToolViaIpc helper instead of duplicating the JSON-RPC tools/call socket protocol. defaultIpcEndpoint and defaultLiveSessionId are inlined locally because the helper does not export them.\n\nAggregate gate stays daemon-free: scripts/check-v3-code-isomorphism-complete.mjs spawns scripts/check-v3-request-flow-smoke.mjs without arguments, so the aggregate path runs only static + fixture verification. --live-ipc is opt-in and does not appear in the aggregate's PER_SURFACE_CHECKERS invocation.\n\nAcceptance: every command listed in the task contract exits 0 (see :acceptance_results). The two --live-ipc invocations in the acceptance set use distinct request_ids (wave43-live-ipc-smoke-v0 and wave43-live-ipc-smoke-v0-json) so they do not collide on the request-local directory; both end with --cleanup and successful directory removal."
+  :verification_tier smoke)
