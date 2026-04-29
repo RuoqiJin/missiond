@@ -4,6 +4,7 @@ use super::finalization::*;
 use super::projection::*;
 use super::resume::*;
 use super::rollback::*;
+use super::scheduler::*;
 use super::*;
 use chrono::TimeZone;
 use chrono::Utc;

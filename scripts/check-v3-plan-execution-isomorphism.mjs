@@ -37,6 +37,7 @@ const DEFAULT_FILES = {
   planDagResume: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs',
   planDagProjection: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs',
   planDagFinalization: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs',
+  planDagScheduler: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs',
   planDagTests: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs',
   unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -120,6 +121,7 @@ function checkFiles(root, files) {
     'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
     'plan_dag/projection.rs owns the DAG response projection core',
     'plan_dag/finalization.rs owns the DAG finalization projection core',
+    'plan_dag/scheduler.rs owns the DAG scheduler projection core',
     'execute can derive target_source=plan_hint from plan.sexp_text',
     'DAG execution parses node-local Lisp hints',
     'node scripts/check-v3-plan-execution-isomorphism.mjs',
@@ -304,8 +306,6 @@ function checkFiles(root, files) {
     '"requested-cwd" | "requested_cwd" | "cwd"',
     '"acceptance-commands" | "acceptance_commands"',
     '"workstation-dispatch" | "workstation_dispatch"',
-    'node_args.insert("timeout_secs".to_string()',
-    'build_internal_dispatch_args(',
     'run_workstation_dispatch',
     'mod acceptance;',
     'use acceptance::{',
@@ -319,6 +319,8 @@ function checkFiles(root, files) {
     'pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};',
     'mod projection;',
     'use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};',
+    'mod scheduler;',
+    'use scheduler::{',
     'mod finalization;',
     'pub(super) use finalization::parse_finalize_plan;',
     'use finalization::{',
@@ -406,6 +408,17 @@ function checkFiles(root, files) {
     'pub(super) fn build_distill_block',
   ]);
 
+  requireAll(diagnostics, files.planDagScheduler, sources.planDagScheduler, [
+    'pub(super) fn compute_concurrency_plan',
+    'pub(super) fn parse_max_parallel_nodes',
+    'pub(super) fn propagate_taint',
+    'pub(super) struct NodeInnerArgs',
+    'pub(super) fn build_node_inner_args',
+    'node_args.insert("timeout_secs".to_string()',
+    'build_internal_dispatch_args',
+    'ParsedPlanHints::default()',
+  ]);
+
   requireAll(diagnostics, files.planDagTests, sources.planDagTests, [
     'use super::*;',
     'use super::acceptance::*;',
@@ -414,6 +427,7 @@ function checkFiles(root, files) {
     'use super::projection::*;',
     'use super::resume::*;',
     'use super::rollback::*;',
+    'use super::scheduler::*;',
     'fn parse_plan_dag_extracts_explicit_node_forms',
     'fn build_validated_dag_accepts_valid_chain',
     'fn validate_resume_request_routes_unique_paused_node',
@@ -496,8 +510,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -703,6 +718,10 @@ pub(super) use resume::validate_resume_request;
 pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};
 mod projection;
 use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};
+mod scheduler;
+use scheduler::{
+    build_node_inner_args, compute_concurrency_plan, parse_max_parallel_nodes, propagate_taint,
+};
 mod finalization;
 pub(super) use finalization::parse_finalize_plan;
 use finalization::{
@@ -792,6 +811,17 @@ fn unchanged_status_label() {}
 pub(super) fn build_finalization_block() {}
 pub(super) fn build_distill_block() {}
 `);
+  writeFixture(root, DEFAULT_FILES.planDagScheduler, `
+pub(super) fn compute_concurrency_plan() {}
+pub(super) fn parse_max_parallel_nodes() {}
+pub(super) fn propagate_taint() {}
+pub(super) struct NodeInnerArgs;
+pub(super) fn build_node_inner_args() {
+  node_args.insert("timeout_secs".to_string(), Value::Number(secs.into()));
+  build_internal_dispatch_args();
+  ParsedPlanHints::default();
+}
+`);
   writeFixture(root, DEFAULT_FILES.planDagTests, `
 use super::*;
 use super::acceptance::*;
@@ -800,6 +830,7 @@ use super::finalization::*;
 use super::projection::*;
 use super::resume::*;
 use super::rollback::*;
+use super::scheduler::*;
 fn parse_plan_dag_extracts_explicit_node_forms() {}
 fn build_validated_dag_accepts_valid_chain() {}
 fn validate_resume_request_routes_unique_paused_node() {}
