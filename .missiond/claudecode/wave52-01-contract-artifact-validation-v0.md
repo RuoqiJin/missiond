@@ -124,4 +124,3 @@ node scripts/verify-task-contract.mjs .missiond/tasks/wave52/wave52-01-contract-
 - `How commit-specific artifact bytes are validated.`
 - `Evidence that wave51 commit 7f462d17 now fails for invalid session-trace.`
 - `Acceptance command results.`
-

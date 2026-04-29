@@ -41,4 +41,3 @@ node scripts/task-scope-guard.mjs --task <task.lisp> --mode staged
 MISSIOND_TASK_CONTRACT=<task.lisp> git commit -m "<message>"
 node scripts/verify-task-contract.mjs <task.lisp>
 ```
-
