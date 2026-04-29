@@ -1,0 +1,87 @@
+;; Wave 42 task contract.
+
+(task wave42-01-v3-request-flow-smoke-v0
+  :schema "missiond.task-contract.v1"
+  :title "v3 request flow smoke v0"
+  :kind code-alignment
+  :status ready
+  :owner "claudecode"
+  :depends-on []
+  :dispatch-strategy "fresh-code-alignment"
+  :verification-tier smoke
+  :dispatch-group "A"
+  :estimated-minutes 50
+  :heartbeat-minutes 10
+  :session-trace-writable true
+  :context-atlas-path ".missiond/tasks/wave42/context-atlas.lisp"
+  :pattern-card-path ".missiond/tasks/wave42/pattern-cards.lisp"
+  :router-policy-path ".missiond/router/router-policy-v1.lisp"
+  :router-backend-registry-path ".missiond/router/router-backend-registry-v1.lisp"
+  :goal "Add a V3 request-flow smoke checker that proves the user-facing MissionD path the user actually cares about: a request produces request-local Lisp review artifacts, approve_intent leads to plan.lisp, approve_plan reaches awaiting_execution, and execute_plan remains an explicit execution gate. This should graduate the post-wave41 state from per-surface code-isomorphism to an executable cross-surface flow pin."
+
+  :write-scope
+    [".missiond/v3/missiond-blueprint.lisp"
+     "scripts/check-v3-request-flow-smoke.mjs"
+     "scripts/check-v3-code-isomorphism-complete.mjs"
+     "scripts/check-lisp-blueprint-compression.mjs"
+     "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+     "crates/missiond-mcp/src/tools/knowledge/request.rs"]
+
+  :must-not-touch
+    ["packages/**"
+     ".missiond/v1/**"
+     ".missiond/v2/**"
+     ".missiond/research/**"
+     ".missiond/router/**"
+     ".missiond/tasks/wave28/**"
+     ".missiond/tasks/wave29/**"
+     ".missiond/tasks/wave30/**"
+     ".missiond/tasks/wave31/**"
+     ".missiond/tasks/wave32/**"
+     ".missiond/tasks/wave33/**"
+     ".missiond/tasks/wave34/**"
+     ".missiond/tasks/wave35/**"
+     ".missiond/tasks/wave36/**"
+     ".missiond/tasks/wave37/**"
+     ".missiond/tasks/wave38/**"
+     ".missiond/tasks/wave39/**"
+     ".missiond/tasks/wave40/**"
+     ".missiond/tasks/wave41/**"
+     ".missiond/tasks/wave42/manifest.lisp"
+     ".missiond/tasks/wave42/context-atlas.lisp"
+     ".missiond/tasks/wave42/pattern-cards.lisp"
+     ".missiond/tasks/wave42/wave42-*.lisp"
+     ".missiond/claudecode/**"]
+
+  :requirements
+    ["Start from .missiond/v3/missiond-blueprint.lisp. Treat the V3 unified-entry/review-packet/review-response clauses as the source of truth. If you find drift, update the Lisp contract first and then the checker/code to match."
+     "Add scripts/check-v3-request-flow-smoke.mjs. It must be deterministic, read-only by default, support --json and --dry-fixture, and validate the cross-surface user flow from request-local Lisp artifacts rather than only string needles. Use the shared Lisp parser where practical."
+     "Dry fixtures must cover at least: request-only received/default packet; intent-alignment.lisp present with :directive_id + :version -> awaiting_intent_approval; plan.lisp present before approval -> awaiting_plan_approval; plan.lisp with :plan_id/:version/:board_task_id plus an approve_plan review event -> awaiting_execution with execute_plan allowed; execute_plan event -> execute_requested/observe; malformed/missing persisted refs produce a failure diagnostic."
+     "Default acceptance must not dispatch a real workstation task. If you add an optional --live-ipc mode, keep it opt-in and stop before real execution unless a second explicit flag is supplied."
+     "Add the new smoke checker to the V3 compression-contract :checks list and to scripts/check-v3-code-isomorphism-complete.mjs as a cross-surface check. The aggregate gate must still run every existing per-surface checker."
+     "Update scripts/check-lisp-blueprint-compression.mjs narrowly if it pins the compression-contract command set."
+     "Only edit crates/missiond-daemon/src/handlers/knowledge/request.rs or crates/missiond-mcp/src/tools/knowledge/request.rs if the new smoke exposes real drift. Keep fixes surgical and backed by the existing request.rs tests."]
+
+  :acceptance
+    ["node scripts/check-v3-request-flow-smoke.mjs --dry-fixture"
+     "node scripts/check-v3-request-flow-smoke.mjs"
+     "node scripts/check-v3-code-isomorphism-complete.mjs"
+     "node scripts/check-v3-request-lisp-isomorphism.mjs"
+     "node scripts/check-lisp-blueprint-compression.mjs"
+     "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+     "cargo test -p missiond-daemon handlers::knowledge::request::tests"
+     "cargo test -p missiond-mcp test_directive_plan_workflow_surfaces_registered"
+     "perl -ne 'exit 1 if /\\x00/' .missiond/v3/missiond-blueprint.lisp scripts/check-v3-request-flow-smoke.mjs scripts/check-v3-code-isomorphism-complete.mjs scripts/check-lisp-blueprint-compression.mjs crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+     "git diff --check -- .missiond/v3/missiond-blueprint.lisp scripts/check-v3-request-flow-smoke.mjs scripts/check-v3-code-isomorphism-complete.mjs scripts/check-lisp-blueprint-compression.mjs crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"]
+
+  :commit
+    (:required true
+     :message "feat(v3): add request-flow smoke gate"
+     :scope-check write-scope-only)
+
+  :report
+    ["Commit hash."
+     "What request-flow states the new checker pins."
+     "Whether any Lisp/code drift was found and how it was resolved."
+     "How the checker avoids real workstation dispatch by default."
+     "Acceptance command results."])
