@@ -1,6 +1,16 @@
-use chrono::{DateTime, Utc};
+use crate::state::AppState;
+use anyhow::{anyhow, Result};
+use chrono::{DateTime, SecondsFormat, Utc};
+use missiond_core::event::events::ExecutionEvent;
+use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
+use serde_json::{json, Value};
 
-use super::log_surface::{parse_kv_pairs, sexp::Node, LogFile};
+use super::log_surface::{
+    allocate_id, append_to_block, companion_path, emit_execution_event, lisp_quote_string, now_iso,
+    parse_kv_pairs, project_or_target_project, read_dispatch_metadata_from_log, read_log_file,
+    require_str, resolve_project_root, sexp::Node, touch_last_updated, update_kv_in_node,
+    write_log_file, Counter, LogFile,
+};
 
 pub(super) const DEFAULT_LEASE_SECS: i64 = 1800;
 pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600;
@@ -109,4 +119,328 @@ pub(super) fn find_claim_node<'a>(file: &'a LogFile, claim_id: &str) -> Option<&
         }
     }
     None
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// action: claim / heartbeat / release
+// ───────────────────────────────────────────────────────────────────────
+
+pub(super) async fn action_claim(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let execution_id = match require_str(args, "execution_id") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let claimer = match require_str(args, "claimer_name") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let scope = match require_str(args, "scope") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let phase = args.get("phase").and_then(|v| v.as_str()).unwrap_or("");
+    let lease_secs = args
+        .get("lease_secs")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_LEASE_SECS)
+        .clamp(60, MAX_LEASE_SECS);
+
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
+    let path = companion_path(&root, execution_id);
+    let mut file = read_log_file(&path)?;
+
+    // Conflict check: any active claim with overlapping scope.
+    let now = Utc::now();
+    let claims = parse_claims(&file);
+    for c in &claims {
+        if c.status != "active" {
+            continue;
+        }
+        // Treat lease-expired claims as soft-released for conflict purposes
+        // (still surfaced in audit as stale).
+        if let Some(exp) = c.lease_expires_at.as_deref().and_then(parse_iso) {
+            if exp < now {
+                continue;
+            }
+        }
+        if scopes_overlap(&c.scope, scope) {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    "CLAIM_CONFLICT",
+                    format!(
+                        "scope `{}` overlaps active claim {} held by `{}` over `{}`",
+                        scope, c.id, c.claimer, c.scope
+                    ),
+                )
+                .with_suggestion(
+                    "wait for release/heartbeat expiry, narrow scope, or contact the claimer",
+                ),
+            ));
+        }
+    }
+
+    let claim_id = allocate_id(&mut file, Counter::Claim)?;
+    let acquired = now_iso();
+    let expires =
+        (now + chrono::Duration::seconds(lease_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
+    let entry = format!(
+        "    ({id}\n      :claimer {claimer}\n      :scope {scope}\n      :phase {phase}\n      :acquired-at {acquired}\n      :lease-expires-at {expires}\n      :heartbeat-at {acquired}\n      :status \"active\")",
+        id = claim_id,
+        claimer = lisp_quote_string(claimer),
+        scope = lisp_quote_string(scope),
+        phase = lisp_quote_string(phase),
+        acquired = lisp_quote_string(&acquired),
+        expires = lisp_quote_string(&expires),
+    );
+    append_to_block(&mut file, "claims", &entry)?;
+    touch_last_updated(&mut file)?;
+    write_log_file(&path, &file)?;
+
+    // Surface the workstation-dispatch trio on the live event so consumers
+    // can correlate this claim against the dispatch context without
+    // re-loading the companion log. We read the trio from the same
+    // post-write `file` handle so the meta block we observe is the one
+    // just persisted (the claim append doesn't touch meta beyond
+    // `:last-updated-at`, which we ignore here).
+    let meta = read_dispatch_metadata_from_log(&file);
+    emit_execution_event(
+        state,
+        ExecutionEvent::Claimed {
+            execution_id: execution_id.to_string(),
+            claim_id: claim_id.clone(),
+            claimer: claimer.to_string(),
+            scope: scope.to_string(),
+            phase: phase.to_string(),
+            lease_expires_at: expires.clone(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
+        },
+    )
+    .await;
+
+    Ok(ToolResult::json_pretty(&json!({
+        "status": "claimed",
+        "claim_id": claim_id,
+        "claimer": claimer,
+        "scope": scope,
+        "phase": phase,
+        "acquired_at": acquired,
+        "lease_expires_at": expires,
+    })))
+}
+
+pub(super) async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let execution_id = match require_str(args, "execution_id") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let claim_id = match require_str(args, "claim_id") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let claimer = match require_str(args, "claimer_name") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let lease_secs = args
+        .get("lease_secs")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(DEFAULT_LEASE_SECS)
+        .clamp(60, MAX_LEASE_SECS);
+
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
+    let path = companion_path(&root, execution_id);
+    let mut file = read_log_file(&path)?;
+
+    let claim_node = match find_claim_node(&file, claim_id) {
+        Some(n) => n.clone(),
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("claim {} not found", claim_id),
+                )
+                .with_suggestion("use action=status to list active claims"),
+            ))
+        }
+    };
+
+    let kvs = parse_kv_pairs(&file.src, claim_node.children());
+    let owner = kvs
+        .get("claimer")
+        .or_else(|| kvs.get("agent"))
+        .cloned()
+        .unwrap_or_default();
+    if owner.trim_matches('"') != claimer {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "CLAIM_WRONG_OWNER",
+                format!("claim {} owned by `{}`, not `{}`", claim_id, owner, claimer),
+            )
+            .with_suggestion("use the original claimer_name or run action=audit"),
+        ));
+    }
+
+    let now = Utc::now();
+    let now_s = now.to_rfc3339_opts(SecondsFormat::Secs, true);
+    let expires =
+        (now + chrono::Duration::seconds(lease_secs)).to_rfc3339_opts(SecondsFormat::Secs, true);
+
+    update_kv_in_node(
+        &mut file,
+        &claim_node,
+        "heartbeat-at",
+        &lisp_quote_string(&now_s),
+    )?;
+    let claim_node2 = find_claim_node(&file, claim_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("claim node vanished after heartbeat update"))?;
+    update_kv_in_node(
+        &mut file,
+        &claim_node2,
+        "lease-expires-at",
+        &lisp_quote_string(&expires),
+    )?;
+    touch_last_updated(&mut file)?;
+    write_log_file(&path, &file)?;
+
+    // Wave 20 / Task 09 — surface the workstation-dispatch trio on the
+    // live event so a long-lived heartbeat stream stays correlatable
+    // against the dispatch context. The same projection rationale as
+    // `action_claim` / `action_complete`: read the trio from the
+    // post-write `file` handle so the meta block we observe is the one
+    // just persisted.
+    let meta = read_dispatch_metadata_from_log(&file);
+    emit_execution_event(
+        state,
+        ExecutionEvent::Heartbeat {
+            execution_id: execution_id.to_string(),
+            claim_id: claim_id.to_string(),
+            claimer: claimer.to_string(),
+            heartbeat_at: now_s.clone(),
+            lease_expires_at: expires.clone(),
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
+        },
+    )
+    .await;
+
+    Ok(ToolResult::json_pretty(&json!({
+        "status": "heartbeat",
+        "claim_id": claim_id,
+        "heartbeat_at": now_s,
+        "lease_expires_at": expires,
+    })))
+}
+
+pub(super) async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let execution_id = match require_str(args, "execution_id") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let claim_id = match require_str(args, "claim_id") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let claimer = match require_str(args, "claimer_name") {
+        Ok(s) => s,
+        Err(r) => return Ok(r),
+    };
+    let summary = args.get("summary").and_then(|v| v.as_str()).unwrap_or("");
+
+    let root = resolve_project_root(state, project_or_target_project(args)).await?;
+    let path = companion_path(&root, execution_id);
+    let mut file = read_log_file(&path)?;
+
+    let claim_node = match find_claim_node(&file, claim_id) {
+        Some(n) => n.clone(),
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::NOT_FOUND,
+                    format!("claim {} not found", claim_id),
+                )
+                .with_suggestion("use action=status to list active claims"),
+            ))
+        }
+    };
+
+    let kvs = parse_kv_pairs(&file.src, claim_node.children());
+    let owner = kvs
+        .get("claimer")
+        .or_else(|| kvs.get("agent"))
+        .cloned()
+        .unwrap_or_default();
+    if owner.trim_matches('"') != claimer {
+        return Ok(ToolResult::structured_error(
+            ToolError::new(
+                "CLAIM_WRONG_OWNER",
+                format!("claim {} owned by `{}`, not `{}`", claim_id, owner, claimer),
+            )
+            .with_suggestion("use the original claimer_name or run action=audit"),
+        ));
+    }
+
+    let now = now_iso();
+    update_kv_in_node(
+        &mut file,
+        &claim_node,
+        "released-at",
+        &lisp_quote_string(&now),
+    )?;
+    let claim_node2 = find_claim_node(&file, claim_id)
+        .cloned()
+        .ok_or_else(|| anyhow!("claim node vanished after release update"))?;
+    update_kv_in_node(
+        &mut file,
+        &claim_node2,
+        "status",
+        &lisp_quote_string("released"),
+    )?;
+    if !summary.is_empty() {
+        let claim_node3 = find_claim_node(&file, claim_id)
+            .cloned()
+            .ok_or_else(|| anyhow!("claim node vanished after status update"))?;
+        update_kv_in_node(
+            &mut file,
+            &claim_node3,
+            "summary",
+            &lisp_quote_string(summary),
+        )?;
+    }
+    touch_last_updated(&mut file)?;
+    write_log_file(&path, &file)?;
+
+    // Wave 20 / Task 09 — same dispatch-metadata projection rationale as
+    // `action_claim`. `Released` completes the pair with `Claimed`, so
+    // claim-lifetime aggregators can join the two events without
+    // re-loading the companion log.
+    let meta = read_dispatch_metadata_from_log(&file);
+    emit_execution_event(
+        state,
+        ExecutionEvent::Released {
+            execution_id: execution_id.to_string(),
+            claim_id: claim_id.to_string(),
+            claimer: claimer.to_string(),
+            released_at: now.clone(),
+            summary: if summary.is_empty() {
+                None
+            } else {
+                Some(summary.to_string())
+            },
+            dispatch_strategy: meta.dispatch_strategy,
+            target_project: meta.target_project,
+            requested_cwd: meta.requested_cwd,
+        },
+    )
+    .await;
+
+    Ok(ToolResult::json_pretty(&json!({
+        "status": "released",
+        "claim_id": claim_id,
+        "released_at": now,
+        "summary": summary,
+    })))
 }

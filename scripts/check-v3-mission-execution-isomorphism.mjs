@@ -73,9 +73,6 @@ const DAEMON_NEEDLES = [
   'use self::log_surface::{',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
-  'async fn action_claim',
-  'async fn action_heartbeat',
-  'async fn action_release',
   'async fn action_preflight_commit',
 ];
 
@@ -128,6 +125,9 @@ const CLAIM_LEASE_NEEDLES = [
   'pub(super) fn parse_claims',
   'pub(super) fn parse_iso',
   'pub(super) fn find_claim_node',
+  'pub(super) async fn action_claim',
+  'pub(super) async fn action_heartbeat',
+  'pub(super) async fn action_release',
 ];
 
 const COMPLETION_AUDIT_NEEDLES = [
@@ -440,9 +440,6 @@ use self::log_surface::{
 };
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
-async fn action_claim() {}
-async fn action_heartbeat() {}
-async fn action_release() {}
 async fn action_preflight_commit() {}
 `;
 }
@@ -497,6 +494,9 @@ pub(super) struct ClaimRecord {}
 pub(super) fn parse_claims() {}
 pub(super) fn parse_iso() {}
 pub(super) fn find_claim_node() {}
+pub(super) async fn action_claim() {}
+pub(super) async fn action_heartbeat() {}
+pub(super) async fn action_release() {}
 `;
 }
 
