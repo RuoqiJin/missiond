@@ -32,6 +32,7 @@ use crate::state::AppState;
 
 mod claim_lease;
 mod completion_audit;
+mod completion_gates;
 mod log_surface;
 mod preflight;
 mod task_verifier;
@@ -43,12 +44,15 @@ use self::claim_lease::{action_claim, action_heartbeat, action_release};
 use self::completion_audit::{action_audit, action_complete, action_repair};
 #[cfg(test)]
 use self::completion_audit::{
-    audit_scoped_commit_handoff, collect_string_list, enforce_scoped_commit_completion,
-    enforce_task_contract_completion, normalize_commit_status, normalize_task_run_verifier_status,
+    collect_string_list, normalize_commit_status, normalize_task_run_verifier_status,
     normalize_verifier_status, parse_completions, parse_string_list, render_string_list,
     summarize_durability, CompletionRecord, FINDING_COMMIT_BLOCKED_NO_BLOCKER,
     FINDING_COMMIT_STATUS_NO_HASH, FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES,
     VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
+};
+#[cfg(test)]
+use self::completion_gates::{
+    audit_scoped_commit_handoff, enforce_scoped_commit_completion, enforce_task_contract_completion,
 };
 use self::log_surface::{
     action_decide, action_deviate, action_issue, action_list, action_open, action_status,

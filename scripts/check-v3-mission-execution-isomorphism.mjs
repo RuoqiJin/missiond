@@ -13,6 +13,8 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
   - mission_execution-claim-lease: claim/heartbeat/release and scope conflict rules
   - mission_execution-completion-audit: completion metadata, scoped commit audit,
     task contract verification, auto-verifier, repair, and audit
+  - agent_execution/completion_gates.rs: scoped-commit and task-contract
+    completion enforcement gates used by the completion-audit surface
   - agent_execution/preflight.rs: read-only pre-commit git/status and task-contract
     scope projection used by the completion-audit surface
   - agent_execution/task_verifier.rs: read-only report-contract/shared-memory
@@ -27,6 +29,8 @@ const DEFAULT_FILES = {
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   completionAudit:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
+  completionGates:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_gates.rs',
   preflight: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
   taskVerifier:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
@@ -46,7 +50,7 @@ const SURFACES = [
   },
   {
     name: 'mission_execution-completion-audit',
-    noteNeedles: ['VALID_COMMIT_STATUSES', 'enforce_scoped_commit_completion', 'agent_execution/task_verifier.rs', 'agent_execution/preflight.rs'],
+    noteNeedles: ['VALID_COMMIT_STATUSES', 'agent_execution/completion_gates.rs', 'agent_execution/task_verifier.rs', 'agent_execution/preflight.rs'],
   },
 ];
 
@@ -57,6 +61,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_gates.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
   'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
@@ -81,6 +86,7 @@ const DAEMON_NEEDLES = [
   'mod log_surface',
   'mod claim_lease',
   'mod completion_audit',
+  'mod completion_gates',
   'mod preflight',
   'mod task_verifier',
   '#[cfg(test)]',
@@ -173,15 +179,22 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) struct CompletionRecord',
   'pub(super) fn parse_completions',
   'pub(super) fn summarize_durability',
-  'pub(super) fn check_id_monotonic',
-  'pub(super) fn audit_scoped_commit_handoff',
-  'pub(super) fn enforce_scoped_commit_completion',
-  'pub(super) fn enforce_task_contract_completion',
   'pub(super) fn parse_string_list',
   'pub(super) async fn action_complete',
   'pub(super) async fn action_audit',
   'pub(super) async fn action_repair',
   'fn rebuild_derived_indexes',
+];
+
+const COMPLETION_GATES_NEEDLES = [
+  'pub(super) fn check_id_monotonic',
+  'pub(super) fn audit_scoped_commit_handoff',
+  'pub(super) fn enforce_scoped_commit_completion',
+  'pub(super) fn enforce_task_contract_completion',
+  'COMMIT_HASH_REQUIRED',
+  'SCOPED_COMMIT_VIOLATION',
+  'TASK_CONTRACT_MALFORMED',
+  'CLAIM_SCOPE_MISSING',
 ];
 
 const TASK_VERIFIER_NEEDLES = [
@@ -299,6 +312,7 @@ function checkFiles(root, files) {
     sources.completionAudit,
     COMPLETION_AUDIT_NEEDLES,
   );
+  requireAll(diagnostics, files.completionGates, sources.completionGates, COMPLETION_GATES_NEEDLES);
   requireAll(diagnostics, files.preflight, sources.preflight, PREFLIGHT_NEEDLES);
   requireAll(diagnostics, files.taskVerifier, sources.taskVerifier, TASK_VERIFIER_NEEDLES);
   requireAll(diagnostics, files.mcp, sources.mcp, MCP_NEEDLES);
@@ -337,6 +351,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
     [DEFAULT_FILES.completionAudit]: buildGoodCompletionAudit(),
+    [DEFAULT_FILES.completionGates]: buildGoodCompletionGates(),
     [DEFAULT_FILES.preflight]: buildGoodPreflight(),
     [DEFAULT_FILES.taskVerifier]: buildGoodTaskVerifier(),
     [DEFAULT_FILES.mcp]: buildGoodMcp(),
@@ -464,10 +479,11 @@ function buildGoodBlueprint() {
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_gates.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-      :note "VALID_COMMIT_STATUSES, verifier status enums, enforce_scoped_commit_completion, enforce_task_contract_completion, repair, and audit form the completion durability gate; agent_execution/task_verifier.rs owns auto_run_task_run_verifier and report/shared-memory proof; agent_execution/preflight.rs owns preflight_commit/build_preflight_summary before a writer commits."))
+      :note "VALID_COMMIT_STATUSES and verifier status enums stay in completion_audit; agent_execution/completion_gates.rs owns enforce_scoped_commit_completion and enforce_task_contract_completion; agent_execution/task_verifier.rs owns auto_run_task_run_verifier and report/shared-memory proof; agent_execution/preflight.rs owns preflight_commit/build_preflight_summary before a writer commits."))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
 }
@@ -493,6 +509,7 @@ function buildGoodDaemon() {
 mod log_surface;
 mod claim_lease;
 mod completion_audit;
+mod completion_gates;
 mod preflight;
 mod task_verifier;
 #[cfg(test)]
@@ -592,15 +609,25 @@ pub(super) fn render_string_list() {}
 pub(super) struct CompletionRecord {}
 pub(super) fn parse_completions() {}
 pub(super) fn summarize_durability() {}
-pub(super) fn check_id_monotonic() {}
-pub(super) fn audit_scoped_commit_handoff() {}
-pub(super) fn enforce_scoped_commit_completion() {}
-pub(super) fn enforce_task_contract_completion() {}
 pub(super) fn parse_string_list() {}
 pub(super) async fn action_complete() {}
 pub(super) async fn action_audit() {}
 pub(super) async fn action_repair() {}
 fn rebuild_derived_indexes() {}
+`;
+}
+
+function buildGoodCompletionGates() {
+  return `pub(super) fn check_id_monotonic() {}
+pub(super) fn audit_scoped_commit_handoff() {}
+pub(super) fn enforce_scoped_commit_completion() {
+  "COMMIT_HASH_REQUIRED";
+  "SCOPED_COMMIT_VIOLATION";
+}
+pub(super) fn enforce_task_contract_completion() {
+  "TASK_CONTRACT_MALFORMED";
+  "CLAIM_SCOPE_MISSING";
+}
 `;
 }
 
