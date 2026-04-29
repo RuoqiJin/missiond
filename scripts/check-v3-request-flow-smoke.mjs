@@ -52,11 +52,26 @@
 // to deliberately exercise the legacy opt-in path; that mode is never added
 // to the v3 aggregate gate.
 //
+// Wave45-01 audit mode (--execute-dry-run): after approve_plan succeeds, the
+// smoke calls mission_request respond with response=execute_plan, execute=true,
+// dry_run=true. The smoke asserts:
+//   - respond_outcome=dispatched
+//   - inner_action=unified_entry::plan_execute
+//   - respond_result.execute=true
+//   - review_packet.state=execute_requested
+//   - allowed_responses=[observe]
+//   - a request-local execute_plan review event was appended
+//   - pipeline_result carries one of the two no-dispatch proofs:
+//       (a) bridge mode: status=bridge_ready, runner_status=bridge_only, OR
+//       (b) internal dry-run: status=dry_run, runner_status=dry_run_no_dispatch
+// The smoke never spawns or waits for a worker. Default --live-ipc still stops
+// at awaiting_execution; only --execute-dry-run drives execute_plan.
+//
 // CLI: node scripts/check-v3-request-flow-smoke.mjs [--json] [--dry-fixture]
 //        [--blueprint <path>] [--repo <path>]
 //        [--live-ipc [--endpoint <socket>] [--session-id <id>]
 //                    [--request-id <id>] [--cleanup] [--compat-write-file]
-//                    [--confirm-execute]]
+//                    [--execute-dry-run] [--confirm-execute]]
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -154,10 +169,22 @@ Flags:
                     presence as a failure (the user explicitly asked for
                     them). Without this flag the default smoke FAILS if
                     any compat artifact appears that names this request.
+  --execute-dry-run Opt into the wave45 audit mode. After approve_plan
+                    succeeds, the smoke calls mission_request respond with
+                    response=execute_plan, execute=true, dry_run=true and
+                    asserts review_packet.state=execute_requested,
+                    allowed_responses=[observe], a request-local execute_plan
+                    review event was appended, and the inner pipeline_result
+                    carries a no-dispatch proof (bridge_only/bridge_ready or
+                    dry_run_no_dispatch/dry_run). The smoke never spawns or
+                    waits for a worker. Without this flag --live-ipc still
+                    stops at awaiting_execution.
   --confirm-execute Reserved for future use. This checker explicitly refuses
                     workstation dispatch; with --confirm-execute the run
                     still stops at awaiting_execution and prints a notice
-                    pointing the user to mission_request directly.
+                    pointing the user to mission_request directly. Note that
+                    --execute-dry-run is the wave45-supported audit flag;
+                    --confirm-execute remains a no-op compat slot.
 `;
 
 function fail(message) {
@@ -173,6 +200,7 @@ function parseArgs(argv) {
     confirmExecute: false,
     cleanup: false,
     compatWriteFile: false,
+    executeDryRun: false,
     endpoint: null,
     sessionId: null,
     requestId: null,
@@ -196,6 +224,8 @@ function parseArgs(argv) {
       opts.cleanup = true;
     } else if (arg === '--compat-write-file') {
       opts.compatWriteFile = true;
+    } else if (arg === '--execute-dry-run') {
+      opts.executeDryRun = true;
     } else if (arg === '--endpoint') {
       opts.endpoint = argv[++i] ?? fail('--endpoint requires a value');
     } else if (arg.startsWith('--endpoint=')) {
@@ -1109,6 +1139,7 @@ async function runLiveIpcSmoke(opts) {
     project_root: repoRoot,
     request_dir: requestDir,
     compat_write_file_requested: compatRequested,
+    execute_dry_run_requested: !!opts.executeDryRun,
     confirm_execute_refused: !!opts.confirmExecute,
     confirm_execute_notice: opts.confirmExecute
       ? '--confirm-execute is reserved; this checker still refuses to dispatch a workstation slot. Drive mission_request directly to execute.'
@@ -1361,6 +1392,119 @@ async function runLiveIpcSmoke(opts) {
     summary.steps.push(approvePlanStep);
     summary.error = approvePlanStep.error;
     return summary;
+  }
+
+  // ── Step 4 (opt-in): action=respond response=execute_plan dry_run=true ──
+  // Wave45-01 audit mode. Default --live-ipc keeps stopping at
+  // awaiting_execution; only --execute-dry-run drives execute_plan and even
+  // then it MUST pass dry_run=true, accept either bridge or internal-dry-run
+  // no-dispatch shape, and never spawn or wait for a worker.
+  if (opts.executeDryRun) {
+    let executeStep = { name: 'execute_plan_dry_run', ok: false };
+    const eventsDir = path.join(requestDir, 'events');
+    const eventsBefore = fs.existsSync(eventsDir)
+      ? fs.readdirSync(eventsDir).filter((n) => n.endsWith('.event.lisp')).sort()
+      : [];
+    try {
+      const respondRaw = await callTool('mission_request', {
+        action: 'respond',
+        request_id: requestId,
+        response: 'execute_plan',
+        execute: true,
+        dry_run: true,
+        cwd: repoRoot,
+        target: 'mission_task_delegate',
+        objective: smokeObjective,
+      });
+      const parsed = parseToolResultPayload(respondRaw, 'execute_plan');
+      if (!parsed.ok) {
+        executeStep.error = parsed.error;
+        summary.steps.push(executeStep);
+        summary.error = parsed.error;
+        return summary;
+      }
+      // Note: execute_plan can come back with is_error=true if the inner
+      // execute returned an error structure; we surface the full payload so
+      // the assertion logic below can decide.
+      const respondResult = parsed.payload?.respond_result ?? null;
+      const reviewPacket = parsed.payload?.review_packet ?? null;
+      const pipelineResult = parsed.payload?.pipeline_result ?? null;
+      // pipeline_result is the already-hydrated inner JSON
+      // (tool_result_payload in request.rs runs serde_json::from_str on the
+      // inner ToolResult text). Read status/runner_status directly.
+      const status = pipelineResult?.status ?? null;
+      const runnerStatus = pipelineResult?.runner_status ?? null;
+      const allowed = Array.isArray(reviewPacket?.allowed_responses)
+        ? reviewPacket.allowed_responses
+        : [];
+      const eventsAfter = fs.existsSync(eventsDir)
+        ? fs.readdirSync(eventsDir).filter((n) => n.endsWith('.event.lisp')).sort()
+        : [];
+      const newEvents = eventsAfter.filter((n) => !eventsBefore.includes(n));
+      const newEventTexts = newEvents.map((n) =>
+        fs.readFileSync(path.join(eventsDir, n), 'utf8'),
+      );
+      const executeEventAppended = newEventTexts.some((t) =>
+        t.includes(':decision :execute_plan'),
+      );
+      const noDispatchProof = (
+        (status === 'bridge_ready' && runnerStatus === 'bridge_only')
+        || (status === 'dry_run' && runnerStatus === 'dry_run_no_dispatch')
+      );
+
+      executeStep = {
+        name: 'execute_plan_dry_run',
+        ok: false,
+        respond_outcome: respondResult?.outcome ?? null,
+        respond_inner_action: respondResult?.inner_action ?? null,
+        respond_result_execute: respondResult?.execute ?? null,
+        review_packet_state: reviewPacket?.state ?? null,
+        review_packet_execute_allowed: reviewPacket?.execute_allowed ?? null,
+        allowed_responses: allowed,
+        new_events: newEvents,
+        execute_event_appended: executeEventAppended,
+        pipeline_status: status,
+        pipeline_runner_status: runnerStatus,
+        no_dispatch_proof: noDispatchProof,
+      };
+      const fails = [];
+      if (respondResult?.outcome !== 'dispatched') {
+        fails.push(`expected execute_plan outcome=dispatched, got ${JSON.stringify(respondResult?.outcome)}; blocked_reason=${JSON.stringify(respondResult?.blocked_reason)}`);
+      }
+      if (respondResult?.inner_action !== 'unified_entry::plan_execute') {
+        fails.push(`expected inner_action=unified_entry::plan_execute, got ${JSON.stringify(respondResult?.inner_action)}`);
+      }
+      if (respondResult?.execute !== true) {
+        fails.push(`expected respond_result.execute=true, got ${JSON.stringify(respondResult?.execute)}`);
+      }
+      if (reviewPacket?.state !== 'execute_requested') {
+        fails.push(`expected review_packet.state=execute_requested, got ${JSON.stringify(reviewPacket?.state)}`);
+      }
+      if (allowed.length !== 1 || allowed[0] !== 'observe') {
+        fails.push(`expected allowed_responses=[observe], got ${JSON.stringify(allowed)}`);
+      }
+      if (!executeEventAppended) {
+        fails.push(`expected a request-local execute_plan review event under ${eventsDir}; new events=${JSON.stringify(newEvents)}`);
+      }
+      if (!noDispatchProof) {
+        fails.push(`expected pipeline_result no-dispatch proof (bridge_ready/bridge_only or dry_run/dry_run_no_dispatch); got status=${JSON.stringify(status)}, runner_status=${JSON.stringify(runnerStatus)}`);
+      }
+      if (fails.length === 0) {
+        executeStep.ok = true;
+      } else {
+        executeStep.error = fails.join('; ');
+      }
+      summary.steps.push(executeStep);
+      if (!executeStep.ok) {
+        summary.error = executeStep.error;
+        return summary;
+      }
+    } catch (err) {
+      executeStep.error = err.message ?? String(err);
+      summary.steps.push(executeStep);
+      summary.error = executeStep.error;
+      return summary;
+    }
   }
 
   // ── Compat-writer side-effect audit ─────────────────────────────────

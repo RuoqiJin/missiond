@@ -249,7 +249,23 @@
       :v3-flag :compat_write_file
       :legacy-alias :write_file
       :default false
-      :rationale "Wave43 evidence: live mission_request smoke that passed write_file=true left .missiond/alignment/<request_id>/ and .missiond/plans/<plan_id>/ artifacts in the worktree even after --cleanup, because the request-local cleanup scope intentionally excludes the compat roots. Defaulting compat off keeps the worktree request-local while preserving the legacy escape hatch for callers that depend on the old roots."))
+      :rationale "Wave43 evidence: live mission_request smoke that passed write_file=true left .missiond/alignment/<request_id>/ and .missiond/plans/<plan_id>/ artifacts in the worktree even after --cleanup, because the request-local cleanup scope intentionally excludes the compat roots. Defaulting compat off keeps the worktree request-local while preserving the legacy escape hatch for callers that depend on the old roots.")
+    (execute-dry-run-smoke
+      :surface mission_request
+      :rule "Live mission_request smoke MUST keep the default --live-ipc path stopping at awaiting_execution; the only path that MAY call execute_plan from a checker is an explicit opt-in audit mode (preferred name --execute-dry-run on scripts/check-v3-request-flow-smoke.mjs). That audit path MUST pass dry_run=true on the execute_plan respond call, and MUST accept either of the two no-dispatch proofs the daemon emits today as evidence that no workstation slot was consumed: bridge mode (status=bridge_ready, runner_status=bridge_only, plan-runner returns the next-call descriptor without calling the target tool) or internal dry-run mode (status=dry_run, runner_status=dry_run_no_dispatch, plan-runner emits would_dispatch without firing the inner target). Either proof is sufficient; the smoke MUST NOT spawn or wait for a ClaudeCode worker."
+      :audit-flag :--execute-dry-run
+      :respond-args (:response :execute_plan :execute true :dry_run true :target :mission_task_delegate)
+      :asserts [:respond_outcome_dispatched
+                :respond_inner_action_unified_entry_plan_execute
+                :respond_result_execute_true
+                :review_packet_state_execute_requested
+                :allowed_responses_observe_only
+                :request_local_execute_plan_event_appended
+                :pipeline_result_no_dispatch_proof]
+      :no-dispatch-proofs ((bridge :status "bridge_ready" :runner_status "bridge_only")
+                           (internal-dry-run :status "dry_run" :runner_status "dry_run_no_dispatch"))
+      :non-goal "Default --live-ipc and the v3 aggregate gate MUST remain non-executing; the audit flag is opt-in for explicit smoke runs and never appears in check-v3-code-isomorphism-complete."
+      :rationale "After wave43/44 proved live mission_request through approve_plan, the only un-pinned cross-surface invariant left was the execute_plan gate: mission_request must route execute_plan through unified_entry::plan_execute, surface execute_requested in the review_packet, and emit a request-local execute_plan event — without dispatching a worker. Pinning this in Lisp first, then proving it from a smoke run, locks the invariant against future drift."))
 
   (state-machines
     (state-machine unified-entry
