@@ -28,6 +28,7 @@ const DEFAULT_FILES = {
   daemon: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   tests: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  logStore: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
   sessionTrace:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
@@ -46,7 +47,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['COMPANION_DIR', 'emit_execution_event', 'agent_execution/session_trace.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -63,6 +64,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
@@ -88,6 +90,7 @@ const DAEMON_NEEDLES = [
   '"audit" => action_audit',
   '"repair" => action_repair',
   '"preflight_commit" => action_preflight_commit',
+  'mod log_store',
   'mod log_surface',
   'mod session_trace',
   'mod claim_lease',
@@ -97,6 +100,7 @@ const DAEMON_NEEDLES = [
   'mod task_verifier',
   '#[cfg(test)]',
   'mod tests;',
+  'use self::log_store::{',
   'use self::log_surface::{',
   'use self::session_trace',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
@@ -113,14 +117,12 @@ const TESTS_NEEDLES = [
   'fn resolve_trace_task_id_falls_back_to_execution_id',
 ];
 
-const LOG_SURFACE_NEEDLES = [
+const LOG_STORE_NEEDLES = [
   'pub(super) const COMPANION_DIR: &str = ".missiond/v2"',
   'pub(super) async fn resolve_project_root',
   'pub(super) fn companion_path',
   'pub(super) fn project_or_target_project',
   'pub(super) fn require_str',
-  'const VALID_DISPATCH_STRATEGIES',
-  'const DEFAULT_DISPATCH_STRATEGY',
   'pub(super) mod sexp',
   'pub(super) struct LogFile',
   'pub(super) fn now_iso',
@@ -139,6 +141,11 @@ const LOG_SURFACE_NEEDLES = [
   'pub(super) fn touch_last_updated',
   'pub(super) fn write_log_file',
   'pub(super) fn read_log_file',
+];
+
+const LOG_SURFACE_NEEDLES = [
+  'const VALID_DISPATCH_STRATEGIES',
+  'pub(super) const DEFAULT_DISPATCH_STRATEGY',
   'pub(super) fn normalize_dispatch_strategy',
   'pub(super) async fn action_open',
   'pub(super) async fn action_list',
@@ -318,6 +325,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.blueprint, sources.blueprint, BLUEPRINT_NEEDLES);
   requireAll(diagnostics, files.daemon, sources.daemon, DAEMON_NEEDLES);
   requireAll(diagnostics, files.tests, sources.tests, TESTS_NEEDLES);
+  requireAll(diagnostics, files.logStore, sources.logStore, LOG_STORE_NEEDLES);
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
   requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
@@ -363,6 +371,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.daemon]: buildGoodDaemon(),
     [DEFAULT_FILES.tests]: buildGoodTests(),
+    [DEFAULT_FILES.logStore]: buildGoodLogStore(),
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
     [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
@@ -481,9 +490,10 @@ function buildGoodBlueprint() {
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "COMPANION_DIR .missiond/v2 is the durable log root; action routing, emit_execution_event, DispatchMeta, and agent_execution/session_trace.rs keep log writes, live events, and optional task traces aligned.")
+	      :note "agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, sexp, ID counters, and Lisp read/write helpers authoritative; action routing, emit_execution_event, DispatchMeta, and agent_execution/session_trace.rs keep log writes, live events, and optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -523,6 +533,7 @@ function buildGoodDaemon() {
     "preflight_commit" => action_preflight_commit,
   }
 }
+mod log_store;
 mod log_surface;
 mod session_trace;
 mod claim_lease;
@@ -536,6 +547,7 @@ use self::log_surface::{
   build_opened_event, emit_execution_event, normalize_dispatch_strategy,
   read_dispatch_metadata_from_log,
 };
+use self::log_store::{LogFile};
 use self::session_trace::{append_session_trace_event};
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
@@ -553,14 +565,12 @@ fn resolve_trace_task_id_falls_back_to_execution_id() {}
 `;
 }
 
-function buildGoodLogSurface() {
+function buildGoodLogStore() {
   return `pub(super) const COMPANION_DIR: &str = ".missiond/v2";
 pub(super) async fn resolve_project_root() {}
 pub(super) fn companion_path() {}
 pub(super) fn project_or_target_project() {}
 pub(super) fn require_str() {}
-const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
-const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
 pub(super) mod sexp {}
 pub(super) struct LogFile {}
 pub(super) fn now_iso() {}
@@ -579,6 +589,12 @@ pub(super) fn append_to_block() {}
 pub(super) fn touch_last_updated() {}
 pub(super) fn write_log_file() {}
 pub(super) fn read_log_file() {}
+`;
+}
+
+function buildGoodLogSurface() {
+  return `const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
+pub(super) const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
 pub(super) fn normalize_dispatch_strategy() {}
 pub(super) async fn action_open() {}
 pub(super) async fn action_list() {}

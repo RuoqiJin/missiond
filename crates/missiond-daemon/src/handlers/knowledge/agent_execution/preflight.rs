@@ -7,7 +7,7 @@ use crate::state::AppState;
 
 use super::claim_lease::{parse_claims, scopes_overlap_pure};
 use super::completion_audit::collect_string_list;
-use super::log_surface::{
+use super::log_store::{
     companion_path, project_or_target_project, read_log_file, require_str, resolve_project_root,
     LogFile,
 };

@@ -13,12 +13,13 @@ use super::completion_gates::{
     audit_scoped_commit_handoff, check_id_monotonic, enforce_scoped_commit_completion,
     enforce_task_contract_completion,
 };
-use super::log_surface::{
-    allocate_id, append_to_block, companion_path, emit_execution_event, insert_id_counters_block,
-    lisp_quote_string, list_block_summaries, now_iso, parse_kv_pairs, project_or_target_project,
-    read_dispatch_metadata_from_log, read_log_file, require_str, resolve_project_root, scan_max_id,
-    sexp, touch_last_updated, update_kv_in_node, write_log_file, Counter, LogFile,
+use super::log_store::{
+    allocate_id, append_to_block, companion_path, insert_id_counters_block, lisp_quote_string,
+    list_block_summaries, now_iso, parse_kv_pairs, project_or_target_project, read_log_file,
+    require_str, resolve_project_root, scan_max_id, sexp, touch_last_updated, update_kv_in_node,
+    write_log_file, Counter, LogFile,
 };
+use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
 use super::session_trace::{
     append_session_trace_event, resolve_session_trace_path, resolve_trace_task_id,
     sanitize_trace_backend, TraceEvent, TraceKind,

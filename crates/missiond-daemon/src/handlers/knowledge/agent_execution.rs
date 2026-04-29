@@ -33,6 +33,7 @@ use crate::state::AppState;
 mod claim_lease;
 mod completion_audit;
 mod completion_gates;
+mod log_store;
 mod log_surface;
 mod preflight;
 mod session_trace;
@@ -55,15 +56,18 @@ use self::completion_audit::{
 use self::completion_gates::{
     audit_scoped_commit_handoff, enforce_scoped_commit_completion, enforce_task_contract_completion,
 };
+#[cfg(test)]
+use self::log_store::{
+    allocate_id, append_to_block, lisp_quote_string, now_iso, parse_kv_pairs,
+    project_or_target_project, render_canonical_template, scan_max_id, sexp, Counter, LogFile,
+};
 use self::log_surface::{
     action_decide, action_deviate, action_issue, action_list, action_open, action_status,
 };
 #[cfg(test)]
 use self::log_surface::{
-    allocate_id, append_to_block, build_opened_event, lisp_quote_string,
-    normalize_dispatch_strategy, now_iso, parse_kv_pairs, project_or_target_project,
-    read_dispatch_metadata_from_log, render_canonical_template, scan_max_id, sexp, Counter,
-    DispatchMeta, LogFile, DEFAULT_DISPATCH_STRATEGY,
+    build_opened_event, normalize_dispatch_strategy, read_dispatch_metadata_from_log, DispatchMeta,
+    DEFAULT_DISPATCH_STRATEGY,
 };
 use self::preflight::action_preflight_commit;
 #[cfg(test)]

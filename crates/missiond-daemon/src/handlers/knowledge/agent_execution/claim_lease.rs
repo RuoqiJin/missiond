@@ -5,12 +5,12 @@ use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 
-use super::log_surface::{
-    allocate_id, append_to_block, companion_path, emit_execution_event, lisp_quote_string, now_iso,
-    parse_kv_pairs, project_or_target_project, read_dispatch_metadata_from_log, read_log_file,
-    require_str, resolve_project_root, sexp::Node, touch_last_updated, update_kv_in_node,
-    write_log_file, Counter, LogFile,
+use super::log_store::{
+    allocate_id, append_to_block, companion_path, lisp_quote_string, now_iso, parse_kv_pairs,
+    project_or_target_project, read_log_file, require_str, resolve_project_root, sexp::Node,
+    touch_last_updated, update_kv_in_node, write_log_file, Counter, LogFile,
 };
+use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
 
 pub(super) const DEFAULT_LEASE_SECS: i64 = 1800;
 pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600;
