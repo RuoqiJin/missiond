@@ -67,7 +67,6 @@ const DAEMON_NEEDLES = [
   '"audit" => action_audit',
   '"repair" => action_repair',
   '"preflight_commit" => action_preflight_commit',
-  'const COMPANION_DIR: &str = ".missiond/v2"',
   'mod log_surface',
   'mod claim_lease',
   'mod completion_audit',
@@ -81,6 +80,11 @@ const DAEMON_NEEDLES = [
 ];
 
 const LOG_SURFACE_NEEDLES = [
+  'pub(super) const COMPANION_DIR: &str = ".missiond/v2"',
+  'pub(super) async fn resolve_project_root',
+  'pub(super) fn companion_path',
+  'pub(super) fn project_or_target_project',
+  'pub(super) fn require_str',
   'const VALID_DISPATCH_STRATEGIES',
   'const DEFAULT_DISPATCH_STRATEGY',
   'pub(super) mod sexp',
@@ -427,7 +431,6 @@ function buildGoodDaemon() {
     "preflight_commit" => action_preflight_commit,
   }
 }
-const COMPANION_DIR: &str = ".missiond/v2";
 mod log_surface;
 mod claim_lease;
 mod completion_audit;
@@ -445,7 +448,12 @@ async fn action_preflight_commit() {}
 }
 
 function buildGoodLogSurface() {
-  return `const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
+  return `pub(super) const COMPANION_DIR: &str = ".missiond/v2";
+pub(super) async fn resolve_project_root() {}
+pub(super) fn companion_path() {}
+pub(super) fn project_or_target_project() {}
+pub(super) fn require_str() {}
+const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
 const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
 pub(super) mod sexp {}
 pub(super) struct LogFile {}

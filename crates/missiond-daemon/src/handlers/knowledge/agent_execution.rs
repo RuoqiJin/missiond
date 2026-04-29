@@ -24,7 +24,9 @@ use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(test)]
+use std::path::PathBuf;
 
 use crate::state::AppState;
 
@@ -53,20 +55,19 @@ use self::completion_audit::{
     FINDING_COMMIT_STATUS_NO_HASH, FINDING_SCOPED_COMMIT_VIOLATION,
 };
 use self::log_surface::{
-    allocate_id, append_session_trace_event, append_to_block, build_opened_event,
+    allocate_id, append_session_trace_event, append_to_block, build_opened_event, companion_path,
     emit_execution_event, insert_id_counters_block, json_strip_quotes, lisp_quote_string,
     list_block_summaries, normalize_dispatch_strategy, now_iso, parse_kv_pairs,
-    read_dispatch_metadata_from_log, read_log_file, render_canonical_template,
-    resolve_session_trace_path, resolve_trace_task_id, sanitize_trace_backend, scan_max_id, sexp,
-    touch_last_updated, update_kv_in_node, write_log_file, Counter, LogFile, TraceEvent, TraceKind,
+    project_or_target_project, read_dispatch_metadata_from_log, read_log_file,
+    render_canonical_template, require_str, resolve_project_root, resolve_session_trace_path,
+    resolve_trace_task_id, sanitize_trace_backend, scan_max_id, sexp, touch_last_updated,
+    update_kv_in_node, write_log_file, Counter, LogFile, TraceEvent, TraceKind, COMPANION_DIR,
 };
 #[cfg(test)]
 use self::log_surface::{
     is_valid_trace_id, render_trace_event, scan_max_trace_seq, DispatchMeta, TraceWarning,
     DEFAULT_DISPATCH_STRATEGY,
 };
-
-const COMPANION_DIR: &str = ".missiond/v2";
 
 /// Pull a `[string]` argument off `args[key]` and return it as a `Vec<String>`.
 /// Returns `None` if the key is absent so callers can distinguish "field was
@@ -136,63 +137,6 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
             ),
         )),
     }
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// path resolution
-// ───────────────────────────────────────────────────────────────────────
-
-async fn resolve_project_root(state: &AppState, project_id: Option<&str>) -> Result<PathBuf> {
-    if let Some(id) = project_id {
-        if let Some(p) = state.project_registry.read().await.get(id) {
-            return Ok(PathBuf::from(&p.path));
-        }
-        // Fall through to error below if explicit id given but unknown.
-        return Err(anyhow!(
-            "project '{}' not registered; run mission_project(action=\"list\") to see available ids",
-            id
-        ));
-    }
-    let cwd = std::env::current_dir().map_err(|e| anyhow!("cannot read CWD: {}", e))?;
-    Ok(cwd)
-}
-
-fn companion_path(root: &Path, execution_id: &str) -> PathBuf {
-    let mut p = root.join(COMPANION_DIR);
-    let mut name = execution_id.to_string();
-    if !name.ends_with(".lisp") {
-        name.push_str(".lisp");
-    }
-    p.push(name);
-    p
-}
-
-/// Canonical `project` field accessor. Kept (currently only via the alias
-/// resolver below) so future callers — or sibling handlers reaching in for the
-/// strict canonical field — have one source of truth for the field name.
-#[allow(dead_code)]
-fn project_arg(args: &Value) -> Option<&str> {
-    args.get("project").and_then(|v| v.as_str())
-}
-
-/// Resolve the active project id from either the canonical `project` field or
-/// the workstation-dispatch alias `target_project`. `project` always wins when
-/// both are present so existing callers stay deterministic; the alias is the
-/// surface intent-tools.lisp :: implemented-surface mission_execution exposes
-/// for `:workstation-dispatch-record`.
-fn project_or_target_project(args: &Value) -> Option<&str> {
-    args.get("project")
-        .and_then(|v| v.as_str())
-        .or_else(|| args.get("target_project").and_then(|v| v.as_str()))
-}
-
-fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str, ToolResult> {
-    args.get(key).and_then(|v| v.as_str()).ok_or_else(|| {
-        ToolResult::structured_error(ToolError::new(
-            error_codes::MISSING_PARAM,
-            format!("missing required param `{}`", key),
-        ))
-    })
 }
 
 // ───────────────────────────────────────────────────────────────────────
