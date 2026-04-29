@@ -18,6 +18,7 @@ Checks the V3 plan.lisp execution isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
   unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
@@ -85,6 +86,7 @@ function checkFiles(root, files) {
     ':default-target mission_task_delegate',
     'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
+    'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'execute can derive target_source=plan_hint from plan.sexp_text',
     'DAG execution parses node-local Lisp hints',
@@ -108,6 +110,17 @@ function checkFiles(root, files) {
     'target_source',
     'dispatch_strategy_source',
     'AGENT_TEAM_OBJECTIVE_HINT',
+  ]);
+
+  requireAll(diagnostics, files.planRouterPolicyAdapter, sources.planRouterPolicyAdapter, [
+    'pub(super) enum RouterPolicyMode',
+    'pub(super) fn parse_router_policy_mode',
+    'pub(super) fn attach_router_recommendation_block',
+    'fn compute_recommendation_block',
+    'router_apply_eligible',
+    'router_dispatch_descriptor',
+    'backend_readiness_status',
+    'Value::Bool(false)',
   ]);
 
   requireAll(diagnostics, files.planTaskRunnerAdapter, sources.planTaskRunnerAdapter, [
@@ -192,8 +205,9 @@ function buildFixture() {
   (implementation-map
     (surface mission_plan
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -216,6 +230,16 @@ let x = (t, "plan_hint");
 let target_source = "";
 let dispatch_strategy_source = "";
 const AGENT_TEAM_OBJECTIVE_HINT: &str = "";`);
+  writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
+pub(super) enum RouterPolicyMode { Off, DryRun }
+pub(super) fn parse_router_policy_mode() {}
+pub(super) fn attach_router_recommendation_block() {}
+fn compute_recommendation_block() {
+  "router_apply_eligible";
+  "router_dispatch_descriptor";
+  "backend_readiness_status";
+  Value::Bool(false);
+}`);
   writeFixture(root, DEFAULT_FILES.planTaskRunnerAdapter, `
 pub(super) enum TaskRunnerMode { Off, DryRun }
 pub(super) fn parse_task_runner_mode() {}

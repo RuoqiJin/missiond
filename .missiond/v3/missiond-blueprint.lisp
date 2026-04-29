@@ -1133,10 +1133,11 @@
       :status "code-aligned"
       :implements [plan plan-review-gate plan-runner evidence-collector]
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters. plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter: parse_task_runner_mode and attach_task_runner_block project a task-runner manifest into the advisory task_runner response block while keeping applied=false, no worker spawn, and byte-identical off mode. DAG execution parses node-local Lisp hints (:target, :objective, :timeout-ms, :target-project, :requested-cwd, :acceptance-commands, :workstation-dispatch) and forwards them into the same internal dispatch path. unified_entry owns only routing/argument forwarding: s4 compile forwards target/objective/project hints into mission_plan, and s6 execute forwards approved_plan_id + execute=true knobs without inventing a second plan schema.")
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters. plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter: parse_router_policy_mode and attach_router_recommendation_block project router-policy / trace-index / backend-readiness / dispatch-descriptor Lisp facts into an advisory router_recommendation block while keeping applied=false, no runtime replacement, and byte-identical off mode. plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter: parse_task_runner_mode and attach_task_runner_block project a task-runner manifest into the advisory task_runner response block while keeping applied=false, no worker spawn, and byte-identical off mode. DAG execution parses node-local Lisp hints (:target, :objective, :timeout-ms, :target-project, :requested-cwd, :acceptance-commands, :workstation-dispatch) and forwards them into the same internal dispatch path. unified_entry owns only routing/argument forwarding: s4 compile forwards target/objective/project hints into mission_plan, and s6 execute forwards approved_plan_id + execute=true knobs without inventing a second plan schema.")
 
     (surface evidence-collector
       :status "code-aligned"
@@ -1299,10 +1300,11 @@
       :status "designed"
       :implements [router-policy-dry-run router-backend-readiness router-dispatch-descriptor]
       :code ["crates/missiond-mcp/src/tools/comm/router_chat.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "scripts/check-router-policy.mjs"
              "scripts/check-router-backend-registry.mjs"
              "scripts/check-router-dispatch-descriptor.mjs"]
-      :note "Designed V3 destination for the V2 router-policy dry-run chain. This deliberately does not claim runtime backend replacement; it only prevents router public behavior from remaining unmapped.")
+      :note "Designed V3 destination for the V2 router-policy dry-run chain. plan/router_policy_dry_run.rs is already physically split as mission_plan's advisory runtime adapter for router-policy, backend-readiness, and dispatch-descriptor projection; this surface remains designed rather than code-aligned until the public mission_router_chat tooling is also brought under the same V3 contract. This deliberately does not claim runtime backend replacement; it only prevents router public behavior from remaining unmapped.")
 
     (surface incident-governance
       :status "designed"
