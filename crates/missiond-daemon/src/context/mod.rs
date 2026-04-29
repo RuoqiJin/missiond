@@ -4,3 +4,4 @@ pub mod context_pipeline;
 pub mod pure_budget;
 pub mod slot_env;
 pub mod topology_map;
+pub mod v3_blueprint_runtime;

@@ -463,6 +463,12 @@
       :role operator
       :default-model-profile daily-sonnet
       :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+    (timeout-policy boardtask-dispatch
+      :default_secs 1800
+      :min_secs 60
+      :max_secs 7200
+      :watchdog_grace_secs 120
+      :missing_session_probe_secs 120)
     :invariants
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"

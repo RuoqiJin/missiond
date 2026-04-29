@@ -4,13 +4,10 @@ use missiond_core::types::CreateBoardTaskInput;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::slot_dispatch::SlotAcquireGuard;
 use crate::state::AppState;
 
-/// Max timeout: 2 hours.
-const MAX_TIMEOUT_SECS: i64 = 7200;
-/// Default timeout: 30 minutes.
-const DEFAULT_TIMEOUT_SECS: i64 = 1800;
 /// Rate limit: max delegates per minute (per Jarvis session).
 const MAX_DELEGATES_PER_MINUTE: usize = 5;
 
@@ -52,12 +49,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         .get("priority")
         .and_then(|v| v.as_str())
         .unwrap_or("medium");
-    let timeout_secs = args
-        .get("timeout_secs")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(DEFAULT_TIMEOUT_SECS)
-        .min(MAX_TIMEOUT_SECS)
-        .max(60); // min 1 minute
+    let requested_timeout_secs = args.get("timeout_secs").and_then(|v| v.as_i64());
 
     let depends_on: Vec<String> = args
         .get("depends_on")
@@ -115,6 +107,21 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         None
     };
 
+    let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(
+        target_project_root.as_deref(),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            return Ok(ToolResult::structured_error(
+                    ToolError::new("V3_BLUEPRINT_CONFIG_ERROR", err.to_string())
+                        .with_suggestion(
+                            "ensure <project>/.missiond/v3/missiond-blueprint.lisp contains workstation-config",
+                        ),
+                ));
+        }
+    };
+    let timeout_secs = runtime_config.clamp_timeout_secs(requested_timeout_secs);
+
     // Intent → template mapping
     let template = match intent {
         "code" => "coder",
@@ -122,10 +129,20 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "research" => "researcher",
         _ => "coder",
     };
+    let default_model_profile = if model_arg.is_none() {
+        runtime_config
+            .default_model_profile_for_template(template)
+            .map(str::to_string)
+    } else {
+        None
+    };
+    let effective_model_profile = model_profile_arg
+        .as_deref()
+        .or(default_model_profile.as_deref());
     let requested_model = match super::compute_slot::resolve_model_projection(
         template,
         model_arg.as_deref(),
-        model_profile_arg.as_deref(),
+        effective_model_profile,
     ) {
         Ok(model) => model,
         Err(message) => {
@@ -167,7 +184,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 timeout_secs,
                 cwd,
                 model_arg.as_deref(),
-                model_profile_arg.as_deref(),
+                effective_model_profile,
             )
             .await
             {
@@ -246,6 +263,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "intent": intent,
         "template": template,
         "model": requested_model,
+        "model_profile": effective_model_profile,
         "provisioned_new_slot": provisioned,
         "timeout_secs": timeout_secs,
         "hint": "结果将通过 TaskNotification 自动回报。也可用 mission_board_get 查询进度。"
@@ -341,7 +359,8 @@ async fn auto_provision_slot(
     // execution-ownership :: delegated-boardtask. The slot is provisioned
     // idle (suppress_initial_prompt=true) so Autopilot remains the sole
     // task-prompt owner once the queued BoardTask is dispatched.
-    let create_args = build_compute_slot_create_args(template, objective, ttl, cwd, model, model_profile);
+    let create_args =
+        build_compute_slot_create_args(template, objective, ttl, cwd, model, model_profile);
 
     // Delegate to existing compute_slot handler
     let result = super::compute_slot::handle(state, "mission_compute_slot", create_args).await?;

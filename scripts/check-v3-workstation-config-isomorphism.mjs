@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
   slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
+  v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   mcpComputeSlot: 'crates/missiond-mcp/src/tools/compute/compute_slot.rs',
@@ -99,6 +100,10 @@ function checkFiles(root, files) {
     'Autopilot pty.send budget MUST project from BoardTask.timeout_secs',
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
+    'timeout-policy boardtask-dispatch',
+    ':default_secs 1800',
+    ':min_secs 60',
+    ':max_secs 7200',
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
     'The per-slot dispatch guard MUST be held across the entire state.pty.send call',
     'Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick',
@@ -129,9 +134,10 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.taskDelegate, sources.taskDelegate, [
-    'const DEFAULT_TIMEOUT_SECS: i64 = 1800',
-    'const MAX_TIMEOUT_SECS: i64 = 7200',
-    '.max(60)',
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'runtime_config.clamp_timeout_secs',
+    'default_model_profile_for_template',
+    'effective_model_profile',
     'model_profile_arg',
     'resolve_model_projection',
     'model_projection_matches',
@@ -142,6 +148,23 @@ function checkFiles(root, files) {
     '"suppress_initial_prompt": true',
     'create_args["model_profile"]',
     'starts idle and Autopilot remains the sole task-prompt owner',
+  ]);
+
+  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'pub(crate) struct WorkstationRuntimeConfig',
+    'pub(crate) struct TimeoutPolicy',
+    'pub(crate) fn load_for_project_root',
+    'parse_workstation_config',
+    'find_form(source, "workstation-config")',
+    'timeout-policy boardtask-dispatch',
+    'slot-template',
+    'DEFAULT_MODEL_PROFILE',
+    'DEFAULT_TIMEOUT_SECS',
+    'MIN_TIMEOUT_SECS',
+    'MAX_TIMEOUT_SECS',
+    'WATCHDOG_GRACE_SECS',
+    'MISSING_SESSION_PROBE_SECS',
+    'MissingBlueprint',
   ]);
 
   requireAll(diagnostics, files.slotEnv, sources.slotEnv, [
@@ -228,6 +251,12 @@ function buildFixture() {
     (model-profile coding-default-opus-4-7
       :effective-model "Opus 4.7 with 1M context"
       :spawn-model-arg nil)
+    (timeout-policy boardtask-dispatch
+      :default_secs 1800
+      :min_secs 60
+      :max_secs 7200
+      :watchdog_grace_secs 120
+      :missing_session_probe_secs 120)
     :invariants
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
@@ -263,9 +292,10 @@ let suppress_initial_prompt = true;
 let initial_prompt_for_spawn = None;
 PTYSpawnOptions;`);
   writeFixture(root, DEFAULT_FILES.taskDelegate, `
-const DEFAULT_TIMEOUT_SECS: i64 = 1800;
-const MAX_TIMEOUT_SECS: i64 = 7200;
-x.max(60);
+WorkstationRuntimeConfig::load_for_project_root();
+runtime_config.clamp_timeout_secs();
+default_model_profile_for_template();
+let effective_model_profile = None;
 let model_profile_arg = None;
 resolve_model_projection();
 model_projection_matches();
@@ -276,6 +306,15 @@ build_compute_slot_create_args();
 json!({ "suppress_initial_prompt": true });
 create_args["model_profile"] = v;
 // starts idle and Autopilot remains the sole task-prompt owner`);
+  writeFixture(root, DEFAULT_FILES.v3Runtime, `
+pub(crate) struct WorkstationRuntimeConfig {}
+pub(crate) struct TimeoutPolicy {}
+pub(crate) fn load_for_project_root() {}
+fn parse_workstation_config() {}
+fn x() {
+  find_form(source, "workstation-config");
+  let a = "timeout-policy boardtask-dispatch slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS MissingBlueprint";
+}`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
 fn build_slot_tracking_env() {}
