@@ -24,7 +24,9 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
   - agent_execution/completion_gates.rs: scoped-commit and task-contract
     completion enforcement gates used by the completion-audit surface
   - agent_execution/preflight.rs: read-only pre-commit git/status and task-contract
-    scope projection used by the completion-audit surface
+    action wiring used by the completion-audit surface
+  - agent_execution/preflight_scope.rs: porcelain parsing, claim-scope projection,
+    contract scope projection, and read-only git status for preflight
   - agent_execution/task_verifier.rs: read-only report-contract/shared-memory
     verifier projection used by the completion-audit surface
 `;
@@ -48,6 +50,8 @@ const DEFAULT_FILES = {
   completionGates:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_gates.rs',
   preflight: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
+  preflightScope:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_scope.rs',
   taskVerifier:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
@@ -84,6 +88,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_records.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_gates.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_scope.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
   'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
   AGGREGATE_COMMAND,
@@ -114,6 +119,7 @@ const DAEMON_NEEDLES = [
   'mod completion_records',
   'mod completion_gates',
   'mod preflight',
+  'mod preflight_scope',
   'mod task_verifier',
   '#[cfg(test)]',
   'mod tests;',
@@ -126,6 +132,7 @@ const DAEMON_NEEDLES = [
   'use self::completion_maintenance',
   'use self::completion_records',
   'use self::preflight::action_preflight_commit',
+  'use self::preflight_scope',
   'use self::task_verifier',
 ];
 
@@ -272,6 +279,11 @@ const TASK_VERIFIER_NEEDLES = [
 ];
 
 const PREFLIGHT_NEEDLES = [
+  'pub(super) async fn action_preflight_commit',
+  'resolve_session_trace_path',
+];
+
+const PREFLIGHT_SCOPE_NEEDLES = [
   'pub(super) struct PorcelainEntry',
   'pub(super) fn parse_porcelain_status',
   'pub(super) fn collect_all_claim_scopes',
@@ -281,10 +293,8 @@ const PREFLIGHT_NEEDLES = [
   'pub(super) fn evaluate_task_contract_for_preflight',
   'pub(super) fn build_preflight_summary',
   'pub(super) fn run_git_status',
-  'pub(super) async fn action_preflight_commit',
   'Command::new("git")',
   '.args(["status", "--porcelain=v1"])',
-  'resolve_session_trace_path',
 ];
 
 const MCP_NEEDLES = [
@@ -390,6 +400,7 @@ function checkFiles(root, files) {
   );
   requireAll(diagnostics, files.completionGates, sources.completionGates, COMPLETION_GATES_NEEDLES);
   requireAll(diagnostics, files.preflight, sources.preflight, PREFLIGHT_NEEDLES);
+  requireAll(diagnostics, files.preflightScope, sources.preflightScope, PREFLIGHT_SCOPE_NEEDLES);
   requireAll(diagnostics, files.taskVerifier, sources.taskVerifier, TASK_VERIFIER_NEEDLES);
   requireAll(diagnostics, files.mcp, sources.mcp, MCP_NEEDLES);
   return diagnostics;
@@ -434,6 +445,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.completionRecords]: buildGoodCompletionRecords(),
     [DEFAULT_FILES.completionGates]: buildGoodCompletionGates(),
     [DEFAULT_FILES.preflight]: buildGoodPreflight(),
+    [DEFAULT_FILES.preflightScope]: buildGoodPreflightScope(),
     [DEFAULT_FILES.taskVerifier]: buildGoodTaskVerifier(),
     [DEFAULT_FILES.mcp]: buildGoodMcp(),
   };
@@ -567,9 +579,10 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_records.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_gates.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_scope.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-      :note "agent_execution/completion_records.rs owns VALID_COMMIT_STATUSES, verifier status enums, CompletionRecord, parse_completions, summarize_durability, collect_string_list, render_string_list, and parse_string_list; agent_execution/completion_audit.rs owns action_complete; agent_execution/completion_maintenance.rs owns action_audit, action_repair, rebuild_derived_indexes, ExecutionEvent::Audited, ExecutionEvent::StaleClaim, and ExecutionEvent::Repaired; agent_execution/completion_gates.rs owns enforce_scoped_commit_completion and enforce_task_contract_completion; agent_execution/task_verifier.rs owns auto_run_task_run_verifier and report/shared-memory proof; agent_execution/preflight.rs owns preflight_commit/build_preflight_summary before a writer commits."))
+      :note "agent_execution/completion_records.rs owns VALID_COMMIT_STATUSES, verifier status enums, CompletionRecord, parse_completions, summarize_durability, collect_string_list, render_string_list, and parse_string_list; agent_execution/completion_audit.rs owns action_complete; agent_execution/completion_maintenance.rs owns action_audit, action_repair, rebuild_derived_indexes, ExecutionEvent::Audited, ExecutionEvent::StaleClaim, and ExecutionEvent::Repaired; agent_execution/completion_gates.rs owns enforce_scoped_commit_completion and enforce_task_contract_completion; agent_execution/task_verifier.rs owns auto_run_task_run_verifier and report/shared-memory proof; agent_execution/preflight.rs owns preflight_commit action wiring and session-trace observation before a writer commits; agent_execution/preflight_scope.rs owns build_preflight_summary, porcelain parsing, read-only git status, claim-scope projection, and task-contract scope projection."))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
 }
@@ -602,6 +615,7 @@ mod completion_maintenance;
 mod completion_records;
 mod completion_gates;
 mod preflight;
+mod preflight_scope;
 mod task_verifier;
 #[cfg(test)]
 mod tests;
@@ -617,6 +631,7 @@ use self::completion_audit::{action_complete};
 use self::completion_maintenance::{action_audit, action_repair};
 use self::completion_records::{};
 use self::preflight::action_preflight_commit;
+use self::preflight_scope::{};
 use self::task_verifier::{};
 `;
 }
@@ -765,6 +780,12 @@ pub(super) fn enforce_task_contract_completion() {
 }
 
 function buildGoodPreflight() {
+  return `pub(super) async fn action_preflight_commit() {}
+resolve_session_trace_path();
+`;
+}
+
+function buildGoodPreflightScope() {
   return `pub(super) struct PorcelainEntry {}
 pub(super) fn parse_porcelain_status() {}
 pub(super) fn collect_all_claim_scopes() {}
@@ -774,9 +795,7 @@ pub(super) fn build_contract_scope_summary() {}
 pub(super) fn evaluate_task_contract_for_preflight() {}
 pub(super) fn build_preflight_summary() {}
 pub(super) fn run_git_status() {}
-pub(super) async fn action_preflight_commit() {}
 std::process::Command::new("git").args(["status", "--porcelain=v1"]);
-resolve_session_trace_path();
 `;
 }
 
