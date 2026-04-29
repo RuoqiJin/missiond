@@ -12,8 +12,17 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { runNextAction } from './task-runner-next-action.mjs';
+import {
+  head,
+  isList,
+  keywordPropText,
+  nodeText,
+  readKeywordProps,
+  readLispFile,
+} from './lib/missiond_lisp.mjs';
 
 const DISPATCH_SCHEMA = 'missiond.task-runner-dispatch.v0';
+const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
 
 const usage = `Usage:
   node scripts/task-runner-dispatch.mjs --manifest <manifest.lisp>
@@ -216,6 +225,12 @@ export function buildDelegateCall({ action, repoRoot, manifestPath, actorRole = 
   const briefPath = action.brief_path;
   const contractPath = path.posix.join('.missiond', 'tasks', action.wave, `${taskId}.lisp`);
   const estimated = Number.isInteger(action.estimated_minutes) ? action.estimated_minutes : 30;
+  const timeoutSecs = Number.isInteger(action.timeout_secs)
+    ? action.timeout_secs
+    : timeoutForMinutes(estimated);
+  const modelProfile = action.model_profile ?? DEFAULT_MODEL_PROFILE;
+  const contractHints = loadContractDispatchHints(repoRoot, contractPath);
+  const contextPackPath = action.context_pack_path ?? contractHints.contextPackPath;
   return {
     task_id: taskId,
     target_tool: 'mission_task_delegate',
@@ -227,12 +242,28 @@ export function buildDelegateCall({ action, repoRoot, manifestPath, actorRole = 
         contractPath,
         manifestPath,
         softRefs: action.soft_refs ?? [],
+        modelProfile,
+        timeoutSecs,
+        contextPackPath,
+        writeScope: action.write_scope ?? [],
+        mustNotTouch: contractHints.mustNotTouch,
+        acceptance: contractHints.acceptance,
       }),
       intent: 'code',
       cwd: repoRoot,
-      timeout_secs: timeoutForMinutes(estimated),
+      timeout_secs: timeoutSecs,
+      model_profile: modelProfile,
       priority: priorityForAction(action),
-      context_hints: buildContextHints({ action, briefPath, contractPath, manifestPath }),
+      context_hints: buildContextHints({
+        action,
+        briefPath,
+        contractPath,
+        manifestPath,
+        modelProfile,
+        timeoutSecs,
+        contextPackPath,
+        contractHints,
+      }),
     },
     dispatch_event: {
       event_kind: 'dispatch',
@@ -242,14 +273,34 @@ export function buildDelegateCall({ action, repoRoot, manifestPath, actorRole = 
   };
 }
 
-function buildObjective({ taskId, wave, briefPath, contractPath, manifestPath, softRefs }) {
+function buildObjective({
+  taskId,
+  wave,
+  briefPath,
+  contractPath,
+  manifestPath,
+  softRefs,
+  modelProfile,
+  timeoutSecs,
+  contextPackPath,
+  writeScope,
+  mustNotTouch,
+  acceptance,
+}) {
   const lines = [
     `Execute MissionD task ${taskId} from wave ${wave}.`,
     `Read and follow the thin brief first: ${briefPath}`,
     `Task contract SSOT: ${contractPath}`,
     `Wave manifest: ${manifestPath}`,
+    `Model profile: ${modelProfile}`,
+    `Timeout seconds: ${timeoutSecs}`,
+    'BoardTask ID: assigned by mission_task_delegate; preserve any BoardTask ID suffix appended by Autopilot.',
     'Follow the shared preamble, lifecycle/report/commit protocol, write scope, and acceptance commands in the brief.',
   ];
+  if (contextPackPath) lines.push(`Context pack: ${contextPackPath}`);
+  if (writeScope.length > 0) lines.push(`Write scope: ${writeScope.join(', ')}`);
+  if (mustNotTouch.length > 0) lines.push(`Must-not-touch: ${mustNotTouch.join(', ')}`);
+  if (acceptance.length > 0) lines.push(`Acceptance commands: ${acceptance.join(' | ')}`);
   if (softRefs.length > 0) {
     lines.push(`Soft context refs are guidance only, not blockers: ${softRefs.join(', ')}`);
   }
@@ -257,15 +308,55 @@ function buildObjective({ taskId, wave, briefPath, contractPath, manifestPath, s
   return lines.join('\n');
 }
 
-function buildContextHints({ action, briefPath, contractPath, manifestPath }) {
+function buildContextHints({
+  action,
+  briefPath,
+  contractPath,
+  manifestPath,
+  modelProfile,
+  timeoutSecs,
+  contextPackPath,
+  contractHints,
+}) {
   return uniqueSorted([
     action.task_id,
     action.wave,
     briefPath,
     contractPath,
     manifestPath,
+    modelProfile,
+    `timeout_secs=${timeoutSecs}`,
+    contextPackPath,
+    ...(action.write_scope ?? []),
+    ...(contractHints.mustNotTouch ?? []),
+    ...(contractHints.acceptance ?? []),
     ...(action.soft_refs ?? []),
   ]);
+}
+
+function loadContractDispatchHints(repoRoot, contractPath) {
+  const empty = { contextPackPath: null, mustNotTouch: [], acceptance: [] };
+  const abs = path.resolve(repoRoot, contractPath);
+  if (!fs.existsSync(abs)) return empty;
+  const forms = readLispFile(abs);
+  const task = forms.find((form) => isList(form) && head(form) === 'task');
+  if (!task) return empty;
+  const props = readKeywordProps(task, { start: 2 });
+  return {
+    contextPackPath: keywordPropText(props, ':context-pack-path') ?? null,
+    mustNotTouch: nodeToStringArray(props[':must-not-touch']?.value),
+    acceptance: nodeToStringArray(props[':acceptance']?.value),
+  };
+}
+
+function nodeToStringArray(node) {
+  if (!isList(node)) return [];
+  const out = [];
+  for (const child of node.children) {
+    const text = nodeText(child);
+    if (text != null && text !== '') out.push(text);
+  }
+  return out;
 }
 
 function computeStatus({ blockers, dispatchActions, missingBriefs, allowMissingBriefs }) {
@@ -345,6 +436,15 @@ function runFixtures() {
     fs.writeFileSync(manifestPath, fixtureManifest());
     fs.writeFileSync(path.join(briefDir, 'wave99-01-alpha.md'), '# alpha\n');
     fs.writeFileSync(path.join(briefDir, 'wave99-02-beta.md'), '# beta\n');
+    fs.writeFileSync(
+      path.join(tmp, '.missiond/tasks/wave99/wave99-01-alpha.lisp'),
+      `(task wave99-01-alpha
+  :schema "missiond.task-contract.v1"
+  :must-not-touch ["packages/**"]
+  :acceptance ["node scripts/task-runner-dispatch.mjs --dry-fixture"]
+  :context-pack-path ".missiond/tasks/wave99/context-pack.lisp")
+`,
+    );
 
     const readOnly = runDispatch({
       manifestPath,
@@ -362,6 +462,28 @@ function runFixtures() {
       readOnly.delegate_calls[0].target_args.objective.includes(readOnly.delegate_calls[0].task_id),
       'objective should name the selected task',
     );
+    assert(
+      readOnly.delegate_calls[0].target_args.model_profile === 'coding-default-opus-4-7',
+      'delegate args should carry explicit default model_profile',
+    );
+    assert(
+      readOnly.delegate_calls[0].target_args.timeout_secs === 2400,
+      'manifest timeout_secs should override estimated_minutes padding',
+    );
+    for (const literal of [
+      'Model profile: coding-default-opus-4-7',
+      'Timeout seconds: 2400',
+      'Context pack: .missiond/tasks/wave99/context-pack.lisp',
+      'Write scope: scripts/wave99-alpha.mjs',
+      'Must-not-touch: packages/**',
+      'Acceptance commands: node scripts/task-runner-dispatch.mjs --dry-fixture',
+      'BoardTask ID: assigned by mission_task_delegate',
+    ]) {
+      assert(
+        readOnly.delegate_calls[0].target_args.objective.includes(literal),
+        `delegate objective should include ${literal}`,
+      );
+    }
 
     const emitted = runDispatch({
       manifestPath,
@@ -431,6 +553,9 @@ function fixtureManifest(wave = 'wave99') {
         :dispatch_group A
         :estimated_minutes 15
         :heartbeat_minutes 5
+        :model_profile coding-default-opus-4-7
+        :timeout_secs 2400
+        :context_pack_path ".missiond/tasks/${wave}/context-pack.lisp"
         :write_scope ["scripts/${wave}-alpha.mjs"])
   (node :task_id ${wave}-02-beta
         :depends_on []

@@ -23,7 +23,7 @@ Checks MissionD task-runner-manifest v1/v2 Lisp records:
   - validates each (node ...) entry: required :task_id :depends_on
     :verification_tier :dispatch_group :estimated_minutes
     :heartbeat_minutes :write_scope; optional :hard_deps :soft_refs
-    :notes :owner :kind
+    :notes :owner :kind :model_profile :timeout_secs :context_pack_path
   - rejects: schema mismatch; unknown / missing / unknown-extra fields;
     brief_mode / verification_tier / overlap_policy enum violations;
     non-literal-atom productive_only (strings rejected); non-positive
@@ -60,6 +60,9 @@ const WAVE_ID_RE = /^[a-z][a-z0-9-]*$/;
 const TASK_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
 const GROUP_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const POSITIVE_INT_RE = /^[1-9][0-9]*$/;
+const MODEL_PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MIN_TIMEOUT_SECS = 60;
+const MAX_TIMEOUT_SECS = 7200;
 
 export const BRIEF_MODES = new Set(['thin', 'full', 'preamble']);
 
@@ -108,7 +111,16 @@ const NODE_REQUIRED = [
   ':write_scope',
 ];
 
-const NODE_OPTIONAL = [':hard_deps', ':soft_refs', ':notes', ':owner', ':kind'];
+const NODE_OPTIONAL = [
+  ':hard_deps',
+  ':soft_refs',
+  ':notes',
+  ':owner',
+  ':kind',
+  ':model_profile',
+  ':timeout_secs',
+  ':context_pack_path',
+];
 
 const NODE_ALLOWED = new Set([...NODE_REQUIRED, ...NODE_OPTIONAL]);
 
@@ -605,6 +617,9 @@ function validateNode(file, nodeForm, diagnostics, ctx) {
     notes: null,
     owner: null,
     kind: null,
+    model_profile: null,
+    timeout_secs: null,
+    context_pack_path: null,
   };
 
   // :task_id — non-empty kebab id
@@ -814,6 +829,82 @@ function validateNode(file, nodeForm, diagnostics, ctx) {
     }
   }
 
+  // Optional :model_profile — safe single token projected to mission_task_delegate.
+  if (props[':model_profile']) {
+    const text = keywordPropText(props, ':model_profile');
+    if (text == null || text.trim() === '' || !MODEL_PROFILE_RE.test(text)) {
+      addError(
+        diagnostics,
+        file,
+        props[':model_profile'].value?.loc ?? nodeForm.loc,
+        `:model_profile "${text}" must match ${MODEL_PROFILE_RE}`,
+      );
+    } else {
+      projected.model_profile = text;
+    }
+  }
+
+  // Optional :timeout_secs — explicit BoardTask timeout override.
+  if (props[':timeout_secs']) {
+    const node = props[':timeout_secs'].value;
+    if (!node || node.type !== 'atom') {
+      addError(
+        diagnostics,
+        file,
+        node?.loc ?? nodeForm.loc,
+        `:timeout_secs must be a positive integer literal atom, got ${describeNode(node)}`,
+      );
+    } else if (!POSITIVE_INT_RE.test(node.value)) {
+      addError(
+        diagnostics,
+        file,
+        node.loc,
+        `:timeout_secs must be a positive integer, got "${node.value}"`,
+      );
+    } else {
+      const intValue = Number.parseInt(node.value, 10);
+      if (intValue < MIN_TIMEOUT_SECS || intValue > MAX_TIMEOUT_SECS) {
+        addError(
+          diagnostics,
+          file,
+          node.loc,
+          `:timeout_secs must be between ${MIN_TIMEOUT_SECS} and ${MAX_TIMEOUT_SECS}, got ${intValue}`,
+        );
+      } else {
+        projected.timeout_secs = intValue;
+      }
+    }
+  }
+
+  // Optional :context_pack_path — repo-relative path to the integration-plan pack.
+  if (props[':context_pack_path']) {
+    const text = keywordPropText(props, ':context_pack_path');
+    if (text == null || text.trim() === '') {
+      addError(
+        diagnostics,
+        file,
+        props[':context_pack_path'].value?.loc ?? nodeForm.loc,
+        ':context_pack_path must be a non-empty repo-relative path when present',
+      );
+    } else if (path.isAbsolute(text) || text.startsWith('~')) {
+      addError(
+        diagnostics,
+        file,
+        props[':context_pack_path'].value?.loc ?? nodeForm.loc,
+        `:context_pack_path must be repo-relative, got "${text}"`,
+      );
+    } else if (text.split(/[\\/]/).some((seg) => seg === '..')) {
+      addError(
+        diagnostics,
+        file,
+        props[':context_pack_path'].value?.loc ?? nodeForm.loc,
+        `:context_pack_path must not contain ".." traversal, got "${text}"`,
+      );
+    } else {
+      projected.context_pack_path = text;
+    }
+  }
+
   // Productive-only gate: archive / backfill / index / lisp-backfill nodes
   // are forbidden when the manifest is productive-only. We inspect both
   // :kind (canonical) and :task_id substrings (defence in depth).
@@ -928,7 +1019,8 @@ function addError(diagnostics, file, loc, message) {
 //               soft_refs: string[], verification_tier,
 //               dispatch_group, estimated_minutes: number|null,
 //               heartbeat_minutes: number|null, write_scope: string[],
-//               notes, owner, kind, loc }],
+//               notes, owner, kind, model_profile, timeout_secs,
+//               context_pack_path, loc }],
 //     loc: { line, column } }
 export function projectManifest(form) {
   if (!isList(form) || head(form) !== MANIFEST_HEAD) return null;
@@ -973,6 +1065,7 @@ function projectNode(form) {
   }
   const estimated = parseIntegerAtom(props[':estimated_minutes']?.value);
   const heartbeat = parseIntegerAtom(props[':heartbeat_minutes']?.value);
+  const timeoutSecs = parseIntegerAtom(props[':timeout_secs']?.value);
   return {
     task_id: keywordPropText(props, ':task_id'),
     depends_on,
@@ -988,6 +1081,9 @@ function projectNode(form) {
     notes: keywordPropText(props, ':notes') ?? null,
     owner: keywordPropText(props, ':owner') ?? null,
     kind: keywordPropText(props, ':kind') ?? null,
+    model_profile: keywordPropText(props, ':model_profile') ?? null,
+    timeout_secs: timeoutSecs,
+    context_pack_path: keywordPropText(props, ':context_pack_path') ?? null,
     loc: form.loc ?? null,
   };
 }
@@ -1105,6 +1201,35 @@ export function validateManifestObject(obj) {
     }
     if (!Number.isInteger(node.heartbeat_minutes) || node.heartbeat_minutes <= 0) {
       errors.push(`node "${node.task_id}" :heartbeat_minutes must be a positive integer`);
+    }
+    if (node.model_profile != null) {
+      if (typeof node.model_profile !== 'string' || !MODEL_PROFILE_RE.test(node.model_profile)) {
+        errors.push(`node "${node.task_id}" :model_profile must match ${MODEL_PROFILE_RE}`);
+      }
+    }
+    if (node.timeout_secs != null) {
+      if (
+        !Number.isInteger(node.timeout_secs) ||
+        node.timeout_secs < MIN_TIMEOUT_SECS ||
+        node.timeout_secs > MAX_TIMEOUT_SECS
+      ) {
+        errors.push(
+          `node "${node.task_id}" :timeout_secs must be between ${MIN_TIMEOUT_SECS} and ${MAX_TIMEOUT_SECS}`,
+        );
+      }
+    }
+    if (node.context_pack_path != null) {
+      if (typeof node.context_pack_path !== 'string' || node.context_pack_path.trim() === '') {
+        errors.push(`node "${node.task_id}" :context_pack_path must be a non-empty string`);
+      } else if (path.isAbsolute(node.context_pack_path) || node.context_pack_path.startsWith('~')) {
+        errors.push(
+          `node "${node.task_id}" :context_pack_path must be repo-relative, got "${node.context_pack_path}"`,
+        );
+      } else if (node.context_pack_path.split(/[\\/]/).some((seg) => seg === '..')) {
+        errors.push(
+          `node "${node.task_id}" :context_pack_path must not contain "..", got "${node.context_pack_path}"`,
+        );
+      }
     }
     if (!Array.isArray(node.depends_on)) {
       errors.push(`node "${node.task_id}" :depends_on must be an array`);
@@ -1235,6 +1360,9 @@ function runFixtures(json = false) {
               :dispatch_group A
               :estimated_minutes 30
               :heartbeat_minutes 10
+              :model_profile coding-default-opus-4-7
+              :timeout_secs 1800
+              :context_pack_path ".missiond/tasks/wave99/context-pack.lisp"
               :write_scope ["scripts/foo.mjs"])
         (node :task_id wave99-02-bar
               :depends_on [wave99-01-foo]
@@ -1563,6 +1691,27 @@ function runFixtures(json = false) {
               :dispatch_group A
               :estimated_minutes 30
               :heartbeat_minutes 10
+              :write_scope ["scripts/foo.mjs"]))`,
+      ok: false,
+    },
+    {
+      name: 'fail-invalid-dispatch-projection-fields',
+      category: 'fail-dispatch-projection',
+      source: `(task-runner-manifest m-invalid-dispatch-projection
+        :schema "${SCHEMA_V2}"
+        :wave wave99
+        :brief_mode thin
+        :shared_preamble_path "${sharedPreamble}"
+        :productive_only true
+        (node :task_id wave99-01-foo
+              :depends_on []
+              :verification_tier local
+              :dispatch_group A
+              :estimated_minutes 30
+              :heartbeat_minutes 10
+              :model_profile "bad profile with spaces"
+              :timeout_secs 99999
+              :context_pack_path "../context-pack.lisp"
               :write_scope ["scripts/foo.mjs"]))`,
       ok: false,
     },
