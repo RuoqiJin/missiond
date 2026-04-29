@@ -1,6 +1,8 @@
+use super::super::evidence_collector::{self, EventRef, EvidenceEntry};
 use super::acceptance::*;
 use super::claim_lease::*;
 use super::finalization::*;
+use super::lifecycle::*;
 use super::mode::*;
 use super::parser::*;
 use super::projection::*;
@@ -10,6 +12,7 @@ use super::scheduler::*;
 use super::*;
 use chrono::TimeZone;
 use chrono::Utc;
+use missiond_core::event::events::ExecutionEvent;
 use missiond_core::types::PlanStatus;
 use missiond_mcp::tools::error_codes;
 use uuid::Uuid;

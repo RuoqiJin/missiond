@@ -38,6 +38,7 @@ const DEFAULT_FILES = {
   planDagResume: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs',
   planDagProjection: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs',
   planDagFinalization: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs',
+  planDagLifecycle: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/lifecycle.rs',
   planDagScheduler: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs',
   planDagMode: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs',
   planDagTests: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs',
@@ -124,6 +125,7 @@ function checkFiles(root, files) {
     'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
     'plan_dag/projection.rs owns the DAG response projection core',
     'plan_dag/finalization.rs owns the DAG finalization projection core',
+    'plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core',
     'plan_dag/scheduler.rs owns the DAG scheduler projection core',
     'plan_dag/mode.rs owns the DAG scheduler-mode gate',
     'execute can derive target_source=plan_hint from plan.sexp_text',
@@ -325,6 +327,8 @@ function checkFiles(root, files) {
     'mod finalization;',
     'pub(super) use finalization::parse_finalize_plan;',
     'use finalization::{',
+    'mod lifecycle;',
+    'use lifecycle::{',
     '#[cfg(test)]',
     'mod tests;',
   ]);
@@ -435,6 +439,27 @@ function checkFiles(root, files) {
     'pub(super) fn build_distill_block',
   ]);
 
+  requireAll(diagnostics, files.planDagLifecycle, sources.planDagLifecycle, [
+    'pub(super) struct EvidenceCtx',
+    'pub(super) async fn emit_evidence_dag_finalized',
+    'pub(super) fn deterministic_plan_node_event_id',
+    'pub(super) fn build_plan_node_state_changed_event',
+    'pub(super) async fn publish_plan_node_state_change',
+    'pub(super) fn plan_node_should_retry',
+    'pub(super) async fn emit_evidence_running',
+    'pub(super) async fn emit_evidence_finished',
+    'pub(super) async fn emit_evidence_rollback',
+    'pub(super) async fn emit_evidence_acceptance',
+    'pub(super) async fn emit_evidence_skipped',
+    'pub(super) async fn emit_paused_review_gate',
+    'pub(super) async fn emit_evidence_claimed',
+    'pub(super) async fn emit_evidence_claim_released',
+    'pub(super) async fn emit_evidence_claim_conflict',
+    'with_state_transition("dag_finalized")',
+    'publish_question(ev)',
+    'EventRef::new(',
+  ]);
+
   requireAll(diagnostics, files.planDagScheduler, sources.planDagScheduler, [
     'pub(super) fn compute_concurrency_plan',
     'pub(super) fn parse_max_parallel_nodes',
@@ -459,6 +484,7 @@ function checkFiles(root, files) {
     'use super::acceptance::*;',
     'use super::claim_lease::*;',
     'use super::finalization::*;',
+    'use super::lifecycle::*;',
     'use super::mode::*;',
     'use super::parser::*;',
     'use super::projection::*;',
@@ -548,10 +574,11 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/lifecycle.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -773,6 +800,13 @@ use finalization::{
     parse_distill_mode_arg, parse_distill_on_success, validate_finalize_args,
     FINALIZE_DISTILL_MODE_DRY_RUN,
 };
+mod lifecycle;
+use lifecycle::{
+    emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_claim_released,
+    emit_evidence_claimed, emit_evidence_dag_finalized, emit_evidence_finished,
+    emit_evidence_rollback, emit_evidence_running, emit_evidence_skipped,
+    emit_paused_review_gate, plan_node_should_retry, publish_plan_node_state_change, EvidenceCtx,
+};
 #[cfg(test)]
 mod tests;`);
   writeFixture(root, DEFAULT_FILES.planDagParser, `
@@ -886,6 +920,23 @@ fn unchanged_status_label() {}
 pub(super) fn build_finalization_block() {}
 pub(super) fn build_distill_block() {}
 `);
+  writeFixture(root, DEFAULT_FILES.planDagLifecycle, `
+pub(super) struct EvidenceCtx;
+pub(super) async fn emit_evidence_dag_finalized() { with_state_transition("dag_finalized"); }
+pub(super) fn deterministic_plan_node_event_id() {}
+pub(super) fn build_plan_node_state_changed_event() {}
+pub(super) async fn publish_plan_node_state_change() { EventRef::new(); }
+pub(super) fn plan_node_should_retry() {}
+pub(super) async fn emit_evidence_running() {}
+pub(super) async fn emit_evidence_finished() {}
+pub(super) async fn emit_evidence_rollback() {}
+pub(super) async fn emit_evidence_acceptance() {}
+pub(super) async fn emit_evidence_skipped() {}
+pub(super) async fn emit_paused_review_gate() { publish_question(ev); }
+pub(super) async fn emit_evidence_claimed() {}
+pub(super) async fn emit_evidence_claim_released() {}
+pub(super) async fn emit_evidence_claim_conflict() {}
+`);
   writeFixture(root, DEFAULT_FILES.planDagScheduler, `
 pub(super) fn compute_concurrency_plan() {}
 pub(super) fn parse_max_parallel_nodes() {}
@@ -912,6 +963,7 @@ use super::*;
 use super::acceptance::*;
 use super::claim_lease::*;
 use super::finalization::*;
+use super::lifecycle::*;
 use super::mode::*;
 use super::parser::*;
 use super::projection::*;
