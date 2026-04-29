@@ -2079,6 +2079,49 @@ function runFixtures({ json }) {
       fs.rmSync(tmp, { recursive: true, force: true });
     }
 
+    // wave40-01 cross-layer smoke: a wave39-class rich worker report is
+    // finalized through the parent-hotfix planner; the resulting source
+    // must keep worker :acceptance_results, :notes, and worker-explanation
+    // fields while still carrying the patched lineage fields.
+    {
+      const richWorkerSource = `(report wave99-04-lifecycle
+    :schema "missiond.report-contract.v1"
+    :task_id "wave99-04-lifecycle"
+    :status done
+    :commit_hash "aa10aa1"
+    :files_changed ["scripts/foo.mjs"]
+    :acceptance_results
+      [(:command "node scripts/foo.mjs --dry-fixture" :exit_code 0 :ok true :note "alpha")
+       (:command "node scripts/bar.mjs --dry-fixture" :exit_code 0 :ok true :note "beta")]
+    :notes "wave40-01 preservation smoke prose"
+    :time_sinks ["bench warmup"]
+    :trace_refs ["wave99-04-lifecycle-bench-001"])`;
+      const preservationPlan = planParentHotfixFromSource(richWorkerSource, {
+        taskId: smokeTask,
+        agentCommit: workerCommit,
+        parentCommit: finalCommit,
+        kind: 'doc-fix',
+        reason: 'wave40-01 parent hotfix preservation smoke',
+        files: ['scripts/foo.mjs'],
+      });
+      if (preservationPlan.finalized_report.acceptanceResults.length !== 2) {
+        throw new Error(
+          'wave40-01 preservation smoke expected 2 worker acceptance entries to survive finalization',
+        );
+      }
+      if (!preservationPlan.finalized_report_source.includes(':notes "wave40-01 preservation smoke prose"')) {
+        throw new Error('wave40-01 preservation smoke expected worker :notes to survive finalization');
+      }
+      if (!preservationPlan.finalized_report_source.includes(':trace_refs')) {
+        throw new Error('wave40-01 preservation smoke expected worker :trace_refs to survive finalization');
+      }
+      if (!preservationPlan.finalized_report_source.includes(`:final_commit_hash "${finalCommit}"`)) {
+        throw new Error(
+          'wave40-01 preservation smoke expected lineage :final_commit_hash to be patched to the parent commit',
+        );
+      }
+    }
+
     const smokeReceipt = {
       id: `${smokeTask}-${finalCommit}-smoke`,
       wave: 'wave99',

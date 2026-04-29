@@ -9,11 +9,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import { loadReport, loadReportFromSource } from './verify-task-run.mjs';
+import { loadReportFromSource } from './verify-task-run.mjs';
 import {
   head,
   isList,
   keywordPropText,
+  nodeText,
   nodeToStringArray,
   parseLisp,
   readKeywordProps,
@@ -24,14 +25,21 @@ const usage = `Usage:
     --agent-commit <sha> --final-commit <sha> [--verified-commit <sha>] \\
     --parent-patch-commit <sha> --parent-patch-kind <kind> \\
     --parent-patch-reason <text> --parent-patch-file <repo-path>... \\
-    [--acceptance-command <cmd>] [--write <path>] \\
+    [--acceptance-command <cmd>] [--replace-acceptance] [--write <path>] \\
     [--request-id <request-id> --request-reports-dir <dir>] \\
     [--verification-receipt <receipt-id-or-path>] [--json]
   node scripts/task-runner-finalize-report.mjs --dry-fixture [--json]
 
 Projects parent/orchestrator hotfix facts into a finalized report-contract v1
-record. Default mode is read-only and writes the final report to stdout. The
---write flag is the only mutation boundary and only writes the report file.
+record as a sparse Lisp projection: the worker report's keyword/value pairs
+are preserved verbatim, and only the lineage fields (:status :commit_hash
+:agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches
+plus the unioned :files_changed) are patched. :acceptance_results is
+preserved by default; --acceptance-command appends new entries rather than
+replacing the worker block. --replace-acceptance opts in to the legacy
+replacement behavior. Default mode is read-only and writes the final report
+to stdout. The --write flag is the only mutation boundary and only writes
+the report file.
 
 No git mutation, no git inspection, no spawn, no network, no LLM.
 `;
@@ -64,6 +72,7 @@ function parseArgs(argv) {
     parentPatchReason: null,
     parentPatchFiles: [],
     acceptanceCommands: [],
+    replaceAcceptance: false,
     requestId: null,
     requestReportsDir: null,
     verificationReceipts: [],
@@ -116,6 +125,8 @@ function parseArgs(argv) {
       opts.acceptanceCommands.push(argv[++i] ?? fail('--acceptance-command requires a value'));
     } else if (arg.startsWith('--acceptance-command=')) {
       opts.acceptanceCommands.push(arg.slice('--acceptance-command='.length));
+    } else if (arg === '--replace-acceptance') {
+      opts.replaceAcceptance = true;
     } else if (arg === '--request-id') {
       opts.requestId = argv[++i] ?? fail('--request-id requires a value');
     } else if (arg.startsWith('--request-id=')) {
@@ -256,20 +267,33 @@ export function finalizeReportObject(workerReport, opts = {}) {
     throw new Error(':files_changed must be non-empty on finalized reports');
   }
 
-  const acceptanceResults = opts.acceptanceResults ?? (opts.acceptanceCommands ?? []).map((command) => ({
+  const workerAcceptance = Array.isArray(workerReport.acceptanceResults)
+    ? workerReport.acceptanceResults
+    : [];
+  const appendedFromCommands = (opts.acceptanceCommands ?? []).map((command) => ({
     command,
     exit_code: 0,
     ok: true,
   }));
-  const finalAcceptance = acceptanceResults.length > 0
-    ? acceptanceResults
-    : [
-        {
-          command: 'node scripts/task-runner-finalize-report.mjs --dry-fixture',
-          exit_code: 0,
-          ok: true,
-        },
-      ];
+  let acceptanceResults;
+  if (opts.replaceAcceptance) {
+    acceptanceResults = opts.acceptanceResults ?? appendedFromCommands;
+  } else {
+    acceptanceResults = [
+      ...workerAcceptance,
+      ...(opts.acceptanceResults ?? []),
+      ...appendedFromCommands,
+    ];
+  }
+  if (acceptanceResults.length === 0) {
+    acceptanceResults = [
+      {
+        command: 'node scripts/task-runner-finalize-report.mjs --dry-fixture',
+        exit_code: 0,
+        ok: true,
+      },
+    ];
+  }
 
   return {
     id: workerReport.id,
@@ -281,26 +305,176 @@ export function finalizeReportObject(workerReport, opts = {}) {
     verifiedCommitHash: verifiedCommit,
     parentPatches,
     filesChanged,
-    acceptanceResults: finalAcceptance,
+    acceptanceResults,
+  };
+}
+
+const LINEAGE_KEYS = new Set([
+  ':schema',
+  ':task_id',
+  ':status',
+  ':commit_hash',
+  ':agent_commit_hash',
+  ':final_commit_hash',
+  ':verified_commit_hash',
+  ':parent_patches',
+  ':files_changed',
+  ':acceptance_results',
+]);
+
+export function projectFinalReportSource(source, opts = {}) {
+  const file = opts.file ?? '<report>';
+  const forms = parseLisp(source, file);
+  const reportForm = forms.find((form) => isList(form) && head(form) === 'report');
+  if (!reportForm) throw new Error(`${file}: no (report ...) form found`);
+  if (reportForm.children.length < 2) {
+    throw new Error(`${file}: (report ...) requires an id as the second form`);
+  }
+  const id = nodeText(reportForm.children[1]);
+  if (!id) throw new Error(`${file}: (report ...) id must be an atom or string`);
+  const props = readKeywordProps(reportForm, { start: 2 });
+  const workerSchema = keywordPropText(props, ':schema');
+  if (workerSchema && workerSchema !== REPORT_SCHEMA) {
+    throw new Error(
+      `${file}: report :schema must be "${REPORT_SCHEMA}", got ${JSON.stringify(workerSchema)}`,
+    );
+  }
+  const workerTaskId = keywordPropText(props, ':task_id') ?? id;
+  const workerCommit = keywordPropText(props, ':commit_hash') ?? null;
+  const workerAgent = keywordPropText(props, ':agent_commit_hash') ?? null;
+  const workerFinal = keywordPropText(props, ':final_commit_hash') ?? null;
+  const workerVerified = keywordPropText(props, ':verified_commit_hash') ?? null;
+  const workerFiles = nodeToStringArray(props[':files_changed']?.value);
+  const workerParentPatches = parentPatchesFromNode(props[':parent_patches']?.value);
+  const workerAcceptance = acceptanceResultsFromNode(props[':acceptance_results']?.value);
+
+  const projection = finalizeReportObject(
+    {
+      id,
+      taskId: workerTaskId,
+      commitHash: workerCommit,
+      agentCommitHash: workerAgent,
+      finalCommitHash: workerFinal,
+      verifiedCommitHash: workerVerified,
+      parentPatches: workerParentPatches,
+      filesChanged: workerFiles,
+      acceptanceResults: workerAcceptance,
+    },
+    opts,
+  );
+
+  const preservedPairs = [];
+  const preservedKeys = [];
+  for (let i = 2; i < reportForm.children.length; i += 1) {
+    const keyNode = reportForm.children[i];
+    if (keyNode.type !== 'atom' || !keyNode.value.startsWith(':')) continue;
+    const key = keyNode.value;
+    const valueNode = reportForm.children[i + 1] ?? null;
+    if (valueNode != null) i += 1;
+    if (LINEAGE_KEYS.has(key)) continue;
+    preservedPairs.push({ key, valueNode });
+    preservedKeys.push(key);
+  }
+
+  const renderedSource = renderProjectedFinalReport({
+    projection,
+    preservedPairs,
+  });
+
+  return {
+    report: { ...projection, preservedKeys },
+    source: renderedSource,
   };
 }
 
 export function finalizeReportSource(source, opts = {}) {
-  const workerReport = loadReportFromSource(source, opts.file ?? '<report>');
-  const report = finalizeReportObject(workerReport, opts);
-  return {
-    report,
-    source: renderFinalReport(report),
-  };
+  const projected = projectFinalReportSource(source, opts);
+  // Re-validate via the full report loader so we catch shape regressions.
+  loadReportFromSource(projected.source, opts.file ?? '<finalized-report>');
+  return projected;
 }
 
 export function finalizeReportFile(file, opts = {}) {
-  const workerReport = loadReport(file);
-  const report = finalizeReportObject(workerReport, opts);
-  return {
-    report,
-    source: renderFinalReport(report),
-  };
+  const source = fs.readFileSync(file, 'utf8');
+  const projected = projectFinalReportSource(source, { ...opts, file });
+  loadReportFromSource(projected.source, file);
+  return projected;
+}
+
+function parentPatchesFromNode(node) {
+  if (!node || !isList(node)) return [];
+  const out = [];
+  for (const entry of node.children) {
+    if (!isList(entry)) continue;
+    const ep = readKeywordProps(entry, { start: 0 });
+    out.push({
+      commit: keywordPropText(ep, ':commit'),
+      kind: keywordPropText(ep, ':kind'),
+      reason: keywordPropText(ep, ':reason'),
+      files: nodeToStringArray(ep[':files']?.value),
+    });
+  }
+  return out;
+}
+
+function acceptanceResultsFromNode(node) {
+  if (!node || !isList(node)) return [];
+  const out = [];
+  for (const entry of node.children) {
+    if (!isList(entry)) continue;
+    const ep = readKeywordProps(entry, { start: 0 });
+    const command = keywordPropText(ep, ':command');
+    if (!command) continue;
+    const exitText = keywordPropText(ep, ':exit_code');
+    const exitCode = exitText != null && /^-?\d+$/.test(exitText) ? Number.parseInt(exitText, 10) : 0;
+    const okText = keywordPropText(ep, ':ok');
+    const ok = okText !== 'false';
+    const note = keywordPropText(ep, ':note');
+    const result = { command, exit_code: exitCode, ok };
+    if (note != null && note !== '') result.note = note;
+    out.push(result);
+  }
+  return out;
+}
+
+function lispInline(node) {
+  if (!node) return '';
+  if (node.type === 'string') return JSON.stringify(node.value);
+  if (node.type === 'atom') return node.value;
+  if (isList(node)) {
+    const open = node.kind === 'bracket' ? '[' : '(';
+    const close = node.kind === 'bracket' ? ']' : ')';
+    return open + node.children.map(lispInline).join(' ') + close;
+  }
+  return '';
+}
+
+function renderProjectedFinalReport({ projection, preservedPairs }) {
+  const lines = [`(report ${projection.id}`];
+  lines.push(`  :schema ${lispString(REPORT_SCHEMA)}`);
+  lines.push(`  :task_id ${lispString(projection.taskId)}`);
+  lines.push('  :status done');
+  lines.push(`  :commit_hash ${lispString(projection.commitHash)}`);
+  lines.push(`  :agent_commit_hash ${lispString(projection.agentCommitHash)}`);
+  lines.push(`  :final_commit_hash ${lispString(projection.finalCommitHash)}`);
+  lines.push(`  :verified_commit_hash ${lispString(projection.verifiedCommitHash)}`);
+  lines.push('  :parent_patches');
+  lines.push(`    ${renderParentPatches(projection.parentPatches)}`);
+  lines.push(`  :files_changed ${renderStringVector(projection.filesChanged)}`);
+  lines.push('  :acceptance_results');
+  lines.push(`    ${renderAcceptanceResults(projection.acceptanceResults)}`);
+
+  for (const pair of preservedPairs) {
+    if (pair.valueNode == null) {
+      lines.push(`  ${pair.key}`);
+      continue;
+    }
+    const rendered = lispInline(pair.valueNode);
+    lines.push(`  ${pair.key} ${rendered}`);
+  }
+
+  lines[lines.length - 1] += ')';
+  return `${lines.join('\n')}\n`;
 }
 
 function lispString(value) {
@@ -330,7 +504,15 @@ function renderAcceptanceResults(results) {
     .map((r) => {
       const exitCode = Number.isInteger(r.exit_code) ? r.exit_code : 0;
       const ok = r.ok === false ? 'false' : 'true';
-      return `(:command ${lispString(r.command)} :exit_code ${exitCode} :ok ${ok})`;
+      const parts = [
+        `:command ${lispString(r.command)}`,
+        `:exit_code ${exitCode}`,
+        `:ok ${ok}`,
+      ];
+      if (r.note != null && String(r.note).trim() !== '') {
+        parts.push(`:note ${lispString(r.note)}`);
+      }
+      return `(${parts.join(' ')})`;
     })
     .join('\n   ');
   return `[\n   ${body}]`;
@@ -478,6 +660,7 @@ function cliOptionsToFinalizeOptions(opts) {
     verifiedCommit: opts.verifiedCommit ?? opts.finalCommit,
     parentPatches,
     acceptanceCommands: opts.acceptanceCommands,
+    replaceAcceptance: opts.replaceAcceptance,
   };
 }
 
@@ -614,7 +797,139 @@ function runFixtures() {
   }
   assert(rejected, 'final commit must agree with trailing parent patch');
 
-  return { ok: true, cases: 4 };
+  // wave40-01: a wave39-class rich worker report must keep its acceptance
+  // entries, :notes, worker-explanation fields, and any optional report-
+  // contract additions through finalization. Only lineage fields move.
+  const richWorkerSource = `(report wave99-99-rich-worker
+    :schema "missiond.report-contract.v1"
+    :task_id "wave99-99-rich-worker"
+    :status done
+    :commit_hash "aa10aa1"
+    :files_changed ["scripts/foo.mjs"]
+    :acceptance_results
+      [(:command "node scripts/foo.mjs --dry-fixture" :exit_code 0 :ok true :note "alpha")
+       (:command "node scripts/bar.mjs --dry-fixture" :exit_code 0 :ok true :note "beta")]
+    :notes "worker prose that must survive finalization."
+    :verification_tier local
+    :time_sinks ["bench warmup"]
+    :major_decisions [(:decision "kept the dual-mode path" :rationale "simpler review")]
+    :unexpected_work [(:summary "router seed shape needed widening")]
+    :blockers []
+    :trace_refs ["wave99-99-rich-worker-bench-001"]
+    :recommended_backend claudecode
+    :router_confidence high
+    :router_dry_run_only true
+    :router_applied false)`;
+
+  const richFinalized = finalizeReportSource(richWorkerSource, {
+    agentCommit: 'aa10aa1',
+    finalCommit: 'aa10aa2',
+    verifiedCommit: 'aa10aa2',
+    parentPatches: [
+      {
+        commit: 'aa10aa2',
+        kind: 'doc-fix',
+        reason: 'wave40-01 preservation parent hotfix',
+        files: ['scripts/foo.mjs'],
+      },
+    ],
+    acceptanceCommands: ['node scripts/task-runner-finalize-report.mjs --dry-fixture'],
+  });
+  assert(
+    richFinalized.report.acceptanceResults.length === 3,
+    `worker acceptance entries should be preserved AND the appended command added; got ${richFinalized.report.acceptanceResults.length}`,
+  );
+  assert(
+    richFinalized.report.acceptanceResults[0].command === 'node scripts/foo.mjs --dry-fixture',
+    'first acceptance entry should remain the worker entry alpha',
+  );
+  assert(
+    richFinalized.report.acceptanceResults[0].note === 'alpha',
+    'worker acceptance :note must survive finalization',
+  );
+  for (const key of [':notes', ':verification_tier', ':time_sinks', ':major_decisions',
+    ':unexpected_work', ':blockers', ':trace_refs', ':recommended_backend',
+    ':router_confidence', ':router_dry_run_only', ':router_applied']) {
+    assert(
+      richFinalized.report.preservedKeys.includes(key),
+      `preservedKeys should include ${key}`,
+    );
+    assert(
+      richFinalized.source.includes(`\n  ${key} `) || richFinalized.source.includes(`\n  ${key})`),
+      `finalized source must still carry ${key}`,
+    );
+  }
+  assert(
+    richFinalized.source.includes(':agent_commit_hash "aa10aa1"'),
+    'finalized source should patch :agent_commit_hash to the worker commit',
+  );
+  assert(
+    richFinalized.source.includes(':final_commit_hash "aa10aa2"'),
+    'finalized source should patch :final_commit_hash to the parent commit',
+  );
+  assert(
+    richFinalized.source.includes(':verified_commit_hash "aa10aa2"'),
+    'finalized source should patch :verified_commit_hash to the parent commit',
+  );
+  assert(
+    richFinalized.source.includes('doc-fix'),
+    'finalized source should record the parent hotfix kind',
+  );
+  // The full report loader was already called inside finalizeReportSource,
+  // so this re-validation is a defense-in-depth pin.
+  loadReportFromSource(richFinalized.source, '<wave40-01-rich-finalized>');
+
+  // Replace mode opts in to legacy behavior for callers that need it.
+  const richReplaced = finalizeReportSource(richWorkerSource, {
+    agentCommit: 'aa10aa1',
+    finalCommit: 'aa10aa2',
+    verifiedCommit: 'aa10aa2',
+    parentPatches: [
+      {
+        commit: 'aa10aa2',
+        kind: 'doc-fix',
+        reason: 'wave40-01 explicit replacement',
+        files: ['scripts/foo.mjs'],
+      },
+    ],
+    acceptanceResults: [
+      { command: 'node scripts/replacement-only.mjs --dry-fixture', exit_code: 0, ok: true },
+    ],
+    replaceAcceptance: true,
+  });
+  assert(
+    richReplaced.report.acceptanceResults.length === 1,
+    'replaceAcceptance should swap in opts.acceptanceResults wholesale',
+  );
+  assert(
+    richReplaced.report.acceptanceResults[0].command === 'node scripts/replacement-only.mjs --dry-fixture',
+    'replaceAcceptance should drop worker entries when explicitly opted in',
+  );
+
+  // Minimal worker report still finalizes correctly (backward-compat with
+  // wave29/wave30 fixtures that ship only the required fields).
+  const minimal = finalizeReportSource(workerDraft, {
+    agentCommit: 'd36de80',
+    finalCommit: 'd842b1d',
+    parentPatches: [
+      {
+        commit: 'd842b1d',
+        kind: 'lint-cleanup',
+        reason: 'minimal old report compat',
+        files: ['scripts/prepare-task-runner-wave.mjs'],
+      },
+    ],
+  });
+  assert(
+    minimal.report.preservedKeys.length === 0,
+    'minimal old reports should have no preserved optional fields',
+  );
+  assert(
+    minimal.report.acceptanceResults.length === 1,
+    'minimal report should retain its single worker acceptance entry',
+  );
+
+  return { ok: true, cases: 6 };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

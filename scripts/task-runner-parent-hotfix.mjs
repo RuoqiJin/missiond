@@ -296,7 +296,48 @@ function runFixtures() {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
 
-  return { ok: true, cases: 2 };
+  // wave40-01: a wave39-class rich worker report flows through the parent-
+  // hotfix planner and keeps its acceptance + worker-explanation fields.
+  const richSource = `(report wave99-99-rich-worker
+    :schema "missiond.report-contract.v1"
+    :task_id "wave99-99-rich-worker"
+    :status done
+    :commit_hash "aa10aa1"
+    :files_changed ["scripts/foo.mjs"]
+    :acceptance_results
+      [(:command "node scripts/foo.mjs --dry-fixture" :exit_code 0 :ok true :note "alpha")
+       (:command "node scripts/bar.mjs --dry-fixture" :exit_code 0 :ok true :note "beta")]
+    :notes "worker prose that must survive parent hotfix"
+    :time_sinks ["bench warmup"]
+    :trace_refs ["wave99-99-rich-worker-bench-001"])`;
+
+  const richPlan = planParentHotfixFromSource(richSource, {
+    taskId: 'wave99-99-rich-worker',
+    agentCommit: 'aa10aa1',
+    parentCommit: 'aa10aa2',
+    kind: 'doc-fix',
+    reason: 'wave40-01 parent hotfix preservation through planner',
+    files: ['scripts/foo.mjs'],
+  });
+  assert(richPlan.mutation_mode === 'read-only', 'planner default mode is still read-only');
+  assert(
+    richPlan.finalized_report.acceptanceResults.length === 2,
+    'planner should preserve worker acceptance entries by default',
+  );
+  assert(
+    richPlan.finalized_report_source.includes(':notes "worker prose'),
+    'planner output source should still carry worker :notes',
+  );
+  assert(
+    richPlan.finalized_report_source.includes(':trace_refs ["wave99-99-rich-worker-bench-001"]'),
+    'planner output source should still carry worker :trace_refs',
+  );
+  assert(
+    richPlan.finalized_report.preservedKeys.includes(':time_sinks'),
+    'planner result should expose preservedKeys for instrumentation',
+  );
+
+  return { ok: true, cases: 3 };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

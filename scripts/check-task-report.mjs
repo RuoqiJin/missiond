@@ -1922,6 +1922,43 @@ function runFixtures() {
       ok: false,
       expects: /commit_hash.*does not match.*parent_patches|parent_patches.*does not match.*commit_hash|drift|final|trailing/i,
     },
+    // wave40-01: a finalized rich worker report must still validate after
+    // sparse projection. Acceptance entries, :notes, :time_sinks,
+    // :trace_refs, and router fields all coexist with the patched lineage
+    // fields in the same finalized report.
+    {
+      name: 'wave40-01 sparse-projection rich finalized report validates',
+      source: `(report wave99-99-rich-worker
+        :schema "missiond.report-contract.v1"
+        :task_id "wave99-99-rich-worker"
+        :status done
+        :commit_hash "aa10aa2"
+        :agent_commit_hash "aa10aa1"
+        :final_commit_hash "aa10aa2"
+        :verified_commit_hash "aa10aa2"
+        :parent_patches
+          [(:commit "aa10aa2"
+            :kind doc-fix
+            :reason "wave40-01 preservation parent hotfix"
+            :files ["scripts/foo.mjs"])]
+        :files_changed ["scripts/foo.mjs"]
+        :acceptance_results
+          [(:command "node scripts/foo.mjs --dry-fixture" :exit_code 0 :ok true :note "alpha")
+           (:command "node scripts/bar.mjs --dry-fixture" :exit_code 0 :ok true :note "beta")
+           (:command "node scripts/task-runner-finalize-report.mjs --dry-fixture" :exit_code 0 :ok true)]
+        :notes "worker prose preserved by sparse finalization"
+        :verification_tier local
+        :time_sinks ["bench warmup"]
+        :major_decisions [(:decision "kept the dual-mode path" :rationale "simpler review")]
+        :unexpected_work [(:summary "router seed shape needed widening")]
+        :blockers []
+        :trace_refs ["wave99-99-rich-worker-bench-001"]
+        :recommended_backend claudecode
+        :router_confidence high
+        :router_dry_run_only true
+        :router_applied false)`,
+      ok: true,
+    },
   ];
 
   let failed = 0;

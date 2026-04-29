@@ -26,6 +26,7 @@ Checks the V3 task-runner lifecycle Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   lifecycleSchema: '.missiond/tasks/schema/task-lifecycle-event-v1.lisp',
+  reportSchema: '.missiond/tasks/schema/report-contract-v1.lisp',
   lifecycleChecker: 'scripts/check-task-lifecycle-events.mjs',
   appendEvent: 'scripts/task-runner-append-event.mjs',
   finalizer: 'scripts/task-runner-finalize-report.mjs',
@@ -125,6 +126,8 @@ function checkFiles(root, files) {
     'legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs',
     'task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args',
     'task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files',
+    'parent-hotfix finalization is a sparse Lisp projection over the worker report',
+    ':acceptance_results is preserved by default',
     'node scripts/check-v3-task-lifecycle-isomorphism.mjs',
   ]);
 
@@ -180,6 +183,12 @@ function checkFiles(root, files) {
     'REQUEST_FINAL_REPORT_SCHEMA',
     '--request-id',
     '--request-reports-dir',
+    '--replace-acceptance',
+    'projectFinalReportSource',
+    'preservedKeys',
+    'LINEAGE_KEYS',
+    'sparse Lisp projection',
+    'replaceAcceptance',
     'renderRequestFinalReport',
     'validateRequestFinalReportSource',
     'writeRequestFinalReportFile',
@@ -193,6 +202,8 @@ function checkFiles(root, files) {
     'request_final_report',
     '--request-reports-dir',
     '--write-report',
+    'preservedKeys',
+    'preservation through planner',
   ]);
 
   requireAll(diagnostics, files.projector, sources.projector, [
@@ -278,6 +289,15 @@ function checkFiles(root, files) {
     'compatibility projection/input',
   ]);
 
+  requireAll(diagnostics, files.reportSchema, sources.reportSchema, [
+    'missiond.report-contract.v1',
+    'Wave40-01 sparse-projection invariant',
+    'sparse Lisp projection',
+    'patching only the lineage fields',
+    ':acceptance_results is preserved by default',
+    'append rather than replace',
+  ]);
+
   requireAll(diagnostics, files.batchVerifier, sources.batchVerifier, [
     "from './check-task-lifecycle-events.mjs'",
     "from './task-runner-append-event.mjs'",
@@ -323,7 +343,7 @@ function buildFixture() {
              "scripts/task-runner-submit-dispatch.mjs"
              "scripts/check-verification-receipt.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "Task-scoped lifecycle events are first-class one-event files at .missiond/tasks/<wave>/events/<seq>.event.lisp; the task-lifecycle-events.lisp ledger is now a compatibility projection/input. request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files"))
+      :note "Task-scoped lifecycle events are first-class one-event files at .missiond/tasks/<wave>/events/<seq>.event.lisp; the task-lifecycle-events.lisp ledger is now a compatibility projection/input. request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files. parent-hotfix finalization is a sparse Lisp projection over the worker report; :acceptance_results is preserved by default."))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.lifecycleSchema, `
@@ -368,7 +388,8 @@ const a = 'at least one parent patch is required';
 const b = 'trailing parent patch commit';
 const c = ':agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches';
 function renderFinalReport() {}
-const s = 'REQUEST_FINAL_REPORT_SCHEMA --request-id --request-reports-dir';
+const s = 'REQUEST_FINAL_REPORT_SCHEMA --request-id --request-reports-dir --replace-acceptance';
+const proj = 'projectFinalReportSource preservedKeys LINEAGE_KEYS sparse Lisp projection replaceAcceptance';
 function renderRequestFinalReport() {}
 function validateRequestFinalReportSource() {}
 function writeRequestFinalReportFile() {}`);
@@ -376,7 +397,11 @@ function writeRequestFinalReportFile() {}`);
 import {} from './task-runner-finalize-report.mjs';
 const event = { kind: 'parent_hotfix' };
 const mode = "mutation_mode: opts.writeReport ? 'write-report' : 'read-only'";
-const a = 'finalized_report_source request_final_report --request-reports-dir --write-report';`);
+const a = 'finalized_report_source request_final_report --request-reports-dir --write-report';
+const p = 'preservedKeys preservation through planner';`);
+  writeFixture(root, DEFAULT_FILES.reportSchema, `
+(report-contract-schema missiond.report-contract.v1
+  :note "Wave40-01 sparse-projection invariant: sparse Lisp projection patching only the lineage fields. :acceptance_results is preserved by default; --acceptance-command appends instead of append rather than replace.")`);
   writeFixture(root, DEFAULT_FILES.projector, `
 if (event.event_kind === 'parent_hotfix') {}
 if (event.event_kind === 'finalized_report') {}
