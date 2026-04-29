@@ -2,7 +2,7 @@
   :schema "missiond.task-lifecycle-event.v1"
   :wave wave38
   :created-at "2026-04-29T02:00:45Z"
-  :sequence 2
+  :sequence 3
 
 
   (lifecycle-event
@@ -28,4 +28,15 @@
     :at "2026-04-29T02:00:45Z"
     :touched [".missiond/claudecode/wave38-shared-preamble.md"]
     :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads."
-    :legacy_trace_id wave38-trace-bootstrap-read-002))
+    :legacy_trace_id wave38-trace-bootstrap-read-002)
+
+  (lifecycle-event
+    :id wave38-01-workflow-methodology-artifact-v0-dispatch-003
+    :task wave38-01-workflow-methodology-artifact-v0
+    :actor_role orchestrator
+    :event_kind dispatch
+    :commit_role none
+    :seq 3
+    :at "2026-04-29T02:01:37Z"
+    :touched [".missiond/claudecode/wave38-01-workflow-methodology-artifact-v0.md" ".missiond/tasks/wave38/manifest.lisp"]
+    :summary "Dispatch wave38-01-workflow-methodology-artifact-v0: hard dependencies satisfied."))
