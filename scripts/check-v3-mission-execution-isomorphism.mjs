@@ -123,6 +123,10 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) fn normalize_commit_status',
   'pub(super) fn normalize_verifier_status',
   'pub(super) fn normalize_task_run_verifier_status',
+  'pub(super) struct CompletionRecord',
+  'pub(super) fn parse_completions',
+  'pub(super) fn summarize_durability',
+  'pub(super) fn parse_string_list',
 ];
 
 const MCP_NEEDLES = [
@@ -453,6 +457,10 @@ const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
 pub(super) fn normalize_commit_status() {}
 pub(super) fn normalize_verifier_status() {}
 pub(super) fn normalize_task_run_verifier_status() {}
+pub(super) struct CompletionRecord {}
+pub(super) fn parse_completions() {}
+pub(super) fn summarize_durability() {}
+pub(super) fn parse_string_list() {}
 `;
 }
 
