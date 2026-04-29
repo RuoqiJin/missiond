@@ -18,6 +18,7 @@ Checks the V3 plan.lisp execution isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planExecuteHints: 'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
   planTaskContract: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs',
   planDistillChain: 'crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs',
@@ -91,6 +92,7 @@ function checkFiles(root, files) {
     ':default-target mission_task_delegate',
     'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
+    'plan/compile_authoring.rs owns mission_plan plan-authoring entry/core',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
     'plan/task_contract.rs owns mission_plan task-contract Lisp projection',
     'plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress',
@@ -104,6 +106,16 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.planHandler, sources.planHandler, [
+    'mod compile_authoring',
+    'use compile_authoring::{action_compile, collect_string_list}',
+    'parse_plan_hints(&plan.sexp_text)',
+    '(t, "plan_hint")',
+    'target_source',
+    'dispatch_strategy_source',
+  ]);
+
+  requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, [
+    'pub(super) async fn action_compile',
     'fn resolve_dry_run_plan_target',
     'return Ok("mission_task_delegate");',
     'fn render_dry_run_plan_sexp',
@@ -112,10 +124,11 @@ function checkFiles(root, files) {
     'push_lisp_string_field(&mut out, "target", input.target);',
     'push_lisp_string_field(&mut out, "objective", input.objective);',
     'out.push_str("  :nodes\\n");',
-    'parse_plan_hints(&plan.sexp_text)',
-    '(t, "plan_hint")',
-    'target_source',
-    'dispatch_strategy_source',
+    'pub(super) fn build_planner_system_prompt',
+    'pub(super) fn build_planner_user_prompt',
+    'pub(super) fn validate_compiled_plan_sexp',
+    'pub(super) async fn maybe_write_plan_artifact',
+    'attempt_artifact_write',
   ]);
 
   requireAll(diagnostics, files.planExecuteHints, sources.planExecuteHints, [
@@ -279,16 +292,25 @@ function buildFixture() {
     (surface mission_plan
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
+mod compile_authoring;
+use compile_authoring::{action_compile, collect_string_list};
+parse_plan_hints(&plan.sexp_text);
+let x = (t, "plan_hint");
+let target_source = "";
+let dispatch_strategy_source = "";`);
+  writeFixture(root, DEFAULT_FILES.planCompileAuthoring, `
+pub(super) async fn action_compile() {}
 fn resolve_dry_run_plan_target() { return Ok("mission_task_delegate"); }
 fn render_dry_run_plan_sexp() {
   String::from("(plan-draft\\n");
@@ -297,16 +319,13 @@ fn render_dry_run_plan_sexp() {
   push_lisp_string_field(&mut out, "objective", input.objective);
   out.push_str("  :nodes\\n");
 }
-fn parse_plan_hints() {
-  match key.as_str() {
-    "target" | "target-tool" | "tool" => {}
-    "objective" => store_first(&mut h.objective, &value)
-  }
+pub(super) fn build_planner_system_prompt() {}
+pub(super) fn build_planner_user_prompt() {}
+pub(super) fn validate_compiled_plan_sexp() {}
+pub(super) async fn maybe_write_plan_artifact() {
+  attempt_artifact_write;
 }
-parse_plan_hints(&plan.sexp_text);
-let x = (t, "plan_hint");
-let target_source = "";
-let dispatch_strategy_source = "";`);
+`);
   writeFixture(root, DEFAULT_FILES.planExecuteHints, `
 pub(crate) struct ParsedPlanHints {}
 pub(crate) struct ResolvedExec {}

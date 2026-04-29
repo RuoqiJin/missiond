@@ -33,6 +33,7 @@ const DEFAULT_FILES = {
   reviewGate: 'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   workflow: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   mcpDirective: 'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -93,6 +94,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -147,11 +149,14 @@ const DIRECTIVE_RS_NEEDLES = [
 
 const PLAN_RS_NEEDLES = [
   'use crate::handlers::knowledge::review_gate::',
+  'maybe_emit_review_question_resolved',
+];
+
+const PLAN_COMPILE_AUTHORING_RS_NEEDLES = [
   'parse_review_gate_policy(args)',
   'review_gate_policy_was_explicit(args)',
   'parse_compile_review_gate(args)',
   'apply_compile_review_gates(',
-  'maybe_emit_review_question_resolved',
 ];
 
 const WORKFLOW_RS_NEEDLES = [
@@ -230,6 +235,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.reviewGate, sources.reviewGate, REVIEW_GATE_RS_NEEDLES);
   requireAll(diagnostics, files.directive, sources.directive, DIRECTIVE_RS_NEEDLES);
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
+  requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, PLAN_COMPILE_AUTHORING_RS_NEEDLES);
   requireAll(diagnostics, files.workflow, sources.workflow, WORKFLOW_RS_NEEDLES);
   requireAll(diagnostics, files.mcpDirective, sources.mcpDirective, MCP_DIRECTIVE_NEEDLES);
   requireAll(diagnostics, files.mcpPlan, sources.mcpPlan, MCP_PLAN_NEEDLES);
@@ -300,7 +306,8 @@ function runFixtures(json) {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.reviewGate]: buildGoodReviewGate(),
     [DEFAULT_FILES.directive]: buildGoodCallerRs(),
-    [DEFAULT_FILES.plan]: buildGoodCallerRs(),
+    [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
+    [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.workflow]: buildGoodWorkflowRs(),
     [DEFAULT_FILES.mcpDirective]: buildGoodMcpRs({ neverAutoApprove: true }),
     [DEFAULT_FILES.mcpPlan]: buildGoodMcpRs({ neverAutoApprove: true }),
@@ -441,6 +448,7 @@ function buildGoodBlueprint() {
       :code ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"
@@ -486,6 +494,18 @@ fn caller(args: &serde_json::Value) {
     apply_compile_review_gates();
     maybe_emit_review_question_resolved();
     let _ = (policy, policy_explicit, legacy);
+}
+`;
+}
+
+function buildGoodPlanFacadeRs() {
+  return `// fixture
+use crate::handlers::knowledge::review_gate::{
+    maybe_emit_review_question_resolved,
+};
+
+fn caller() {
+    maybe_emit_review_question_resolved();
 }
 `;
 }
