@@ -34,6 +34,7 @@ const DEFAULT_FILES = {
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
+  planApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
   workflow: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   mcpDirective: 'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -95,6 +96,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -148,8 +150,9 @@ const DIRECTIVE_RS_NEEDLES = [
 ];
 
 const PLAN_RS_NEEDLES = [
-  'use crate::handlers::knowledge::review_gate::',
-  'maybe_emit_review_question_resolved',
+  'mod approval_review',
+  'use approval_review::{action_approve, action_mark, action_supersede}',
+  'pub(crate) use approval_review::{handle_review_resolved_event, PlanSubscriberOutcome}',
 ];
 
 const PLAN_COMPILE_AUTHORING_RS_NEEDLES = [
@@ -157,6 +160,19 @@ const PLAN_COMPILE_AUTHORING_RS_NEEDLES = [
   'review_gate_policy_was_explicit(args)',
   'parse_compile_review_gate(args)',
   'apply_compile_review_gates(',
+];
+
+const PLAN_APPROVAL_REVIEW_RS_NEEDLES = [
+  'pub(super) async fn action_approve',
+  'pub(super) async fn action_mark',
+  'pub(super) async fn action_supersede',
+  'parse_review_resolution_input(args)',
+  'parse_review_automation_policy(args)',
+  'evaluate_review_automation(',
+  'request_plan_auto_approve_proposal(',
+  'maybe_emit_review_question_resolved(',
+  'pub(crate) enum PlanSubscriberOutcome',
+  'pub(crate) async fn handle_review_resolved_event',
 ];
 
 const WORKFLOW_RS_NEEDLES = [
@@ -236,6 +252,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.directive, sources.directive, DIRECTIVE_RS_NEEDLES);
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
   requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, PLAN_COMPILE_AUTHORING_RS_NEEDLES);
+  requireAll(diagnostics, files.planApprovalReview, sources.planApprovalReview, PLAN_APPROVAL_REVIEW_RS_NEEDLES);
   requireAll(diagnostics, files.workflow, sources.workflow, WORKFLOW_RS_NEEDLES);
   requireAll(diagnostics, files.mcpDirective, sources.mcpDirective, MCP_DIRECTIVE_NEEDLES);
   requireAll(diagnostics, files.mcpPlan, sources.mcpPlan, MCP_PLAN_NEEDLES);
@@ -308,6 +325,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.directive]: buildGoodCallerRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
+    [DEFAULT_FILES.planApprovalReview]: buildGoodPlanApprovalReviewRs(),
     [DEFAULT_FILES.workflow]: buildGoodWorkflowRs(),
     [DEFAULT_FILES.mcpDirective]: buildGoodMcpRs({ neverAutoApprove: true }),
     [DEFAULT_FILES.mcpPlan]: buildGoodMcpRs({ neverAutoApprove: true }),
@@ -449,6 +467,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"
@@ -500,11 +519,24 @@ fn caller(args: &serde_json::Value) {
 
 function buildGoodPlanFacadeRs() {
   return `// fixture
-use crate::handlers::knowledge::review_gate::{
-    maybe_emit_review_question_resolved,
-};
+mod approval_review;
+use approval_review::{action_approve, action_mark, action_supersede};
+pub(crate) use approval_review::{handle_review_resolved_event, PlanSubscriberOutcome};
+`;
+}
 
-fn caller() {
+function buildGoodPlanApprovalReviewRs() {
+  return `// fixture
+pub(super) async fn action_approve() {}
+pub(super) async fn action_mark() {}
+pub(super) async fn action_supersede() {}
+pub(crate) enum PlanSubscriberOutcome {}
+pub(crate) async fn handle_review_resolved_event() {}
+fn caller(args: &serde_json::Value) {
+    parse_review_resolution_input(args);
+    parse_review_automation_policy(args);
+    evaluate_review_automation();
+    request_plan_auto_approve_proposal();
     maybe_emit_review_question_resolved();
 }
 `;
