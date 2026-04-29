@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use super::claim_lease::{parse_claims, scopes_overlap, ClaimRecord};
-use super::completion_audit::{
+use super::completion_records::{
     parse_completions, FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
     FINDING_SCOPED_COMMIT_VIOLATION,
 };

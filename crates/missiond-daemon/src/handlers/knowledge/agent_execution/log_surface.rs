@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use tracing::warn;
 
 use super::claim_lease::{parse_claims, parse_iso};
-use super::completion_audit::{parse_completions, summarize_durability};
+use super::completion_records::{parse_completions, summarize_durability};
 use super::log_store::{
     allocate_id, append_to_block, companion_path, json_strip_quotes, lisp_quote_string,
     list_block_summaries, now_iso, parse_kv_pairs, project_or_target_project, read_log_file,
