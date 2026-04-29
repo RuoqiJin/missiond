@@ -40,53 +40,12 @@ use self::completion_audit::{
     FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
     VALID_VERIFIER_STATUSES,
 };
+use self::log_surface::{
+    build_opened_event, emit_execution_event, normalize_dispatch_strategy,
+    read_dispatch_metadata_from_log,
+};
 #[cfg(test)]
-use self::log_surface::DEFAULT_DISPATCH_STRATEGY;
-use self::log_surface::{build_opened_event, emit_execution_event, normalize_dispatch_strategy};
-
-/// Single tuple of the workstation-dispatch trio surfaced on every
-/// `ExecutionEvent` variant that carries dispatch context. Sourced from the
-/// companion-log meta block so consumers don't have to re-load the file to
-/// correlate the event against its dispatch strategy / target project /
-/// requested cwd. All three fields are `None` when the meta block omits the
-/// corresponding `:key`, which lets the legacy companion logs (pre-wave12-01)
-/// emit cleanly with the default skip-serialize wire form.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-struct DispatchMeta {
-    dispatch_strategy: Option<String>,
-    target_project: Option<String>,
-    requested_cwd: Option<String>,
-}
-
-/// Read the workstation-dispatch trio (`:dispatch-strategy` /
-/// `:target-project` / `:requested-cwd`) from the companion-log meta block.
-///
-/// Mirrors the parsing path used by `action_list` so the live event stream
-/// and the dashboard list view see identical strings. Quoted-string atoms
-/// have their outer quotes stripped via `trim_matches('"')` to match the
-/// downstream contract; whitespace-only values collapse to `None` so a
-/// caller that wrote `:target-project ""` doesn't surface a confusing empty
-/// label on the bus.
-///
-/// Returns `DispatchMeta::default()` when the file has no meta block — the
-/// caller emits the event without metadata in that case, matching what
-/// legacy producers serialized before the trio was added.
-fn read_dispatch_metadata_from_log(file: &LogFile) -> DispatchMeta {
-    let Some(block) = file.find_block("meta") else {
-        return DispatchMeta::default();
-    };
-    let meta = parse_kv_pairs(&file.src, block.children());
-    let read = |key: &str| -> Option<String> {
-        meta.get(key)
-            .map(|s| s.trim().trim_matches('"').to_string())
-            .filter(|s| !s.is_empty())
-    };
-    DispatchMeta {
-        dispatch_strategy: read("dispatch-strategy"),
-        target_project: read("target-project"),
-        requested_cwd: read("requested-cwd"),
-    }
-}
+use self::log_surface::{DispatchMeta, DEFAULT_DISPATCH_STRATEGY};
 
 const COMPANION_DIR: &str = ".missiond/v2";
 
