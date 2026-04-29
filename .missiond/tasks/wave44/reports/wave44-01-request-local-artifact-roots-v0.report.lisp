@@ -1,12 +1,49 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 44 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave44-01-request-local-artifact-roots-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave44-01-request-local-artifact-roots-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "c9dfe3b57a5e"
+  :files_changed
+    [".missiond/v3/missiond-blueprint.lisp"
+     "crates/missiond-daemon/src/handlers/knowledge/request.rs"
+     "crates/missiond-mcp/src/tools/knowledge/request.rs"
+     "scripts/check-v3-request-flow-smoke.mjs"]
+  :acceptance_results
+    [(:command "node scripts/check-v3-request-flow-smoke.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "Daemon-free fixture-only mode unchanged: 9 fixtures pass.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs"
+              :exit_code 0 :ok true
+              :note "Default static + fixture mode unchanged: blueprint review-packet/review-response parse, request handler + MCP wire-string pinning, 9 fixtures. Daemon-free.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs --live-ipc --request-id wave44-request-local-artifacts-v0 --cleanup"
+              :exit_code 0 :ok true
+              :note "Live IPC drove start -> approve_intent -> approve_plan against the daemon; default flow no longer passes write_file=true. Four steps OK including the new compat_write_audit step which asserts no .missiond/alignment/<request_id>/ and no new .missiond/plans/*/PLAN.lisp containing the smoke objective were created. plan.lisp materialized with :plan_id, :version, :board_task_id; review_packet.state=awaiting_execution + execute_allowed=true + allowed_responses=[execute_plan, ask_question]. --cleanup removed only the request-local directory.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs --live-ipc --request-id wave44-request-local-artifacts-v0-json --cleanup --json"
+              :exit_code 0 :ok true
+              :note "Same four-step path with --json output; legacy_compat_artifacts block reports compat_write_file_requested=false, new_alignment_subdirs=[], new_plan_subdirs=[], new_alignment_path_for_this_request=null, new_plan_compat_paths_for_this_smoke=[]. Confirms the V3 default flow leaves the compat roots untouched.")
+     (:command "node scripts/check-v3-code-isomorphism-complete.mjs"
+              :exit_code 0 :ok true
+              :note "Aggregate gate: 6 surfaces graduated + 7 per-surface checkers spawned (smoke runs in default static + fixture mode without --live-ipc; aggregate stays daemon-free).")
+     (:command "node scripts/check-lisp-blueprint-compression.mjs"
+              :exit_code 0 :ok true
+              :note "Blueprint compression contract still holds; new (compat-writer-policy ...) sub-form lives under unified-entry alongside review-packet/review-response/tool-schema-contract; existing required sections + state-machine + surface IDs unchanged.")
+     (:command "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+              :exit_code 0 :ok true
+              :note "Architecture-lisp check OK on the updated blueprint.")
+     (:command "cargo test -p missiond-daemon handlers::knowledge::request::tests"
+              :exit_code 0 :ok true
+              :note "86 daemon request handler tests pass (was 79, +7 new): respond_plan_compile_args_strips_write_file_by_default, respond_plan_compile_args_forwards_compat_write_file, respond_plan_compile_args_compat_write_file_false_does_not_inject, normalize_start_args_strips_default_write_file, normalize_start_args_preserves_legacy_write_file_alias, normalize_start_args_compat_write_file_true_normalizes_to_write_file, normalize_start_args_strips_explicit_false_compat_keys.")
+     (:command "cargo test -p missiond-mcp test_directive_plan_workflow_surfaces_registered"
+              :exit_code 0 :ok true
+              :note "MCP surfaces-registered smoke passes; mission_request schema gained compat_write_file property and updated long-form description.")
+     (:command "perl -ne 'exit 1 if /\\x00/' scripts/check-v3-request-flow-smoke.mjs .missiond/v3/missiond-blueprint.lisp crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No NUL bytes in any of the four declared write-scope files.")
+     (:command "git diff --check -- scripts/check-v3-request-flow-smoke.mjs .missiond/v3/missiond-blueprint.lisp crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No whitespace-error or conflict markers in the write-scope files.")]
+  :notes "Removes the wave43 default-flow worktree pollution by making the legacy .missiond/alignment/<topic>/ and .missiond/plans/<plan_id>/ compatibility writers explicit opt-in. Lisp/MCP/checker now declare request-local artifacts as the V3 SSOT and compatibility roots as opt-in legacy projections.\n\nWhether compat_write_file was added or only doc/checker correction was needed: a real compat_write_file boolean was added at the mission_request adapter layer, with legacy write_file preserved as an alias. Specifically: a new helper apply_compat_write_file_policy(args) (called from normalize_start_args) and a parallel branch in build_respond_plan_compile_args derive a single compat_write_requested = compat_write_file == true OR write_file == true, then strip BOTH keys from the args forwarded to the inner mission_directive / mission_plan compile, and re-inject write_file=true only when compat_write_requested is true. Old callers passing write_file=true keep getting compat artifacts; new V3 callers should use compat_write_file (the schema description marks write_file as legacy alias). Default mission_request flow strips both keys, so the inner compile never receives write_file=true unless the caller explicitly opts in. Per requirement #8, even though one might argue 'just don't pass write_file', adding the explicit switch with the legacy alias is what the brief required so future callers do not learn the wrong default from MCP docs or smoke examples.\n\nDefault live IPC side effects after this wave:\n  - Filesystem (request-local): .missiond/requests/<request_id>/{request.lisp, intent-alignment.lisp, plan.lisp, events/<seq>.event.lisp} are created during the live flow. With --cleanup the smoke removes only that request-local directory after all assertions pass, with the same defensive prefix check from wave43.\n  - Filesystem (compat roots): NONE. The smoke snapshots .missiond/alignment/ and .missiond/plans/ before the live flow and diffs after; the new compat_write_audit step fails when the default flow (no --compat-write-file) leaves a .missiond/alignment/<request_id>/ directory or any new .missiond/plans/<plan_id>/PLAN.lisp containing the smoke objective string. The acceptance run shows new_alignment_subdirs=[] and new_plan_subdirs=[] for both --live-ipc invocations: confirmed worktree-clean default behavior.\n  - Database: each invocation still creates one directive (intent-alignment), one plan (with :version 2 — version 1 is the dry_run scaffold, version 2 is the post-approval materialized draft), and one BoardTask anchor. Per pattern-card request-local-default, DB rows are intentionally NOT cleaned up; the filesystem invariant is about artifact roots, not database cleanup. The cleanup.kept_db_rows field documents this explicitly.\n\nOptional legacy compat smoke behavior: a new --compat-write-file flag was added to the smoke checker. When supplied, the smoke passes compat_write_file=true on the start AND approve_intent calls. The compat_write_audit step then runs in reporting mode rather than asserting mode: it captures the new alignment subdir under .missiond/alignment/<request_id>/ and any new .missiond/plans/<plan_id>/PLAN.lisp containing the smoke objective into the legacy_compat_artifacts.compat_artifacts block, and treats their presence as the user-requested outcome rather than a failure. This flag is opt-in only; it does NOT appear in the aggregate v3 gate or any acceptance command in this wave's contract. Per pattern-card compat-opt-in-alias, it remains outside check-v3-code-isomorphism-complete so the aggregate path stays deterministic and request-local-only. The opt-in path requires a daemon binary that recognizes compat_write_file (i.e. one built from this commit's request.rs); against the currently-deployed daemon binary, --compat-write-file's compat_write_file=true would be ignored as additionalProperties=true noise so the audit would still report empty compat artifacts. The unit tests in request.rs (normalize_start_args_compat_write_file_true_normalizes_to_write_file, respond_plan_compile_args_forwards_compat_write_file) provide deterministic coverage of the new daemon behavior independent of which binary is running.\n\nLisp-first ordering (per pattern-card lisp-first-gap-fix): the V3 blueprint changed first. (artifact intent-alignment) and (artifact plan) gained :compat-status declaring the compat-path as legacy projection only opt-in via mission_request compat_write_file=true (or legacy write_file=true alias). (unified-entry) gained a new (compat-writer-policy ...) sub-form sibling of (review-packet) / (review-response) / (tool-schema-contract), declaring :v3-flag :compat_write_file, :legacy-alias :write_file, :default false, plus a :rationale citing the wave43 evidence. (tool-schema-contract :rule) was extended with the compat_write_file property requirement. The mission_request implementation-map :note grew a paragraph documenting the strip-then-reinject policy and citing (compat-writer-policy ...). Then request.rs got the helper + tests; then MCP got the new property + the long-form description update; then the smoke got --compat-write-file and the audit step.\n\nWave43 invariants preserved: default and --dry-fixture remain daemon-free; --live-ipc still stops at awaiting_execution and never calls execute_plan; --confirm-execute is still reserved and refuses dispatch; --cleanup is still scoped to .missiond/requests/<request_id>/; aggregate gate still runs the smoke without --live-ipc."
+  :verification_tier smoke)
