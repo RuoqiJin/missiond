@@ -1,12 +1,45 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 42 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave42-01-v3-request-flow-smoke-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave42-01-v3-request-flow-smoke-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "67ec5d8b6c7f"
+  :files_changed
+    [".missiond/v3/missiond-blueprint.lisp"
+     "scripts/check-v3-request-flow-smoke.mjs"
+     "scripts/check-v3-code-isomorphism-complete.mjs"]
+  :acceptance_results
+    [(:command "node scripts/check-v3-request-flow-smoke.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "9 cross-surface fixtures: received default, awaiting_intent_approval (good + missing-:directive_id+:version), awaiting_plan_approval, awaiting_execution (materialized plan.lisp + approve_plan event), awaiting_execution malformed (approve_plan event but plan.lisp missing :plan_id stamp), execute_requested (execute_plan event), execute=true short-circuit (trusted-agent), and approve_plan event without plan.lisp. Each maps to one of the blueprint state-derivation rules.")
+     (:command "node scripts/check-v3-request-flow-smoke.mjs"
+              :exit_code 0 :ok true
+              :note "Live mode reads .missiond/v3/missiond-blueprint.lisp through the shared parser, extracts review-packet :states / :state-derivation rule heads / :allowed-responses modes and review-response :decisions, and pins crates/missiond-daemon/src/handlers/knowledge/request.rs (enum ReviewState wire strings + classify_review_state + latest_review_event_checkpoint + allowed_responses_for + derive_review_packet + build_review_event_lisp + enrich_materialized_plan_lisp + extract_plan_ref_from_artifact + :decision/:outcome event tokens) plus crates/missiond-mcp/src/tools/knowledge/request.rs (decision enum + state mentions). Then runs the same 9 fixtures.")
+     (:command "node scripts/check-v3-code-isomorphism-complete.mjs"
+              :exit_code 0 :ok true
+              :note "Aggregate gate: 6 graduated surfaces validated + 7 per-surface checkers spawned (the existing six plus the new check-v3-request-flow-smoke.mjs). Aggregate command still pinned in compression-contract :checks.")
+     (:command "node scripts/check-v3-request-lisp-isomorphism.mjs"
+              :exit_code 0 :ok true
+              :note "Existing narrow mission_request static checker still passes; the new smoke complements it by deriving the cross-surface state from request-local Lisp instead of needles.")
+     (:command "node scripts/check-lisp-blueprint-compression.mjs"
+              :exit_code 0 :ok true
+              :note "Blueprint compression contract still holds after adding the new smoke command to :checks. The compression checker does not pin a specific :checks command set, so no narrow update was required.")
+     (:command "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+              :exit_code 0 :ok true
+              :note "Architecture-lisp check OK on the updated blueprint.")
+     (:command "cargo test -p missiond-daemon handlers::knowledge::request::tests"
+              :exit_code 0 :ok true
+              :note "79 daemon request handler tests pass; covers classify_review_state for all six states, latest_review_event_checkpoint event-text parsing, allowed_responses_for both modes, derive_review_packet preview/path/allowed wiring, enrich_materialized_plan_lisp ref stamping, build_review_event_lisp dispatched/blocked outcomes, extract_lisp_keyword_string semantics, request_paths_for V3 layout, build_artifact_existence_with predicate.")
+     (:command "cargo test -p missiond-mcp test_directive_plan_workflow_surfaces_registered"
+              :exit_code 0 :ok true
+              :note "MCP surfaces-registered smoke passes; mission_request schema (decision enum + states described) remains intact.")
+     (:command "perl -ne 'exit 1 if /\\x00/' .missiond/v3/missiond-blueprint.lisp scripts/check-v3-request-flow-smoke.mjs scripts/check-v3-code-isomorphism-complete.mjs scripts/check-lisp-blueprint-compression.mjs crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No NUL bytes in any of the six write-scope files.")
+     (:command "git diff --check -- .missiond/v3/missiond-blueprint.lisp scripts/check-v3-request-flow-smoke.mjs scripts/check-v3-code-isomorphism-complete.mjs scripts/check-lisp-blueprint-compression.mjs crates/missiond-daemon/src/handlers/knowledge/request.rs crates/missiond-mcp/src/tools/knowledge/request.rs"
+              :exit_code 0 :ok true
+              :note "No whitespace-error or conflict markers in the write-scope files.")]
+  :notes "Adds an executable V3 request-flow smoke gate that pins the user-facing MissionD path declared in unified-entry/review-packet/review-response. Before this task the V3 implementation-map graduation gate (wave41-01) only enforced per-surface code alignment; nothing prevented a future regression that broke the cross-surface user flow (received -> intent -> plan -> approve -> execute) while every per-surface checker still passed.\n\nWhat the new checker pins:\n  1. State derivation: the V3 blueprint's review-packet :states list contains the six wire states the handler implements (received / intent_drafting / awaiting_intent_approval / awaiting_plan_approval / awaiting_execution / execute_requested) and the :state-derivation block names the six rules the handler dispatches on (plan-present-wins / plan-present-execute-requested / plan-approved-event / intent-only-present / intent-drafting / received-default).\n  2. Decision surface: the review-response :decisions list contains the six respond decisions (approve_intent / reject_intent / ask_question / approve_plan / reject_plan / execute_plan).\n  3. Wire-string isomorphism: crates/missiond-daemon/src/handlers/knowledge/request.rs declares enum ReviewState with the six Self::<Variant> => \"<wire>\" arms exactly matching the blueprint, plus the keyword tokens :decision :approve_plan / :execute_plan and :outcome :dispatched the latest_review_event_checkpoint reader looks for. crates/missiond-mcp/src/tools/knowledge/request.rs enumerates the same six decisions and mentions every state.\n  4. Cross-surface flow: a JS port of classify_review_state + latest_review_event_checkpoint + allowed_responses_for is run against synthetic .missiond/requests/<request_id>/{request,intent-alignment,plan}.lisp + events/<seq>.event.lisp directories. The fixtures cover the six required cases plus three malformed ones: an awaiting_intent_approval state where intent-alignment.lisp lacks :directive_id + :version (refDiagnostics mention 'missing :directive_id'); an awaiting_execution state where the approve_plan dispatched event landed but plan.lisp was not stamped with :plan_id (refDiagnostics mention 'missing materialized :plan_id'); an approve_plan event without any plan.lisp (refDiagnostics mention 'plan.lisp absent'). Each fixture asserts state, artifact_kind, allowed_responses, and either an exact refDiagnostics list or a substring match.\n\nLisp / code drift found: none. The blueprint already declared the full review-packet/review-response contract; the request handler already implemented all six wire states + decisions + dispatched-event tokens; the MCP schema already enumerated all six decisions. No edits to crates/missiond-daemon/src/handlers/knowledge/request.rs or crates/missiond-mcp/src/tools/knowledge/request.rs were needed. The only blueprint change was a single :checks list addition.\n\nWhy no real workstation dispatch: the default mode runs only static Lisp/code parsing plus in-process JS fixture cases against tmpdir directories — never spawns a slot, never calls mission_task_delegate, never opens an IPC connection. --dry-fixture skips even the live repo reads and runs only the fixture cases. The optional --live-ipc flag is reserved but currently a structured no-op: without --confirm-execute it reports 'no real verification beyond static + fixtures'; with --confirm-execute it still refuses to dispatch a workstation slot and instructs the user to drive mission_request directly. The aggregate gate (check-v3-code-isomorphism-complete) spawns the new checker via spawnSync without arguments, so the aggregate path also stays in static + fixture mode.\n\nWiring:\n  - .missiond/v3/missiond-blueprint.lisp: compression-contract :checks gains 'node scripts/check-v3-request-flow-smoke.mjs' (kept ahead of the aggregate command to preserve the per-surface-then-aggregate ordering).\n  - scripts/check-v3-code-isomorphism-complete.mjs: PER_SURFACE_CHECKERS gains 'scripts/check-v3-request-flow-smoke.mjs' as the cross-surface entry. The aggregate continues to spawn every existing per-surface checker; the live run reports '7 per-surface checkers passed' (was 6).\n  - scripts/check-lisp-blueprint-compression.mjs: untouched. It only validates section presence and required artifact / state-machine ids; it does not enumerate the compression-contract :checks list, so no narrow update was required (per task requirement #6 'narrowly if it pins').\n\nAcceptance: every command listed in the task contract exits 0. See :acceptance_results above for per-command notes."
+  :verification_tier smoke)
