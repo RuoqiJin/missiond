@@ -15,7 +15,7 @@ for both --execute-dry-run and --execute-real-dispatch smokes.
 
   - V3 blueprint declares (surface workstation-dispatch ...) with
     :status "code-aligned" and :code naming workstation_dispatch.rs plus
-    the physical descriptor / decision / brief splits under workstation_dispatch/.
+    the physical descriptor / decision / outcome / brief splits under workstation_dispatch/.
   - The surface note pins the substrate contract names that other surfaces
     rely on by string match:
       WorkstationDispatchOutcome / DryRun / Dispatched
@@ -41,6 +41,9 @@ for both --execute-dry-run and --execute-real-dispatch smokes.
     and workstation_dispatch/decision.rs owns the pure dispatch gate:
       WorkstationDispatchSource / DispatchDecision / InferenceContext
       INFERABLE_DISPATCH_STRATEGIES / evaluate_dispatch_decision
+    and workstation_dispatch/outcome.rs owns the response projection:
+      WorkstationDispatchOutcome / SafeDescriptorReason
+      outcome_to_response_fields / extract_inner_board_task_id
     and workstation_dispatch/brief.rs owns the scoped handoff renderer:
       BriefTaskKind / classify_task_kind / build_task_brief*
     plus the deterministic status strings ("dispatched",
@@ -61,6 +64,8 @@ const DEFAULT_FILES = {
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs',
   workstationDecision:
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/decision.rs',
+  workstationOutcome:
+    'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs',
   workstationBrief:
     'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs',
   requestFlowSmoke: 'scripts/check-v3-request-flow-smoke.mjs',
@@ -120,16 +125,19 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/decision.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs',
   'WorkstationDispatchOutcome',
   'DryRun',
   'Dispatched',
   'ParsedTaskContract',
   'InferenceContext',
+  'SafeDescriptorReason',
   'BriefTaskKind',
   'parse_task_contract',
   'run_workstation_dispatch_with_contract_and_trace',
   'evaluate_dispatch_decision',
+  'outcome_to_response_fields',
   'classify_task_kind',
   'build_task_brief',
   'extract_inner_board_task_id',
@@ -154,10 +162,12 @@ const BLUEPRINT_SURFACE_BODY_ANCHORS = [
   'Dispatched',
   'ParsedTaskContract',
   'InferenceContext',
+  'SafeDescriptorReason',
   'BriefTaskKind',
   'parse_task_contract',
   'run_workstation_dispatch_with_contract_and_trace',
   'evaluate_dispatch_decision',
+  'outcome_to_response_fields',
   'classify_task_kind',
   'build_task_brief',
   'extract_inner_board_task_id',
@@ -167,28 +177,18 @@ const BLUEPRINT_SURFACE_BODY_ANCHORS = [
 const WORKSTATION_DISPATCH_RS_NEEDLES = [
   'mod descriptor;',
   'mod decision;',
+  'mod outcome;',
   'mod brief;',
   'pub(crate) use descriptor::{',
   'pub(crate) use decision::{',
+  'pub(crate) use outcome::{',
   'pub(crate) use brief::{',
-  'pub(crate) enum WorkstationDispatchOutcome',
-  'WorkstationDispatchOutcome::Dispatched',
-  'WorkstationDispatchOutcome::DryRun',
-  'WorkstationDispatchOutcome::InnerError',
-  'WorkstationDispatchOutcome::SafeDescriptor',
-  'pub(crate) enum SafeDescriptorReason',
   'evaluate_dispatch_decision',
   'pub(crate) async fn run_workstation_dispatch_with_contract_and_trace',
-  'pub(crate) fn outcome_to_response_fields',
-  'fn extract_inner_board_task_id',
+  'outcome_to_response_fields',
   'classify_task_kind',
-  '"workstation_dispatch_status"',
-  '"task_brief_preview"',
-  '"delegated_board_task_id"',
-  '"inner_result"',
-  '"dispatched"',
-  '"dry_run_no_dispatch"',
-  '"inner_returned_error"',
+  'WorkstationDispatchOutcome',
+  'SafeDescriptorReason',
   'mission_task_delegate',
 ];
 
@@ -214,6 +214,27 @@ const WORKSTATION_DECISION_RS_NEEDLES = [
   'explicit_arg',
   'inferred',
   'mission_task_delegate',
+];
+
+const WORKSTATION_OUTCOME_RS_NEEDLES = [
+  'pub(crate) enum WorkstationDispatchOutcome',
+  'WorkstationDispatchOutcome::Dispatched',
+  'WorkstationDispatchOutcome::DryRun',
+  'WorkstationDispatchOutcome::InnerError',
+  'WorkstationDispatchOutcome::SafeDescriptor',
+  'pub(crate) enum SafeDescriptorReason',
+  'pub(crate) fn outcome_to_response_fields',
+  'pub(crate) fn extract_inner_board_task_id',
+  'pub(crate) fn truncate_brief_preview',
+  'SCOPED_COMMIT_REQUIRED',
+  'SCOPED_COMMIT_POLICY',
+  '"workstation_dispatch_status"',
+  '"task_brief_preview"',
+  '"delegated_board_task_id"',
+  '"inner_result"',
+  '"dispatched"',
+  '"dry_run_no_dispatch"',
+  '"inner_returned_error"',
 ];
 
 const WORKSTATION_BRIEF_RS_NEEDLES = [
@@ -278,6 +299,12 @@ function checkFiles(root, files) {
     files.workstationDecision,
     sources.workstationDecision,
     WORKSTATION_DECISION_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.workstationOutcome,
+    sources.workstationOutcome,
+    WORKSTATION_OUTCOME_RS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -358,6 +385,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.workstationDispatch]: buildGoodWorkstationDispatch(),
     [DEFAULT_FILES.workstationDescriptor]: buildGoodWorkstationDescriptor(),
     [DEFAULT_FILES.workstationDecision]: buildGoodWorkstationDecision(),
+    [DEFAULT_FILES.workstationOutcome]: buildGoodWorkstationOutcome(),
     [DEFAULT_FILES.workstationBrief]: buildGoodWorkstationBrief(),
     [DEFAULT_FILES.requestFlowSmoke]: buildGoodRequestFlowSmoke(),
   };
@@ -406,26 +434,26 @@ function runFixtures(json) {
 
   // ── Fail: workstation_dispatch.rs missing WorkstationDispatchOutcome enum. ─
   const missingOutcome = { ...goodFiles };
-  missingOutcome[DEFAULT_FILES.workstationDispatch] = goodFiles[
-    DEFAULT_FILES.workstationDispatch
+  missingOutcome[DEFAULT_FILES.workstationOutcome] = goodFiles[
+    DEFAULT_FILES.workstationOutcome
   ].replace(
     'pub(crate) enum WorkstationDispatchOutcome',
     'pub(crate) enum WorkstationDispatchGHOST',
   );
   cases.push({
-    name: 'fail: workstation_dispatch.rs lost the WorkstationDispatchOutcome enum',
+    name: 'fail: workstation_dispatch/outcome.rs lost the WorkstationDispatchOutcome enum',
     expectOk: false,
     expectMessage: /pub\(crate\) enum WorkstationDispatchOutcome/,
     files: missingOutcome,
   });
 
-  // ── Fail: workstation_dispatch.rs renames extract_inner_board_task_id. ─
+  // ── Fail: workstation_dispatch/outcome.rs renames extract_inner_board_task_id. ─
   const missingExtract = { ...goodFiles };
-  missingExtract[DEFAULT_FILES.workstationDispatch] = goodFiles[
-    DEFAULT_FILES.workstationDispatch
-  ].replace('fn extract_inner_board_task_id', 'fn extract_inner_board_task_GHOST');
+  missingExtract[DEFAULT_FILES.workstationOutcome] = goodFiles[
+    DEFAULT_FILES.workstationOutcome
+  ].replace('pub(crate) fn extract_inner_board_task_id', 'pub(crate) fn extract_inner_board_task_GHOST');
   cases.push({
-    name: 'fail: workstation_dispatch.rs renames extract_inner_board_task_id',
+    name: 'fail: workstation_dispatch/outcome.rs renames extract_inner_board_task_id',
     expectOk: false,
     expectMessage: /extract_inner_board_task_id/,
     files: missingExtract,
@@ -504,8 +532,9 @@ function buildGoodBlueprint() {
       :code ["crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/descriptor.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/decision.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/outcome.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/brief.rs"]
-      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. workstation_dispatch/decision.rs owns InferenceContext and evaluate_dispatch_decision, the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). workstation_dispatch/brief.rs owns BriefTaskKind, classify_task_kind, and build_task_brief / build_task_brief_with_source / build_task_brief_with_source_and_trace, including the Completion handoff (scoped commit), Session trace block, and AGENT_TEAM_OBJECTIVE_HINT projection. extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
+      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. workstation_dispatch/outcome.rs owns WorkstationDispatchOutcome, SafeDescriptorReason, and outcome_to_response_fields; WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. workstation_dispatch/decision.rs owns InferenceContext and evaluate_dispatch_decision, the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). workstation_dispatch/brief.rs owns BriefTaskKind, classify_task_kind, and build_task_brief / build_task_brief_with_source / build_task_brief_with_source_and_trace, including the Completion handoff (scoped commit), Session trace block, and AGENT_TEAM_OBJECTIVE_HINT projection. extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-dispatch-isomorphism.mjs"]))
 `;
@@ -515,6 +544,7 @@ function buildGoodWorkstationDispatch() {
   return `// fixture
 mod descriptor;
 mod decision;
+mod outcome;
 mod brief;
 pub(crate) use descriptor::{
     load_task_contract, resolve_contract_path_public, ParsedTaskContract, TaskContractParseError,
@@ -523,10 +553,27 @@ pub(crate) use decision::{
     evaluate_dispatch_decision, explicit_workstation_dispatch_flag, opt_in_requested,
     DispatchDecision, InferenceContext, WorkstationDispatchSource, INFERABLE_DISPATCH_STRATEGIES,
 };
+pub(crate) use outcome::{
+    outcome_to_response_fields, truncate_brief_preview, SafeDescriptorReason, WorkstationDispatchOutcome,
+    SCOPED_COMMIT_POLICY, SCOPED_COMMIT_REQUIRED,
+};
 pub(crate) use brief::{
     build_task_brief, build_task_brief_with_source, build_task_brief_with_source_and_trace,
     classify_task_kind, BriefTaskKind,
 };
+pub(crate) async fn run_workstation_dispatch_with_contract_and_trace() {}
+// Stable wire field names projected by outcome_to_response_fields:
+//   "workstation_dispatch_status" "task_brief_preview"
+//   "delegated_board_task_id"     "inner_result"
+// Stable status values returned by WorkstationDispatchOutcome::status:
+//   "dispatched" "dry_run_no_dispatch" "inner_returned_error"
+// substrate only ever wraps mission_task_delegate
+`;
+}
+
+function buildGoodWorkstationOutcome() {
+  return `// fixture
+use serde_json::{json, Value};
 pub(crate) enum WorkstationDispatchOutcome {
     Dispatched { /* ... */ },
     InnerError { /* ... */ },
@@ -540,16 +587,16 @@ const REFS: &[&str] = &[
     "WorkstationDispatchOutcome::SafeDescriptor",
 ];
 pub(crate) enum SafeDescriptorReason { UnsupportedTarget(String) }
-pub(crate) fn evaluate_dispatch_decision() {}
-pub(crate) async fn run_workstation_dispatch_with_contract_and_trace() {}
 pub(crate) fn outcome_to_response_fields() {}
-fn extract_inner_board_task_id() {}
+pub(crate) fn extract_inner_board_task_id() {}
+pub(crate) fn truncate_brief_preview() {}
+pub(crate) const SCOPED_COMMIT_REQUIRED: bool = true;
+pub(crate) const SCOPED_COMMIT_POLICY: &str = "enforced-on-complete";
 // Stable wire field names projected by outcome_to_response_fields:
 //   "workstation_dispatch_status" "task_brief_preview"
 //   "delegated_board_task_id"     "inner_result"
 // Stable status values returned by WorkstationDispatchOutcome::status:
 //   "dispatched" "dry_run_no_dispatch" "inner_returned_error"
-// substrate only ever wraps mission_task_delegate
 `;
 }
 
