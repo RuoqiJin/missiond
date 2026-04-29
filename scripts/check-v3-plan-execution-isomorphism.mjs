@@ -20,6 +20,7 @@ const DEFAULT_FILES = {
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planExecuteHints: 'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
   planTaskContract: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs',
+  planDistillChain: 'crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs',
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
@@ -90,6 +91,7 @@ function checkFiles(root, files) {
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
     'plan/task_contract.rs owns mission_plan task-contract Lisp projection',
+    'plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress',
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'execute can derive target_source=plan_hint from plan.sexp_text',
@@ -137,6 +139,21 @@ function checkFiles(root, files) {
     'pub(crate) fn task_contract_inputs_from_hints',
     'pub(crate) fn task_contract_inputs_from_hints_with_trace',
     ':session-trace-path',
+  ]);
+
+  requireAll(diagnostics, files.planDistillChain, sources.planDistillChain, [
+    'pub(super) const DISTILL_CHAIN_MODE_RECORD_ONLY',
+    'pub(super) const CHAIN_RECORD_KIND',
+    'pub(super) fn parse_distill_chain_id',
+    'pub(super) fn parse_distill_chain_name',
+    'pub(super) fn parse_distill_chain_mode',
+    'pub(super) fn distill_chain_requested',
+    'pub(super) fn validate_distill_chain_args',
+    'pub(super) fn build_distill_chain_block',
+    'pub(super) async fn apply_distill_chain',
+    'pub(super) fn attach_distill_chain_to_payload',
+    'distill_chain_status',
+    'mission_workflow',
   ]);
 
   requireAll(diagnostics, files.planRouterPolicyAdapter, sources.planRouterPolicyAdapter, [
@@ -235,8 +252,9 @@ function buildFixture() {
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -285,6 +303,21 @@ pub(crate) fn write_task_contract_under_root() {}
 pub(crate) async fn emit_task_contract() {}
 pub(crate) fn task_contract_inputs_from_hints() {}
 pub(crate) fn task_contract_inputs_from_hints_with_trace() {}`);
+  writeFixture(root, DEFAULT_FILES.planDistillChain, `
+pub(super) const DISTILL_CHAIN_MODE_RECORD_ONLY: &str = "record_only";
+pub(super) const CHAIN_RECORD_KIND: &str = "distill_chain_record";
+pub(super) fn parse_distill_chain_id() {}
+pub(super) fn parse_distill_chain_name() {}
+pub(super) fn parse_distill_chain_mode() {}
+pub(super) fn distill_chain_requested() {}
+pub(super) fn validate_distill_chain_args() {}
+pub(super) fn build_distill_chain_block() {
+  "distill_chain_status";
+}
+pub(super) async fn apply_distill_chain() {
+  "mission_workflow";
+}
+pub(super) fn attach_distill_chain_to_payload() {}`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
 pub(super) enum RouterPolicyMode { Off, DryRun }
 pub(super) fn parse_router_policy_mode() {}
