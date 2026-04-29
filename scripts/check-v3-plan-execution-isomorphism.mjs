@@ -36,6 +36,7 @@ const DEFAULT_FILES = {
   planDagRollback: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs',
   planDagResume: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs',
   planDagProjection: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs',
+  planDagFinalization: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs',
   planDagTests: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs',
   unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -118,6 +119,7 @@ function checkFiles(root, files) {
     'plan_dag/rollback.rs owns the DAG rollback/cascade core',
     'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
     'plan_dag/projection.rs owns the DAG response projection core',
+    'plan_dag/finalization.rs owns the DAG finalization projection core',
     'execute can derive target_source=plan_hint from plan.sexp_text',
     'DAG execution parses node-local Lisp hints',
     'node scripts/check-v3-plan-execution-isomorphism.mjs',
@@ -317,6 +319,9 @@ function checkFiles(root, files) {
     'pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};',
     'mod projection;',
     'use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};',
+    'mod finalization;',
+    'pub(super) use finalization::parse_finalize_plan;',
+    'use finalization::{',
     '#[cfg(test)]',
     'mod tests;',
   ]);
@@ -388,10 +393,24 @@ function checkFiles(root, files) {
     'unsupported_fields',
   ]);
 
+  requireAll(diagnostics, files.planDagFinalization, sources.planDagFinalization, [
+    'pub(super) const FINALIZE_DISTILL_MODE_DRY_RUN',
+    'pub(super) const FINALIZE_DISTILL_MODE_SONNET',
+    'pub(in crate::handlers::knowledge) fn parse_finalize_plan',
+    'pub(super) fn parse_distill_on_success',
+    'pub(super) fn parse_distill_mode_arg',
+    'pub(super) fn validate_finalize_args',
+    'pub(super) fn finalize_plan_status_label',
+    'fn unchanged_status_label',
+    'pub(super) fn build_finalization_block',
+    'pub(super) fn build_distill_block',
+  ]);
+
   requireAll(diagnostics, files.planDagTests, sources.planDagTests, [
     'use super::*;',
     'use super::acceptance::*;',
     'use super::claim_lease::*;',
+    'use super::finalization::*;',
     'use super::projection::*;',
     'use super::resume::*;',
     'use super::rollback::*;',
@@ -476,8 +495,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -683,6 +703,13 @@ pub(super) use resume::validate_resume_request;
 pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};
 mod projection;
 use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};
+mod finalization;
+pub(super) use finalization::parse_finalize_plan;
+use finalization::{
+    build_distill_block, build_finalization_block, finalize_plan_status_label,
+    parse_distill_mode_arg, parse_distill_on_success, validate_finalize_args,
+    FINALIZE_DISTILL_MODE_DRY_RUN,
+};
 #[cfg(test)]
 mod tests;`);
   writeFixture(root, DEFAULT_FILES.planDagAcceptance, `
@@ -753,10 +780,23 @@ pub(super) fn build_node_hint_summary() {
   unsupported_fields;
 }
 `);
+  writeFixture(root, DEFAULT_FILES.planDagFinalization, `
+pub(super) const FINALIZE_DISTILL_MODE_DRY_RUN: &str = "dry_run";
+pub(super) const FINALIZE_DISTILL_MODE_SONNET: &str = "sonnet";
+pub(in crate::handlers::knowledge) fn parse_finalize_plan() {}
+pub(super) fn parse_distill_on_success() {}
+pub(super) fn parse_distill_mode_arg() {}
+pub(super) fn validate_finalize_args() {}
+pub(super) fn finalize_plan_status_label() {}
+fn unchanged_status_label() {}
+pub(super) fn build_finalization_block() {}
+pub(super) fn build_distill_block() {}
+`);
   writeFixture(root, DEFAULT_FILES.planDagTests, `
 use super::*;
 use super::acceptance::*;
 use super::claim_lease::*;
+use super::finalization::*;
 use super::projection::*;
 use super::resume::*;
 use super::rollback::*;

@@ -1,5 +1,6 @@
 use super::acceptance::*;
 use super::claim_lease::*;
+use super::finalization::*;
 use super::projection::*;
 use super::resume::*;
 use super::rollback::*;
