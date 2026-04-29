@@ -12,7 +12,9 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
   - mission_execution-log: companion log, action routing, event projection, trace append
   - mission_execution-claim-lease: claim/heartbeat/release and scope conflict rules
   - mission_execution-completion-audit: completion metadata, scoped commit audit,
-    task contract verification, auto-verifier, repair, and preflight
+    task contract verification, auto-verifier, repair, and audit
+  - agent_execution/preflight.rs: read-only pre-commit git/status and task-contract
+    scope projection used by the completion-audit surface
 `;
 
 const DEFAULT_FILES = {
@@ -23,6 +25,7 @@ const DEFAULT_FILES = {
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   completionAudit:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
+  preflight: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
 };
 
@@ -39,7 +42,7 @@ const SURFACES = [
   },
   {
     name: 'mission_execution-completion-audit',
-    noteNeedles: ['VALID_COMMIT_STATUSES', 'enforce_scoped_commit_completion', 'auto_run_task_run_verifier', 'preflight_commit'],
+    noteNeedles: ['VALID_COMMIT_STATUSES', 'enforce_scoped_commit_completion', 'auto_run_task_run_verifier', 'agent_execution/preflight.rs'],
   },
 ];
 
@@ -50,6 +53,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
   'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
   AGGREGATE_COMMAND,
 ];
@@ -72,11 +76,13 @@ const DAEMON_NEEDLES = [
   'mod log_surface',
   'mod claim_lease',
   'mod completion_audit',
+  'mod preflight',
   '#[cfg(test)]',
   'mod tests;',
   'use self::log_surface::{',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
+  'use self::preflight::action_preflight_commit',
 ];
 
 const TESTS_NEEDLES = [
@@ -173,6 +179,13 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) struct SharedMemorySummary',
   'pub(super) fn read_shared_memory_ledger',
   'pub(super) fn read_completion_task_id',
+  'pub(super) async fn action_complete',
+  'pub(super) async fn action_audit',
+  'pub(super) async fn action_repair',
+  'fn rebuild_derived_indexes',
+];
+
+const PREFLIGHT_NEEDLES = [
   'pub(super) struct PorcelainEntry',
   'pub(super) fn parse_porcelain_status',
   'pub(super) fn collect_all_claim_scopes',
@@ -182,11 +195,10 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) fn evaluate_task_contract_for_preflight',
   'pub(super) fn build_preflight_summary',
   'pub(super) fn run_git_status',
-  'pub(super) async fn action_complete',
   'pub(super) async fn action_preflight_commit',
-  'pub(super) async fn action_audit',
-  'pub(super) async fn action_repair',
-  'fn rebuild_derived_indexes',
+  'Command::new("git")',
+  '.args(["status", "--porcelain=v1"])',
+  'resolve_session_trace_path',
 ];
 
 const MCP_NEEDLES = [
@@ -275,6 +287,7 @@ function checkFiles(root, files) {
     sources.completionAudit,
     COMPLETION_AUDIT_NEEDLES,
   );
+  requireAll(diagnostics, files.preflight, sources.preflight, PREFLIGHT_NEEDLES);
   requireAll(diagnostics, files.mcp, sources.mcp, MCP_NEEDLES);
   return diagnostics;
 }
@@ -311,6 +324,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
     [DEFAULT_FILES.completionAudit]: buildGoodCompletionAudit(),
+    [DEFAULT_FILES.preflight]: buildGoodPreflight(),
     [DEFAULT_FILES.mcp]: buildGoodMcp(),
   };
   const cases = [
@@ -436,8 +450,9 @@ function buildGoodBlueprint() {
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-      :note "VALID_COMMIT_STATUSES, verifier status enums, enforce_scoped_commit_completion, enforce_task_contract_completion, auto_run_task_run_verifier, repair, audit, and preflight_commit form the completion durability gate."))
+      :note "VALID_COMMIT_STATUSES, verifier status enums, enforce_scoped_commit_completion, enforce_task_contract_completion, auto_run_task_run_verifier, repair, and audit form the completion durability gate; agent_execution/preflight.rs owns preflight_commit/build_preflight_summary before a writer commits."))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
 }
@@ -463,6 +478,7 @@ function buildGoodDaemon() {
 mod log_surface;
 mod claim_lease;
 mod completion_audit;
+mod preflight;
 #[cfg(test)]
 mod tests;
 use self::log_surface::{
@@ -471,6 +487,7 @@ use self::log_surface::{
 };
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
+use self::preflight::action_preflight_commit;
 `;
 }
 
@@ -571,7 +588,15 @@ pub(super) fn auto_run_task_run_verifier() {}
 pub(super) struct SharedMemorySummary {}
 pub(super) fn read_shared_memory_ledger() {}
 pub(super) fn read_completion_task_id() {}
-pub(super) struct PorcelainEntry {}
+pub(super) async fn action_complete() {}
+pub(super) async fn action_audit() {}
+pub(super) async fn action_repair() {}
+fn rebuild_derived_indexes() {}
+`;
+}
+
+function buildGoodPreflight() {
+  return `pub(super) struct PorcelainEntry {}
 pub(super) fn parse_porcelain_status() {}
 pub(super) fn collect_all_claim_scopes() {}
 pub(super) fn collect_specific_claim_scope() {}
@@ -580,11 +605,9 @@ pub(super) fn build_contract_scope_summary() {}
 pub(super) fn evaluate_task_contract_for_preflight() {}
 pub(super) fn build_preflight_summary() {}
 pub(super) fn run_git_status() {}
-pub(super) async fn action_complete() {}
 pub(super) async fn action_preflight_commit() {}
-pub(super) async fn action_audit() {}
-pub(super) async fn action_repair() {}
-fn rebuild_derived_indexes() {}
+std::process::Command::new("git").args(["status", "--porcelain=v1"]);
+resolve_session_trace_path();
 `;
 }
 

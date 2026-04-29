@@ -2761,7 +2761,7 @@ fn verified_accepts_short_long_sha_prefix_overlap() {
     assert!(res.is_ok(), "long↔short sha overlap should pass");
 }
 
-/// Read-only proof: the mission_execution facade + completion-audit
+/// Read-only proof: the mission_execution facade + preflight
 /// surface may only spawn `git` for `git status --porcelain=v1` (the
 /// wave18-08 preflight check). We grep both files at test time so the
 /// proof survives future edits — exactly one `Command::new(<git>)` site
@@ -2776,12 +2776,12 @@ fn daemon_never_invokes_mutating_git() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     let facade_path =
         std::path::Path::new(manifest_dir).join("src/handlers/knowledge/agent_execution.rs");
-    let audit_path = std::path::Path::new(manifest_dir)
-        .join("src/handlers/knowledge/agent_execution/completion_audit.rs");
+    let preflight_path = std::path::Path::new(manifest_dir)
+        .join("src/handlers/knowledge/agent_execution/preflight.rs");
     let src = format!(
         "{}\n{}",
         std::fs::read_to_string(&facade_path).expect("read facade"),
-        std::fs::read_to_string(&audit_path).expect("read completion audit"),
+        std::fs::read_to_string(&preflight_path).expect("read preflight"),
     );
     let needle = format!("Command::new({}git{})", '"', '"');
     let command_git = src.matches(needle.as_str()).count();

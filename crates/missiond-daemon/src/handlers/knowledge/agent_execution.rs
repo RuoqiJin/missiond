@@ -33,26 +33,23 @@ use crate::state::AppState;
 mod claim_lease;
 mod completion_audit;
 mod log_surface;
+mod preflight;
 
 #[cfg(test)]
 use self::claim_lease::parse_claims;
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::claim_lease::{action_claim, action_heartbeat, action_release};
-use self::completion_audit::{
-    action_audit, action_complete, action_preflight_commit, action_repair,
-};
+use self::completion_audit::{action_audit, action_complete, action_repair};
 #[cfg(test)]
 use self::completion_audit::{
-    audit_scoped_commit_handoff, auto_run_task_run_verifier, build_contract_scope_summary,
-    build_preflight_summary, collect_all_claim_scopes, collect_specific_claim_scope,
-    collect_string_list, enforce_scoped_commit_completion, enforce_task_contract_completion,
-    enforce_verified_completion, evaluate_task_contract_for_preflight, normalize_commit_status,
-    normalize_task_run_verifier_status, normalize_verifier_status, parse_completions,
-    parse_porcelain_status, parse_string_list, pattern_matches_path, read_report_summary,
+    audit_scoped_commit_handoff, auto_run_task_run_verifier, collect_string_list,
+    enforce_scoped_commit_completion, enforce_task_contract_completion,
+    enforce_verified_completion, normalize_commit_status, normalize_task_run_verifier_status,
+    normalize_verifier_status, parse_completions, parse_string_list, read_report_summary,
     read_shared_memory_ledger, read_task_contract_id, render_string_list, summarize_durability,
-    CompletionRecord, PorcelainEntry, FINDING_COMMIT_BLOCKED_NO_BLOCKER,
-    FINDING_COMMIT_STATUS_NO_HASH, FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES,
-    VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
+    CompletionRecord, FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
+    FINDING_SCOPED_COMMIT_VIOLATION, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
+    VALID_VERIFIER_STATUSES,
 };
 use self::log_surface::{
     action_decide, action_deviate, action_issue, action_list, action_open, action_status,
@@ -65,6 +62,13 @@ use self::log_surface::{
     render_trace_event, resolve_session_trace_path, resolve_trace_task_id, sanitize_trace_backend,
     scan_max_id, scan_max_trace_seq, sexp, Counter, DispatchMeta, LogFile, TraceEvent, TraceKind,
     TraceWarning, DEFAULT_DISPATCH_STRATEGY,
+};
+use self::preflight::action_preflight_commit;
+#[cfg(test)]
+use self::preflight::{
+    build_contract_scope_summary, build_preflight_summary, collect_all_claim_scopes,
+    collect_specific_claim_scope, evaluate_task_contract_for_preflight, parse_porcelain_status,
+    pattern_matches_path, PorcelainEntry,
 };
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
