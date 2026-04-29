@@ -32,4 +32,18 @@
     :backend prepare-task-runner-wave
     :kind read
     :files [".missiond/claudecode/wave37-shared-preamble.md"]
-    :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads."))
+    :summary "Audit expectation: every worker brief MUST load the shared preamble before broad scans; this entry seeds the preamble-read trace pin so verifiers can detect missing follow-up reads.")
+
+  (trace-event
+    :id wave37-01-request-verification-receipt-v0-preamble-read-004
+    :seq 4
+    :at "2026-04-29T02:00:00+08:00"
+    :task wave37-01-request-verification-receipt-v0
+    :backend claudecode
+    :kind read
+    :files [".missiond/claudecode/wave37-shared-preamble.md"
+            ".missiond/claudecode/wave37-01-request-verification-receipt-v0.md"
+            ".missiond/tasks/wave37/wave37-01-request-verification-receipt-v0.lisp"
+            ".missiond/tasks/wave37/context-atlas.lisp"
+            ".missiond/tasks/wave37/pattern-cards.lisp"]
+    :summary "Worker loaded shared preamble + thin brief + atlas/pattern cards before broad scans, satisfying the wave37 audit expectation."))
