@@ -31,6 +31,7 @@ const DEFAULT_FILES = {
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
+  planDagTests: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs',
   unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
 };
@@ -108,6 +109,7 @@ function checkFiles(root, files) {
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade',
+    'plan_dag/tests.rs does the same for the DAG scheduler regression suite',
     'execute can derive target_source=plan_hint from plan.sexp_text',
     'DAG execution parses node-local Lisp hints',
     'node scripts/check-v3-plan-execution-isomorphism.mjs',
@@ -295,6 +297,17 @@ function checkFiles(root, files) {
     'node_args.insert("timeout_secs".to_string()',
     'build_internal_dispatch_args(',
     'run_workstation_dispatch',
+    '#[cfg(test)]',
+    'mod tests;',
+  ]);
+
+  requireAll(diagnostics, files.planDagTests, sources.planDagTests, [
+    'use super::*;',
+    'fn parse_plan_dag_extracts_explicit_node_forms',
+    'fn build_validated_dag_accepts_valid_chain',
+    'fn validate_resume_request_routes_unique_paused_node',
+    'fn claim_registry_rejects_overlapping_scope',
+    'fn task_contract_dispatch_ctx_captures_machine_mode_for_dag',
   ]);
 
   requireAll(diagnostics, files.unifiedEntry, sources.unifiedEntry, [
@@ -364,8 +377,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+             "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -548,7 +562,17 @@ fn parse_node_form() {
 }
 node_args.insert("timeout_secs".to_string(), Value::Number(secs.into()));
 build_internal_dispatch_args();
-run_workstation_dispatch();`);
+run_workstation_dispatch();
+#[cfg(test)]
+mod tests;`);
+  writeFixture(root, DEFAULT_FILES.planDagTests, `
+use super::*;
+fn parse_plan_dag_extracts_explicit_node_forms() {}
+fn build_validated_dag_accepts_valid_chain() {}
+fn validate_resume_request_routes_unique_paused_node() {}
+fn claim_registry_rejects_overlapping_scope() {}
+fn task_contract_dispatch_ctx_captures_machine_mode_for_dag() {}
+`);
   writeFixture(root, DEFAULT_FILES.unifiedEntry, `
 pub(crate) fn plan_pipeline() {}
 PipelineDecision::PlanCompile;
