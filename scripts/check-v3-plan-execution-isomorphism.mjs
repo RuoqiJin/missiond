@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   planTaskContract: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs',
   planDistillChain: 'crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs',
   planDispatchResponse: 'crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs',
+  planEvidenceSidecar: 'crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs',
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
@@ -94,6 +95,7 @@ function checkFiles(root, files) {
     'plan/task_contract.rs owns mission_plan task-contract Lisp projection',
     'plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress',
     'plan/dispatch_response.rs owns mission_plan execution response egress',
+    'plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress',
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'execute can derive target_source=plan_hint from plan.sexp_text',
@@ -171,6 +173,16 @@ function checkFiles(root, files) {
     'task_contract_emit_failed',
     'workstation_dispatch_v0',
     'status_update_failed',
+  ]);
+
+  requireAll(diagnostics, files.planEvidenceSidecar, sources.planEvidenceSidecar, [
+    'pub(super) async fn action_record_evidence',
+    'pub(crate) async fn append_plan_evidence_entry',
+    'wrap_legacy_record_evidence',
+    'recorded_at',
+    'entry_count',
+    'COMPANION_DIR',
+    'source_override',
   ]);
 
   requireAll(diagnostics, files.planRouterPolicyAdapter, sources.planRouterPolicyAdapter, [
@@ -271,8 +283,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -352,6 +365,16 @@ pub(super) fn build_workstation_dispatch_response() {
 }
 pub(super) fn build_internal_dispatch_success_response() {
   "status_update_failed";
+}`);
+  writeFixture(root, DEFAULT_FILES.planEvidenceSidecar, `
+pub(super) async fn action_record_evidence() {
+  let source_override = "";
+  "wrap_legacy_record_evidence";
+  "entry_count";
+}
+pub(crate) async fn append_plan_evidence_entry() {
+  "recorded_at";
+  "COMPANION_DIR";
 }`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
 pub(super) enum RouterPolicyMode { Off, DryRun }
