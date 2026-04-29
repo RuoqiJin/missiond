@@ -175,12 +175,30 @@ if [ -x "$REPO_ROOT/target/debug/mission-mcp" ] || [ -x "$REPO_ROOT/target/relea
   MCP="${REPO_ROOT}/target/release/mission-mcp"
   [ -x "$MCP" ] || MCP="${REPO_ROOT}/target/debug/mission-mcp"
 
+  run_mcp_initialize_smoke() {
+    if command -v timeout >/dev/null 2>&1; then
+      timeout 5 "$MCP" <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
+EOF
+    elif command -v gtimeout >/dev/null 2>&1; then
+      gtimeout 5 "$MCP" <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
+EOF
+    elif command -v perl >/dev/null 2>&1; then
+      perl -e 'alarm shift @ARGV; exec @ARGV' 5 "$MCP" <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
+EOF
+    else
+      "$MCP" <<'EOF'
+{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
+EOF
+    fi
+  }
+
   # Send a minimal initialize + tools/call to the IPC. We don't run a full
   # MCP exchange — we just want to know: does the IPC respond?
   log "smoke: $MCP < initialize"
-  RESP=$(timeout 5 "$MCP" <<'EOF' 2>&1 | tail -3 || true)
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
-EOF
+  RESP=$(run_mcp_initialize_smoke 2>&1 | tail -3 || true)
   if echo "$RESP" | grep -q '"protocolVersion"'; then
     log "smoke: IPC responded OK"
   else
