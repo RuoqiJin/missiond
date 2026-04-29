@@ -55,7 +55,7 @@
     :at "2026-04-29T10:35:00Z"
     :task wave51-01-autopilot-concurrent-slot-dispatch-v0
     :backend claudecode
-    :kind acceptance
+    :kind test
     :files ["scripts/check-v3-workstation-config-isomorphism.mjs"
             "scripts/check-v3-code-isomorphism-complete.mjs"
             "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"]
