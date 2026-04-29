@@ -19,6 +19,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planExecuteHints: 'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
+  planTaskContract: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs',
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
@@ -88,6 +89,7 @@ function checkFiles(root, files) {
     'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
+    'plan/task_contract.rs owns mission_plan task-contract Lisp projection',
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'execute can derive target_source=plan_hint from plan.sexp_text',
@@ -121,6 +123,20 @@ function checkFiles(root, files) {
     'pub(crate) fn canonicalize_strategy',
     'pub(crate) fn resolve_dispatch_strategy',
     'AGENT_TEAM_OBJECTIVE_HINT',
+  ]);
+
+  requireAll(diagnostics, files.planTaskContract, sources.planTaskContract, [
+    'pub(crate) enum TaskContractEmitMode',
+    'pub(crate) enum DispatchContractMode',
+    'pub(crate) struct TaskContractInputs',
+    'pub(crate) fn parse_task_contract_emit_mode',
+    'pub(crate) fn parse_dispatch_contract_mode',
+    'pub(crate) fn build_task_contract_lisp',
+    'pub(crate) fn write_task_contract_under_root',
+    'pub(crate) async fn emit_task_contract',
+    'pub(crate) fn task_contract_inputs_from_hints',
+    'pub(crate) fn task_contract_inputs_from_hints_with_trace',
+    ':session-trace-path',
   ]);
 
   requireAll(diagnostics, files.planRouterPolicyAdapter, sources.planRouterPolicyAdapter, [
@@ -218,8 +234,9 @@ function buildFixture() {
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -255,6 +272,19 @@ pub(crate) fn normalize_target() {}
 pub(crate) fn canonicalize_strategy() {}
 pub(crate) fn resolve_dispatch_strategy() {}
 const AGENT_TEAM_OBJECTIVE_HINT: &str = "";`);
+  writeFixture(root, DEFAULT_FILES.planTaskContract, `
+pub(crate) enum TaskContractEmitMode {}
+pub(crate) enum DispatchContractMode {}
+pub(crate) struct TaskContractInputs {}
+pub(crate) fn parse_task_contract_emit_mode() {}
+pub(crate) fn parse_dispatch_contract_mode() {}
+pub(crate) fn build_task_contract_lisp() {
+  ":session-trace-path";
+}
+pub(crate) fn write_task_contract_under_root() {}
+pub(crate) async fn emit_task_contract() {}
+pub(crate) fn task_contract_inputs_from_hints() {}
+pub(crate) fn task_contract_inputs_from_hints_with_trace() {}`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
 pub(super) enum RouterPolicyMode { Off, DryRun }
 pub(super) fn parse_router_policy_mode() {}
