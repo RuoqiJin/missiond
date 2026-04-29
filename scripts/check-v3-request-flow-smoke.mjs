@@ -78,6 +78,21 @@
 // The smoke never spawns or waits for a worker. Default --live-ipc still stops
 // at awaiting_execution; only --execute-dry-run drives execute_plan.
 //
+// Wave49-01 audit mode (--restart-during-dispatch): PLAN-ONLY by default. After
+// the wave47 --execute-real-dispatch step has produced a delegated BoardTask
+// pinned to a dynamic slot, this opt-in mode emits a structured
+// restart-recovery step plan that a parent/orchestrator can REVIEW and then
+// execute manually against a live daemon. The script itself NEVER kills the
+// daemon, never sends SIGTERM, and never invokes launchctl. The plan lists
+// the exact parent-run command, the pre-restart observation steps, the
+// expected pin-clear transition, and the re-dispatch assertion so the
+// recovery contract from wave48-01 (autopilot.rs::dispatch_board_tasks
+// clearing stale dynamic slot pins) can be live-verified end-to-end without
+// surprising the operator.
+// Validation: --restart-during-dispatch is REJECTED unless both --live-ipc
+// and --execute-real-dispatch are also present, because the plan only makes
+// sense once a real delegated BoardTask exists.
+//
 // Wave47-01 audit mode (--execute-real-dispatch): SLOW + SIDE-EFFECTING. After
 // approve_plan succeeds, the smoke calls mission_request respond with
 // response=execute_plan, execute=true, dry_run=false, execute_mode=internal,
@@ -107,7 +122,7 @@
 //        [--live-ipc [--endpoint <socket>] [--session-id <id>]
 //                    [--request-id <id>] [--cleanup] [--compat-write-file]
 //                    [--execute-dry-run] [--execute-real-dispatch]
-//                    [--confirm-execute]]
+//                    [--restart-during-dispatch] [--confirm-execute]]
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -225,6 +240,21 @@ Flags:
                     the workstation_dispatch substrate. The smoke never
                     spawns or waits for a worker. Without this flag
                     --live-ipc still stops at awaiting_execution.
+  --restart-during-dispatch
+                    Wave49 opt-in restart-recovery PLAN audit. Requires
+                    --live-ipc AND --execute-real-dispatch (the planner
+                    refuses unsafe combinations). After the real-dispatch
+                    step produces a delegated BoardTask pinned to a dynamic
+                    slot, the smoke emits a structured restart_recovery_plan
+                    onto the live-ipc summary describing: (1) pre-restart
+                    state capture, (2) the exact parent-run daemon-restart
+                    command, (3) expected pin-clear transition, (4) expected
+                    re-dispatch to a fresh slot, (5) recovery assertion
+                    against wave48-01 autopilot.rs::dispatch_board_tasks
+                    clear-stale-dyn-pin contract. The smoke NEVER kills the
+                    daemon itself; the actual restart is parent-driven so
+                    the operator can review the plan first. Without this
+                    flag --execute-real-dispatch behavior is unchanged.
   --execute-real-dispatch
                     Wave47 opt-in REAL dispatch audit. SLOW + SIDE-EFFECTING.
                     After approve_plan succeeds, the smoke calls
@@ -274,6 +304,7 @@ function parseArgs(argv) {
     compatWriteFile: false,
     executeDryRun: false,
     executeRealDispatch: false,
+    restartDuringDispatch: false,
     endpoint: null,
     sessionId: null,
     requestId: null,
@@ -301,6 +332,8 @@ function parseArgs(argv) {
       opts.executeDryRun = true;
     } else if (arg === '--execute-real-dispatch') {
       opts.executeRealDispatch = true;
+    } else if (arg === '--restart-during-dispatch') {
+      opts.restartDuringDispatch = true;
     } else if (arg === '--endpoint') {
       opts.endpoint = argv[++i] ?? fail('--endpoint requires a value');
     } else if (arg.startsWith('--endpoint=')) {
@@ -326,6 +359,114 @@ function parseArgs(argv) {
     }
   }
   return opts;
+}
+
+// wave49-01: validate flag combinations before any IO. The restart-recovery
+// plan only makes sense once the live flow has produced a real delegated
+// BoardTask, so --restart-during-dispatch must accompany --live-ipc and
+// --execute-real-dispatch. Returns { ok, errors } so unit/dry fixtures can
+// assert the rejections without going through process.exit.
+export function validateOpts(opts) {
+  const errors = [];
+  if (opts.restartDuringDispatch) {
+    if (!opts.liveIpc) {
+      errors.push('--restart-during-dispatch requires --live-ipc; the recovery plan operates against a running daemon.');
+    }
+    if (!opts.executeRealDispatch) {
+      errors.push('--restart-during-dispatch requires --execute-real-dispatch; without a real delegated BoardTask there is nothing to recover.');
+    }
+  }
+  return { ok: errors.length === 0, errors };
+}
+
+// wave49-01: pure planner for the restart-recovery step sequence. Pre-restart
+// observations come from the realStep result captured by runLiveIpcSmoke;
+// the actual daemon restart is intentionally documented as a parent-run
+// shell command rather than executed here, so the operator gets a chance to
+// review before touching the supervisor. The :assertion step encodes the
+// wave48-01 contract (autopilot.rs::dispatch_board_tasks clears stale
+// dynamic pins so the BoardTask re-routes to a fresh idle coder slot).
+export function buildRestartRecoveryPlan({
+  delegatedBoardTaskId,
+  preRestartAssignee,
+  requestId,
+  repoRoot,
+} = {}) {
+  const taskRef = delegatedBoardTaskId ?? '<delegated_board_task_id>';
+  const slotRef = preRestartAssignee ?? '<pre_restart_assignee>';
+  return {
+    schema: 'missiond.request-flow.restart-recovery-plan.v0',
+    requires_flags: ['--live-ipc', '--execute-real-dispatch', '--restart-during-dispatch'],
+    live_executed: false,
+    live_execution_owner: 'parent/orchestrator (operator must run the restart command after reviewing this plan)',
+    pre_restart_state: {
+      delegated_board_task_id: delegatedBoardTaskId ?? null,
+      pre_restart_assignee: preRestartAssignee ?? null,
+      request_id: requestId ?? null,
+      repo_root: repoRoot ?? null,
+    },
+    parent_run_command: {
+      description: 'Daemon restart that wipes all active dynamic slots (main.rs:252-269 Phase 6.7). Pick whichever path matches your supervisor; both are safe under launchctl-managed missiond.',
+      preferred:
+        'launchctl kickstart -k gui/$(id -u)/com.missiond.daemon  # graceful kill + supervised restart',
+      fallback:
+        'pgrep -f \"^/.+/missiond( |$)\" | xargs -r kill -TERM  # send SIGTERM to missiond pid; launchd brings it back within a few seconds',
+    },
+    expected_post_restart: {
+      list_dynamic_slots_active_excludes: slotRef,
+      board_task_assignee_transitions: ['Some(' + slotRef + ')', 'None', 'Some(<fresh_slot_id>)'],
+      board_task_status_progression: ['open', 'running'],
+      autopilot_note_pattern: '🔄 Pinned slot ' + slotRef + ' 在重启后已不可用，已解除 pin 等待重新调度',
+    },
+    steps: [
+      {
+        step: 1,
+        name: 'capture_pre_restart_state',
+        kind: 'observation',
+        action:
+          'Read pipeline_result from the preceding execute_plan_real_dispatch step. Record delegated_board_task_id and delegated_board_task_assignee. Optionally call mission_compute_slot list status=active to confirm the dynamic slot is currently registered in SlotManager.',
+        expectation:
+          'delegated_board_task_assignee matches a slot-dyn-* id and that slot appears in mission.list_slots() output.',
+      },
+      {
+        step: 2,
+        name: 'restart_daemon',
+        kind: 'side_effect',
+        live_only: true,
+        action:
+          'Run the parent_run_command above. Wait until mission_health/list_pages call (or any tools/call ping) succeeds again — typically 3-10 seconds under launchctl supervision.',
+        expectation:
+          'New missiond pid; main.rs:252-269 logs "Terminated active dynamic slots on startup (clean slate)" so the dynamic slot list is empty for ' + slotRef + '.',
+      },
+      {
+        step: 3,
+        name: 'observe_pin_clear',
+        kind: 'observation',
+        action:
+          'Poll mission_board_get(taskId=' + taskRef + ') every 5 seconds for up to 5 minutes (Autopilot ticks every ~60s).',
+        expectation:
+          'BoardTask.assignee transitions Some(' + slotRef + ') -> None within 1-2 autopilot ticks. A board note matching autopilot_note_pattern is appended.',
+      },
+      {
+        step: 4,
+        name: 'observe_redispatch',
+        kind: 'observation',
+        action:
+          'Continue polling mission_board_get(taskId=' + taskRef + ').',
+        expectation:
+          'BoardTask.assignee transitions None -> Some(<fresh_slot_id>) where fresh_slot_id != ' + slotRef + ', BoardTask.status moves open -> running, and pipeline_result on the new slot reflects the same task_brief.',
+      },
+      {
+        step: 5,
+        name: 'assert_recovery_proof',
+        kind: 'assertion',
+        action:
+          'Compare new assignee to pre_restart_assignee and capture the autopilot note that justified the pin clear.',
+        expectation:
+          'new_assignee != ' + slotRef + ', BoardTask reaches a non-failed terminal state (done) without manual intervention; this proves the wave48-01 clear-stale-dyn-pin contract holds end-to-end.',
+      },
+    ],
+  };
 }
 
 function defaultIpcEndpoint() {
@@ -987,6 +1128,189 @@ function buildFixtureCases() {
   ];
 }
 
+// wave49-01 dry-fixture coverage for the --restart-during-dispatch parser
+// gate and for the structural shape of the restart-recovery plan. Returns
+// { totalCases, failedCases } so it can compose with runFixtures into a
+// single fixture-summary line. Pure: never touches a daemon, never spawns,
+// never writes outside the temp dir.
+function runRestartRecoveryFixtures(diagnostics) {
+  const cases = [
+    {
+      name: 'default opts validate ok (no restart flag)',
+      opts: {
+        liveIpc: false,
+        executeRealDispatch: false,
+        restartDuringDispatch: false,
+      },
+      expect: { ok: true, errorContains: null },
+    },
+    {
+      name: 'live-ipc only without restart flag still validates ok',
+      opts: {
+        liveIpc: true,
+        executeRealDispatch: false,
+        restartDuringDispatch: false,
+      },
+      expect: { ok: true, errorContains: null },
+    },
+    {
+      name: 'restart-during-dispatch alone is rejected',
+      opts: {
+        liveIpc: false,
+        executeRealDispatch: false,
+        restartDuringDispatch: true,
+      },
+      expect: { ok: false, errorContains: 'requires --live-ipc' },
+    },
+    {
+      name: 'restart-during-dispatch + live-ipc without real-dispatch is rejected',
+      opts: {
+        liveIpc: true,
+        executeRealDispatch: false,
+        restartDuringDispatch: true,
+      },
+      expect: { ok: false, errorContains: 'requires --execute-real-dispatch' },
+    },
+    {
+      name: 'restart-during-dispatch + execute-real-dispatch without live-ipc is rejected',
+      opts: {
+        liveIpc: false,
+        executeRealDispatch: true,
+        restartDuringDispatch: true,
+      },
+      expect: { ok: false, errorContains: 'requires --live-ipc' },
+    },
+    {
+      name: 'restart-during-dispatch with both gates validates ok',
+      opts: {
+        liveIpc: true,
+        executeRealDispatch: true,
+        restartDuringDispatch: true,
+      },
+      expect: { ok: true, errorContains: null },
+    },
+  ];
+  let failed = 0;
+  for (const c of cases) {
+    const result = validateOpts(c.opts);
+    const fxFails = [];
+    if (result.ok !== c.expect.ok) {
+      fxFails.push(`expected ok=${c.expect.ok}, got ${result.ok} (errors=${JSON.stringify(result.errors)})`);
+    }
+    if (
+      c.expect.errorContains
+      && !result.errors.some((e) => e.includes(c.expect.errorContains))
+    ) {
+      fxFails.push(
+        `expected an error containing "${c.expect.errorContains}", got ${JSON.stringify(result.errors)}`,
+      );
+    }
+    if (fxFails.length > 0) {
+      failed += 1;
+      diagnostics.push({
+        file: 'restart-recovery-fixture',
+        message: `restart-recovery fixture FAILED [${c.name}]: ${fxFails.join('; ')}`,
+      });
+    }
+  }
+
+  // Plan structural fixture: with synthetic pre-restart inputs, the planner
+  // must emit the five-step recovery sequence in order, name each step's
+  // kind, and reproduce the slot/task identifiers in the parent_run_command
+  // expectations. This gives the parent a stable contract to bind against.
+  const plan = buildRestartRecoveryPlan({
+    delegatedBoardTaskId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    preRestartAssignee: 'slot-dyn-fixture',
+    requestId: 'wave49-fixture-request',
+    repoRoot: '/tmp/fixture-repo',
+  });
+  const planFails = [];
+  const expectedNames = [
+    'capture_pre_restart_state',
+    'restart_daemon',
+    'observe_pin_clear',
+    'observe_redispatch',
+    'assert_recovery_proof',
+  ];
+  if (!Array.isArray(plan.steps) || plan.steps.length !== expectedNames.length) {
+    planFails.push(
+      `expected ${expectedNames.length} steps, got ${Array.isArray(plan.steps) ? plan.steps.length : typeof plan.steps}`,
+    );
+  } else {
+    for (let i = 0; i < expectedNames.length; i += 1) {
+      const observed = plan.steps[i];
+      if (observed?.name !== expectedNames[i]) {
+        planFails.push(
+          `step ${i + 1} expected name=${expectedNames[i]}, got ${JSON.stringify(observed?.name)}`,
+        );
+      }
+      if (observed?.step !== i + 1) {
+        planFails.push(
+          `step ${i + 1} expected step=${i + 1}, got ${JSON.stringify(observed?.step)}`,
+        );
+      }
+      if (
+        typeof observed?.action !== 'string'
+        || observed.action.trim() === ''
+      ) {
+        planFails.push(`step ${expectedNames[i]} has empty action string`);
+      }
+      if (
+        typeof observed?.expectation !== 'string'
+        || observed.expectation.trim() === ''
+      ) {
+        planFails.push(`step ${expectedNames[i]} has empty expectation string`);
+      }
+    }
+  }
+  if (plan.live_executed !== false) {
+    planFails.push('plan.live_executed must be false in this shard (live restart is parent-driven)');
+  }
+  if (
+    !Array.isArray(plan.requires_flags)
+    || !plan.requires_flags.includes('--restart-during-dispatch')
+    || !plan.requires_flags.includes('--live-ipc')
+    || !plan.requires_flags.includes('--execute-real-dispatch')
+  ) {
+    planFails.push(
+      `plan.requires_flags missing one of [--live-ipc, --execute-real-dispatch, --restart-during-dispatch], got ${JSON.stringify(plan.requires_flags)}`,
+    );
+  }
+  if (
+    typeof plan.parent_run_command?.preferred !== 'string'
+    || !plan.parent_run_command.preferred.includes('launchctl')
+  ) {
+    planFails.push(
+      `plan.parent_run_command.preferred should reference launchctl; got ${JSON.stringify(plan.parent_run_command?.preferred)}`,
+    );
+  }
+  if (
+    plan.pre_restart_state?.delegated_board_task_id
+    !== 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+    || plan.pre_restart_state?.pre_restart_assignee !== 'slot-dyn-fixture'
+  ) {
+    planFails.push('planner did not echo synthetic pre_restart_state inputs back into the plan');
+  }
+  if (
+    plan.expected_post_restart?.list_dynamic_slots_active_excludes
+    !== 'slot-dyn-fixture'
+  ) {
+    planFails.push(
+      `plan.expected_post_restart.list_dynamic_slots_active_excludes should equal pre_restart_assignee; got ${JSON.stringify(plan.expected_post_restart?.list_dynamic_slots_active_excludes)}`,
+    );
+  }
+  if (planFails.length > 0) {
+    failed += 1;
+    diagnostics.push({
+      file: 'restart-recovery-fixture',
+      message: `restart-recovery plan structural fixture FAILED: ${planFails.join('; ')}`,
+    });
+  }
+
+  // +1 case for the plan structural fixture itself.
+  return { totalCases: cases.length + 1, failedCases: failed };
+}
+
 function runFixtures(diagnostics) {
   const cases = buildFixtureCases();
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-request-flow-'));
@@ -1049,6 +1373,12 @@ function runFixtures(diagnostics) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  const optsValidation = validateOpts(opts);
+  if (!optsValidation.ok) {
+    for (const e of optsValidation.errors) process.stderr.write(`error: ${e}\n`);
+    process.stderr.write(`\n${usage}`);
+    process.exit(2);
+  }
   const diagnostics = [];
 
   let blueprintResult = { ok: true, diagnostics: [] };
@@ -1103,6 +1433,9 @@ async function main() {
   }
 
   const fxSummary = runFixtures(diagnostics);
+  const restartFxSummary = runRestartRecoveryFixtures(diagnostics);
+  fxSummary.totalCases += restartFxSummary.totalCases;
+  fxSummary.failedCases += restartFxSummary.failedCases;
 
   let liveIpcSummary = null;
   if (opts.liveIpc) {
@@ -1234,6 +1567,7 @@ async function runLiveIpcSmoke(opts) {
     compat_write_file_requested: compatRequested,
     execute_dry_run_requested: !!opts.executeDryRun,
     execute_real_dispatch_requested: !!opts.executeRealDispatch,
+    restart_during_dispatch_requested: !!opts.restartDuringDispatch,
     confirm_execute_refused: !!opts.confirmExecute,
     confirm_execute_notice: opts.confirmExecute
       ? '--confirm-execute is reserved; this checker still refuses to dispatch a workstation slot. Drive mission_request directly to execute.'
@@ -1241,6 +1575,7 @@ async function runLiveIpcSmoke(opts) {
     steps: [],
     cleanup: { requested: !!opts.cleanup, removed_path: null, kept_db_rows: 'directives, plans, board_tasks rows created during the live flow remain as audit records — only the request-local Lisp directory is cleaned up.' },
     legacy_compat_artifacts: null,
+    restart_recovery_plan: null,
     error: null,
   };
 
@@ -1875,6 +2210,47 @@ async function runLiveIpcSmoke(opts) {
       summary.error = realStep.error;
       return summary;
     }
+  }
+
+  // ── Step 4c (opt-in): wave49-01 restart-recovery PLAN emission ──────
+  // Plan-only by default. The step captures the delegated BoardTask id and
+  // pre-restart assignee from the realStep summary, builds a structured
+  // restart-recovery plan, and pushes it onto summary.steps as a review
+  // artifact. The actual daemon restart is parent-driven (see
+  // plan.parent_run_command) so the operator can inspect the plan before
+  // touching the supervisor. Validation already ensured we have both
+  // --live-ipc and --execute-real-dispatch by this point.
+  if (opts.restartDuringDispatch) {
+    const realStepSnapshot = summary.steps.find(
+      (s) => s.name === 'execute_plan_real_dispatch',
+    );
+    const planStep = {
+      name: 'restart_recovery_plan',
+      ok: false,
+      kind: 'review',
+      live_executed: false,
+    };
+    if (!realStepSnapshot || !realStepSnapshot.ok) {
+      planStep.error =
+        'restart-recovery plan requires a successful execute_plan_real_dispatch step; none observed.';
+      summary.steps.push(planStep);
+      summary.error = planStep.error;
+      return summary;
+    }
+    const plan = buildRestartRecoveryPlan({
+      delegatedBoardTaskId: realStepSnapshot.delegated_board_task_id ?? null,
+      preRestartAssignee:
+        realStepSnapshot.delegated_board_task_assignee ?? null,
+      requestId,
+      repoRoot,
+    });
+    summary.restart_recovery_plan = plan;
+    planStep.ok = true;
+    planStep.plan_step_count = plan.steps.length;
+    planStep.parent_run_command_preferred = plan.parent_run_command.preferred;
+    planStep.assertion =
+      'restart-recovery plan emitted for review; live execution intentionally deferred to the parent/orchestrator (see restart_recovery_plan.parent_run_command).';
+    summary.steps.push(planStep);
   }
 
   // ── Compat-writer side-effect audit ─────────────────────────────────
