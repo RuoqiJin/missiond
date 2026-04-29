@@ -55,16 +55,16 @@ case "$MODE" in
     ;;
   branch)
     [ -n "$BRANCH" ] || { echo "--branch requires a base ref" >&2; exit 1; }
-    FILES=$(git diff --name-only --diff-filter=ACMR "${BRANCH}...HEAD"
-            git diff --name-only --diff-filter=ACMR)
-    FILES=$(printf '%s\n' "$FILES" | sort -u)
+    FILES=$( { git diff --name-only --diff-filter=ACMR "${BRANCH}...HEAD"
+               git diff --name-only --diff-filter=ACMR
+             } | sort -u )
     ;;
 esac
 
 # Keep only existing Rust files. (`--diff-filter=ACMR` already excludes deletes,
 # but a rename can leave the old path; the `-f` test handles that defensively.)
 RUST_FILES=$(printf '%s\n' "$FILES" \
-  | grep -E '\.rs$' \
+  | awk '/\.rs$/ { print }' \
   | while read -r f; do [ -f "$f" ] && printf '%s\n' "$f"; done)
 
 if [ -z "$RUST_FILES" ]; then
@@ -94,7 +94,7 @@ if [ -f "Cargo.toml" ]; then
 fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
-  if printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition "$EDITION" --check 2>&1; then
+  if printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition "$EDITION" --config skip_children=true --check 2>&1; then
     echo "[fmt-touched] all $COUNT file(s) already formatted."
     exit 0
   else
@@ -103,5 +103,5 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
   fi
 fi
 
-printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition "$EDITION"
+printf '%s\n' "$RUST_FILES" | xargs rustfmt --edition "$EDITION" --config skip_children=true
 echo "[fmt-touched] formatted $COUNT file(s)."
