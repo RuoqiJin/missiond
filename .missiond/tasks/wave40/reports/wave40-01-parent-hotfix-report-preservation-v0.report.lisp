@@ -1,12 +1,49 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 40 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave40-01-parent-hotfix-report-preservation-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave40-01-parent-hotfix-report-preservation-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "539a9d3cbcab"
+  :files_changed
+    [".missiond/tasks/schema/report-contract-v1.lisp"
+     ".missiond/v3/missiond-blueprint.lisp"
+     "scripts/check-task-report.mjs"
+     "scripts/check-v3-task-lifecycle-isomorphism.mjs"
+     "scripts/task-runner-finalize-report.mjs"
+     "scripts/task-runner-parent-hotfix.mjs"
+     "scripts/verify-task-runner-batch.mjs"]
+  :acceptance_results
+    [(:command "node scripts/task-runner-finalize-report.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "6 cases: existing wave29-03 + parse-failure + tail-drift + new wave40-01 rich preservation case (worker acceptance + :notes + worker-explanation + router fields all survive; preservedKeys exposes them; replaceAcceptance opt-in works) + minimal-old-report backward-compat case.")
+     (:command "node scripts/task-runner-parent-hotfix.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "3 cases: existing wave29-03 in-memory + file-write + new wave40-01 wave39-class rich planner case asserting acceptance/notes/trace_refs survive and preservedKeys exposes :time_sinks.")
+     (:command "node scripts/check-task-report.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "51 cases: 50 existing + new wave40-01 sparse-projection rich finalized report fixture validating worker acceptance + :notes + worker-explanation + router-recommendation fields coexist with patched lineage fields.")
+     (:command "node scripts/verify-task-runner-batch.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "19 fixtures: existing receipt/finalized-report + wave39-01 task-scoped events-dir smoke + new wave40-01 cross-layer preservation smoke calling planParentHotfixFromSource on a rich worker source and asserting :acceptance_results length=2, :notes, :trace_refs, and :final_commit_hash patch all show up in the rendered source.")
+     (:command "node scripts/check-v3-task-lifecycle-isomorphism.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "Cross-layer dry fixture extended with sparse-projection needles in blueprint note, finalizer (projectFinalReportSource / preservedKeys / LINEAGE_KEYS / replaceAcceptance / --replace-acceptance), parent-hotfix (preservedKeys / preservation through planner), and a new report-schema fixture pinning the Wave40-01 sparse-projection invariant.")
+     (:command "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
+              :exit_code 0 :ok true
+              :note "Real-tree run pins the same needles against the live blueprint / report-contract schema / finalizer / parent-hotfix / batch verifier so future drift is caught.")
+     (:command "node scripts/check-lisp-blueprint-compression.mjs"
+              :exit_code 0 :ok true
+              :note "v1 manifest + v3 blueprint compression contract still holds after extending the task-runner-cli :note for parent-hotfix sparse projection.")
+     (:command "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
+              :exit_code 0 :ok true
+              :note "blueprint architecture-lisp check OK on the updated file.")
+     (:command "perl -ne 'exit 1 if /\\x00/' .missiond/v3/missiond-blueprint.lisp .missiond/tasks/schema/report-contract-v1.lisp scripts/task-runner-finalize-report.mjs scripts/task-runner-parent-hotfix.mjs scripts/check-task-report.mjs scripts/check-v3-task-lifecycle-isomorphism.mjs scripts/verify-task-runner-batch.mjs"
+              :exit_code 0 :ok true
+              :note "no NUL bytes in any of the seven touched files.")
+     (:command "git diff --check -- .missiond/v3/missiond-blueprint.lisp .missiond/tasks/schema/report-contract-v1.lisp scripts/task-runner-finalize-report.mjs scripts/task-runner-parent-hotfix.mjs scripts/check-task-report.mjs scripts/check-v3-task-lifecycle-isomorphism.mjs scripts/verify-task-runner-batch.mjs"
+              :exit_code 0 :ok true
+              :note "no whitespace-error or conflict markers in the write-scope files.")]
+  :notes "Closes the report-preservation gap exposed by wave39 parent hotfix finalization. Wave39 evidence: a rich worker report carrying multiple :acceptance_results entries (with :note suffixes), :notes prose, and worker-explanation fields was being collapsed to a minimal report by the previous reconstruction-based finalizer.\n\nLisp/report-contract wording added before code changes: .missiond/tasks/schema/report-contract-v1.lisp now declares the Wave40-01 sparse-projection invariant in :status (top-level changelog) AND in the :parent_patches field-contract block. The invariant: task-runner-finalize-report MUST treat finalization as a sparse Lisp projection over the worker report, parsing keyword/value pairs and re-emitting them as-is, patching only the lineage fields (:status :commit_hash :agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches plus the unioned :files_changed). Optional fields already present in the worker — :notes :verification_tier :time_sinks :major_decisions :unexpected_work :blockers :trace_refs and the router-recommendation / router-readiness / router-dispatch-descriptor / verification-receipt blocks AND any future additive optional fields — MUST survive finalization unchanged. :acceptance_results is preserved by default; --acceptance-command / appended programmatic entries append rather than replace unless an explicit replacement opt is supplied. .missiond/v3/missiond-blueprint.lisp's task-runner-cli :note carries the same invariant.\n\nPreservation implementation shape: sparse AST/property patch via a new projectFinalReportSource(source, opts) in scripts/task-runner-finalize-report.mjs. The function parses the worker source through the existing missiond_lisp.mjs parser, extracts only the lineage fields needed to compute the projection (commits, files, parent patches, acceptance, schema, task_id), then walks the worker (report ...) form's children in order; it skips lineage keywords (LINEAGE_KEYS = :schema :task_id :status :commit_hash :agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches :files_changed :acceptance_results) and routes everything else into a preservedPairs vector. renderProjectedFinalReport then emits the lineage block in canonical order (using the existing renderParentPatches / renderStringVector / renderAcceptanceResults helpers, with renderAcceptanceResults extended to keep optional :note) followed by the preserved pairs rendered through a generic lispInline AST emitter so unknown nested vectors / property lists round-trip parseable. finalizeReportSource and finalizeReportFile delegate to projectFinalReportSource and additionally re-validate the rendered bytes through loadReportFromSource (defense in depth) so a regression that emits a non-loadable report fails the finalizer immediately.\n\nWhat fields are preserved and what lineage fields are patched: lineage = :status (forced to done), :commit_hash (final commit), :agent_commit_hash (worker commit), :final_commit_hash, :verified_commit_hash, :parent_patches (worker patches + new patches in order), :files_changed (uniqueSorted union of worker + opts + parent-patch files), :acceptance_results (worker entries + appended commands by default; replaced wholesale only when opts.replaceAcceptance / --replace-acceptance is set). Preserved (verbatim through generic AST emission, in worker-supplied order): :notes :scope_deviations :verification_tier :time_sinks :major_decisions :unexpected_work :blockers :trace_refs the wave25-02 router-recommendation block (:recommended_backend :router_confidence :router_policy_path :router_dry_run_only :router_applied :router_reasons :router_trace_index_path) the wave26-04 router-readiness block (:router_backend_readiness_status :router_backend_runtime_allowed :router_apply_eligible :router_apply_blockers :router_backend_registry_path) the wave27-04 router-dispatch-descriptor block (:router_dispatch_descriptor_path :router_dispatch_descriptor_status :router_dispatch_backend :router_dispatch_eligible :router_dispatch_no_execution :router_dispatch_blockers) and any future additive optional fields a later wave introduces — they ride through unchanged because the preservation path is keyword-set complement instead of a hand-coded allowlist. The finalizer result exposes preservedKeys for instrumentation and so isomorphism checkers can pin that the path is operative.\n\nWave39-style preservation fixture result: scripts/task-runner-finalize-report.mjs gains a wave99-99-rich-worker fixture that constructs a worker report with two acceptance entries (with :note suffixes), :notes, :verification_tier, :time_sinks, :major_decisions, :unexpected_work, :blockers, :trace_refs, and the four wave25-02 router-recommendation atoms; finalizes it with --acceptance-command appending one new entry; asserts the resulting report has 3 acceptance entries (worker alpha + worker beta + appended), the worker :note=alpha is intact, all preserved keys appear in preservedKeys AND in the rendered source bytes, the lineage commit hashes are patched to aa10aa2, and loadReportFromSource still parses the projection. A second sub-case exercises the explicit replaceAcceptance opt and asserts wholesale replacement. A third sub-case re-runs the legacy minimal-report path to pin backward compat. scripts/task-runner-parent-hotfix.mjs gains a parallel wave99-99-rich-worker fixture proving the planner inherits the preservation behavior. scripts/verify-task-runner-batch.mjs gains a wave40-01 cross-layer preservation smoke. scripts/check-task-report.mjs gains a wave40-01 fixture validating that a rich finalized report still passes the structural checker.\n\nAcceptance command results: every command listed in the task contract completes with exit_code 0; see :acceptance_results above for the per-command notes."
+  :verification_tier local)
