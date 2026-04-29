@@ -13,7 +13,7 @@
 // The aggregate covers exactly these implementation surfaces unless the
 // blueprint explicitly changes the V3 surface set:
 //   mission_request, mission_directive, mission_plan, mission_workflow,
-//   task-runner-cli, context-pack, workstation-config, ops-infra.
+//   task-runner-cli, source-hygiene, context-pack, workstation-config, ops-infra.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -36,6 +36,7 @@ export const EXPECTED_SURFACES = [
   'mission_plan',
   'mission_workflow',
   'task-runner-cli',
+  'source-hygiene',
   'context-pack',
   'workstation-config',
   'ops-infra',
@@ -47,6 +48,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-plan-execution-isomorphism.mjs',
   'scripts/check-v3-workflow-isomorphism.mjs',
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
+  'scripts/check-v3-source-hygiene-isomorphism.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
@@ -387,6 +389,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface source-hygiene
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface context-pack
       :status "code-aligned"
       :code ["a"]
@@ -402,7 +408,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all eight surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all nine surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -457,9 +463,9 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'missing-surface fixture: ops-infra absent fails the gate',
+    name: 'missing-surface fixture: source-hygiene absent fails the gate',
     expectOk: false,
-    expectMessage: /missing required surface "ops-infra"/i,
+    expectMessage: /missing required surface "source-hygiene"/i,
     source: missingSurfaceSource,
   });
 

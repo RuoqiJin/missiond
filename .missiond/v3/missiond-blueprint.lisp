@@ -398,6 +398,21 @@
     (policy verification-reuse
       :rule "Receipts may cover later states only when commit prefix, file set, tier, and exit_code rules pass."))
 
+  (source-hygiene
+    :desc "Read-only source and staged-index hygiene before scoped task commits."
+    :entrypoints [scripts/check-staged-source-hygiene.mjs
+                  scripts/task-scope-guard.mjs
+                  .githooks/pre-commit]
+    :hook-policy "Repo-local hook install is explicit opt-in; the pre-commit hook is a no-op unless MISSIOND_TASK_CONTRACT names a task.lisp contract."
+    :invariants
+      ["Staged hygiene MUST be read-only: no git add, commit, reset, checkout, stash, push, merge, rebase, hook mutation, or working-tree mutation."
+       "MISSIOND_TASK_CONTRACT enables task-scope guard enforcement in the pre-commit hook; without it the hook exits 0 so non-task commits are not blocked."
+       "Staged source hygiene MUST reject raw NUL bytes in staged blobs before commit."
+       "Staged source hygiene MUST run git diff --cached --check over the staged path set."
+       "Task-scope guard MUST reject staged paths outside :write-scope and any path matching :must-not-touch."
+       "The hook doctor MUST be read-only by default; hook installation is a separate explicit install command."
+       "Batch verification MAY import checkSuppliedFiles for final-tree source hygiene fixtures, but must not mutate git."])
+
   (multi-agent-context-pack
     :desc "Two-stage parallel investigation and shard implementation as a Lisp-owned append-only context bus."
     :schema "missiond.context-pack.v1"
@@ -549,6 +564,18 @@
              "scripts/verify-task-runner-batch.mjs"]
       :note "Task-scoped lifecycle events are first-class one-event files: the primary task-scoped path is .missiond/tasks/<wave>/events/<seq>.event.lisp (one lifecycle-event form per file, schema=missiond.task-lifecycle-event.v1, validated by check-task-lifecycle-events as standalone task-scoped event files), and task-runner-append-event allocates the next numeric file under a directory lock, validates the candidate bytes, and atomically creates them via fs.openSync(file, 'wx') when --events-dir is supplied. The legacy task-scoped task-lifecycle-events.lisp ledger is now a compatibility projection/input only: existing --ledger callers keep working unchanged, and task-runner-wave-state reads conventional task-scoped event files when present and falls back to the legacy ledger for historical waves, deduping by event id when both inputs exist. task-runner-append-event can ALSO project each append into request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp when request-id/request-events-dir are supplied; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args through their real dispatch-event paths, via task-runner-next-action, instead of leaving them as append-helper-only knobs. task-runner-finalize-report can project the same finalized lineage into the V3 request-local final-report artifact at .missiond/requests/<request_id>/reports/final.lisp when request-id/request-reports-dir are supplied; the legacy report-contract remains the compatibility report. check-verification-receipt can project a single receipt into the V3 request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp when request-id/request-receipts-dir are supplied through renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile; the writer rejects malformed request_id, malformed receipt_id, absolute or .. paths inside the resolved target, and invalid receipt objects (validateReceiptObject), validates the rendered Lisp bytes through the existing structural checker before atomic create-only rename, and refuses to overwrite an unrelated receipt file unless mode=replace and the on-disk bytes already equal the candidate; legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs for readVerificationReceiptFile and verify-task-runner-batch --receipts. task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files: it uses a sibling lock, rereads under lock, validates the candidate ledger or standalone event bytes, then atomically renames/creates outputs. task-runner-next-action prioritizes finalize_report before dispatch_task and emits dispatch events through appendLifecycleEvent. task-runner-parent-hotfix is read-only by default and projects parent patches through task-runner-finalize-report, preserving worker commit as :agent_commit_hash while :commit_hash/:final_commit_hash/:verified_commit_hash move to the final commit, and can also write the V3 request-local final-report projection. parent-hotfix finalization is a sparse Lisp projection over the worker report: task-runner-finalize-report parses the worker report's keyword/value pairs and re-emits them as-is, patching only the lineage fields (:status :commit_hash :agent_commit_hash :final_commit_hash :verified_commit_hash :parent_patches plus the unioned :files_changed) while preserving optional report-contract fields the worker already wrote (:notes :verification_tier :time_sinks :major_decisions :unexpected_work :blockers :trace_refs router-recommendation / router-readiness / router-dispatch-descriptor / verification-receipts and any additive optional fields). :acceptance_results is preserved by default; --acceptance-command appends new entries rather than replacing the worker block unless an explicit replacement opt is supplied. project-task-lifecycle-ledger backfills shared-memory/session-trace compatibility facts from lifecycle events. verify-task-runner-batch imports lifecycle validation, append-event, and parent-hotfix projections so batch smoke covers the task-scoped event files, the legacy ledger compatibility, the final-report, and the receipt path. verify-task-contract is the commit-snapshot artifact validator: real --commit verification stays read-only on git, but discovers known Lisp artifact paths (.missiond/tasks/<wave>/session-trace.lisp -> check-session-trace, .missiond/tasks/<wave>/shared-memory.lisp -> check-task-memory, .missiond/tasks/<wave>/task-lifecycle-events.lisp and .missiond/tasks/<wave>/events/*.event.lisp -> check-task-lifecycle-events, .missiond/tasks/<wave>/reports/*.report.lisp -> check-task-report) from the contract :write-scope union with the resolved commit's modified files via planArtifactValidation, materializes each artifact's commit bytes into a temp tree using git show <commit>:<path> through validateCommitArtifacts, and runs the existing checker scripts against the materialized bytes so a worker-commit defect (for example a wave51 session-trace with :kind acceptance) cannot pass even after a later parent hotfix repairs the working tree. The pure verifyContract(contract, commitInfo) API stays unchanged for verify-task-run and verify-task-runner-batch importers; artifact validation runs only on the verify-task-contract CLI path, with --dry-fixture covering the planArtifactValidation cases and a self-contained invalid session-trace bytes regression that exercises the spawn-checker code path without git access.")
 
+    (surface source-hygiene
+      :status "code-aligned"
+      :implements [source-hygiene scoped-write-gate]
+      :code ["scripts/check-staged-source-hygiene.mjs"
+             "scripts/task-scope-guard.mjs"
+             "scripts/check-missiond-hooks.mjs"
+             "scripts/install-missiond-hooks.mjs"
+             ".githooks/pre-commit"
+             "scripts/verify-task-runner-batch.mjs"
+             "scripts/check-v3-source-hygiene-isomorphism.mjs"]
+      :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: default mode reads staged ACMR files, rejects raw NUL bytes from staged blobs, runs git diff --cached --check, and delegates to task-scope-guard.mjs when --task or MISSIOND_TASK_CONTRACT is set; --files mode checks supplied files without reading git blobs. task-scope-guard.mjs owns task contract write-scope/must-not-touch enforcement for staged and commit modes. .githooks/pre-commit is opt-in per task via MISSIOND_TASK_CONTRACT; check-missiond-hooks.mjs is a read-only doctor and install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for source-hygiene fixture coverage without mutating git.")
+
     (surface context-pack
       :status "code-aligned"
       :implements [multi-agent-context-pack]
@@ -589,6 +616,7 @@
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
              "node scripts/check-v3-workflow-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
+             "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"
