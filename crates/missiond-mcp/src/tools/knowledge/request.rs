@@ -133,9 +133,13 @@ fn build_properties() -> Value {
         "string",
         "[start|advance] forwarded to file-first compatibility writers; defaults to request_id when mission_request allocates one",
     ));
+    p.insert("compat_write_file".into(), prop(
+        "boolean",
+        "[start|advance|respond approve_intent] V3-preferred opt-in for the legacy compatibility writers; when true, mission_request forwards write_file=true to mission_directive (writes .missiond/alignment/<topic>/intent-alignment.lisp) and mission_plan (writes .missiond/plans/<plan_id>/PLAN.lisp). Request-local artifacts under .missiond/requests/<request_id>/ are always the V3 review surface and are written regardless of this flag. Default false: mission_request never writes compat paths unless the caller opts in.",
+    ));
     p.insert("write_file".into(), prop(
         "boolean",
-        "[start|advance|respond approve_intent] forwarded to mission_directive / mission_plan file-first compatibility writer",
+        "[start|advance|respond approve_intent] LEGACY ALIAS for compat_write_file. Preserved for old callers; new code should use compat_write_file. When true, identical effect: mission_request forwards write_file=true to the inner directive/plan compile so the legacy compatibility roots .missiond/alignment/<topic>/ and .missiond/plans/<plan_id>/ are written. Has no effect on the V3 request-local artifacts under .missiond/requests/<request_id>/, which are always the review surface.",
     ));
     p.insert("review_gate_policy".into(), prop_enum(
         "string",
@@ -252,7 +256,13 @@ pub fn definitions() -> Vec<ToolDefinition> {
          reject_plan / ask_question never mutate directive/plan approval state and only append a \
          request-local review event under .missiond/requests/<request_id>/events/<seq>.event.lisp. \
          All actions never auto-approve intent or plan, never bypass mission_plan, and never spawn \
-         workstation work directly. Wrapper response shape (start/advance): { status, action, mode, \
+         workstation work directly. Default artifact roots are request-local: every flow writes \
+         request.lisp, intent-alignment.lisp, plan.lisp, and events/<seq>.event.lisp under \
+         .missiond/requests/<request_id>/, which is the V3 review surface. The legacy compatibility \
+         roots .missiond/alignment/<topic>/intent-alignment.lisp and .missiond/plans/<plan_id>/PLAN.lisp \
+         are OPT-IN: callers must pass compat_write_file=true (V3 name) or write_file=true (legacy \
+         alias) to fire the inner directive/plan compatibility writers. Default mission_request \
+         flow leaves the worktree free of compat artifacts. Wrapper response shape (start/advance): { status, action, mode, \
          request_artifacts, projection: { status: written|skipped_*|write_failed, target?, \
          sexp_source?, path?, sha256?, bytes?, created?, overwritten?, error? }, pipeline, v3_contract, \
          next_step, review_packet?: { state: received|intent_drafting|awaiting_intent_approval|\

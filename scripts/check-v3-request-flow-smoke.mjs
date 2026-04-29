@@ -42,10 +42,21 @@
 // --confirm-execute is reserved as a future flag and is explicitly refused
 // here — workstation dispatch is not the responsibility of this checker.
 //
+// Default live-IPC mode (wave44-01) is request-local-only: no write_file is
+// passed to mission_request, so the daemon never writes the legacy
+// .missiond/alignment/<topic>/intent-alignment.lisp or
+// .missiond/plans/<plan_id>/PLAN.lisp compatibility artifacts. The smoke
+// snapshots both compat roots before/after the live flow and fails if any
+// new compat artifact appears that names this request_id or smoke objective.
+// An optional --compat-write-file flag re-introduces compat_write_file=true
+// to deliberately exercise the legacy opt-in path; that mode is never added
+// to the v3 aggregate gate.
+//
 // CLI: node scripts/check-v3-request-flow-smoke.mjs [--json] [--dry-fixture]
 //        [--blueprint <path>] [--repo <path>]
 //        [--live-ipc [--endpoint <socket>] [--session-id <id>]
-//                    [--request-id <id>] [--cleanup] [--confirm-execute]]
+//                    [--request-id <id>] [--cleanup] [--compat-write-file]
+//                    [--confirm-execute]]
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -130,7 +141,19 @@ Flags:
   --cleanup         After successful validation, remove only
                     .missiond/requests/<request_id>/ from disk. DB rows
                     (directives, plans, board_tasks) created by the live
-                    flow remain as audit records.
+                    flow remain as audit records. Cleanup never touches the
+                    legacy compat roots .missiond/alignment/ or
+                    .missiond/plans/.
+  --compat-write-file
+                    Opt into the legacy compatibility-writer path: passes
+                    compat_write_file=true on start AND approve_intent so
+                    the daemon writes .missiond/alignment/<topic>/intent-
+                    alignment.lisp and .missiond/plans/<plan_id>/PLAN.lisp.
+                    The smoke reports the compat artifacts in a separate
+                    legacy_compat_artifacts block and does NOT count their
+                    presence as a failure (the user explicitly asked for
+                    them). Without this flag the default smoke FAILS if
+                    any compat artifact appears that names this request.
   --confirm-execute Reserved for future use. This checker explicitly refuses
                     workstation dispatch; with --confirm-execute the run
                     still stops at awaiting_execution and prints a notice
@@ -149,6 +172,7 @@ function parseArgs(argv) {
     liveIpc: false,
     confirmExecute: false,
     cleanup: false,
+    compatWriteFile: false,
     endpoint: null,
     sessionId: null,
     requestId: null,
@@ -170,6 +194,8 @@ function parseArgs(argv) {
       opts.confirmExecute = true;
     } else if (arg === '--cleanup') {
       opts.cleanup = true;
+    } else if (arg === '--compat-write-file') {
+      opts.compatWriteFile = true;
     } else if (arg === '--endpoint') {
       opts.endpoint = argv[++i] ?? fail('--endpoint requires a value');
     } else if (arg.startsWith('--endpoint=')) {
@@ -216,6 +242,19 @@ function generateLiveRequestId() {
   // across rapid retries.
   const stamp = new Date().toISOString().replace(/[^0-9]/g, '').slice(0, 14);
   return `wave43-live-ipc-smoke-${stamp}-${process.pid}`;
+}
+
+// Snapshot direct subdirectory names of a path, sorted, []. Missing dir = [].
+function snapshotSubdirs(root) {
+  try {
+    return fs
+      .readdirSync(root, { withFileTypes: true })
+      .filter((e) => e.isDirectory())
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    return [];
+  }
 }
 
 // Read the JSON payload out of an MCP tools/call response. The daemon emits
@@ -1049,6 +1088,17 @@ async function runLiveIpcSmoke(opts) {
   const requestPath = path.join(requestDir, 'request.lisp');
   const intentPath = path.join(requestDir, 'intent-alignment.lisp');
   const planPath = path.join(requestDir, 'plan.lisp');
+  const alignmentRoot = path.join(repoRoot, '.missiond', 'alignment');
+  const plansRoot = path.join(repoRoot, '.missiond', 'plans');
+  const compatRequested = !!opts.compatWriteFile;
+  const smokeObjective = compatRequested
+    ? 'wave44-live-ipc-smoke compat-write-file path; opt-in legacy compat artifacts.'
+    : 'wave44-live-ipc-smoke request-local-only path; no compat artifacts expected.';
+
+  const compatBefore = {
+    alignment_subdirs: snapshotSubdirs(alignmentRoot),
+    plans_subdirs: snapshotSubdirs(plansRoot),
+  };
 
   const summary = {
     attempted: true,
@@ -1058,12 +1108,14 @@ async function runLiveIpcSmoke(opts) {
     request_id: requestId,
     project_root: repoRoot,
     request_dir: requestDir,
+    compat_write_file_requested: compatRequested,
     confirm_execute_refused: !!opts.confirmExecute,
     confirm_execute_notice: opts.confirmExecute
       ? '--confirm-execute is reserved; this checker still refuses to dispatch a workstation slot. Drive mission_request directly to execute.'
       : null,
     steps: [],
     cleanup: { requested: !!opts.cleanup, removed_path: null, kept_db_rows: 'directives, plans, board_tasks rows created during the live flow remain as audit records — only the request-local Lisp directory is cleaned up.' },
+    legacy_compat_artifacts: null,
     error: null,
   };
 
@@ -1076,21 +1128,27 @@ async function runLiveIpcSmoke(opts) {
   });
 
   // ── Step 1: action=start ─────────────────────────────────────────────
+  // Default flow does NOT pass write_file=true: per V3
+  // (compat-writer-policy ...), request-local artifacts are the SSOT and
+  // .missiond/alignment/ + .missiond/plans/ compat writes are opt-in via
+  // --compat-write-file (which sets compat_write_file=true on the call).
   const startArgs = {
     action: 'start',
     request_id: requestId,
-    message: 'wave43-live-ipc-smoke: prove the V3 request-flow execution gate without dispatching a workstation slot.',
+    message: smokeObjective,
     mode: 'human_interactive',
     cwd: repoRoot,
     compiler_mode: 'dry_run',
     persist: true,
     write_request_file: true,
-    write_file: true,
     overwrite_file: true,
     review_gate_policy: 'manual',
     target: 'mission_task_delegate',
-    objective: 'wave43-live-ipc-smoke harmless objective; no workstation dispatch.',
+    objective: smokeObjective,
   };
+  if (compatRequested) {
+    startArgs.compat_write_file = true;
+  }
 
   let startStep = { name: 'start', ok: false };
   try {
@@ -1149,19 +1207,22 @@ async function runLiveIpcSmoke(opts) {
   // ── Step 2: action=respond response=approve_intent ──────────────────
   let approveIntentStep = { name: 'approve_intent', ok: false };
   try {
-    const respondRaw = await callTool('mission_request', {
+    const approveIntentArgs = {
       action: 'respond',
       request_id: requestId,
       response: 'approve_intent',
       cwd: repoRoot,
       compiler_mode: 'dry_run',
       persist: true,
-      write_file: true,
       overwrite_file: true,
       review_gate_policy: 'manual',
       target: 'mission_task_delegate',
-      objective: 'wave43-live-ipc-smoke plan-authoring; no workstation dispatch.',
-    });
+      objective: smokeObjective,
+    };
+    if (compatRequested) {
+      approveIntentArgs.compat_write_file = true;
+    }
+    const respondRaw = await callTool('mission_request', approveIntentArgs);
     const parsed = parseToolResultPayload(respondRaw, 'approve_intent');
     if (!parsed.ok) {
       approveIntentStep.error = parsed.error;
@@ -1300,6 +1361,86 @@ async function runLiveIpcSmoke(opts) {
     summary.steps.push(approvePlanStep);
     summary.error = approvePlanStep.error;
     return summary;
+  }
+
+  // ── Compat-writer side-effect audit ─────────────────────────────────
+  // Snapshot .missiond/alignment/ and .missiond/plans/ after the live flow
+  // and diff against the pre-run snapshot. The default smoke FAILS if any
+  // new compat artifact appears that names this request_id or the smoke
+  // objective; --compat-write-file flips that into a separate "you asked
+  // for them" report (the user explicitly opted into legacy compat writes).
+  const compatAfter = {
+    alignment_subdirs: snapshotSubdirs(alignmentRoot),
+    plans_subdirs: snapshotSubdirs(plansRoot),
+  };
+  const newAlignmentSubdirs = compatAfter.alignment_subdirs.filter(
+    (n) => !compatBefore.alignment_subdirs.includes(n),
+  );
+  const newPlansSubdirs = compatAfter.plans_subdirs.filter(
+    (n) => !compatBefore.plans_subdirs.includes(n),
+  );
+  // Plan compat dirs are named by plan UUID, not request_id; identify the
+  // ones belonging to this request by searching their PLAN.lisp for the
+  // smoke objective string.
+  const newPlanCompatPaths = newPlansSubdirs
+    .map((n) => path.join(plansRoot, n, 'PLAN.lisp'))
+    .filter((p) => {
+      try {
+        return fs.existsSync(p) && fs.readFileSync(p, 'utf8').includes(smokeObjective);
+      } catch {
+        return false;
+      }
+    });
+  const alignmentForThisRequest = newAlignmentSubdirs.includes(requestId)
+    ? path.join(alignmentRoot, requestId, 'intent-alignment.lisp')
+    : null;
+
+  summary.legacy_compat_artifacts = {
+    snapshot_root_alignment: alignmentRoot,
+    snapshot_root_plans: plansRoot,
+    new_alignment_subdirs: newAlignmentSubdirs,
+    new_plan_subdirs: newPlansSubdirs,
+    new_alignment_path_for_this_request: alignmentForThisRequest,
+    new_plan_compat_paths_for_this_smoke: newPlanCompatPaths,
+    compat_write_file_requested: compatRequested,
+  };
+
+  if (!compatRequested) {
+    const compatFails = [];
+    if (alignmentForThisRequest) {
+      compatFails.push(
+        `default flow leaked compat artifact ${alignmentForThisRequest}; .missiond/alignment/<request_id>/ must be opt-in via --compat-write-file`,
+      );
+    }
+    if (newPlanCompatPaths.length > 0) {
+      compatFails.push(
+        `default flow leaked compat plan artifacts ${JSON.stringify(newPlanCompatPaths)}; .missiond/plans/<plan_id>/PLAN.lisp must be opt-in via --compat-write-file`,
+      );
+    }
+    if (compatFails.length > 0) {
+      summary.steps.push({
+        name: 'compat_write_audit',
+        ok: false,
+        error: compatFails.join('; '),
+      });
+      summary.error = compatFails.join('; ');
+      return summary;
+    }
+    summary.steps.push({
+      name: 'compat_write_audit',
+      ok: true,
+      assertion: 'no .missiond/alignment/<request_id>/ and no .missiond/plans/*/PLAN.lisp containing the smoke objective were created',
+    });
+  } else {
+    summary.steps.push({
+      name: 'compat_write_audit',
+      ok: true,
+      assertion: '--compat-write-file requested; legacy compat artifacts are reported separately and are not a failure',
+      compat_artifacts: {
+        alignment_path: alignmentForThisRequest,
+        plan_compat_paths: newPlanCompatPaths,
+      },
+    });
   }
 
   summary.ok = true;

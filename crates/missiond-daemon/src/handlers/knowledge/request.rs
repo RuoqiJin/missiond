@@ -523,6 +523,16 @@ fn build_respond_plan_compile_args(
     out.insert("directive_version".into(), json!(directive.version));
     out.insert("board_task_id".into(), json!(board_task_id));
 
+    // The inner mission_plan compile only understands write_file; the
+    // V3-preferred compat_write_file name and the legacy write_file alias
+    // are both mission_request-local controls. Forward write_file=true to
+    // the inner surface only when the caller opted into compat writes.
+    // Per (compat-writer-policy ...) in .missiond/v3/missiond-blueprint.lisp.
+    let compat_requested = match args.as_object() {
+        Some(map) => compat_write_requested(map),
+        None => false,
+    };
+
     for key in [
         "compiler_mode",
         "persist",
@@ -533,7 +543,6 @@ fn build_respond_plan_compile_args(
         "objective",
         "requested_cwd",
         "flow_id",
-        "write_file",
         "overwrite_file",
         "topic",
         "project",
@@ -550,6 +559,9 @@ fn build_respond_plan_compile_args(
                 out.insert(key.into(), v.clone());
             }
         }
+    }
+    if compat_requested {
+        out.insert("write_file".into(), json!(true));
     }
     Value::Object(out)
 }
@@ -1339,6 +1351,44 @@ fn normalize_start_args(args: &mut Value, request_id: &str) {
         map.entry("source").or_insert_with(|| json!("user_request"));
         map.entry("topic").or_insert_with(|| json!(request_id));
     }
+    apply_compat_write_file_policy(args);
+}
+
+/// Derives `compat_write_requested = compat_write_file == true || write_file == true`
+/// from the caller args, then rewrites the args forwarded to the inner
+/// directive / plan compile so:
+///   - both `compat_write_file` and `write_file` keys are removed (they are
+///     mission_request-local controls; the inner surfaces only know about
+///     `write_file`),
+///   - `write_file: true` is re-injected only when compat was explicitly
+///     requested.
+///
+/// Default mission_request flow therefore never writes the legacy
+/// .missiond/alignment/<topic>/ or .missiond/plans/<plan_id>/ projections.
+/// Per (compat-writer-policy ...) in .missiond/v3/missiond-blueprint.lisp.
+fn apply_compat_write_file_policy(args: &mut Value) {
+    let map = match args.as_object_mut() {
+        Some(m) => m,
+        None => return,
+    };
+    let compat_requested = compat_write_requested(map);
+    map.remove("compat_write_file");
+    map.remove("write_file");
+    if compat_requested {
+        map.insert("write_file".into(), json!(true));
+    }
+}
+
+fn compat_write_requested(map: &serde_json::Map<String, Value>) -> bool {
+    let compat = map
+        .get("compat_write_file")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let legacy = map
+        .get("write_file")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    compat || legacy
 }
 
 fn wrap_pipeline_result(
@@ -3381,9 +3431,117 @@ mod tests {
         assert_eq!(out["target_project"], "missiond");
         assert_eq!(out["objective"], "ship from request-local PLAN");
         assert_eq!(out["requested_cwd"], "/Users/jinchen/Projects/missiond");
+        // Legacy write_file=true is preserved as a compat alias and forwarded.
         assert_eq!(out["write_file"], true);
         assert_eq!(out["overwrite_file"], true);
         assert_eq!(out["review_gate_policy"], "manual");
+    }
+
+    #[test]
+    fn respond_plan_compile_args_strips_write_file_by_default() {
+        let directive = DirectiveRef {
+            id: "00000000-0000-0000-0000-000000000abc".into(),
+            version: 1,
+        };
+        // Caller did not opt into compat writes; the inner plan compile must
+        // not receive write_file=true, even if the caller never set it.
+        let args = json!({
+            "board_task_id": "btk-42",
+            "target": "mission_task_delegate",
+            "objective": "request-local default flow",
+            "overwrite_file": true,
+        });
+        let out = build_respond_plan_compile_args(&args, &directive, "req-123");
+        assert!(
+            out.get("write_file").is_none(),
+            "default flow must not forward write_file to mission_plan compile"
+        );
+        // overwrite_file is unrelated to compat and still forwarded.
+        assert_eq!(out["overwrite_file"], true);
+    }
+
+    #[test]
+    fn respond_plan_compile_args_forwards_compat_write_file() {
+        let directive = DirectiveRef {
+            id: "00000000-0000-0000-0000-000000000abc".into(),
+            version: 1,
+        };
+        // V3-preferred name compat_write_file=true must turn into
+        // write_file=true on the inner plan compile call.
+        let args = json!({
+            "board_task_id": "btk-42",
+            "compat_write_file": true,
+        });
+        let out = build_respond_plan_compile_args(&args, &directive, "req-123");
+        assert_eq!(out["write_file"], true);
+        assert!(
+            out.get("compat_write_file").is_none(),
+            "mission_plan compile does not understand compat_write_file"
+        );
+    }
+
+    #[test]
+    fn respond_plan_compile_args_compat_write_file_false_does_not_inject() {
+        let directive = DirectiveRef {
+            id: "00000000-0000-0000-0000-000000000abc".into(),
+            version: 1,
+        };
+        // Explicit false on both flags must NOT forward write_file=true.
+        let args = json!({
+            "board_task_id": "btk-42",
+            "compat_write_file": false,
+            "write_file": false,
+        });
+        let out = build_respond_plan_compile_args(&args, &directive, "req-123");
+        assert!(out.get("write_file").is_none());
+        assert!(out.get("compat_write_file").is_none());
+    }
+
+    #[test]
+    fn normalize_start_args_strips_default_write_file() {
+        // Default caller (no compat opt-in) — write_file must not survive
+        // into the forwarded pipeline args.
+        let mut args = json!({
+            "compiler_mode": "dry_run",
+            "persist": true,
+        });
+        normalize_start_args(&mut args, "req-1");
+        assert_eq!(args["action"], "start-forwarded");
+        assert_eq!(args["topic"], "req-1");
+        assert!(args.get("write_file").is_none());
+    }
+
+    #[test]
+    fn normalize_start_args_preserves_legacy_write_file_alias() {
+        // Legacy callers passing write_file=true still get compat writes.
+        let mut args = json!({
+            "write_file": true,
+        });
+        normalize_start_args(&mut args, "req-2");
+        assert_eq!(args["write_file"], true);
+    }
+
+    #[test]
+    fn normalize_start_args_compat_write_file_true_normalizes_to_write_file() {
+        let mut args = json!({
+            "compat_write_file": true,
+        });
+        normalize_start_args(&mut args, "req-3");
+        assert_eq!(args["write_file"], true);
+        // V3-preferred name is consumed by mission_request; the inner
+        // pipeline only knows about write_file.
+        assert!(args.get("compat_write_file").is_none());
+    }
+
+    #[test]
+    fn normalize_start_args_strips_explicit_false_compat_keys() {
+        let mut args = json!({
+            "compat_write_file": false,
+            "write_file": false,
+        });
+        normalize_start_args(&mut args, "req-4");
+        assert!(args.get("compat_write_file").is_none());
+        assert!(args.get("write_file").is_none());
     }
 
     // ── event sequencing — pure ────────────────────────────────────────
