@@ -1,12 +1,39 @@
-;; Draft report skeleton scaffolded by scripts/prepare-task-runner-wave.mjs.
+;; Wave 51 task report.
 ;; Schema: missiond.report-contract.v1
-;; Replace :status with done (and fill :commit_hash + :files_changed
-;; + :acceptance_results) once the task completes.
 
 (report wave51-01-autopilot-concurrent-slot-dispatch-v0
   :schema "missiond.report-contract.v1"
   :task_id "wave51-01-autopilot-concurrent-slot-dispatch-v0"
-  :status draft
-  :commit_hash ""
-  :files_changed []
-  :acceptance_results [])
+  :status done
+  :commit_hash "2d988fc5"
+  :files_changed
+    ["crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+     ".missiond/v3/missiond-blueprint.lisp"
+     "scripts/check-v3-workstation-config-isomorphism.mjs"
+     ".missiond/tasks/wave51/shared-memory.lisp"
+     ".missiond/tasks/wave51/session-trace.lisp"
+     ".missiond/tasks/wave51/reports/wave51-01-autopilot-concurrent-slot-dispatch-v0.report.lisp"]
+  :acceptance_results
+    [(:command "node scripts/check-v3-workstation-config-isomorphism.mjs --dry-fixture"
+              :exit_code 0 :ok true
+              :note "Dry fixture passes with the new :concurrent-slot-dispatch invariant text and the JoinSet/OwnedSlotDispatchGuard anchors mirrored in the synthetic blueprint and autopilot.rs fixtures.")
+     (:command "node scripts/check-v3-workstation-config-isomorphism.mjs"
+              :exit_code 0 :ok true
+              :note "Live workstation-config Lisp/code isomorphism check passes; the new requireAll lines (blueprint :concurrent-slot-dispatch invariant + autopilot pins for OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id), tokio::task::JoinSet, send_jobs.spawn, send_jobs.join_next) all match.")
+     (:command "node scripts/check-v3-code-isomorphism-complete.mjs"
+              :exit_code 0 :ok true
+              :note "Aggregate V3 gate still green: 7 surfaces graduated, 8 per-surface checkers passed.")
+     (:command "cargo check -p missiond-daemon"
+              :exit_code 0 :ok true
+              :note "Clean build (only pre-existing dead_code/unused-import warnings unrelated to this shard).")
+     (:command "cargo test -p missiond-daemon engine::intent_engine::autopilot::tests -- --nocapture"
+              :exit_code 0 :ok true
+              :note "34/34 autopilot tests pass (31 pre-existing + 3 new concurrent-slot-dispatch guards: owned_dispatch_guard_allows_concurrent_different_slots, owned_dispatch_guard_preserves_same_slot_exclusion, dispatch_board_tasks_uses_concurrent_send_pipeline).")
+     (:command "node scripts/check-task-report.mjs .missiond/tasks/wave51/reports/wave51-01-autopilot-concurrent-slot-dispatch-v0.report.lisp"
+              :exit_code 0 :ok true
+              :note "Filled in pre-commit; commit_hash placeholder PENDING is replaced post-commit by the verify step.")
+     (:command "git diff --check -- crates/missiond-daemon/src/engine/intent_engine/autopilot.rs .missiond/v3/missiond-blueprint.lisp scripts/check-v3-workstation-config-isomorphism.mjs .missiond/tasks/wave51/reports/wave51-01-autopilot-concurrent-slot-dispatch-v0.report.lisp"
+              :exit_code 0 :ok true
+              :note "No whitespace errors in the wave51-01 write scope.")]
+  :notes "Implements wave51-shard-concurrent-slot-send (the single accepted shard in wave51-integration-plan-001 dispatch-group A).\n\nConcurrency structure:\n  - dispatch_board_tasks declares `let mut send_jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();` before the for-task prep loop.\n  - For each ready BoardTask the prep loop still runs sequentially (slot selection, DAG check, claim + lease, prompt assembly, prompt snapshot, SlotEvent::TaskDispatched emission). The fast prep work cannot block other slots' sends because no `.await` on `state.pty.send` happens here.\n  - Just before the spawn, the per-slot RAII guard is acquired with `OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id)` (a wrapper around Arc<SlotDispatchGuard>::try_acquire + release on Drop, defined locally in autopilot.rs so slot_dispatch.rs stays untouched). The pre-send Idle status check still runs in the prep loop and unclaim+continue if the slot drifted.\n  - The send + post-send tail is then handed to `send_jobs.spawn(async move { ... })` with `state.clone()` (Arc-backed AppState clone), `task.clone()` (BoardTask is Clone), `slot_id`/`full_prompt` ownership transferred, and `slot_guard` (OwnedSlotDispatchGuard) moved in as `let _slot_guard = slot_guard;` so it lives the entire spawned future. Inside the spawn the legacy code is preserved verbatim aside from `continue;` -> `return;` (auth-error path) and `break;` -> `return;` (quota-exhaustion circuit-breaker), since neither continue nor break is legal inside an async block.\n  - After the prep loop, the outer dispatch_board_tasks drains the JoinSet with `while let Some(res) = send_jobs.join_next().await { if let Err(join_err) = res { warn!(...); } }` so the dispatch tick still observes KB-confidence feedback, working-memory graduation, jarvis async append, deploy post-mortem trigger, retry/failure persistence, and global_paused circuit-breaker side effects before returning Ok(()).\n\nPer-slot guard lifetime:\n  - The owned guard is constructed in the prep loop via `OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id)` which projects the same try_acquire/release semantics as the borrowed `state.slot_dispatch.try_acquire_guard(&slot_id)` shape but holds an `Arc<SlotDispatchGuard>` instead of a `&'a SlotDispatchGuard`. This eliminates the lifetime tie to `&AppState` that previously prevented moving the guard across a `'static` task boundary.\n  - The guard is moved into the spawned task as `let _slot_guard = slot_guard;`. It drops at the end of the spawn body, which is AFTER `state.pty.send(&slot_id, &full_prompt, timeout_ms).await` and the entire post-send tail (close-owner decide_close_action, KB confidence + utility feedback, working-memory graduation, jarvis-task append, deploy post-mortem tokio::spawn, error retry / max-retry path with apply_attributed_penalty). Same-slot exclusion therefore still covers everything the legacy serial loop's guard scope covered.\n  - Different slots can each hold their own owned guard at the same time (regression-guarded by `owned_dispatch_guard_allows_concurrent_different_slots`); same-slot double-acquire still fails until the first guard drops (regression-guarded by `owned_dispatch_guard_preserves_same_slot_exclusion`).\n\nV3 blueprint / checker invariant updated:\n  - Added a new keyword `:concurrent-slot-dispatch` under `(execution-ownership delegated-boardtask ...)` in .missiond/v3/missiond-blueprint.lisp. Its body pins: `Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick`, the legacy serial-loop starvation rationale, the implementation MUST hand each ready BoardTask's send + post-send tail to a `tokio::task::JoinSet` task with an `OwnedSlotDispatchGuard` moved in, and the outer loop MUST drain the JoinSet via `join_next` so quota / global-pause / KB-feedback / retry semantics still complete before the dispatch tick returns.\n  - Updated the `(implementation-map (surface workstation-config :note ...))` paragraph to replace `holding slot_dispatch.try_acquire_guard across state.pty.send` with `holding an OwnedSlotDispatchGuard across state.pty.send + post-send tail inside a tokio::task::JoinSet send-task so different-slot sends run concurrently within a single dispatch tick`.\n  - Updated scripts/check-v3-workstation-config-isomorphism.mjs:\n      * blueprint requireAll: added `Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick` and `tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in`.\n      * autopilot requireAll: replaced `state.slot_dispatch.try_acquire_guard(&slot_id)` with `OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id)`; added pins for `tokio::task::JoinSet`, `send_jobs.spawn`, `send_jobs.join_next`. The `state.pty.send(&slot_id, &full_prompt, timeout_ms).await` pin is preserved unchanged.\n      * `--dry-fixture` blueprint and autopilot fixtures updated to mirror the new pinned text + JoinSet/OwnedSlotDispatchGuard call shape.\n\nPattern-card compliance:\n  - split-prepare-from-send: task selection / dependency check / claim / lease / prompt assembly / prompt snapshot / SlotEvent::TaskDispatched emission stay in the prep loop; only the send + completion tail is in the collectable JoinSet future. The per-slot RAII guard is held across each individual send via OwnedSlotDispatchGuard moved into the spawn. Flow-task behavior unchanged.\n  - lisp-code-isomorphism-pin: blueprint invariant text + checker requireAll + dry fixture updated together; per-surface checker run before the aggregate V3 gate. A focused source-level regression guard (`dispatch_board_tasks_uses_concurrent_send_pipeline`) asserts the JoinSet declaration / `send_jobs.spawn(async move` / `send_jobs.join_next().await` shape stays in autopilot.rs so a future serial regression fails before it ships.\n\nScope-clean: only the six declared write-scope paths are modified."
+  :verification_tier local)

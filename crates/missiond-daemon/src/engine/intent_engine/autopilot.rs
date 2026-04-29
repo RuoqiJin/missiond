@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
+use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 // ── Autopilot pty.send / watchdog timeout policy ───────────────────────
@@ -26,6 +27,7 @@ const WATCHDOG_GRACE_SECS: i64 = 120;
 /// "no-PTY-session" branch the brief mandates we keep fast.
 const WATCHDOG_MISSING_SESSION_PROBE_SECS: i64 = 120;
 
+use crate::slot_dispatch::SlotDispatchGuard;
 use crate::claude_md_sync::sync_claude_md;
 use crate::engine::learning_engine;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
@@ -150,6 +152,50 @@ fn decide_close_action(
             DispatchCloseAction::PreserveBlocked
         }
         _ => DispatchCloseAction::OwnerClosesAsDone,
+    }
+}
+
+/// V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
+///
+/// Owned RAII handle for the per-slot dispatch lock. Mirrors
+/// `SlotDispatchGuard::try_acquire_guard` but holds an `Arc<SlotDispatchGuard>`
+/// internally so the guard can be moved into a spawned dispatch task. The
+/// borrowed `SlotAcquireGuard` shape ties the lock lifetime to the
+/// `&AppState` reference, which prevents `dispatch_board_tasks` from starting
+/// `state.pty.send` for one slot concurrently with another slot's send under
+/// `tokio::task::JoinSet`. The owned variant releases on Drop, so same-slot
+/// exclusion is preserved across the entire send + post-send tail.
+pub(crate) struct OwnedSlotDispatchGuard {
+    dispatch: Arc<SlotDispatchGuard>,
+    slot_id: String,
+}
+
+impl OwnedSlotDispatchGuard {
+    /// Try to acquire the per-slot dispatch lock with an owned guard. Returns
+    /// `None` when the slot is already locked. Projects the same semantics as
+    /// `state.slot_dispatch.try_acquire_guard(&slot_id)` but without borrowing
+    /// `state.slot_dispatch` so the guard may travel through a `'static`
+    /// task boundary while still holding the lock across the send.
+    pub(crate) fn try_acquire(dispatch: &Arc<SlotDispatchGuard>, slot_id: &str) -> Option<Self> {
+        if dispatch.try_acquire(slot_id) {
+            Some(Self {
+                dispatch: Arc::clone(dispatch),
+                slot_id: slot_id.to_string(),
+            })
+        } else {
+            None
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn slot_id(&self) -> &str {
+        &self.slot_id
+    }
+}
+
+impl Drop for OwnedSlotDispatchGuard {
+    fn drop(&mut self) {
+        self.dispatch.release(&self.slot_id);
     }
 }
 
@@ -477,6 +523,17 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
 
     // Slot-level exclusivity: only dispatch ONE task per slot per tick
     let mut dispatched_slots: HashSet<String> = HashSet::new();
+
+    // V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
+    // Concurrent slot dispatch: each ready BoardTask hands its prepared
+    // send + post-send tail to a `tokio::task::JoinSet` task so different
+    // slots' state.pty.send calls start in the same dispatch tick. The
+    // OwnedSlotDispatchGuard travels into each spawned task and is dropped
+    // only after the post-send tail completes, so same-slot exclusion still
+    // covers the entire send + close-owner / KB-feedback / deploy-review
+    // sequence. The legacy serial loop awaited state.pty.send inline, which
+    // starved every other ready slot for the duration of one slot's send.
+    let mut send_jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
 
     // Excluded roles: these slots have dedicated purposes, not for ad-hoc tasks
     const EXCLUDED_ROLES: &[&str] = &[
@@ -919,9 +976,14 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         // a release-before-send race cannot let a second caller dispatch to
         // the same slot while the first send is in flight. The guard is
         // per-slot — holding it does not starve callers targeting other
-        // slots. The guard auto-releases on Drop at every continue/break/end
-        // of this iteration, so no manual release is needed.
-        let _slot_guard = match state.slot_dispatch.try_acquire_guard(&slot_id) {
+        // slots. The owned variant lets the guard travel into the spawned
+        // dispatch task while still releasing on Drop, so same-slot
+        // exclusion covers the entire send + post-send tail without
+        // serializing different-slot sends inside this dispatch tick. The
+        // legacy borrow-shaped `state.slot_dispatch.try_acquire_guard(&slot_id)`
+        // tied the lock lifetime to `&AppState`, which forced the loop to
+        // await one send before another slot's send could even start.
+        let slot_guard = match OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id) {
             Some(g) => g,
             None => {
                 debug!(task_id = %task.id, slot_id = %slot_id,
@@ -939,13 +1001,28 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
             }
         }
 
-        // Send prompt and wait for response — derive the budget from the
-        // BoardTask.timeout_secs that mission_task_delegate already stored,
-        // so a 55-minute Opus coding task does not get capped at 10 minutes.
-        // _slot_guard is held across the entire send so Autopilot remains the
-        // sole prompt+close owner for this dispatch.
+        // Spawn the send + post-send tail so different-slot dispatches start
+        // their state.pty.send calls concurrently within this tick. The
+        // OwnedSlotDispatchGuard moves into the spawned task and is dropped
+        // only after the post-send tail completes, so the per-slot dispatch
+        // guard is held across the entire state.pty.send call. Each spawned
+        // task carries an `AppState` clone (Arc-backed) plus a cloned
+        // `BoardTask`, the resolved slot_id, and the assembled prompt; the
+        // outer dispatch_board_tasks awaits the JoinSet drain so quota /
+        // KB-feedback / deploy-review / retry semantics still complete
+        // before the tick returns.
         let timeout_ms = derive_pty_timeout_ms(task.timeout_secs);
-        match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
+        let send_state = state.clone();
+        let send_task = task.clone();
+        let send_slot_id = slot_id.clone();
+        let send_full_prompt = full_prompt;
+        send_jobs.spawn(async move {
+            let _slot_guard = slot_guard;
+            let state: &AppState = &send_state;
+            let task: &missiond_core::types::BoardTask = &send_task;
+            let slot_id: String = send_slot_id;
+            let full_prompt: String = send_full_prompt;
+            match state.pty.send(&slot_id, &full_prompt, timeout_ms).await {
             Ok(res) => {
                 // Check for auth errors in successful PTY response
                 if is_auth_error(&res.response) {
@@ -996,7 +1073,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                             .increment_board_task_retry(task.id.as_str(), new_retry)
                             .await;
                     }
-                    continue;
+                    return;
                 }
 
                 // Check for quota exhaustion — circuit breaker: auto global_pause
@@ -1062,8 +1139,11 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         .publish_incident(IncidentEvent::Reported { incident })
                         .await;
                     notify_jarvis_failure(state, &task, "API 配额耗尽，系统已全局暂停").await;
-                    // Stop processing remaining tasks — quota is gone
-                    break;
+                    // Quota is gone — stop this task's post-send tail. Other
+                    // in-flight sends already started concurrently (different
+                    // slots), so they finish on their own; the next dispatch
+                    // tick will short-circuit on global_paused above.
+                    return;
                 }
 
                 // Record result as a board note
@@ -1395,6 +1475,17 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     }
                 }
             }
+        }
+        });
+    }
+
+    // Drain the JoinSet so KB feedback, retries, deploy post-mortem triggers,
+    // and quota / global-pause side effects all complete before this dispatch
+    // tick returns. Different-slot sends ran concurrently above; here we
+    // simply join them.
+    while let Some(res) = send_jobs.join_next().await {
+        if let Err(join_err) = res {
+            warn!(error = %join_err, "Autopilot: dispatch send task failed to join");
         }
     }
 
@@ -2356,6 +2447,69 @@ mod tests {
         assert!(is_dynamic_slot_id("slot-dyn-abc123"));
         assert!(!is_dynamic_slot_id("slot-coder"));
         assert!(!is_dynamic_slot_id("coder-dyn-abc123"));
+    }
+
+    // ── Concurrent slot dispatch — pure invariant guard ─────────────────
+
+    #[test]
+    fn owned_dispatch_guard_allows_concurrent_different_slots() {
+        // The legacy borrow-shaped SlotAcquireGuard tied the lock lifetime
+        // to `&AppState`, which prevented dispatch_board_tasks from holding
+        // a guard while moving it into a tokio::task::JoinSet send-task. The
+        // owned shape MUST allow two different slots to hold a guard at the
+        // same time so different-slot pty.send calls can start concurrently
+        // within a single dispatch tick.
+        let dispatch = Arc::new(SlotDispatchGuard::new());
+        let g1 = OwnedSlotDispatchGuard::try_acquire(&dispatch, "slot-1");
+        let g2 = OwnedSlotDispatchGuard::try_acquire(&dispatch, "slot-2");
+        assert!(g1.is_some(), "slot-1 must acquire");
+        assert!(g2.is_some(), "slot-2 must acquire while slot-1 is held");
+    }
+
+    #[test]
+    fn owned_dispatch_guard_preserves_same_slot_exclusion() {
+        // Same-slot work MUST remain exclusive across the entire send +
+        // post-send tail. Acquiring twice on the same slot id must fail
+        // until the first guard is dropped.
+        let dispatch = Arc::new(SlotDispatchGuard::new());
+        let g1 = OwnedSlotDispatchGuard::try_acquire(&dispatch, "slot-coder").expect("acquire");
+        let g2 = OwnedSlotDispatchGuard::try_acquire(&dispatch, "slot-coder");
+        assert!(
+            g2.is_none(),
+            "same-slot double-acquire must fail while first guard is held"
+        );
+        drop(g1);
+        let g3 = OwnedSlotDispatchGuard::try_acquire(&dispatch, "slot-coder");
+        assert!(
+            g3.is_some(),
+            "after drop, same slot must be re-acquirable"
+        );
+    }
+
+    #[test]
+    fn dispatch_board_tasks_uses_concurrent_send_pipeline() {
+        // Source-level guard: the implementation MUST stop awaiting one
+        // slot's pty.send before scheduling another slot's send. The needle
+        // pins the JoinSet-based concurrent dispatch shape so a refactor
+        // that re-introduces a serial `.await` on state.pty.send inside the
+        // for loop fails before it ships. The needles are composed at
+        // runtime so the guard cannot trip on its own assertion text.
+        let src = include_str!("./autopilot.rs");
+        let join_set_decl = format!("{}::JoinSet<()>", "tokio::task");
+        let spawn_call = format!("send_jobs.{}(async move", "spawn");
+        let drain_call = format!("send_jobs.{}().await", "join_next");
+        assert!(
+            src.contains(&join_set_decl),
+            "dispatch_board_tasks must declare a tokio::task::JoinSet for concurrent dispatch"
+        );
+        assert!(
+            src.contains(&spawn_call),
+            "dispatch_board_tasks must spawn each pty.send + post-send tail into the JoinSet"
+        );
+        assert!(
+            src.contains(&drain_call),
+            "dispatch_board_tasks must drain the JoinSet so KB feedback / quota / retries still complete"
+        );
     }
 
     #[test]

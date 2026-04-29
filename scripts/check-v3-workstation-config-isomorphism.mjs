@@ -13,6 +13,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
   - delegated BoardTask auto-provision starts slots idle via suppress_initial_prompt.
   - project-local Claude hooks and MISSION_IPC_ENDPOINT are injected before PTY spawn.
   - Autopilot owns pty.send, close state, timeout budget, and dispatch guard.
+  - Autopilot starts pty.send concurrently across different slots within a tick.
   - Autopilot clears stale slot-dyn-* assignee pins after daemon restart.
 `;
 
@@ -100,6 +101,8 @@ function checkFiles(root, files) {
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
     'The per-slot dispatch guard MUST be held across the entire state.pty.send call',
+    'Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick',
+    'tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in',
     'Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins',
     'BoardStore::clear_board_task_assignee',
     'node scripts/check-v3-workstation-config-isomorphism.mjs',
@@ -177,8 +180,11 @@ function checkFiles(root, files) {
     'fn is_dynamic_slot_id',
     'fn should_clear_stale_dynamic_assignee',
     'clear_board_task_assignee(task.id.as_str(), id)',
-    'state.slot_dispatch.try_acquire_guard(&slot_id)',
+    'OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id)',
     'state.pty.send(&slot_id, &full_prompt, timeout_ms).await',
+    'tokio::task::JoinSet',
+    'send_jobs.spawn',
+    'send_jobs.join_next',
     'DispatchCloseAction::AlreadySelfClosed',
     'DispatchCloseAction::PreserveBlocked',
     'DispatchCloseAction::OwnerClosesAsDone',
@@ -235,7 +241,8 @@ function buildFixture() {
        "BoardStore::clear_board_task_assignee"])
     (execution-ownership delegated-boardtask
       :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
-      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"))
+      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"
+      :concurrent-slot-dispatch "Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick. The implementation MUST hand each ready BoardTask's send + post-send tail to a tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in."))
   (implementation-map
     (surface workstation-config
       :status "code-aligned"
@@ -294,8 +301,11 @@ fn decide_close_action() {}
 fn is_dynamic_slot_id() {}
 fn should_clear_stale_dynamic_assignee() {}
 clear_board_task_assignee(task.id.as_str(), id);
-state.slot_dispatch.try_acquire_guard(&slot_id);
+OwnedSlotDispatchGuard::try_acquire(&state.slot_dispatch, &slot_id);
 state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
+let mut send_jobs: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+send_jobs.spawn(async move {});
+while let Some(_) = send_jobs.join_next().await {}
 DispatchCloseAction::AlreadySelfClosed;
 DispatchCloseAction::PreserveBlocked;
 DispatchCloseAction::OwnerClosesAsDone;`);
