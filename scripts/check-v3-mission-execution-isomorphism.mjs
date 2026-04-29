@@ -164,6 +164,7 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) fn evaluate_task_contract_for_preflight',
   'pub(super) fn build_preflight_summary',
   'pub(super) fn run_git_status',
+  'pub(super) async fn action_complete',
   'pub(super) async fn action_preflight_commit',
   'pub(super) async fn action_audit',
   'pub(super) async fn action_repair',
@@ -539,6 +540,7 @@ pub(super) fn build_contract_scope_summary() {}
 pub(super) fn evaluate_task_contract_for_preflight() {}
 pub(super) fn build_preflight_summary() {}
 pub(super) fn run_git_status() {}
+pub(super) async fn action_complete() {}
 pub(super) async fn action_preflight_commit() {}
 pub(super) async fn action_audit() {}
 pub(super) async fn action_repair() {}
