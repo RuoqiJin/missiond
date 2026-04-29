@@ -52,18 +52,29 @@
 // to deliberately exercise the legacy opt-in path; that mode is never added
 // to the v3 aggregate gate.
 //
-// Wave45-01 audit mode (--execute-dry-run): after approve_plan succeeds, the
+// Wave46-01 audit mode (--execute-dry-run): after approve_plan succeeds, the
 // smoke calls mission_request respond with response=execute_plan, execute=true,
-// dry_run=true. The smoke asserts:
+// dry_run=true, execute_mode=internal, dispatch_strategy=agent-team,
+// target=mission_task_delegate. The smoke asserts the wave45 review-level
+// invariants AND the workstation-dispatch substrate dry-run no-dispatch shape:
 //   - respond_outcome=dispatched
 //   - inner_action=unified_entry::plan_execute
 //   - respond_result.execute=true
 //   - review_packet.state=execute_requested
 //   - allowed_responses=[observe]
 //   - a request-local execute_plan review event was appended
-//   - pipeline_result carries one of the two no-dispatch proofs:
-//       (a) bridge mode: status=bridge_ready, runner_status=bridge_only, OR
-//       (b) internal dry-run: status=dry_run, runner_status=dry_run_no_dispatch
+//   - pipeline_result.execute_mode='internal'
+//   - pipeline_result.status='dry_run'
+//   - pipeline_result.runner_status='workstation_dispatch_v0'
+//   - pipeline_result.workstation_dispatch_status='dry_run_no_dispatch'
+//   - pipeline_result.target_tool='mission_task_delegate'
+//   - pipeline_result.dispatch_strategy='agent-team'
+//   - pipeline_result.task_brief_preview is a non-empty string
+// Bridge mode (status=bridge_ready, runner_status=bridge_only) is no longer
+// accepted as a no-dispatch proof for --execute-dry-run because it bypasses
+// the workstation_dispatch substrate. The audit explicitly drives the
+// substrate so MissionD reaches `run_workstation_dispatch_with_contract_and_trace`
+// and emits `WorkstationDispatchOutcome::DryRun` instead of dispatching.
 // The smoke never spawns or waits for a worker. Default --live-ipc still stops
 // at awaiting_execution; only --execute-dry-run drives execute_plan.
 //
@@ -169,21 +180,31 @@ Flags:
                     presence as a failure (the user explicitly asked for
                     them). Without this flag the default smoke FAILS if
                     any compat artifact appears that names this request.
-  --execute-dry-run Opt into the wave45 audit mode. After approve_plan
+  --execute-dry-run Opt into the wave46 audit mode. After approve_plan
                     succeeds, the smoke calls mission_request respond with
-                    response=execute_plan, execute=true, dry_run=true and
-                    asserts review_packet.state=execute_requested,
-                    allowed_responses=[observe], a request-local execute_plan
-                    review event was appended, and the inner pipeline_result
-                    carries a no-dispatch proof (bridge_only/bridge_ready or
-                    dry_run_no_dispatch/dry_run). The smoke never spawns or
-                    waits for a worker. Without this flag --live-ipc still
-                    stops at awaiting_execution.
+                    response=execute_plan, execute=true, dry_run=true,
+                    execute_mode=internal, dispatch_strategy=agent-team,
+                    target=mission_task_delegate. It asserts the wave45
+                    review-level invariants (respond_outcome=dispatched,
+                    inner_action=unified_entry::plan_execute,
+                    respond_result.execute=true,
+                    review_packet.state=execute_requested,
+                    allowed_responses=[observe], request-local execute_plan
+                    event appended) AND the wave46 workstation-dispatch
+                    substrate dry-run shape (pipeline_result.execute_mode=
+                    internal, status=dry_run, runner_status=
+                    workstation_dispatch_v0, workstation_dispatch_status=
+                    dry_run_no_dispatch, target_tool=mission_task_delegate,
+                    dispatch_strategy=agent-team, task_brief_preview present).
+                    Bridge mode is no longer accepted: the audit MUST drive
+                    the workstation_dispatch substrate. The smoke never
+                    spawns or waits for a worker. Without this flag
+                    --live-ipc still stops at awaiting_execution.
   --confirm-execute Reserved for future use. This checker explicitly refuses
                     workstation dispatch; with --confirm-execute the run
                     still stops at awaiting_execution and prints a notice
                     pointing the user to mission_request directly. Note that
-                    --execute-dry-run is the wave45-supported audit flag;
+                    --execute-dry-run is the wave46-supported audit flag;
                     --confirm-execute remains a no-op compat slot.
 `;
 
@@ -1395,10 +1416,18 @@ async function runLiveIpcSmoke(opts) {
   }
 
   // ── Step 4 (opt-in): action=respond response=execute_plan dry_run=true ──
-  // Wave45-01 audit mode. Default --live-ipc keeps stopping at
-  // awaiting_execution; only --execute-dry-run drives execute_plan and even
-  // then it MUST pass dry_run=true, accept either bridge or internal-dry-run
-  // no-dispatch shape, and never spawn or wait for a worker.
+  // Wave46-01 audit mode. Default --live-ipc keeps stopping at
+  // awaiting_execution; only --execute-dry-run drives execute_plan. When
+  // opted in, the smoke MUST pass execute_mode=internal +
+  // dispatch_strategy=agent-team + dry_run=true + target=mission_task_delegate
+  // so mission_plan's `action_execute_internal` path reaches
+  // `run_workstation_dispatch_with_contract_and_trace` and returns the
+  // `WorkstationDispatchOutcome::DryRun` shape (status=dry_run,
+  // runner_status=workstation_dispatch_v0,
+  // workstation_dispatch_status=dry_run_no_dispatch, task_brief_preview
+  // present). Bridge mode is no longer accepted as a no-dispatch proof
+  // because it short-circuits before the substrate runs. The smoke never
+  // spawns or waits for a worker.
   if (opts.executeDryRun) {
     let executeStep = { name: 'execute_plan_dry_run', ok: false };
     const eventsDir = path.join(requestDir, 'events');
@@ -1412,6 +1441,8 @@ async function runLiveIpcSmoke(opts) {
         response: 'execute_plan',
         execute: true,
         dry_run: true,
+        execute_mode: 'internal',
+        dispatch_strategy: 'agent-team',
         cwd: repoRoot,
         target: 'mission_task_delegate',
         objective: smokeObjective,
@@ -1431,9 +1462,18 @@ async function runLiveIpcSmoke(opts) {
       const pipelineResult = parsed.payload?.pipeline_result ?? null;
       // pipeline_result is the already-hydrated inner JSON
       // (tool_result_payload in request.rs runs serde_json::from_str on the
-      // inner ToolResult text). Read status/runner_status directly.
+      // inner ToolResult text). Read substrate fields directly.
       const status = pipelineResult?.status ?? null;
       const runnerStatus = pipelineResult?.runner_status ?? null;
+      const executeMode = pipelineResult?.execute_mode ?? null;
+      const workstationDispatchStatus =
+        pipelineResult?.workstation_dispatch_status ?? null;
+      const targetTool = pipelineResult?.target_tool ?? null;
+      const pipelineDispatchStrategy =
+        pipelineResult?.dispatch_strategy ?? null;
+      const taskBriefPreview = pipelineResult?.task_brief_preview ?? null;
+      const taskBriefPreviewPresent =
+        typeof taskBriefPreview === 'string' && taskBriefPreview.length > 0;
       const allowed = Array.isArray(reviewPacket?.allowed_responses)
         ? reviewPacket.allowed_responses
         : [];
@@ -1447,9 +1487,12 @@ async function runLiveIpcSmoke(opts) {
       const executeEventAppended = newEventTexts.some((t) =>
         t.includes(':decision :execute_plan'),
       );
+      // wave46: no-dispatch proof now requires the workstation_dispatch
+      // substrate's dry-run shape. Bridge mode is no longer accepted.
       const noDispatchProof = (
-        (status === 'bridge_ready' && runnerStatus === 'bridge_only')
-        || (status === 'dry_run' && runnerStatus === 'dry_run_no_dispatch')
+        status === 'dry_run'
+        && runnerStatus === 'workstation_dispatch_v0'
+        && workstationDispatchStatus === 'dry_run_no_dispatch'
       );
 
       executeStep = {
@@ -1465,6 +1508,11 @@ async function runLiveIpcSmoke(opts) {
         execute_event_appended: executeEventAppended,
         pipeline_status: status,
         pipeline_runner_status: runnerStatus,
+        pipeline_execute_mode: executeMode,
+        pipeline_workstation_dispatch_status: workstationDispatchStatus,
+        pipeline_target_tool: targetTool,
+        pipeline_dispatch_strategy: pipelineDispatchStrategy,
+        pipeline_task_brief_preview_present: taskBriefPreviewPresent,
         no_dispatch_proof: noDispatchProof,
       };
       const fails = [];
@@ -1486,8 +1534,29 @@ async function runLiveIpcSmoke(opts) {
       if (!executeEventAppended) {
         fails.push(`expected a request-local execute_plan review event under ${eventsDir}; new events=${JSON.stringify(newEvents)}`);
       }
+      if (executeMode !== 'internal') {
+        fails.push(`expected pipeline_result.execute_mode='internal', got ${JSON.stringify(executeMode)}`);
+      }
+      if (status !== 'dry_run') {
+        fails.push(`expected pipeline_result.status='dry_run', got ${JSON.stringify(status)}`);
+      }
+      if (runnerStatus !== 'workstation_dispatch_v0') {
+        fails.push(`expected pipeline_result.runner_status='workstation_dispatch_v0', got ${JSON.stringify(runnerStatus)}`);
+      }
+      if (workstationDispatchStatus !== 'dry_run_no_dispatch') {
+        fails.push(`expected pipeline_result.workstation_dispatch_status='dry_run_no_dispatch', got ${JSON.stringify(workstationDispatchStatus)}`);
+      }
+      if (targetTool !== 'mission_task_delegate') {
+        fails.push(`expected pipeline_result.target_tool='mission_task_delegate', got ${JSON.stringify(targetTool)}`);
+      }
+      if (pipelineDispatchStrategy !== 'agent-team') {
+        fails.push(`expected pipeline_result.dispatch_strategy='agent-team', got ${JSON.stringify(pipelineDispatchStrategy)}`);
+      }
+      if (!taskBriefPreviewPresent) {
+        fails.push(`expected pipeline_result.task_brief_preview to be a non-empty string; got ${JSON.stringify(taskBriefPreview)}`);
+      }
       if (!noDispatchProof) {
-        fails.push(`expected pipeline_result no-dispatch proof (bridge_ready/bridge_only or dry_run/dry_run_no_dispatch); got status=${JSON.stringify(status)}, runner_status=${JSON.stringify(runnerStatus)}`);
+        fails.push(`expected workstation-dispatch substrate no-dispatch proof (status=dry_run + runner_status=workstation_dispatch_v0 + workstation_dispatch_status=dry_run_no_dispatch); got status=${JSON.stringify(status)}, runner_status=${JSON.stringify(runnerStatus)}, workstation_dispatch_status=${JSON.stringify(workstationDispatchStatus)}`);
       }
       if (fails.length === 0) {
         executeStep.ok = true;
