@@ -52,13 +52,12 @@ use self::completion_audit::{
     CompletionRecord, PorcelainEntry, FINDING_COMMIT_BLOCKED_NO_BLOCKER,
     FINDING_COMMIT_STATUS_NO_HASH, FINDING_SCOPED_COMMIT_VIOLATION,
 };
-use self::log_surface::sexp::Node;
 use self::log_surface::{
     allocate_id, append_session_trace_event, append_to_block, build_opened_event,
-    emit_execution_event, lisp_quote_string, locate_kv_value, normalize_dispatch_strategy, now_iso,
-    parse_kv_pairs, read_dispatch_metadata_from_log, read_log_file, render_canonical_template,
+    emit_execution_event, lisp_quote_string, normalize_dispatch_strategy, now_iso, parse_kv_pairs,
+    read_dispatch_metadata_from_log, read_log_file, render_canonical_template,
     resolve_session_trace_path, resolve_trace_task_id, sanitize_trace_backend, scan_max_id, sexp,
-    touch_last_updated, write_log_file, Counter, LogFile, TraceEvent, TraceKind,
+    touch_last_updated, update_kv_in_node, write_log_file, Counter, LogFile, TraceEvent, TraceKind,
 };
 #[cfg(test)]
 use self::log_surface::{
@@ -780,40 +779,6 @@ async fn action_release(state: &AppState, args: &Value) -> Result<ToolResult> {
         "released_at": now,
         "summary": summary,
     })))
-}
-
-/// Update or insert `:key value` inside the given node. The node must be a
-/// list; insertion happens just before the closing paren.
-fn update_kv_in_node(
-    file: &mut LogFile,
-    node: &Node,
-    key: &str,
-    new_value_lit: &str,
-) -> Result<()> {
-    if let Some((kstart, vstart, vend)) = locate_kv_value(&file.src, node, key) {
-        let _ = kstart;
-        let mut new_src = String::with_capacity(file.src.len());
-        new_src.push_str(&file.src[..vstart]);
-        new_src.push_str(new_value_lit);
-        new_src.push_str(&file.src[vend..]);
-        file.src = new_src;
-    } else {
-        let close = node.end - 1;
-        let insertion = format!("\n      :{} {}", key, new_value_lit);
-        let mut new_src = String::with_capacity(file.src.len() + insertion.len());
-        new_src.push_str(&file.src[..close]);
-        new_src.push_str(&insertion);
-        new_src.push_str(&file.src[close..]);
-        file.src = new_src;
-    }
-    let forms = sexp::parse(&file.src)?;
-    let root_idx = forms
-        .iter()
-        .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
-        .ok_or_else(|| anyhow!("execution-log root vanished after kv update"))?;
-    file.forms = forms;
-    file.root_idx = root_idx;
-    Ok(())
 }
 
 // ───────────────────────────────────────────────────────────────────────

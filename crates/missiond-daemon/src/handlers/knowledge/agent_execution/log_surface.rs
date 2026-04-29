@@ -537,6 +537,40 @@ pub(super) fn locate_kv_value(src: &str, block: &Node, key: &str) -> Option<(usi
     None
 }
 
+/// Update or insert `:key value` inside the given node. The node must be a
+/// list; insertion happens just before the closing paren.
+pub(super) fn update_kv_in_node(
+    file: &mut LogFile,
+    node: &Node,
+    key: &str,
+    new_value_lit: &str,
+) -> Result<()> {
+    if let Some((kstart, vstart, vend)) = locate_kv_value(&file.src, node, key) {
+        let _ = kstart;
+        let mut new_src = String::with_capacity(file.src.len());
+        new_src.push_str(&file.src[..vstart]);
+        new_src.push_str(new_value_lit);
+        new_src.push_str(&file.src[vend..]);
+        file.src = new_src;
+    } else {
+        let close = node.end - 1;
+        let insertion = format!("\n      :{} {}", key, new_value_lit);
+        let mut new_src = String::with_capacity(file.src.len() + insertion.len());
+        new_src.push_str(&file.src[..close]);
+        new_src.push_str(&insertion);
+        new_src.push_str(&file.src[close..]);
+        file.src = new_src;
+    }
+    let forms = sexp::parse(&file.src)?;
+    let root_idx = forms
+        .iter()
+        .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
+        .ok_or_else(|| anyhow!("execution-log root vanished after kv update"))?;
+    file.forms = forms;
+    file.root_idx = root_idx;
+    Ok(())
+}
+
 /// Allocate the next ID for `counter`. Returns the formatted id string and
 /// rewrites the source to bump the counter. If the id-counters block is
 /// missing, falls back to scanning existing entries for max+1 and synthesizes
