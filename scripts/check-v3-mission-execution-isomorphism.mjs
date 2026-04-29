@@ -68,8 +68,6 @@ const DAEMON_NEEDLES = [
   '"repair" => action_repair',
   '"preflight_commit" => action_preflight_commit',
   'const COMPANION_DIR: &str = ".missiond/v2"',
-  'fn read_log_file',
-  'fn write_log_file',
   'mod log_surface',
   'mod claim_lease',
   'mod completion_audit',
@@ -92,6 +90,18 @@ const LOG_SURFACE_NEEDLES = [
   'const DEFAULT_DISPATCH_STRATEGY',
   'pub(super) mod sexp',
   'pub(super) struct LogFile',
+  'pub(super) fn now_iso',
+  'pub(super) fn parse_kv_pairs',
+  'pub(super) fn lisp_quote_string',
+  'pub(super) fn render_canonical_template',
+  'pub(super) enum Counter',
+  'pub(super) fn locate_kv_value',
+  'pub(super) fn allocate_id',
+  'pub(super) fn scan_max_id',
+  'pub(super) fn append_to_block',
+  'pub(super) fn touch_last_updated',
+  'pub(super) fn write_log_file',
+  'pub(super) fn read_log_file',
   'pub(super) fn normalize_dispatch_strategy',
   'pub(super) async fn emit_execution_event',
   'pub(super) fn build_opened_event',
@@ -410,8 +420,6 @@ use self::log_surface::{
 };
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
-fn read_log_file() {}
-fn write_log_file() {}
 async fn action_claim() {}
 async fn action_heartbeat() {}
 async fn action_release() {}
@@ -429,6 +437,18 @@ function buildGoodLogSurface() {
 const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
 pub(super) mod sexp {}
 pub(super) struct LogFile {}
+pub(super) fn now_iso() {}
+pub(super) fn parse_kv_pairs() {}
+pub(super) fn lisp_quote_string() {}
+pub(super) fn render_canonical_template() {}
+pub(super) enum Counter {}
+pub(super) fn locate_kv_value() {}
+pub(super) fn allocate_id() {}
+pub(super) fn scan_max_id() {}
+pub(super) fn append_to_block() {}
+pub(super) fn touch_last_updated() {}
+pub(super) fn write_log_file() {}
+pub(super) fn read_log_file() {}
 pub(super) fn normalize_dispatch_strategy() {}
 pub(super) async fn emit_execution_event() {}
 pub(super) fn build_opened_event() {}

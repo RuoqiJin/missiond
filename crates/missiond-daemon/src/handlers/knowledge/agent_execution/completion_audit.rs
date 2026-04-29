@@ -2,8 +2,7 @@ use anyhow::{anyhow, Result};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 
-use super::log_surface::{sexp, LogFile};
-use super::parse_kv_pairs;
+use super::log_surface::{parse_kv_pairs, sexp, LogFile};
 
 /// Canonical scoped-commit handoff statuses surfaced by intent-memory.lisp ::
 /// helper agent-execution-coordination :: shared-memory-slots :: completions

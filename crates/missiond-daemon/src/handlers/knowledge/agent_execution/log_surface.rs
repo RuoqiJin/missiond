@@ -1,13 +1,13 @@
 use crate::state::AppState;
 use anyhow::{anyhow, Result};
+use chrono::{SecondsFormat, Utc};
 use missiond_core::event::events::ExecutionEvent;
 use serde_json::Value;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use super::completion_audit::read_task_contract_id;
-use super::{lisp_quote_string, now_iso, parse_kv_pairs};
-
 pub(super) mod sexp {
     use anyhow::{anyhow, Result};
 
@@ -288,7 +288,7 @@ pub(super) mod sexp {
     }
 }
 
-use self::sexp::Node;
+use self::sexp::{Node, NodeKind};
 
 // ───────────────────────────────────────────────────────────────────────
 // execution-log accessor — sits on top of the parsed tree
@@ -338,6 +338,403 @@ impl LogFile {
             .iter()
             .find(|n| n.head_atom() == Some(name))
     }
+}
+
+pub(super) fn now_iso() -> String {
+    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// minimal S-expression parser with byte spans
+// ───────────────────────────────────────────────────────────────────────
+
+/// Parse a `(:key value :key value ...)` style argument tail into a map of
+/// keyword (without leading `:`) to the raw source slice covering the value.
+pub(super) fn parse_kv_pairs<'a>(src: &'a str, kids: &[Node]) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+    let mut i = 0;
+    while i < kids.len() {
+        let tok = kids[i].as_atom().unwrap_or("");
+        if tok.starts_with(':') && i + 1 < kids.len() {
+            let key = tok.trim_start_matches(':').to_string();
+            let val_node = &kids[i + 1];
+            let val = match &val_node.kind {
+                NodeKind::Str(s) => s.clone(),
+                _ => val_node.slice(src).to_string(),
+            };
+            out.insert(key, val);
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// canonical writer — used by `open` and by `repair` to materialize blocks
+// ───────────────────────────────────────────────────────────────────────
+
+pub(super) fn lisp_quote_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
+    out
+}
+
+pub(super) fn render_canonical_template(
+    execution_id: &str,
+    parent_design: &str,
+    scope: &str,
+    owner: &str,
+    dispatch_strategy: &str,
+    target_project: Option<&str>,
+    requested_cwd: Option<&str>,
+) -> String {
+    let now = now_iso();
+    let id_q = lisp_quote_string(execution_id);
+    let parent_q = lisp_quote_string(parent_design);
+    let now_q = lisp_quote_string(&now);
+    let owner_q = lisp_quote_string(owner);
+    let scope_q = lisp_quote_string(scope);
+    let dispatch_q = lisp_quote_string(dispatch_strategy);
+
+    // Build the meta block incrementally so the optional dispatch slots can be
+    // omitted cleanly when not supplied while keeping the closing paren
+    // balanced. `:companion-of` was the historical terminal field — we preserve
+    // its position and append the new dispatch metadata after it.
+    let mut meta = String::new();
+    meta.push_str("  (meta\n");
+    meta.push_str(&format!("    :execution-id {}\n", id_q));
+    meta.push_str(&format!("    :parent-design {}\n", parent_q));
+    meta.push_str("    :status \"open\"\n");
+    meta.push_str(&format!("    :opened-at {}\n", now_q));
+    meta.push_str(&format!("    :last-updated-at {}\n", now_q));
+    meta.push_str(&format!("    :owner {}\n", owner_q));
+    meta.push_str(&format!("    :scope {}\n", scope_q));
+    meta.push_str(&format!("    :companion-of {}\n", parent_q));
+    meta.push_str(&format!("    :dispatch-strategy {}", dispatch_q));
+    if let Some(tp) = target_project {
+        meta.push('\n');
+        meta.push_str(&format!("    :target-project {}", lisp_quote_string(tp)));
+    }
+    if let Some(cwd) = requested_cwd {
+        meta.push('\n');
+        meta.push_str(&format!("    :requested-cwd {}", lisp_quote_string(cwd)));
+    }
+    meta.push_str(")\n");
+
+    format!(
+        ";; ══════════════════════════════════════════════════════\n\
+         ;; MissionD — Execution Companion Log\n\
+         ;; Created via mission_execution(action=open) at {now}\n\
+         ;; Protocol: agent-execution-coordination v0.5.x\n\
+         ;; Parent:   {parent}\n\
+         ;; ══════════════════════════════════════════════════════\n\
+         \n\
+         (execution-log\n\
+         {meta}\n\
+         \x20\x20(id-counters\n\
+         \x20\x20\x20\x20:next-claim-id 1\n\
+         \x20\x20\x20\x20:next-deviation-id 1\n\
+         \x20\x20\x20\x20:next-decision-id 1\n\
+         \x20\x20\x20\x20:next-issue-id 1\n\
+         \x20\x20\x20\x20:next-completion-id 1)\n\
+         \n\
+         \x20\x20(phase-tracker\n\
+         \x20\x20\x20\x20:current-phase nil\n\
+         \x20\x20\x20\x20:phases ()\n\
+         \x20\x20\x20\x20:stage-cursor 0\n\
+         \x20\x20\x20\x20:checkpoints ())\n\
+         \n\
+         \x20\x20(claims)\n\
+         \n\
+         \x20\x20(deviations)\n\
+         \n\
+         \x20\x20(decisions)\n\
+         \n\
+         \x20\x20(issues)\n\
+         \n\
+         \x20\x20(completions)\n\
+         \n\
+         \x20\x20(derived-indexes\n\
+         \x20\x20\x20\x20:active-claims ()\n\
+         \x20\x20\x20\x20:open-issues ()\n\
+         \x20\x20\x20\x20:unresolved-deviations ()\n\
+         \x20\x20\x20\x20:latest-decisions ()\n\
+         \x20\x20\x20\x20:completed-phases ()))\n",
+        now = now,
+        parent = parent_design,
+        meta = meta,
+    )
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// id allocation helpers — atomic via id-counters slot
+// ───────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Copy)]
+pub(super) enum Counter {
+    Claim,
+    Deviation,
+    Decision,
+    Issue,
+    Completion,
+}
+
+impl Counter {
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Counter::Claim => "next-claim-id",
+            Counter::Deviation => "next-deviation-id",
+            Counter::Decision => "next-decision-id",
+            Counter::Issue => "next-issue-id",
+            Counter::Completion => "next-completion-id",
+        }
+    }
+
+    pub(super) fn prefix(self) -> &'static str {
+        match self {
+            Counter::Claim => "C",
+            Counter::Deviation => "D",
+            Counter::Decision => "DC",
+            Counter::Issue => "I",
+            Counter::Completion => "COMP",
+        }
+    }
+
+    pub(super) fn block_name(self) -> &'static str {
+        match self {
+            Counter::Claim => "claims",
+            Counter::Deviation => "deviations",
+            Counter::Decision => "decisions",
+            Counter::Issue => "issues",
+            Counter::Completion => "completions",
+        }
+    }
+}
+
+/// Find the byte position in `src` where `:key <value>` begins inside the
+/// id-counters block. Returns (key_start, value_start, value_end).
+pub(super) fn locate_kv_value(src: &str, block: &Node, key: &str) -> Option<(usize, usize, usize)> {
+    let kids = block.children();
+    let mut i = 1; // skip head atom
+    while i + 1 < kids.len() {
+        if kids[i].as_atom().map(|a| a.trim_start_matches(':')) == Some(key) {
+            return Some((kids[i].start, kids[i + 1].start, kids[i + 1].end));
+        }
+        i += 1;
+    }
+    let _ = src;
+    None
+}
+
+/// Allocate the next ID for `counter`. Returns the formatted id string and
+/// rewrites the source to bump the counter. If the id-counters block is
+/// missing, falls back to scanning existing entries for max+1 and synthesizes
+/// the counter via `repair`-style insertion before the first existing entry
+/// block. (audit will surface this as a structural fix-up.)
+pub(super) fn allocate_id(file: &mut LogFile, counter: Counter) -> Result<String> {
+    let counter_block = file.find_block("id-counters").cloned();
+
+    if let Some(block) = counter_block {
+        let (_, vstart, vend) =
+            locate_kv_value(&file.src, &block, counter.key()).ok_or_else(|| {
+                anyhow!(
+                    "id-counters block missing `:{}` — run mission_execution(action=\"repair\")",
+                    counter.key()
+                )
+            })?;
+        let value_text = file.src[vstart..vend].trim();
+        let n: u32 = value_text.parse().map_err(|e| {
+            anyhow!(
+                "id-counters `:{}` not an integer: {} ({})",
+                counter.key(),
+                value_text,
+                e
+            )
+        })?;
+        let id = format!("{}{:03}", counter.prefix(), n);
+        let next = n + 1;
+        let new_value = next.to_string();
+        let mut new_src = String::with_capacity(file.src.len());
+        new_src.push_str(&file.src[..vstart]);
+        new_src.push_str(&new_value);
+        new_src.push_str(&file.src[vend..]);
+        file.src = new_src;
+        // Re-parse so subsequent block lookups use refreshed spans.
+        let forms = sexp::parse(&file.src)?;
+        let root_idx = forms
+            .iter()
+            .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
+            .ok_or_else(|| anyhow!("execution-log root vanished after counter bump"))?;
+        file.forms = forms;
+        file.root_idx = root_idx;
+        return Ok(id);
+    }
+
+    // Fallback path: no id-counters block. Scan existing entries for the
+    // largest numeric suffix matching the prefix, and synthesize next.
+    // Mutating without an id-counters slot is allowed but flagged by audit.
+    let max = scan_max_id(file, counter);
+    let next = max + 1;
+    Ok(format!("{}{:03}", counter.prefix(), next))
+}
+
+pub(super) fn scan_max_id(file: &LogFile, counter: Counter) -> u32 {
+    let block = match file.find_block(counter.block_name()) {
+        Some(b) => b,
+        None => return 0,
+    };
+    let prefix = counter.prefix();
+    let mut max: u32 = 0;
+    for child in block.children().iter().skip(1) {
+        // Two flavors:
+        //   (D001 ...)   — id is the head atom
+        //   (deviation :id D001 ...) — id is after :id
+        if let Some(head) = child.head_atom() {
+            if let Some(rest) = head.strip_prefix(prefix) {
+                if rest.chars().all(|c| c.is_ascii_digit()) && !rest.is_empty() {
+                    if let Ok(n) = rest.parse::<u32>() {
+                        max = max.max(n);
+                        continue;
+                    }
+                }
+            }
+            // Look for `:id <ID>` inside.
+            let kids = child.children();
+            let mut i = 1;
+            while i + 1 < kids.len() {
+                if kids[i].as_atom() == Some(":id") {
+                    let val = match &kids[i + 1].kind {
+                        NodeKind::Str(s) => s.clone(),
+                        NodeKind::Atom(s) => s.clone(),
+                        _ => String::new(),
+                    };
+                    if let Some(rest) = val.strip_prefix(prefix) {
+                        if let Ok(n) = rest.parse::<u32>() {
+                            max = max.max(n);
+                        }
+                    }
+                    break;
+                }
+                i += 1;
+            }
+        }
+    }
+    max
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// block append / read / write helpers
+// ───────────────────────────────────────────────────────────────────────
+
+/// Insert `entry_text` (already-rendered S-expr lines without leading newline)
+/// into the block named `block_name` just before its closing paren. If the
+/// block is missing it is synthesized at the end of the root form (audit will
+/// flag the file but the append still succeeds — this matches the lisp's
+/// "derived-indexes can rebuild" tolerance).
+pub(super) fn append_to_block(
+    file: &mut LogFile,
+    block_name: &str,
+    entry_text: &str,
+) -> Result<()> {
+    if let Some(block) = file.find_block(block_name).cloned() {
+        let close = block.end - 1;
+        let body_is_empty = block_body_is_empty(&block, &file.src);
+        let mut new_src = String::with_capacity(file.src.len() + entry_text.len() + 8);
+        new_src.push_str(&file.src[..close]);
+        if body_is_empty {
+            new_src.push('\n');
+        } else {
+            new_src.push_str("\n");
+        }
+        new_src.push_str(entry_text);
+        if !entry_text.ends_with('\n') {
+            new_src.push('\n');
+        }
+        new_src.push_str("  ");
+        new_src.push_str(&file.src[close..]);
+        file.src = new_src;
+    } else {
+        // Synthesize block before the root form's closing paren.
+        let root = file.root().clone();
+        let close = root.end - 1;
+        let synth = format!(
+            "\n  ({block}\n{entry}\n  )\n",
+            block = block_name,
+            entry = entry_text,
+        );
+        let mut new_src = String::with_capacity(file.src.len() + synth.len());
+        new_src.push_str(&file.src[..close]);
+        new_src.push_str(&synth);
+        new_src.push_str(&file.src[close..]);
+        file.src = new_src;
+    }
+    let forms = sexp::parse(&file.src)?;
+    let root_idx = forms
+        .iter()
+        .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
+        .ok_or_else(|| anyhow!("execution-log root vanished after append"))?;
+    file.forms = forms;
+    file.root_idx = root_idx;
+    Ok(())
+}
+
+fn block_body_is_empty(block: &Node, _src: &str) -> bool {
+    block.children().len() <= 1
+}
+
+/// Update the meta block's :last-updated-at field to `now`. If the block is
+/// absent or the field absent, this is a best-effort no-op.
+pub(super) fn touch_last_updated(file: &mut LogFile) -> Result<()> {
+    let now = now_iso();
+    let meta = match file.find_block("meta").cloned() {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+    if let Some((_, vstart, vend)) = locate_kv_value(&file.src, &meta, "last-updated-at") {
+        let new_value = lisp_quote_string(&now);
+        let mut new_src = String::with_capacity(file.src.len() + new_value.len());
+        new_src.push_str(&file.src[..vstart]);
+        new_src.push_str(&new_value);
+        new_src.push_str(&file.src[vend..]);
+        file.src = new_src;
+        let forms = sexp::parse(&file.src)?;
+        let root_idx = forms
+            .iter()
+            .position(|n| matches!(n.head_atom(), Some("execution-log") | Some("execution")))
+            .ok_or_else(|| anyhow!("execution-log root vanished after touch"))?;
+        file.forms = forms;
+        file.root_idx = root_idx;
+    }
+    Ok(())
+}
+
+pub(super) fn write_log_file(path: &Path, file: &LogFile) -> Result<()> {
+    sexp::check_balance(&file.src)
+        .map_err(|e| anyhow!("refusing to write — paren balance broken: {}", e))?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("lisp.tmp");
+    std::fs::write(&tmp, file.src.as_bytes())?;
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+pub(super) fn read_log_file(path: &Path) -> Result<LogFile> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| anyhow!("cannot read {}: {}", path.display(), e))?;
+    LogFile::parse(text)
 }
 
 /// Canonical workstation-dispatch strategies surfaced by intent-tools.lisp ::
