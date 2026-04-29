@@ -129,6 +129,9 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) fn parse_completions',
   'pub(super) fn summarize_durability',
   'pub(super) fn parse_string_list',
+  'pub(super) struct ReportSummary',
+  'pub(super) fn read_report_summary',
+  'pub(super) fn read_task_contract_id',
 ];
 
 const MCP_NEEDLES = [
@@ -465,6 +468,9 @@ pub(super) struct CompletionRecord {}
 pub(super) fn parse_completions() {}
 pub(super) fn summarize_durability() {}
 pub(super) fn parse_string_list() {}
+pub(super) struct ReportSummary {}
+pub(super) fn read_report_summary() {}
+pub(super) fn read_task_contract_id() {}
 `;
 }
 

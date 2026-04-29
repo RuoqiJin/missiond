@@ -5,7 +5,8 @@ use serde_json::Value;
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
-use super::{lisp_quote_string, now_iso, parse_kv_pairs, read_task_contract_id};
+use super::completion_audit::read_task_contract_id;
+use super::{lisp_quote_string, now_iso, parse_kv_pairs};
 
 pub(super) mod sexp {
     use anyhow::{anyhow, Result};
