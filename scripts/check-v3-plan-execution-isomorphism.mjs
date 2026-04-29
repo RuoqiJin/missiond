@@ -19,6 +19,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
+  planFieldInference: 'crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs',
   planExecuteHints: 'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
   planTaskContract: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs',
   planDistillChain: 'crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs',
@@ -93,6 +94,7 @@ function checkFiles(root, files) {
     'plan artifact MUST be amended with :plan_id + :version + :board_task_id',
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
     'plan/compile_authoring.rs owns mission_plan plan-authoring entry/core',
+    'plan/field_inference.rs owns mission_plan execute preflight field inference/core',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
     'plan/task_contract.rs owns mission_plan task-contract Lisp projection',
     'plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress',
@@ -129,6 +131,22 @@ function checkFiles(root, files) {
     'pub(super) fn validate_compiled_plan_sexp',
     'pub(super) async fn maybe_write_plan_artifact',
     'attempt_artifact_write',
+  ]);
+
+  requireAll(diagnostics, files.planFieldInference, sources.planFieldInference, [
+    'pub(crate) enum InferPlanFieldsMode',
+    'pub(crate) fn parse_infer_plan_fields_mode',
+    'pub(super) struct PlanFieldInference',
+    'pub(super) fn compute_plan_field_inference',
+    'pub(super) async fn request_llm_proposals',
+    'pub(super) fn apply_safe_augmentation',
+    'pub(super) fn compute_apply_gate',
+    'pub(super) async fn execute_persisted_apply',
+    'pub(super) const WORKSTATION_INFER_MODE_SONNET_SUGGEST',
+    'pub(super) fn parse_workstation_inference_mode',
+    'pub(super) fn refuse_workstation_inference_in_dag_mode',
+    'plan_field_inference',
+    'persisted_apply',
   ]);
 
   requireAll(diagnostics, files.planExecuteHints, sources.planExecuteHints, [
@@ -293,13 +311,14 @@ function buildFixture() {
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -325,6 +344,20 @@ pub(super) fn validate_compiled_plan_sexp() {}
 pub(super) async fn maybe_write_plan_artifact() {
   attempt_artifact_write;
 }
+`);
+  writeFixture(root, DEFAULT_FILES.planFieldInference, `
+pub(crate) enum InferPlanFieldsMode {}
+pub(crate) fn parse_infer_plan_fields_mode() {}
+pub(super) struct PlanFieldInference {}
+pub(super) fn compute_plan_field_inference() {}
+pub(super) async fn request_llm_proposals() {}
+pub(super) fn apply_safe_augmentation() {}
+pub(super) fn compute_apply_gate() {}
+pub(super) async fn execute_persisted_apply() {}
+pub(super) const WORKSTATION_INFER_MODE_SONNET_SUGGEST: &str = "sonnet_suggest";
+pub(super) fn parse_workstation_inference_mode() {}
+pub(super) fn refuse_workstation_inference_in_dag_mode() {}
+const RESPONSE_KEYS: &[&str] = &["plan_field_inference", "persisted_apply"];
 `);
   writeFixture(root, DEFAULT_FILES.planExecuteHints, `
 pub(crate) struct ParsedPlanHints {}
