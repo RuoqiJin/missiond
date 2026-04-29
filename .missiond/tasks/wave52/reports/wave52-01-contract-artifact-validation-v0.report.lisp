@@ -5,7 +5,11 @@
   :schema "missiond.report-contract.v1"
   :task_id "wave52-01-contract-artifact-validation-v0"
   :status done
-  :commit_hash "c389e442"
+  :commit_hash "f75799e4"
+  :agent_commit_hash "f75799e4"
+  :final_commit_hash "f75799e4"
+  :verified_commit_hash "f75799e4"
+  :parent_patches []
   :files_changed
     ["scripts/verify-task-contract.mjs"
      ".missiond/v3/missiond-blueprint.lisp"
@@ -31,7 +35,7 @@
               :note "Wave51 worker commit 7f462d17 now FAILS with: artifact .missiond/tasks/wave51/session-trace.lisp (session-trace) failed validation at commit 7f462d1789fa via scripts/check-session-trace.mjs / event :kind \"acceptance\" must be one of dispatch|start|read|edit|command|test|commit|complete|failure|retry|observation. The failure is on the artifact bytes from that commit's tree, not on commit message or scope, exactly as the wave52 integration plan required.")
      (:command "node scripts/check-task-report.mjs .missiond/tasks/wave52/reports/wave52-01-contract-artifact-validation-v0.report.lisp"
               :exit_code 0 :ok true
-              :note "Filled in pre-commit; commit_hash placeholder c389e442 (wave52 prep commit) is replaced post-commit by a parent-hotfix step using the same lineage projection wave51 used.")
+              :note "Report hash pinned by parent after the worker commit; no parent code patch was required.")
      (:command "git diff --check -- scripts/verify-task-contract.mjs .missiond/v3/missiond-blueprint.lisp scripts/check-v3-task-lifecycle-isomorphism.mjs .missiond/tasks/wave52/reports/wave52-01-contract-artifact-validation-v0.report.lisp"
               :exit_code 0 :ok true
               :note "No whitespace errors in the wave52-01 write scope.")]
