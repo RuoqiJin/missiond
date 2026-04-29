@@ -1803,6 +1803,25 @@ pub(crate) fn outcome_to_response_fields(
             if let Some(e) = evidence_error {
                 m.insert("evidence_error".to_string(), json!(e));
             }
+            // wave-47 / task 01 — surface a stable top-level identifier for
+            // the BoardTask the substrate just delegated. The inner
+            // `mission_task_delegate` response embeds the full DB BoardTask
+            // row under `task_id` (the variable was named after its
+            // semantic role rather than the wire type — see
+            // crates/missiond-daemon/src/handlers/compute/task_delegate.rs::handle
+            // where `task_id = state.store.create_board_task(...)` returns
+            // the full row, then is serialized as `"task_id": <row>`). The
+            // BoardTask UUID lives at `task_id.id` (camelCase per the
+            // store's serde derives). Project that UUID to
+            // `delegated_board_task_id` so observers (and the wave-47 v3
+            // request-flow real-dispatch smoke) can pin a single stable
+            // field name without parsing a nested struct.
+            if let Some(id) = extract_inner_board_task_id(&inner_payload) {
+                m.insert(
+                    "delegated_board_task_id".to_string(),
+                    json!(id),
+                );
+            }
             m.insert("inner_result".to_string(), inner_payload.clone());
         }
         WorkstationDispatchOutcome::InnerError {
@@ -1832,6 +1851,35 @@ pub(crate) fn outcome_to_response_fields(
         }
     }
     Value::Object(m)
+}
+
+/// wave-47 / task 01 — robustly extract the delegated BoardTask UUID from
+/// the inner `mission_task_delegate` payload. Tolerates two shapes:
+///   * `task_id`: full BoardTask object with a `.id` UUID string (current
+///     daemon behaviour — see compute/task_delegate.rs::handle which feeds
+///     the BoardTask returned by `create_board_task` straight into the
+///     response under the `task_id` key);
+///   * `task_id`: bare UUID string (defensive fallback in case
+///     compute/task_delegate.rs is later tightened to surface a string).
+/// Returns `None` when neither shape matches so the caller can fall back
+/// to inspecting `inner_result` itself; `outcome_to_response_fields`
+/// always emits the full `inner_result` alongside, so this projection is
+/// purely an ergonomic affordance, never a load-bearing schema change.
+fn extract_inner_board_task_id(inner_payload: &Value) -> Option<String> {
+    let task_id = inner_payload.get("task_id")?;
+    if let Some(s) = task_id.as_str() {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    if let Some(s) = task_id.get("id").and_then(|v| v.as_str()) {
+        let trimmed = s.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 /// Trim the brief for the response preview field. The full text already
@@ -4021,6 +4069,7 @@ mod tests {
         assert_eq!(v["evidence_path"], "/tmp/sidecar.json");
         assert!(v["task_brief_preview"].as_str().unwrap().contains("## Objective"));
         assert_eq!(v["inner_result"]["task_id"], "btk-9");
+        assert_eq!(v["delegated_board_task_id"], "btk-9");
         // wave-20 / task 04 — legacy / rendered path leaves the
         // `task_contract_source_path` key OFF so the wire shape stays
         // byte-compatible with wave-15..19 callers.
@@ -4051,6 +4100,29 @@ mod tests {
             v["task_contract_source_path"],
             "/tmp/p/.missiond/tasks/generated/plan/root.lisp"
         );
+    }
+
+    #[test]
+    fn outcome_to_response_dispatched_projects_nested_board_task_id() {
+        let outcome = WorkstationDispatchOutcome::Dispatched {
+            task_brief: "## Objective\nship\n".to_string(),
+            task_brief_path: None,
+            task_contract_source_path: None,
+            evidence_path: None,
+            evidence_error: None,
+            inner_payload: json!({
+                "task_id": {
+                    "id": "3ab1b19d-3d64-45de-9493-ff9972d2e77f",
+                    "status": "open"
+                }
+            }),
+        };
+        let v = outcome_to_response_fields(&outcome, "agent-team");
+        assert_eq!(
+            v["delegated_board_task_id"],
+            "3ab1b19d-3d64-45de-9493-ff9972d2e77f"
+        );
+        assert_eq!(v["inner_result"]["task_id"]["status"], "open");
     }
 
     #[test]

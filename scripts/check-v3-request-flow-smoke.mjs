@@ -78,11 +78,36 @@
 // The smoke never spawns or waits for a worker. Default --live-ipc still stops
 // at awaiting_execution; only --execute-dry-run drives execute_plan.
 //
+// Wave47-01 audit mode (--execute-real-dispatch): SLOW + SIDE-EFFECTING. After
+// approve_plan succeeds, the smoke calls mission_request respond with
+// response=execute_plan, execute=true, dry_run=false, execute_mode=internal,
+// dispatch_strategy=agent-team, target=mission_task_delegate, cwd=<repo>, and
+// a deliberately read-only smoke objective that tells the delegated worker to
+// do no file edits and no commits. The substrate
+// (run_workstation_dispatch_with_contract_and_trace) takes the
+// WorkstationDispatchOutcome::Dispatched branch and creates a delegated
+// BoardTask via mission_task_delegate. The smoke asserts the wave45/46
+// review-level invariants AND the substrate dispatch shape:
+//   - pipeline_result.status='executing'
+//   - pipeline_result.execute_mode='internal'
+//   - pipeline_result.runner_status='workstation_dispatch_v0'
+//   - pipeline_result.workstation_dispatch_status='dispatched'
+//   - pipeline_result.target_tool='mission_task_delegate'
+//   - pipeline_result.dispatch_strategy='agent-team'
+//   - pipeline_result.task_brief_preview is a non-empty string
+//   - pipeline_result.inner_result is a non-null object
+//   - pipeline_result.delegated_board_task_id is the delegated BoardTask UUID
+// The smoke NEVER waits synchronously for the worker; the BoardTask stays in
+// the queue for Autopilot to pick up. --cleanup removes only the request-local
+// directory; the BoardTask + DB rows + worker-side artifacts remain. NEVER
+// added to the v3 aggregate gate.
+//
 // CLI: node scripts/check-v3-request-flow-smoke.mjs [--json] [--dry-fixture]
 //        [--blueprint <path>] [--repo <path>]
 //        [--live-ipc [--endpoint <socket>] [--session-id <id>]
 //                    [--request-id <id>] [--cleanup] [--compat-write-file]
-//                    [--execute-dry-run] [--confirm-execute]]
+//                    [--execute-dry-run] [--execute-real-dispatch]
+//                    [--confirm-execute]]
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -200,12 +225,38 @@ Flags:
                     the workstation_dispatch substrate. The smoke never
                     spawns or waits for a worker. Without this flag
                     --live-ipc still stops at awaiting_execution.
+  --execute-real-dispatch
+                    Wave47 opt-in REAL dispatch audit. SLOW + SIDE-EFFECTING.
+                    After approve_plan succeeds, the smoke calls
+                    mission_request respond with response=execute_plan,
+                    execute=true, dry_run=false, execute_mode=internal,
+                    dispatch_strategy=agent-team, target=mission_task_delegate,
+                    cwd=<repo>, and a deliberately read-only smoke objective
+                    that tells the delegated worker to do no file edits and
+                    no commits. The substrate (run_workstation_dispatch_with_
+                    contract_and_trace) takes the
+                    WorkstationDispatchOutcome::Dispatched branch and creates
+                    a delegated BoardTask via mission_task_delegate. The
+                    smoke asserts pipeline_result.status='executing',
+                    runner_status='workstation_dispatch_v0',
+                    workstation_dispatch_status='dispatched',
+                    target_tool='mission_task_delegate',
+                    dispatch_strategy='agent-team', task_brief_preview is a
+                    non-empty string, inner_result is a non-null object, and
+                    delegated_board_task_id is a UUID. The smoke NEVER waits
+                    synchronously for the worker; the BoardTask stays in the
+                    queue for Autopilot. --cleanup removes only the
+                    request-local directory; the BoardTask + DB rows + any
+                    worker-side artifacts remain. NEVER appears in the
+                    aggregate v3 gate.
   --confirm-execute Reserved for future use. This checker explicitly refuses
                     workstation dispatch; with --confirm-execute the run
                     still stops at awaiting_execution and prints a notice
-                    pointing the user to mission_request directly. Note that
-                    --execute-dry-run is the wave46-supported audit flag;
-                    --confirm-execute remains a no-op compat slot.
+                    pointing the user to --execute-real-dispatch instead.
+                    Note that --execute-dry-run is the wave46-supported
+                    no-slot audit flag and --execute-real-dispatch is the
+                    wave47 opt-in real-dispatch flag; --confirm-execute
+                    remains a no-op compat slot.
 `;
 
 function fail(message) {
@@ -222,6 +273,7 @@ function parseArgs(argv) {
     cleanup: false,
     compatWriteFile: false,
     executeDryRun: false,
+    executeRealDispatch: false,
     endpoint: null,
     sessionId: null,
     requestId: null,
@@ -247,6 +299,8 @@ function parseArgs(argv) {
       opts.compatWriteFile = true;
     } else if (arg === '--execute-dry-run') {
       opts.executeDryRun = true;
+    } else if (arg === '--execute-real-dispatch') {
+      opts.executeRealDispatch = true;
     } else if (arg === '--endpoint') {
       opts.endpoint = argv[++i] ?? fail('--endpoint requires a value');
     } else if (arg.startsWith('--endpoint=')) {
@@ -1142,9 +1196,27 @@ async function runLiveIpcSmoke(opts) {
   const alignmentRoot = path.join(repoRoot, '.missiond', 'alignment');
   const plansRoot = path.join(repoRoot, '.missiond', 'plans');
   const compatRequested = !!opts.compatWriteFile;
-  const smokeObjective = compatRequested
-    ? 'wave44-live-ipc-smoke compat-write-file path; opt-in legacy compat artifacts.'
-    : 'wave44-live-ipc-smoke request-local-only path; no compat artifacts expected.';
+  // wave47-01: when --execute-real-dispatch is on, the smoke objective is
+  // forwarded all the way through to the workstation_dispatch substrate's
+  // task_brief (Objective section). It MUST tell the delegated worker not
+  // to edit any files and not to commit, so the BoardTask Autopilot picks
+  // up performs a read-only confirmation only. owned_files stays empty so
+  // classify_task_kind→ReadOnly and the brief instructs commit_status=
+  // not-required (see workstation_dispatch.rs::build_task_brief).
+  const realDispatchObjective = (
+    'WAVE47 REAL-DISPATCH SMOKE — READ-ONLY. '
+    + 'DO NOT edit any files. DO NOT git add. DO NOT git commit. '
+    + 'DO NOT modify the worktree or any external service. '
+    + 'Run `git status --short` and `git rev-parse HEAD`, capture the output verbatim, '
+    + 'then call mission_execution(action=complete) with enforce_scoped_commit=true, '
+    + 'commit_status=not-required, and a one-line summary explaining no commit was produced. '
+    + 'This is a real-dispatch substrate audit; do not attempt to satisfy any acceptance command.'
+  );
+  const smokeObjective = opts.executeRealDispatch
+    ? realDispatchObjective
+    : compatRequested
+      ? 'wave44-live-ipc-smoke compat-write-file path; opt-in legacy compat artifacts.'
+      : 'wave44-live-ipc-smoke request-local-only path; no compat artifacts expected.';
 
   const compatBefore = {
     alignment_subdirs: snapshotSubdirs(alignmentRoot),
@@ -1161,6 +1233,7 @@ async function runLiveIpcSmoke(opts) {
     request_dir: requestDir,
     compat_write_file_requested: compatRequested,
     execute_dry_run_requested: !!opts.executeDryRun,
+    execute_real_dispatch_requested: !!opts.executeRealDispatch,
     confirm_execute_refused: !!opts.confirmExecute,
     confirm_execute_notice: opts.confirmExecute
       ? '--confirm-execute is reserved; this checker still refuses to dispatch a workstation slot. Drive mission_request directly to execute.'
@@ -1572,6 +1645,234 @@ async function runLiveIpcSmoke(opts) {
       executeStep.error = err.message ?? String(err);
       summary.steps.push(executeStep);
       summary.error = executeStep.error;
+      return summary;
+    }
+  }
+
+  // ── Step 4b (opt-in): action=respond response=execute_plan dry_run=false ──
+  // Wave47-01 audit mode (--execute-real-dispatch). SLOW + SIDE-EFFECTING.
+  // Drives the workstation_dispatch substrate end-to-end with dry_run=false
+  // so `run_workstation_dispatch_with_contract_and_trace` calls
+  // mission_task_delegate, which creates a delegated BoardTask via
+  // state.store.create_board_task and notifies the dispatcher. The smoke
+  // pins the wire shape (status='executing', runner_status='workstation_
+  // dispatch_v0', workstation_dispatch_status='dispatched',
+  // delegated_board_task_id present as a UUID, task_brief_preview present)
+  // WITHOUT waiting on the worker. The created BoardTask stays in the
+  // queue for Autopilot to pick up. NEVER part of the aggregate v3 gate.
+  // This block is SKIPPED whenever --execute-real-dispatch is absent, so
+  // default and --execute-dry-run runs cannot real-dispatch.
+  if (opts.executeRealDispatch) {
+    let realStep = { name: 'execute_plan_real_dispatch', ok: false };
+    const eventsDir = path.join(requestDir, 'events');
+    const eventsBefore = fs.existsSync(eventsDir)
+      ? fs.readdirSync(eventsDir).filter((n) => n.endsWith('.event.lisp')).sort()
+      : [];
+    try {
+      const respondRaw = await callTool('mission_request', {
+        action: 'respond',
+        request_id: requestId,
+        response: 'execute_plan',
+        execute: true,
+        dry_run: false,
+        execute_mode: 'internal',
+        dispatch_strategy: 'agent-team',
+        cwd: repoRoot,
+        target: 'mission_task_delegate',
+        objective: smokeObjective,
+      });
+      const parsed = parseToolResultPayload(respondRaw, 'execute_plan');
+      if (!parsed.ok) {
+        realStep.error = parsed.error;
+        summary.steps.push(realStep);
+        summary.error = parsed.error;
+        return summary;
+      }
+      const respondResult = parsed.payload?.respond_result ?? null;
+      const reviewPacket = parsed.payload?.review_packet ?? null;
+      const pipelineResult = parsed.payload?.pipeline_result ?? null;
+      const status = pipelineResult?.status ?? null;
+      const runnerStatus = pipelineResult?.runner_status ?? null;
+      const executeMode = pipelineResult?.execute_mode ?? null;
+      const workstationDispatchStatus =
+        pipelineResult?.workstation_dispatch_status ?? null;
+      const targetTool = pipelineResult?.target_tool ?? null;
+      const pipelineDispatchStrategy =
+        pipelineResult?.dispatch_strategy ?? null;
+      const taskBriefPreview = pipelineResult?.task_brief_preview ?? null;
+      const taskBriefPreviewPresent =
+        typeof taskBriefPreview === 'string' && taskBriefPreview.length > 0;
+      const innerResult = pipelineResult?.inner_result ?? null;
+      const innerResultPresent =
+        innerResult !== null
+        && typeof innerResult === 'object'
+        && !Array.isArray(innerResult);
+      // wave47-01: workstation_dispatch.rs::extract_inner_board_task_id
+      // projects a stable top-level `delegated_board_task_id` UUID string
+      // onto pipeline_result for the Dispatched outcome. The inner
+      // mission_task_delegate response also carries the BoardTask under
+      // `inner_result.task_id` (currently the FULL DB row because
+      // compute/task_delegate.rs::handle shadows the variable name —
+      // `task_id = state.store.create_board_task(...)` returns the row).
+      // Prefer the projected field; fall back to inner_result.task_id.id
+      // (current daemon behaviour) and inner_result.task_id (defensive
+      // fallback if compute/task_delegate.rs is later tightened to
+      // surface a string).
+      const projectedDelegatedId =
+        pipelineResult?.delegated_board_task_id ?? null;
+      const innerTaskIdRaw = innerResultPresent
+        ? (innerResult.task_id ?? null)
+        : null;
+      const innerTaskIdNested =
+        innerTaskIdRaw && typeof innerTaskIdRaw === 'object'
+          ? (innerTaskIdRaw.id ?? null)
+          : null;
+      const innerTaskIdString =
+        typeof innerTaskIdRaw === 'string' ? innerTaskIdRaw : null;
+      const delegatedBoardTaskId =
+        (typeof projectedDelegatedId === 'string'
+          ? projectedDelegatedId
+          : null)
+        ?? innerTaskIdNested
+        ?? innerTaskIdString;
+      const uuidRegex =
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+      const delegatedBoardTaskIdLooksLikeUuid =
+        typeof delegatedBoardTaskId === 'string'
+        && uuidRegex.test(delegatedBoardTaskId);
+      // BoardTask row status is camelCase per the store's serde derives;
+      // accept either snake or camel for the queued/open status field.
+      const innerBoardTaskStatus =
+        (innerTaskIdRaw && typeof innerTaskIdRaw === 'object'
+          ? (innerTaskIdRaw.status ?? null)
+          : null)
+        ?? (innerResultPresent ? (innerResult.status ?? null) : null);
+      const innerAssignee = innerResultPresent
+        ? (innerResult.assignee ?? null)
+        : null;
+      const innerProvisionedNewSlot = innerResultPresent
+        ? (innerResult.provisioned_new_slot ?? null)
+        : null;
+      const allowed = Array.isArray(reviewPacket?.allowed_responses)
+        ? reviewPacket.allowed_responses
+        : [];
+      const eventsAfter = fs.existsSync(eventsDir)
+        ? fs.readdirSync(eventsDir).filter((n) => n.endsWith('.event.lisp')).sort()
+        : [];
+      const newEvents = eventsAfter.filter((n) => !eventsBefore.includes(n));
+      const newEventTexts = newEvents.map((n) =>
+        fs.readFileSync(path.join(eventsDir, n), 'utf8'),
+      );
+      const executeEventAppended = newEventTexts.some((t) =>
+        t.includes(':decision :execute_plan'),
+      );
+      // wave-15 substrate Dispatched semantics (see plan.rs::
+      // build_workstation_dispatch_response): the response status reflects
+      // the plan FSM transition triggered by a successful dispatch
+      // ("executing"), while the substrate-level invariant is carried by
+      // workstation_dispatch_status="dispatched". Both are required for a
+      // real-dispatch proof.
+      const dispatchProof = (
+        status === 'executing'
+        && runnerStatus === 'workstation_dispatch_v0'
+        && workstationDispatchStatus === 'dispatched'
+      );
+
+      realStep = {
+        name: 'execute_plan_real_dispatch',
+        ok: false,
+        respond_outcome: respondResult?.outcome ?? null,
+        respond_inner_action: respondResult?.inner_action ?? null,
+        respond_result_execute: respondResult?.execute ?? null,
+        review_packet_state: reviewPacket?.state ?? null,
+        review_packet_execute_allowed: reviewPacket?.execute_allowed ?? null,
+        allowed_responses: allowed,
+        new_events: newEvents,
+        execute_event_appended: executeEventAppended,
+        pipeline_status: status,
+        pipeline_runner_status: runnerStatus,
+        pipeline_execute_mode: executeMode,
+        pipeline_workstation_dispatch_status: workstationDispatchStatus,
+        pipeline_target_tool: targetTool,
+        pipeline_dispatch_strategy: pipelineDispatchStrategy,
+        pipeline_task_brief_preview_present: taskBriefPreviewPresent,
+        pipeline_inner_result_present: innerResultPresent,
+        pipeline_delegated_board_task_id_projected:
+          typeof projectedDelegatedId === 'string'
+            ? projectedDelegatedId
+            : null,
+        delegated_board_task_id: delegatedBoardTaskId,
+        delegated_board_task_status: innerBoardTaskStatus,
+        delegated_board_task_assignee: innerAssignee,
+        delegated_board_task_provisioned_new_slot: innerProvisionedNewSlot,
+        dispatch_proof: dispatchProof,
+        autopilot_handoff_note:
+          'BoardTask is queued; Autopilot drives it. The smoke does not wait. '
+          + 'Use mission_board_get(taskId=<delegated_board_task_id>) to observe progress.',
+      };
+      const fails = [];
+      if (respondResult?.outcome !== 'dispatched') {
+        fails.push(`expected execute_plan outcome=dispatched, got ${JSON.stringify(respondResult?.outcome)}; blocked_reason=${JSON.stringify(respondResult?.blocked_reason)}`);
+      }
+      if (respondResult?.inner_action !== 'unified_entry::plan_execute') {
+        fails.push(`expected inner_action=unified_entry::plan_execute, got ${JSON.stringify(respondResult?.inner_action)}`);
+      }
+      if (respondResult?.execute !== true) {
+        fails.push(`expected respond_result.execute=true, got ${JSON.stringify(respondResult?.execute)}`);
+      }
+      if (reviewPacket?.state !== 'execute_requested') {
+        fails.push(`expected review_packet.state=execute_requested, got ${JSON.stringify(reviewPacket?.state)}`);
+      }
+      if (allowed.length !== 1 || allowed[0] !== 'observe') {
+        fails.push(`expected allowed_responses=[observe], got ${JSON.stringify(allowed)}`);
+      }
+      if (!executeEventAppended) {
+        fails.push(`expected a request-local execute_plan review event under ${eventsDir}; new events=${JSON.stringify(newEvents)}`);
+      }
+      if (executeMode !== 'internal') {
+        fails.push(`expected pipeline_result.execute_mode='internal', got ${JSON.stringify(executeMode)}`);
+      }
+      if (status !== 'executing') {
+        fails.push(`expected pipeline_result.status='executing' (the plan FSM transitions to Executing on a successful workstation_dispatch substrate Dispatched outcome — see crates/missiond-daemon/src/handlers/knowledge/plan.rs::build_workstation_dispatch_response); got ${JSON.stringify(status)}`);
+      }
+      if (runnerStatus !== 'workstation_dispatch_v0') {
+        fails.push(`expected pipeline_result.runner_status='workstation_dispatch_v0', got ${JSON.stringify(runnerStatus)}`);
+      }
+      if (workstationDispatchStatus !== 'dispatched') {
+        fails.push(`expected pipeline_result.workstation_dispatch_status='dispatched', got ${JSON.stringify(workstationDispatchStatus)}`);
+      }
+      if (targetTool !== 'mission_task_delegate') {
+        fails.push(`expected pipeline_result.target_tool='mission_task_delegate', got ${JSON.stringify(targetTool)}`);
+      }
+      if (pipelineDispatchStrategy !== 'agent-team') {
+        fails.push(`expected pipeline_result.dispatch_strategy='agent-team', got ${JSON.stringify(pipelineDispatchStrategy)}`);
+      }
+      if (!taskBriefPreviewPresent) {
+        fails.push(`expected pipeline_result.task_brief_preview to be a non-empty string; got ${JSON.stringify(taskBriefPreview)}`);
+      }
+      if (!innerResultPresent) {
+        fails.push(`expected pipeline_result.inner_result to be a non-null object; got ${JSON.stringify(innerResult)}`);
+      }
+      if (!delegatedBoardTaskIdLooksLikeUuid) {
+        fails.push(`expected a delegated BoardTask UUID at pipeline_result.delegated_board_task_id (preferred, projected by workstation_dispatch.rs::extract_inner_board_task_id) or pipeline_result.inner_result.task_id.id; got ${JSON.stringify(delegatedBoardTaskId)}. Real-dispatch substrate must surface a stable BoardTask id so observers can close the delegated task.`);
+      }
+      if (!dispatchProof) {
+        fails.push(`expected workstation-dispatch substrate dispatch proof (status='executing' + runner_status='workstation_dispatch_v0' + workstation_dispatch_status='dispatched'); got status=${JSON.stringify(status)}, runner_status=${JSON.stringify(runnerStatus)}, workstation_dispatch_status=${JSON.stringify(workstationDispatchStatus)}`);
+      }
+      if (fails.length === 0) {
+        realStep.ok = true;
+      } else {
+        realStep.error = fails.join('; ');
+      }
+      summary.steps.push(realStep);
+      if (!realStep.ok) {
+        summary.error = realStep.error;
+        return summary;
+      }
+    } catch (err) {
+      realStep.error = err.message ?? String(err);
+      summary.steps.push(realStep);
+      summary.error = realStep.error;
       return summary;
     }
   }
