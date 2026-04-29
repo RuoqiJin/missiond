@@ -10,6 +10,8 @@ const usage = `Usage:
 Checks the V3 mission_execution Lisp/code isomorphism contract. The large
 agent_execution.rs runtime is deliberately split into three V3 surfaces:
   - mission_execution-log: companion log, action routing, event projection
+  - agent_execution/log_governance.rs: deviation/decision/issue governance
+    records plus matching live event projection
   - agent_execution/log_status.rs: status/read-model projection for companion
     logs, claims, issues, decisions, and completion durability
   - agent_execution/lisp_syntax.rs: shared S-expression parser and delimiter
@@ -40,6 +42,8 @@ const DEFAULT_FILES = {
   daemon: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   tests: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  logGovernance:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
   logStatus: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
   logStore: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
   lispSyntax: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
@@ -69,7 +73,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -86,6 +90,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
@@ -120,6 +125,7 @@ const DAEMON_NEEDLES = [
   '"preflight_commit" => action_preflight_commit',
   'mod log_store',
   'mod lisp_syntax',
+  'mod log_governance',
   'mod log_status',
   'mod log_surface',
   'mod session_trace',
@@ -135,6 +141,7 @@ const DAEMON_NEEDLES = [
   '#[cfg(test)]',
   'mod tests;',
   'use self::log_store::{',
+  'use self::log_governance',
   'use self::log_status::action_status',
   'use self::lisp_syntax',
   'use self::log_surface::{',
@@ -200,13 +207,21 @@ const LOG_SURFACE_NEEDLES = [
   'pub(super) fn normalize_dispatch_strategy',
   'pub(super) async fn action_open',
   'pub(super) async fn action_list',
-  'pub(super) async fn action_deviate',
-  'pub(super) async fn action_decide',
-  'pub(super) async fn action_issue',
   'pub(super) async fn emit_execution_event',
   'pub(super) fn build_opened_event',
   'pub(super) struct DispatchMeta',
   'pub(super) fn read_dispatch_metadata_from_log',
+];
+
+const LOG_GOVERNANCE_NEEDLES = [
+  'pub(super) async fn action_deviate',
+  'pub(super) async fn action_decide',
+  'pub(super) async fn action_issue',
+  'ExecutionEvent::DeviationRecorded',
+  'ExecutionEvent::DecisionRecorded',
+  'ExecutionEvent::IssueRecorded',
+  'read_dispatch_metadata_from_log',
+  'append_to_block',
 ];
 
 const LOG_STATUS_NEEDLES = [
@@ -407,6 +422,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.logStore, sources.logStore, LOG_STORE_NEEDLES);
   requireAll(diagnostics, files.lispSyntax, sources.lispSyntax, LISP_SYNTAX_NEEDLES);
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
+  requireAll(diagnostics, files.logGovernance, sources.logGovernance, LOG_GOVERNANCE_NEEDLES);
   requireAll(diagnostics, files.logStatus, sources.logStatus, LOG_STATUS_NEEDLES);
   requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
@@ -474,6 +490,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.logStore]: buildGoodLogStore(),
     [DEFAULT_FILES.lispSyntax]: buildGoodLispSyntax(),
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
+    [DEFAULT_FILES.logGovernance]: buildGoodLogGovernance(),
     [DEFAULT_FILES.logStatus]: buildGoodLogStatus(),
     [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
@@ -596,12 +613,13 @@ function buildGoodBlueprint() {
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, ID counters, and Lisp read/write helpers authoritative; action routing, emit_execution_event, and DispatchMeta stay in agent_execution/log_surface.rs; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
+	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, ID counters, and Lisp read/write helpers authoritative; action routing, emit_execution_event, and DispatchMeta stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -647,6 +665,7 @@ function buildGoodDaemon() {
 }
 mod log_store;
 mod lisp_syntax;
+mod log_governance;
 mod log_status;
 mod log_surface;
 mod session_trace;
@@ -666,6 +685,7 @@ use self::log_surface::{
   read_dispatch_metadata_from_log,
 };
 use self::log_store::{LogFile};
+use self::log_governance::{action_decide, action_deviate, action_issue};
 use self::log_status::action_status;
 use self::lisp_syntax as sexp;
 use self::session_trace::{append_session_trace_event};
@@ -734,13 +754,29 @@ pub(super) const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
 pub(super) fn normalize_dispatch_strategy() {}
 pub(super) async fn action_open() {}
 pub(super) async fn action_list() {}
-pub(super) async fn action_deviate() {}
-pub(super) async fn action_decide() {}
-pub(super) async fn action_issue() {}
 pub(super) async fn emit_execution_event() {}
 pub(super) fn build_opened_event() {}
 pub(super) struct DispatchMeta {}
 pub(super) fn read_dispatch_metadata_from_log() {}
+`;
+}
+
+function buildGoodLogGovernance() {
+  return `pub(super) async fn action_deviate() {
+  ExecutionEvent::DeviationRecorded;
+  read_dispatch_metadata_from_log();
+  append_to_block();
+}
+pub(super) async fn action_decide() {
+  ExecutionEvent::DecisionRecorded;
+  read_dispatch_metadata_from_log();
+  append_to_block();
+}
+pub(super) async fn action_issue() {
+  ExecutionEvent::IssueRecorded;
+  read_dispatch_metadata_from_log();
+  append_to_block();
+}
 `;
 }
 
