@@ -80,7 +80,6 @@ const DAEMON_NEEDLES = [
   'fn enforce_scoped_commit_completion',
   'fn enforce_task_contract_completion',
   'fn enforce_verified_completion',
-  'fn build_preflight_summary',
   'async fn action_preflight_commit',
 ];
 
@@ -145,6 +144,15 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) struct SharedMemorySummary',
   'pub(super) fn read_shared_memory_ledger',
   'pub(super) fn read_completion_task_id',
+  'pub(super) struct PorcelainEntry',
+  'pub(super) fn parse_porcelain_status',
+  'pub(super) fn collect_all_claim_scopes',
+  'pub(super) fn collect_specific_claim_scope',
+  'pub(super) fn pattern_matches_path',
+  'pub(super) fn build_contract_scope_summary',
+  'pub(super) fn evaluate_task_contract_for_preflight',
+  'pub(super) fn build_preflight_summary',
+  'pub(super) fn run_git_status',
 ];
 
 const MCP_NEEDLES = [
@@ -429,7 +437,6 @@ async fn action_release() {}
 fn enforce_scoped_commit_completion() {}
 fn enforce_task_contract_completion() {}
 fn enforce_verified_completion() {}
-fn build_preflight_summary() {}
 async fn action_preflight_commit() {}
 `;
 }
@@ -497,6 +504,15 @@ pub(super) fn auto_run_task_run_verifier() {}
 pub(super) struct SharedMemorySummary {}
 pub(super) fn read_shared_memory_ledger() {}
 pub(super) fn read_completion_task_id() {}
+pub(super) struct PorcelainEntry {}
+pub(super) fn parse_porcelain_status() {}
+pub(super) fn collect_all_claim_scopes() {}
+pub(super) fn collect_specific_claim_scope() {}
+pub(super) fn pattern_matches_path() {}
+pub(super) fn build_contract_scope_summary() {}
+pub(super) fn evaluate_task_contract_for_preflight() {}
+pub(super) fn build_preflight_summary() {}
+pub(super) fn run_git_status() {}
 `;
 }
 
