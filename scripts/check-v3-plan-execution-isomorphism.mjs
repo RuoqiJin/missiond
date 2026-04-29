@@ -18,6 +18,7 @@ Checks the V3 plan.lisp execution isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   planHandler: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
+  planTests: 'crates/missiond-daemon/src/handlers/knowledge/plan/tests.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planFieldInference: 'crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
@@ -106,6 +107,7 @@ function checkFiles(root, files) {
     'plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress',
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
+    'plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade',
     'execute can derive target_source=plan_hint from plan.sexp_text',
     'DAG execution parses node-local Lisp hints',
     'node scripts/check-v3-plan-execution-isomorphism.mjs',
@@ -118,6 +120,16 @@ function checkFiles(root, files) {
     'use execution_runtime::action_execute',
     'mod internal_dispatch',
     'pub(super) use internal_dispatch::{build_internal_dispatch_args, tool_result_payload}',
+    '#[cfg(test)]',
+    'mod tests;',
+  ]);
+
+  requireAll(diagnostics, files.planTests, sources.planTests, [
+    'use super::*;',
+    'fn sha256_hex_is_64_chars',
+    'fn require_str_rejects_empty',
+    'fn dry_run_plan_sexp_carries_executable_target_hints',
+    'fn build_internal_args_for_mission_execution_uses_plan_hints',
   ]);
 
   requireAll(diagnostics, files.planExecutionRuntime, sources.planExecutionRuntime, [
@@ -343,6 +355,7 @@ function buildFixture() {
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs"
@@ -352,7 +365,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -362,6 +375,16 @@ mod execution_runtime;
 use execution_runtime::action_execute;
 mod internal_dispatch;
 pub(super) use internal_dispatch::{build_internal_dispatch_args, tool_result_payload};
+#[cfg(test)]
+mod tests;
+`);
+  writeFixture(root, DEFAULT_FILES.planTests, `
+use super::*;
+
+fn sha256_hex_is_64_chars() {}
+fn require_str_rejects_empty() {}
+fn dry_run_plan_sexp_carries_executable_target_hints() {}
+fn build_internal_args_for_mission_execution_uses_plan_hints() {}
 `);
   writeFixture(root, DEFAULT_FILES.planExecutionRuntime, `
 pub(super) async fn action_execute() {}
