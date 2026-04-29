@@ -70,8 +70,6 @@ const DAEMON_NEEDLES = [
   'const COMPANION_DIR: &str = ".missiond/v2"',
   'fn read_log_file',
   'fn write_log_file',
-  'enum TraceKind',
-  'fn append_session_trace_event',
   'mod log_surface',
   'mod claim_lease',
   'mod completion_audit',
@@ -98,6 +96,13 @@ const LOG_SURFACE_NEEDLES = [
   'pub(super) fn build_opened_event',
   'pub(super) struct DispatchMeta',
   'pub(super) fn read_dispatch_metadata_from_log',
+  'pub(super) enum TraceKind',
+  'pub(super) struct TraceEvent',
+  'pub(super) enum TraceWarning',
+  'pub(super) fn append_session_trace_event',
+  'pub(super) fn resolve_session_trace_path',
+  'pub(super) fn resolve_trace_task_id',
+  'pub(super) fn sanitize_trace_backend',
 ];
 
 const CLAIM_LEASE_NEEDLES = [
@@ -395,8 +400,6 @@ pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
 fn read_log_file() {}
 fn write_log_file() {}
-enum TraceKind {}
-fn append_session_trace_event() {}
 fn parse_claims() {}
 async fn action_claim() {}
 async fn action_heartbeat() {}
@@ -418,6 +421,13 @@ pub(super) async fn emit_execution_event() {}
 pub(super) fn build_opened_event() {}
 pub(super) struct DispatchMeta {}
 pub(super) fn read_dispatch_metadata_from_log() {}
+pub(super) enum TraceKind {}
+pub(super) struct TraceEvent {}
+pub(super) enum TraceWarning {}
+pub(super) fn append_session_trace_event() {}
+pub(super) fn resolve_session_trace_path() {}
+pub(super) fn resolve_trace_task_id() {}
+pub(super) fn sanitize_trace_backend() {}
 `;
 }
 
