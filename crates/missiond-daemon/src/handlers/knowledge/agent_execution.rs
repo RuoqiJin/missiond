@@ -42,6 +42,7 @@ mod preflight;
 mod preflight_scope;
 mod session_trace;
 mod task_verifier;
+mod task_verifier_inputs;
 
 #[cfg(test)]
 use self::claim_lease::parse_claims;
@@ -90,9 +91,10 @@ use self::session_trace::{
     TraceWarning,
 };
 #[cfg(test)]
-use self::task_verifier::{
-    auto_run_task_run_verifier, enforce_verified_completion, read_report_summary,
-    read_shared_memory_ledger, read_task_contract_id,
+use self::task_verifier::{auto_run_task_run_verifier, enforce_verified_completion};
+#[cfg(test)]
+use self::task_verifier_inputs::{
+    read_report_summary, read_shared_memory_ledger, read_task_contract_id,
 };
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
