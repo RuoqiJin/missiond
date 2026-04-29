@@ -76,6 +76,17 @@ fn idle_watchdog_threshold_secs(timeout_secs: Option<i64>) -> i64 {
     derive_pty_timeout_secs(timeout_secs).saturating_add(WATCHDOG_GRACE_SECS)
 }
 
+/// Lease horizon Autopilot writes onto a freshly-claimed BoardTask, in
+/// seconds from now. Equals `idle_watchdog_threshold_secs(timeout_secs)` so
+/// that the smart-watchdog reclaim threshold and the claim lease move
+/// together when `BoardTask.timeout_secs` changes. The lease therefore covers
+/// the full pty.send budget plus `WATCHDOG_GRACE_SECS`, never the legacy
+/// fixed 20-minute window. Pure helper so unit tests can pin the policy
+/// without an `AppState`.
+fn derive_board_task_lease_secs(timeout_secs: Option<i64>) -> i64 {
+    idle_watchdog_threshold_secs(timeout_secs)
+}
+
 /// Build the base prompt body shown to a delegated worker.
 ///
 /// `mission_task_delegate` stores the user objective as `BoardTask.title` and
@@ -724,8 +735,13 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         {
             Ok(Some(_)) => {
                 dispatched_slots.insert(slot_id.clone());
-                // Set lease: normal autopilot tasks get 20 minutes
-                let lease = (chrono::Utc::now() + chrono::TimeDelta::minutes(20)).to_rfc3339();
+                // Set lease: project from BoardTask.timeout_secs so the
+                // claim lease, pty.send budget, and smart-watchdog reclaim
+                // threshold all move together. See
+                // derive_board_task_lease_secs for the policy.
+                let lease_secs = derive_board_task_lease_secs(task.timeout_secs);
+                let lease =
+                    (chrono::Utc::now() + chrono::TimeDelta::seconds(lease_secs)).to_rfc3339();
                 let _ = state
                     .store
                     .set_board_task_lease(task.id.as_str(), &lease)
@@ -2065,6 +2081,94 @@ mod tests {
         assert!(3300 < threshold);
         // Past the budget+grace — reclaim allowed.
         assert!(threshold + 1 > threshold);
+    }
+
+    // ── BoardTask claim lease — pure helper, no AppState ────────────────
+
+    #[test]
+    fn board_task_lease_default_when_field_absent() {
+        // Default budget + grace = lease, mirroring the watchdog threshold
+        // so the watchdog never reclaims while the lease is still valid.
+        assert_eq!(
+            derive_board_task_lease_secs(None),
+            PTY_TIMEOUT_DEFAULT_SECS + WATCHDOG_GRACE_SECS
+        );
+    }
+
+    #[test]
+    fn board_task_lease_default_for_invalid_values() {
+        // Zero / negative timeouts fall back to the default budget; lease
+        // therefore matches the default watchdog threshold.
+        let expected = PTY_TIMEOUT_DEFAULT_SECS + WATCHDOG_GRACE_SECS;
+        assert_eq!(derive_board_task_lease_secs(Some(0)), expected);
+        assert_eq!(derive_board_task_lease_secs(Some(-300)), expected);
+    }
+
+    #[test]
+    fn board_task_lease_explicit_3300_is_3420() {
+        // Wave31 / wave50 case: a 55-minute Opus task gets a 3300s pty
+        // budget and a 3420s lease (3300 + 120s grace). The legacy fixed
+        // 20-minute lease would have been 1200s — too short.
+        assert_eq!(derive_board_task_lease_secs(Some(3300)), 3420);
+    }
+
+    #[test]
+    fn board_task_lease_clamps_high_values() {
+        // PTY budget caps at PTY_TIMEOUT_MAX_SECS, so the lease caps at
+        // PTY_TIMEOUT_MAX_SECS + WATCHDOG_GRACE_SECS.
+        assert_eq!(
+            derive_board_task_lease_secs(Some(86_400)),
+            PTY_TIMEOUT_MAX_SECS + WATCHDOG_GRACE_SECS
+        );
+    }
+
+    #[test]
+    fn board_task_lease_clamps_low_values() {
+        // Sub-floor timeouts round up to PTY_TIMEOUT_MIN_SECS, so the lease
+        // is PTY_TIMEOUT_MIN_SECS + WATCHDOG_GRACE_SECS = 180s.
+        assert_eq!(
+            derive_board_task_lease_secs(Some(5)),
+            PTY_TIMEOUT_MIN_SECS + WATCHDOG_GRACE_SECS
+        );
+    }
+
+    #[test]
+    fn board_task_lease_matches_idle_watchdog_threshold() {
+        // Single source of truth: the lease MUST equal the smart-watchdog
+        // idle-recovery threshold for every supported timeout shape, so
+        // the watchdog cannot reclaim a slot whose lease is still valid.
+        for t in [
+            None,
+            Some(0),
+            Some(-1),
+            Some(60),
+            Some(900),
+            Some(1800),
+            Some(3300),
+            Some(7200),
+            Some(86_400),
+        ] {
+            assert_eq!(
+                derive_board_task_lease_secs(t),
+                idle_watchdog_threshold_secs(t),
+                "lease must equal watchdog threshold for {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn dispatch_no_longer_uses_fixed_20_minute_lease() {
+        // Regression guard: the legacy fixed-20-minute literal must never
+        // re-emerge in this source file. The needle is composed at runtime
+        // so the guard cannot trip on its own assertion text. Any future
+        // refactor that re-introduces the literal will fail this test
+        // before it ships; use derive_board_task_lease_secs instead.
+        let src = include_str!("./autopilot.rs");
+        let banned = format!("Time{}::minutes(20)", "Delta");
+        assert!(
+            !src.contains(&banned),
+            "autopilot.rs must not reintroduce the fixed 20-minute lease; use derive_board_task_lease_secs"
+        );
     }
 
     #[test]

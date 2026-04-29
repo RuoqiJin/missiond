@@ -97,6 +97,7 @@ function checkFiles(root, files) {
     'MISSION_IPC_ENDPOINT',
     'Autopilot pty.send budget MUST project from BoardTask.timeout_secs',
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
+    'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
     'The per-slot dispatch guard MUST be held across the entire state.pty.send call',
     'Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins',
@@ -169,6 +170,7 @@ function checkFiles(root, files) {
     'const WATCHDOG_GRACE_SECS: i64 = 120',
     'fn derive_pty_timeout_secs',
     'fn idle_watchdog_threshold_secs',
+    'fn derive_board_task_lease_secs',
     'fn build_base_prompt',
     'fn append_board_task_id_suffix',
     'fn decide_close_action',
@@ -228,6 +230,7 @@ function buildFixture() {
        "MISSION_IPC_ENDPOINT"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"
+       "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold"
        "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
        "BoardStore::clear_board_task_assignee"])
     (execution-ownership delegated-boardtask
@@ -284,6 +287,7 @@ const PTY_TIMEOUT_MAX_SECS: i64 = 7200;
 const WATCHDOG_GRACE_SECS: i64 = 120;
 fn derive_pty_timeout_secs() {}
 fn idle_watchdog_threshold_secs() {}
+fn derive_board_task_lease_secs() {}
 fn build_base_prompt() {}
 fn append_board_task_id_suffix() {}
 fn decide_close_action() {}
