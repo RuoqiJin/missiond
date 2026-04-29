@@ -15,6 +15,8 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
     task contract verification, auto-verifier, repair, and audit
   - agent_execution/preflight.rs: read-only pre-commit git/status and task-contract
     scope projection used by the completion-audit surface
+  - agent_execution/task_verifier.rs: read-only report-contract/shared-memory
+    verifier projection used by the completion-audit surface
 `;
 
 const DEFAULT_FILES = {
@@ -26,6 +28,8 @@ const DEFAULT_FILES = {
   completionAudit:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
   preflight: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
+  taskVerifier:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
 };
 
@@ -42,7 +46,7 @@ const SURFACES = [
   },
   {
     name: 'mission_execution-completion-audit',
-    noteNeedles: ['VALID_COMMIT_STATUSES', 'enforce_scoped_commit_completion', 'auto_run_task_run_verifier', 'agent_execution/preflight.rs'],
+    noteNeedles: ['VALID_COMMIT_STATUSES', 'enforce_scoped_commit_completion', 'agent_execution/task_verifier.rs', 'agent_execution/preflight.rs'],
   },
 ];
 
@@ -54,6 +58,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
   'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
   AGGREGATE_COMMAND,
 ];
@@ -77,12 +82,14 @@ const DAEMON_NEEDLES = [
   'mod claim_lease',
   'mod completion_audit',
   'mod preflight',
+  'mod task_verifier',
   '#[cfg(test)]',
   'mod tests;',
   'use self::log_surface::{',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
   'use self::preflight::action_preflight_commit',
+  'use self::task_verifier',
 ];
 
 const TESTS_NEEDLES = [
@@ -170,8 +177,14 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) fn audit_scoped_commit_handoff',
   'pub(super) fn enforce_scoped_commit_completion',
   'pub(super) fn enforce_task_contract_completion',
-  'pub(super) fn enforce_verified_completion',
   'pub(super) fn parse_string_list',
+  'pub(super) async fn action_complete',
+  'pub(super) async fn action_audit',
+  'pub(super) async fn action_repair',
+  'fn rebuild_derived_indexes',
+];
+
+const TASK_VERIFIER_NEEDLES = [
   'pub(super) struct ReportSummary',
   'pub(super) fn read_report_summary',
   'pub(super) fn read_task_contract_id',
@@ -179,10 +192,9 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) struct SharedMemorySummary',
   'pub(super) fn read_shared_memory_ledger',
   'pub(super) fn read_completion_task_id',
-  'pub(super) async fn action_complete',
-  'pub(super) async fn action_audit',
-  'pub(super) async fn action_repair',
-  'fn rebuild_derived_indexes',
+  'pub(super) fn enforce_verified_completion',
+  'TASK_REPORT_COMMIT_HASH_MISMATCH',
+  'SHARED_MEMORY_NO_COMPLETION_FOR_TASK',
 ];
 
 const PREFLIGHT_NEEDLES = [
@@ -288,6 +300,7 @@ function checkFiles(root, files) {
     COMPLETION_AUDIT_NEEDLES,
   );
   requireAll(diagnostics, files.preflight, sources.preflight, PREFLIGHT_NEEDLES);
+  requireAll(diagnostics, files.taskVerifier, sources.taskVerifier, TASK_VERIFIER_NEEDLES);
   requireAll(diagnostics, files.mcp, sources.mcp, MCP_NEEDLES);
   return diagnostics;
 }
@@ -325,6 +338,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
     [DEFAULT_FILES.completionAudit]: buildGoodCompletionAudit(),
     [DEFAULT_FILES.preflight]: buildGoodPreflight(),
+    [DEFAULT_FILES.taskVerifier]: buildGoodTaskVerifier(),
     [DEFAULT_FILES.mcp]: buildGoodMcp(),
   };
   const cases = [
@@ -451,8 +465,9 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-      :note "VALID_COMMIT_STATUSES, verifier status enums, enforce_scoped_commit_completion, enforce_task_contract_completion, auto_run_task_run_verifier, repair, and audit form the completion durability gate; agent_execution/preflight.rs owns preflight_commit/build_preflight_summary before a writer commits."))
+      :note "VALID_COMMIT_STATUSES, verifier status enums, enforce_scoped_commit_completion, enforce_task_contract_completion, repair, and audit form the completion durability gate; agent_execution/task_verifier.rs owns auto_run_task_run_verifier and report/shared-memory proof; agent_execution/preflight.rs owns preflight_commit/build_preflight_summary before a writer commits."))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
 }
@@ -479,6 +494,7 @@ mod log_surface;
 mod claim_lease;
 mod completion_audit;
 mod preflight;
+mod task_verifier;
 #[cfg(test)]
 mod tests;
 use self::log_surface::{
@@ -488,6 +504,7 @@ use self::log_surface::{
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
 use self::preflight::action_preflight_commit;
+use self::task_verifier::{};
 `;
 }
 
@@ -579,15 +596,7 @@ pub(super) fn check_id_monotonic() {}
 pub(super) fn audit_scoped_commit_handoff() {}
 pub(super) fn enforce_scoped_commit_completion() {}
 pub(super) fn enforce_task_contract_completion() {}
-pub(super) fn enforce_verified_completion() {}
 pub(super) fn parse_string_list() {}
-pub(super) struct ReportSummary {}
-pub(super) fn read_report_summary() {}
-pub(super) fn read_task_contract_id() {}
-pub(super) fn auto_run_task_run_verifier() {}
-pub(super) struct SharedMemorySummary {}
-pub(super) fn read_shared_memory_ledger() {}
-pub(super) fn read_completion_task_id() {}
 pub(super) async fn action_complete() {}
 pub(super) async fn action_audit() {}
 pub(super) async fn action_repair() {}
@@ -608,6 +617,21 @@ pub(super) fn run_git_status() {}
 pub(super) async fn action_preflight_commit() {}
 std::process::Command::new("git").args(["status", "--porcelain=v1"]);
 resolve_session_trace_path();
+`;
+}
+
+function buildGoodTaskVerifier() {
+  return `pub(super) struct ReportSummary {}
+pub(super) fn read_report_summary() {}
+pub(super) fn read_task_contract_id() {}
+pub(super) fn auto_run_task_run_verifier() {
+  "TASK_REPORT_COMMIT_HASH_MISMATCH";
+  "SHARED_MEMORY_NO_COMPLETION_FOR_TASK";
+}
+pub(super) struct SharedMemorySummary {}
+pub(super) fn read_shared_memory_ledger() {}
+pub(super) fn read_completion_task_id() {}
+pub(super) fn enforce_verified_completion() {}
 `;
 }
 

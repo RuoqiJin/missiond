@@ -9,7 +9,8 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 use super::claim_lease::{parse_claims, parse_iso};
-use super::completion_audit::{parse_completions, read_task_contract_id, summarize_durability};
+use super::completion_audit::{parse_completions, summarize_durability};
+use super::task_verifier::read_task_contract_id;
 
 pub(super) const COMPANION_DIR: &str = ".missiond/v2";
 
