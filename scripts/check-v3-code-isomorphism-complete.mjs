@@ -13,9 +13,9 @@
 // The aggregate covers exactly these implementation surfaces unless the
 // blueprint explicitly changes the V3 surface set:
 //   mission_request, unified-entry-runtime, file-artifacts,
-//   mission_directive, mission_plan, mission_workflow, review-gate,
-//   task-runner-cli, source-hygiene, context-pack, workstation-config,
-//   workstation-dispatch, mission_board, ops-infra.
+//   mission_directive, mission_plan, evidence-collector, mission_workflow,
+//   review-gate, task-runner-cli, source-hygiene, context-pack,
+//   workstation-config, workstation-dispatch, mission_board, ops-infra.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -38,6 +38,7 @@ export const EXPECTED_SURFACES = [
   'file-artifacts',
   'mission_directive',
   'mission_plan',
+  'evidence-collector',
   'mission_workflow',
   'review-gate',
   'task-runner-cli',
@@ -55,6 +56,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-file-artifacts-isomorphism.mjs',
   'scripts/check-v3-intent-alignment-isomorphism.mjs',
   'scripts/check-v3-plan-execution-isomorphism.mjs',
+  'scripts/check-v3-evidence-collector-isomorphism.mjs',
   'scripts/check-v3-workflow-isomorphism.mjs',
   'scripts/check-v3-review-gate-isomorphism.mjs',
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
@@ -401,6 +403,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface evidence-collector
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface mission_workflow
       :status "code-aligned"
       :code ["a"]
@@ -440,7 +446,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all fourteen surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all fifteen surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -481,6 +487,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface mission_plan
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface evidence-collector
       :status "code-aligned"
       :code ["a"]
       :note "n")

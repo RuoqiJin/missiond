@@ -556,6 +556,14 @@
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
       :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold with :target, :objective, and :nodes; execute can derive target_source=plan_hint from plan.sexp_text instead of caller escape parameters. DAG execution parses node-local Lisp hints (:target, :objective, :timeout-ms, :target-project, :requested-cwd, :acceptance-commands, :workstation-dispatch) and forwards them into the same internal dispatch path. unified_entry owns only routing/argument forwarding: s4 compile forwards target/objective/project hints into mission_plan, and s6 execute forwards approved_plan_id + execute=true knobs without inventing a second plan schema.")
 
+    (surface evidence-collector
+      :status "code-aligned"
+      :implements [verification-receipt]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
+             "scripts/check-v3-evidence-collector-isomorphism.mjs"]
+      :note "EVIDENCE_SCHEMA_VERSION pins the evidence wire shape for verification-receipt consumers. EventRefStatus is the closed status enum live | log | unavailable describing whether an event ref is live from publish, recovered from the event log, or unavailable. EventRefProvenance is the closed provenance enum live | passive_cache | event_log_query | unavailable so consumers can distinguish immediate publish results, the bounded in-memory passive cache, and the bounded event_log_query recovery path. EVENT_REF_CACHE_CAP = 1024 fixes the passive cache capacity. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, keeping plan.rs compatibility while making the receipt payload Lisp-addressable.")
+
     (surface mission_workflow
       :status "code-aligned"
       :implements [workflow workflow-distiller]
@@ -663,6 +671,7 @@
              "node scripts/check-v3-file-artifacts-isomorphism.mjs"
              "node scripts/check-v3-intent-alignment-isomorphism.mjs"
              "node scripts/check-v3-plan-execution-isomorphism.mjs"
+             "node scripts/check-v3-evidence-collector-isomorphism.mjs"
              "node scripts/check-v3-workflow-isomorphism.mjs"
              "node scripts/check-v3-review-gate-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"

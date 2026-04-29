@@ -23,6 +23,8 @@ Checks the V3 evidence-collector Lisp/code isomorphism contract:
     point, append_entry_to_project_root, wrap_legacy_record_evidence,
     EVENT_REF_CACHE_CAP = 1024, the log-query miss / error reason constants,
     and the EventRefResolver struct that owns resolver tier composition.
+  - plan.rs routes evidence writes through the sibling evidence_collector module
+    instead of hand-rolling sidecar JSON.
 `;
 
 const DEFAULT_FILES = {
@@ -129,7 +131,9 @@ const EVIDENCE_COLLECTOR_RS_NEEDLES = [
 ];
 
 const PLAN_RS_NEEDLES = [
-  'use crate::handlers::knowledge::evidence_collector',
+  'super::evidence_collector::EvidenceEntry::new',
+  'super::evidence_collector::append(',
+  'super::evidence_collector::wrap_legacy_record_evidence',
 ];
 
 function checkFiles(root, files) {
@@ -276,11 +280,11 @@ function runFixtures(json) {
 
   const planBypass = { ...goodFiles };
   planBypass[DEFAULT_FILES.plan] = goodFiles[DEFAULT_FILES.plan].replace(
-    'use crate::handlers::knowledge::evidence_collector',
-    'use crate::handlers::knowledge::evidence_GHOST',
+    'super::evidence_collector::EvidenceEntry::new',
+    'hand_rolled_json::EvidenceEntry::new',
   );
   cases.push({
-    name: 'fail: plan.rs stops importing evidence_collector',
+    name: 'fail: plan.rs stops routing writes through evidence_collector',
     expectOk: false,
     expectMessage: /evidence_collector/,
     files: planBypass,
@@ -399,10 +403,16 @@ pub(crate) struct EventRefResolver {}
 
 function buildGoodPlan() {
   return `// fixture
-use crate::handlers::knowledge::evidence_collector::{EventRef, EvidenceEntry};
+fn dispatch_caller() {
+    let entry = super::evidence_collector::EvidenceEntry::new(
+        super::evidence_collector::source::PLAN_RUNNER_DISPATCH,
+        super::evidence_collector::kind::DISPATCH,
+    );
+    let _ = super::evidence_collector::append(entry);
+}
 
-fn caller() {
-    let _ = (EventRef {}, EvidenceEntry {});
+fn manual_caller() {
+    let _ = super::evidence_collector::wrap_legacy_record_evidence();
 }
 `;
 }
