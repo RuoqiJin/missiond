@@ -21,6 +21,7 @@ const DEFAULT_FILES = {
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planFieldInference: 'crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
+  planInternalDispatch: 'crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs',
   planExecuteHints: 'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
   planTaskContract: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs',
   planDistillChain: 'crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs',
@@ -97,6 +98,7 @@ function checkFiles(root, files) {
     'plan/compile_authoring.rs owns mission_plan plan-authoring entry/core',
     'plan/field_inference.rs owns mission_plan execute preflight field inference/core',
     'plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration',
+    'plan/internal_dispatch.rs owns mission_plan inner target argument projection',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
     'plan/task_contract.rs owns mission_plan task-contract Lisp projection',
     'plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress',
@@ -114,6 +116,8 @@ function checkFiles(root, files) {
     'use compile_authoring::{action_compile, collect_string_list}',
     'mod execution_runtime',
     'use execution_runtime::action_execute',
+    'mod internal_dispatch',
+    'pub(super) use internal_dispatch::{build_internal_dispatch_args, tool_result_payload}',
   ]);
 
   requireAll(diagnostics, files.planExecutionRuntime, sources.planExecutionRuntime, [
@@ -129,6 +133,19 @@ function checkFiles(root, files) {
     'pub(super) async fn compute_workstation_proposal_bundle',
     'pub(super) async fn compute_workstation_auto_spawn_gate',
     'pub(super) fn attach_inference_block',
+  ]);
+
+  requireAll(diagnostics, files.planInternalDispatch, sources.planInternalDispatch, [
+    'pub(in crate::handlers::knowledge) fn build_internal_dispatch_args',
+    '"mission_execution"',
+    '"mission_task_delegate"',
+    '"mission_flow_run"',
+    'DERIVED_OBJECTIVE_MAX',
+    'VALID_DELEGATE_INTENTS',
+    'AGENT_TEAM_OBJECTIVE_HINT',
+    'pub(super) fn derive_objective_from_plan',
+    'pub(super) fn truncate_chars',
+    'pub(in crate::handlers::knowledge) fn tool_result_payload',
   ]);
 
   requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, [
@@ -328,13 +345,14 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/distill_chain.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -342,6 +360,8 @@ mod compile_authoring;
 use compile_authoring::{action_compile, collect_string_list};
 mod execution_runtime;
 use execution_runtime::action_execute;
+mod internal_dispatch;
+pub(super) use internal_dispatch::{build_internal_dispatch_args, tool_result_payload};
 `);
   writeFixture(root, DEFAULT_FILES.planExecutionRuntime, `
 pub(super) async fn action_execute() {}
@@ -356,6 +376,19 @@ super::super::workstation_dispatch::run_workstation_dispatch_with_contract_and_t
 pub(super) async fn compute_workstation_proposal_bundle() {}
 pub(super) async fn compute_workstation_auto_spawn_gate() {}
 pub(super) fn attach_inference_block() {}
+`);
+  writeFixture(root, DEFAULT_FILES.planInternalDispatch, `
+pub(in crate::handlers::knowledge) fn build_internal_dispatch_args() {
+  "mission_execution";
+  "mission_task_delegate";
+  "mission_flow_run";
+  DERIVED_OBJECTIVE_MAX;
+  VALID_DELEGATE_INTENTS;
+  AGENT_TEAM_OBJECTIVE_HINT;
+}
+pub(super) fn derive_objective_from_plan() {}
+pub(super) fn truncate_chars() {}
+pub(in crate::handlers::knowledge) fn tool_result_payload() {}
 `);
   writeFixture(root, DEFAULT_FILES.planCompileAuthoring, `
 pub(super) async fn action_compile() {}
