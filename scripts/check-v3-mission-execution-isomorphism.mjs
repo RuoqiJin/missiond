@@ -73,7 +73,6 @@ const DAEMON_NEEDLES = [
   'use self::log_surface::{',
   'pub(super) use self::claim_lease::scopes_overlap_pure',
   'use self::completion_audit',
-  'async fn action_preflight_commit',
 ];
 
 const LOG_SURFACE_NEEDLES = [
@@ -138,6 +137,8 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) fn normalize_commit_status',
   'pub(super) fn normalize_verifier_status',
   'pub(super) fn normalize_task_run_verifier_status',
+  'pub(super) fn collect_string_list',
+  'pub(super) fn render_string_list',
   'pub(super) struct CompletionRecord',
   'pub(super) fn parse_completions',
   'pub(super) fn summarize_durability',
@@ -163,6 +164,7 @@ const COMPLETION_AUDIT_NEEDLES = [
   'pub(super) fn evaluate_task_contract_for_preflight',
   'pub(super) fn build_preflight_summary',
   'pub(super) fn run_git_status',
+  'pub(super) async fn action_preflight_commit',
   'pub(super) async fn action_audit',
   'pub(super) async fn action_repair',
   'fn rebuild_derived_indexes',
@@ -443,7 +445,6 @@ use self::log_surface::{
 };
 pub(super) use self::claim_lease::scopes_overlap_pure;
 use self::completion_audit::{};
-async fn action_preflight_commit() {}
 `;
 }
 
@@ -511,6 +512,8 @@ const FINDING_SCOPED_COMMIT_VIOLATION: &str = "scoped-commit-violation";
 pub(super) fn normalize_commit_status() {}
 pub(super) fn normalize_verifier_status() {}
 pub(super) fn normalize_task_run_verifier_status() {}
+pub(super) fn collect_string_list() {}
+pub(super) fn render_string_list() {}
 pub(super) struct CompletionRecord {}
 pub(super) fn parse_completions() {}
 pub(super) fn summarize_durability() {}
@@ -536,6 +539,7 @@ pub(super) fn build_contract_scope_summary() {}
 pub(super) fn evaluate_task_contract_for_preflight() {}
 pub(super) fn build_preflight_summary() {}
 pub(super) fn run_git_status() {}
+pub(super) async fn action_preflight_commit() {}
 pub(super) async fn action_audit() {}
 pub(super) async fn action_repair() {}
 fn rebuild_derived_indexes() {}
