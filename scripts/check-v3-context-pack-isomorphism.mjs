@@ -19,6 +19,7 @@ const DEFAULT_FILES = {
   checker: 'scripts/check-context-pack.mjs',
   appender: 'scripts/context-pack-append.mjs',
   compiler: 'scripts/context-pack-compile-shards.mjs',
+  materializer: 'scripts/context-pack-materialize-wave.mjs',
 };
 
 function main() {
@@ -43,7 +44,12 @@ function main() {
   const repoRoot = dryFixture ? buildFixture() : process.cwd();
   const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
   if (diagnostics.length === 0) {
-    for (const script of [DEFAULT_FILES.checker, DEFAULT_FILES.appender, DEFAULT_FILES.compiler]) {
+    for (const script of [
+      DEFAULT_FILES.checker,
+      DEFAULT_FILES.appender,
+      DEFAULT_FILES.compiler,
+      DEFAULT_FILES.materializer,
+    ]) {
       const proc = spawnSync(process.execPath, [path.join(repoRoot, script), '--dry-fixture'], {
         cwd: repoRoot,
         encoding: 'utf8',
@@ -99,13 +105,18 @@ function checkFiles(root, files) {
     'accepted-shards',
     'dispatch-groups',
     'context-pack-compile-shards',
+    'context-pack-materialize-wave',
     'two-stage',
     'code workers consume',
+    'materialize-wave',
+    'task-runner-manifest',
+    'task-contracts',
     '(surface context-pack',
     ':status "code-aligned"',
     'scripts/check-context-pack.mjs',
     'scripts/context-pack-append.mjs',
     'scripts/context-pack-compile-shards.mjs',
+    'scripts/context-pack-materialize-wave.mjs',
     'node scripts/check-v3-context-pack-isomorphism.mjs',
   ]);
 
@@ -145,6 +156,20 @@ function checkFiles(root, files) {
     'context-pack shard compile OK',
   ]);
 
+  requireAll(diagnostics, files.materializer, sources.materializer, [
+    'materializeContextPackWave',
+    'compileContextPackSource',
+    'context-pack remains the SSOT',
+    'task-runner-manifest.v2',
+    'task-contract.v1',
+    'mapped dispatch groups',
+    'model_profile',
+    'timeout_secs',
+    'context_pack_path',
+    'prepare-task-runner-wave.mjs',
+    'task-runner-dispatch.mjs',
+  ]);
+
   return diagnostics;
 }
 
@@ -168,20 +193,26 @@ function buildFixture() {
   (multi-agent-context-pack
     :write-model "multi-agent append-only"
     :entries [claim observation anchor shard-proposal conflict integration-plan]
-    :merge "two-stage: investigators append proposals; code workers consume integration-plan accepted-shards and dispatch-groups via context-pack-compile-shards")
+    :merge "two-stage: investigators append proposals; code workers consume integration-plan accepted-shards and dispatch-groups via context-pack-compile-shards then context-pack-materialize-wave"
+    :flow [compile-shards materialize-wave]
+    :egress [task-runner-manifest task-contracts])
   (implementation-map
     (surface context-pack
       :status "code-aligned"
-      :code ["scripts/check-context-pack.mjs"
-             "scripts/context-pack-append.mjs"
-             "scripts/context-pack-compile-shards.mjs"]
-      :note "fixture"))
+	      :code ["scripts/check-context-pack.mjs"
+	             "scripts/context-pack-append.mjs"
+	             "scripts/context-pack-compile-shards.mjs"
+	             "scripts/context-pack-materialize-wave.mjs"]
+	      :note "context-pack-materialize-wave materialize-wave task-runner-manifest task-contracts fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-context-pack-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.checker, fs.readFileSync(DEFAULT_FILES.checker, 'utf8'));
   writeFixture(root, DEFAULT_FILES.appender, fs.readFileSync(DEFAULT_FILES.appender, 'utf8'));
   writeFixture(root, DEFAULT_FILES.compiler, fs.readFileSync(DEFAULT_FILES.compiler, 'utf8'));
+  writeFixture(root, DEFAULT_FILES.materializer, fs.readFileSync(DEFAULT_FILES.materializer, 'utf8'));
   writeFixture(root, 'scripts/lib/missiond_lisp.mjs', fs.readFileSync('scripts/lib/missiond_lisp.mjs', 'utf8'));
+  writeFixture(root, 'scripts/check-task-contract.mjs', fs.readFileSync('scripts/check-task-contract.mjs', 'utf8'));
+  writeFixture(root, 'scripts/check-task-runner-manifest.mjs', fs.readFileSync('scripts/check-task-runner-manifest.mjs', 'utf8'));
   return root;
 }
 
