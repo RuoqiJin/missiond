@@ -67,6 +67,11 @@ import {
   isReceiptReusable,
   readVerificationReceiptFile,
   validateReceiptObject,
+  // wave37-01: optional cross-layer smoke for the request-local
+  // verification-receipt projection. Receipts remain ADVISORY ONLY; the
+  // request-local writer only adds an additive smoke fixture and never
+  // changes the default --receipts JSON shape.
+  writeRequestVerificationReceiptFile,
 } from './check-verification-receipt.mjs';
 import { checkSuppliedFiles } from './check-staged-source-hygiene.mjs';
 import { validateLifecycleEventFiles } from './check-task-lifecycle-events.mjs';
@@ -2068,6 +2073,53 @@ function runFixtures({ json }) {
       tier: 'local',
     })) {
       throw new Error('wave30-05 receipt should cover the local reuse query');
+    }
+
+    // wave37-01 cross-layer smoke: project the same smoke receipt into a
+    // request-local .missiond/requests/<request_id>/receipts/<receipt_id>.lisp
+    // file and revalidate it through the same checker. Additive only — does
+    // not change the default --receipts JSON shape (the smoke fixture still
+    // carries the legacy receipt object array via `receipts`).
+    const projectionTmp = fs.mkdtempSync(
+      path.join(process.cwd(), '.tmp-wave37-01-receipt-smoke-'),
+    );
+    try {
+      const requestId = 'req-wave99-04-lifecycle-smoke';
+      const requestReceiptsDir = path.join(
+        projectionTmp,
+        '.missiond',
+        'requests',
+        requestId,
+        'receipts',
+      );
+      const projected = writeRequestVerificationReceiptFile({
+        requestReceiptsDir,
+        requestId,
+        receipt: smokeReceipt,
+        receiptId: smokeReceipt.id,
+      });
+      if (projected.mode !== 'created') {
+        throw new Error(
+          `wave37-01 cross-layer smoke expected mode=created, got ${projected.mode}`,
+        );
+      }
+      const projectedFromDisk = readVerificationReceiptFile(projected.path);
+      if (projectedFromDisk.length !== 1 || projectedFromDisk[0].id !== smokeReceipt.id) {
+        throw new Error(
+          `wave37-01 cross-layer smoke: request-local projection did not parse back to one receipt with id=${smokeReceipt.id}`,
+        );
+      }
+      if (!isReceiptReusable(projectedFromDisk[0], {
+        commit_hash: finalCommit,
+        command: smokeCommand,
+        tier: 'local',
+      })) {
+        throw new Error(
+          'wave37-01 cross-layer smoke: request-local projection should still satisfy the conservative reuse rules',
+        );
+      }
+    } finally {
+      fs.rmSync(projectionTmp, { recursive: true, force: true });
     }
 
     const smokeManifest = {

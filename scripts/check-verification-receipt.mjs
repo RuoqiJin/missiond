@@ -986,6 +986,232 @@ function vectorToStrings(node) {
 }
 
 // --------------------------------------------------------------------------
+// Request-local verification-receipt projection (wave37-01).
+// Surface name: request-local verification-receipt projection.
+//
+// The legacy task-scoped (verification-receipt-set ...) Lisp file remains the
+// compatibility input for readVerificationReceiptFile / verify-task-runner-batch
+// --receipts. The helpers below add a deterministic single-receipt projection
+// at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp. The writer
+// validates the projected receipt object (validateReceiptObject) and the
+// rendered Lisp bytes (validateRequestVerificationReceiptSource) before any
+// rename/create, refuses path traversal in receipt_id, and is create-only by
+// default. Receipts remain ADVISORY ACCELERATION ONLY; this projection does
+// NOT widen isReceiptReusable rules and does NOT let downstream verifiers
+// skip contract / report / memory / commit checks.
+// --------------------------------------------------------------------------
+
+// request_id shape — same character class as receipt/task ids; load-bearing
+// for the request-local path under .missiond/requests/<request_id>/...
+export const REQUEST_ID_RE = /^[a-z0-9][a-z0-9._-]*$/;
+
+// Public schema constant for the request-local projection — same Lisp schema
+// as the legacy single-receipt form so verify-task-runner-batch / planners
+// read both shapes through the same parser.
+export const REQUEST_RECEIPT_SCHEMA = SCHEMA;
+
+function quoteLispString(value) {
+  if (value == null) return '""';
+  return `"${String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function renderLispStringVector(items) {
+  if (!Array.isArray(items) || items.length === 0) return '[]';
+  return `[${items.map(quoteLispString).join(' ')}]`;
+}
+
+// Render a single (verification-receipt ...) form for projection under
+// .missiond/requests/<request_id>/receipts/<receipt_id>.lisp. Throws when
+// requestId or receiptId are malformed, or when the receipt object itself
+// does not satisfy validateReceiptObject. The caller MUST then run the
+// rendered bytes through validateRequestVerificationReceiptSource (or the
+// writer below, which does so atomically).
+export function renderRequestVerificationReceipt(receipt, opts = {}) {
+  const requestId = opts.requestId;
+  if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) {
+    throw new Error(`request_id ${JSON.stringify(requestId)} must match ${REQUEST_ID_RE}`);
+  }
+  if (!receipt || typeof receipt !== 'object') {
+    throw new Error('receipt object is required for request-local projection');
+  }
+  const id = opts.receiptId ?? receipt.id;
+  if (typeof id !== 'string' || !RECEIPT_ID_RE.test(id)) {
+    throw new Error(`receipt_id ${JSON.stringify(id)} must match ${RECEIPT_ID_RE}`);
+  }
+  const objErrors = validateReceiptObject(receipt);
+  if (objErrors.length > 0) {
+    throw new Error(`invalid receipt object: ${objErrors.join('; ')}`);
+  }
+  if (typeof receipt.task_id !== 'string' || !receipt.task_id.startsWith(`${receipt.wave}-`)) {
+    throw new Error(`receipt :task_id "${receipt.task_id}" must start with :wave prefix "${receipt.wave}-"`);
+  }
+  const lines = [];
+  lines.push(`(${SINGLE_HEAD} ${id}`);
+  lines.push(`  :schema ${quoteLispString(REQUEST_RECEIPT_SCHEMA)}`);
+  lines.push(`  :version "v1"`);
+  lines.push(`  :wave ${receipt.wave}`);
+  lines.push(`  :task_id ${receipt.task_id}`);
+  lines.push(`  :commit_hash ${quoteLispString(receipt.commit_hash)}`);
+  lines.push(`  :command ${quoteLispString(receipt.command)}`);
+  lines.push(`  :exit_code ${receipt.exit_code}`);
+  lines.push(`  :tier ${receipt.tier}`);
+  if (typeof receipt.started_at === 'string' && typeof receipt.finished_at === 'string') {
+    lines.push(`  :started_at ${quoteLispString(receipt.started_at)}`);
+    lines.push(`  :finished_at ${quoteLispString(receipt.finished_at)}`);
+  }
+  if (Number.isInteger(receipt.duration_ms) && receipt.duration_ms >= 0) {
+    lines.push(`  :duration_ms ${receipt.duration_ms}`);
+  }
+  if (Array.isArray(receipt.files) && receipt.files.length > 0) {
+    lines.push(`  :files ${renderLispStringVector(receipt.files)}`);
+  }
+  if (typeof receipt.notes === 'string' && receipt.notes.trim() !== '') {
+    lines.push(`  :notes ${quoteLispString(receipt.notes)}`);
+  }
+  return `${lines.join('\n')})\n`;
+}
+
+// Validate rendered request-local verification-receipt bytes through the
+// existing structural checker. Returns an array of "line:col: message"
+// strings; empty array means OK. Used by the writer before rename/create
+// and by external callers that want to verify hand-built bytes.
+export function validateRequestVerificationReceiptSource(source, file = '<request-verification-receipt>') {
+  let forms;
+  try {
+    forms = parseLisp(source, file);
+  } catch (err) {
+    return [`${err.line ?? 1}:${err.column ?? 1}: ${err.message}`];
+  }
+  const receipts = forms.filter((f) => isList(f) && head(f) === SINGLE_HEAD);
+  if (receipts.length !== 1) {
+    return [
+      `expected exactly one (${SINGLE_HEAD} ...) form for a request-local projection, got ${receipts.length}`,
+    ];
+  }
+  const diagnostics = [];
+  validateForms(file, forms, diagnostics, new Map());
+  return diagnostics
+    .filter((d) => d.severity === 'error')
+    .map((d) => `${d.line}:${d.column}: ${d.message}`);
+}
+
+// Atomic request-local verification-receipt writer.
+//
+// Writes one (verification-receipt <receipt-id> :schema ... ...) Lisp form
+// into <requestReceiptsDir>/<receipt-id>.lisp after:
+//   1. validating request_id / receipt_id shape (REQUEST_ID_RE / RECEIPT_ID_RE),
+//   2. rejecting receipt_id with path separators, '~', '..' or '.' segments,
+//   3. resolving the target and refusing any path that escapes the resolved
+//      requestReceiptsDir (defence-in-depth against absolute / traversal),
+//   4. running validateReceiptObject(receipt) to reject malformed receipts,
+//   5. rendering the Lisp bytes,
+//   6. revalidating those bytes through validateRequestVerificationReceiptSource
+//      from the on-disk tmp file (so the on-disk projection always matches what
+//      the structural checker accepts), and
+//   7. atomically claiming the target via fs.openSync(target, 'wx').
+//
+// Default mode is "create-only": refuses to overwrite an existing file.
+// Mode "replace" performs a deterministic safe re-write — it succeeds only
+// when the on-disk bytes already equal the rendered bytes (idempotent
+// re-render); a byte-different existing file is treated as an unrelated
+// receipt and the writer throws rather than clobbering it.
+export function writeRequestVerificationReceiptFile(opts) {
+  const {
+    requestReceiptsDir,
+    requestId,
+    receipt,
+    receiptId,
+    mode = 'create-only',
+  } = opts ?? {};
+  if (typeof requestReceiptsDir !== 'string' || requestReceiptsDir.trim() === '') {
+    throw new Error('requestReceiptsDir is required to write a request-local verification receipt');
+  }
+  if (mode !== 'create-only' && mode !== 'replace') {
+    throw new Error(`unsupported writer mode ${JSON.stringify(mode)}; expected 'create-only' or 'replace'`);
+  }
+  if (typeof requestId !== 'string' || !REQUEST_ID_RE.test(requestId)) {
+    throw new Error(`request_id ${JSON.stringify(requestId)} must match ${REQUEST_ID_RE}`);
+  }
+  const id = receiptId ?? receipt?.id;
+  if (typeof id !== 'string' || !RECEIPT_ID_RE.test(id)) {
+    throw new Error(`receipt_id ${JSON.stringify(id)} must match ${RECEIPT_ID_RE}`);
+  }
+  if (id.includes('/') || id.includes('\\') || id.startsWith('~')) {
+    throw new Error(`receipt_id must not contain path separators or '~', got ${JSON.stringify(id)}`);
+  }
+  const segs = id.split(/[\\/]/);
+  if (segs.some((seg) => seg === '..' || seg === '.')) {
+    throw new Error(`receipt_id must not contain '.' or '..' path segments, got ${JSON.stringify(id)}`);
+  }
+
+  const dir = path.resolve(requestReceiptsDir);
+  const target = path.resolve(dir, `${id}.lisp`);
+  const rel = path.relative(dir, target);
+  if (
+    rel === '' ||
+    rel.startsWith('..') ||
+    rel.split(path.sep).includes('..') ||
+    path.isAbsolute(rel)
+  ) {
+    throw new Error(`resolved target ${target} escapes request receipts dir ${dir}`);
+  }
+
+  const source = renderRequestVerificationReceipt(receipt, { requestId, receiptId: id });
+
+  fs.mkdirSync(dir, { recursive: true });
+  const tmp = path.join(
+    dir,
+    `.${id}.lisp.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2, 8)}.tmp`,
+  );
+  fs.writeFileSync(tmp, source);
+  let onDisk;
+  try {
+    onDisk = fs.readFileSync(tmp, 'utf8');
+  } catch (err) {
+    fs.rmSync(tmp, { force: true });
+    throw err;
+  }
+  const diagnostics = validateRequestVerificationReceiptSource(onDisk, tmp);
+  if (diagnostics.length > 0) {
+    fs.rmSync(tmp, { force: true });
+    throw new Error(
+      `generated request-local verification receipt failed validation: ${diagnostics.join('; ')}`,
+    );
+  }
+
+  try {
+    const fd = fs.openSync(target, 'wx');
+    try {
+      fs.writeFileSync(fd, source);
+    } finally {
+      fs.closeSync(fd);
+    }
+    fs.rmSync(tmp, { force: true });
+    return { path: target, source, mode: 'created' };
+  } catch (err) {
+    if (err.code !== 'EEXIST') {
+      fs.rmSync(tmp, { force: true });
+      throw err;
+    }
+    if (mode !== 'replace') {
+      fs.rmSync(tmp, { force: true });
+      throw new Error(
+        `request-local verification receipt already exists at ${target}; refusing to overwrite (mode='create-only')`,
+      );
+    }
+    const existing = fs.readFileSync(target, 'utf8');
+    if (existing !== source) {
+      fs.rmSync(tmp, { force: true });
+      throw new Error(
+        `request-local verification receipt at ${target} differs from candidate; refusing to overwrite unrelated receipt (mode='replace' only allows byte-identical re-render)`,
+      );
+    }
+    fs.rmSync(tmp, { force: true });
+    return { path: target, source, mode: 'unchanged' };
+  }
+}
+
+// --------------------------------------------------------------------------
 // Self-contained pass/fail fixtures.
 // --------------------------------------------------------------------------
 
@@ -1435,15 +1661,199 @@ function runFixtures(json = false) {
     }
   }
 
+  // wave37-01 request-local projection writer fixture. Writes a single
+  // (verification-receipt ...) form into a temp .missiond/requests/<request_id>/
+  // receipts/<receipt_id>.lisp tree, then revalidates it through the on-disk
+  // CLI checker (validateForms over the projected file) so the request-local
+  // projection always passes the same structural rules as the legacy
+  // task-scoped (verification-receipt-set ...) input. Also exercises the
+  // create-only / replace contract and the path-traversal / malformed-id
+  // / invalid-receipt-object guards.
+  categories.add('wave37-01-request-projection-writer');
+  const writerResults = [];
+  {
+    const tmpRoot = fs.mkdtempSync(path.join(process.cwd(), '.tmp-wave37-receipt-'));
+    try {
+      const requestId = 'req-wave99-01-foo';
+      const receipt = {
+        id: 'wave99-01-foo-7777aaa-smoke',
+        wave: 'wave99',
+        task_id: 'wave99-01-foo',
+        commit_hash: '7777aaa1234',
+        command: 'node scripts/foo.mjs --dry-fixture',
+        exit_code: 0,
+        tier: 'smoke',
+        started_at: null,
+        finished_at: null,
+        duration_ms: 250,
+        files: ['scripts/foo.mjs'],
+        notes: 'wave37-01 writer fixture',
+        loc: null,
+      };
+      const requestReceiptsDir = path.join(
+        tmpRoot,
+        '.missiond',
+        'requests',
+        requestId,
+        'receipts',
+      );
+
+      const checkWriter = (name, expectOk, fn) => {
+        let ok;
+        let detail = null;
+        try {
+          fn();
+          ok = expectOk === true;
+          if (!ok) detail = 'expected throw, got success';
+        } catch (err) {
+          ok = expectOk === false;
+          if (!ok) detail = `unexpected throw: ${err.message}`;
+        }
+        writerResults.push({ name, ok });
+        if (!ok) {
+          failed += 1;
+          console.error(
+            `wave37-01 writer fixture FAILED: ${name} — ${detail ?? 'unknown'}`,
+          );
+        }
+        return ok;
+      };
+
+      // 1) Happy path: writer creates the receipt file and the on-disk bytes
+      //    pass the existing CLI checker (validateForms).
+      let firstWrite = null;
+      checkWriter('create-only writes receipt and revalidates through CLI checker', true, () => {
+        firstWrite = writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId,
+          receipt,
+          receiptId: receipt.id,
+        });
+        if (firstWrite.mode !== 'created') {
+          throw new Error(`expected mode=created, got ${firstWrite.mode}`);
+        }
+        const expectedTarget = path.join(requestReceiptsDir, `${receipt.id}.lisp`);
+        if (path.resolve(firstWrite.path) !== path.resolve(expectedTarget)) {
+          throw new Error(`expected target ${expectedTarget}, got ${firstWrite.path}`);
+        }
+        // Re-run the on-disk file through the same validator the CLI uses.
+        const forms = readLispFile(firstWrite.path);
+        const diagnostics = [];
+        const validated = validateForms(firstWrite.path, forms, diagnostics, new Map());
+        if (validated !== 1) {
+          throw new Error(`expected 1 receipt validated from on-disk file, got ${validated}`);
+        }
+        const errs = diagnostics.filter((d) => d.severity === 'error');
+        if (errs.length !== 0) {
+          throw new Error(
+            `on-disk request-local receipt failed CLI validation: ${errs
+              .map((d) => d.message)
+              .join('; ')}`,
+          );
+        }
+      });
+
+      // 2) Default mode is create-only: a second write to the same path throws.
+      checkWriter('create-only refuses to overwrite existing target', false, () => {
+        writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId,
+          receipt,
+          receiptId: receipt.id,
+        });
+      });
+
+      // 3) Replace mode with byte-identical render is an idempotent no-op.
+      checkWriter('replace mode no-ops on byte-identical re-render', true, () => {
+        const second = writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId,
+          receipt,
+          receiptId: receipt.id,
+          mode: 'replace',
+        });
+        if (second.mode !== 'unchanged') {
+          throw new Error(`expected mode=unchanged for byte-identical replace, got ${second.mode}`);
+        }
+      });
+
+      // 4) Replace mode refuses to overwrite a byte-different file.
+      checkWriter('replace mode refuses to overwrite byte-different existing receipt', false, () => {
+        const tampered = { ...receipt, command: `${receipt.command} --tampered` };
+        writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId,
+          receipt: tampered,
+          receiptId: receipt.id,
+          mode: 'replace',
+        });
+      });
+
+      // 5) Path-traversal in receipt_id is rejected before any write.
+      checkWriter('rejects receipt_id with .. traversal', false, () => {
+        writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId,
+          receipt: { ...receipt, id: '../escape' },
+          receiptId: '../escape',
+        });
+      });
+
+      // 6) Absolute receipt_id (with leading /) is rejected by the regex.
+      checkWriter('rejects absolute receipt_id', false, () => {
+        writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId,
+          receipt: { ...receipt, id: '/etc/passwd' },
+          receiptId: '/etc/passwd',
+        });
+      });
+
+      // 7) Malformed request_id is rejected.
+      checkWriter('rejects malformed request_id', false, () => {
+        writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId: '../bad-request-id',
+          receipt,
+          receiptId: receipt.id,
+        });
+      });
+
+      // 8) Invalid receipt object (validateReceiptObject errors) is rejected.
+      checkWriter('rejects invalid receipt object', false, () => {
+        writeRequestVerificationReceiptFile({
+          requestReceiptsDir,
+          requestId,
+          receipt: { ...receipt, exit_code: 'zero' },
+          receiptId: 'wave99-01-foo-bbbbcccc-smoke',
+        });
+      });
+
+      // 9) The renderer rejects a stale wave/task mismatch even when the
+      //    object passes validateReceiptObject for shape but fails the
+      //    wave-prefix invariant — defence in depth against a misrouted
+      //    receipt being written under a request directory.
+      checkWriter('renderRequestVerificationReceipt rejects stale wave/task mismatch', false, () => {
+        renderRequestVerificationReceipt(
+          { ...receipt, wave: 'wave99', task_id: 'wave28-01-pasted-here' },
+          { requestId, receiptId: 'wave99-01-foo-cccc1234-smoke' },
+        );
+      });
+    } finally {
+      fs.rmSync(tmpRoot, { recursive: true, force: true });
+    }
+  }
+
   if (json) {
     console.log(
       JSON.stringify(
         {
           ok: failed === 0,
-          fixtures: fixtures.length + reuseHelperResults.length,
+          fixtures: fixtures.length + reuseHelperResults.length + writerResults.length,
           failed,
           categories: [...categories].sort(),
           reuse_helper: reuseHelperResults,
+          request_local_writer: writerResults,
         },
         null,
         2,
@@ -1452,13 +1862,15 @@ function runFixtures(json = false) {
   }
   if (failed > 0) {
     console.error(
-      `verification-receipt fixtures FAILED — ${failed} of ${fixtures.length + reuseHelperResults.length}`,
+      `verification-receipt fixtures FAILED — ${failed} of ${
+        fixtures.length + reuseHelperResults.length + writerResults.length
+      }`,
     );
     process.exit(1);
   }
   if (!json) {
     console.log(
-      `verification-receipt fixtures OK (${fixtures.length} structural + ${reuseHelperResults.length} reuse-helper, ${categories.size} categories)`,
+      `verification-receipt fixtures OK (${fixtures.length} structural + ${reuseHelperResults.length} reuse-helper + ${writerResults.length} request-local-writer, ${categories.size} categories)`,
     );
   }
 }

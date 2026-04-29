@@ -15,6 +15,11 @@ Checks the V3 task-runner lifecycle Lisp/code isomorphism contract:
   - finalizer can project request-local final.lisp reports when request ids are supplied.
   - dispatch/submit paths pass request-local lifecycle projection args into append-event.
   - parent-hotfix and final-report projection preserve lineage fields.
+  - verification-receipt checker exposes a request-local single-receipt
+    writer/projection that validates rendered Lisp bytes through the existing
+    structural checker before atomic create-only rename, while legacy task-
+    scoped (verification-receipt-set ...) Lisp files remain compatibility
+    inputs.
   - scheduler and batch verifier consume lifecycle/finalization projections.
 `;
 
@@ -28,6 +33,7 @@ const DEFAULT_FILES = {
   nextAction: 'scripts/task-runner-next-action.mjs',
   dispatch: 'scripts/task-runner-dispatch.mjs',
   submitDispatch: 'scripts/task-runner-submit-dispatch.mjs',
+  receiptChecker: 'scripts/check-verification-receipt.mjs',
   batchVerifier: 'scripts/verify-task-runner-batch.mjs',
 };
 
@@ -100,12 +106,19 @@ function checkFiles(root, files) {
     'scripts/project-task-lifecycle-ledger.mjs',
     'scripts/task-runner-dispatch.mjs',
     'scripts/task-runner-submit-dispatch.mjs',
+    'scripts/check-verification-receipt.mjs',
     'scripts/verify-task-runner-batch.mjs',
     'task-scoped compatibility lifecycle ledger',
     '.missiond/requests/<request_id>/events/<seq>.event.lisp',
     '.missiond/requests/<request_id>/reports/final.lisp',
+    '.missiond/requests/<request_id>/receipts/<receipt_id>.lisp',
     'request-local one-event files',
     'request-local final-report',
+    'request-local verification-receipt artifact',
+    'renderRequestVerificationReceipt',
+    'validateRequestVerificationReceiptSource',
+    'writeRequestVerificationReceiptFile',
+    'legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs',
     'task-runner-dispatch and task-runner-submit-dispatch pass request-local lifecycle projection args',
     'task-runner-append-event is the only cooperative mutation helper',
     'node scripts/check-v3-task-lifecycle-isomorphism.mjs',
@@ -207,13 +220,31 @@ function checkFiles(root, files) {
     'request_event_path',
   ]);
 
+  requireAll(diagnostics, files.receiptChecker, sources.receiptChecker, [
+    "export const SCHEMA = 'missiond.verification-receipt.v1'",
+    'export const REQUEST_RECEIPT_SCHEMA',
+    'export const REQUEST_ID_RE',
+    'export function renderRequestVerificationReceipt',
+    'export function validateRequestVerificationReceiptSource',
+    'export function writeRequestVerificationReceiptFile',
+    "fs.openSync(target, 'wx')",
+    "validateRequestVerificationReceiptSource(onDisk",
+    'validateReceiptObject(receipt)',
+    "mode = 'create-only'",
+    'request-local verification-receipt projection',
+    "expected exactly one (${SINGLE_HEAD} ...) form for a request-local projection",
+    'wave37-01-request-projection-writer',
+  ]);
+
   requireAll(diagnostics, files.batchVerifier, sources.batchVerifier, [
     "from './check-task-lifecycle-events.mjs'",
     "from './task-runner-append-event.mjs'",
     "from './task-runner-parent-hotfix.mjs'",
+    "from './check-verification-receipt.mjs'",
     'validateLifecycleEventFiles',
     'appendLifecycleEvent',
     'planParentHotfixFromSource',
+    'writeRequestVerificationReceiptFile',
     'lifecycle receipt finalized-report smoke',
   ]);
 
@@ -247,8 +278,9 @@ function buildFixture() {
              "scripts/project-task-lifecycle-ledger.mjs"
              "scripts/task-runner-dispatch.mjs"
              "scripts/task-runner-submit-dispatch.mjs"
+             "scripts/check-verification-receipt.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; task-runner-dispatch and task-runner-submit-dispatch pass request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper"))
+      :note "task-scoped compatibility lifecycle ledger; request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass request-local lifecycle projection args; task-runner-append-event is the only cooperative mutation helper"))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.lifecycleChecker, `
@@ -312,13 +344,30 @@ import {} from './task-runner-next-action.mjs';
 function submitDispatch() {}
 const args = '--request-id --request-events-dir';
 const a = 'requestEventsDir request_event_path';`);
+  writeFixture(root, DEFAULT_FILES.receiptChecker, `
+export const SCHEMA = 'missiond.verification-receipt.v1';
+export const REQUEST_RECEIPT_SCHEMA = SCHEMA;
+export const REQUEST_ID_RE = /^[a-z0-9]/;
+export function renderRequestVerificationReceipt() {}
+export function validateRequestVerificationReceiptSource() {}
+export function writeRequestVerificationReceiptFile() {
+  fs.openSync(target, 'wx');
+  validateRequestVerificationReceiptSource(onDisk);
+  validateReceiptObject(receipt);
+  const mode = 'create-only';
+  const m = 'request-local verification-receipt projection';
+  const e = 'expected exactly one (\${SINGLE_HEAD} ...) form for a request-local projection';
+}
+const cat = 'wave37-01-request-projection-writer';`);
   writeFixture(root, DEFAULT_FILES.batchVerifier, `
 import {} from './check-task-lifecycle-events.mjs';
 import {} from './task-runner-append-event.mjs';
 import {} from './task-runner-parent-hotfix.mjs';
+import {} from './check-verification-receipt.mjs';
 validateLifecycleEventFiles([]);
 appendLifecycleEvent({});
 planParentHotfixFromSource('');
+writeRequestVerificationReceiptFile({});
 const smoke = 'lifecycle receipt finalized-report smoke';`);
   return root;
 }
