@@ -34,6 +34,7 @@ const DEFAULT_FILES = {
   planDagAcceptance: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/acceptance.rs',
   planDagClaimLease: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs',
   planDagRollback: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs',
+  planDagResume: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs',
   planDagTests: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs',
   unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -114,6 +115,7 @@ function checkFiles(root, files) {
     'plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade',
     'plan_dag/tests.rs does the same for the DAG scheduler regression suite',
     'plan_dag/rollback.rs owns the DAG rollback/cascade core',
+    'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
     'execute can derive target_source=plan_hint from plan.sexp_text',
     'DAG execution parses node-local Lisp hints',
     'node scripts/check-v3-plan-execution-isomorphism.mjs',
@@ -307,6 +309,10 @@ function checkFiles(root, files) {
     'use claim_lease::{',
     'mod rollback;',
     'use rollback::{',
+    'mod resume;',
+    'pub(super) use resume::action_execute_resume;',
+    'pub(super) use resume::validate_resume_request;',
+    'pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};',
     '#[cfg(test)]',
     'mod tests;',
   ]);
@@ -356,10 +362,24 @@ function checkFiles(root, files) {
     'fn truncate_rollback_brief_preview',
   ]);
 
+  requireAll(diagnostics, files.planDagResume, sources.planDagResume, [
+    'pub(in crate::handlers::knowledge) enum PlanNodeResumeError',
+    'pub(in crate::handlers::knowledge) fn validate_resume_request',
+    'pub(in crate::handlers::knowledge) async fn action_execute_resume',
+    'fn resume_error_to_tool_result',
+    'async fn emit_resume_decision_evidence',
+    'pub(crate) enum PlanNodeResumeListenerOutcome',
+    'pub(crate) async fn handle_review_resolved_plan_node_event',
+    'parse_review_question_id_struct',
+    'PlanNodeResumeInput',
+    'TaskContractDispatchCtx::off()',
+  ]);
+
   requireAll(diagnostics, files.planDagTests, sources.planDagTests, [
     'use super::*;',
     'use super::acceptance::*;',
     'use super::claim_lease::*;',
+    'use super::resume::*;',
     'use super::rollback::*;',
     'fn parse_plan_dag_extracts_explicit_node_forms',
     'fn build_validated_dag_accepts_valid_chain',
@@ -440,8 +460,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/acceptance.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -640,6 +661,11 @@ use rollback::{
     run_cascade_rollback, run_rollback, RollbackCascadeMode, RollbackEvaluation, RollbackPolicy,
     RollbackStatus,
 };
+mod resume;
+pub(super) use resume::action_execute_resume;
+#[cfg(test)]
+pub(super) use resume::validate_resume_request;
+pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};
 #[cfg(test)]
 mod tests;`);
   writeFixture(root, DEFAULT_FILES.planDagAcceptance, `
@@ -686,10 +712,25 @@ pub(super) async fn run_cascade_rollback() {}
 fn map_dispatch_outcome_to_compensation() {}
 fn truncate_rollback_brief_preview() {}
 `);
+  writeFixture(root, DEFAULT_FILES.planDagResume, `
+pub(in crate::handlers::knowledge) enum PlanNodeResumeError { MissingTopicHash }
+pub(in crate::handlers::knowledge) fn validate_resume_request() {}
+pub(in crate::handlers::knowledge) async fn action_execute_resume() {
+  parse_review_question_id_struct();
+  PlanNodeResumeInput;
+}
+fn resume_error_to_tool_result() {}
+async fn emit_resume_decision_evidence() {}
+pub(crate) enum PlanNodeResumeListenerOutcome { NotFound }
+pub(crate) async fn handle_review_resolved_plan_node_event() {
+  TaskContractDispatchCtx::off();
+}
+`);
   writeFixture(root, DEFAULT_FILES.planDagTests, `
 use super::*;
 use super::acceptance::*;
 use super::claim_lease::*;
+use super::resume::*;
 use super::rollback::*;
 fn parse_plan_dag_extracts_explicit_node_forms() {}
 fn build_validated_dag_accepts_valid_chain() {}

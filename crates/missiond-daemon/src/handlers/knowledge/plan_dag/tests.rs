@@ -1,5 +1,6 @@
 use super::acceptance::*;
 use super::claim_lease::*;
+use super::resume::*;
 use super::rollback::*;
 use super::*;
 use chrono::TimeZone;
