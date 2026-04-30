@@ -521,7 +521,7 @@ fn build_node_inner_args_for_mission_execution_emits_known_fields() {
         ..Default::default()
     };
     let plan = fixture_plan("(plan)");
-    let built = build_node_inner_args(&node, &plan);
+    let built = super::scheduler::build_node_inner_args(&node, &plan);
     let inner = built.inner_args.expect("ok");
     assert_eq!(inner["action"], "open");
     assert_eq!(inner["dispatch_strategy"], "fresh-code-alignment");
@@ -543,7 +543,7 @@ fn build_node_inner_args_for_task_delegate_uses_objective_and_cwd() {
         ..Default::default()
     };
     let plan = fixture_plan("(plan)");
-    let built = build_node_inner_args(&node, &plan);
+    let built = super::scheduler::build_node_inner_args(&node, &plan);
     let inner = built.inner_args.expect("ok");
     assert_eq!(inner["objective"], "ship a thing");
     assert_eq!(inner["cwd"], "/abs/path");
@@ -559,7 +559,7 @@ fn build_node_inner_args_for_flow_run_requires_flow_id() {
         ..Default::default()
     };
     let plan = fixture_plan("(plan)");
-    let built = build_node_inner_args(&node, &plan);
+    let built = super::scheduler::build_node_inner_args(&node, &plan);
     // Missing flow_id -> inner builder returns Err with a structured payload.
     assert!(built.inner_args.is_err());
 }

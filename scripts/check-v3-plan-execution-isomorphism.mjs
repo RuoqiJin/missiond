@@ -38,6 +38,7 @@ const DEFAULT_FILES = {
   planDagParser: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser.rs',
   planDagAcceptance: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/acceptance.rs',
   planDagClaimLease: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs',
+  planDagDispatch: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/dispatch.rs',
   planDagRollback: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs',
   planDagResume: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs',
   planDagProjection: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs',
@@ -127,6 +128,7 @@ function checkFiles(root, files) {
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade',
     'plan_dag/parser.rs owns the DAG parser/validator core',
+    'plan_dag/dispatch.rs owns the DAG node dispatch bridge',
     'plan_dag/tests.rs does the same for the DAG scheduler regression suite',
     'plan_dag/rollback.rs owns the DAG rollback/cascade core',
     'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
@@ -356,7 +358,6 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.planDag, sources.planDag, [
-    'run_workstation_dispatch',
     'mod acceptance;',
     'use acceptance::{',
     'mod claim_lease;',
@@ -374,6 +375,8 @@ function checkFiles(root, files) {
     'use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};',
     'mod scheduler;',
     'use scheduler::{',
+    'mod dispatch;',
+    'use dispatch::{dispatch_node, DispatchOutcome, TaskContractDispatchCtx};',
     'mod mode;',
     'pub(super) use mode::{detect_scheduler_mode, refuse_llm_inference_in_dag_mode};',
     'mod finalization;',
@@ -436,6 +439,21 @@ function checkFiles(root, files) {
     'pub(super) struct ClaimRegistry',
     'pub(super) fn build_planned_claims',
     'scopes_overlap_pure',
+  ]);
+
+  requireAll(diagnostics, files.planDagDispatch, sources.planDagDispatch, [
+    'pub(super) struct DispatchOutcome',
+    'pub(super) struct TaskContractDispatchCtx',
+    'pub(super) async fn dispatch_node',
+    'fn node_to_workstation_hints',
+    'fn workstation_outcome_to_dispatch_pair',
+    'workstation_dispatch::run_workstation_dispatch_with_contract',
+    'agent_execution::handle',
+    'task_delegate::handle',
+    'flow_run::handle',
+    'plan::emit_task_contract',
+    'plan::merge_task_contract_block',
+    'tool_result_payload',
   ]);
 
   requireAll(diagnostics, files.planDagRollback, sources.planDagRollback, [
@@ -625,6 +643,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/acceptance.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/dispatch.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs"
@@ -633,7 +652,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate and persisted_apply, including explicit apply approval, LLM caller approval, proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate and persisted_apply, including explicit apply approval, LLM caller approval, proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -881,9 +900,9 @@ pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeLi
 mod projection;
 use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};
 mod scheduler;
-use scheduler::{
-    build_node_inner_args, compute_concurrency_plan, parse_max_parallel_nodes, propagate_taint,
-};
+use scheduler::{compute_concurrency_plan, parse_max_parallel_nodes, propagate_taint};
+mod dispatch;
+use dispatch::{dispatch_node, DispatchOutcome, TaskContractDispatchCtx};
 mod mode;
 pub(super) use mode::{detect_scheduler_mode, refuse_llm_inference_in_dag_mode};
 mod finalization;
@@ -902,6 +921,21 @@ use lifecycle::{
 };
 #[cfg(test)]
 mod tests;`);
+  writeFixture(root, DEFAULT_FILES.planDagDispatch, `
+pub(super) struct DispatchOutcome;
+pub(super) struct TaskContractDispatchCtx;
+pub(super) async fn dispatch_node() {
+  workstation_dispatch::run_workstation_dispatch_with_contract();
+  agent_execution::handle();
+  task_delegate::handle();
+  flow_run::handle();
+  plan::emit_task_contract();
+  plan::merge_task_contract_block();
+  tool_result_payload();
+}
+fn node_to_workstation_hints() {}
+fn workstation_outcome_to_dispatch_pair() {}
+`);
   writeFixture(root, DEFAULT_FILES.planDagParser, `
 pub(super) const MAX_NODE_ATTEMPTS_CAP: u32 = 3;
 pub(super) const MAX_RETRY_DELAY_MS: u64 = 60000;
