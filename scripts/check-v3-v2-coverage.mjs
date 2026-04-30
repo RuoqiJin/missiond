@@ -35,7 +35,7 @@ Validates V3's V2 convergence and public-surface coverage:
   - (v2-convergence-map ...) exists and declares the status enum.
   - Every (v2-item ...) maps to existing V3 pillar/function/surface refs.
   - No convergence item or public tool group may use :status missing.
-  - All 18 current V3 code-aligned surfaces are covered by code-aligned or
+  - All current V3 code-aligned surfaces are covered by code-aligned or
     runtime-projected V2 items.
   - Every MCP ToolDefinition::new("mission_*", ...) under crates/missiond-mcp
     appears in exactly one public tool group.

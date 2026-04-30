@@ -7,10 +7,9 @@ import path from 'node:path';
 const usage = `Usage:
   node scripts/check-v3-memory-kb-isomorphism.mjs [--json] [--dry-fixture]
 
-Checks the V3 memory-kb convergence contract. This surface is still
-:status "designed", but the checker pins the first physical Rust split:
-kb.rs stays the facade, while kb/args.rs, kb/quality.rs, kb/compact.rs,
-and kb/conflicts.rs own the corresponding V3 function boundaries.
+Checks the V3 memory-kb convergence contract. The surface is now
+:status "code-aligned": kb.rs stays the facade while kb/* modules own
+the corresponding V3 function boundaries.
 `;
 
 const DEFAULT_FILES = {
@@ -91,7 +90,7 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     '(surface memory-kb',
-    ':status "designed"',
+    ':status "code-aligned"',
     'crates/missiond-daemon/src/handlers/knowledge/kb.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/args.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs',
@@ -386,7 +385,7 @@ function buildFixture() {
 (missiond-blueprint
   (implementation-map
     (surface memory-kb
-      :status "designed"
+      :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/args.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs"

@@ -657,12 +657,12 @@
       :surface ops-infra
       :note "Local deploy, smoke, and scoped formatting are code-aligned V3 operations.")
     (v2-item knowledge-memory-and-kb
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: memory/kb-manager"
       :v3-pillar memory
       :v3-function knowledge-memory
       :surface memory-kb
-      :note "KB, beacon, memory, insight, and intent snapshot tools are visible in V3 but still need physical/runtime Lisp alignment.")
+      :note "KB, beacon, memory, insight, and intent snapshot tools are physically split under the V3 memory-kb surface; runtime projection remains a separate future graduation step.")
     (v2-item project-registry
       :status designed
       :v2-source ".missiond/v2/intent-worker.lisp :: project-root-spawn-cwd / ProjectRegistry"
@@ -793,7 +793,7 @@
                 mission_inbox mission_sonnet_process mission_minimax_process mission_cc_query mission_cc_swarm
                 mission_worker mission_control mission_pause mission_forge_build mission_forge_lint])
       (tool-group knowledge-memory-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent.lisp :: memory/kb-manager"
         :v3-pillar memory
         :v3-function knowledge-memory
@@ -1549,7 +1549,7 @@
       :note "mission_board is the durable BoardTask coordination surface underneath delegated ClaudeCode work: MCP exposes query/create/update/delete/claim/decompose/retry/note_add with a generated schema from .missiond/intent-tools.lisp. board.rs is the thin MCP dispatch facade; board/query.rs owns list/get/search/summary/clear_done entry logic and session binding refresh on get; board/create.rs owns create plus flowTemplate initialization; board/update.rs owns single, batch, and toggle mutation paths plus done-status decision harvest; board/delete.rs owns deletion egress; board/claim.rs owns current-session executor fallback, atomic claim_board_task, and claimed event projection; board/note.rs owns note ingress and NoteAdded egress; board/decompose.rs owns decompose prompt construction, slot dispatch, and parent progress note egress; board/retry.rs owns retry/requeue semantics; board/session.rs owns record_session_task_binding; board/events.rs owns BoardEvent created/updated/status_changed projections. BoardTaskStatus is the closed persisted status vocabulary (open/running/verifying/done/blocked/failed/skipped); BoardTask carries assignee, auto_execute, depends_on, claim_executor_id, claim_executor_type, claimed_at, lease_expires_at, timeout_secs, and notes_count so Autopilot, workstation dispatch, and humans observe the same row. BoardStore is the single trait boundary for BoardTask CRUD, atomic claim_board_task, open-only clear_board_task_assignee, release_board_claims_by_executor, recover_stale_running_tasks, clear_dangling_dynamic_slot_assignees, set_board_task_lease, list_autopilot_tasks, dependency checks, retry, notes, and BoardTask-with-context queries. PgMissionStore pins the concurrency semantics: claim_board_task updates only rows with status='open' and claim_executor_id IS NULL, release only resets running rows for the executor, clear_board_task_assignee only clears the expected assignee while the task is still open, stale recovery honors lease_expires_at first and falls back to timeout_secs, clear_dangling_dynamic_slot_assignees targets only assignee LIKE 'slot-dyn-%' with no active dynamic slot, and list_autopilot_tasks orders assigned tasks first before order_idx. This surface is intentionally separate from workstation-config: workstation-config owns slot/model/prompt dispatch, mission_board owns the durable BoardTask row and claim/lease/retry/note semantics those dispatchers mutate.")
 
     (surface memory-kb
-      :status "designed"
+      :status "code-aligned"
       :implements [knowledge-memory kb-manager memory insight intent-snapshot]
       :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/args.rs"
@@ -1574,7 +1574,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "Designed V3 destination for the legacy memory/KB public tools. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress. The surface intentionally remains designed rather than code-aligned until runtime projection is Lisp-owned.")
+      :note "Code-aligned V3 destination for the legacy memory/KB public tools. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress. Runtime projection remains a later runtime-projected graduation.")
 
     (surface project-registry
       :status "designed"
