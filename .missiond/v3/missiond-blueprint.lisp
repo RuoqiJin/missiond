@@ -1132,8 +1132,9 @@
       :status "code-aligned"
       :implements [intent-alignment alignment-review-gate]
       :code ["crates/missiond-daemon/src/handlers/knowledge/directive.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs"
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"]
-      :note "dry_run emits a deterministic directive-draft Lisp artifact with utterance/source/status; sonnet output is accepted only when it is one balanced Lisp s-expression with head directive|directive-draft|intent-alignment. Persisted directive Lisp is enriched with :directive_id + :version before being surfaced as compiled_sexp(_preview) and before optional file-first writes. The compatibility file writer targets ArtifactKind::IntentAlignment at .missiond/alignment/<topic>/intent-alignment.lisp, never rolls back a committed row on file failure, and review_gate_policy only emits/records gates; it never auto-approves intent.")
+      :note "dry_run emits a deterministic directive-draft Lisp artifact with utterance/source/status; sonnet output is accepted only when it is one balanced Lisp s-expression with head directive|directive-draft|intent-alignment. Persisted directive Lisp is enriched with :directive_id + :version before being surfaced as compiled_sexp(_preview) and before optional file-first writes. The compatibility file writer targets ArtifactKind::IntentAlignment at .missiond/alignment/<topic>/intent-alignment.lisp, never rolls back a committed row on file failure, and review_gate_policy only emits/records gates; it never auto-approves intent. directive/tests.rs owns the compiler, sexp validation, file-arg, and review-resolution regression pins outside the facade.")
 
     (surface mission_plan
       :status "code-aligned"

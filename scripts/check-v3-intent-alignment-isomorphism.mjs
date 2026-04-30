@@ -18,6 +18,7 @@ Checks the V3 intent-alignment Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   directiveHandler: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
+  directiveTests: 'crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs',
   mcpDirective: 'crates/missiond-mcp/src/tools/knowledge/directive.rs',
 };
 
@@ -85,6 +86,7 @@ function checkFiles(root, files) {
     'dry_run emits a deterministic directive-draft Lisp artifact',
     'sonnet output is accepted only when it is one balanced Lisp s-expression',
     'ArtifactKind::IntentAlignment',
+    'crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs',
     'node scripts/check-v3-intent-alignment-isomorphism.mjs',
   ]);
 
@@ -110,6 +112,14 @@ function checkFiles(root, files) {
     'ArtifactKind::IntentAlignment',
     'attempt_artifact_write(',
     'apply_compile_review_gates(',
+    'mod tests;',
+  ]);
+
+  requireAll(diagnostics, files.directiveTests, sources.directiveTests, [
+    'enrich_persisted_directive_sexp_adds_ref_before_final_paren',
+    'validate_accepts_intent_alignment',
+    'extract_directive_file_args_defaults_are_inert',
+    'directive_resolution_envelope_accepts_canonical_approve',
   ]);
 
   requireAll(diagnostics, files.mcpDirective, sources.mcpDirective, [
@@ -152,6 +162,7 @@ function buildFixture() {
   (implementation-map
     (surface mission_directive
       :status "code-aligned"
+      :code ["crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs"]
       :note "dry_run emits a deterministic directive-draft Lisp artifact; sonnet output is accepted only when it is one balanced Lisp s-expression; ArtifactKind::IntentAlignment"))
   (compression-contract
     :checks ["node scripts/check-v3-intent-alignment-isomorphism.mjs"]))`);
@@ -177,7 +188,13 @@ fn enrich_persisted_directive_sexp() { ":directive_id"; ":version"; }
 fn extract_directive_file_args() {}
 ArtifactKind::IntentAlignment;
 attempt_artifact_write();
-apply_compile_review_gates();`);
+apply_compile_review_gates();
+mod tests;`);
+  writeFixture(root, DEFAULT_FILES.directiveTests, `
+fn enrich_persisted_directive_sexp_adds_ref_before_final_paren() {}
+fn validate_accepts_intent_alignment() {}
+fn extract_directive_file_args_defaults_are_inert() {}
+fn directive_resolution_envelope_accepts_canonical_approve() {}`);
   writeFixture(root, DEFAULT_FILES.mcpDirective, `
 默认 compiler_mode=\\"dry_run\\" 不调 LLM
 compiler_mode=\\"sonnet\\" 走 SonnetGateway interactive
