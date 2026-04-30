@@ -31,6 +31,8 @@ Checks the V3 evidence-collector Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   evidenceCollector: 'crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs',
+  evidenceCollectorResolver:
+    'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs',
   evidenceCollectorTests: 'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
   planEvidenceSidecar: 'crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
@@ -88,6 +90,7 @@ const BLUEPRINT_NEEDLES = [
   '(surface evidence-collector',
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
   'verification-receipt',
   'EventRefStatus',
@@ -121,18 +124,22 @@ const EVIDENCE_COLLECTOR_RS_NEEDLES = [
   'pub(crate) async fn append',
   'pub(crate) fn append_entry_to_project_root',
   'pub(crate) fn wrap_legacy_record_evidence',
+  'mod resolver;',
+  'pub(crate) use resolver::{',
+  'EventRefResolver',
+  'mod tests;',
+];
+
+const EVIDENCE_COLLECTOR_RESOLVER_RS_NEEDLES = [
   'pub(crate) const EVENT_REF_CACHE_CAP: usize = 1024',
   'pub(crate) const EVENT_REF_RESOLVER_MISS_REASON',
   'pub(crate) const EVENT_REF_LOG_QUERY_MISS_REASON',
   'pub(crate) const EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX',
   'pub(crate) const EVENT_REF_LOG_QUERY_SCAN_LIMIT',
   'pub(crate) struct EventRefResolver',
-  '"live"',
-  '"log"',
-  '"unavailable"',
-  '"passive_cache"',
-  '"event_log_query"',
-  'mod tests;',
+  'EventLogQueryable::query',
+  'EventRef::from_event_log_query',
+  'EventRef::unavailable',
 ];
 
 const EVIDENCE_COLLECTOR_TESTS_NEEDLES = [
@@ -179,6 +186,12 @@ function checkFiles(root, files) {
     files.evidenceCollector,
     sources.evidenceCollector,
     EVIDENCE_COLLECTOR_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.evidenceCollectorResolver,
+    sources.evidenceCollectorResolver,
+    EVIDENCE_COLLECTOR_RESOLVER_RS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -257,6 +270,7 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.evidenceCollector]: buildGoodEvidenceCollector(),
+    [DEFAULT_FILES.evidenceCollectorResolver]: buildGoodEvidenceCollectorResolver(),
     [DEFAULT_FILES.evidenceCollectorTests]: buildGoodEvidenceCollectorTests(),
     [DEFAULT_FILES.planExecutionRuntime]: buildGoodPlanExecutionRuntime(),
     [DEFAULT_FILES.planEvidenceSidecar]: buildGoodPlanEvidenceSidecar(),
@@ -304,7 +318,7 @@ function runFixtures(json) {
   });
 
   const wrongCacheCap = { ...goodFiles };
-  wrongCacheCap[DEFAULT_FILES.evidenceCollector] = goodFiles[DEFAULT_FILES.evidenceCollector]
+  wrongCacheCap[DEFAULT_FILES.evidenceCollectorResolver] = goodFiles[DEFAULT_FILES.evidenceCollectorResolver]
     .replace('pub(crate) const EVENT_REF_CACHE_CAP: usize = 1024', 'pub(crate) const EVENT_REF_CACHE_CAP: usize = 999');
   cases.push({
     name: 'fail: passive cache cap drifted from 1024',
@@ -385,6 +399,7 @@ function buildGoodBlueprint() {
       :status "code-aligned"
       :implements [verification-receipt]
       :code ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs"
              "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"]
@@ -430,6 +445,14 @@ pub(crate) async fn append() {}
 pub(crate) fn append_entry_to_project_root() {}
 pub(crate) fn wrap_legacy_record_evidence() {}
 
+mod resolver;
+pub(crate) use resolver::{EventRefResolver};
+mod tests;
+`;
+}
+
+function buildGoodEvidenceCollectorResolver() {
+  return `// fixture
 pub(crate) const EVENT_REF_CACHE_CAP: usize = 1024;
 pub(crate) const EVENT_REF_RESOLVER_MISS_REASON: &str = "passive_cache_miss";
 pub(crate) const EVENT_REF_LOG_QUERY_MISS_REASON: &str = "log_query_miss";
@@ -437,7 +460,11 @@ pub(crate) const EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX: &str = "log_query_erro
 pub(crate) const EVENT_REF_LOG_QUERY_SCAN_LIMIT: usize = 512;
 
 pub(crate) struct EventRefResolver {}
-mod tests;
+fn query_path() {
+    let _ = EventLogQueryable::query;
+    let _ = EventRef::from_event_log_query;
+    let _ = EventRef::unavailable;
+}
 `;
 }
 
