@@ -36,6 +36,10 @@ const DEFAULT_FILES = {
   reviewGateResolution: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   reviewGateAutoAnswer: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   reviewGateLlmApproval: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
+  reviewGateLlmProposal:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/proposal.rs',
+  reviewGateLlmApplyGate:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/apply_gate.rs',
   reviewGateTests: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs',
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   directiveCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
@@ -113,6 +117,8 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/proposal.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/apply_gate.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs',
@@ -328,8 +334,8 @@ function checkFiles(root, files) {
     ['alignment-review-gate', 'plan-review-gate', 'never auto-approve'],
   );
 
-  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}\n${sources.reviewGateAutoAnswer}\n${sources.reviewGateLlmApproval}`;
-  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution} + ${files.reviewGateAutoAnswer} + ${files.reviewGateLlmApproval}`;
+  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}\n${sources.reviewGateAutoAnswer}\n${sources.reviewGateLlmApproval}\n${sources.reviewGateLlmProposal}\n${sources.reviewGateLlmApplyGate}`;
+  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution} + ${files.reviewGateAutoAnswer} + ${files.reviewGateLlmApproval} + ${files.reviewGateLlmProposal} + ${files.reviewGateLlmApplyGate}`;
   requireAll(diagnostics, reviewGateSurfaceLabel, reviewGateSurface, REVIEW_GATE_RS_NEEDLES);
   requireAll(diagnostics, files.reviewGateCreated, sources.reviewGateCreated, [
     'pub(crate) fn derive_review_question_id',
@@ -359,12 +365,21 @@ function checkFiles(root, files) {
     'NEVER auto-reject',
   ]);
   requireAll(diagnostics, files.reviewGateLlmApproval, sources.reviewGateLlmApproval, [
+    'mod apply_gate;',
+    'mod proposal;',
+    'pub(crate) use apply_gate::{',
+    'pub(crate) use proposal::{',
+  ]);
+  requireAll(diagnostics, files.reviewGateLlmProposal, sources.reviewGateLlmProposal, [
     'pub(crate) enum LlmAutoApproveProposalMode',
     'pub(crate) fn parse_llm_auto_approve_proposal_mode',
     'pub(crate) fn parse_llm_auto_approve_proposal',
     'pub(crate) fn enforce_proposal_invariants',
     'pub(crate) fn build_llm_auto_approve_proposal_system_prompt',
     'pub(crate) fn stamp_llm_auto_approve_proposal_payload',
+    'never auto-approve',
+  ]);
+  requireAll(diagnostics, files.reviewGateLlmApplyGate, sources.reviewGateLlmApplyGate, [
     'pub(crate) enum LlmApproveApplyStatus',
     'pub(crate) fn parse_llm_approve_apply_gate_input',
     'pub(crate) fn compute_proposal_hash',
@@ -488,6 +503,8 @@ function runFixtures(json) {
     [DEFAULT_FILES.reviewGateResolution]: buildGoodReviewGateResolution(),
     [DEFAULT_FILES.reviewGateAutoAnswer]: buildGoodReviewGateAutoAnswer(),
     [DEFAULT_FILES.reviewGateLlmApproval]: buildGoodReviewGateLlmApproval(),
+    [DEFAULT_FILES.reviewGateLlmProposal]: buildGoodReviewGateLlmProposal(),
+    [DEFAULT_FILES.reviewGateLlmApplyGate]: buildGoodReviewGateLlmApplyGate(),
     [DEFAULT_FILES.reviewGateTests]: buildGoodReviewGateTests(),
     [DEFAULT_FILES.directive]: buildGoodDirectiveFacadeRs(),
     [DEFAULT_FILES.directiveCompileAuthoring]: buildGoodCallerRs(),
@@ -644,6 +661,8 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/proposal.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/apply_gate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs"
@@ -729,12 +748,28 @@ pub(crate) fn is_destructive_review_action() {}
 
 function buildGoodReviewGateLlmApproval() {
   return `// fixture
+mod apply_gate;
+mod proposal;
+pub(crate) use apply_gate::{LlmApproveApplyStatus};
+pub(crate) use proposal::{LlmAutoApproveProposalMode};
+// never auto-approve
+`;
+}
+
+function buildGoodReviewGateLlmProposal() {
+  return `// fixture
 pub(crate) enum LlmAutoApproveProposalMode { Off, SonnetSuggest }
 pub(crate) fn parse_llm_auto_approve_proposal_mode() {}
 pub(crate) fn parse_llm_auto_approve_proposal() {}
 pub(crate) fn enforce_proposal_invariants() {}
 pub(crate) fn build_llm_auto_approve_proposal_system_prompt() {}
 pub(crate) fn stamp_llm_auto_approve_proposal_payload() {}
+// never auto-approve
+`;
+}
+
+function buildGoodReviewGateLlmApplyGate() {
+  return `// fixture
 pub(crate) enum LlmApproveApplyStatus { NotRequested, Applied }
 pub(crate) fn parse_llm_approve_apply_gate_input() {}
 pub(crate) fn compute_proposal_hash() {}
