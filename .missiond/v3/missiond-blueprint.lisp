@@ -1191,10 +1191,13 @@
 	      :implements [execution-claim-lease scoped-write-gate]
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_records.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_release.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"
 	             "scripts/check-v3-mission-execution-isomorphism.mjs"]
-	      :note "mission_execution-claim-lease owns the conflict window around execution work. action_claim allocates C ids, action_heartbeat extends lease-expires-at, and action_release stamps released-at + status released from the facade; agent_execution/claim_lease.rs owns DEFAULT_LEASE_SECS = 1800, MAX_LEASE_SECS = 24 * 3600, scopes_overlap, and scopes_overlap_pure. parse_claims reads active/released claims, and scopes_overlap_pure is re-exported for the Plan DAG scheduler and scoped-commit checks so claim overlap, staged path checks, and released-claim handoff all use one rule.")
+	      :note "mission_execution-claim-lease owns the conflict window around execution work. agent_execution/claim_lease.rs owns DEFAULT_LEASE_SECS = 1800, MAX_LEASE_SECS = 24 * 3600, scopes_overlap, scopes_overlap_pure, action_claim, and compatibility re-exports. agent_execution/claim_records.rs owns ClaimRecord, parse_claims, parse_iso, and find_claim_node for active/released claim read-model projection. agent_execution/claim_heartbeat.rs owns action_heartbeat and lease-expires-at extension. agent_execution/claim_release.rs owns action_release and released-at/status projection. scopes_overlap_pure is re-exported for the Plan DAG scheduler and scoped-commit checks so claim overlap, staged path checks, and released-claim handoff all use one rule.")
 
 	    (surface mission_execution-completion-audit
 	      :status "code-aligned"

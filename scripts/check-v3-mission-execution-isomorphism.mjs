@@ -63,6 +63,12 @@ const DEFAULT_FILES = {
   sessionTrace:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
+  claimHeartbeat:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs',
+  claimRecords:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_records.rs',
+  claimRelease:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_release.rs',
   completionContractGate:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_contract_gate.rs',
   completionAudit:
@@ -112,7 +118,7 @@ const SURFACES = [
   },
   {
     name: 'mission_execution-claim-lease',
-    noteNeedles: ['DEFAULT_LEASE_SECS', 'scopes_overlap_pure', 'action_claim', 'action_heartbeat', 'action_release'],
+    noteNeedles: ['DEFAULT_LEASE_SECS', 'scopes_overlap_pure', 'action_claim', 'agent_execution/claim_records.rs', 'agent_execution/claim_heartbeat.rs', 'agent_execution/claim_release.rs'],
   },
   {
     name: 'mission_execution-completion-audit',
@@ -132,6 +138,9 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_records.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_release.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_contract_gate.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_audit.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/completion_entry.rs',
@@ -178,6 +187,9 @@ const DAEMON_NEEDLES = [
   'mod log_surface',
   'mod session_trace',
   'mod claim_lease',
+  'mod claim_heartbeat',
+  'mod claim_records',
+  'mod claim_release',
   'mod completion_contract_gate',
   'mod completion_audit',
   'mod completion_entry',
@@ -325,13 +337,34 @@ const CLAIM_LEASE_NEEDLES = [
   'pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600',
   'pub(super) fn scopes_overlap',
   'pub(in crate::handlers::knowledge) fn scopes_overlap_pure',
+  'pub(super) use super::claim_heartbeat::action_heartbeat',
+  'pub(super) use super::claim_records::{find_claim_node, parse_claims, parse_iso, ClaimRecord}',
+  'pub(super) use super::claim_release::action_release',
+  'pub(super) async fn action_claim',
+];
+
+const CLAIM_RECORDS_NEEDLES = [
   'pub(super) struct ClaimRecord',
   'pub(super) fn parse_claims',
   'pub(super) fn parse_iso',
   'pub(super) fn find_claim_node',
-  'pub(super) async fn action_claim',
+  'lease_expires_at',
+  'heartbeat_at',
+];
+
+const CLAIM_HEARTBEAT_NEEDLES = [
   'pub(super) async fn action_heartbeat',
+  'ExecutionEvent::Heartbeat',
+  'heartbeat-at',
+  'lease-expires-at',
+  'CLAIM_WRONG_OWNER',
+];
+
+const CLAIM_RELEASE_NEEDLES = [
   'pub(super) async fn action_release',
+  'ExecutionEvent::Released',
+  'released-at',
+  'CLAIM_WRONG_OWNER',
 ];
 
 const COMPLETION_AUDIT_NEEDLES = [
@@ -586,6 +619,9 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.logStatus, sources.logStatus, LOG_STATUS_NEEDLES);
   requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
+  requireAll(diagnostics, files.claimRecords, sources.claimRecords, CLAIM_RECORDS_NEEDLES);
+  requireAll(diagnostics, files.claimHeartbeat, sources.claimHeartbeat, CLAIM_HEARTBEAT_NEEDLES);
+  requireAll(diagnostics, files.claimRelease, sources.claimRelease, CLAIM_RELEASE_NEEDLES);
   requireAll(
     diagnostics,
     files.completionAudit,
@@ -716,6 +752,9 @@ function runFixtures(json) {
     [DEFAULT_FILES.logStatus]: buildGoodLogStatus(),
     [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
+    [DEFAULT_FILES.claimHeartbeat]: buildGoodClaimHeartbeat(),
+    [DEFAULT_FILES.claimRecords]: buildGoodClaimRecords(),
+    [DEFAULT_FILES.claimRelease]: buildGoodClaimRelease(),
     [DEFAULT_FILES.completionContractGate]: buildGoodCompletionContractGate(),
     [DEFAULT_FILES.completionAudit]: buildGoodCompletionAudit(),
     [DEFAULT_FILES.completionEntry]: buildGoodCompletionEntry(),
@@ -858,9 +897,12 @@ function buildGoodBlueprint() {
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_records.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_release.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "DEFAULT_LEASE_SECS and MAX_LEASE_SECS bound action_claim and action_heartbeat; action_release closes claims; scopes_overlap_pure is the shared conflict predicate.")
+	      :note "DEFAULT_LEASE_SECS and MAX_LEASE_SECS stay in agent_execution/claim_lease.rs with action_claim and scopes_overlap_pure; agent_execution/claim_records.rs owns ClaimRecord, parse_claims, parse_iso, and find_claim_node; agent_execution/claim_heartbeat.rs owns action_heartbeat; agent_execution/claim_release.rs owns action_release.")
 	    (surface mission_execution-completion-audit
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -916,6 +958,9 @@ mod log_status;
 mod log_surface;
 mod session_trace;
 mod claim_lease;
+mod claim_heartbeat;
+mod claim_records;
+mod claim_release;
 mod completion_contract_gate;
 mod completion_audit;
 mod completion_entry;
@@ -1091,13 +1136,40 @@ function buildGoodClaimLease() {
 pub(super) const MAX_LEASE_SECS: i64 = 24 * 3600;
 pub(super) fn scopes_overlap() {}
 pub(in crate::handlers::knowledge) fn scopes_overlap_pure() {}
-pub(super) struct ClaimRecord {}
+pub(super) use super::claim_heartbeat::action_heartbeat;
+pub(super) use super::claim_records::{find_claim_node, parse_claims, parse_iso, ClaimRecord};
+pub(super) use super::claim_release::action_release;
+pub(super) async fn action_claim() {}
+`;
+}
+
+function buildGoodClaimRecords() {
+  return `pub(super) struct ClaimRecord {
+  lease_expires_at: String,
+  heartbeat_at: String,
+}
 pub(super) fn parse_claims() {}
 pub(super) fn parse_iso() {}
 pub(super) fn find_claim_node() {}
-pub(super) async fn action_claim() {}
-pub(super) async fn action_heartbeat() {}
-pub(super) async fn action_release() {}
+`;
+}
+
+function buildGoodClaimHeartbeat() {
+  return `pub(super) async fn action_heartbeat() {
+  ExecutionEvent::Heartbeat;
+  "heartbeat-at";
+  "lease-expires-at";
+  "CLAIM_WRONG_OWNER";
+}
+`;
+}
+
+function buildGoodClaimRelease() {
+  return `pub(super) async fn action_release() {
+  ExecutionEvent::Released;
+  "released-at";
+  "CLAIM_WRONG_OWNER";
+}
 `;
 }
 

@@ -30,7 +30,10 @@ use std::path::{Path, PathBuf};
 
 use crate::state::AppState;
 
+mod claim_heartbeat;
 mod claim_lease;
+mod claim_records;
+mod claim_release;
 mod completion_audit;
 mod completion_contract_gate;
 mod completion_entry;
