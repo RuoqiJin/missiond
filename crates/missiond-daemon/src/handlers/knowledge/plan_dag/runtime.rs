@@ -29,6 +29,13 @@ use super::parser::{DagNode, ParsedDag, ReviewGateKind, FAILURE_POLICY_FAIL_FAST
 use super::rollback::{run_cascade_rollback, run_rollback};
 use super::scheduler::propagate_taint;
 
+mod bookkeeping;
+use bookkeeping::{
+    build_node_map, build_successor_map, build_topo_index, collect_tainted_pending,
+    compute_ready_ids, has_running_nodes, initialize_lifecycle, pending_ids,
+    stitch_results_topologically,
+};
+
 pub(super) async fn execute_with_concurrency(
     state: &AppState,
     args: &Value,
@@ -39,32 +46,14 @@ pub(super) async fn execute_with_concurrency(
     task_contract_ctx: TaskContractDispatchCtx,
 ) -> Result<ExecutionOutcome> {
     let max_parallel = max_parallel_nodes.max(1);
-    let by_id: HashMap<String, DagNode> = parsed
-        .nodes
-        .iter()
-        .map(|n| (n.id.clone(), n.clone()))
-        .collect();
-
+    let by_id = build_node_map(&parsed.nodes);
     // Reverse-adjacency for failure propagation.
-    let mut succs: HashMap<&str, Vec<&str>> = HashMap::new();
-    for n in &parsed.nodes {
-        for dep in &n.depends_on {
-            succs.entry(dep.as_str()).or_default().push(n.id.as_str());
-        }
-    }
+    let succs = build_successor_map(&parsed.nodes);
     // Topo position so we can write results in topological order at the end
     // (matches v1's shape — `nodes` array is topologically ordered).
-    let topo_index: HashMap<&str, usize> = order
-        .iter()
-        .enumerate()
-        .map(|(i, id)| (id.as_str(), i))
-        .collect();
+    let topo_index = build_topo_index(order);
 
-    let mut lifecycle: HashMap<String, NodeLifecycle> = parsed
-        .nodes
-        .iter()
-        .map(|n| (n.id.clone(), NodeLifecycle::Pending))
-        .collect();
+    let mut lifecycle = initialize_lifecycle(&parsed.nodes);
     let mut tainted_by: HashMap<String, String> = HashMap::new();
     let mut results_by_id: HashMap<String, NodeResult> = HashMap::new();
     // wave-16 / task 05 — per-node attempt counter. Bumped each time
@@ -103,15 +92,7 @@ pub(super) async fn execute_with_concurrency(
         //    in the response in topological order even when the wave that
         //    causes the taint runs concurrently with their would-have-been
         //    siblings.
-        let mut became_skipped: Vec<(String, NodeState)> = Vec::new();
-        for id in order {
-            if !matches!(lifecycle.get(id.as_str()), Some(NodeLifecycle::Pending)) {
-                continue;
-            }
-            if let Some(failed_dep) = tainted_by.get(id.as_str()).cloned() {
-                became_skipped.push((id.clone(), NodeState::SkippedUpstreamFailed { failed_dep }));
-            }
-        }
+        let mut became_skipped = collect_tainted_pending(order, &lifecycle, &tainted_by);
         for (id, state_skip) in became_skipped.drain(..) {
             let node = match by_id.get(&id) {
                 Some(n) => n.clone(),
@@ -147,40 +128,16 @@ pub(super) async fn execute_with_concurrency(
 
         // 2. Compute ready set: Pending nodes whose dependencies are all
         //    Succeeded. Sorted by id for deterministic dispatch order.
-        let mut ready_ids: Vec<String> = Vec::new();
-        for id in order {
-            if !matches!(lifecycle.get(id.as_str()), Some(NodeLifecycle::Pending)) {
-                continue;
-            }
-            let node = match by_id.get(id.as_str()) {
-                Some(n) => n,
-                None => continue,
-            };
-            let deps_done = node
-                .depends_on
-                .iter()
-                .all(|dep| matches!(lifecycle.get(dep.as_str()), Some(NodeLifecycle::Succeeded)));
-            if deps_done {
-                ready_ids.push(id.clone());
-            }
-        }
-        ready_ids.sort();
+        let ready_ids = compute_ready_ids(order, &lifecycle, &by_id);
 
         // 3. If fail-fast aborted and no Running, force-skip remaining
         //    Pending nodes and stop.
-        let any_running = lifecycle
-            .values()
-            .any(|s| matches!(s, NodeLifecycle::Running));
+        let any_running = has_running_nodes(&lifecycle);
         if abort_new_dispatch && !any_running {
             let aborter = abort_aborter.clone().unwrap_or_default();
             // Force-skip every still-pending node (including ones already in
             // the just-computed ready set — fail-fast supersedes ready).
-            let pending_ids: Vec<String> = order
-                .iter()
-                .filter(|id| matches!(lifecycle.get(id.as_str()), Some(NodeLifecycle::Pending)))
-                .cloned()
-                .collect();
-            for id in pending_ids {
+            for id in pending_ids(order, &lifecycle) {
                 let node = match by_id.get(&id) {
                     Some(n) => n.clone(),
                     None => continue,
@@ -1005,12 +962,7 @@ pub(super) async fn execute_with_concurrency(
 
     // Stitch results back into topological order so the response array's
     // shape matches v1.
-    let mut ordered: Vec<(usize, NodeResult)> = results_by_id
-        .into_iter()
-        .filter_map(|(id, r)| topo_index.get(id.as_str()).map(|&i| (i, r)))
-        .collect();
-    ordered.sort_by_key(|(i, _)| *i);
-    outcome.results = ordered.into_iter().map(|(_, r)| r).collect();
+    outcome.results = stitch_results_topologically(results_by_id, &topo_index);
 
     Ok(outcome)
 }
