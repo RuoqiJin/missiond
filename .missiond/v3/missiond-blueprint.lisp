@@ -1553,6 +1553,7 @@
       :implements [knowledge-memory kb-manager memory insight intent-snapshot]
       :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/args.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs"
@@ -1563,6 +1564,8 @@
              "crates/missiond-daemon/src/handlers/knowledge/kb/import.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
              "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
              "crates/missiond-daemon/src/handlers/knowledge/insight.rs"
              "crates/missiond-daemon/src/handlers/knowledge/intent.rs"
@@ -1571,7 +1574,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "Designed V3 destination for the legacy memory/KB public tools. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress. The surface intentionally remains designed rather than code-aligned until beacon/code-search action handlers are split and runtime projection is Lisp-owned.")
+      :note "Designed V3 destination for the legacy memory/KB public tools. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress. The surface intentionally remains designed rather than code-aligned until runtime projection is Lisp-owned.")
 
     (surface project-registry
       :status "designed"

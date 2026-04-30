@@ -17,6 +17,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   kbFacade: 'crates/missiond-daemon/src/handlers/knowledge/kb.rs',
   kbArgs: 'crates/missiond-daemon/src/handlers/knowledge/kb/args.rs',
+  kbRemember: 'crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs',
   kbQuality: 'crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs',
   kbCompact: 'crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs',
   kbConflicts: 'crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs',
@@ -27,6 +28,8 @@ const DEFAULT_FILES = {
   kbImport: 'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
   kbGc: 'crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs',
   kbOps: 'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
+  kbBeacon: 'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
+  kbCodeSearch: 'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
 };
 
@@ -91,6 +94,7 @@ function checkFiles(root, files) {
     ':status "designed"',
     'crates/missiond-daemon/src/handlers/knowledge/kb.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/args.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs',
@@ -101,9 +105,12 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
     'scripts/check-v3-memory-kb-isomorphism.mjs',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
+    'kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting',
     'kb/quality.rs owns content-quality rejection',
     'kb/compact.rs owns rule-based KB compaction',
     'kb/conflicts.rs owns semantic conflict detection',
@@ -114,12 +121,16 @@ function checkFiles(root, files) {
     'kb/import.rs owns servers_yaml import projection',
     'kb/gc.rs owns stats/stale/duplicates cleanup actions',
     'kb/ops.rs owns queue-status and execute-plan operation egress',
+    'kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate',
+    'kb/code_search.rs owns AST code-search egress',
     'node scripts/check-v3-memory-kb-isomorphism.mjs',
   ]);
 
   requireAll(diagnostics, files.kbFacade, sources.kbFacade, [
     'mod analyze;',
     'mod args;',
+    'mod beacon;',
+    'mod code_search;',
     'mod compact;',
     'mod conflicts;',
     'mod discovery;',
@@ -129,10 +140,11 @@ function checkFiles(root, files) {
     'mod ops;',
     'mod quality;',
     'mod query;',
-    'use args::KBRememberArgs;',
+    'mod remember;',
     'use analyze::handle_kb_analyze;',
+    'route_beacon_action',
+    'handle_code_search',
     'use compact::handle_kb_compact;',
-    'use conflicts::detect_kb_conflicts;',
     'use discovery::handle_kb_discover;',
     'use gc::handle_kb_gc;',
     'use import::handle_kb_import;',
@@ -143,12 +155,13 @@ function checkFiles(root, files) {
     'handle_kb_execute_plan',
     'handle_kb_queue_status',
     'handle_kb_analyze',
-    'use quality::check_content_quality;',
+    'handle_kb_remember',
     'use query::{handle_kb_get, handle_kb_list, handle_kb_search};',
     'pub(crate) async fn handle',
     '"mission_kb_query"',
     '"mission_kb_mutate"',
     '"mission_kb_ops"',
+    '"mission_beacon"',
     '"mission_kb_remember"',
   ]);
 
@@ -175,6 +188,21 @@ function checkFiles(root, files) {
     'stack trace',
     'RUST_BACKTRACE',
     'detail 过长',
+  ]);
+
+  requireAll(diagnostics, files.kbRemember, sources.kbRemember, [
+    'pub(super) async fn handle_kb_remember',
+    'KBRememberArgs',
+    'check_content_quality',
+    'KBRememberInput',
+    'EmbeddingTask::ProcessKBEntry',
+    'consolidated_from',
+    'kb_add_edge',
+    'kb_add_ast_link',
+    'KBBatchMutated',
+    'detect_kb_conflicts',
+    'kb_adjust_confidence',
+    'contradicts',
   ]);
 
   requireAll(diagnostics, files.kbCompact, sources.kbCompact, [
@@ -304,11 +332,41 @@ function checkFiles(root, files) {
     'submit_task',
   ]);
 
+  requireAll(diagnostics, files.kbBeacon, sources.kbBeacon, [
+    'pub(super) fn route_beacon_action',
+    'mission_beacon_map',
+    'mission_beacon_tag',
+    'mission_beacon_annotate',
+    'feature',
+    'pub(super) async fn handle_beacon_list',
+    'pub(super) async fn handle_beacon_map',
+    'pub(super) async fn handle_beacon_tag',
+    'pub(super) async fn handle_beacon_annotate',
+    'beacon_list',
+    'beacon_map',
+    'beacon_ensure',
+    'beacon_node_upsert',
+    'beacon_node_annotate',
+    '@beacon:',
+  ]);
+
+  requireAll(diagnostics, files.kbCodeSearch, sources.kbCodeSearch, [
+    'pub(super) async fn handle_code_search',
+    'CodeSearchArgs',
+    'ast_search',
+    'node_type',
+    'ast_find_related',
+    'No code nodes found matching query',
+    'No code nodes matched filters',
+  ]);
+
   requireAll(diagnostics, files.mcpKb, sources.mcpKb, [
     '"mission_kb_query"',
     '"mission_kb_remember"',
     '"mission_kb_mutate"',
     '"mission_kb_ops"',
+    '"mission_beacon"',
+    '"mission_code_search"',
   ]);
 
   return diagnostics;
@@ -331,6 +389,7 @@ function buildFixture() {
       :status "designed"
       :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/args.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs"
@@ -341,14 +400,18 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/kb/import.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress."))
+      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
   writeFixture(root, DEFAULT_FILES.kbFacade, `
 mod analyze;
 mod args;
+mod beacon;
+mod code_search;
 mod compact;
 mod conflicts;
 mod discovery;
@@ -358,20 +421,20 @@ mod mutate;
 mod ops;
 mod quality;
 mod query;
-use args::KBRememberArgs;
+mod remember;
 use analyze::handle_kb_analyze;
+route_beacon_action; handle_code_search;
 use compact::handle_kb_compact;
-use conflicts::detect_kb_conflicts;
 use discovery::handle_kb_discover;
 use gc::handle_kb_gc;
 use import::handle_kb_import;
 handle_kb_batch_forget; handle_kb_batch_set_project; handle_kb_forget; handle_kb_update;
 handle_kb_execute_plan; handle_kb_queue_status;
 handle_kb_analyze;
-use quality::check_content_quality;
+handle_kb_remember;
 use query::{handle_kb_get, handle_kb_list, handle_kb_search};
 pub(crate) async fn handle() {
-  "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_kb_remember";
+  "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_kb_remember";
 }`);
   writeFixture(root, DEFAULT_FILES.kbArgs, `
 pub(super) struct KBRememberArgs;
@@ -388,6 +451,10 @@ fn default_list_limit() {}
   writeFixture(root, DEFAULT_FILES.kbQuality, `
 pub(super) fn check_content_quality() {
   architecture:summary; summary 过长; summary 为空; test write; batch-; stack trace; RUST_BACKTRACE; detail 过长;
+}`);
+  writeFixture(root, DEFAULT_FILES.kbRemember, `
+pub(super) async fn handle_kb_remember() {
+  KBRememberArgs; check_content_quality(); KBRememberInput; EmbeddingTask::ProcessKBEntry; consolidated_from; kb_add_edge(); kb_add_ast_link(); KBBatchMutated; detect_kb_conflicts(); kb_adjust_confidence(); contradicts;
 }`);
   writeFixture(root, DEFAULT_FILES.kbCompact, `
 pub(super) async fn handle_kb_compact() {
@@ -437,8 +504,19 @@ pub(super) async fn handle_kb_queue_status() {
 pub(super) async fn handle_kb_execute_plan() {
   kb_ops_list(); kb_ops_expire_stale(); kb_ops_update_status(); execute_delete(); execute_update(); execute_dispatch(); KBRememberInput; publish_task(); TaskEvent::Created; submit_task();
 }`);
+  writeFixture(root, DEFAULT_FILES.kbBeacon, `
+pub(super) fn route_beacon_action() { mission_beacon_map; mission_beacon_tag; mission_beacon_annotate; feature; }
+pub(super) async fn handle_beacon_list() { beacon_list(); }
+pub(super) async fn handle_beacon_map() { beacon_map(); }
+pub(super) async fn handle_beacon_tag() { beacon_ensure(); beacon_node_upsert(); @beacon:; }
+pub(super) async fn handle_beacon_annotate() { beacon_node_annotate(); }
+`);
+  writeFixture(root, DEFAULT_FILES.kbCodeSearch, `
+pub(super) async fn handle_code_search() {
+  CodeSearchArgs; ast_search(); node_type; ast_find_related(); No code nodes found matching query; No code nodes matched filters;
+}`);
   writeFixture(root, DEFAULT_FILES.mcpKb, `
-"mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_ops";
+"mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_code_search";
 `);
   return root;
 }
