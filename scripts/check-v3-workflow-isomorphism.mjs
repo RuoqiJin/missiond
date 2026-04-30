@@ -26,6 +26,8 @@ const DEFAULT_FILES = {
   workflowAutoChainRules:
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_chain/rules.rs',
   workflowAutoSonnet: 'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs',
+  workflowAutoSonnetPolicy:
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet/policy.rs',
   workflowDistill: 'crates/missiond-daemon/src/handlers/knowledge/workflow/distill.rs',
   workflowMethodology: 'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
   workflowReviewResolution: 'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
@@ -111,6 +113,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_chain/recorder.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_chain/rules.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet/policy.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/distill.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
@@ -121,8 +124,8 @@ function checkFiles(root, files) {
     'node scripts/check-v3-workflow-isomorphism.mjs',
   ]);
 
-  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowReviewResolution}\n${sources.workflowTests}`;
-  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowAutoChain} + ${files.workflowAutoChainRecorder} + ${files.workflowAutoChainRules} + ${files.workflowAutoSonnet} + ${files.workflowDistill} + ${files.workflowMethodology} + ${files.workflowReviewResolution} + ${files.workflowTests}`;
+  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowReviewResolution}\n${sources.workflowTests}`;
+  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowAutoChain} + ${files.workflowAutoChainRecorder} + ${files.workflowAutoChainRules} + ${files.workflowAutoSonnet} + ${files.workflowAutoSonnetPolicy} + ${files.workflowDistill} + ${files.workflowMethodology} + ${files.workflowReviewResolution} + ${files.workflowTests}`;
   requireAll(diagnostics, workflowSurfaceLabel, workflowSurface, [
     'enum DistillMode',
     'fn parse_distill_mode',
@@ -256,13 +259,19 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.workflowAutoSonnet, sources.workflowAutoSonnet, [
+    'mod policy;',
+    'pub(super) use policy::*;',
     'pub(super) fn validate_auto_sonnet_args',
     'pub(super) fn auto_sonnet_requested',
     'pub(super) async fn maybe_apply_auto_sonnet',
     'pub(super) async fn maybe_apply_auto_sonnet_no_trigger',
-    'pub(super) enum AutoSonnetPolicy',
-    'pub(super) fn parse_auto_sonnet_policy',
-    'pub(super) async fn maybe_apply_auto_sonnet_policy',
+  ]);
+
+  requireAll(diagnostics, files.workflowAutoSonnetPolicy, sources.workflowAutoSonnetPolicy, [
+    'use super::*;',
+    'pub(in crate::handlers::knowledge::workflow) enum AutoSonnetPolicy',
+    'pub(in crate::handlers::knowledge::workflow) fn parse_auto_sonnet_policy',
+    'pub(in crate::handlers::knowledge::workflow) async fn maybe_apply_auto_sonnet_policy',
     'AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR',
     'review_required=true',
   ]);
@@ -329,11 +338,12 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_chain/recorder.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_chain/rules.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet/policy.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/distill.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs"]
-      :note "workflow/distill.rs owns DistillMode and action_distill. distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; workflow/auto_chain/recorder.rs owns the wave-19 explicit recorder; workflow/auto_chain/rules.rs owns deterministic auto-trigger rule evaluation; auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
+      :note "workflow/distill.rs owns DistillMode and action_distill. distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; workflow/auto_chain/recorder.rs owns the wave-19 explicit recorder; workflow/auto_chain/rules.rs owns deterministic auto-trigger rule evaluation; workflow/auto_sonnet.rs owns the wave-21 dual opt-in gate; workflow/auto_sonnet/policy.rs owns auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
@@ -463,13 +473,18 @@ const SAFETY_RULE_INNER_DISTILL_OK: &str = "inner_distill_succeeded";
 EvidenceOutcome::Present;
 `);
   writeFixture(root, DEFAULT_FILES.workflowAutoSonnet, `
+mod policy;
+pub(super) use policy::*;
 pub(super) fn validate_auto_sonnet_args() {}
 pub(super) fn auto_sonnet_requested() {}
 pub(super) async fn maybe_apply_auto_sonnet() {}
 pub(super) async fn maybe_apply_auto_sonnet_no_trigger() {}
-pub(super) enum AutoSonnetPolicy {}
-pub(super) fn parse_auto_sonnet_policy() {}
-pub(super) async fn maybe_apply_auto_sonnet_policy() {}
+`);
+  writeFixture(root, DEFAULT_FILES.workflowAutoSonnetPolicy, `
+use super::*;
+pub(in crate::handlers::knowledge::workflow) enum AutoSonnetPolicy {}
+pub(in crate::handlers::knowledge::workflow) fn parse_auto_sonnet_policy() {}
+pub(in crate::handlers::knowledge::workflow) async fn maybe_apply_auto_sonnet_policy() {}
 const AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR: &str = "safe_after_rules";
 // review_required=true
 `);
