@@ -60,6 +60,7 @@ mod log_store;
 mod log_surface;
 mod log_template;
 mod preflight;
+mod preflight_contract;
 mod preflight_patterns;
 mod preflight_porcelain;
 mod preflight_scope;

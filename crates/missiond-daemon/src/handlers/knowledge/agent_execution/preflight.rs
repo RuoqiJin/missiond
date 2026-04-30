@@ -9,10 +9,10 @@ use super::completion_fields::collect_string_list;
 use super::log_store::{
     companion_path, project_or_target_project, read_log_file, require_str, resolve_project_root,
 };
+use super::preflight_contract::apply_task_contract_projection;
 use super::preflight_porcelain::{parse_porcelain_status, run_git_status};
 use super::preflight_scope::{
     build_preflight_summary, collect_all_claim_scopes, collect_specific_claim_scope,
-    evaluate_task_contract_for_preflight,
 };
 use super::session_trace::{
     append_session_trace_event, resolve_session_trace_path, resolve_trace_task_id, TraceEvent,
@@ -185,81 +185,7 @@ pub(super) async fn action_preflight_commit(state: &AppState, args: &Value) -> R
     // writer can fix the path / file content without preflight hard-
     // rejecting (the post-commit gate at `action=complete` is the
     // authoritative enforcement).
-    if let Some(tcp) = args
-        .get("task_contract_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-    {
-        summary["task_contract_path"] = json!(tcp);
-        let staged: Vec<String> = summary
-            .get("staged_files")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let changed: Vec<String> = summary
-            .get("changed_files")
-            .and_then(|v| v.as_array())
-            .map(|a| {
-                a.iter()
-                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        let (status, scope_summary, resolved_path, failure) =
-            evaluate_task_contract_for_preflight(&root, tcp, &staged, &changed);
-        summary["task_contract_status"] = json!(status);
-        if let Some(rp) = resolved_path {
-            summary["task_contract_resolved_path"] = json!(rp);
-        }
-        if let Some(scope) = scope_summary {
-            // Promote the four contract-derived fields to the top level so
-            // dashboards keying off `task_contract_status` can read the
-            // drift signals without descending one more level. The full
-            // projection (including write_scope / must_not_touch echo)
-            // stays under `task_contract_scope` for inspectors that want
-            // the raw inputs.
-            for key in [
-                "staged_out_of_scope",
-                "staged_forbidden",
-                "unstaged_in_scope",
-            ] {
-                if let Some(v) = scope.get(key) {
-                    summary[key] = v.clone();
-                }
-            }
-            // Override `next_step` with the contract-aware hint when the
-            // contract added forbidden / out-of-scope drift the claim-only
-            // check missed (forbidden patterns aren't a claim concept).
-            // Otherwise prefer the existing claim-derived next_step.
-            let has_contract_drift = scope
-                .get("staged_forbidden")
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false)
-                || scope
-                    .get("staged_out_of_scope")
-                    .and_then(|v| v.as_array())
-                    .map(|a| !a.is_empty())
-                    .unwrap_or(false);
-            if has_contract_drift {
-                if let Some(ns) = scope.get("next_step") {
-                    summary["next_step"] = ns.clone();
-                }
-                // Flip `ok=false` because contract-level drift is at least
-                // as serious as claim-level drift; downstream consumers
-                // already key off `ok` for go/no-go decisions.
-                summary["ok"] = json!(false);
-            }
-            summary["task_contract_scope"] = scope;
-        } else if let Some(msg) = failure {
-            summary["task_contract_error"] = json!(msg);
-        }
-    }
+    apply_task_contract_projection(&mut summary, &root, args);
 
     // wave-21 / task 03 — echo the task-run verifier hint paths when
     // the caller threads them through preflight. These are advisory
