@@ -19,6 +19,7 @@ Checks the V3 workflow Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   workflowHandler: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
+  workflowMethodology: 'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
 };
 
@@ -95,10 +96,13 @@ function checkFiles(root, files) {
     'instead of canonicalizing the raw methodology source',
     'ArtifactKind::Workflow',
     'auto_sonnet_policy={off|safe_after_rules|dry_run}',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
     'node scripts/check-v3-workflow-isomorphism.mjs',
   ]);
 
-  requireAll(diagnostics, files.workflowHandler, sources.workflowHandler, [
+  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowMethodology}`;
+  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowMethodology}`;
+  requireAll(diagnostics, workflowSurfaceLabel, workflowSurface, [
     'enum DistillMode',
     'fn parse_distill_mode',
     'Some("dry_run") => Ok(DistillMode::DryRun)',
@@ -151,6 +155,13 @@ function checkFiles(root, files) {
     '"safe_after_rules"',
   ]);
 
+  requireAll(diagnostics, files.workflowMethodology, sources.workflowMethodology, [
+    'pub(super) fn extract_methodology_lifted',
+    'pub(super) fn build_generated_yaml',
+    'pub(super) fn resolve_compiled_flow',
+    'pub(super) struct GeneratedMeta',
+  ]);
+
   requireAll(diagnostics, files.mcpWorkflow, sources.mcpWorkflow, [
     'manager action — see Lisp implemented-surface mission_workflow',
     '"distill"',
@@ -201,6 +212,7 @@ function buildFixture() {
   (implementation-map
     (surface mission_workflow
       :status "code-aligned"
+      :code ["crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs"]
       :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
@@ -255,6 +267,11 @@ mod tests {
   fn methodology_compile_review_required_status_when_no_steps() {}
   fn build_methodology_match_rules_includes_flow_id_and_source_hash() {}
 }`);
+  writeFixture(root, DEFAULT_FILES.workflowMethodology, `
+pub(super) struct GeneratedMeta {}
+pub(super) fn extract_methodology_lifted() {}
+pub(super) fn build_generated_yaml() {}
+pub(super) fn resolve_compiled_flow() {}`);
   writeFixture(root, DEFAULT_FILES.mcpWorkflow, `
 manager action — see Lisp implemented-surface mission_workflow
 "distill" "compile_methodology" "run_methodology" "resolve_review"
