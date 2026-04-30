@@ -31,6 +31,8 @@ const DEFAULT_FILES = {
   planDispatchResponse: 'crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs',
   planEvidenceSidecar: 'crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs',
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
+  planRouterPolicySchemaParser:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
   planDag: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs',
   planDagParser: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser.rs',
@@ -121,6 +123,7 @@ function checkFiles(root, files) {
     'plan/dispatch_response.rs owns mission_plan execution response egress',
     'plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress',
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
+    'plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade',
     'plan_dag/parser.rs owns the DAG parser/validator core',
@@ -310,6 +313,9 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.planRouterPolicyAdapter, sources.planRouterPolicyAdapter, [
+    'mod schema_parser',
+    'schema_parser::parse_backend_registry(input)',
+    'schema_parser::parse_router_policy(input)',
     'pub(super) enum RouterPolicyMode',
     'pub(super) fn parse_router_policy_mode',
     'pub(super) fn attach_router_recommendation_block',
@@ -319,6 +325,23 @@ function checkFiles(root, files) {
     'backend_readiness_status',
     'Value::Bool(false)',
   ]);
+
+  requireAll(
+    diagnostics,
+    files.planRouterPolicySchemaParser,
+    sources.planRouterPolicySchemaParser,
+    [
+      'pub(super) fn parse_router_policy',
+      'pub(super) fn parse_backend_registry',
+      'const READINESS_STATUSES',
+      'fn parse_rule',
+      'fn parse_backend_entry',
+      'fn parse_clause',
+      'enum Sexp',
+      'enum Token',
+      'struct TokenCursor',
+    ],
+  );
 
   requireAll(diagnostics, files.planTaskRunnerAdapter, sources.planTaskRunnerAdapter, [
     'pub(super) enum TaskRunnerMode',
@@ -584,6 +607,7 @@ function buildFixture() {
     (surface mission_plan
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs"
@@ -609,7 +633,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate and persisted_apply, including explicit apply approval, LLM caller approval, proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate and persisted_apply, including explicit apply approval, LLM caller approval, proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -782,6 +806,9 @@ pub(crate) async fn append_plan_evidence_entry() {
   "COMPANION_DIR";
 }`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
+mod schema_parser;
+pub(super) fn parse_backend_registry(input: &str) { schema_parser::parse_backend_registry(input); }
+pub(super) fn parse_router_policy(input: &str) { schema_parser::parse_router_policy(input); }
 pub(super) enum RouterPolicyMode { Off, DryRun }
 pub(super) fn parse_router_policy_mode() {}
 pub(super) fn attach_router_recommendation_block() {}
@@ -791,6 +818,17 @@ fn compute_recommendation_block() {
   "backend_readiness_status";
   Value::Bool(false);
 }`);
+  writeFixture(root, DEFAULT_FILES.planRouterPolicySchemaParser, `
+pub(super) fn parse_router_policy() {}
+pub(super) fn parse_backend_registry() {}
+const READINESS_STATUSES: &[&str] = &[];
+fn parse_rule() {}
+fn parse_backend_entry() {}
+fn parse_clause() {}
+enum Sexp {}
+enum Token {}
+struct TokenCursor;
+`);
   writeFixture(root, DEFAULT_FILES.planTaskRunnerAdapter, `
 pub(super) enum TaskRunnerMode { Off, DryRun }
 pub(super) fn parse_task_runner_mode() {}
