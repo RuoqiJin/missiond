@@ -20,8 +20,8 @@ use super::claim_lease::{
 };
 use super::dispatch::{dispatch_node, DispatchOutcome, TaskContractDispatchCtx};
 use super::lifecycle::{
-    emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_claimed,
-    emit_evidence_finished, emit_evidence_running, plan_node_should_retry, EvidenceCtx,
+    emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_finished,
+    emit_evidence_running, plan_node_should_retry, EvidenceCtx,
 };
 use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
 use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
@@ -36,7 +36,7 @@ use bookkeeping::{
     build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
     initialize_lifecycle, stitch_results_topologically,
 };
-use claims::release_claim_if_recorded;
+use claims::{record_acquired_claim, record_compat_claim, release_claim_if_recorded};
 use gates::filter_ready_nodes_for_gates;
 use rollbacks::evaluate_and_emit_rollback;
 use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
@@ -218,20 +218,18 @@ pub(super) async fn execute_with_concurrency(
 
             match acquire_outcome {
                 ClaimAcquire::Acquired(claim) => {
-                    lifecycle.insert(node.id.clone(), NodeLifecycle::Claimed);
-                    emit_evidence_claimed(
+                    record_acquired_claim(
                         state,
                         &ctx,
                         &node,
                         &dispatch_strategy,
                         attempt,
                         &claim,
-                        "acquired",
-                        None,
+                        &mut lifecycle,
+                        &mut active_claims_by_node,
                         &mut outcome,
                     )
                     .await;
-                    active_claims_by_node.insert(node.id.clone(), claim.claim_id.clone());
                 }
                 ClaimAcquire::Conflict {
                     attempted_claim_id,
@@ -336,21 +334,20 @@ pub(super) async fn execute_with_concurrency(
                         lease_expires_at: acquire_now + chrono::Duration::seconds(claim_lease_secs),
                         released_at: None,
                     };
-                    lifecycle.insert(node.id.clone(), NodeLifecycle::Claimed);
-                    emit_evidence_claimed(
+                    record_compat_claim(
                         state,
                         &ctx,
                         &node,
                         &dispatch_strategy,
                         attempt,
                         &synthetic_claim,
-                        "recorded_compat",
-                        Some((
+                        (
                             conflicting_claim_id,
                             conflicting_claimer,
                             conflicting_scope,
                             offending_scope,
-                        )),
+                        ),
+                        &mut lifecycle,
                         &mut outcome,
                     )
                     .await;
@@ -635,20 +632,18 @@ pub(super) async fn execute_with_concurrency(
                 );
                 match retry_acquire {
                     ClaimAcquire::Acquired(retry_claim) => {
-                        lifecycle.insert(node_id.clone(), NodeLifecycle::Claimed);
-                        emit_evidence_claimed(
+                        record_acquired_claim(
                             state,
                             &ctx,
                             &node,
                             &dispatch_strategy,
                             next_attempt,
                             &retry_claim,
-                            "acquired",
-                            None,
+                            &mut lifecycle,
+                            &mut active_claims_by_node,
                             &mut outcome,
                         )
                         .await;
-                        active_claims_by_node.insert(node_id.clone(), retry_claim.claim_id.clone());
                     }
                     ClaimAcquire::Conflict {
                         attempted_scopes,
@@ -675,21 +670,20 @@ pub(super) async fn execute_with_concurrency(
                                 + chrono::Duration::seconds(claim_lease_secs),
                             released_at: None,
                         };
-                        lifecycle.insert(node_id.clone(), NodeLifecycle::Claimed);
-                        emit_evidence_claimed(
+                        record_compat_claim(
                             state,
                             &ctx,
                             &node,
                             &dispatch_strategy,
                             next_attempt,
                             &synthetic,
-                            "recorded_compat",
-                            Some((
+                            (
                                 conflicting_claim_id,
                                 conflicting_claimer,
                                 conflicting_scope,
                                 offending_scope,
-                            )),
+                            ),
+                            &mut lifecycle,
                             &mut outcome,
                         )
                         .await;
