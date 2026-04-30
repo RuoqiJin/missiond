@@ -40,6 +40,8 @@ const DEFAULT_FILES = {
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
+  planApprovalProposer:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/proposer.rs',
   planApprovalSubscriber:
     'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs',
   workflow: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
@@ -109,6 +111,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/proposer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   'crates/missiond-mcp/src/tools/knowledge/directive.rs',
@@ -177,7 +180,10 @@ const PLAN_COMPILE_AUTHORING_RS_NEEDLES = [
 ];
 
 const PLAN_APPROVAL_REVIEW_RS_NEEDLES = [
+  'mod proposer;',
   'mod subscriber;',
+  'use self::proposer::{',
+  'request_plan_auto_approve_proposal',
   'pub(crate) use self::subscriber::{handle_review_resolved_event, PlanSubscriberOutcome};',
   'pub(super) async fn action_approve',
   'pub(super) async fn action_mark',
@@ -185,8 +191,17 @@ const PLAN_APPROVAL_REVIEW_RS_NEEDLES = [
   'parse_review_resolution_input(args)',
   'parse_review_automation_policy(args)',
   'evaluate_review_automation(',
-  'request_plan_auto_approve_proposal(',
   'maybe_emit_review_question_resolved(',
+];
+
+const PLAN_APPROVAL_PROPOSER_RS_NEEDLES = [
+  'use super::*;',
+  'pub(super) fn build_plan_automation_ctx',
+  'pub(super) async fn request_plan_auto_approve_proposal',
+  'pub(super) fn attach_plan_proposal_block',
+  'pub(super) fn attach_plan_apply_gate_block',
+  'PLAN_REVIEW_PROPOSER_CALLER',
+  'SONNET_PLAN_PROPOSER_MAX_TOKENS',
 ];
 
 const PLAN_APPROVAL_SUBSCRIBER_RS_NEEDLES = [
@@ -328,6 +343,12 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.planApprovalReview, sources.planApprovalReview, PLAN_APPROVAL_REVIEW_RS_NEEDLES);
   requireAll(
     diagnostics,
+    files.planApprovalProposer,
+    sources.planApprovalProposer,
+    PLAN_APPROVAL_PROPOSER_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
     files.planApprovalSubscriber,
     sources.planApprovalSubscriber,
     PLAN_APPROVAL_SUBSCRIBER_RS_NEEDLES,
@@ -410,6 +431,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.planApprovalReview]: buildGoodPlanApprovalReviewRs(),
+    [DEFAULT_FILES.planApprovalProposer]: buildGoodPlanApprovalProposerRs(),
     [DEFAULT_FILES.planApprovalSubscriber]: buildGoodPlanApprovalSubscriberRs(),
     [DEFAULT_FILES.workflow]: buildGoodWorkflowRs(),
     [DEFAULT_FILES.mcpDirective]: buildGoodMcpRs({ neverAutoApprove: true }),
@@ -558,6 +580,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/proposer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"
@@ -686,7 +709,9 @@ pub(crate) use approval_review::{handle_review_resolved_event, PlanSubscriberOut
 
 function buildGoodPlanApprovalReviewRs() {
   return `// fixture
+mod proposer;
 mod subscriber;
+use self::proposer::{request_plan_auto_approve_proposal};
 pub(crate) use self::subscriber::{handle_review_resolved_event, PlanSubscriberOutcome};
 pub(super) async fn action_approve() {}
 pub(super) async fn action_mark() {}
@@ -698,6 +723,18 @@ fn caller(args: &serde_json::Value) {
     request_plan_auto_approve_proposal();
     maybe_emit_review_question_resolved();
 }
+`;
+}
+
+function buildGoodPlanApprovalProposerRs() {
+  return `// fixture
+use super::*;
+const PLAN_REVIEW_PROPOSER_CALLER: &str = "plan_review_proposer";
+const SONNET_PLAN_PROPOSER_MAX_TOKENS: u32 = 1024;
+pub(super) fn build_plan_automation_ctx() {}
+pub(super) async fn request_plan_auto_approve_proposal() {}
+pub(super) fn attach_plan_proposal_block() {}
+pub(super) fn attach_plan_apply_gate_block() {}
 `;
 }
 
