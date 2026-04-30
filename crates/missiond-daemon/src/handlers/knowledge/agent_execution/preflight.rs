@@ -1,7 +1,6 @@
 use anyhow::Result;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
-use std::path::PathBuf;
 
 use crate::state::AppState;
 
@@ -10,6 +9,7 @@ use super::log_store::{
     companion_path, project_or_target_project, read_log_file, require_str, resolve_project_root,
 };
 use super::preflight_contract::apply_task_contract_projection;
+use super::preflight_cwd::resolve_preflight_inspect_dir;
 use super::preflight_porcelain::{parse_porcelain_status, run_git_status};
 use super::preflight_scope::{
     build_preflight_summary, collect_all_claim_scopes, collect_specific_claim_scope,
@@ -66,50 +66,9 @@ pub(super) async fn action_preflight_commit(state: &AppState, args: &Value) -> R
         }
     };
 
-    // Optional `cwd` override — must stay inside the resolved project
-    // root. We canonicalize both sides so symlinks / `..` traversals
-    // can't escape the project boundary. If canonicalization fails we
-    // refuse rather than silently fall back to root, matching the
-    // fail-fast posture of the wave16-06 enforcement gate.
-    let cwd_arg = args
-        .get("cwd")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-    let inspect_dir = match cwd_arg {
-        Some(cwd) => {
-            let candidate = PathBuf::from(cwd);
-            let abs = if candidate.is_absolute() {
-                candidate
-            } else {
-                root.join(candidate)
-            };
-            let canon_root = root.canonicalize().unwrap_or_else(|_| root.clone());
-            let canon_abs = match abs.canonicalize() {
-                Ok(p) => p,
-                Err(e) => {
-                    return Ok(ToolResult::structured_error(ToolError::new(
-                        error_codes::INVALID_PARAM,
-                        format!("cwd `{}` does not exist or is not accessible: {}", cwd, e),
-                    )));
-                }
-            };
-            if !canon_abs.starts_with(&canon_root) {
-                return Ok(ToolResult::structured_error(
-                    ToolError::new(
-                        error_codes::INVALID_PARAM,
-                        format!(
-                            "cwd `{}` resolves outside the project root `{}`",
-                            cwd,
-                            root.display()
-                        ),
-                    )
-                    .with_suggestion("supply a path inside the project, or omit `cwd`"),
-                ));
-            }
-            canon_abs
-        }
-        None => root.clone(),
+    let inspect_dir = match resolve_preflight_inspect_dir(&root, args) {
+        Ok(dir) => dir,
+        Err(err) => return Ok(err),
     };
 
     // Expected_files hint from the workstation brief. Trimmed and
