@@ -22,19 +22,22 @@ use super::dispatch::{dispatch_node, DispatchOutcome, TaskContractDispatchCtx};
 use super::lifecycle::{
     emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_claim_released,
     emit_evidence_claimed, emit_evidence_finished, emit_evidence_rollback, emit_evidence_running,
-    emit_evidence_skipped, emit_paused_review_gate, plan_node_should_retry, EvidenceCtx,
+    plan_node_should_retry, EvidenceCtx,
 };
 use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
-use super::parser::{DagNode, ParsedDag, ReviewGateKind, FAILURE_POLICY_FAIL_FAST};
+use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
 use super::rollback::{run_cascade_rollback, run_rollback};
 use super::scheduler::propagate_taint;
 
 mod bookkeeping;
+mod gates;
+mod skips;
 use bookkeeping::{
-    build_node_map, build_successor_map, build_topo_index, collect_tainted_pending,
-    compute_ready_ids, has_running_nodes, initialize_lifecycle, pending_ids,
-    stitch_results_topologically,
+    build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
+    initialize_lifecycle, stitch_results_topologically,
 };
+use gates::filter_ready_nodes_for_gates;
+use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
 
 pub(super) async fn execute_with_concurrency(
     state: &AppState,
@@ -92,39 +95,17 @@ pub(super) async fn execute_with_concurrency(
         //    in the response in topological order even when the wave that
         //    causes the taint runs concurrently with their would-have-been
         //    siblings.
-        let mut became_skipped = collect_tainted_pending(order, &lifecycle, &tainted_by);
-        for (id, state_skip) in became_skipped.drain(..) {
-            let node = match by_id.get(&id) {
-                Some(n) => n.clone(),
-                None => continue,
-            };
-            lifecycle.insert(id.clone(), NodeLifecycle::Skipped);
-            let dispatch_strategy = node
-                .dispatch_strategy
-                .clone()
-                .unwrap_or_else(|| "unknown".to_string());
-            let (skip_reason, skip_detail) = match &state_skip {
-                NodeState::SkippedUpstreamFailed { failed_dep } => {
-                    ("upstream_failed", Some(("failed_dep", failed_dep.clone())))
-                }
-                _ => ("upstream_failed", None),
-            };
-            emit_evidence_skipped(
-                state,
-                &ctx,
-                &node,
-                &dispatch_strategy,
-                skip_reason,
-                skip_detail,
-                &mut outcome,
-            )
-            .await;
-            let target_clone = node.target.clone();
-            results_by_id.insert(
-                id.clone(),
-                NodeResult::skipped(id, target_clone, state_skip, dispatch_strategy),
-            );
-        }
+        materialize_tainted_pending_skips(
+            state,
+            &ctx,
+            order,
+            &by_id,
+            &mut lifecycle,
+            &tainted_by,
+            &mut results_by_id,
+            &mut outcome,
+        )
+        .await;
 
         // 2. Compute ready set: Pending nodes whose dependencies are all
         //    Succeeded. Sorted by id for deterministic dispatch order.
@@ -135,41 +116,17 @@ pub(super) async fn execute_with_concurrency(
         let any_running = has_running_nodes(&lifecycle);
         if abort_new_dispatch && !any_running {
             let aborter = abort_aborter.clone().unwrap_or_default();
-            // Force-skip every still-pending node (including ones already in
-            // the just-computed ready set — fail-fast supersedes ready).
-            for id in pending_ids(order, &lifecycle) {
-                let node = match by_id.get(&id) {
-                    Some(n) => n.clone(),
-                    None => continue,
-                };
-                lifecycle.insert(id.clone(), NodeLifecycle::Skipped);
-                let dispatch_strategy = node
-                    .dispatch_strategy
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                emit_evidence_skipped(
-                    state,
-                    &ctx,
-                    &node,
-                    &dispatch_strategy,
-                    "fail_fast_aborted",
-                    Some(("aborter", aborter.clone())),
-                    &mut outcome,
-                )
-                .await;
-                let target_clone = node.target.clone();
-                results_by_id.insert(
-                    id.clone(),
-                    NodeResult::skipped(
-                        id,
-                        target_clone,
-                        NodeState::SkippedFailFastAbort {
-                            aborter: aborter.clone(),
-                        },
-                        dispatch_strategy,
-                    ),
-                );
-            }
+            force_skip_fail_fast_pending(
+                state,
+                &ctx,
+                order,
+                &by_id,
+                &mut lifecycle,
+                aborter,
+                &mut results_by_id,
+                &mut outcome,
+            )
+            .await;
             break;
         }
 
@@ -187,85 +144,20 @@ pub(super) async fn execute_with_concurrency(
         //    failure — auto-resume is wave-16 / task 02 territory) but
         //    their downstream stays Pending until a follow-up call
         //    revives them.
-        let mut to_dispatch: Vec<DagNode> = Vec::new();
-        for id in &ready_ids {
-            let node = match by_id.get(id.as_str()) {
-                Some(n) => n,
-                None => continue,
-            };
-            let has_condition = node
-                .condition
-                .as_deref()
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-            if has_condition {
-                lifecycle.insert(id.clone(), NodeLifecycle::Skipped);
-                let dispatch_strategy = node
-                    .dispatch_strategy
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                emit_evidence_skipped(
-                    state,
-                    &ctx,
-                    node,
-                    &dispatch_strategy,
-                    "condition_gated",
-                    node.condition.as_ref().map(|c| ("condition", c.clone())),
-                    &mut outcome,
-                )
-                .await;
-                results_by_id.insert(
-                    id.clone(),
-                    NodeResult::skipped(
-                        id.clone(),
-                        node.target.clone(),
-                        NodeState::SkippedCondition,
-                        dispatch_strategy,
-                    ),
-                );
-                propagate_taint(node, &succs, &mut tainted_by);
-                continue;
-            }
-            // wave-16 / task 04 — review-gate paused state. The first real
-            // non-terminal node state in v2: emit `QuestionEvent::Created`
-            // (best-effort; failure still pauses) + a pending->paused
-            // evidence row, mark the node `Paused`, do NOT call the
-            // target tool. Downstream stays pending; auto-resume lives
-            // in wave-16 / task 02's `QuestionEvent::Resolved` listener.
-            if let ReviewGateKind::QuestionEvent = node.review_gate_kind() {
-                lifecycle.insert(id.clone(), NodeLifecycle::Paused);
-                let dispatch_strategy = node
-                    .dispatch_strategy
-                    .clone()
-                    .unwrap_or_else(|| "unknown".to_string());
-                let (question_id, bus_publish_warning) = emit_paused_review_gate(
-                    state,
-                    &ctx,
-                    plan,
-                    node,
-                    &dispatch_strategy,
-                    &mut outcome,
-                )
-                .await;
-                results_by_id.insert(
-                    id.clone(),
-                    NodeResult::skipped(
-                        id.clone(),
-                        node.target.clone(),
-                        NodeState::Paused {
-                            question_id,
-                            bus_publish_warning,
-                        },
-                        dispatch_strategy,
-                    ),
-                );
-                continue;
-            }
-            to_dispatch.push(node.clone());
-            if to_dispatch.len() >= max_parallel {
-                break;
-            }
-        }
+        let to_dispatch = filter_ready_nodes_for_gates(
+            state,
+            &ctx,
+            plan,
+            &ready_ids,
+            max_parallel,
+            &by_id,
+            &succs,
+            &mut lifecycle,
+            &mut tainted_by,
+            &mut results_by_id,
+            &mut outcome,
+        )
+        .await;
 
         if to_dispatch.is_empty() {
             // Either everything ready was condition-gated (loop again to pick
