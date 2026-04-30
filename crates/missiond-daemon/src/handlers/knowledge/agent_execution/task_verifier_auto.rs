@@ -9,6 +9,7 @@ use super::task_verifier_auto_artifacts::{
 use super::task_verifier_inputs::{
     read_report_summary, read_shared_memory_ledger, read_task_contract_id,
 };
+use super::task_verifier_report::verify_report_against_contract;
 
 // ───────────────────────────────────────────────────────────────────────
 // wave-22 / task 02 — auto task-run verifier (in-process, read-only)
@@ -68,92 +69,13 @@ pub(super) fn auto_run_task_run_verifier(
             ));
         }
     };
-    match report.schema.as_deref() {
-        Some("missiond.report-contract.v1") => {}
-        Some(other) => {
-            return Err(ToolResult::structured_error(ToolError::new(
-                "TASK_REPORT_MALFORMED",
-                format!(
-                    "task_report_path `{}` :schema must equal `missiond.report-contract.v1`, got `{}`",
-                    report_resolved.display(),
-                    other
-                ),
-            )));
-        }
-        None => {
-            return Err(ToolResult::structured_error(ToolError::new(
-                "TASK_REPORT_MALFORMED",
-                format!(
-                    "task_report_path `{}` has no `:schema` field",
-                    report_resolved.display()
-                ),
-            )));
-        }
-    }
-    match report.task_id.as_deref() {
-        Some(id) if id == contract_id => {}
-        Some(other) => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_TASK_ID_MISMATCH",
-                    format!(
-                        "task_report :task_id `{}` does not match task contract head id `{}` (contract `{}`, report `{}`)",
-                        other,
-                        contract_id,
-                        contract_resolved.display(),
-                        report_resolved.display(),
-                    ),
-                )
-                .with_suggestion(
-                    "regenerate the report against the matching contract, or fix the report :task_id field",
-                ),
-            ));
-        }
-        None => {
-            return Err(ToolResult::structured_error(ToolError::new(
-                "TASK_REPORT_MALFORMED",
-                format!(
-                    "task_report_path `{}` is missing required `:task_id` field",
-                    report_resolved.display()
-                ),
-            )));
-        }
-    }
-    // commit_hash overlap: full equality OR either side a prefix of the
-    // other. Mirrors the wave21-03 short<->long sha tolerance so a
-    // 7-char `git log %h` value still matches a 40-char `git rev-parse`.
-    match report.commit_hash.as_deref() {
-        Some(report_hash) => {
-            let matches = report_hash == commit_hash
-                || report_hash.starts_with(commit_hash)
-                || commit_hash.starts_with(report_hash);
-            if !matches {
-                return Err(ToolResult::structured_error(
-                    ToolError::new(
-                        "TASK_REPORT_COMMIT_HASH_MISMATCH",
-                        format!(
-                            "task_report :commit_hash `{}` does not match completion commit_hash `{}` (report `{}`)",
-                            report_hash,
-                            commit_hash,
-                            report_resolved.display(),
-                        ),
-                    )
-                    .with_suggestion(
-                        "regenerate the report against the durable commit, or correct the completion commit_hash",
-                    ),
-                ));
-            }
-        }
-        None => {
-            return Err(ToolResult::structured_error(ToolError::new(
-                "TASK_REPORT_MALFORMED",
-                format!(
-                    "task_report_path `{}` is missing required `:commit_hash` field",
-                    report_resolved.display()
-                ),
-            )));
-        }
-    }
+    verify_report_against_contract(
+        &report,
+        &report_resolved,
+        &contract_resolved,
+        &contract_id,
+        commit_hash,
+    )?;
 
     // (3) Resolve + load the shared-memory ledger. The script-side verifier
     // requires a `(completion :task <id> ...)` entry; the daemon mirrors that

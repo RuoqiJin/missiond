@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::task_verifier_inputs::{read_report_summary, read_task_contract_id};
 use super::task_verifier_preconditions::require_verified_completion_inputs;
+use super::task_verifier_report::verify_report_against_contract;
 
 /// wave-21 / task 03 — verified-completion gate.
 ///
@@ -91,30 +92,6 @@ pub(super) fn enforce_verified_completion(
             ));
         }
     };
-    match report.schema.as_deref() {
-        Some("missiond.report-contract.v1") => {}
-        Some(other) => {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_MALFORMED",
-                    format!(
-                        "task_report_path `{}` :schema must equal `missiond.report-contract.v1`, got `{}`",
-                        report_resolved.display(),
-                        other
-                    ),
-                ),
-            ));
-        }
-        None => {
-            return Err(ToolResult::structured_error(ToolError::new(
-                "TASK_REPORT_MALFORMED",
-                format!(
-                    "task_report_path `{}` has no `:schema` field",
-                    report_resolved.display()
-                ),
-            )));
-        }
-    }
 
     // Load the contract to recover the head id for the cross-check.
     // Failures here re-use the wave19-08 error codes so callers see a
@@ -148,66 +125,13 @@ pub(super) fn enforce_verified_completion(
         ))
     })?;
 
-    if let Some(report_task_id) = report.task_id.as_deref() {
-        if report_task_id != contract_id {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_TASK_ID_MISMATCH",
-                    format!(
-                        "task_report :task_id `{}` does not match task contract head id `{}` (contract `{}`, report `{}`)",
-                        report_task_id,
-                        contract_id,
-                        contract_resolved.display(),
-                        report_resolved.display(),
-                    ),
-                )
-                .with_suggestion(
-                    "regenerate the report against the matching contract, or fix the report :task_id field",
-                ),
-            ));
-        }
-    } else {
-        return Err(ToolResult::structured_error(ToolError::new(
-            "TASK_REPORT_MALFORMED",
-            format!(
-                "task_report_path `{}` is missing required `:task_id` field",
-                report_resolved.display()
-            ),
-        )));
-    }
-
-    if let Some(report_hash) = report.commit_hash.as_deref() {
-        // Accept short<->long sha overlap: either side may be a prefix
-        // of the other. Mirrors how `git log --format=%h` truncates
-        // hashes to 7+ chars by default, while `git rev-parse HEAD`
-        // returns the full 40-char form.
-        let matches =
-            report_hash == hash || report_hash.starts_with(hash) || hash.starts_with(report_hash);
-        if !matches {
-            return Err(ToolResult::structured_error(
-                ToolError::new(
-                    "TASK_REPORT_COMMIT_HASH_MISMATCH",
-                    format!(
-                        "task_report :commit_hash `{}` does not match completion commit_hash `{}` (report `{}`)",
-                        report_hash,
-                        hash,
-                        report_resolved.display(),
-                    ),
-                )
-                .with_suggestion(
-                    "regenerate the report against the durable commit, or correct the completion commit_hash",
-                ),
-            ));
-        }
-    } else {
-        return Err(ToolResult::structured_error(ToolError::new(
-            "TASK_REPORT_MALFORMED",
-            format!(
-                "task_report_path `{}` is missing required `:commit_hash` field",
-                report_resolved.display()
-            ),
-        )));
-    }
+    verify_report_against_contract(
+        &report,
+        &report_resolved,
+        &contract_resolved,
+        &contract_id,
+        hash,
+    )?;
 
     Ok(json!({
         "task_report_path": trp,
