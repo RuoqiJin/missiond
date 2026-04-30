@@ -21,22 +21,23 @@ use super::claim_lease::{
 use super::dispatch::{dispatch_node, DispatchOutcome, TaskContractDispatchCtx};
 use super::lifecycle::{
     emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_claim_released,
-    emit_evidence_claimed, emit_evidence_finished, emit_evidence_rollback, emit_evidence_running,
-    plan_node_should_retry, EvidenceCtx,
+    emit_evidence_claimed, emit_evidence_finished, emit_evidence_running, plan_node_should_retry,
+    EvidenceCtx,
 };
 use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
 use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
-use super::rollback::{run_cascade_rollback, run_rollback};
 use super::scheduler::propagate_taint;
 
 mod bookkeeping;
 mod gates;
+mod rollbacks;
 mod skips;
 use bookkeeping::{
     build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
     initialize_lifecycle, stitch_results_topologically,
 };
 use gates::filter_ready_nodes_for_gates;
+use rollbacks::evaluate_and_emit_rollback;
 use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
 
 pub(super) async fn execute_with_concurrency(
@@ -528,32 +529,18 @@ pub(super) async fn execute_with_concurrency(
                 // branches (the node is not in a "final failed"
                 // state for those).
                 let acc_rollback_eval = if matches!(acceptance.status, AcceptanceStatus::Rejected) {
-                    let mut eval = run_rollback(state, plan, &node).await;
-                    // wave-18 / task 04 — cascade rollback pass after
-                    // node-local rollback. Fold into the same evaluation
-                    // so audit dashboards see a single rollback block.
-                    if node.has_active_rollback_cascade() {
-                        let cascade =
-                            run_cascade_rollback(state, plan, &node, &parsed.nodes, order).await;
-                        if !cascade.is_inactive() {
-                            eval.cascade = Some(cascade);
-                        }
-                    }
-                    if !eval.is_inactive() {
-                        emit_evidence_rollback(
-                            state,
-                            &ctx,
-                            &node,
-                            &dispatch_strategy,
-                            current_attempt,
-                            &eval,
-                            &mut outcome,
-                        )
-                        .await;
-                        Some(eval)
-                    } else {
-                        None
-                    }
+                    evaluate_and_emit_rollback(
+                        state,
+                        &ctx,
+                        plan,
+                        &node,
+                        parsed,
+                        order,
+                        &dispatch_strategy,
+                        current_attempt,
+                        &mut outcome,
+                    )
+                    .await
                 } else {
                     None
                 };
@@ -787,32 +774,18 @@ pub(super) async fn execute_with_concurrency(
             // intact: `:failure-policy fail-fast` still trips the
             // wave-loop abort flag based on the original failure,
             // not the rollback outcome.
-            let mut rollback_eval = run_rollback(state, plan, &node).await;
-            // wave-18 / task 04 — cascade rollback pass after the
-            // node-local rollback. The cascade evaluator is conservative:
-            // it never runs unless the failed node opted in via
-            // `:rollback-cascade "plan" | "dispatch-safe"`. Folding the
-            // outcome into the same `RollbackEvaluation` keeps audit
-            // dashboards on a single block per failed node.
-            if node.has_active_rollback_cascade() {
-                let cascade = run_cascade_rollback(state, plan, &node, &parsed.nodes, order).await;
-                if !cascade.is_inactive() {
-                    rollback_eval.cascade = Some(cascade);
-                }
-            }
-            let rollback_active = !rollback_eval.is_inactive();
-            if rollback_active {
-                emit_evidence_rollback(
-                    state,
-                    &ctx,
-                    &node,
-                    &dispatch_strategy,
-                    current_attempt,
-                    &rollback_eval,
-                    &mut outcome,
-                )
-                .await;
-            }
+            let rollback_eval = evaluate_and_emit_rollback(
+                state,
+                &ctx,
+                plan,
+                &node,
+                parsed,
+                order,
+                &dispatch_strategy,
+                current_attempt,
+                &mut outcome,
+            )
+            .await;
             results_by_id.insert(
                 node_id.clone(),
                 NodeResult {
@@ -824,11 +797,7 @@ pub(super) async fn execute_with_concurrency(
                     attempts_made: current_attempt,
                     max_attempts,
                     retry_skipped_non_retryable: non_retryable,
-                    rollback: if rollback_active {
-                        Some(rollback_eval)
-                    } else {
-                        None
-                    },
+                    rollback: rollback_eval,
                     // wave-17 / task 03 — dispatch-failure path skips
                     // the acceptance phase (failure dominates).
                     acceptance: None,
