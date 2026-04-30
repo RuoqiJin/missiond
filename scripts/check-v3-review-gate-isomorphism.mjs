@@ -21,9 +21,11 @@ Checks the V3 review-gate Lisp/code isomorphism contract:
     auto_emit_review_question_after_artifact_write helpers (never blocks the
     primary action, never auto-approves, surfaces review_question_warning on
     bus failure).
-  - directive.rs + directive/approval_review.rs / plan.rs / workflow.rs go
-    through that dispatcher (no bypass) and call maybe_emit_review_question_resolved
-    on approve/reject/needs_changes.
+  - directive.rs + directive/approval_review.rs +
+    directive/approval_review/proposer.rs / plan.rs / workflow.rs go through
+    that dispatcher (no bypass) and call maybe_emit_review_question_resolved
+    on approve/reject/needs_changes, while directive proposer helpers stay in
+    their own V3-pinned module.
   - The MCP directive / plan / workflow tools expose review_gate_policy with
     the manual|emit_question|off enum AND the wave-15 review_decision with
     the approved|rejected|needs_changes enum.
@@ -44,6 +46,8 @@ const DEFAULT_FILES = {
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   directiveCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
   directiveApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs',
+  directiveApprovalProposer:
+    'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
@@ -122,6 +126,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
@@ -181,6 +186,31 @@ const DIRECTIVE_RS_NEEDLES = [
   'parse_compile_review_gate(args)',
   'apply_compile_review_gates(',
   'maybe_emit_review_question_resolved',
+];
+
+const DIRECTIVE_APPROVAL_REVIEW_RS_NEEDLES = [
+  'mod proposer;',
+  'use self::proposer::{',
+  'request_directive_auto_approve_proposal',
+  'pub(super) async fn action_approve',
+  'async fn action_approve_with_resolution',
+  'async fn action_approve_with_policy_only',
+  'pub(super) async fn action_archive',
+  'async fn action_archive_with_resolution',
+  'async fn action_archive_with_policy_only',
+  'pub(crate) enum DirectiveSubscriberOutcome',
+  'pub(crate) async fn handle_review_resolved_event',
+];
+
+const DIRECTIVE_APPROVAL_PROPOSER_RS_NEEDLES = [
+  'use super::*;',
+  'pub(super) async fn request_directive_auto_approve_proposal',
+  'pub(super) fn attach_directive_proposal_block',
+  'pub(super) fn attach_directive_apply_gate_block',
+  'pub(super) fn parse_proposer_mode_or_error',
+  'pub(super) fn directive_proposer_summary',
+  'DIRECTIVE_REVIEW_PROPOSER_CALLER',
+  'SONNET_PROPOSER_MAX_TOKENS',
 ];
 
 const PLAN_RS_NEEDLES = [
@@ -394,9 +424,21 @@ function checkFiles(root, files) {
     'smoke_wave22_07_review_apply_gate_pins_wave21_06_five_invariants',
     'proposal_invariants_round_trip_never_surface_rejected',
   ]);
-  const directiveCallerSurface = `${sources.directive}\n${sources.directiveCompileAuthoring}\n${sources.directiveApprovalReview}`;
-  const directiveCallerLabel = `${files.directive} + ${files.directiveCompileAuthoring} + ${files.directiveApprovalReview}`;
+  const directiveCallerSurface = `${sources.directive}\n${sources.directiveCompileAuthoring}\n${sources.directiveApprovalReview}\n${sources.directiveApprovalProposer}`;
+  const directiveCallerLabel = `${files.directive} + ${files.directiveCompileAuthoring} + ${files.directiveApprovalReview} + ${files.directiveApprovalProposer}`;
   requireAll(diagnostics, directiveCallerLabel, directiveCallerSurface, DIRECTIVE_RS_NEEDLES);
+  requireAll(
+    diagnostics,
+    files.directiveApprovalReview,
+    sources.directiveApprovalReview,
+    DIRECTIVE_APPROVAL_REVIEW_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.directiveApprovalProposer,
+    sources.directiveApprovalProposer,
+    DIRECTIVE_APPROVAL_PROPOSER_RS_NEEDLES,
+  );
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
   requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, PLAN_COMPILE_AUTHORING_RS_NEEDLES);
   requireAll(diagnostics, files.planApprovalReview, sources.planApprovalReview, PLAN_APPROVAL_REVIEW_RS_NEEDLES);
@@ -508,7 +550,8 @@ function runFixtures(json) {
     [DEFAULT_FILES.reviewGateTests]: buildGoodReviewGateTests(),
     [DEFAULT_FILES.directive]: buildGoodDirectiveFacadeRs(),
     [DEFAULT_FILES.directiveCompileAuthoring]: buildGoodCallerRs(),
-    [DEFAULT_FILES.directiveApprovalReview]: buildGoodDirectiveFacadeRs(),
+    [DEFAULT_FILES.directiveApprovalReview]: buildGoodDirectiveApprovalReviewRs(),
+    [DEFAULT_FILES.directiveApprovalProposer]: buildGoodDirectiveApprovalProposerRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.planApprovalReview]: buildGoodPlanApprovalReviewRs(),
@@ -666,6 +709,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
@@ -814,6 +858,45 @@ use crate::handlers::knowledge::review_gate::maybe_emit_review_question_resolved
 fn directive_facade() {
     maybe_emit_review_question_resolved();
 }
+`;
+}
+
+function buildGoodDirectiveApprovalReviewRs() {
+  return `// fixture
+mod proposer;
+use self::proposer::{
+    attach_directive_apply_gate_block, attach_directive_proposal_block,
+    directive_proposer_summary, parse_proposer_mode_or_error,
+    request_directive_auto_approve_proposal,
+};
+
+pub(super) async fn action_approve() {}
+async fn action_approve_with_resolution() {
+    parse_review_resolution_input(args);
+    maybe_emit_review_question_resolved();
+}
+async fn action_approve_with_policy_only() {}
+pub(super) async fn action_archive() {}
+async fn action_archive_with_resolution() {
+    parse_review_resolution_input(args);
+    maybe_emit_review_question_resolved();
+}
+async fn action_archive_with_policy_only() {}
+pub(crate) enum DirectiveSubscriberOutcome {}
+pub(crate) async fn handle_review_resolved_event() {}
+`;
+}
+
+function buildGoodDirectiveApprovalProposerRs() {
+  return `// fixture
+use super::*;
+const DIRECTIVE_REVIEW_PROPOSER_CALLER: &str = "directive_review_proposer";
+const SONNET_PROPOSER_MAX_TOKENS: u32 = 1024;
+pub(super) async fn request_directive_auto_approve_proposal() {}
+pub(super) fn attach_directive_proposal_block() {}
+pub(super) fn attach_directive_apply_gate_block() {}
+pub(super) fn parse_proposer_mode_or_error() {}
+pub(super) fn directive_proposer_summary() {}
 `;
 }
 
