@@ -18,7 +18,7 @@ use super::log_store::{
     read_log_file, require_str, resolve_project_root, touch_last_updated, write_log_file,
 };
 use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
-use super::task_verifier::auto_run_task_run_verifier;
+use super::task_verifier_auto::auto_run_task_run_verifier;
 
 pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     let execution_id = match require_str(args, "execution_id") {

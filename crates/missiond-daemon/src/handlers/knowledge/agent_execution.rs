@@ -46,6 +46,7 @@ mod preflight;
 mod preflight_scope;
 mod session_trace;
 mod task_verifier;
+mod task_verifier_auto;
 mod task_verifier_inputs;
 
 #[cfg(test)]
@@ -97,7 +98,9 @@ use self::session_trace::{
     TraceWarning,
 };
 #[cfg(test)]
-use self::task_verifier::{auto_run_task_run_verifier, enforce_verified_completion};
+use self::task_verifier::enforce_verified_completion;
+#[cfg(test)]
+use self::task_verifier_auto::auto_run_task_run_verifier;
 #[cfg(test)]
 use self::task_verifier_inputs::{
     read_report_summary, read_shared_memory_ledger, read_task_contract_id,
