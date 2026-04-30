@@ -26,6 +26,7 @@ Checks the V3 file-artifacts Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   fileArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs',
+  fileArtifactsTests: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs',
 };
 
 function main() {
@@ -84,6 +85,7 @@ const BLUEPRINT_NEEDLES = [
   '(surface file-artifacts',
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs',
   'node scripts/check-v3-file-artifacts-isomorphism.mjs',
 ];
 
@@ -117,6 +119,8 @@ const FILE_ARTIFACTS_NEEDLES = [
   'pub(crate) fn atomic_write_artifact',
   'pub(crate) async fn attempt_artifact_write',
   'pub(crate) struct WriterContext',
+  '#[cfg(test)]',
+  'mod tests;',
   'AttemptOutcome::Written',
   'AttemptOutcome::ResolveFailed',
   'AttemptOutcome::WriteFailed',
@@ -157,6 +161,14 @@ function checkFiles(root, files) {
   );
 
   requireAll(diagnostics, files.fileArtifacts, sources.fileArtifacts, FILE_ARTIFACTS_NEEDLES);
+  requireAll(diagnostics, files.fileArtifactsTests, sources.fileArtifactsTests, [
+    'use super::*;',
+    'fn sanitize_topic_keeps_safe_chars',
+    'fn artifact_path_alignment_lives_under_alignment_topic_dir',
+    'fn atomic_write_returns_correct_sha256_and_bytes',
+    'fn splice_writes_emits_canonical_keys',
+    'fn splice_resolve_failed_downgrades_status_and_includes_error',
+  ]);
 
   return diagnostics;
 }
@@ -222,6 +234,7 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.fileArtifacts]: buildGoodFileArtifacts(),
+    [DEFAULT_FILES.fileArtifactsTests]: buildGoodFileArtifactsTests(),
   };
   cases.push({
     name: 'pass: blueprint surface + file_artifacts.rs surface aligned',
@@ -391,8 +404,9 @@ function buildGoodBlueprint() {
   (implementation-map
     (surface file-artifacts
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"]
-      :note "file-artifacts is the file-first SSOT writer underneath compile_directive / compile_plan / compile_workflow and the request-local artifact projection that mission_request materializes for review. ArtifactKind is a closed enum IntentAlignment | Plan | Workflow; artifact_path locks the stable artifact paths (.missiond/alignment/<topic>/intent-alignment.lisp, .missiond/plans/<topic>/PLAN.lisp, .missiond/workflows/<topic>.lisp) which are the V3 compat path served when mission_request opt-in compat_write_file=true. atomic_write_artifact wires temp file + fsync + rename so callers see no partial writes on crash, and attempt_artifact_write composes a WriterContext + project-root resolver so the file-vs-db contract never silently rolls back a committed row when the file write fails."))
+      :code ["crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs"]
+      :note "file-artifacts is the file-first SSOT writer underneath compile_directive / compile_plan / compile_workflow and the request-local artifact projection that mission_request materializes for review. ArtifactKind is a closed enum IntentAlignment | Plan | Workflow; artifact_path locks the stable artifact paths (.missiond/alignment/<topic>/intent-alignment.lisp, .missiond/plans/<topic>/PLAN.lisp, .missiond/workflows/<topic>.lisp) which are the V3 compat path served when mission_request opt-in compat_write_file=true. atomic_write_artifact wires temp file + fsync + rename so callers see no partial writes on crash, and attempt_artifact_write composes a WriterContext + project-root resolver so the file-vs-db contract never silently rolls back a committed row when the file write fails. file_artifacts/tests.rs holds the writer regression suite outside the runtime facade."))
   (compression-contract
     :checks ["node scripts/check-v3-file-artifacts-isomorphism.mjs"]))
 `;
@@ -436,6 +450,20 @@ const _: &[&str] = &[
 ];
 
 pub(crate) async fn attempt_artifact_write() {}
+#[cfg(test)]
+mod tests;
+`;
+}
+
+function buildGoodFileArtifactsTests() {
+  return `// fixture
+use super::*;
+
+fn sanitize_topic_keeps_safe_chars() {}
+fn artifact_path_alignment_lives_under_alignment_topic_dir() {}
+fn atomic_write_returns_correct_sha256_and_bytes() {}
+fn splice_writes_emits_canonical_keys() {}
+fn splice_resolve_failed_downgrades_status_and_includes_error() {}
 `;
 }
 

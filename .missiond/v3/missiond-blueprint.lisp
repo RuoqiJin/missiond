@@ -1125,8 +1125,9 @@
       :status "code-aligned"
       :implements [file-artifacts request-local-artifacts compat-artifact-paths]
       :code ["crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs"
              "scripts/check-v3-file-artifacts-isomorphism.mjs"]
-      :note "file-artifacts is the shared writer layer for file-first Lisp artifacts. ArtifactKind covers IntentAlignment, Plan, and Workflow; artifact_path maps stable compat path roots .missiond/alignment, .missiond/plans, and .missiond/workflows, while mission_request and task-runner surfaces layer request-local artifact projection under .missiond/requests/<request_id>/ on top. atomic_write_artifact and unique_temp_path_in_dir provide the temp-file + fsync + rename discipline; attempt_artifact_write with WriterContext returns AttemptOutcome::Written, ResolveFailed, or WriteFailed so DB/file partial states stay visible. The invariant is no partial writes: failed writes must not leak partial bytes, and callers must surface write_failed / partial status rather than pretending the Lisp artifact is authoritative.")
+      :note "file-artifacts is the shared writer layer for file-first Lisp artifacts. ArtifactKind covers IntentAlignment, Plan, and Workflow; artifact_path maps stable compat path roots .missiond/alignment, .missiond/plans, and .missiond/workflows, while mission_request and task-runner surfaces layer request-local artifact projection under .missiond/requests/<request_id>/ on top. atomic_write_artifact and unique_temp_path_in_dir provide the temp-file + fsync + rename discipline; attempt_artifact_write with WriterContext returns AttemptOutcome::Written, ResolveFailed, or WriteFailed so DB/file partial states stay visible. The invariant is no partial writes: failed writes must not leak partial bytes, and callers must surface write_failed / partial status rather than pretending the Lisp artifact is authoritative. file_artifacts/tests.rs holds the writer regression suite outside the runtime facade.")
 
     (surface mission_directive
       :status "code-aligned"
