@@ -32,6 +32,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   reviewGate: 'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   reviewGateCreated: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
+  reviewGateResolution: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -95,6 +96,7 @@ const BLUEPRINT_NEEDLES = [
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -250,8 +252,8 @@ function checkFiles(root, files) {
     ['alignment-review-gate', 'plan-review-gate', 'never auto-approve'],
   );
 
-  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}`;
-  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated}`;
+  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}`;
+  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution}`;
   requireAll(diagnostics, reviewGateSurfaceLabel, reviewGateSurface, REVIEW_GATE_RS_NEEDLES);
   requireAll(diagnostics, files.reviewGateCreated, sources.reviewGateCreated, [
     'pub(crate) fn derive_review_question_id',
@@ -260,6 +262,16 @@ function checkFiles(root, files) {
     'pub(crate) async fn apply_compile_review_gates',
     'pub(crate) async fn auto_emit_review_question_after_artifact_write',
     'pub(crate) const PLAN_NODE_REVIEW_DEFAULT_ACTION',
+  ]);
+  requireAll(diagnostics, files.reviewGateResolution, sources.reviewGateResolution, [
+    'pub(crate) enum ReviewDecision',
+    'pub(crate) async fn maybe_emit_review_question_resolved',
+    'pub(crate) fn parse_review_resolution_input',
+    'pub(crate) fn parse_review_question_id_struct',
+    'pub(crate) fn validate_review_resolution_envelope',
+    'pub(crate) fn plan_review_resolved_dispatch',
+    'pub(crate) fn evaluate_review_automation',
+    'DB action already committed',
   ]);
   requireAll(diagnostics, files.directive, sources.directive, DIRECTIVE_RS_NEEDLES);
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
@@ -335,6 +347,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.reviewGate]: buildGoodReviewGate(),
     [DEFAULT_FILES.reviewGateCreated]: buildGoodReviewGateCreated(),
+    [DEFAULT_FILES.reviewGateResolution]: buildGoodReviewGateResolution(),
     [DEFAULT_FILES.directive]: buildGoodCallerRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
@@ -478,6 +491,7 @@ function buildGoodBlueprint() {
       :implements [alignment-review-gate plan-review-gate two-gate-default]
       :code ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
@@ -495,10 +509,9 @@ function buildGoodBlueprint() {
 function buildGoodReviewGate() {
   return `// fixture
 mod created;
+mod resolution;
 pub(crate) use created::{ReviewGatePolicy, apply_compile_review_gates};
-pub(crate) enum ReviewDecision { Approved, Rejected, NeedsChanges }
-const DECISIONS: &[&str] = &["ReviewDecision::Approved", "ReviewDecision::Rejected", "ReviewDecision::NeedsChanges"];
-pub(crate) async fn maybe_emit_review_question_resolved() {}
+pub(crate) use resolution::{ReviewDecision, maybe_emit_review_question_resolved};
 // payload markers: review_question_warning + BUS_PUBLISH_FAILED
 // "persisted artifact remains intact" / "DB action already committed"
 `;
@@ -519,6 +532,21 @@ pub(crate) async fn auto_emit_review_question_after_artifact_write() {}
 pub(crate) const PLAN_NODE_REVIEW_DEFAULT_ACTION: &str = "plan-node";
 // payload markers: review_question_warning + BUS_PUBLISH_FAILED
 // "persisted artifact remains intact"
+`;
+}
+
+function buildGoodReviewGateResolution() {
+  return `// fixture
+pub(crate) enum ReviewDecision { Approved, Rejected, NeedsChanges }
+const DECISIONS: &[&str] = &["ReviewDecision::Approved", "ReviewDecision::Rejected", "ReviewDecision::NeedsChanges"];
+pub(crate) async fn maybe_emit_review_question_resolved() {}
+pub(crate) fn parse_review_resolution_input() {}
+pub(crate) fn parse_review_question_id_struct() {}
+pub(crate) fn validate_review_resolution_envelope() {}
+pub(crate) fn plan_review_resolved_dispatch() {}
+pub(crate) fn evaluate_review_automation() {}
+// payload markers: review_question_warning + BUS_PUBLISH_FAILED
+// "DB action already committed"
 `;
 }
 
