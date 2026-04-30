@@ -713,12 +713,12 @@
       :surface skill-runtime
       :note "Skill query/context/mutate/exec is physically split and pinned under the V3 skill-runtime surface.")
     (v2-item cascade-universe-governance
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-event-bus.lisp :: cascade/control tree"
       :v3-pillar worker-runtime
       :v3-function cascade-governance
       :surface cascade-governance
-      :note "Universe graph and cascade tools are mapped as governance/runtime, not left as loose legacy tools.")
+      :note "Universe graph, cascade planning, trigger execution, and integrity linting are physically split and pinned under the V3 cascade-governance surface.")
     (v2-item sysinfra-control
       :status designed
       :v2-source ".missiond/v2/intent-system-layer.lisp :: system/sysinfra tools"
@@ -815,7 +815,7 @@
         :surface skill-runtime
         :tools [mission_skill_query mission_skill_context mission_skill_mutate mission_skill_exec])
       (tool-group cascade-runtime-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-event-bus.lisp :: cascade"
         :v3-pillar worker-runtime
         :v3-function cascade-governance
@@ -1645,11 +1645,17 @@
       :note "Code-aligned V3 destination for skill registry and skill execution behavior. skill.rs is the thin mission_skill facade for consolidated mission_skill_query, mission_skill_context, mission_skill_mutate, and direct legacy skill tool names; skill/query.rs owns list/search/topics/actions/stats, FTS/vector ranking, topic hit recording, workflow action projection, and execution stats egress; skill/context.rs owns context build/resolve, skill dependency expansion, infra and KB dependency aggregation, and optional BoardTask context projection; skill/mutate.rs owns upsert/record/render/rollback, topic auto-create, block writes, materialization, skill version rollback, and embedding refresh through ProcessSkillTopic; skill/exec.rs owns mission_skill_exec and execute_workflow result/error egress. Runtime projection remains a later runtime-projected graduation so V3 can own skill execution policy directly.")
 
     (surface cascade-governance
-      :status "designed"
+      :status "code-aligned"
       :implements [universe-graph cascade-plan cascade-trigger cascade-lint]
       :code ["crates/missiond-daemon/src/handlers/knowledge/cascade.rs"
-             "crates/missiond-mcp/src/tools/knowledge/cascade.rs"]
-      :note "Designed V3 destination for universe graph and cascade tools. This keeps cascade/control-tree behavior explicit while later waves decide the physical split.")
+             "crates/missiond-daemon/src/handlers/knowledge/cascade/path.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/cascade/graph.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/cascade/plan.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/cascade/trigger.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/cascade/lint.rs"
+             "crates/missiond-mcp/src/tools/knowledge/cascade.rs"
+             "scripts/check-v3-cascade-governance-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for universe graph and cascade tools. cascade.rs is the thin cascade-governance facade; cascade/path.rs owns UNIVERSE_MANIFEST / UNIVERSE_ROOT path policy; cascade/graph.rs owns mission_universe_graph; cascade/plan.rs owns mission_cascade_plan dry-run; cascade/trigger.rs owns mission_cascade_trigger, CASCADE_TRIGGER_ENABLED kill switch, TaskEvent::CascadeTriggered/Completed, and spawn_blocking execute_plan; cascade/lint.rs owns mission_cascade_lint integrity egress. Runtime projection remains a later runtime-projected graduation so V3 can own cascade policy directly.")
 
     (surface sysinfra-control
       :status "designed"
@@ -1688,6 +1694,7 @@
              "node scripts/check-v3-memory-kb-isomorphism.mjs"
              "node scripts/check-v3-project-registry-isomorphism.mjs"
              "node scripts/check-v3-skill-runtime-isomorphism.mjs"
+             "node scripts/check-v3-cascade-governance-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
