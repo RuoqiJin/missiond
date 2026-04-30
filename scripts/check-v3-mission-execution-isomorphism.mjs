@@ -16,6 +16,8 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
     logs, claims, issues, decisions, and completion durability
   - agent_execution/log_counters.rs: id-counters allocation, repair insertion,
     and legacy ID scanning shared by claim/governance/completion surfaces
+  - agent_execution/log_deviation.rs, log_decision.rs, and log_issue.rs:
+    governance action writers plus matching live event projection
   - agent_execution/log_mutation.rs: Lisp quoting, key/value mutation, block
     append, and metadata update helpers for durable companion-log writes
   - agent_execution/lisp_syntax.rs: shared S-expression parser facade used by
@@ -75,8 +77,13 @@ const DEFAULT_FILES = {
   logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   logDispatch:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_dispatch.rs',
+  logDecision:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_decision.rs',
+  logDeviation:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_deviation.rs',
   logGovernance:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
+  logIssue: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_issue.rs',
   logList: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_list.rs',
   logOpen: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_open.rs',
   logStatus: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
@@ -171,7 +178,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_mutation.rs', 'agent_execution/log_paths.rs', 'agent_execution/log_template.rs', 'agent_execution/log_dispatch.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_open.rs', 'agent_execution/log_list.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'agent_execution/lisp_syntax_node.rs', 'agent_execution/lisp_syntax_balance.rs', 'emit_execution_event', 'agent_execution/session_trace.rs', 'agent_execution/session_trace_event.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_mutation.rs', 'agent_execution/log_paths.rs', 'agent_execution/log_template.rs', 'agent_execution/log_dispatch.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_deviation.rs', 'agent_execution/log_decision.rs', 'agent_execution/log_issue.rs', 'agent_execution/log_open.rs', 'agent_execution/log_list.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'agent_execution/lisp_syntax_node.rs', 'agent_execution/lisp_syntax_balance.rs', 'emit_execution_event', 'agent_execution/session_trace.rs', 'agent_execution/session_trace_event.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -189,7 +196,10 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_dispatch.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_decision.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_deviation.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_issue.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_open.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_list.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
@@ -261,8 +271,11 @@ const DAEMON_NEEDLES = [
   'mod lisp_syntax_balance',
   'mod lisp_syntax_node',
   'mod log_counters',
+  'mod log_decision',
+  'mod log_deviation',
   'mod log_dispatch',
   'mod log_governance',
+  'mod log_issue',
   'mod log_list',
   'mod log_mutation',
   'mod log_open',
@@ -450,14 +463,33 @@ const LOG_DISPATCH_NEEDLES = [
 ];
 
 const LOG_GOVERNANCE_NEEDLES = [
+  'pub(super) use super::log_deviation::action_deviate',
+  'pub(super) use super::log_decision::action_decide',
+  'pub(super) use super::log_issue::action_issue',
+];
+
+const LOG_DEVIATION_NEEDLES = [
   'pub(super) async fn action_deviate',
-  'pub(super) async fn action_decide',
-  'pub(super) async fn action_issue',
   'ExecutionEvent::DeviationRecorded',
+  'read_dispatch_metadata_from_log',
+  'append_to_block',
+  'Counter::Deviation',
+];
+
+const LOG_DECISION_NEEDLES = [
+  'pub(super) async fn action_decide',
   'ExecutionEvent::DecisionRecorded',
+  'read_dispatch_metadata_from_log',
+  'append_to_block',
+  'Counter::Decision',
+];
+
+const LOG_ISSUE_NEEDLES = [
+  'pub(super) async fn action_issue',
   'ExecutionEvent::IssueRecorded',
   'read_dispatch_metadata_from_log',
   'append_to_block',
+  'Counter::Issue',
 ];
 
 const LOG_STATUS_NEEDLES = [
@@ -903,6 +935,9 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.logList, sources.logList, LOG_LIST_NEEDLES);
   requireAll(diagnostics, files.logDispatch, sources.logDispatch, LOG_DISPATCH_NEEDLES);
   requireAll(diagnostics, files.logGovernance, sources.logGovernance, LOG_GOVERNANCE_NEEDLES);
+  requireAll(diagnostics, files.logDeviation, sources.logDeviation, LOG_DEVIATION_NEEDLES);
+  requireAll(diagnostics, files.logDecision, sources.logDecision, LOG_DECISION_NEEDLES);
+  requireAll(diagnostics, files.logIssue, sources.logIssue, LOG_ISSUE_NEEDLES);
   requireAll(diagnostics, files.logStatus, sources.logStatus, LOG_STATUS_NEEDLES);
   requireAll(diagnostics, files.logTemplate, sources.logTemplate, LOG_TEMPLATE_NEEDLES);
   requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
@@ -1111,6 +1146,9 @@ function runFixtures(json) {
     [DEFAULT_FILES.logList]: buildGoodLogList(),
     [DEFAULT_FILES.logDispatch]: buildGoodLogDispatch(),
     [DEFAULT_FILES.logGovernance]: buildGoodLogGovernance(),
+    [DEFAULT_FILES.logDeviation]: buildGoodLogDeviation(),
+    [DEFAULT_FILES.logDecision]: buildGoodLogDecision(),
+    [DEFAULT_FILES.logIssue]: buildGoodLogIssue(),
     [DEFAULT_FILES.logStatus]: buildGoodLogStatus(),
     [DEFAULT_FILES.logTemplate]: buildGoodLogTemplate(),
     [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
@@ -1262,6 +1300,9 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_dispatch.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_deviation.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_decision.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_issue.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_open.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_list.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs"
@@ -1276,7 +1317,7 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace_event.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and compatibility re-exports; agent_execution/lisp_syntax_node.rs owns Node/NodeKind and node accessors; agent_execution/lisp_syntax_balance.rs owns check_balance delimiter audit; agent_execution/log_paths.rs owns COMPANION_DIR .missiond/v2, resolve_project_root, companion_path, project_or_target_project, and require_str for companion-log ingress path resolution; agent_execution/log_store.rs keeps LogFile, parse_kv_pairs, read_log_file, write_log_file, and read-model helpers authoritative; agent_execution/log_mutation.rs owns Lisp quoting, key/value mutation, block append, touch_last_updated, and refresh_root after durable companion-log edits; agent_execution/log_template.rs owns render_canonical_template for canonical companion-log Lisp projection; agent_execution/log_dispatch.rs owns VALID_DISPATCH_STRATEGIES, normalize_dispatch_strategy, build_opened_event, DispatchMeta, and read_dispatch_metadata_from_log; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; agent_execution/log_open.rs owns action_open and session-trace dispatch projection; agent_execution/log_list.rs owns action_list and compact execution durability rows; agent_execution/log_surface.rs keeps emit_execution_event plus compatibility re-exports for open/list routing; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace_event.rs owns TraceKind, TraceEvent, TraceWarning, TRACE_ID_RE, render_trace_event, scan_max_trace_seq, sanitize_trace_backend, and is_valid_trace_id; agent_execution/session_trace.rs owns append_session_trace_event, resolve_session_trace_path, and resolve_trace_task_id for optional task traces.")
+	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and compatibility re-exports; agent_execution/lisp_syntax_node.rs owns Node/NodeKind and node accessors; agent_execution/lisp_syntax_balance.rs owns check_balance delimiter audit; agent_execution/log_paths.rs owns COMPANION_DIR .missiond/v2, resolve_project_root, companion_path, project_or_target_project, and require_str for companion-log ingress path resolution; agent_execution/log_store.rs keeps LogFile, parse_kv_pairs, read_log_file, write_log_file, and read-model helpers authoritative; agent_execution/log_mutation.rs owns Lisp quoting, key/value mutation, block append, touch_last_updated, and refresh_root after durable companion-log edits; agent_execution/log_template.rs owns render_canonical_template for canonical companion-log Lisp projection; agent_execution/log_dispatch.rs owns VALID_DISPATCH_STRATEGIES, normalize_dispatch_strategy, build_opened_event, DispatchMeta, and read_dispatch_metadata_from_log; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; agent_execution/log_open.rs owns action_open and session-trace dispatch projection; agent_execution/log_list.rs owns action_list and compact execution durability rows; agent_execution/log_surface.rs keeps emit_execution_event plus compatibility re-exports for open/list routing; agent_execution/log_governance.rs is the governance facade; agent_execution/log_deviation.rs owns action_deviate and DeviationRecorded projection; agent_execution/log_decision.rs owns action_decide and DecisionRecorded projection; agent_execution/log_issue.rs owns action_issue and IssueRecorded projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace_event.rs owns TraceKind, TraceEvent, TraceWarning, TRACE_ID_RE, render_trace_event, scan_max_trace_seq, sanitize_trace_backend, and is_valid_trace_id; agent_execution/session_trace.rs owns append_session_trace_event, resolve_session_trace_path, and resolve_trace_task_id for optional task traces.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -1350,8 +1391,11 @@ mod log_counters;
 mod lisp_syntax;
 mod lisp_syntax_balance;
 mod lisp_syntax_node;
+mod log_decision;
+mod log_deviation;
 mod log_dispatch;
 mod log_governance;
+mod log_issue;
 mod log_list;
 mod log_mutation;
 mod log_open;
@@ -1576,20 +1620,40 @@ pub(super) fn read_dispatch_metadata_from_log() {}
 }
 
 function buildGoodLogGovernance() {
+  return `pub(super) use super::log_deviation::action_deviate;
+pub(super) use super::log_decision::action_decide;
+pub(super) use super::log_issue::action_issue;
+`;
+}
+
+function buildGoodLogDeviation() {
   return `pub(super) async fn action_deviate() {
   ExecutionEvent::DeviationRecorded;
   read_dispatch_metadata_from_log();
   append_to_block();
+  Counter::Deviation;
 }
+`;
+}
+
+function buildGoodLogDecision() {
+  return `
 pub(super) async fn action_decide() {
   ExecutionEvent::DecisionRecorded;
   read_dispatch_metadata_from_log();
   append_to_block();
+  Counter::Decision;
 }
+`;
+}
+
+function buildGoodLogIssue() {
+  return `
 pub(super) async fn action_issue() {
   ExecutionEvent::IssueRecorded;
   read_dispatch_metadata_from_log();
   append_to_block();
+  Counter::Issue;
 }
 `;
 }
