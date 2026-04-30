@@ -1,5 +1,9 @@
+use crate::state::AppState;
+use missiond_core::types::Plan;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
+
+use super::super::plan::tool_result_payload;
 
 // ── wave-17 / task 05 — DAG finalize + distill trigger v0 ──────────────
 //
@@ -209,4 +213,127 @@ pub(super) fn build_distill_block(
         block["warning"] = json!("distill trigger returned an error; plan final state preserved");
     }
     block
+}
+
+/// wave-17 / task 05 — drive the optional distill trigger. Returns the
+/// `distill` block (or `None` when no trigger was requested). Async egress
+/// lives beside the finalization projection helpers so the scheduler loop
+/// only decides when to finalize.
+///
+/// Decision matrix:
+///
+///   * `distill_on_success=false`              → return `None`
+///   * `aggregate != dag_succeeded`            → block with `triggered=false`
+///                                               and a recorded skip reason
+///   * `plan_status_after != "succeeded"`      → block with `triggered=false`
+///                                               (defensive: the workflow
+///                                               distill handler also gates
+///                                               on plan.status==Succeeded;
+///                                               if the FSM update failed we
+///                                               do NOT call distill because
+///                                               the gate would refuse anyway)
+///   * otherwise                               → call workflow distill,
+///                                               surface its result + a
+///                                               warning when it errored
+pub(super) async fn maybe_run_distill_trigger(
+    state: &AppState,
+    args: &Value,
+    plan: &Plan,
+    aggregate_status: &str,
+    plan_status_after: Option<&str>,
+) -> Option<Value> {
+    if !parse_distill_on_success(args) {
+        return None;
+    }
+    let distill_mode = match parse_distill_mode_arg(args) {
+        Ok(m) => m,
+        Err(_) => {
+            // Unreachable: validate_finalize_args already returned the
+            // structured error before we got here. Defensive return so a
+            // future refactor cannot silently bypass the validator.
+            return Some(build_distill_block(
+                false,
+                "distill_mode_invalid_unreachable",
+                FINALIZE_DISTILL_MODE_DRY_RUN,
+                None,
+                false,
+            ));
+        }
+    };
+    if aggregate_status != "dag_succeeded" {
+        return Some(build_distill_block(
+            false,
+            "aggregate_not_succeeded",
+            distill_mode,
+            None,
+            false,
+        ));
+    }
+    if plan_status_after != Some("succeeded") {
+        return Some(build_distill_block(
+            false,
+            "plan_status_not_succeeded_after_finalize",
+            distill_mode,
+            None,
+            false,
+        ));
+    }
+    // Build the distill args object. We forward the project-resolution
+    // signals (`project` / `cwd` / `target_project`) verbatim so the
+    // distill handler's evidence-sidecar reader resolves the same root the
+    // DAG run wrote into. `persist=false` by default — the wave-17 / task
+    // 05 trigger is an automatic preview pass, not a stamp-the-registry
+    // call. Callers that want persistence still issue an explicit
+    // `mission_workflow(action=distill, persist=true)` themselves.
+    let mut distill_args = serde_json::Map::new();
+    distill_args.insert("action".to_string(), json!("distill"));
+    distill_args.insert("plan_id".to_string(), json!(plan.id.to_string()));
+    distill_args.insert("distill_mode".to_string(), json!(distill_mode));
+    if let Some(p) = args.get("project").and_then(|v| v.as_str()) {
+        distill_args.insert("project".to_string(), json!(p));
+    }
+    if let Some(c) = args.get("cwd").and_then(|v| v.as_str()) {
+        distill_args.insert("cwd".to_string(), json!(c));
+    }
+    if let Some(tp) = args.get("target_project").and_then(|v| v.as_str()) {
+        distill_args.insert("target_project".to_string(), json!(tp));
+    }
+    let distill_call_args = Value::Object(distill_args);
+    let distill_result =
+        super::super::workflow::handle(state, "mission_workflow", distill_call_args).await;
+    match distill_result {
+        Ok(tr) => {
+            let inner_payload = tool_result_payload(&tr);
+            let inner_is_error = tr.is_error.unwrap_or(false);
+            let reason = if inner_is_error {
+                "distill_invoked_returned_error"
+            } else {
+                "distill_invoked_ok"
+            };
+            Some(build_distill_block(
+                true,
+                reason,
+                distill_mode,
+                Some(inner_payload),
+                inner_is_error,
+            ))
+        }
+        Err(e) => {
+            // Unexpected handler-level error (bubbled `Result::Err`). Surface
+            // it as a warning + non-fatal: the plan final state is preserved
+            // because we already updated it to Succeeded above.
+            tracing::warn!(
+                plan_id = %plan.id,
+                error = %e,
+                "DAG finalize: distill trigger handler returned error"
+            );
+            Some(build_distill_block(
+                true,
+                "distill_invoked_handler_error",
+                distill_mode,
+                Some(json!({"error": e.to_string()})),
+                true,
+            ))
+        }
+    }
 }

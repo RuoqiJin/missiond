@@ -613,6 +613,11 @@ function checkFiles(root, files) {
     'fn unchanged_status_label',
     'pub(super) fn build_finalization_block',
     'pub(super) fn build_distill_block',
+    'pub(super) async fn maybe_run_distill_trigger',
+    'super::super::workflow::handle',
+    'tool_result_payload',
+    'distill_invoked_ok',
+    'distill_invoked_handler_error',
   ]);
 
   requireAll(diagnostics, files.planDagLifecycle, sources.planDagLifecycle, [
@@ -1100,9 +1105,7 @@ pub(super) use mode::{detect_scheduler_mode, refuse_llm_inference_in_dag_mode};
 mod finalization;
 pub(super) use finalization::parse_finalize_plan;
 use finalization::{
-    build_distill_block, build_finalization_block, finalize_plan_status_label,
-    parse_distill_mode_arg, parse_distill_on_success, validate_finalize_args,
-    FINALIZE_DISTILL_MODE_DRY_RUN,
+    build_finalization_block, maybe_run_distill_trigger, validate_finalize_args,
 };
 mod lifecycle;
 use lifecycle::{
@@ -1258,6 +1261,12 @@ pub(super) fn finalize_plan_status_label() {}
 fn unchanged_status_label() {}
 pub(super) fn build_finalization_block() {}
 pub(super) fn build_distill_block() {}
+pub(super) async fn maybe_run_distill_trigger() {
+  super::super::workflow::handle();
+  tool_result_payload();
+  distill_invoked_ok;
+  distill_invoked_handler_error;
+}
 `);
   writeFixture(root, DEFAULT_FILES.planDagLifecycle, `
 pub(super) struct EvidenceCtx;
