@@ -692,12 +692,12 @@
       :surface incident-governance
       :note "Question CRUD, decision stats, LLM trace, Gemini auth, and incident routing are physically split and pinned under the V3 incident-governance surface.")
     (v2-item capability-governance
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-capability-governance.lisp"
       :v3-pillar communication
       :v3-function capability-governance
       :surface capability-governance
-      :note "Capability usage, audit, and Codex ops are mapped but not yet physically same-shaped as V3.")
+      :note "Capability usage, audit, and Codex ops are physically pinned under the V3 capability-governance surface; runtime projection remains a separate future graduation step.")
     (v2-item compute-primitives
       :status designed
       :v2-source ".missiond/v2/intent-worker.lisp :: pty / llm / worker / engine runtime"
@@ -844,7 +844,7 @@
         :surface incident-governance
         :tools [mission_question mission_llm_trace mission_decision_stats mission_gemini_auth mission_incident])
       (tool-group capability-audit-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-capability-governance.lisp"
         :v3-pillar communication
         :v3-function capability-governance
@@ -1641,12 +1641,18 @@
       :note "Code-aligned V3 destination for question, incident, LLM trace, Gemini auth, and decision stats behavior. question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question create/list/get/answer/dismiss, running-autopilot task inference, QuestionEvent::Created/Resolved, and TaskEvent::Completed scheduler wakeup; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace routing to Gemini/Jarvis trace adapters; question/auth.rs owns mission_gemini_auth routing; question/incident.rs owns mission_incident routing plus legacy mission_incident_* routing; handlers/mod.rs sends both consolidated and legacy question/incident public tools through this facade; sysinfra/misc.rs remains the legacy incident and Gemini execution adapter until sysinfra-control is physically split.")
 
     (surface capability-governance
-      :status "designed"
+      :status "code-aligned"
       :implements [capability-usage audit codex-ops]
       :code ["crates/missiond-mcp/src/tools/comm/capability_usage.rs"
              "crates/missiond-mcp/src/tools/comm/audit.rs"
-             "crates/missiond-mcp/src/tools/comm/codex_ops.rs"]
-      :note "Designed V3 destination for capability usage, audit, and Codex ops surfaces. The V2 evidence philosophy is preserved, but the handlers are not yet Lisp-isomorphic.")
+             "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
+             "crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
+             "crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs"
+             "crates/missiond-daemon/src/handlers/comm/audit.rs"
+             "crates/missiond-daemon/src/handlers/comm/codex_ops.rs"
+             "scripts/check-v3-capability-governance-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for capability usage, audit, and Codex ops surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations.")
 
     (surface compute-primitives
       :status "designed"
@@ -1705,6 +1711,7 @@
              "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-v2-coverage.mjs"
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
+             "node scripts/check-v3-capability-governance-isomorphism.mjs"
              "node scripts/check-v3-router-policy-isomorphism.mjs"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"
