@@ -25,6 +25,7 @@ const usage = `Usage:
     [--repo <repo-root>] [--max-parallel <n|all>] [--endpoint <ipc>]
     [--session-id <id>] [--actor-role <role>] [--allow-missing-briefs]
     [--request-id <request-id> --request-events-dir <dir>]
+    [--blueprint <path>] [--allow-default-config]
     [--apply] [--json]
   node scripts/task-runner-submit-dispatch.mjs --dry-fixture [--json]
 
@@ -51,6 +52,8 @@ function parseArgs(argv) {
     actorRole: 'orchestrator',
     requestId: null,
     requestEventsDir: null,
+    blueprintPath: null,
+    allowDefaultConfig: false,
     allowMissingBriefs: false,
     apply: false,
     json: false,
@@ -113,6 +116,12 @@ function parseArgs(argv) {
       opts.requestEventsDir = argv[++i] ?? fail('--request-events-dir requires a value');
     } else if (arg.startsWith('--request-events-dir=')) {
       opts.requestEventsDir = arg.slice('--request-events-dir='.length);
+    } else if (arg === '--blueprint') {
+      opts.blueprintPath = argv[++i] ?? fail('--blueprint requires a value');
+    } else if (arg.startsWith('--blueprint=')) {
+      opts.blueprintPath = arg.slice('--blueprint='.length);
+    } else if (arg === '--allow-default-config') {
+      opts.allowDefaultConfig = true;
     } else {
       fail(`unknown argument: ${arg}`);
     }
@@ -132,6 +141,8 @@ export async function submitDispatch({
   actorRole = 'orchestrator',
   requestId = null,
   requestEventsDir = null,
+  blueprintPath = null,
+  allowDefaultConfig = false,
   allowMissingBriefs = false,
   apply = false,
   callTool = null,
@@ -148,6 +159,8 @@ export async function submitDispatch({
     actorRole,
     requestId,
     requestEventsDir,
+    blueprintPath,
+    allowDefaultConfig,
     allowMissingBriefs,
     emitDispatchEvents: false,
     nowIso,
@@ -333,6 +346,8 @@ function main() {
     actorRole: opts.actorRole,
     requestId: opts.requestId,
     requestEventsDir: opts.requestEventsDir,
+    blueprintPath: opts.blueprintPath,
+    allowDefaultConfig: opts.allowDefaultConfig,
     allowMissingBriefs: opts.allowMissingBriefs,
     apply: opts.apply,
   }).then(
@@ -360,6 +375,9 @@ async function submitDispatchFixtures() {
     const briefDir = path.join(tmp, '.missiond/claudecode');
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.mkdirSync(briefDir, { recursive: true });
+    const blueprintPath = path.join(tmp, '.missiond/v3/missiond-blueprint.lisp');
+    fs.mkdirSync(path.dirname(blueprintPath), { recursive: true });
+    fs.writeFileSync(blueprintPath, fixtureBlueprint());
     fs.writeFileSync(manifestPath, fixtureManifest());
     fs.writeFileSync(path.join(briefDir, 'wave99-01-alpha.md'), '# alpha\n');
     fs.writeFileSync(path.join(briefDir, 'wave99-02-beta.md'), '# beta\n');
@@ -374,6 +392,14 @@ async function submitDispatchFixtures() {
     assert(dry.mode === 'dry-run', 'default fixture should be dry-run');
     assert(dry.submitted_count === 0, 'dry-run should submit nothing');
     assert(dry.delegate_call_count === 1, 'dry-run should still expose one delegate call');
+    assert(
+      dry.descriptor.runtime_projection.default_model_profile === 'submit-fixture-opus-4-7',
+      'submit dry-run should project dispatch defaults from V3 workstation-config',
+    );
+    assert(
+      dry.descriptor.delegate_calls[0].target_args.timeout_secs === 3660,
+      'submit dry-run should use V3 default timeout in delegate payload',
+    );
 
     const calls = [];
     const applied = await submitDispatch({
@@ -454,6 +480,20 @@ function fixtureManifest() {
         :estimated_minutes 20
         :heartbeat_minutes 5
         :write_scope ["scripts/wave99-beta.mjs"]))\n`;
+}
+
+function fixtureBlueprint() {
+  return `(missiond-blueprint
+  (workstation-config
+    (slot-template coder
+      :role coder
+      :default-model-profile submit-fixture-opus-4-7)
+    (timeout-policy boardtask-dispatch
+      :default_secs 3660
+      :min_secs 60
+      :max_secs 7200
+      :watchdog_grace_secs 120
+      :missing_session_probe_secs 120)))`;
 }
 
 function assert(condition, message) {

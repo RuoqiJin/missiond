@@ -20,9 +20,12 @@ import {
   readKeywordProps,
   readLispFile,
 } from './lib/missiond_lisp.mjs';
+import {
+  DEFAULT_MODEL_PROFILE,
+  loadWorkstationRuntimeConfigForRepo,
+} from './lib/v3_workstation_runtime.mjs';
 
 const DISPATCH_SCHEMA = 'missiond.task-runner-dispatch.v0';
-const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
 
 const usage = `Usage:
   node scripts/task-runner-dispatch.mjs --manifest <manifest.lisp>
@@ -30,6 +33,7 @@ const usage = `Usage:
     [--receipts <receipts.lisp>]
     [--repo <repo-root>] [--max-parallel <n|all>] [--actor-role <role>]
     [--request-id <request-id> --request-events-dir <dir>]
+    [--blueprint <path>] [--allow-default-config]
     [--allow-missing-briefs] [--emit-dispatch-events] [--json]
   node scripts/task-runner-dispatch.mjs --dry-fixture [--json]
 
@@ -60,6 +64,8 @@ function parseArgs(argv) {
     actorRole: 'orchestrator',
     requestId: null,
     requestEventsDir: null,
+    blueprintPath: null,
+    allowDefaultConfig: false,
     allowMissingBriefs: false,
     emitDispatchEvents: false,
     json: false,
@@ -114,6 +120,12 @@ function parseArgs(argv) {
       opts.requestEventsDir = argv[++i] ?? fail('--request-events-dir requires a value');
     } else if (arg.startsWith('--request-events-dir=')) {
       opts.requestEventsDir = arg.slice('--request-events-dir='.length);
+    } else if (arg === '--blueprint') {
+      opts.blueprintPath = argv[++i] ?? fail('--blueprint requires a value');
+    } else if (arg.startsWith('--blueprint=')) {
+      opts.blueprintPath = arg.slice('--blueprint='.length);
+    } else if (arg === '--allow-default-config') {
+      opts.allowDefaultConfig = true;
     } else {
       fail(`unknown argument: ${arg}`);
     }
@@ -131,11 +143,17 @@ export function runDispatch({
   actorRole = 'orchestrator',
   requestId = null,
   requestEventsDir = null,
+  blueprintPath = null,
+  allowDefaultConfig = false,
   allowMissingBriefs = false,
   emitDispatchEvents = false,
   nowIso = isoNow(),
 }) {
   const repo = path.resolve(repoRoot);
+  const runtimeConfig = loadWorkstationRuntimeConfigForRepo(repo, {
+    blueprintPath,
+    allowDefaultFallback: allowDefaultConfig,
+  });
   const before = runNextAction({
     manifestPath,
     repoRoot: repo,
@@ -167,7 +185,13 @@ export function runDispatch({
 
   const delegateCalls = canBuildCalls
     ? dispatchActions.map((action) =>
-        buildDelegateCall({ action, repoRoot: repo, manifestPath: before.manifest_path, actorRole }),
+        buildDelegateCall({
+          action,
+          repoRoot: repo,
+          manifestPath: before.manifest_path,
+          actorRole,
+          runtimeConfig,
+        }),
       )
     : [];
 
@@ -187,6 +211,11 @@ export function runDispatch({
     missing_briefs: missingBriefs.map(({ task_id, brief_path }) => ({ task_id, brief_path })),
     delegate_call_count: delegateCalls.length,
     delegate_calls: delegateCalls,
+    runtime_projection: {
+      config_source: runtimeConfig.source,
+      default_model_profile: runtimeConfig.defaultModelProfileForTemplate('coder') ?? DEFAULT_MODEL_PROFILE,
+      default_timeout_secs: runtimeConfig.clampTimeoutSecs(null),
+    },
     appended_events: [],
     after_counts: null,
     after_running: null,
@@ -220,15 +249,26 @@ export function runDispatch({
   return result;
 }
 
-export function buildDelegateCall({ action, repoRoot, manifestPath, actorRole = 'orchestrator' }) {
+export function buildDelegateCall({
+  action,
+  repoRoot,
+  manifestPath,
+  actorRole = 'orchestrator',
+  runtimeConfig,
+}) {
+  const config = runtimeConfig ?? loadWorkstationRuntimeConfigForRepo(repoRoot, {
+    allowDefaultFallback: true,
+  });
   const taskId = action.task_id;
   const briefPath = action.brief_path;
   const contractPath = path.posix.join('.missiond', 'tasks', action.wave, `${taskId}.lisp`);
-  const estimated = Number.isInteger(action.estimated_minutes) ? action.estimated_minutes : 30;
   const timeoutSecs = Number.isInteger(action.timeout_secs)
-    ? action.timeout_secs
-    : timeoutForMinutes(estimated);
-  const modelProfile = action.model_profile ?? DEFAULT_MODEL_PROFILE;
+    ? config.clampTimeoutSecs(action.timeout_secs)
+    : config.clampTimeoutSecs(null);
+  const modelProfile =
+    action.model_profile ??
+    config.defaultModelProfileForTemplate('coder') ??
+    DEFAULT_MODEL_PROFILE;
   const contractHints = loadContractDispatchHints(repoRoot, contractPath);
   const contextPackPath = action.context_pack_path ?? contractHints.contextPackPath;
   return {
@@ -372,11 +412,6 @@ function priorityForAction(action) {
   return 'medium';
 }
 
-function timeoutForMinutes(minutes) {
-  const padded = (minutes + 10) * 60;
-  return Math.max(900, Math.min(7200, padded));
-}
-
 function fileExists(repoRoot, repoRelativePath) {
   return Boolean(repoRelativePath) && fs.existsSync(path.resolve(repoRoot, repoRelativePath));
 }
@@ -409,6 +444,8 @@ function main() {
       actorRole: opts.actorRole,
       requestId: opts.requestId,
       requestEventsDir: opts.requestEventsDir,
+      blueprintPath: opts.blueprintPath,
+      allowDefaultConfig: opts.allowDefaultConfig,
       allowMissingBriefs: opts.allowMissingBriefs,
       emitDispatchEvents: opts.emitDispatchEvents,
     });
@@ -433,6 +470,9 @@ function runFixtures() {
     const briefDir = path.join(tmp, '.missiond/claudecode');
     fs.mkdirSync(path.dirname(manifestPath), { recursive: true });
     fs.mkdirSync(briefDir, { recursive: true });
+    const blueprintPath = path.join(tmp, '.missiond/v3/missiond-blueprint.lisp');
+    fs.mkdirSync(path.dirname(blueprintPath), { recursive: true });
+    fs.writeFileSync(blueprintPath, fixtureBlueprint());
     fs.writeFileSync(manifestPath, fixtureManifest());
     fs.writeFileSync(path.join(briefDir, 'wave99-01-alpha.md'), '# alpha\n');
     fs.writeFileSync(path.join(briefDir, 'wave99-02-beta.md'), '# beta\n');
@@ -463,16 +503,16 @@ function runFixtures() {
       'objective should name the selected task',
     );
     assert(
-      readOnly.delegate_calls[0].target_args.model_profile === 'coding-default-opus-4-7',
-      'delegate args should carry explicit default model_profile',
+      readOnly.delegate_calls[0].target_args.model_profile === 'dispatch-fixture-opus-4-7',
+      'delegate args should carry V3 workstation-config default model_profile',
     );
     assert(
-      readOnly.delegate_calls[0].target_args.timeout_secs === 2400,
-      'manifest timeout_secs should override estimated_minutes padding',
+      readOnly.delegate_calls[0].target_args.timeout_secs === 3660,
+      'delegate args should carry V3 workstation-config default timeout_secs',
     );
     for (const literal of [
-      'Model profile: coding-default-opus-4-7',
-      'Timeout seconds: 2400',
+      'Model profile: dispatch-fixture-opus-4-7',
+      'Timeout seconds: 3660',
       'Context pack: .missiond/tasks/wave99/context-pack.lisp',
       'Write scope: scripts/wave99-alpha.mjs',
       'Must-not-touch: packages/**',
@@ -553,8 +593,6 @@ function fixtureManifest(wave = 'wave99') {
         :dispatch_group A
         :estimated_minutes 15
         :heartbeat_minutes 5
-        :model_profile coding-default-opus-4-7
-        :timeout_secs 2400
         :context_pack_path ".missiond/tasks/${wave}/context-pack.lisp"
         :write_scope ["scripts/${wave}-alpha.mjs"])
   (node :task_id ${wave}-02-beta
@@ -575,6 +613,20 @@ function fixtureManifest(wave = 'wave99') {
         :estimated_minutes 10
         :heartbeat_minutes 5
         :write_scope ["scripts/${wave}-child.mjs"]))\n`;
+}
+
+function fixtureBlueprint() {
+  return `(missiond-blueprint
+  (workstation-config
+    (slot-template coder
+      :role coder
+      :default-model-profile dispatch-fixture-opus-4-7)
+    (timeout-policy boardtask-dispatch
+      :default_secs 3660
+      :min_secs 60
+      :max_secs 7200
+      :watchdog_grace_secs 120
+      :missing_session_probe_secs 120)))`;
 }
 
 function assert(condition, message) {

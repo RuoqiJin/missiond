@@ -127,7 +127,8 @@ function checkFiles(root, files) {
     'legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs',
     'task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args',
     'task-runner-dispatch projects manifest/action model_profile, timeout_secs, and context_pack_path into mission_task_delegate target_args',
-    'defaults missing model_profile to coding-default-opus-4-7',
+    'loads V3 workstation-config through scripts/lib/v3_workstation_runtime.mjs',
+    'missing model_profile and timeout_secs now project from workstation-config',
     'task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files',
     'parent-hotfix finalization is a sparse Lisp projection over the worker report',
     ':acceptance_results is preserved by default',
@@ -249,12 +250,18 @@ function checkFiles(root, files) {
     '--events-dir',
     '--request-id',
     '--request-events-dir',
+    '--blueprint',
+    '--allow-default-config',
     'eventsDirPath',
     'requestEventsDir',
+    'blueprintPath',
+    'allowDefaultConfig',
     'request_event_path',
     'events_dir_path',
-    'DEFAULT_MODEL_PROFILE',
-    'coding-default-opus-4-7',
+    'loadWorkstationRuntimeConfigForRepo',
+    'defaultModelProfileForTemplate(\'coder\')',
+    'clampTimeoutSecs',
+    'runtime_projection',
     'model_profile: modelProfile',
     'timeout_secs: timeoutSecs',
     'Context pack:',
@@ -381,7 +388,7 @@ function buildFixture() {
              "scripts/check-verification-receipt.mjs"
              "scripts/verify-task-contract.mjs"
              "scripts/verify-task-runner-batch.mjs"]
-      :note "Task-scoped lifecycle events are first-class one-event files at .missiond/tasks/<wave>/events/<seq>.event.lisp; the task-lifecycle-events.lisp ledger is now a compatibility projection/input. request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args; task-runner-dispatch projects manifest/action model_profile, timeout_secs, and context_pack_path into mission_task_delegate target_args, context_hints, and the worker objective; it defaults missing model_profile to coding-default-opus-4-7. task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files. parent-hotfix finalization is a sparse Lisp projection over the worker report; :acceptance_results is preserved by default. verify-task-contract is the commit-snapshot artifact validator: planArtifactValidation discovers known Lisp artifact paths (.missiond/tasks/<wave>/session-trace.lisp -> check-session-trace, .missiond/tasks/<wave>/shared-memory.lisp -> check-task-memory, .missiond/tasks/<wave>/events/*.event.lisp -> check-task-lifecycle-events, .missiond/tasks/<wave>/reports/*.report.lisp -> check-task-report) and validateCommitArtifacts materializes their bytes via git show <commit>:<path> through the per-artifact checkers. The pure verifyContract(contract, commitInfo) API stays unchanged for importers; --dry-fixture exercises the planning logic plus an invalid session-trace bytes regression."))
+      :note "Task-scoped lifecycle events are first-class one-event files at .missiond/tasks/<wave>/events/<seq>.event.lisp; the task-lifecycle-events.lisp ledger is now a compatibility projection/input. request-local one-event files at .missiond/requests/<request_id>/events/<seq>.event.lisp; request-local final-report at .missiond/requests/<request_id>/reports/final.lisp; request-local verification-receipt artifact at .missiond/requests/<request_id>/receipts/<receipt_id>.lisp via renderRequestVerificationReceipt + validateRequestVerificationReceiptSource + writeRequestVerificationReceiptFile, while legacy task-scoped (verification-receipt-set ...) Lisp files remain compatibility inputs; task-runner-dispatch and task-runner-submit-dispatch pass both task-scoped events-dir and request-local lifecycle projection args; task-runner-dispatch projects manifest/action model_profile, timeout_secs, and context_pack_path into mission_task_delegate target_args, context_hints, and the worker objective; it loads V3 workstation-config through scripts/lib/v3_workstation_runtime.mjs, and missing model_profile and timeout_secs now project from workstation-config. task-runner-append-event is the only cooperative mutation helper for task-lifecycle-event-log and task-scoped event files. parent-hotfix finalization is a sparse Lisp projection over the worker report; :acceptance_results is preserved by default. verify-task-contract is the commit-snapshot artifact validator: planArtifactValidation discovers known Lisp artifact paths (.missiond/tasks/<wave>/session-trace.lisp -> check-session-trace, .missiond/tasks/<wave>/shared-memory.lisp -> check-task-memory, .missiond/tasks/<wave>/events/*.event.lisp -> check-task-lifecycle-events, .missiond/tasks/<wave>/reports/*.report.lisp -> check-task-report) and validateCommitArtifacts materializes their bytes via git show <commit>:<path> through the per-artifact checkers. The pure verifyContract(contract, commitInfo) API stays unchanged for importers; --dry-fixture exercises the planning logic plus an invalid session-trace bytes regression."))
   (compression-contract
     :checks ["node scripts/check-v3-task-lifecycle-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.lifecycleSchema, `
@@ -456,16 +463,16 @@ const args = '--events-dir --request-events-dir';
 const a = 'eventsDirPath requestEventsDir request_event_path event_file';`);
   writeFixture(root, DEFAULT_FILES.dispatch, `
 import {} from './task-runner-next-action.mjs';
-const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
+import { loadWorkstationRuntimeConfigForRepo } from './lib/v3_workstation_runtime.mjs';
 function runDispatch() {}
-const args = '--events-dir --request-id --request-events-dir';
-const a = 'eventsDirPath requestEventsDir request_event_path events_dir_path model_profile: modelProfile timeout_secs: timeoutSecs Context pack: Model profile: Timeout seconds:';`);
+const args = '--events-dir --request-id --request-events-dir --blueprint --allow-default-config';
+const a = "eventsDirPath requestEventsDir blueprintPath allowDefaultConfig request_event_path events_dir_path model_profile: modelProfile timeout_secs: timeoutSecs Context pack: Model profile: Timeout seconds: defaultModelProfileForTemplate('coder') clampTimeoutSecs runtime_projection";`);
   writeFixture(root, DEFAULT_FILES.submitDispatch, `
 import {} from './task-runner-dispatch.mjs';
 import {} from './task-runner-next-action.mjs';
 function submitDispatch() {}
-const args = '--events-dir --request-id --request-events-dir';
-const a = 'eventsDirPath requestEventsDir request_event_path events_dir_path';`);
+const args = '--events-dir --request-id --request-events-dir --blueprint --allow-default-config';
+const a = 'eventsDirPath requestEventsDir blueprintPath allowDefaultConfig request_event_path events_dir_path';`);
   writeFixture(root, DEFAULT_FILES.waveState, `
 import {} from './check-task-lifecycle-events.mjs';
 function defaultEventsDirPath() {}
