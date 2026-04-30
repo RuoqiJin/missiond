@@ -12,6 +12,12 @@ pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
 pub(crate) const MIN_SLOT_TTL_SECS: i64 = 300;
 pub(crate) const MAX_SLOT_TTL_SECS: i64 = 28800;
+pub(crate) const DEFAULT_CASCADE_MANIFEST_PATH: &str =
+    "/Users/jinchen/Projects/universe.intent.lisp";
+pub(crate) const DEFAULT_CASCADE_ALLOWED_ROOT: &str = "/Users/jinchen/Projects";
+pub(crate) const DEFAULT_CASCADE_TRIGGER_ENABLED: bool = true;
+pub(crate) const DEFAULT_CASCADE_MAX_CYCLES: usize = 3;
+pub(crate) const MAX_CASCADE_MAX_CYCLES: usize = 12;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -36,6 +42,15 @@ pub(crate) struct SlotTtlPolicy {
     pub max_secs: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CascadeRuntimeConfig {
+    pub default_manifest_path: PathBuf,
+    pub allowed_root: PathBuf,
+    pub trigger_enabled: bool,
+    pub default_max_cycles: usize,
+    pub max_cycles_limit: usize,
+}
+
 #[derive(Debug)]
 pub(crate) enum BlueprintConfigError {
     MissingBlueprint(PathBuf),
@@ -57,7 +72,11 @@ impl fmt::Display for BlueprintConfigError {
                     message
                 )
             }
-            Self::Parse(message) => write!(f, "failed to parse V3 workstation-config: {}", message),
+            Self::Parse(message) => write!(
+                f,
+                "failed to parse V3 blueprint runtime config: {}",
+                message
+            ),
         }
     }
 }
@@ -94,6 +113,18 @@ impl Default for WorkstationRuntimeConfig {
             slot_default_profiles,
             timeout_policy: TimeoutPolicy::default(),
             slot_ttl_policy: SlotTtlPolicy::default(),
+        }
+    }
+}
+
+impl Default for CascadeRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            default_manifest_path: PathBuf::from(DEFAULT_CASCADE_MANIFEST_PATH),
+            allowed_root: PathBuf::from(DEFAULT_CASCADE_ALLOWED_ROOT),
+            trigger_enabled: DEFAULT_CASCADE_TRIGGER_ENABLED,
+            default_max_cycles: DEFAULT_CASCADE_MAX_CYCLES,
+            max_cycles_limit: MAX_CASCADE_MAX_CYCLES,
         }
     }
 }
@@ -140,6 +171,66 @@ impl WorkstationRuntimeConfig {
             _ => self.slot_ttl_policy.default_secs,
         };
         raw.clamp(self.slot_ttl_policy.min_secs, self.slot_ttl_policy.max_secs)
+    }
+}
+
+impl CascadeRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_cascade_policy(&source)
+    }
+
+    pub(crate) fn env_or_default_manifest_path(&self) -> PathBuf {
+        std::env::var("UNIVERSE_MANIFEST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| self.default_manifest_path.clone())
+    }
+
+    pub(crate) fn env_or_allowed_root(&self) -> PathBuf {
+        std::env::var("UNIVERSE_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| self.allowed_root.clone())
+    }
+
+    pub(crate) fn env_or_trigger_enabled(&self) -> bool {
+        std::env::var("CASCADE_TRIGGER_ENABLED")
+            .ok()
+            .and_then(|value| parse_bool_token(&value))
+            .unwrap_or(self.trigger_enabled)
+    }
+
+    pub(crate) fn clamp_max_cycles(&self, max_cycles: Option<usize>) -> usize {
+        let raw = max_cycles
+            .filter(|value| *value > 0)
+            .unwrap_or(self.default_max_cycles);
+        raw.clamp(1, self.max_cycles_limit.max(1))
     }
 }
 
@@ -200,6 +291,42 @@ pub(crate) fn parse_workstation_config(
     Ok(config)
 }
 
+pub(crate) fn parse_cascade_policy(
+    source: &str,
+) -> Result<CascadeRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "cascade-policy")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing (cascade-policy ...)".into()))?;
+    let tokens = tokenize_lisp(&block);
+    let default_manifest_path = keyword_value(&tokens, ":default-manifest")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing :default-manifest".into()))?;
+    let allowed_root = keyword_value(&tokens, ":allowed-root")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing :allowed-root".into()))?;
+    let trigger_enabled = keyword_value(&tokens, ":trigger-enabled")
+        .and_then(|value| parse_bool_token(&value))
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(":trigger-enabled must be true or false".into())
+        })?;
+    let default_max_cycles = usize_keyword(&tokens, ":default-max-cycles")?;
+    let max_cycles_limit = usize_keyword(&tokens, ":max-cycles-limit")?;
+    if default_max_cycles == 0 {
+        return Err(BlueprintConfigError::Parse(
+            ":default-max-cycles must be positive".into(),
+        ));
+    }
+    if max_cycles_limit < default_max_cycles {
+        return Err(BlueprintConfigError::Parse(
+            ":max-cycles-limit must be >= :default-max-cycles".into(),
+        ));
+    }
+    Ok(CascadeRuntimeConfig {
+        default_manifest_path: PathBuf::from(default_manifest_path),
+        allowed_root: PathBuf::from(allowed_root),
+        trigger_enabled,
+        default_max_cycles,
+        max_cycles_limit,
+    })
+}
+
 fn int_keyword(tokens: &[String], key: &str) -> Result<i64, BlueprintConfigError> {
     let value = keyword_value(tokens, key)
         .ok_or_else(|| BlueprintConfigError::Parse(format!("missing {}", key)))?;
@@ -208,11 +335,35 @@ fn int_keyword(tokens: &[String], key: &str) -> Result<i64, BlueprintConfigError
         .map_err(|_| BlueprintConfigError::Parse(format!("{} must be an integer", key)))
 }
 
+fn usize_keyword(tokens: &[String], key: &str) -> Result<usize, BlueprintConfigError> {
+    let value = keyword_value(tokens, key)
+        .ok_or_else(|| BlueprintConfigError::Parse(format!("missing {}", key)))?;
+    value
+        .parse::<usize>()
+        .map_err(|_| BlueprintConfigError::Parse(format!("{} must be a positive integer", key)))
+}
+
 fn keyword_value(tokens: &[String], key: &str) -> Option<String> {
     tokens
         .windows(2)
         .find(|pair| pair[0] == key)
         .map(|pair| pair[1].clone())
+}
+
+fn parse_bool_token(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "t" | "1" | "yes" | "on" => Some(true),
+        "false" | "nil" | "0" | "no" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn nearest_missiond_root(start: &Path) -> PathBuf {
+    start
+        .ancestors()
+        .find(|candidate| candidate.join(".missiond").exists())
+        .unwrap_or(start)
+        .to_path_buf()
 }
 
 fn find_forms(source: &str, head: &str) -> Vec<String> {
@@ -371,7 +522,13 @@ mod tests {
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
-      :max_secs 28800)))
+      :max_secs 28800))
+  (cascade-policy
+    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
+    :allowed-root "/Users/jinchen/Projects"
+    :trigger-enabled true
+    :default-max-cycles 3
+    :max-cycles-limit 12))
 "#;
 
     #[test]
@@ -435,5 +592,32 @@ mod tests {
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");
         assert!(err.to_string().contains("ttl-policy dynamic-slot"));
+    }
+
+    #[test]
+    fn parses_cascade_policy_defaults() {
+        let cfg = parse_cascade_policy(BLUEPRINT).expect("parse cascade policy");
+        assert_eq!(
+            cfg.default_manifest_path,
+            PathBuf::from(DEFAULT_CASCADE_MANIFEST_PATH)
+        );
+        assert_eq!(
+            cfg.allowed_root,
+            PathBuf::from(DEFAULT_CASCADE_ALLOWED_ROOT)
+        );
+        assert!(cfg.trigger_enabled);
+        assert_eq!(cfg.default_max_cycles, 3);
+        assert_eq!(cfg.max_cycles_limit, 12);
+        assert_eq!(cfg.clamp_max_cycles(None), 3);
+        assert_eq!(cfg.clamp_max_cycles(Some(0)), 3);
+        assert_eq!(cfg.clamp_max_cycles(Some(8)), 8);
+        assert_eq!(cfg.clamp_max_cycles(Some(99)), 12);
+    }
+
+    #[test]
+    fn missing_cascade_policy_is_rejected() {
+        let err = parse_cascade_policy("(missiond-blueprint)")
+            .expect_err("missing cascade policy should fail");
+        assert!(err.to_string().contains("cascade-policy"));
     }
 }

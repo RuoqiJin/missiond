@@ -514,6 +514,19 @@
       :rationale
         "Wave33 evidence: a delegated BoardTask was sent twice — once via spawner.initial_prompt fire-and-forget, then again via Autopilot pty.send — and the slot's TextOutputEvent::Complete arrived without Autopilot transitioning the BoardTask to done. Single ownership of prompt+close eliminates the orphaned-task class entirely."))
 
+  (cascade-policy
+    :desc "Lisp-owned universe cascade runtime policy; env vars and caller args are explicit overrides, not hidden defaults."
+    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
+    :allowed-root "/Users/jinchen/Projects"
+    :trigger-enabled true
+    :default-max-cycles 3
+    :max-cycles-limit 12
+    :env-overrides [UNIVERSE_MANIFEST UNIVERSE_ROOT CASCADE_TRIGGER_ENABLED]
+    :invariants
+      ["cascade/path.rs MUST project default manifest and allowed root from cascade-policy before consulting env overrides."
+       "mission_cascade_trigger MUST project trigger-enabled and max-cycle bounds from cascade-policy; CASCADE_TRIGGER_ENABLED may only override the V3 switch explicitly."
+       "A real MissionD project with .missiond but no V3 cascade-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
+
   (ops-infra
     :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
     :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
@@ -718,12 +731,12 @@
       :surface skill-runtime
       :note "Skill query/context/mutate/exec is physically split and pinned under the V3 skill-runtime surface.")
     (v2-item cascade-universe-governance
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent-event-bus.lisp :: cascade/control tree"
       :v3-pillar worker-runtime
       :v3-function cascade-governance
       :surface cascade-governance
-      :note "Universe graph, cascade planning, trigger execution, and integrity linting are physically split and pinned under the V3 cascade-governance surface.")
+      :note "Universe graph, cascade planning, trigger execution, and integrity linting are physically split and pinned under the V3 cascade-governance surface; cascade-policy now projects default manifest, allowed root, trigger switch, and max-cycle bounds into cascade path/trigger runtime.")
     (v2-item sysinfra-control
       :status code-aligned
       :v2-source ".missiond/v2/intent-system-layer.lisp :: system/sysinfra tools"
@@ -1704,7 +1717,8 @@
     (surface cascade-governance
       :status "code-aligned"
       :implements [universe-graph cascade-plan cascade-trigger cascade-lint]
-      :code ["crates/missiond-daemon/src/handlers/knowledge/cascade.rs"
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/cascade.rs"
              "crates/missiond-daemon/src/handlers/knowledge/cascade/path.rs"
              "crates/missiond-daemon/src/handlers/knowledge/cascade/graph.rs"
              "crates/missiond-daemon/src/handlers/knowledge/cascade/plan.rs"
@@ -1712,7 +1726,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/cascade/lint.rs"
              "crates/missiond-mcp/src/tools/knowledge/cascade.rs"
              "scripts/check-v3-cascade-governance-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for universe graph and cascade tools. cascade.rs is the thin cascade-governance facade; cascade/path.rs owns UNIVERSE_MANIFEST / UNIVERSE_ROOT path policy; cascade/graph.rs owns mission_universe_graph; cascade/plan.rs owns mission_cascade_plan dry-run; cascade/trigger.rs owns mission_cascade_trigger, CASCADE_TRIGGER_ENABLED kill switch, TaskEvent::CascadeTriggered/Completed, and spawn_blocking execute_plan; cascade/lint.rs owns mission_cascade_lint integrity egress. Runtime projection remains a later runtime-projected graduation so V3 can own cascade policy directly.")
+      :note "Code-aligned V3 destination for universe graph and cascade tools. cascade.rs is the thin cascade-governance facade; cascade/path.rs owns manifest/root path policy by loading CascadeRuntimeConfig from V3 cascade-policy before honoring explicit UNIVERSE_MANIFEST / UNIVERSE_ROOT overrides; cascade/graph.rs owns mission_universe_graph; cascade/plan.rs owns mission_cascade_plan dry-run; cascade/trigger.rs owns mission_cascade_trigger, V3 trigger-enabled plus CASCADE_TRIGGER_ENABLED explicit override, TaskEvent::CascadeTriggered/Completed, max-cycle clamp, and spawn_blocking execute_plan; cascade/lint.rs owns mission_cascade_lint integrity egress.")
 
     (surface sysinfra-control
       :status "code-aligned"

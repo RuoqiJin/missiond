@@ -11,12 +11,13 @@ Checks the V3 cascade-governance Lisp/code isomorphism contract:
   - cascade.rs stays a thin route facade.
   - manifest/root path policy is isolated from graph/plan/trigger/lint behavior.
   - each public cascade MCP tool maps to a dedicated Rust module.
-  - trigger execution keeps the explicit kill switch and task bus audit events.
+  - trigger execution projects V3 cascade-policy plus explicit env overrides.
 `;
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   facade: 'crates/missiond-daemon/src/handlers/knowledge/cascade.rs',
+  runtimeConfig: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   pathPolicy: 'crates/missiond-daemon/src/handlers/knowledge/cascade/path.rs',
   graph: 'crates/missiond-daemon/src/handlers/knowledge/cascade/graph.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/cascade/plan.rs',
@@ -83,8 +84,17 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'cascade-governance',
+    '(v2-item cascade-universe-governance',
+    ':status runtime-projected',
+    '(cascade-policy',
+    ':default-manifest "/Users/jinchen/Projects/universe.intent.lisp"',
+    ':allowed-root "/Users/jinchen/Projects"',
+    ':trigger-enabled true',
+    ':default-max-cycles 3',
+    ':max-cycles-limit 12',
     '(surface cascade-governance',
     ':status "code-aligned"',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/handlers/knowledge/cascade.rs',
     'crates/missiond-daemon/src/handlers/knowledge/cascade/path.rs',
     'crates/missiond-daemon/src/handlers/knowledge/cascade/graph.rs',
@@ -94,12 +104,13 @@ function checkFiles(root, files) {
     'crates/missiond-mcp/src/tools/knowledge/cascade.rs',
     'scripts/check-v3-cascade-governance-isomorphism.mjs',
     'cascade.rs is the thin cascade-governance facade',
-    'cascade/path.rs owns UNIVERSE_MANIFEST / UNIVERSE_ROOT path policy',
+    'cascade/path.rs owns manifest/root path policy by loading CascadeRuntimeConfig',
     'cascade/graph.rs owns mission_universe_graph',
     'cascade/plan.rs owns mission_cascade_plan dry-run',
     'cascade/trigger.rs owns mission_cascade_trigger',
-    'CASCADE_TRIGGER_ENABLED kill switch',
+    'V3 trigger-enabled plus CASCADE_TRIGGER_ENABLED explicit override',
     'TaskEvent::CascadeTriggered/Completed',
+    'max-cycle clamp',
     'cascade/lint.rs owns mission_cascade_lint integrity egress',
     'node scripts/check-v3-cascade-governance-isomorphism.mjs',
   ]);
@@ -117,12 +128,32 @@ function checkFiles(root, files) {
     'unknown cascade tool',
   ]);
 
-  requireAll(diagnostics, files.pathPolicy, sources.pathPolicy, [
-    'resolve_manifest_path',
+  requireAll(diagnostics, files.runtimeConfig, sources.runtimeConfig, [
+    'CascadeRuntimeConfig',
+    'DEFAULT_CASCADE_MANIFEST_PATH',
+    'DEFAULT_CASCADE_ALLOWED_ROOT',
+    'DEFAULT_CASCADE_TRIGGER_ENABLED',
+    'DEFAULT_CASCADE_MAX_CYCLES',
+    'MAX_CASCADE_MAX_CYCLES',
+    'parse_cascade_policy',
+    'load_for_current_dir',
+    'nearest_missiond_root',
+    'env_or_default_manifest_path',
+    'env_or_allowed_root',
+    'env_or_trigger_enabled',
+    'clamp_max_cycles',
     'UNIVERSE_MANIFEST',
     'UNIVERSE_ROOT',
-    '/Users/jinchen/Projects/universe.intent.lisp',
-    '/Users/jinchen/Projects',
+    'CASCADE_TRIGGER_ENABLED',
+    'cascade-policy',
+  ]);
+
+  requireAll(diagnostics, files.pathPolicy, sources.pathPolicy, [
+    'CascadeRuntimeConfig::load_for_current_dir',
+    'resolve_manifest_path',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'env_or_default_manifest_path',
+    'env_or_allowed_root',
     'canonicalize',
     'starts_with',
     'manifestPath',
@@ -151,7 +182,10 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.trigger, sources.trigger, [
     'CascadeTriggerArgs',
     'handle_cascade_trigger',
-    'default_max_cycles',
+    'CascadeRuntimeConfig::load_for_current_dir',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'env_or_trigger_enabled',
+    'clamp_max_cycles',
     'CASCADE_TRIGGER_ENABLED',
     'TaskEvent::CascadeTriggered',
     'TaskEvent::CascadeCompleted',
@@ -197,10 +231,20 @@ function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-cascade-governance-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
+  (v2-convergence-map
+    (v2-item cascade-universe-governance
+      :status runtime-projected))
+  (cascade-policy
+    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
+    :allowed-root "/Users/jinchen/Projects"
+    :trigger-enabled true
+    :default-max-cycles 3
+    :max-cycles-limit 12)
   (implementation-map
     (surface cascade-governance
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/cascade.rs"
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/cascade.rs"
              "crates/missiond-daemon/src/handlers/knowledge/cascade/path.rs"
              "crates/missiond-daemon/src/handlers/knowledge/cascade/graph.rs"
              "crates/missiond-daemon/src/handlers/knowledge/cascade/plan.rs"
@@ -208,7 +252,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/cascade/lint.rs"
              "crates/missiond-mcp/src/tools/knowledge/cascade.rs"
              "scripts/check-v3-cascade-governance-isomorphism.mjs"]
-      :note "cascade.rs is the thin cascade-governance facade; cascade/path.rs owns UNIVERSE_MANIFEST / UNIVERSE_ROOT path policy; cascade/graph.rs owns mission_universe_graph; cascade/plan.rs owns mission_cascade_plan dry-run; cascade/trigger.rs owns mission_cascade_trigger, CASCADE_TRIGGER_ENABLED kill switch, TaskEvent::CascadeTriggered/Completed, and spawn_blocking execute_plan; cascade/lint.rs owns mission_cascade_lint integrity egress."))
+      :note "cascade.rs is the thin cascade-governance facade; cascade/path.rs owns manifest/root path policy by loading CascadeRuntimeConfig; cascade/graph.rs owns mission_universe_graph; cascade/plan.rs owns mission_cascade_plan dry-run; cascade/trigger.rs owns mission_cascade_trigger, V3 trigger-enabled plus CASCADE_TRIGGER_ENABLED explicit override, TaskEvent::CascadeTriggered/Completed, max-cycle clamp, and spawn_blocking execute_plan; cascade/lint.rs owns mission_cascade_lint integrity egress."))
   (compression-contract
     :checks ["node scripts/check-v3-cascade-governance-isomorphism.mjs"]))`);
 
@@ -225,9 +269,17 @@ mod trigger;
 unknown cascade tool
 `);
 
+  writeFixture(root, DEFAULT_FILES.runtimeConfig, `
+CascadeRuntimeConfig DEFAULT_CASCADE_MANIFEST_PATH DEFAULT_CASCADE_ALLOWED_ROOT
+DEFAULT_CASCADE_TRIGGER_ENABLED DEFAULT_CASCADE_MAX_CYCLES MAX_CASCADE_MAX_CYCLES
+parse_cascade_policy load_for_current_dir env_or_default_manifest_path
+nearest_missiond_root env_or_allowed_root env_or_trigger_enabled clamp_max_cycles cascade-policy
+UNIVERSE_MANIFEST UNIVERSE_ROOT CASCADE_TRIGGER_ENABLED
+`);
+
   writeFixture(root, DEFAULT_FILES.pathPolicy, `
-resolve_manifest_path UNIVERSE_MANIFEST UNIVERSE_ROOT
-/Users/jinchen/Projects/universe.intent.lisp /Users/jinchen/Projects
+CascadeRuntimeConfig::load_for_current_dir resolve_manifest_path V3_BLUEPRINT_CONFIG_ERROR
+env_or_default_manifest_path env_or_allowed_root
 canonicalize starts_with manifestPath
 `);
 
@@ -242,7 +294,8 @@ create_plan "upstream_map"
 `);
 
   writeFixture(root, DEFAULT_FILES.trigger, `
-CascadeTriggerArgs handle_cascade_trigger default_max_cycles CASCADE_TRIGGER_ENABLED
+CascadeTriggerArgs handle_cascade_trigger CascadeRuntimeConfig::load_for_current_dir
+V3_BLUEPRINT_CONFIG_ERROR env_or_trigger_enabled clamp_max_cycles CASCADE_TRIGGER_ENABLED
 TaskEvent::CascadeTriggered TaskEvent::CascadeCompleted CascadeConfig
 max_repair_cycles dry_run: false tokio::task::spawn_blocking execute_plan hard_halted
 `);

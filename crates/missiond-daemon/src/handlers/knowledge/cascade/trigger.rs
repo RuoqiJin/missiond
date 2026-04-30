@@ -4,6 +4,7 @@ use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::context::v3_blueprint_runtime::CascadeRuntimeConfig;
 use crate::state::AppState;
 
 use super::path::resolve_manifest_path;
@@ -15,24 +16,25 @@ struct CascadeTriggerArgs {
     service: String,
     #[serde(default)]
     changed: Vec<String>,
-    #[serde(default = "default_max_cycles")]
-    max_cycles: usize,
-}
-
-fn default_max_cycles() -> usize {
-    3
+    max_cycles: Option<usize>,
 }
 
 pub(super) async fn handle_cascade_trigger(state: &AppState, args: Value) -> Result<ToolResult> {
     let args: CascadeTriggerArgs = serde_json::from_value(args)?;
 
-    let cascade_enabled = std::env::var("CASCADE_TRIGGER_ENABLED")
-        .map(|v| v == "1" || v == "true")
-        .unwrap_or(true);
+    let runtime_config = match CascadeRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            return Ok(ToolResult::error(format!(
+                "V3_BLUEPRINT_CONFIG_ERROR: {err}"
+            )));
+        }
+    };
+    let cascade_enabled = runtime_config.env_or_trigger_enabled();
 
     if !cascade_enabled {
         return Ok(ToolResult::error(
-            "mission_cascade_trigger is disabled. Set CASCADE_TRIGGER_ENABLED=1 to enable.",
+            "mission_cascade_trigger is disabled by V3 cascade-policy or CASCADE_TRIGGER_ENABLED override.",
         ));
     }
 
@@ -54,7 +56,7 @@ pub(super) async fn handle_cascade_trigger(state: &AppState, args: Value) -> Res
     };
 
     let config = forge_core::cascade::CascadeConfig {
-        max_repair_cycles: args.max_cycles,
+        max_repair_cycles: runtime_config.clamp_max_cycles(args.max_cycles),
         dry_run: false,
         ..Default::default()
     };
