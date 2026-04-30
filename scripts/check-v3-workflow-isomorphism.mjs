@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   workflowArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs',
   workflowMethodology: 'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
   workflowReviewResolution: 'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
+  workflowTests: 'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
 };
 
@@ -101,13 +102,14 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
     'workflow/review_resolution.rs owns resolve_review',
     'WorkflowSubscriberOutcome',
     'node scripts/check-v3-workflow-isomorphism.mjs',
   ]);
 
-  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowMethodology}\n${sources.workflowReviewResolution}`;
-  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowMethodology} + ${files.workflowReviewResolution}`;
+  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowMethodology}\n${sources.workflowReviewResolution}\n${sources.workflowTests}`;
+  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowMethodology} + ${files.workflowReviewResolution} + ${files.workflowTests}`;
   requireAll(diagnostics, workflowSurfaceLabel, workflowSurface, [
     'enum DistillMode',
     'fn parse_distill_mode',
@@ -159,6 +161,7 @@ function checkFiles(root, files) {
     'apply_compile_review_gates(',
     'fn parse_auto_sonnet_policy',
     '"safe_after_rules"',
+    'mod tests;',
   ]);
 
   requireAll(diagnostics, files.workflowMethodology, sources.workflowMethodology, [
@@ -183,6 +186,13 @@ function checkFiles(root, files) {
     'pub(super) async fn maybe_write_workflow_artifact',
     'pub(super) fn render_workflow_artifact_sexp',
     'pub(super) fn build_methodology_match_rules',
+  ]);
+
+  requireAll(diagnostics, files.workflowTests, sources.workflowTests, [
+    'use super::*;',
+    'methodology_compile_renders_v3_workflow_artifact_not_raw_source',
+    'methodology_compile_review_required_status_when_no_steps',
+    'build_methodology_match_rules_includes_flow_id_and_source_hash',
   ]);
 
   requireAll(diagnostics, files.mcpWorkflow, sources.mcpWorkflow, [
@@ -237,7 +247,8 @@ function buildFixture() {
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs"]
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs"]
       :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
@@ -287,11 +298,14 @@ fn render_workflow_steps() {}
 parse_review_gate_policy(args);
 apply_compile_review_gates();
 fn parse_auto_sonnet_policy() { "safe_after_rules"; }
-mod tests {
-  fn methodology_compile_renders_v3_workflow_artifact_not_raw_source() {}
-  fn methodology_compile_review_required_status_when_no_steps() {}
-  fn build_methodology_match_rules_includes_flow_id_and_source_hash() {}
-}`);
+#[cfg(test)]
+mod tests;
+`);
+  writeFixture(root, DEFAULT_FILES.workflowTests, `
+use super::*;
+fn methodology_compile_renders_v3_workflow_artifact_not_raw_source() {}
+fn methodology_compile_review_required_status_when_no_steps() {}
+fn build_methodology_match_rules_includes_flow_id_and_source_hash() {}`);
   writeFixture(root, DEFAULT_FILES.workflowArtifacts, `
 pub(super) fn extract_workflow_file_args() {}
 pub(super) async fn maybe_write_workflow_artifact() {}
