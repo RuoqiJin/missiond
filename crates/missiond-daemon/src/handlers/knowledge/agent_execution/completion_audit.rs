@@ -5,18 +5,19 @@ use serde_json::{json, Value};
 
 use crate::state::AppState;
 
+use super::completion_entry::{render_completion_entry, CompletionEntryFields};
 use super::completion_gates::{enforce_scoped_commit_completion, enforce_task_contract_completion};
 use super::completion_records::{
     collect_string_list, normalize_commit_status, normalize_task_run_verifier_status,
-    normalize_verifier_status, render_string_list, VALID_COMMIT_STATUSES,
-    VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
+    normalize_verifier_status, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
+    VALID_VERIFIER_STATUSES,
 };
 use super::completion_trace::append_completion_trace_if_requested;
 use super::completion_verification::evaluate_completion_verification;
 use super::log_counters::{allocate_id, Counter};
 use super::log_store::{
-    append_to_block, companion_path, lisp_quote_string, now_iso, project_or_target_project,
-    read_log_file, require_str, resolve_project_root, touch_last_updated, write_log_file,
+    append_to_block, companion_path, now_iso, project_or_target_project, read_log_file,
+    require_str, resolve_project_root, touch_last_updated, write_log_file,
 };
 use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
 
@@ -269,102 +270,28 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
     let id = allocate_id(&mut file, Counter::Completion)?;
     let date = now_iso();
 
-    // Build the completion entry incrementally so the durability handoff
-    // fields are appended only when supplied. The legacy 6-field shape stays
-    // byte-identical when no scoped-commit metadata is provided; new callers
-    // simply tack additional `:key value` pairs onto the same form.
-    let mut entry = format!(
-        "    ({id}\n      :phase {phase}\n      :agent {agent}\n      :summary {summary}\n      :deliverables {deliverables}\n      :verification {verification}\n      :at {date}",
-        id = id,
-        phase = lisp_quote_string(phase),
-        agent = lisp_quote_string(agent),
-        summary = lisp_quote_string(summary),
-        deliverables = lisp_quote_string(deliverables),
-        verification = lisp_quote_string(verification),
-        date = lisp_quote_string(&date),
-    );
-    if let Some(ref list) = changed_files {
-        entry.push_str(&format!(
-            "\n      :changed-files {}",
-            render_string_list(list)
-        ));
-    }
-    if let Some(ref list) = staged_files {
-        entry.push_str(&format!(
-            "\n      :staged-files {}",
-            render_string_list(list)
-        ));
-    }
-    if let Some(ref hash) = commit_hash {
-        entry.push_str(&format!("\n      :commit-hash {}", lisp_quote_string(hash)));
-    }
-    if let Some(ref status_val) = commit_status {
-        entry.push_str(&format!(
-            "\n      :commit-status {}",
-            lisp_quote_string(status_val)
-        ));
-    }
-    if let Some(ref blocker) = commit_blocker {
-        entry.push_str(&format!(
-            "\n      :commit-blocker {}",
-            lisp_quote_string(blocker)
-        ));
-    }
-    // wave-19 / task 08 — task-contract metadata. Each field skips when
-    // absent so legacy callers that never set them keep the byte-identical
-    // 6-field shape (or 11-field shape with scoped-commit fields).
-    if let Some(ref tcp) = task_contract_path {
-        entry.push_str(&format!(
-            "\n      :task-contract-path {}",
-            lisp_quote_string(tcp)
-        ));
-    }
-    if let Some(ref trp) = task_report_path {
-        entry.push_str(&format!(
-            "\n      :task-report-path {}",
-            lisp_quote_string(trp)
-        ));
-    }
-    if let Some(ref vs) = verifier_status {
-        entry.push_str(&format!(
-            "\n      :verifier-status {}",
-            lisp_quote_string(vs)
-        ));
-    }
-    if let Some(ref vn) = verifier_notes {
-        entry.push_str(&format!(
-            "\n      :verifier-notes {}",
-            lisp_quote_string(vn)
-        ));
-    }
-    // wave-21 / task 03 — task-run verifier metadata. Each field skips
-    // when absent so legacy callers (and wave19-08 callers that never
-    // touched the wave21 slots) keep their byte-identical companion log
-    // shape. `verified` is written as a bare `true`/`false` atom so a
-    // round-trip through `parse_completions` recovers the boolean
-    // without quoted-string handling.
-    if let Some(ref trvs) = task_run_verifier_status {
-        entry.push_str(&format!(
-            "\n      :task-run-verifier-status {}",
-            lisp_quote_string(trvs)
-        ));
-    }
-    if let Some(ref smp) = shared_memory_path {
-        entry.push_str(&format!(
-            "\n      :shared-memory-path {}",
-            lisp_quote_string(smp)
-        ));
-    }
-    if let Some(ref vd) = verifier_diagnostics {
-        entry.push_str(&format!(
-            "\n      :verifier-diagnostics {}",
-            lisp_quote_string(vd)
-        ));
-    }
-    if let Some(v) = verified_flag {
-        entry.push_str(&format!("\n      :verified {}", v));
-    }
-    entry.push(')');
+    let entry = render_completion_entry(CompletionEntryFields {
+        id: &id,
+        phase,
+        agent,
+        summary,
+        deliverables,
+        verification,
+        date: &date,
+        changed_files: changed_files.as_deref(),
+        staged_files: staged_files.as_deref(),
+        commit_hash: commit_hash.as_deref(),
+        commit_status: commit_status.as_deref(),
+        commit_blocker: commit_blocker.as_deref(),
+        task_contract_path: task_contract_path.as_deref(),
+        task_report_path: task_report_path.as_deref(),
+        verifier_status: verifier_status.as_deref(),
+        verifier_notes: verifier_notes.as_deref(),
+        task_run_verifier_status: task_run_verifier_status.as_deref(),
+        shared_memory_path: shared_memory_path.as_deref(),
+        verifier_diagnostics: verifier_diagnostics.as_deref(),
+        verified: verified_flag,
+    });
 
     append_to_block(&mut file, "completions", &entry)?;
     touch_last_updated(&mut file)?;
