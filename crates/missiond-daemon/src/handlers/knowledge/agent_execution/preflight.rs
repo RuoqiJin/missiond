@@ -9,9 +9,10 @@ use super::completion_records::collect_string_list;
 use super::log_store::{
     companion_path, project_or_target_project, read_log_file, require_str, resolve_project_root,
 };
+use super::preflight_porcelain::{parse_porcelain_status, run_git_status};
 use super::preflight_scope::{
     build_preflight_summary, collect_all_claim_scopes, collect_specific_claim_scope,
-    evaluate_task_contract_for_preflight, parse_porcelain_status, run_git_status,
+    evaluate_task_contract_for_preflight,
 };
 use super::session_trace::{
     append_session_trace_event, resolve_session_trace_path, resolve_trace_task_id, TraceEvent,

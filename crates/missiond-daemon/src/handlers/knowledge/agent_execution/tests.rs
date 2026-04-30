@@ -2778,13 +2778,13 @@ fn daemon_never_invokes_mutating_git() {
         std::path::Path::new(manifest_dir).join("src/handlers/knowledge/agent_execution.rs");
     let preflight_path = std::path::Path::new(manifest_dir)
         .join("src/handlers/knowledge/agent_execution/preflight.rs");
-    let preflight_scope_path = std::path::Path::new(manifest_dir)
-        .join("src/handlers/knowledge/agent_execution/preflight_scope.rs");
+    let preflight_porcelain_path = std::path::Path::new(manifest_dir)
+        .join("src/handlers/knowledge/agent_execution/preflight_porcelain.rs");
     let src = format!(
         "{}\n{}\n{}",
         std::fs::read_to_string(&facade_path).expect("read facade"),
         std::fs::read_to_string(&preflight_path).expect("read preflight"),
-        std::fs::read_to_string(&preflight_scope_path).expect("read preflight scope"),
+        std::fs::read_to_string(&preflight_porcelain_path).expect("read preflight porcelain"),
     );
     let needle = format!("Command::new({}git{})", '"', '"');
     let command_git = src.matches(needle.as_str()).count();
