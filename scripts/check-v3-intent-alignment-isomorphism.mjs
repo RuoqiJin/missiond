@@ -18,6 +18,7 @@ Checks the V3 intent-alignment Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   directiveHandler: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
+  directiveCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
   directiveTests: 'crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs',
   mcpDirective: 'crates/missiond-mcp/src/tools/knowledge/directive.rs',
 };
@@ -86,13 +87,22 @@ function checkFiles(root, files) {
     'dry_run emits a deterministic directive-draft Lisp artifact',
     'sonnet output is accepted only when it is one balanced Lisp s-expression',
     'ArtifactKind::IntentAlignment',
+    'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
     'crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs',
     'node scripts/check-v3-intent-alignment-isomorphism.mjs',
   ]);
 
   requireAll(diagnostics, files.directiveHandler, sources.directiveHandler, [
-    'const ALLOWED_SEXP_HEADS: &[&str] = &["directive", "directive-draft", "intent-alignment"]',
-    'async fn action_compile',
+    'mod compile_authoring;',
+    'use compile_authoring::action_compile',
+    'mod tests;',
+  ]);
+
+  requireAll(diagnostics, files.directiveCompileAuthoring, sources.directiveCompileAuthoring, [
+    'const ALLOWED_SEXP_HEADS: &[&str]',
+    '"directive-draft"',
+    '"intent-alignment"',
+    'pub(super) async fn action_compile',
     'COMPILER_MODE_DRY_RUN',
     'COMPILER_MODE_SONNET',
     'async fn action_compile_dry_run',
@@ -112,7 +122,6 @@ function checkFiles(root, files) {
     'ArtifactKind::IntentAlignment',
     'attempt_artifact_write(',
     'apply_compile_review_gates(',
-    'mod tests;',
   ]);
 
   requireAll(diagnostics, files.directiveTests, sources.directiveTests, [
@@ -162,13 +171,18 @@ function buildFixture() {
   (implementation-map
     (surface mission_directive
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs"]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/directive/tests.rs"]
       :note "dry_run emits a deterministic directive-draft Lisp artifact; sonnet output is accepted only when it is one balanced Lisp s-expression; ArtifactKind::IntentAlignment"))
   (compression-contract
     :checks ["node scripts/check-v3-intent-alignment-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.directiveHandler, `
+mod compile_authoring;
+use compile_authoring::action_compile;
+mod tests;`);
+  writeFixture(root, DEFAULT_FILES.directiveCompileAuthoring, `
 const ALLOWED_SEXP_HEADS: &[&str] = &["directive", "directive-draft", "intent-alignment"];
-async fn action_compile() {}
+pub(super) async fn action_compile() {}
 const COMPILER_MODE_DRY_RUN: &str = "dry_run";
 const COMPILER_MODE_SONNET: &str = "sonnet";
 async fn action_compile_dry_run() {
@@ -188,8 +202,7 @@ fn enrich_persisted_directive_sexp() { ":directive_id"; ":version"; }
 fn extract_directive_file_args() {}
 ArtifactKind::IntentAlignment;
 attempt_artifact_write();
-apply_compile_review_gates();
-mod tests;`);
+apply_compile_review_gates();`);
   writeFixture(root, DEFAULT_FILES.directiveTests, `
 fn enrich_persisted_directive_sexp_adds_ref_before_final_paren() {}
 fn validate_accepts_intent_alignment() {}

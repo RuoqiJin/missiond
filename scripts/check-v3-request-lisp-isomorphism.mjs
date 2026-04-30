@@ -20,6 +20,7 @@ const DEFAULT_FILES = {
   requestArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/request/request_artifacts.rs',
   requestTests: 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs',
   directiveHandler: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
+  directiveCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
   mcpRequest: 'crates/missiond-mcp/src/tools/knowledge/request.rs',
 };
 
@@ -84,9 +85,11 @@ function checkFiles(root, files) {
   requireText(diagnostics, files.blueprint, sources.blueprint, ':status "code-aligned"');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs');
 
-  requireText(diagnostics, files.directiveHandler, sources.directiveHandler, 'fn enrich_persisted_directive_sexp');
-  requireText(diagnostics, files.directiveHandler, sources.directiveHandler, 'payload["compiled_sexp_preview"] = json!(persisted_preview_sexp)');
-  requireText(diagnostics, files.directiveHandler, sources.directiveHandler, 'payload["compiled_sexp"] = json!(persisted_compiled_sexp)');
+  const directiveSurface = `${sources.directiveHandler}\n${sources.directiveCompileAuthoring}`;
+  const directiveSurfaceLabel = `${files.directiveHandler} + ${files.directiveCompileAuthoring}`;
+  requireText(diagnostics, directiveSurfaceLabel, directiveSurface, 'fn enrich_persisted_directive_sexp');
+  requireText(diagnostics, directiveSurfaceLabel, directiveSurface, 'payload["compiled_sexp_preview"] = json!(persisted_preview_sexp)');
+  requireText(diagnostics, directiveSurfaceLabel, directiveSurface, 'payload["compiled_sexp"] = json!(persisted_compiled_sexp)');
 
   const requestSurface = `${sources.requestHandler}\n${sources.requestArtifacts}`;
   const requestSurfaceLabel = `${files.requestHandler} + ${files.requestArtifacts}`;
@@ -129,6 +132,8 @@ function buildFixture() {
       :code ["crates/missiond-daemon/src/handlers/knowledge/request/tests.rs"]
       :note "fixture")))`);
   writeFixture(root, DEFAULT_FILES.directiveHandler, `
+mod compile_authoring;`);
+  writeFixture(root, DEFAULT_FILES.directiveCompileAuthoring, `
 fn enrich_persisted_directive_sexp() {}
 payload["compiled_sexp_preview"] = json!(persisted_preview_sexp);
 payload["compiled_sexp"] = json!(persisted_compiled_sexp);`);

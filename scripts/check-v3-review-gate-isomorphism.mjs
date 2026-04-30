@@ -37,6 +37,7 @@ const DEFAULT_FILES = {
   reviewGateLlmApproval: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
   reviewGateTests: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs',
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
+  directiveCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
@@ -375,7 +376,9 @@ function checkFiles(root, files) {
     'smoke_wave22_07_review_apply_gate_pins_wave21_06_five_invariants',
     'proposal_invariants_round_trip_never_surface_rejected',
   ]);
-  requireAll(diagnostics, files.directive, sources.directive, DIRECTIVE_RS_NEEDLES);
+  const directiveCallerSurface = `${sources.directive}\n${sources.directiveCompileAuthoring}`;
+  const directiveCallerLabel = `${files.directive} + ${files.directiveCompileAuthoring}`;
+  requireAll(diagnostics, directiveCallerLabel, directiveCallerSurface, DIRECTIVE_RS_NEEDLES);
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
   requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, PLAN_COMPILE_AUTHORING_RS_NEEDLES);
   requireAll(diagnostics, files.planApprovalReview, sources.planApprovalReview, PLAN_APPROVAL_REVIEW_RS_NEEDLES);
@@ -483,7 +486,8 @@ function runFixtures(json) {
     [DEFAULT_FILES.reviewGateAutoAnswer]: buildGoodReviewGateAutoAnswer(),
     [DEFAULT_FILES.reviewGateLlmApproval]: buildGoodReviewGateLlmApproval(),
     [DEFAULT_FILES.reviewGateTests]: buildGoodReviewGateTests(),
-    [DEFAULT_FILES.directive]: buildGoodCallerRs(),
+    [DEFAULT_FILES.directive]: buildGoodDirectiveFacadeRs(),
+    [DEFAULT_FILES.directiveCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.planApprovalReview]: buildGoodPlanApprovalReviewRs(),
@@ -542,9 +546,11 @@ function runFixtures(json) {
     files: missingPolicy,
   });
 
-  // ── Fail: directive.rs stops calling apply_compile_review_gates. ───
+  // ── Fail: directive compile authoring stops calling apply_compile_review_gates. ─
   const directiveBypass = { ...goodFiles };
-  directiveBypass[DEFAULT_FILES.directive] = goodFiles[DEFAULT_FILES.directive].replace(
+  directiveBypass[DEFAULT_FILES.directiveCompileAuthoring] = goodFiles[
+    DEFAULT_FILES.directiveCompileAuthoring
+  ].replace(
     'apply_compile_review_gates(',
     'apply_compile_review_GHOST(',
   );
@@ -757,6 +763,16 @@ fn caller(args: &serde_json::Value) {
     apply_compile_review_gates();
     maybe_emit_review_question_resolved();
     let _ = (policy, policy_explicit, legacy);
+}
+`;
+}
+
+function buildGoodDirectiveFacadeRs() {
+  return `// fixture
+use crate::handlers::knowledge::review_gate::maybe_emit_review_question_resolved;
+
+fn directive_facade() {
+    maybe_emit_review_question_resolved();
 }
 `;
 }
