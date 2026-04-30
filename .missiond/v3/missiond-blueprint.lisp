@@ -1217,14 +1217,19 @@
       :status "code-aligned"
       :implements [verification-receipt]
       :code ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/append.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/entry.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/event_ref.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/legacy.rs"
              "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/taxonomy.rs"
              "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs"
              "scripts/check-v3-evidence-collector-isomorphism.mjs"]
-      :note "EVIDENCE_SCHEMA_VERSION pins the evidence wire shape for verification-receipt consumers. EventRefStatus is the closed status enum live | log | unavailable describing whether an event ref is live from publish, recovered from the event log, or unavailable. EventRefProvenance is the closed provenance enum live | passive_cache | event_log_query | unavailable so consumers can distinguish immediate publish results, the bounded in-memory passive cache, and the bounded event_log_query recovery path. evidence_collector/resolver.rs owns EventRefResolver, EVENT_REF_CACHE_CAP = 1024, cache-miss/log-query miss constants, and the bounded event-log query recovery path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, keeping plan.rs compatibility while making the receipt payload Lisp-addressable. evidence_collector/tests.rs owns builder-shape, event-ref resolver, legacy wrapping, sidecar append, commit metadata, and distill-chain regression pins outside the collector facade. plan/execution_runtime/internal.rs owns the mission_plan internal dispatch evidence append path through evidence_collector::append, while plan/evidence_sidecar.rs owns manual record_evidence compatibility wrapping.")
+      :note "evidence_collector.rs remains the compatibility facade for the verification-receipt evidence surface. evidence_collector/taxonomy.rs owns EVIDENCE_SCHEMA_VERSION and source/kind wire constants; evidence_collector/event_ref.rs owns EventRefStatus live | log | unavailable plus EventRefProvenance live | passive_cache | event_log_query | unavailable; evidence_collector/entry.rs owns EvidenceEntry typed builder/projection; evidence_collector/append.rs owns AppendOutcome and the sidecar append writer; evidence_collector/legacy.rs owns wrap_legacy_record_evidence. evidence_collector/resolver.rs owns EventRefResolver, EVENT_REF_CACHE_CAP = 1024, cache-miss/log-query miss constants, and the bounded event-log query recovery path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, keeping plan.rs compatibility while making the receipt payload Lisp-addressable. evidence_collector/tests.rs owns builder-shape, event-ref resolver, legacy wrapping, sidecar append, commit metadata, and distill-chain regression pins outside the collector facade. plan/execution_runtime/internal.rs owns the mission_plan internal dispatch evidence append path through evidence_collector::append, while plan/evidence_sidecar.rs owns manual record_evidence compatibility wrapping.")
 
 	    (surface mission_execution-log
 	      :status "code-aligned"

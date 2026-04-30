@@ -31,8 +31,18 @@ Checks the V3 evidence-collector Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   evidenceCollector: 'crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs',
+  evidenceCollectorAppend:
+    'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/append.rs',
+  evidenceCollectorEntry:
+    'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/entry.rs',
+  evidenceCollectorEventRef:
+    'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/event_ref.rs',
+  evidenceCollectorLegacy:
+    'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/legacy.rs',
   evidenceCollectorResolver:
     'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs',
+  evidenceCollectorTaxonomy:
+    'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/taxonomy.rs',
   evidenceCollectorTests: 'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
   planEvidenceSidecar: 'crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
@@ -92,7 +102,12 @@ const BLUEPRINT_NEEDLES = [
   '(surface evidence-collector',
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/append.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/entry.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/event_ref.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/legacy.rs',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/taxonomy.rs',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs',
   'verification-receipt',
@@ -111,7 +126,28 @@ const BLUEPRINT_NEEDLES = [
 ];
 
 const EVIDENCE_COLLECTOR_RS_NEEDLES = [
+  'mod append;',
+  'mod entry;',
+  'mod event_ref;',
+  'mod legacy;',
+  'mod resolver;',
+  'mod taxonomy;',
+  'pub(crate) use append::*;',
+  'pub(crate) use entry::*;',
+  'pub(crate) use event_ref::*;',
+  'pub(crate) use legacy::*;',
+  'pub(crate) use resolver::{',
+  'pub(crate) use taxonomy::*;',
+  'mod tests;',
+];
+
+const EVIDENCE_COLLECTOR_TAXONOMY_RS_NEEDLES = [
   'pub(crate) const EVIDENCE_SCHEMA_VERSION: &str = "v0"',
+  'pub(crate) mod source',
+  'pub(crate) mod kind',
+];
+
+const EVIDENCE_COLLECTOR_EVENT_REF_RS_NEEDLES = [
   'pub(crate) enum EventRefStatus',
   'EventRefStatus::Live',
   'EventRefStatus::Log',
@@ -122,15 +158,26 @@ const EVIDENCE_COLLECTOR_RS_NEEDLES = [
   'EventRefProvenance::EventLogQuery',
   'EventRefProvenance::Unavailable',
   'pub(crate) struct EventRef',
+  'pub(crate) fn from_event_log_query',
+  'pub(crate) fn unavailable',
+];
+
+const EVIDENCE_COLLECTOR_ENTRY_RS_NEEDLES = [
   'pub(crate) struct EvidenceEntry',
+  'pub(crate) fn new',
+  'pub(crate) fn with_primary_event_ref',
+  'pub(crate) fn into_json',
+];
+
+const EVIDENCE_COLLECTOR_APPEND_RS_NEEDLES = [
   'pub(crate) enum AppendOutcome',
   'pub(crate) async fn append',
   'pub(crate) fn append_entry_to_project_root',
+  'super::super::plan::append_plan_evidence_entry',
+];
+
+const EVIDENCE_COLLECTOR_LEGACY_RS_NEEDLES = [
   'pub(crate) fn wrap_legacy_record_evidence',
-  'mod resolver;',
-  'pub(crate) use resolver::{',
-  'EventRefResolver',
-  'mod tests;',
 ];
 
 const EVIDENCE_COLLECTOR_RESOLVER_RS_NEEDLES = [
@@ -189,6 +236,36 @@ function checkFiles(root, files) {
     files.evidenceCollector,
     sources.evidenceCollector,
     EVIDENCE_COLLECTOR_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.evidenceCollectorTaxonomy,
+    sources.evidenceCollectorTaxonomy,
+    EVIDENCE_COLLECTOR_TAXONOMY_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.evidenceCollectorEventRef,
+    sources.evidenceCollectorEventRef,
+    EVIDENCE_COLLECTOR_EVENT_REF_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.evidenceCollectorEntry,
+    sources.evidenceCollectorEntry,
+    EVIDENCE_COLLECTOR_ENTRY_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.evidenceCollectorAppend,
+    sources.evidenceCollectorAppend,
+    EVIDENCE_COLLECTOR_APPEND_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.evidenceCollectorLegacy,
+    sources.evidenceCollectorLegacy,
+    EVIDENCE_COLLECTOR_LEGACY_RS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -273,7 +350,12 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.evidenceCollector]: buildGoodEvidenceCollector(),
+    [DEFAULT_FILES.evidenceCollectorAppend]: buildGoodEvidenceCollectorAppend(),
+    [DEFAULT_FILES.evidenceCollectorEntry]: buildGoodEvidenceCollectorEntry(),
+    [DEFAULT_FILES.evidenceCollectorEventRef]: buildGoodEvidenceCollectorEventRef(),
+    [DEFAULT_FILES.evidenceCollectorLegacy]: buildGoodEvidenceCollectorLegacy(),
     [DEFAULT_FILES.evidenceCollectorResolver]: buildGoodEvidenceCollectorResolver(),
+    [DEFAULT_FILES.evidenceCollectorTaxonomy]: buildGoodEvidenceCollectorTaxonomy(),
     [DEFAULT_FILES.evidenceCollectorTests]: buildGoodEvidenceCollectorTests(),
     [DEFAULT_FILES.planExecutionRuntime]: buildGoodPlanExecutionRuntime(),
     [DEFAULT_FILES.planExecutionInternal]: buildGoodPlanExecutionInternal(),
@@ -298,7 +380,7 @@ function runFixtures(json) {
   });
 
   const missingAnchor = { ...goodFiles };
-  missingAnchor[DEFAULT_FILES.blueprint] = goodFiles[DEFAULT_FILES.blueprint].replace(
+  missingAnchor[DEFAULT_FILES.blueprint] = goodFiles[DEFAULT_FILES.blueprint].replaceAll(
     'EventRefProvenance',
     'EventRefGHOST',
   );
@@ -310,7 +392,9 @@ function runFixtures(json) {
   });
 
   const missingApi = { ...goodFiles };
-  missingApi[DEFAULT_FILES.evidenceCollector] = goodFiles[DEFAULT_FILES.evidenceCollector].replace(
+  missingApi[DEFAULT_FILES.evidenceCollectorTaxonomy] = goodFiles[
+    DEFAULT_FILES.evidenceCollectorTaxonomy
+  ].replace(
     'pub(crate) const EVIDENCE_SCHEMA_VERSION: &str = "v0"',
     'pub(crate) const EVIDENCE_SCHEMA_GHOST: &str = "v0"',
   );
@@ -403,12 +487,17 @@ function buildGoodBlueprint() {
       :status "code-aligned"
       :implements [verification-receipt]
       :code ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/append.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/entry.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/event_ref.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/legacy.rs"
              "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/taxonomy.rs"
              "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs"]
-      :note "EVIDENCE_SCHEMA_VERSION = \\"v0\\" pins the wire shape; EventRefStatus is the closed enum live | log | unavailable describing whether the ref is live-from-publish, log-recovered post hoc, or simply unavailable. EventRefProvenance further pivots the recovery tier as live | passive_cache | event_log_query | unavailable so consumers can attribute lookups to the wave-16 in-memory passive cache (EVENT_REF_CACHE_CAP = 1024 FIFO entries) vs the wave-18 bounded event_log_query path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, so the verification-receipt artifact stays consistent with what plan.rs already wrote."))
+      :note "evidence_collector.rs is the compatibility facade. evidence_collector/taxonomy.rs owns EVIDENCE_SCHEMA_VERSION = \\"v0\\" plus source/kind wire constants; evidence_collector/event_ref.rs owns EventRefStatus and EventRefProvenance; evidence_collector/entry.rs owns EvidenceEntry; evidence_collector/append.rs owns AppendOutcome and the sidecar append writer; evidence_collector/legacy.rs owns wrap_legacy_record_evidence. EventRefStatus is the closed enum live | log | unavailable describing whether the ref is live-from-publish, log-recovered post hoc, or simply unavailable. EventRefProvenance further pivots the recovery tier as live | passive_cache | event_log_query | unavailable so consumers can attribute lookups to the wave-16 in-memory passive cache (EVENT_REF_CACHE_CAP = 1024 FIFO entries) vs the wave-18 bounded event_log_query path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, so the verification-receipt artifact stays consistent with what plan.rs already wrote."))
   (compression-contract
     :checks ["node scripts/check-v3-evidence-collector-isomorphism.mjs"]))
 `;
@@ -416,8 +505,36 @@ function buildGoodBlueprint() {
 
 function buildGoodEvidenceCollector() {
   return `// fixture
-pub(crate) const EVIDENCE_SCHEMA_VERSION: &str = "v0";
+mod append;
+mod entry;
+mod event_ref;
+mod legacy;
+mod resolver;
+mod taxonomy;
+pub(crate) use append::*;
+pub(crate) use entry::*;
+pub(crate) use event_ref::*;
+pub(crate) use legacy::*;
+pub(crate) use resolver::{EventRefResolver};
+pub(crate) use taxonomy::*;
+mod tests;
+`;
+}
 
+function buildGoodEvidenceCollectorTaxonomy() {
+  return `// fixture
+pub(crate) const EVIDENCE_SCHEMA_VERSION: &str = "v0";
+pub(crate) mod source {
+    pub(crate) const PLAN_RUNNER_DISPATCH: &str = "plan_runner_dispatch";
+}
+pub(crate) mod kind {
+    pub(crate) const DISPATCH: &str = "dispatch";
+}
+`;
+}
+
+function buildGoodEvidenceCollectorEventRef() {
+  return `// fixture
 pub(crate) enum EventRefStatus { Live, Log, Unavailable }
 fn status_wire(s: EventRefStatus) -> &'static str {
     match s {
@@ -443,16 +560,36 @@ fn provenance_wire(p: EventRefProvenance) -> &'static str {
 }
 
 pub(crate) struct EventRef {}
-pub(crate) struct EvidenceEntry {}
-pub(crate) enum AppendOutcome { Written, NoOp }
+impl EventRef {
+    pub(crate) fn from_event_log_query() {}
+    pub(crate) fn unavailable() {}
+}
+`;
+}
 
+function buildGoodEvidenceCollectorEntry() {
+  return `// fixture
+pub(crate) struct EvidenceEntry {}
+impl EvidenceEntry {
+    pub(crate) fn new() {}
+    pub(crate) fn with_primary_event_ref() {}
+    pub(crate) fn into_json() {}
+}
+`;
+}
+
+function buildGoodEvidenceCollectorAppend() {
+  return `// fixture
+pub(crate) enum AppendOutcome { Written, NoOp }
 pub(crate) async fn append() {}
 pub(crate) fn append_entry_to_project_root() {}
-pub(crate) fn wrap_legacy_record_evidence() {}
+fn call_legacy_writer() { let _ = super::super::plan::append_plan_evidence_entry; }
+`;
+}
 
-mod resolver;
-pub(crate) use resolver::{EventRefResolver};
-mod tests;
+function buildGoodEvidenceCollectorLegacy() {
+  return `// fixture
+pub(crate) fn wrap_legacy_record_evidence() {}
 `;
 }
 
