@@ -7,7 +7,8 @@ use serde_json::{json, Value};
 
 use crate::state::AppState;
 
-use super::{action_distill_sonnet, inner_result_is_error, AutoChainTrigger};
+use super::action_distill_sonnet;
+use super::auto_chain::{inner_result_is_error, AutoChainTrigger};
 
 // ───────────────────────────────────────────────────────────────────────
 // wave-21 / task 07 :: sonnet distill chain auto-apply v1
