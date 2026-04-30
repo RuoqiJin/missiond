@@ -46,6 +46,10 @@ const DEFAULT_FILES = {
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   directiveCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
   directiveApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs',
+  directiveApprovalApprove:
+    'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/approve.rs',
+  directiveApprovalArchive:
+    'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/archive.rs',
   directiveApprovalProposer:
     'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs',
   directiveApprovalSubscriber:
@@ -128,6 +132,8 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/approve.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/archive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/subscriber.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
@@ -192,17 +198,35 @@ const DIRECTIVE_RS_NEEDLES = [
 ];
 
 const DIRECTIVE_APPROVAL_REVIEW_RS_NEEDLES = [
+  'mod approve;',
+  'mod archive;',
   'mod proposer;',
   'mod subscriber;',
+  'pub(super) use self::approve::action_approve;',
+  'pub(super) use self::archive::action_archive;',
   'use self::proposer::{',
   'request_directive_auto_approve_proposal',
   'pub(crate) use self::subscriber::{handle_review_resolved_event, DirectiveSubscriberOutcome};',
-  'pub(super) async fn action_approve',
+];
+
+const DIRECTIVE_APPROVAL_APPROVE_RS_NEEDLES = [
+  'use super::*;',
+  'pub(in crate::handlers::knowledge::directive) async fn action_approve',
   'async fn action_approve_with_resolution',
   'async fn action_approve_with_policy_only',
-  'pub(super) async fn action_archive',
+  'parse_review_resolution_input(args)',
+  'maybe_emit_review_question_resolved',
+  'directive_approve',
+];
+
+const DIRECTIVE_APPROVAL_ARCHIVE_RS_NEEDLES = [
+  'use super::*;',
+  'pub(in crate::handlers::knowledge::directive) async fn action_archive',
   'async fn action_archive_with_resolution',
   'async fn action_archive_with_policy_only',
+  'parse_review_resolution_input(args)',
+  'maybe_emit_review_question_resolved',
+  'DirectiveStatus::Archived',
 ];
 
 const DIRECTIVE_APPROVAL_PROPOSER_RS_NEEDLES = [
@@ -436,14 +460,26 @@ function checkFiles(root, files) {
     'smoke_wave22_07_review_apply_gate_pins_wave21_06_five_invariants',
     'proposal_invariants_round_trip_never_surface_rejected',
   ]);
-  const directiveCallerSurface = `${sources.directive}\n${sources.directiveCompileAuthoring}\n${sources.directiveApprovalReview}\n${sources.directiveApprovalProposer}\n${sources.directiveApprovalSubscriber}`;
-  const directiveCallerLabel = `${files.directive} + ${files.directiveCompileAuthoring} + ${files.directiveApprovalReview} + ${files.directiveApprovalProposer} + ${files.directiveApprovalSubscriber}`;
+  const directiveCallerSurface = `${sources.directive}\n${sources.directiveCompileAuthoring}\n${sources.directiveApprovalReview}\n${sources.directiveApprovalApprove}\n${sources.directiveApprovalArchive}\n${sources.directiveApprovalProposer}\n${sources.directiveApprovalSubscriber}`;
+  const directiveCallerLabel = `${files.directive} + ${files.directiveCompileAuthoring} + ${files.directiveApprovalReview} + ${files.directiveApprovalApprove} + ${files.directiveApprovalArchive} + ${files.directiveApprovalProposer} + ${files.directiveApprovalSubscriber}`;
   requireAll(diagnostics, directiveCallerLabel, directiveCallerSurface, DIRECTIVE_RS_NEEDLES);
   requireAll(
     diagnostics,
     files.directiveApprovalReview,
     sources.directiveApprovalReview,
     DIRECTIVE_APPROVAL_REVIEW_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.directiveApprovalApprove,
+    sources.directiveApprovalApprove,
+    DIRECTIVE_APPROVAL_APPROVE_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.directiveApprovalArchive,
+    sources.directiveApprovalArchive,
+    DIRECTIVE_APPROVAL_ARCHIVE_RS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -569,6 +605,8 @@ function runFixtures(json) {
     [DEFAULT_FILES.directive]: buildGoodDirectiveFacadeRs(),
     [DEFAULT_FILES.directiveCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.directiveApprovalReview]: buildGoodDirectiveApprovalReviewRs(),
+    [DEFAULT_FILES.directiveApprovalApprove]: buildGoodDirectiveApprovalApproveRs(),
+    [DEFAULT_FILES.directiveApprovalArchive]: buildGoodDirectiveApprovalArchiveRs(),
     [DEFAULT_FILES.directiveApprovalProposer]: buildGoodDirectiveApprovalProposerRs(),
     [DEFAULT_FILES.directiveApprovalSubscriber]: buildGoodDirectiveApprovalSubscriberRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
@@ -728,6 +766,8 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/approve.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/archive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/subscriber.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
@@ -742,7 +782,7 @@ function buildGoodBlueprint() {
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"
              "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
-      :note "alignment-review-gate + plan-review-gate event emission for the file-first directive / plan / workflow surfaces. ReviewGatePolicy is a closed enum manual | emit_question | off; the dispatcher apply_compile_review_gates fans out to maybe_emit_review_question_created (legacy explicit) or auto_emit_review_question_after_artifact_write (wave-14 auto). ReviewDecision is a closed enum approved | rejected | needs_changes carried by the wave-15 review-resolution input. The gate never auto-approves, never blocks the primary DB / file-write outcome, and never waits for a human; bus failures surface review_question_warning + the deterministic review_question_id so callers can retry or resolve manually with the same id. directive / plan / workflow approve / reject paths route through maybe_emit_review_question_resolved without bypassing the gate."))
+      :note "alignment-review-gate + plan-review-gate event emission for the file-first directive / plan / workflow surfaces. directive/approval_review.rs owns the directive review facade; directive/approval_review/approve.rs owns directive approve transitions; directive/approval_review/archive.rs owns directive archive transitions. ReviewGatePolicy is a closed enum manual | emit_question | off; the dispatcher apply_compile_review_gates fans out to maybe_emit_review_question_created (legacy explicit) or auto_emit_review_question_after_artifact_write (wave-14 auto). ReviewDecision is a closed enum approved | rejected | needs_changes carried by the wave-15 review-resolution input. The gate never auto-approves, never blocks the primary DB / file-write outcome, and never waits for a human; bus failures surface review_question_warning + the deterministic review_question_id so callers can retry or resolve manually with the same id. directive / plan / workflow approve / reject paths route through maybe_emit_review_question_resolved without bypassing the gate."))
   (compression-contract
     :checks ["node scripts/check-v3-review-gate-isomorphism.mjs"]))
 `;
@@ -883,22 +923,45 @@ fn directive_facade() {
 
 function buildGoodDirectiveApprovalReviewRs() {
   return `// fixture
+mod approve;
+mod archive;
 mod proposer;
 mod subscriber;
+pub(super) use self::approve::action_approve;
+pub(super) use self::archive::action_archive;
 use self::proposer::{
     attach_directive_apply_gate_block, attach_directive_proposal_block,
     directive_proposer_summary, parse_proposer_mode_or_error,
     request_directive_auto_approve_proposal,
 };
 pub(crate) use self::subscriber::{handle_review_resolved_event, DirectiveSubscriberOutcome};
+`;
+}
 
-pub(super) async fn action_approve() {}
+function buildGoodDirectiveApprovalApproveRs() {
+  return `// fixture
+use super::*;
+pub(in crate::handlers::knowledge::directive) async fn action_approve() {
+    parse_review_resolution_input(args);
+    maybe_emit_review_question_resolved();
+    directive_approve;
+}
 async fn action_approve_with_resolution() {
     parse_review_resolution_input(args);
     maybe_emit_review_question_resolved();
 }
 async fn action_approve_with_policy_only() {}
-pub(super) async fn action_archive() {}
+`;
+}
+
+function buildGoodDirectiveApprovalArchiveRs() {
+  return `// fixture
+use super::*;
+pub(in crate::handlers::knowledge::directive) async fn action_archive() {
+    parse_review_resolution_input(args);
+    maybe_emit_review_question_resolved();
+    DirectiveStatus::Archived;
+}
 async fn action_archive_with_resolution() {
     parse_review_resolution_input(args);
     maybe_emit_review_question_resolved();
