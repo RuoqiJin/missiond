@@ -12,10 +12,10 @@ use super::completion_records::{
     VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
 };
 use super::completion_trace::append_completion_trace_if_requested;
+use super::log_counters::{allocate_id, Counter};
 use super::log_store::{
-    allocate_id, append_to_block, companion_path, lisp_quote_string, now_iso,
-    project_or_target_project, read_log_file, require_str, resolve_project_root,
-    touch_last_updated, write_log_file, Counter,
+    append_to_block, companion_path, lisp_quote_string, now_iso, project_or_target_project,
+    read_log_file, require_str, resolve_project_root, touch_last_updated, write_log_file,
 };
 use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
 use super::task_verifier::auto_run_task_run_verifier;

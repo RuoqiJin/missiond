@@ -7,7 +7,8 @@ use super::completion_records::{
     parse_completions, FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
     FINDING_SCOPED_COMMIT_VIOLATION,
 };
-use super::log_store::{parse_kv_pairs, Counter, LogFile};
+use super::log_counters::Counter;
+use super::log_store::{parse_kv_pairs, LogFile};
 
 // ───────────────────────────────────────────────────────────────────────
 // completion audit/enforcement gates

@@ -9,10 +9,11 @@ use crate::state::AppState;
 use super::claim_lease::{find_claim_node, parse_claims, parse_iso, scopes_overlap};
 use super::completion_gates::{audit_scoped_commit_handoff, check_id_monotonic};
 use super::lisp_syntax as sexp;
+use super::log_counters::{insert_id_counters_block, scan_max_id, Counter};
 use super::log_store::{
-    companion_path, insert_id_counters_block, lisp_quote_string, list_block_summaries,
-    parse_kv_pairs, project_or_target_project, require_str, resolve_project_root, scan_max_id,
-    touch_last_updated, update_kv_in_node, write_log_file, Counter, LogFile,
+    companion_path, lisp_quote_string, list_block_summaries, parse_kv_pairs,
+    project_or_target_project, require_str, resolve_project_root, touch_last_updated,
+    update_kv_in_node, write_log_file, LogFile,
 };
 use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
 

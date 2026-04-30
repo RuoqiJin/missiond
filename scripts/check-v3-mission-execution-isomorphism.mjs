@@ -14,6 +14,8 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
     records plus matching live event projection
   - agent_execution/log_status.rs: status/read-model projection for companion
     logs, claims, issues, decisions, and completion durability
+  - agent_execution/log_counters.rs: id-counters allocation, repair insertion,
+    and legacy ID scanning shared by claim/governance/completion surfaces
   - agent_execution/lisp_syntax.rs: shared S-expression parser and delimiter
     checker used by all Lisp-backed mission_execution surfaces
   - agent_execution/session_trace.rs: optional task session-trace projection
@@ -47,6 +49,8 @@ const DEFAULT_FILES = {
   logGovernance:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
   logStatus: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
+  logCounters:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs',
   logStore: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
   lispSyntax: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   sessionTrace:
@@ -77,7 +81,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -96,6 +100,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
@@ -130,6 +135,7 @@ const DAEMON_NEEDLES = [
   '"preflight_commit" => action_preflight_commit',
   'mod log_store',
   'mod lisp_syntax',
+  'mod log_counters',
   'mod log_governance',
   'mod log_status',
   'mod log_surface',
@@ -147,6 +153,7 @@ const DAEMON_NEEDLES = [
   '#[cfg(test)]',
   'mod tests;',
   'use self::log_store::{',
+  'use self::log_counters',
   'use self::log_governance',
   'use self::log_status::action_status',
   'use self::lisp_syntax',
@@ -181,18 +188,27 @@ const LOG_STORE_NEEDLES = [
   'pub(super) fn parse_kv_pairs',
   'pub(super) fn lisp_quote_string',
   'pub(super) fn render_canonical_template',
-  'pub(super) enum Counter',
   'pub(super) fn locate_kv_value',
   'pub(super) fn update_kv_in_node',
   'pub(super) fn list_block_summaries',
   'pub(super) fn json_strip_quotes',
-  'pub(super) fn insert_id_counters_block',
-  'pub(super) fn allocate_id',
-  'pub(super) fn scan_max_id',
   'pub(super) fn append_to_block',
   'pub(super) fn touch_last_updated',
   'pub(super) fn write_log_file',
   'pub(super) fn read_log_file',
+];
+
+const LOG_COUNTERS_NEEDLES = [
+  'pub(super) enum Counter',
+  'pub(super) fn key',
+  'pub(super) fn prefix',
+  'pub(super) fn block_name',
+  'pub(super) fn insert_id_counters_block',
+  'pub(super) fn allocate_id',
+  'pub(super) fn scan_max_id',
+  'locate_kv_value',
+  'NodeKind::Str',
+  'NodeKind::Atom',
 ];
 
 const LISP_SYNTAX_NEEDLES = [
@@ -436,6 +452,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.daemon, sources.daemon, DAEMON_NEEDLES);
   requireAll(diagnostics, files.tests, sources.tests, TESTS_NEEDLES);
   requireAll(diagnostics, files.logStore, sources.logStore, LOG_STORE_NEEDLES);
+  requireAll(diagnostics, files.logCounters, sources.logCounters, LOG_COUNTERS_NEEDLES);
   requireAll(diagnostics, files.lispSyntax, sources.lispSyntax, LISP_SYNTAX_NEEDLES);
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
   requireAll(diagnostics, files.logGovernance, sources.logGovernance, LOG_GOVERNANCE_NEEDLES);
@@ -505,6 +522,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.daemon]: buildGoodDaemon(),
     [DEFAULT_FILES.tests]: buildGoodTests(),
     [DEFAULT_FILES.logStore]: buildGoodLogStore(),
+    [DEFAULT_FILES.logCounters]: buildGoodLogCounters(),
     [DEFAULT_FILES.lispSyntax]: buildGoodLispSyntax(),
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
     [DEFAULT_FILES.logGovernance]: buildGoodLogGovernance(),
@@ -633,11 +651,12 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, ID counters, and Lisp read/write helpers authoritative; action routing, emit_execution_event, and DispatchMeta stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
+	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, companion paths, canonical template, key/value mutation, block append, and Lisp read/write helpers authoritative; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; action routing, emit_execution_event, and DispatchMeta stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -683,6 +702,7 @@ function buildGoodDaemon() {
   }
 }
 mod log_store;
+mod log_counters;
 mod lisp_syntax;
 mod log_governance;
 mod log_status;
@@ -704,6 +724,7 @@ use self::log_surface::{
   build_opened_event, emit_execution_event, normalize_dispatch_strategy,
   read_dispatch_metadata_from_log,
 };
+use self::log_counters::{Counter};
 use self::log_store::{LogFile};
 use self::log_governance::{action_decide, action_deviate, action_issue};
 use self::log_status::action_status;
@@ -741,18 +762,32 @@ pub(super) fn now_iso() {}
 pub(super) fn parse_kv_pairs() {}
 pub(super) fn lisp_quote_string() {}
 pub(super) fn render_canonical_template() {}
-pub(super) enum Counter {}
 pub(super) fn locate_kv_value() {}
 pub(super) fn update_kv_in_node() {}
 pub(super) fn list_block_summaries() {}
 pub(super) fn json_strip_quotes() {}
-pub(super) fn insert_id_counters_block() {}
-pub(super) fn allocate_id() {}
-pub(super) fn scan_max_id() {}
 pub(super) fn append_to_block() {}
 pub(super) fn touch_last_updated() {}
 pub(super) fn write_log_file() {}
 pub(super) fn read_log_file() {}
+`;
+}
+
+function buildGoodLogCounters() {
+  return `pub(super) enum Counter {}
+impl Counter {
+pub(super) fn key() {}
+pub(super) fn prefix() {}
+pub(super) fn block_name() {}
+}
+pub(super) fn insert_id_counters_block() {}
+pub(super) fn allocate_id() {
+locate_kv_value();
+}
+pub(super) fn scan_max_id() {
+NodeKind::Str;
+NodeKind::Atom;
+}
 `;
 }
 

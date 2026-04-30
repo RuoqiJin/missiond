@@ -37,6 +37,7 @@ mod completion_maintenance;
 mod completion_records;
 mod completion_trace;
 mod lisp_syntax;
+mod log_counters;
 mod log_governance;
 mod log_status;
 mod log_store;
@@ -67,12 +68,14 @@ use self::completion_records::{
 };
 #[cfg(test)]
 use self::lisp_syntax as sexp;
+#[cfg(test)]
+use self::log_counters::{allocate_id, scan_max_id, Counter};
 use self::log_governance::{action_decide, action_deviate, action_issue};
 use self::log_status::action_status;
 #[cfg(test)]
 use self::log_store::{
-    allocate_id, append_to_block, lisp_quote_string, now_iso, parse_kv_pairs,
-    project_or_target_project, render_canonical_template, scan_max_id, Counter, LogFile,
+    append_to_block, lisp_quote_string, now_iso, parse_kv_pairs, project_or_target_project,
+    render_canonical_template, LogFile,
 };
 use self::log_surface::{action_list, action_open};
 #[cfg(test)]
