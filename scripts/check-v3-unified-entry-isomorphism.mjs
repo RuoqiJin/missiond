@@ -55,6 +55,7 @@ const DEFAULT_FILES = {
   unifiedPlanner: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs',
   unifiedDecorator: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/decorator.rs',
   unifiedStages: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/stages.rs',
+  unifiedTests: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/tests.rs',
   requestHandler: 'crates/missiond-daemon/src/handlers/knowledge/request.rs',
 };
 
@@ -116,6 +117,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs',
   'crates/missiond-daemon/src/handlers/knowledge/unified_entry/decorator.rs',
   'crates/missiond-daemon/src/handlers/knowledge/unified_entry/stages.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/unified_entry/tests.rs',
   'node scripts/check-v3-unified-entry-isomorphism.mjs',
 ];
 
@@ -160,6 +162,7 @@ const UNIFIED_ENTRY_SURFACE_NEEDLES = [
   'mod decorator;',
   'mod planner;',
   'pub(crate) mod stages;',
+  'mod tests;',
   // public stage runner entry point
   'pub(crate) async fn run_pipeline',
   // per-stage async runners
@@ -231,14 +234,27 @@ function checkFiles(root, files) {
       files.unifiedPlanner,
       files.unifiedDecorator,
       files.unifiedStages,
+      files.unifiedTests,
     ].join(' + '),
     [
       sources.unifiedEntry,
       sources.unifiedPlanner,
       sources.unifiedDecorator,
       sources.unifiedStages,
+      sources.unifiedTests,
     ].join('\n'),
     UNIFIED_ENTRY_SURFACE_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.unifiedTests,
+    sources.unifiedTests,
+    [
+      'use super::*;',
+      'smoke_canonical_loop_message_to_directive_to_plan_to_execute_with_evidence',
+      'build_artifact_refs_directive_compile_persisted_with_file_and_review_gate',
+      'decorate_appends_artifact_refs_and_pipeline_meta_without_touching_inner',
+    ],
   );
   requireAll(
     diagnostics,
@@ -314,6 +330,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.unifiedPlanner]: buildGoodUnifiedPlanner(),
     [DEFAULT_FILES.unifiedDecorator]: buildGoodUnifiedDecorator(),
     [DEFAULT_FILES.unifiedStages]: buildGoodUnifiedStages(),
+    [DEFAULT_FILES.unifiedTests]: buildGoodUnifiedTests(),
     [DEFAULT_FILES.requestHandler]: buildGoodRequestHandler(),
   };
   cases.push({
@@ -495,7 +512,8 @@ function buildGoodBlueprint() {
       :code ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs"
              "crates/missiond-daemon/src/handlers/knowledge/unified_entry/decorator.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/unified_entry/stages.rs"]
+             "crates/missiond-daemon/src/handlers/knowledge/unified_entry/stages.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/unified_entry/tests.rs"]
       :note "unified-entry-runtime is the in-daemon stage substrate that mission_request, mission_directive, mission_plan, and mission_workflow compose to drive F-intent-alignment-plan-execution-loop. run_pipeline is the single dispatcher; per-stage runners are run_directive_compile_stage, run_plan_compile_stage, and run_plan_execute_stage. The wire stage label vocabulary stamped into pipeline_stage is s1_message_intake, s3_alignment_review_gate, s4_plan_authoring, s5_plan_review_gate, s6_execution_runner. ArtifactScope (Directive | Plan | Execution) is the projection scope the decorator surfaces into artifact_refs. Every response carries the same shape: pipeline_stage + flow_ref (FLOW_REF=F-intent-alignment-plan-execution-loop) + artifact_refs + next_step (and next_call when meaningful). mission_request bridges via super::unified_entry::run_pipeline; mission_directive / mission_plan / mission_workflow are the inner handlers each stage forwards to."))
   (compression-contract
     :checks ["node scripts/check-v3-unified-entry-isomorphism.mjs"]))
@@ -512,6 +530,8 @@ pub(crate) async fn run_pipeline() {}
 async fn run_directive_compile_stage() {}
 async fn run_plan_compile_stage() {}
 async fn run_plan_execute_stage() {}
+#[cfg(test)]
+mod tests;
 `;
 }
 
@@ -549,6 +569,15 @@ fn decorate() {
     // wire field names stamped onto every response
     let _names = ["pipeline_stage", "flow_ref", "artifact_refs", "next_step"];
 }
+`;
+}
+
+function buildGoodUnifiedTests() {
+  return `// fixture
+use super::*;
+fn smoke_canonical_loop_message_to_directive_to_plan_to_execute_with_evidence() {}
+fn build_artifact_refs_directive_compile_persisted_with_file_and_review_gate() {}
+fn decorate_appends_artifact_refs_and_pipeline_meta_without_touching_inner() {}
 `;
 }
 
