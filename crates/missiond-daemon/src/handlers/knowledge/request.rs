@@ -52,17 +52,17 @@ use respond::events::{
     parse_event_seq_from_filename, RespondOutcome, ReviewEventArgs,
 };
 #[cfg(test)]
+use respond::materialization::{
+    enrich_materialized_plan_lisp, plan_materialization_to_json, PlanArtifactProjection,
+    PlanMaterialization,
+};
+#[cfg(test)]
 use respond::routing::{
     build_respond_plan_compile_args, extract_directive_ref_from_artifact, extract_lisp_keyword_int,
     extract_lisp_keyword_string, parse_respond_decision, resolve_directive_ref, resolve_plan_ref,
     DirectiveRef, PlanRef, RespondDecision, RespondParseError,
 };
 use respond::{action_respond, read_event_texts};
-#[cfg(test)]
-use respond::{
-    enrich_materialized_plan_lisp, plan_materialization_to_json, PlanArtifactProjection,
-    PlanMaterialization,
-};
 #[cfg(test)]
 use review_packet::{
     allowed_responses_for, build_review_artifact_preview, classify_review_state, ArtifactExistence,
