@@ -45,15 +45,17 @@ use request_artifacts::{
     build_artifact_existence_with, classify_projection_target, extract_pipeline_meta,
     plan_projection, PipelineMeta, ProjectionPlan, ProjectionStatus, ProjectionTarget,
 };
+#[cfg(test)]
+use respond::events::parse_event_seq_from_filename;
 use respond::{action_respond, list_event_filenames, read_event_texts};
 #[cfg(test)]
 use respond::{
     build_respond_plan_compile_args, build_review_event_lisp, enrich_materialized_plan_lisp,
     event_path_for_seq, extract_directive_ref_from_artifact, extract_lisp_keyword_int,
-    extract_lisp_keyword_string, next_action_for, next_event_seq, parse_event_seq_from_filename,
-    parse_respond_decision, plan_materialization_to_json, resolve_directive_ref, resolve_plan_ref,
-    DirectiveRef, PlanArtifactProjection, PlanMaterialization, PlanRef, RespondDecision,
-    RespondOutcome, RespondParseError, ReviewEventArgs,
+    extract_lisp_keyword_string, next_action_for, next_event_seq, parse_respond_decision,
+    plan_materialization_to_json, resolve_directive_ref, resolve_plan_ref, DirectiveRef,
+    PlanArtifactProjection, PlanMaterialization, PlanRef, RespondDecision, RespondOutcome,
+    RespondParseError, ReviewEventArgs,
 };
 #[cfg(test)]
 use review_packet::{

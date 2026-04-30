@@ -19,6 +19,7 @@ const DEFAULT_FILES = {
   requestHandler: 'crates/missiond-daemon/src/handlers/knowledge/request.rs',
   requestArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/request/request_artifacts.rs',
   requestRespond: 'crates/missiond-daemon/src/handlers/knowledge/request/respond.rs',
+  requestRespondEvents: 'crates/missiond-daemon/src/handlers/knowledge/request/respond/events.rs',
   requestReviewPacket: 'crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs',
   requestTests: 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs',
   directiveHandler: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
@@ -86,6 +87,7 @@ function checkFiles(root, files) {
   requireText(diagnostics, files.blueprint, sources.blueprint, '(surface mission_request');
   requireText(diagnostics, files.blueprint, sources.blueprint, ':status "code-aligned"');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond.rs');
+  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/respond/events.rs');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs');
 
@@ -95,12 +97,18 @@ function checkFiles(root, files) {
   requireText(diagnostics, directiveSurfaceLabel, directiveSurface, 'payload["compiled_sexp_preview"] = json!(persisted_preview_sexp)');
   requireText(diagnostics, directiveSurfaceLabel, directiveSurface, 'payload["compiled_sexp"] = json!(persisted_compiled_sexp)');
 
-  const requestSurface = `${sources.requestHandler}\n${sources.requestArtifacts}\n${sources.requestRespond}\n${sources.requestReviewPacket}`;
-  const requestSurfaceLabel = `${files.requestHandler} + ${files.requestArtifacts} + ${files.requestRespond} + ${files.requestReviewPacket}`;
+  const requestSurface = `${sources.requestHandler}\n${sources.requestArtifacts}\n${sources.requestRespond}\n${sources.requestRespondEvents}\n${sources.requestReviewPacket}`;
+  const requestSurfaceLabel = `${files.requestHandler} + ${files.requestArtifacts} + ${files.requestRespond} + ${files.requestRespondEvents} + ${files.requestReviewPacket}`;
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_intent_alignment_projection');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_materialized_plan_lisp');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'atomic_write_artifact(&paths.plan, &enriched_plan_text, true)');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'respond_result.insert("plan_materialized"');
+  requireText(diagnostics, files.requestRespond, sources.requestRespond, 'mod events;');
+  requireText(diagnostics, files.requestRespond, sources.requestRespond, 'pub(super) use self::events::{');
+  requireText(diagnostics, files.requestRespondEvents, sources.requestRespondEvents, 'pub(in crate::handlers::knowledge::request) fn build_review_event_lisp');
+  requireText(diagnostics, files.requestRespondEvents, sources.requestRespondEvents, 'pub(in crate::handlers::knowledge::request) fn next_event_seq');
+  requireText(diagnostics, files.requestRespondEvents, sources.requestRespondEvents, 'pub(in crate::handlers::knowledge::request) fn next_action_for');
+  requireText(diagnostics, files.requestRespondEvents, sources.requestRespondEvents, 'EVENT_SCHEMA');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn derive_review_packet');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn classify_review_state');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn latest_review_event_checkpoint');
@@ -137,6 +145,7 @@ function buildFixture() {
     (surface mission_request
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/request/respond.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/request/respond/events.rs"
              "crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs"
              "crates/missiond-daemon/src/handlers/knowledge/request/tests.rs"]
       :note "fixture")))`);
@@ -155,9 +164,15 @@ fn respond_plan_compile_args_strips_write_file_by_default() {}`);
   writeFixture(root, DEFAULT_FILES.requestArtifacts, `
 fn enrich_intent_alignment_projection() {}`);
   writeFixture(root, DEFAULT_FILES.requestRespond, `
+mod events;
+pub(super) use self::events::{build_review_event_lisp, next_action_for, next_event_seq};
 fn enrich_materialized_plan_lisp() {}
 atomic_write_artifact(&paths.plan, &enriched_plan_text, true);
 respond_result.insert("plan_materialized", json!(true));`);
+  writeFixture(root, DEFAULT_FILES.requestRespondEvents, `
+pub(in crate::handlers::knowledge::request) fn build_review_event_lisp() { EVENT_SCHEMA; }
+pub(in crate::handlers::knowledge::request) fn next_event_seq() {}
+pub(in crate::handlers::knowledge::request) fn next_action_for() {}`);
   writeFixture(root, DEFAULT_FILES.requestReviewPacket, `
 pub(super) fn derive_review_packet() {}
 pub(super) fn classify_review_state() {}
