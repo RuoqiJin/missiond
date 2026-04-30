@@ -8,11 +8,12 @@ use crate::state::AppState;
 
 use super::claim_lease::{DEFAULT_LEASE_SECS, MAX_LEASE_SECS};
 use super::claim_records::find_claim_node;
+use super::log_dispatch::read_dispatch_metadata_from_log;
 use super::log_store::{
     companion_path, lisp_quote_string, parse_kv_pairs, project_or_target_project, read_log_file,
     require_str, resolve_project_root, touch_last_updated, update_kv_in_node, write_log_file,
 };
-use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
+use super::log_surface::emit_execution_event;
 
 pub(super) async fn action_heartbeat(state: &AppState, args: &Value) -> Result<ToolResult> {
     let execution_id = match require_str(args, "execution_id") {

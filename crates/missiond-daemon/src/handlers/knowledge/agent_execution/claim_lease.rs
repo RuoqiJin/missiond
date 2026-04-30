@@ -6,11 +6,12 @@ use missiond_mcp::tools::{ToolError, ToolResult};
 use serde_json::{json, Value};
 
 use super::log_counters::{allocate_id, Counter};
+use super::log_dispatch::read_dispatch_metadata_from_log;
 use super::log_store::{
     append_to_block, companion_path, lisp_quote_string, now_iso, project_or_target_project,
     read_log_file, require_str, resolve_project_root, touch_last_updated, write_log_file,
 };
-use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
+use super::log_surface::emit_execution_event;
 
 pub(super) use super::claim_heartbeat::action_heartbeat;
 pub(super) use super::claim_records::{find_claim_node, parse_claims, parse_iso, ClaimRecord};

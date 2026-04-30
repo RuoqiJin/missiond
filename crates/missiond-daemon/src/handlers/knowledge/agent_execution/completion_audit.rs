@@ -16,11 +16,12 @@ use super::completion_response::{build_completion_response, CompletionResponseFi
 use super::completion_trace::append_completion_trace_if_requested;
 use super::completion_verification::evaluate_completion_verification;
 use super::log_counters::{allocate_id, Counter};
+use super::log_dispatch::read_dispatch_metadata_from_log;
 use super::log_store::{
     append_to_block, companion_path, now_iso, project_or_target_project, read_log_file,
     require_str, resolve_project_root, touch_last_updated, write_log_file,
 };
-use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
+use super::log_surface::emit_execution_event;
 
 pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     let execution_id = match require_str(args, "execution_id") {

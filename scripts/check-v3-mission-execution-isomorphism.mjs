@@ -53,6 +53,8 @@ const DEFAULT_FILES = {
   daemon: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   tests: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   logSurface: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  logDispatch:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_dispatch.rs',
   logGovernance:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
   logStatus: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
@@ -116,7 +118,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_template.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_template.rs', 'agent_execution/log_dispatch.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -133,6 +135,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_dispatch.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs',
@@ -185,6 +188,7 @@ const DAEMON_NEEDLES = [
   'mod log_store',
   'mod lisp_syntax',
   'mod log_counters',
+  'mod log_dispatch',
   'mod log_governance',
   'mod log_status',
   'mod log_surface',
@@ -299,12 +303,16 @@ const LISP_SYNTAX_NEEDLES = [
 ];
 
 const LOG_SURFACE_NEEDLES = [
-  'const VALID_DISPATCH_STRATEGIES',
-  'pub(super) const DEFAULT_DISPATCH_STRATEGY',
-  'pub(super) fn normalize_dispatch_strategy',
+  'use super::log_dispatch::{build_opened_event, normalize_dispatch_strategy}',
   'pub(super) async fn action_open',
   'pub(super) async fn action_list',
   'pub(super) async fn emit_execution_event',
+];
+
+const LOG_DISPATCH_NEEDLES = [
+  'const VALID_DISPATCH_STRATEGIES',
+  'pub(super) const DEFAULT_DISPATCH_STRATEGY',
+  'pub(super) fn normalize_dispatch_strategy',
   'pub(super) fn build_opened_event',
   'pub(super) struct DispatchMeta',
   'pub(super) fn read_dispatch_metadata_from_log',
@@ -628,6 +636,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.logCounters, sources.logCounters, LOG_COUNTERS_NEEDLES);
   requireAll(diagnostics, files.lispSyntax, sources.lispSyntax, LISP_SYNTAX_NEEDLES);
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
+  requireAll(diagnostics, files.logDispatch, sources.logDispatch, LOG_DISPATCH_NEEDLES);
   requireAll(diagnostics, files.logGovernance, sources.logGovernance, LOG_GOVERNANCE_NEEDLES);
   requireAll(diagnostics, files.logStatus, sources.logStatus, LOG_STATUS_NEEDLES);
   requireAll(diagnostics, files.logTemplate, sources.logTemplate, LOG_TEMPLATE_NEEDLES);
@@ -762,6 +771,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.logCounters]: buildGoodLogCounters(),
     [DEFAULT_FILES.lispSyntax]: buildGoodLispSyntax(),
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
+    [DEFAULT_FILES.logDispatch]: buildGoodLogDispatch(),
     [DEFAULT_FILES.logGovernance]: buildGoodLogGovernance(),
     [DEFAULT_FILES.logStatus]: buildGoodLogStatus(),
     [DEFAULT_FILES.logTemplate]: buildGoodLogTemplate(),
@@ -900,6 +910,7 @@ function buildGoodBlueprint() {
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/tests.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_surface.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_dispatch.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_governance.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs"
@@ -908,7 +919,7 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, companion paths, key/value mutation, block append, and Lisp read/write helpers authoritative; agent_execution/log_template.rs owns render_canonical_template for canonical companion-log Lisp projection; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; action routing, emit_execution_event, and DispatchMeta stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
+	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, companion paths, key/value mutation, block append, and Lisp read/write helpers authoritative; agent_execution/log_template.rs owns render_canonical_template for canonical companion-log Lisp projection; agent_execution/log_dispatch.rs owns VALID_DISPATCH_STRATEGIES, normalize_dispatch_strategy, build_opened_event, DispatchMeta, and read_dispatch_metadata_from_log; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; action routing, action_open/action_list, and emit_execution_event stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -969,6 +980,7 @@ function buildGoodDaemon() {
 mod log_store;
 mod log_counters;
 mod lisp_syntax;
+mod log_dispatch;
 mod log_governance;
 mod log_status;
 mod log_surface;
@@ -1101,12 +1113,17 @@ pub fn check_balance() {}
 }
 
 function buildGoodLogSurface() {
-  return `const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
-pub(super) const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
-pub(super) fn normalize_dispatch_strategy() {}
+  return `use super::log_dispatch::{build_opened_event, normalize_dispatch_strategy};
 pub(super) async fn action_open() {}
 pub(super) async fn action_list() {}
 pub(super) async fn emit_execution_event() {}
+`;
+}
+
+function buildGoodLogDispatch() {
+  return `const VALID_DISPATCH_STRATEGIES: &[&str] = &[];
+pub(super) const DEFAULT_DISPATCH_STRATEGY: &str = "unknown";
+pub(super) fn normalize_dispatch_strategy() {}
 pub(super) fn build_opened_event() {}
 pub(super) struct DispatchMeta {}
 pub(super) fn read_dispatch_metadata_from_log() {}

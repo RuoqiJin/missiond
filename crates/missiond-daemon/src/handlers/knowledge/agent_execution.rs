@@ -48,6 +48,7 @@ mod completion_trace;
 mod completion_verification;
 mod lisp_syntax;
 mod log_counters;
+mod log_dispatch;
 mod log_governance;
 mod log_status;
 mod log_store;
@@ -84,6 +85,11 @@ use self::completion_records::{
 use self::lisp_syntax as sexp;
 #[cfg(test)]
 use self::log_counters::{allocate_id, scan_max_id, Counter};
+#[cfg(test)]
+use self::log_dispatch::{
+    build_opened_event, normalize_dispatch_strategy, read_dispatch_metadata_from_log, DispatchMeta,
+    DEFAULT_DISPATCH_STRATEGY,
+};
 use self::log_governance::{action_decide, action_deviate, action_issue};
 use self::log_status::action_status;
 #[cfg(test)]
@@ -92,11 +98,6 @@ use self::log_store::{
     render_canonical_template, LogFile,
 };
 use self::log_surface::{action_list, action_open};
-#[cfg(test)]
-use self::log_surface::{
-    build_opened_event, normalize_dispatch_strategy, read_dispatch_metadata_from_log, DispatchMeta,
-    DEFAULT_DISPATCH_STRATEGY,
-};
 use self::preflight::action_preflight_commit;
 #[cfg(test)]
 use self::preflight_patterns::pattern_matches_path;
