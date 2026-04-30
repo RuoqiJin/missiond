@@ -22,6 +22,8 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
     checker used by all Lisp-backed mission_execution surfaces
   - agent_execution/session_trace.rs: optional task session-trace projection
     used by the mission_execution-log and completion-audit surfaces
+  - agent_execution/session_trace_event.rs: trace schema types, id validation,
+    event rendering, and sequence scanning
   - mission_execution-claim-lease: claim/heartbeat/release and scope conflict rules
   - mission_execution-completion-audit: completion metadata, scoped commit audit,
     task contract verification, auto-verifier, repair, and audit
@@ -75,6 +77,8 @@ const DEFAULT_FILES = {
   lispSyntax: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   sessionTrace:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
+  sessionTraceEvent:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace_event.rs',
   claimLease: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   claimHeartbeat:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs',
@@ -137,7 +141,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_mutation.rs', 'agent_execution/log_paths.rs', 'agent_execution/log_template.rs', 'agent_execution/log_dispatch.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_mutation.rs', 'agent_execution/log_paths.rs', 'agent_execution/log_template.rs', 'agent_execution/log_dispatch.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs', 'agent_execution/session_trace_event.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -164,6 +168,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_template.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace_event.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_heartbeat.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_records.rs',
@@ -222,6 +227,7 @@ const DAEMON_NEEDLES = [
   'mod log_surface',
   'mod log_template',
   'mod session_trace',
+  'mod session_trace_event',
   'mod claim_lease',
   'mod claim_heartbeat',
   'mod claim_records',
@@ -384,14 +390,22 @@ const LOG_STATUS_NEEDLES = [
 ];
 
 const SESSION_TRACE_NEEDLES = [
-  'const TRACE_ID_RE',
+  'pub(super) use super::session_trace_event::{',
+  'pub(super) fn append_session_trace_event',
+  'pub(super) fn resolve_session_trace_path',
+  'pub(super) fn resolve_trace_task_id',
+  'is_valid_trace_id',
+  'TraceEvent',
+  'TraceKind',
+  'TraceWarning',
+];
+
+const SESSION_TRACE_EVENT_NEEDLES = [
+  'pub(super) const TRACE_ID_RE',
   'pub(super) enum TraceKind',
   'pub(super) struct TraceEvent',
   'pub(super) enum TraceWarning',
   'pub(super) fn is_valid_trace_id',
-  'pub(super) fn append_session_trace_event',
-  'pub(super) fn resolve_session_trace_path',
-  'pub(super) fn resolve_trace_task_id',
   'pub(super) fn sanitize_trace_backend',
   'pub(super) fn render_trace_event',
   'pub(super) fn scan_max_trace_seq',
@@ -732,6 +746,12 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.logStatus, sources.logStatus, LOG_STATUS_NEEDLES);
   requireAll(diagnostics, files.logTemplate, sources.logTemplate, LOG_TEMPLATE_NEEDLES);
   requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
+  requireAll(
+    diagnostics,
+    files.sessionTraceEvent,
+    sources.sessionTraceEvent,
+    SESSION_TRACE_EVENT_NEEDLES,
+  );
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
   requireAll(diagnostics, files.claimRecords, sources.claimRecords, CLAIM_RECORDS_NEEDLES);
   requireAll(diagnostics, files.claimHeartbeat, sources.claimHeartbeat, CLAIM_HEARTBEAT_NEEDLES);
@@ -894,6 +914,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.logStatus]: buildGoodLogStatus(),
     [DEFAULT_FILES.logTemplate]: buildGoodLogTemplate(),
     [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
+    [DEFAULT_FILES.sessionTraceEvent]: buildGoodSessionTraceEvent(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
     [DEFAULT_FILES.claimHeartbeat]: buildGoodClaimHeartbeat(),
     [DEFAULT_FILES.claimRecords]: buildGoodClaimRecords(),
@@ -1043,8 +1064,9 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_template.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace_event.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_paths.rs owns COMPANION_DIR .missiond/v2, resolve_project_root, companion_path, project_or_target_project, and require_str for companion-log ingress path resolution; agent_execution/log_store.rs keeps LogFile, parse_kv_pairs, read_log_file, write_log_file, and read-model helpers authoritative; agent_execution/log_mutation.rs owns Lisp quoting, key/value mutation, block append, touch_last_updated, and refresh_root after durable companion-log edits; agent_execution/log_template.rs owns render_canonical_template for canonical companion-log Lisp projection; agent_execution/log_dispatch.rs owns VALID_DISPATCH_STRATEGIES, normalize_dispatch_strategy, build_opened_event, DispatchMeta, and read_dispatch_metadata_from_log; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; action routing, action_open/action_list, and emit_execution_event stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
+	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_paths.rs owns COMPANION_DIR .missiond/v2, resolve_project_root, companion_path, project_or_target_project, and require_str for companion-log ingress path resolution; agent_execution/log_store.rs keeps LogFile, parse_kv_pairs, read_log_file, write_log_file, and read-model helpers authoritative; agent_execution/log_mutation.rs owns Lisp quoting, key/value mutation, block append, touch_last_updated, and refresh_root after durable companion-log edits; agent_execution/log_template.rs owns render_canonical_template for canonical companion-log Lisp projection; agent_execution/log_dispatch.rs owns VALID_DISPATCH_STRATEGIES, normalize_dispatch_strategy, build_opened_event, DispatchMeta, and read_dispatch_metadata_from_log; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; action routing, action_open/action_list, and emit_execution_event stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace_event.rs owns TraceKind, TraceEvent, TraceWarning, TRACE_ID_RE, render_trace_event, scan_max_trace_seq, sanitize_trace_backend, and is_valid_trace_id; agent_execution/session_trace.rs owns append_session_trace_event, resolve_session_trace_path, and resolve_trace_task_id for optional task traces.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -1118,6 +1140,7 @@ mod log_status;
 mod log_surface;
 mod log_template;
 mod session_trace;
+mod session_trace_event;
 mod claim_lease;
 mod claim_heartbeat;
 mod claim_records;
@@ -1318,14 +1341,22 @@ function buildGoodLogStatus() {
 }
 
 function buildGoodSessionTrace() {
-  return `const TRACE_ID_RE: &str = "^[a-z0-9][a-z0-9._-]*$";
+  return `pub(super) use super::session_trace_event::{
+  is_valid_trace_id, render_trace_event, sanitize_trace_backend, scan_max_trace_seq, TraceEvent,
+  TraceKind, TraceWarning,
+};
+pub(super) fn append_session_trace_event() {}
+pub(super) fn resolve_session_trace_path() {}
+pub(super) fn resolve_trace_task_id() {}
+`;
+}
+
+function buildGoodSessionTraceEvent() {
+  return `pub(super) const TRACE_ID_RE: &str = "^[a-z0-9][a-z0-9._-]*$";
 pub(super) enum TraceKind {}
 pub(super) struct TraceEvent {}
 pub(super) enum TraceWarning {}
 pub(super) fn is_valid_trace_id() {}
-pub(super) fn append_session_trace_event() {}
-pub(super) fn resolve_session_trace_path() {}
-pub(super) fn resolve_trace_task_id() {}
 pub(super) fn sanitize_trace_backend() {}
 pub(super) fn render_trace_event() {}
 pub(super) fn scan_max_trace_seq() {}

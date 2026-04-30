@@ -66,6 +66,7 @@ mod preflight_porcelain;
 mod preflight_scope;
 mod preflight_trace;
 mod session_trace;
+mod session_trace_event;
 mod task_verifier;
 mod task_verifier_auto;
 mod task_verifier_inputs;
