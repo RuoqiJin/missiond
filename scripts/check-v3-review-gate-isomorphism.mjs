@@ -48,6 +48,8 @@ const DEFAULT_FILES = {
   directiveApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs',
   directiveApprovalProposer:
     'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs',
+  directiveApprovalSubscriber:
+    'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/subscriber.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planApprovalReview: 'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
@@ -127,6 +129,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/subscriber.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs',
@@ -190,16 +193,16 @@ const DIRECTIVE_RS_NEEDLES = [
 
 const DIRECTIVE_APPROVAL_REVIEW_RS_NEEDLES = [
   'mod proposer;',
+  'mod subscriber;',
   'use self::proposer::{',
   'request_directive_auto_approve_proposal',
+  'pub(crate) use self::subscriber::{handle_review_resolved_event, DirectiveSubscriberOutcome};',
   'pub(super) async fn action_approve',
   'async fn action_approve_with_resolution',
   'async fn action_approve_with_policy_only',
   'pub(super) async fn action_archive',
   'async fn action_archive_with_resolution',
   'async fn action_archive_with_policy_only',
-  'pub(crate) enum DirectiveSubscriberOutcome',
-  'pub(crate) async fn handle_review_resolved_event',
 ];
 
 const DIRECTIVE_APPROVAL_PROPOSER_RS_NEEDLES = [
@@ -211,6 +214,15 @@ const DIRECTIVE_APPROVAL_PROPOSER_RS_NEEDLES = [
   'pub(super) fn directive_proposer_summary',
   'DIRECTIVE_REVIEW_PROPOSER_CALLER',
   'SONNET_PROPOSER_MAX_TOKENS',
+];
+
+const DIRECTIVE_APPROVAL_SUBSCRIBER_RS_NEEDLES = [
+  'use super::*;',
+  'pub(crate) enum DirectiveSubscriberOutcome',
+  'pub(crate) async fn handle_review_resolved_event',
+  'validate_review_resolution_envelope',
+  'DIRECTIVE_REVIEW_ACTIONS',
+  'DirectiveStatus::Archived',
 ];
 
 const PLAN_RS_NEEDLES = [
@@ -424,8 +436,8 @@ function checkFiles(root, files) {
     'smoke_wave22_07_review_apply_gate_pins_wave21_06_five_invariants',
     'proposal_invariants_round_trip_never_surface_rejected',
   ]);
-  const directiveCallerSurface = `${sources.directive}\n${sources.directiveCompileAuthoring}\n${sources.directiveApprovalReview}\n${sources.directiveApprovalProposer}`;
-  const directiveCallerLabel = `${files.directive} + ${files.directiveCompileAuthoring} + ${files.directiveApprovalReview} + ${files.directiveApprovalProposer}`;
+  const directiveCallerSurface = `${sources.directive}\n${sources.directiveCompileAuthoring}\n${sources.directiveApprovalReview}\n${sources.directiveApprovalProposer}\n${sources.directiveApprovalSubscriber}`;
+  const directiveCallerLabel = `${files.directive} + ${files.directiveCompileAuthoring} + ${files.directiveApprovalReview} + ${files.directiveApprovalProposer} + ${files.directiveApprovalSubscriber}`;
   requireAll(diagnostics, directiveCallerLabel, directiveCallerSurface, DIRECTIVE_RS_NEEDLES);
   requireAll(
     diagnostics,
@@ -438,6 +450,12 @@ function checkFiles(root, files) {
     files.directiveApprovalProposer,
     sources.directiveApprovalProposer,
     DIRECTIVE_APPROVAL_PROPOSER_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.directiveApprovalSubscriber,
+    sources.directiveApprovalSubscriber,
+    DIRECTIVE_APPROVAL_SUBSCRIBER_RS_NEEDLES,
   );
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
   requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, PLAN_COMPILE_AUTHORING_RS_NEEDLES);
@@ -552,6 +570,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.directiveCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.directiveApprovalReview]: buildGoodDirectiveApprovalReviewRs(),
     [DEFAULT_FILES.directiveApprovalProposer]: buildGoodDirectiveApprovalProposerRs(),
+    [DEFAULT_FILES.directiveApprovalSubscriber]: buildGoodDirectiveApprovalSubscriberRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
     [DEFAULT_FILES.planApprovalReview]: buildGoodPlanApprovalReviewRs(),
@@ -710,6 +729,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/proposer.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/directive/approval_review/subscriber.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
@@ -864,11 +884,13 @@ fn directive_facade() {
 function buildGoodDirectiveApprovalReviewRs() {
   return `// fixture
 mod proposer;
+mod subscriber;
 use self::proposer::{
     attach_directive_apply_gate_block, attach_directive_proposal_block,
     directive_proposer_summary, parse_proposer_mode_or_error,
     request_directive_auto_approve_proposal,
 };
+pub(crate) use self::subscriber::{handle_review_resolved_event, DirectiveSubscriberOutcome};
 
 pub(super) async fn action_approve() {}
 async fn action_approve_with_resolution() {
@@ -882,8 +904,6 @@ async fn action_archive_with_resolution() {
     maybe_emit_review_question_resolved();
 }
 async fn action_archive_with_policy_only() {}
-pub(crate) enum DirectiveSubscriberOutcome {}
-pub(crate) async fn handle_review_resolved_event() {}
 `;
 }
 
@@ -897,6 +917,18 @@ pub(super) fn attach_directive_proposal_block() {}
 pub(super) fn attach_directive_apply_gate_block() {}
 pub(super) fn parse_proposer_mode_or_error() {}
 pub(super) fn directive_proposer_summary() {}
+`;
+}
+
+function buildGoodDirectiveApprovalSubscriberRs() {
+  return `// fixture
+use super::*;
+pub(crate) enum DirectiveSubscriberOutcome {}
+pub(crate) async fn handle_review_resolved_event() {
+    validate_review_resolution_envelope;
+    DIRECTIVE_REVIEW_ACTIONS;
+    DirectiveStatus::Archived;
+}
 `;
 }
 
