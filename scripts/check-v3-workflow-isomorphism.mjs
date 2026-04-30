@@ -20,6 +20,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   workflowHandler: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   workflowArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs',
+  workflowAutoSonnet: 'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs',
   workflowMethodology: 'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
   workflowReviewResolution: 'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
   workflowTests: 'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
@@ -100,6 +101,7 @@ function checkFiles(root, files) {
     'ArtifactKind::Workflow',
     'auto_sonnet_policy={off|safe_after_rules|dry_run}',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
@@ -108,8 +110,8 @@ function checkFiles(root, files) {
     'node scripts/check-v3-workflow-isomorphism.mjs',
   ]);
 
-  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowMethodology}\n${sources.workflowReviewResolution}\n${sources.workflowTests}`;
-  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowMethodology} + ${files.workflowReviewResolution} + ${files.workflowTests}`;
+  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoSonnet}\n${sources.workflowMethodology}\n${sources.workflowReviewResolution}\n${sources.workflowTests}`;
+  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowAutoSonnet} + ${files.workflowMethodology} + ${files.workflowReviewResolution} + ${files.workflowTests}`;
   requireAll(diagnostics, workflowSurfaceLabel, workflowSurface, [
     'enum DistillMode',
     'fn parse_distill_mode',
@@ -188,6 +190,18 @@ function checkFiles(root, files) {
     'pub(super) fn build_methodology_match_rules',
   ]);
 
+  requireAll(diagnostics, files.workflowAutoSonnet, sources.workflowAutoSonnet, [
+    'pub(super) fn validate_auto_sonnet_args',
+    'pub(super) fn auto_sonnet_requested',
+    'pub(super) async fn maybe_apply_auto_sonnet',
+    'pub(super) async fn maybe_apply_auto_sonnet_no_trigger',
+    'pub(super) enum AutoSonnetPolicy',
+    'pub(super) fn parse_auto_sonnet_policy',
+    'pub(super) async fn maybe_apply_auto_sonnet_policy',
+    'AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR',
+    'review_required=true',
+  ]);
+
   requireAll(diagnostics, files.workflowTests, sources.workflowTests, [
     'use super::*;',
     'methodology_compile_renders_v3_workflow_artifact_not_raw_source',
@@ -246,6 +260,7 @@ function buildFixture() {
     (surface mission_workflow
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs"]
@@ -317,6 +332,17 @@ pub(super) fn build_methodology_match_rules() {
 }
 fn json_to_lisp() {}
 fn render_workflow_steps() {}`);
+  writeFixture(root, DEFAULT_FILES.workflowAutoSonnet, `
+pub(super) fn validate_auto_sonnet_args() {}
+pub(super) fn auto_sonnet_requested() {}
+pub(super) async fn maybe_apply_auto_sonnet() {}
+pub(super) async fn maybe_apply_auto_sonnet_no_trigger() {}
+pub(super) enum AutoSonnetPolicy {}
+pub(super) fn parse_auto_sonnet_policy() {}
+pub(super) async fn maybe_apply_auto_sonnet_policy() {}
+const AUTO_SONNET_POLICY_SAFE_AFTER_RULES_STR: &str = "safe_after_rules";
+// review_required=true
+`);
   writeFixture(root, DEFAULT_FILES.workflowMethodology, `
 pub(super) struct GeneratedMeta {}
 pub(super) fn extract_methodology_lifted() {}
