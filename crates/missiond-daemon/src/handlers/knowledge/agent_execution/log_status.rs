@@ -5,7 +5,8 @@ use missiond_mcp::tools::ToolResult;
 use serde_json::{json, Value};
 
 use super::claim_lease::{parse_claims, parse_iso};
-use super::completion_records::{parse_completions, summarize_durability};
+use super::completion_durability::summarize_durability;
+use super::completion_records::parse_completions;
 use super::log_store::{
     companion_path, json_strip_quotes, list_block_summaries, parse_kv_pairs,
     project_or_target_project, read_log_file, require_str, resolve_project_root,

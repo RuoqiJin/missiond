@@ -7,7 +7,8 @@ use std::collections::HashMap;
 use tracing::warn;
 
 use super::claim_lease::parse_claims;
-use super::completion_records::{parse_completions, summarize_durability};
+use super::completion_durability::summarize_durability;
+use super::completion_records::parse_completions;
 use super::lisp_syntax as sexp;
 use super::log_dispatch::{build_opened_event, normalize_dispatch_strategy};
 use super::log_store::{
