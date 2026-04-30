@@ -1,6 +1,9 @@
 use super::*;
 
-pub(super) async fn action_approve(state: &AppState, args: &Value) -> Result<ToolResult> {
+pub(in crate::handlers::knowledge::plan) async fn action_approve(
+    state: &AppState,
+    args: &Value,
+) -> Result<ToolResult> {
     let id = parse_id_arg(args, "plan_id")?;
 
     let automation_policy = parse_review_automation_policy(args);
