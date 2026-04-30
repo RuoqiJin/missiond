@@ -23,7 +23,7 @@ Checks the V3 evidence-collector Lisp/code isomorphism contract:
     point, append_entry_to_project_root, wrap_legacy_record_evidence,
     EVENT_REF_CACHE_CAP = 1024, the log-query miss / error reason constants,
     and the EventRefResolver struct that owns resolver tier composition.
-  - plan/evidence_sidecar.rs and plan/execution_runtime.rs route evidence writes
+  - plan/evidence_sidecar.rs and plan/execution_runtime/internal.rs route evidence writes
     through the sibling evidence_collector module instead of hand-rolling
     sidecar JSON.
 `;
@@ -36,6 +36,8 @@ const DEFAULT_FILES = {
   evidenceCollectorTests: 'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
   planEvidenceSidecar: 'crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
+  planExecutionInternal:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs',
 };
 
 function main() {
@@ -92,6 +94,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs',
   'verification-receipt',
   'EventRefStatus',
   'EventRefProvenance',
@@ -150,9 +153,9 @@ const EVIDENCE_COLLECTOR_TESTS_NEEDLES = [
   'distill_chain_records_are_strictly_additive_per_plan',
 ];
 
-const PLAN_EXECUTION_RUNTIME_RS_NEEDLES = [
-  'super::super::evidence_collector::EvidenceEntry::new',
-  'super::super::evidence_collector::append(',
+const PLAN_EXECUTION_INTERNAL_RS_NEEDLES = [
+  'evidence_collector::EvidenceEntry::new',
+  'evidence_collector::append(',
 ];
 
 const PLAN_EVIDENCE_SIDECAR_RS_NEEDLES = [
@@ -201,9 +204,9 @@ function checkFiles(root, files) {
   );
   requireAll(
     diagnostics,
-    files.planExecutionRuntime,
-    sources.planExecutionRuntime,
-    PLAN_EXECUTION_RUNTIME_RS_NEEDLES,
+    files.planExecutionInternal,
+    sources.planExecutionInternal,
+    PLAN_EXECUTION_INTERNAL_RS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -273,6 +276,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.evidenceCollectorResolver]: buildGoodEvidenceCollectorResolver(),
     [DEFAULT_FILES.evidenceCollectorTests]: buildGoodEvidenceCollectorTests(),
     [DEFAULT_FILES.planExecutionRuntime]: buildGoodPlanExecutionRuntime(),
+    [DEFAULT_FILES.planExecutionInternal]: buildGoodPlanExecutionInternal(),
     [DEFAULT_FILES.planEvidenceSidecar]: buildGoodPlanEvidenceSidecar(),
   };
   cases.push({
@@ -328,10 +332,10 @@ function runFixtures(json) {
   });
 
   const planBypass = { ...goodFiles };
-  planBypass[DEFAULT_FILES.planExecutionRuntime] = goodFiles[
-    DEFAULT_FILES.planExecutionRuntime
+  planBypass[DEFAULT_FILES.planExecutionInternal] = goodFiles[
+    DEFAULT_FILES.planExecutionInternal
   ].replace(
-    'super::super::evidence_collector::EvidenceEntry::new',
+    'evidence_collector::EvidenceEntry::new',
     'hand_rolled_json::EvidenceEntry::new',
   );
   cases.push({
@@ -402,7 +406,8 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/resolver.rs"
              "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"]
+             "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs"]
       :note "EVIDENCE_SCHEMA_VERSION = \\"v0\\" pins the wire shape; EventRefStatus is the closed enum live | log | unavailable describing whether the ref is live-from-publish, log-recovered post hoc, or simply unavailable. EventRefProvenance further pivots the recovery tier as live | passive_cache | event_log_query | unavailable so consumers can attribute lookups to the wave-16 in-memory passive cache (EVENT_REF_CACHE_CAP = 1024 FIFO entries) vs the wave-18 bounded event_log_query path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, so the verification-receipt artifact stays consistent with what plan.rs already wrote."))
   (compression-contract
     :checks ["node scripts/check-v3-evidence-collector-isomorphism.mjs"]))
@@ -480,12 +485,18 @@ fn distill_chain_records_are_strictly_additive_per_plan() {}
 
 function buildGoodPlanExecutionRuntime() {
   return `// fixture
+fn facade_only() {}
+`;
+}
+
+function buildGoodPlanExecutionInternal() {
+  return `// fixture
 fn dispatch_caller() {
-    let entry = super::super::evidence_collector::EvidenceEntry::new(
-        super::super::evidence_collector::source::PLAN_RUNNER_DISPATCH,
-        super::super::evidence_collector::kind::DISPATCH,
+    let entry = evidence_collector::EvidenceEntry::new(
+        evidence_collector::source::PLAN_RUNNER_DISPATCH,
+        evidence_collector::kind::DISPATCH,
     );
-    let _ = super::super::evidence_collector::append(entry);
+    let _ = evidence_collector::append(entry);
 }
 `;
 }

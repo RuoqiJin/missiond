@@ -41,6 +41,10 @@ const DEFAULT_FILES = {
   planFieldInferenceApplyPersisted:
     'crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/apply/persisted.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
+  planExecutionBridge:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/bridge.rs',
+  planExecutionInternal:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs',
   planExecutionWorkstation:
     'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/workstation.rs',
   planInternalDispatch: 'crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs',
@@ -165,7 +169,9 @@ function checkFiles(root, files) {
     'plan/field_inference/llm.rs owns Sonnet proposal parsing',
     'plan/field_inference/apply.rs owns apply_gate',
     'plan/field_inference/apply/persisted.rs owns persisted_apply',
-    'plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration',
+    'plan/execution_runtime.rs owns mission_plan execute facade orchestration',
+    'plan/execution_runtime/bridge.rs owns bridge descriptor projection',
+    'plan/execution_runtime/internal.rs owns mission_plan internal dispatch runtime',
     'plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts',
     'plan/internal_dispatch.rs owns mission_plan inner target argument projection',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
@@ -225,17 +231,38 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.planExecutionRuntime, sources.planExecutionRuntime, [
     'pub(super) async fn action_execute',
-    'pub(super) fn action_execute_bridge',
-    'pub(super) async fn action_execute_internal',
     'parse_plan_hints(&plan.sexp_text)',
     '(t, "plan_hint")',
     'target_source',
     'dispatch_strategy_source',
     'super::super::plan_dag::action_execute_dag_v1',
-    'super::super::workstation_dispatch::run_workstation_dispatch_with_contract_and_trace',
+    'mod bridge',
+    'pub(super) use bridge::{action_execute_bridge, attach_inference_block}',
+    'mod internal',
+    'pub(super) use internal::action_execute_internal',
     'mod workstation',
     'pub(super) use workstation::{',
-    'pub(super) fn attach_inference_block',
+  ]);
+
+  requireAll(diagnostics, files.planExecutionBridge, sources.planExecutionBridge, [
+    'pub(in crate::handlers::knowledge::plan) fn attach_inference_block',
+    'pub(in crate::handlers::knowledge::plan) fn action_execute_bridge',
+    '"bridge_ready"',
+    '"runner_status": "bridge_only"',
+    'next_call',
+  ]);
+
+  requireAll(diagnostics, files.planExecutionInternal, sources.planExecutionInternal, [
+    'pub(in crate::handlers::knowledge::plan) async fn action_execute_internal',
+    'parse_task_contract_emit_mode',
+    'validate_session_trace_path_arg',
+    'workstation_dispatch::run_workstation_dispatch_with_contract_and_trace',
+    'build_internal_dispatch_args',
+    'agent_execution::handle',
+    'task_delegate::handle',
+    'flow_run::handle',
+    'evidence_collector::append',
+    'build_internal_dispatch_success_response',
   ]);
 
   requireAll(diagnostics, files.planExecutionWorkstation, sources.planExecutionWorkstation, [
@@ -972,6 +999,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/apply.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/apply/persisted.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/bridge.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/workstation.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_contract.rs"
@@ -981,7 +1011,6 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run/manifest.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run/projection.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/workstation.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/parser.rs"
@@ -1002,7 +1031,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/predicate.rs owns router-policy predicate projection; plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection; plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/task_runner_dry_run/manifest.rs owns task-runner manifest loading/parsing; plan/task_runner_dry_run/projection.rs owns task-runner manifest response projection; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs owns DAG node/error shapes; plan_dag/parser/scanner.rs owns PLAN.lisp S-expression scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG node-local rollback core; plan_dag/rollback/cascade.rs owns the DAG cascade rollback planner/dispatcher; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/outcome.rs owns the DAG node outcome/state response projection core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute facade orchestration; plan/execution_runtime/bridge.rs owns bridge descriptor projection; plan/execution_runtime/internal.rs owns mission_plan internal dispatch runtime; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/predicate.rs owns router-policy predicate projection; plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection; plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/task_runner_dry_run/manifest.rs owns task-runner manifest loading/parsing; plan/task_runner_dry_run/projection.rs owns task-runner manifest response projection; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs owns DAG node/error shapes; plan_dag/parser/scanner.rs owns PLAN.lisp S-expression scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG node-local rollback core; plan_dag/rollback/cascade.rs owns the DAG cascade rollback planner/dispatcher; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/outcome.rs owns the DAG node outcome/state response projection core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -1025,14 +1054,15 @@ fn build_internal_args_for_mission_execution_uses_plan_hints() {}
 `);
   writeFixture(root, DEFAULT_FILES.planExecutionRuntime, `
 pub(super) async fn action_execute() {}
-pub(super) fn action_execute_bridge() {}
-pub(super) async fn action_execute_internal() {}
 parse_plan_hints(&plan.sexp_text);
 let x = (t, "plan_hint");
 let target_source = "";
 let dispatch_strategy_source = "";
 super::super::plan_dag::action_execute_dag_v1;
-super::super::workstation_dispatch::run_workstation_dispatch_with_contract_and_trace;
+mod bridge;
+pub(super) use bridge::{action_execute_bridge, attach_inference_block};
+mod internal;
+pub(super) use internal::action_execute_internal;
 mod workstation;
 pub(super) use workstation::{
   attach_workstation_auto_spawn_gate_block,
@@ -1041,7 +1071,26 @@ pub(super) use workstation::{
   compute_workstation_proposal_bundle,
   plan_hints_carry_workstation_signal,
 };
-pub(super) fn attach_inference_block() {}
+`);
+  writeFixture(root, DEFAULT_FILES.planExecutionBridge, `
+pub(in crate::handlers::knowledge::plan) fn attach_inference_block() {}
+pub(in crate::handlers::knowledge::plan) fn action_execute_bridge() {
+  "bridge_ready";
+  "runner_status": "bridge_only";
+  next_call;
+}
+`);
+  writeFixture(root, DEFAULT_FILES.planExecutionInternal, `
+pub(in crate::handlers::knowledge::plan) async fn action_execute_internal() {}
+parse_task_contract_emit_mode;
+validate_session_trace_path_arg;
+workstation_dispatch::run_workstation_dispatch_with_contract_and_trace;
+build_internal_dispatch_args;
+agent_execution::handle;
+task_delegate::handle;
+flow_run::handle;
+evidence_collector::append;
+build_internal_dispatch_success_response;
 `);
   writeFixture(root, DEFAULT_FILES.planExecutionWorkstation, `
 pub(in crate::handlers::knowledge::plan) async fn compute_workstation_proposal_bundle() {}
