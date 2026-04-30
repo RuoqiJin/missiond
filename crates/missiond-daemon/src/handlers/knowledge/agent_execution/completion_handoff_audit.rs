@@ -1,10 +1,11 @@
 use serde_json::{json, Value};
 
 use super::claim_lease::{scopes_overlap, ClaimRecord};
-use super::completion_records::{
-    parse_completions, FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
+use super::completion_fields::{
+    FINDING_COMMIT_BLOCKED_NO_BLOCKER, FINDING_COMMIT_STATUS_NO_HASH,
     FINDING_SCOPED_COMMIT_VIOLATION,
 };
+use super::completion_records::parse_completions;
 use super::log_store::LogFile;
 
 /// Run the scoped-commit handoff checks against every completion in the file.

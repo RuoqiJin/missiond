@@ -6,12 +6,12 @@ use serde_json::Value;
 use crate::state::AppState;
 
 use super::completion_entry::{render_completion_entry, CompletionEntryFields};
-use super::completion_gates::{enforce_scoped_commit_completion, enforce_task_contract_completion};
-use super::completion_records::{
+use super::completion_fields::{
     collect_string_list, normalize_commit_status, normalize_task_run_verifier_status,
     normalize_verifier_status, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
     VALID_VERIFIER_STATUSES,
 };
+use super::completion_gates::{enforce_scoped_commit_completion, enforce_task_contract_completion};
 use super::completion_response::{build_completion_response, CompletionResponseFields};
 use super::completion_trace::append_completion_trace_if_requested;
 use super::completion_verification::evaluate_completion_verification;

@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::state::AppState;
 
-use super::completion_records::collect_string_list;
+use super::completion_fields::collect_string_list;
 use super::log_store::{
     companion_path, project_or_target_project, read_log_file, require_str, resolve_project_root,
 };

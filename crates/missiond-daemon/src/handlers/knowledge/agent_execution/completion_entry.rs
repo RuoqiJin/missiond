@@ -1,4 +1,4 @@
-use super::completion_records::render_string_list;
+use super::completion_fields::render_string_list;
 use super::log_store::lisp_quote_string;
 
 pub(super) struct CompletionEntryFields<'a> {

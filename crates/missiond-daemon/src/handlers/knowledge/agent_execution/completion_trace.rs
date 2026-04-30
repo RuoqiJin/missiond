@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::path::Path;
 
-use super::completion_records::collect_string_list;
+use super::completion_fields::collect_string_list;
 use super::session_trace::{
     append_session_trace_event, resolve_session_trace_path, resolve_trace_task_id,
     sanitize_trace_backend, TraceEvent, TraceKind,
