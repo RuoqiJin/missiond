@@ -33,6 +33,7 @@ const DEFAULT_FILES = {
   reviewGate: 'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   reviewGateCreated: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
   reviewGateResolution: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
+  reviewGateAutoAnswer: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -97,6 +98,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -252,8 +254,8 @@ function checkFiles(root, files) {
     ['alignment-review-gate', 'plan-review-gate', 'never auto-approve'],
   );
 
-  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}`;
-  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution}`;
+  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}\n${sources.reviewGateAutoAnswer}`;
+  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution} + ${files.reviewGateAutoAnswer}`;
   requireAll(diagnostics, reviewGateSurfaceLabel, reviewGateSurface, REVIEW_GATE_RS_NEEDLES);
   requireAll(diagnostics, files.reviewGateCreated, sources.reviewGateCreated, [
     'pub(crate) fn derive_review_question_id',
@@ -272,6 +274,15 @@ function checkFiles(root, files) {
     'pub(crate) fn plan_review_resolved_dispatch',
     'pub(crate) fn evaluate_review_automation',
     'DB action already committed',
+  ]);
+  requireAll(diagnostics, files.reviewGateAutoAnswer, sources.reviewGateAutoAnswer, [
+    'pub(crate) enum AutoAnswerPolicy',
+    'pub(crate) fn parse_auto_answer_policy',
+    'pub(crate) fn auto_answer_policy_was_explicit',
+    'pub(crate) fn evaluate_auto_answer_policy',
+    'pub(crate) fn stamp_auto_answer_payload',
+    'pub(crate) fn is_destructive_review_action',
+    'NEVER auto-reject',
   ]);
   requireAll(diagnostics, files.directive, sources.directive, DIRECTIVE_RS_NEEDLES);
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
@@ -348,6 +359,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.reviewGate]: buildGoodReviewGate(),
     [DEFAULT_FILES.reviewGateCreated]: buildGoodReviewGateCreated(),
     [DEFAULT_FILES.reviewGateResolution]: buildGoodReviewGateResolution(),
+    [DEFAULT_FILES.reviewGateAutoAnswer]: buildGoodReviewGateAutoAnswer(),
     [DEFAULT_FILES.directive]: buildGoodCallerRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
@@ -492,6 +504,7 @@ function buildGoodBlueprint() {
       :code ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
@@ -510,8 +523,10 @@ function buildGoodReviewGate() {
   return `// fixture
 mod created;
 mod resolution;
+mod auto_answer;
 pub(crate) use created::{ReviewGatePolicy, apply_compile_review_gates};
 pub(crate) use resolution::{ReviewDecision, maybe_emit_review_question_resolved};
+pub(crate) use auto_answer::{AutoAnswerPolicy, evaluate_auto_answer_policy};
 // payload markers: review_question_warning + BUS_PUBLISH_FAILED
 // "persisted artifact remains intact" / "DB action already committed"
 `;
@@ -547,6 +562,18 @@ pub(crate) fn plan_review_resolved_dispatch() {}
 pub(crate) fn evaluate_review_automation() {}
 // payload markers: review_question_warning + BUS_PUBLISH_FAILED
 // "DB action already committed"
+`;
+}
+
+function buildGoodReviewGateAutoAnswer() {
+  return `// fixture
+pub(crate) enum AutoAnswerPolicy { Off, DeterministicSafe, DryRun }
+pub(crate) fn parse_auto_answer_policy() {}
+pub(crate) fn auto_answer_policy_was_explicit() -> bool { false }
+pub(crate) fn evaluate_auto_answer_policy() {}
+pub(crate) fn stamp_auto_answer_payload() {}
+pub(crate) fn is_destructive_review_action() {}
+// NEVER auto-reject
 `;
 }
 
