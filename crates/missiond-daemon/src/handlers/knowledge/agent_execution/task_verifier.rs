@@ -3,6 +3,7 @@ use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
 use super::task_verifier_inputs::{read_report_summary, read_task_contract_id};
+use super::task_verifier_preconditions::require_verified_completion_inputs;
 
 /// wave-21 / task 03 — verified-completion gate.
 ///
@@ -35,59 +36,15 @@ pub(super) fn enforce_verified_completion(
     task_report_path: Option<&str>,
     commit_hash: Option<&str>,
 ) -> std::result::Result<Value, ToolResult> {
-    if !enforce_scoped_commit {
-        return Err(ToolResult::structured_error(
-            ToolError::new(
-                "VERIFIED_REQUIRES_ENFORCEMENT",
-                "verified=true requires enforce_scoped_commit=true so the underlying scope + contract gates also run",
-            )
-            .with_suggestion(
-                "set enforce_scoped_commit=true alongside verified=true, or omit verified for legacy completions",
-            ),
-        ));
-    }
-    let tcp = task_contract_path
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ToolResult::structured_error(
-                ToolError::new(
-                    "VERIFIED_REQUIRES_TASK_CONTRACT",
-                    "verified=true requires a non-empty task_contract_path so the daemon-side cross-check can resolve the contract",
-                )
-                .with_suggestion(
-                    "supply task_contract_path pointing at the task-contract v1 lisp file the dispatch brief used",
-                ),
-            )
-        })?;
-    let trp = task_report_path
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ToolResult::structured_error(
-                ToolError::new(
-                    "VERIFIED_REQUIRES_TASK_REPORT",
-                    "verified=true requires a non-empty task_report_path so the daemon can read the report-contract off disk",
-                )
-                .with_suggestion(
-                    "supply task_report_path pointing at the report-contract v1 lisp file the writer produced",
-                ),
-            )
-        })?;
-    let hash = commit_hash
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            ToolResult::structured_error(
-                ToolError::new(
-                    "VERIFIED_REQUIRES_COMMIT_HASH",
-                    "verified=true requires a non-empty commit_hash so the daemon can match it against the report's :commit_hash",
-                )
-                .with_suggestion(
-                    "report the durable scoped commit hash, or omit verified for non-verified completions",
-                ),
-            )
-        })?;
+    let inputs = require_verified_completion_inputs(
+        enforce_scoped_commit,
+        task_contract_path,
+        task_report_path,
+        commit_hash,
+    )?;
+    let tcp = inputs.task_contract_path;
+    let trp = inputs.task_report_path;
+    let hash = inputs.commit_hash;
 
     // Resolve the report path (relative anchors at the project root,
     // absolute paths flow through verbatim — same semantics as the

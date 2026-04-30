@@ -75,6 +75,7 @@ mod task_verifier;
 mod task_verifier_auto;
 mod task_verifier_auto_artifacts;
 mod task_verifier_inputs;
+mod task_verifier_preconditions;
 
 #[cfg(test)]
 use self::claim_lease::parse_claims;
