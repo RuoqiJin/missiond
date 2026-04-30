@@ -50,6 +50,7 @@ const DEFAULT_FILES = {
   planDagDispatch: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/dispatch.rs',
   planDagRollback: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs',
   planDagResume: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs',
+  planDagOutcome: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/outcome.rs',
   planDagProjection: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs',
   planDagFinalization: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs',
   planDagLifecycle: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/lifecycle.rs',
@@ -147,6 +148,7 @@ function checkFiles(root, files) {
     'plan_dag/tests.rs does the same for the DAG scheduler regression suite',
     'plan_dag/rollback.rs owns the DAG rollback/cascade core',
     'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
+    'plan_dag/outcome.rs owns the DAG node outcome/state response projection core',
     'plan_dag/projection.rs owns the DAG response projection core',
     'plan_dag/finalization.rs owns the DAG finalization projection core',
     'plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core',
@@ -454,6 +456,8 @@ function checkFiles(root, files) {
     'pub(super) use resume::action_execute_resume;',
     'pub(super) use resume::validate_resume_request;',
     'pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};',
+    'mod outcome;',
+    'use outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};',
     'mod parser;',
     'pub(super) use parser::{DagNode, ParsedDag};',
     'use parser::{build_validated_dag, ReviewGateKind, FAILURE_POLICY_FAIL_FAST};',
@@ -571,6 +575,22 @@ function checkFiles(root, files) {
     'parse_review_question_id_struct',
     'PlanNodeResumeInput',
     'TaskContractDispatchCtx::off()',
+  ]);
+
+  requireAll(diagnostics, files.planDagOutcome, sources.planDagOutcome, [
+    'pub(super) enum NodeState',
+    'pub(super) enum NodeLifecycle',
+    'pub(super) struct NodeResult',
+    'pub(super) fn skipped',
+    'pub(super) struct ExecutionOutcome',
+    'pub(super) fn node_results_json',
+    'pub(super) fn paused_nodes_json',
+    'pub(super) fn skipped_nodes_json',
+    'pub(super) fn aggregate_status',
+    'pub(super) fn runner_status',
+    'pub(super) fn target_plan_status',
+    'AcceptanceEvaluation',
+    'RollbackEvaluation',
   ]);
 
   requireAll(diagnostics, files.planDagProjection, sources.planDagProjection, [
@@ -738,13 +758,14 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/dispatch.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/outcome.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/projection.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/finalization.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/lifecycle.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate and persisted_apply, including explicit apply approval, LLM caller approval, proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate and persisted_apply, including explicit apply approval, LLM caller approval, proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/outcome.rs owns the DAG node outcome/state response projection core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -1066,6 +1087,8 @@ pub(super) use resume::action_execute_resume;
 #[cfg(test)]
 pub(super) use resume::validate_resume_request;
 pub(crate) use resume::{handle_review_resolved_plan_node_event, PlanNodeResumeListenerOutcome};
+mod outcome;
+use outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
 mod projection;
 use projection::{build_node_hint_summary, build_nodes_summary, build_retry_plan};
 mod scheduler;
@@ -1090,6 +1113,26 @@ use lifecycle::{
 };
 #[cfg(test)]
 mod tests;`);
+  writeFixture(root, DEFAULT_FILES.planDagOutcome, `
+use missiond_core::types::PlanStatus;
+use super::acceptance::AcceptanceEvaluation;
+use super::rollback::RollbackEvaluation;
+pub(super) enum NodeState {}
+pub(super) enum NodeLifecycle {}
+pub(super) struct NodeResult;
+impl NodeResult {
+  pub(super) fn skipped() {}
+}
+pub(super) struct ExecutionOutcome;
+impl ExecutionOutcome {
+  pub(super) fn node_results_json() {}
+  pub(super) fn paused_nodes_json() {}
+  pub(super) fn skipped_nodes_json() {}
+  pub(super) fn aggregate_status() {}
+  pub(super) fn runner_status() {}
+  pub(super) fn target_plan_status() -> Option<PlanStatus> { None }
+}
+`);
   writeFixture(root, DEFAULT_FILES.planDagDispatch, `
 pub(super) struct DispatchOutcome;
 pub(super) struct TaskContractDispatchCtx;
