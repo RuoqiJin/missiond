@@ -15,7 +15,8 @@ mission_plan / mission_workflow bridges) compose to drive
 F-intent-alignment-plan-execution-loop end to end.
 
   - V3 blueprint declares (surface unified-entry-runtime ...) with
-    :status "code-aligned" and :code naming unified_entry.rs.
+    :status "code-aligned" and :code naming the unified_entry facade plus
+    its planner/decorator/stages modules.
   - The surface body pins the substrate contract names that callers and
     other surfaces rely on by string match:
       run_pipeline / run_directive_compile_stage / run_plan_compile_stage /
@@ -32,7 +33,7 @@ F-intent-alignment-plan-execution-loop end to end.
       mission_workflow (the four runtime bridges that compose this
       substrate or are composed by it).
   - compression-contract :checks pins this checker.
-  - unified_entry.rs exposes the stable substrate API:
+  - the unified_entry surface file group exposes the stable substrate API:
       pub(crate) async fn run_pipeline
       async fn run_directive_compile_stage
       async fn run_plan_compile_stage
@@ -51,6 +52,9 @@ F-intent-alignment-plan-execution-loop end to end.
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
+  unifiedPlanner: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs',
+  unifiedDecorator: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/decorator.rs',
+  unifiedStages: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/stages.rs',
   requestHandler: 'crates/missiond-daemon/src/handlers/knowledge/request.rs',
 };
 
@@ -109,6 +113,9 @@ const BLUEPRINT_NEEDLES = [
   '(surface unified-entry-runtime',
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/unified_entry/decorator.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/unified_entry/stages.rs',
   'node scripts/check-v3-unified-entry-isomorphism.mjs',
 ];
 
@@ -144,10 +151,15 @@ const BLUEPRINT_SURFACE_BODY_ANCHORS = [
   'mission_workflow',
 ];
 
-// Tokens that MUST be present in the actual unified_entry.rs source. Robust
-// substring checks that pin the public substrate API + the wire field name
-// string literals the decorator stamps onto every response.
-const UNIFIED_ENTRY_RS_NEEDLES = [
+// Tokens that MUST be present across the unified_entry surface file group.
+// Robust substring checks pin the public substrate API + the wire field name
+// string literals the decorator stamps onto every response while allowing the
+// implementation to follow the V3 function boundary instead of a giant file.
+const UNIFIED_ENTRY_SURFACE_NEEDLES = [
+  // physical V3 split
+  'mod decorator;',
+  'mod planner;',
+  'pub(crate) mod stages;',
   // public stage runner entry point
   'pub(crate) async fn run_pipeline',
   // per-stage async runners
@@ -214,9 +226,19 @@ function checkFiles(root, files) {
 
   requireAll(
     diagnostics,
-    files.unifiedEntry,
-    sources.unifiedEntry,
-    UNIFIED_ENTRY_RS_NEEDLES,
+    [
+      files.unifiedEntry,
+      files.unifiedPlanner,
+      files.unifiedDecorator,
+      files.unifiedStages,
+    ].join(' + '),
+    [
+      sources.unifiedEntry,
+      sources.unifiedPlanner,
+      sources.unifiedDecorator,
+      sources.unifiedStages,
+    ].join('\n'),
+    UNIFIED_ENTRY_SURFACE_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -289,6 +311,9 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.unifiedEntry]: buildGoodUnifiedEntry(),
+    [DEFAULT_FILES.unifiedPlanner]: buildGoodUnifiedPlanner(),
+    [DEFAULT_FILES.unifiedDecorator]: buildGoodUnifiedDecorator(),
+    [DEFAULT_FILES.unifiedStages]: buildGoodUnifiedStages(),
     [DEFAULT_FILES.requestHandler]: buildGoodRequestHandler(),
   };
   cases.push({
@@ -364,10 +389,10 @@ function runFixtures(json) {
     files: missingRunPipeline,
   });
 
-  // ── Fail: unified_entry.rs drops the ArtifactScope enum. ─
+  // ── Fail: unified_entry/decorator.rs drops the ArtifactScope enum. ─
   const missingArtifactScope = { ...goodFiles };
-  missingArtifactScope[DEFAULT_FILES.unifiedEntry] = goodFiles[
-    DEFAULT_FILES.unifiedEntry
+  missingArtifactScope[DEFAULT_FILES.unifiedDecorator] = goodFiles[
+    DEFAULT_FILES.unifiedDecorator
   ].replace(
     'pub(crate) enum ArtifactScope',
     'pub(crate) enum ArtifactGHOST',
@@ -379,10 +404,10 @@ function runFixtures(json) {
     files: missingArtifactScope,
   });
 
-  // ── Fail: unified_entry.rs drops the FLOW_REF binding. ─
+  // ── Fail: unified_entry/stages.rs drops the FLOW_REF binding. ─
   const missingFlowRefRs = { ...goodFiles };
-  missingFlowRefRs[DEFAULT_FILES.unifiedEntry] = goodFiles[
-    DEFAULT_FILES.unifiedEntry
+  missingFlowRefRs[DEFAULT_FILES.unifiedStages] = goodFiles[
+    DEFAULT_FILES.unifiedStages
   ].replace(
     'const FLOW_REF: &str = "F-intent-alignment-plan-execution-loop"',
     'const FLOW_GHOST: &str = "F-intent-alignment-plan-execution-loop"',
@@ -467,7 +492,10 @@ function buildGoodBlueprint() {
     (surface unified-entry-runtime
       :status "code-aligned"
       :implements [unified-entry F-intent-alignment-plan-execution-loop]
-      :code ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/unified_entry/decorator.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/unified_entry/stages.rs"]
       :note "unified-entry-runtime is the in-daemon stage substrate that mission_request, mission_directive, mission_plan, and mission_workflow compose to drive F-intent-alignment-plan-execution-loop. run_pipeline is the single dispatcher; per-stage runners are run_directive_compile_stage, run_plan_compile_stage, and run_plan_execute_stage. The wire stage label vocabulary stamped into pipeline_stage is s1_message_intake, s3_alignment_review_gate, s4_plan_authoring, s5_plan_review_gate, s6_execution_runner. ArtifactScope (Directive | Plan | Execution) is the projection scope the decorator surfaces into artifact_refs. Every response carries the same shape: pipeline_stage + flow_ref (FLOW_REF=F-intent-alignment-plan-execution-loop) + artifact_refs + next_step (and next_call when meaningful). mission_request bridges via super::unified_entry::run_pipeline; mission_directive / mission_plan / mission_workflow are the inner handlers each stage forwards to."))
   (compression-contract
     :checks ["node scripts/check-v3-unified-entry-isomorphism.mjs"]))
@@ -476,27 +504,45 @@ function buildGoodBlueprint() {
 
 function buildGoodUnifiedEntry() {
   return `// fixture
-pub(crate) mod stages {
+mod decorator;
+mod planner;
+pub(crate) mod stages;
+
+pub(crate) async fn run_pipeline() {}
+async fn run_directive_compile_stage() {}
+async fn run_plan_compile_stage() {}
+async fn run_plan_execute_stage() {}
+`;
+}
+
+function buildGoodUnifiedStages() {
+  return `// fixture
     pub(crate) const MESSAGE_INTAKE: &str = "s1_message_intake";
     pub(crate) const DIRECTIVE_REVIEW_GATE: &str = "s3_alignment_review_gate";
     pub(crate) const PLAN_AUTHORING: &str = "s4_plan_authoring";
     pub(crate) const PLAN_REVIEW_GATE: &str = "s5_plan_review_gate";
     pub(crate) const EXECUTION_RUNNER: &str = "s6_execution_runner";
-}
 
 const FLOW_REF: &str = "F-intent-alignment-plan-execution-loop";
+`;
+}
 
+function buildGoodUnifiedPlanner() {
+  return `// fixture
+pub(crate) fn plan_pipeline() {}
+PipelineDecision::PlanCompile;
+PipelineDecision::PlanExecute;
+`;
+}
+
+function buildGoodUnifiedDecorator() {
+  return `// fixture
 pub(crate) enum ArtifactScope { Directive, Plan, Execution }
 const ARTIFACT_SCOPE_REFS: &[&str] = &[
     "ArtifactScope::Directive",
     "ArtifactScope::Plan",
     "ArtifactScope::Execution",
 ];
-
-pub(crate) async fn run_pipeline() {}
-async fn run_directive_compile_stage() {}
-async fn run_plan_compile_stage() {}
-async fn run_plan_execute_stage() {}
 
 fn build_artifact_refs() {}
 fn decorate() {

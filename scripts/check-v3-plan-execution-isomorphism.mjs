@@ -12,7 +12,7 @@ Checks the V3 plan.lisp execution isomorphism contract:
   - mission_plan compile dry_run renders routing hints into Lisp.
   - mission_plan execute can derive target/objective/dispatch hints from plan.sexp_text.
   - DAG execution parses node-local Lisp hints and forwards them to the same dispatch path.
-  - unified_entry forwards plan compile/execute args instead of inventing a second plan schema.
+  - unified_entry/planner.rs forwards plan compile/execute args instead of inventing a second plan schema.
 `;
 
 const DEFAULT_FILES = {
@@ -42,7 +42,7 @@ const DEFAULT_FILES = {
   planDagScheduler: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs',
   planDagMode: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs',
   planDagTests: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs',
-  unifiedEntry: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry.rs',
+  unifiedEntryPlanner: 'crates/missiond-daemon/src/handlers/knowledge/unified_entry/planner.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
 };
 
@@ -498,7 +498,7 @@ function checkFiles(root, files) {
     'fn task_contract_dispatch_ctx_captures_machine_mode_for_dag',
   ]);
 
-  requireAll(diagnostics, files.unifiedEntry, sources.unifiedEntry, [
+  requireAll(diagnostics, files.unifiedEntryPlanner, sources.unifiedEntryPlanner, [
     'pub(crate) fn plan_pipeline',
     'PipelineDecision::PlanCompile',
     'PipelineDecision::PlanExecute',
@@ -976,7 +976,7 @@ fn validate_resume_request_routes_unique_paused_node() {}
 fn claim_registry_rejects_overlapping_scope() {}
 fn task_contract_dispatch_ctx_captures_machine_mode_for_dag() {}
 `);
-  writeFixture(root, DEFAULT_FILES.unifiedEntry, `
+  writeFixture(root, DEFAULT_FILES.unifiedEntryPlanner, `
 pub(crate) fn plan_pipeline() {}
 PipelineDecision::PlanCompile;
 PipelineDecision::PlanExecute;

@@ -152,31 +152,27 @@
 #![allow(dead_code)]
 
 use anyhow::Result;
-use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
+use missiond_mcp::tools::ToolResult;
 use serde_json::{json, Value};
 
 use crate::state::AppState;
 
-// ───────────────────────────────────────────────────────────────────────
-// Stage labels — keep these as constants so tests can pin them and so the
-// flow narrative in intent-flow.lisp stays trivially greppable.
-// ───────────────────────────────────────────────────────────────────────
+mod decorator;
+mod planner;
+pub(crate) mod stages;
 
-/// `pipeline_stage` values returned in the response payload. These line up
-/// 1:1 with `F-intent-alignment-plan-execution-loop` stage ids in
-/// `intent-flow.lisp`. We expose them as constants because both the
-/// planner and its tests pin these strings.
-pub(crate) mod stages {
-    pub(crate) const MESSAGE_INTAKE: &str = "s1_message_intake";
-    pub(crate) const DIRECTIVE_REVIEW_GATE: &str = "s3_alignment_review_gate";
-    pub(crate) const PLAN_AUTHORING: &str = "s4_plan_authoring";
-    pub(crate) const PLAN_REVIEW_GATE: &str = "s5_plan_review_gate";
-    pub(crate) const EXECUTION_RUNNER: &str = "s6_execution_runner";
-}
+use decorator::{decorate, planner_error_response, ArtifactScope, DecorateContext};
+use planner::{plan_pipeline, PipelineDecision};
 
-/// `flow_ref` echoed on every response so callers can correlate a unified
-/// entry response back to the canonical flow narrative.
-const FLOW_REF: &str = "F-intent-alignment-plan-execution-loop";
+#[cfg(test)]
+use decorator::{build_artifact_refs, planner_error_scope, planner_error_stage};
+#[cfg(test)]
+use planner::{
+    build_directive_compile_args, build_plan_compile_args, build_plan_execute_args,
+    forward_file_first_args, forward_review_gate_args, nonblank, PlannerError,
+};
+#[cfg(test)]
+use stages::FLOW_REF;
 
 // ───────────────────────────────────────────────────────────────────────
 // Public entry — composes the existing handlers without owning a new MCP
@@ -279,418 +275,6 @@ pub(crate) async fn run_pipeline(state: &AppState, args: Value) -> Result<ToolRe
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Pure planner — picks the next stage given caller inputs. Pulled out of
-// the async path so unit tests can pin the routing logic without touching
-// AppState / DB / Sonnet.
-// ───────────────────────────────────────────────────────────────────────
-
-/// What the planner decided to do next, expressed as the JSON payload to
-/// forward to the underlying handler. Each variant maps to exactly one
-/// existing manager-surface action:
-///   * `DirectiveCompile` → `directive::handle(action=compile, …)`
-///   * `PlanCompile`      → `plan::handle(action=compile, …)`
-///   * `PlanExecute`      → `plan::handle(action=execute, …)`
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PipelineDecision {
-    DirectiveCompile { compile_args: Value },
-    PlanCompile { compile_args: Value },
-    PlanExecute { execute_args: Value },
-}
-
-/// Errors the planner surfaces *before* hitting any DB / LLM call. These
-/// become structured `ToolError`s in the response. Pulling them out as a
-/// typed enum keeps `plan_pipeline` pure — the test suite asserts on the
-/// variants directly.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum PlannerError {
-    /// Caller hit s1 without supplying any of the upstream signals the
-    /// planner needs. We never silently default `message=""` because that
-    /// would push noise straight into the LLM.
-    MissingMessage,
-    /// Caller declared an `approved_directive_id` but skipped the
-    /// `board_task_id` that the plan-compiler anchors against — fail
-    /// loudly per CLAUDE.md `feedback_fail_fast_no_fallback`, do not
-    /// invent a placeholder.
-    PlanCompileMissingBoardTask,
-    /// Caller declared `execute=true` without an `approved_plan_id`. This
-    /// is the safety check that prevents s6 from firing on a still-being-
-    /// reviewed plan.
-    ExecuteWithoutApprovedPlan,
-    /// `approved_plan_id` is present but the caller forgot the `execute`
-    /// flag. We refuse to autodetect-and-execute — the explicit flag is
-    /// the human-in-the-loop checkpoint.
-    ApprovedPlanWithoutExecuteFlag,
-}
-
-impl PlannerError {
-    fn code(&self) -> &'static str {
-        match self {
-            Self::MissingMessage => error_codes::MISSING_PARAM,
-            Self::PlanCompileMissingBoardTask => error_codes::MISSING_PARAM,
-            Self::ExecuteWithoutApprovedPlan => error_codes::MISSING_PARAM,
-            Self::ApprovedPlanWithoutExecuteFlag => error_codes::INVALID_PARAM,
-        }
-    }
-
-    fn message(&self) -> &'static str {
-        match self {
-            Self::MissingMessage =>
-                "unified entry pipeline requires a non-empty `message` to seed s1 message-intake",
-            Self::PlanCompileMissingBoardTask =>
-                "advancing past s3 to s4 plan-authoring requires `board_task_id` (PLAN.lisp anchors against it; planner refuses to fabricate one)",
-            Self::ExecuteWithoutApprovedPlan =>
-                "execute=true requested but no `approved_plan_id` provided; s6 execution-runner refuses to dispatch without an explicit approved plan id",
-            Self::ApprovedPlanWithoutExecuteFlag =>
-                "`approved_plan_id` provided without `execute=true`; v0 unified entry does NOT auto-execute — set execute=true (or execute_after_approval=true) to dispatch s6",
-        }
-    }
-
-    fn suggestion(&self) -> &'static str {
-        match self {
-            Self::MissingMessage =>
-                "pass `message` (the user utterance / external request body) at minimum",
-            Self::PlanCompileMissingBoardTask =>
-                "create a board task first via mission_board_create, then re-call with board_task_id",
-            Self::ExecuteWithoutApprovedPlan =>
-                "complete s4+s5 first (mission_plan compile + approve), then re-call with approved_plan_id",
-            Self::ApprovedPlanWithoutExecuteFlag =>
-                "re-call with execute=true to dispatch s6, or omit approved_plan_id to stop after s5 review pointer",
-        }
-    }
-}
-
-/// Decide which stage to run based purely on the caller's args.
-///
-/// Routing precedence (highest first):
-///   1. `approved_plan_id` + `execute=true` → s6 execution-runner
-///   2. `approved_plan_id` alone            → ERROR (no auto-execute)
-///   3. `approved_directive_id`             → s4 plan-authoring
-///   4. `message` present                   → s1 message-intake
-///   5. nothing usable                      → ERROR (missing message)
-pub(crate) fn plan_pipeline(args: &Value) -> std::result::Result<PipelineDecision, PlannerError> {
-    let approved_plan_id = nonblank(args.get("approved_plan_id"));
-    let approved_directive_id = nonblank(args.get("approved_directive_id"));
-    let execute_flag = args
-        .get("execute")
-        .and_then(|v| v.as_bool())
-        .or_else(|| args.get("execute_after_approval").and_then(|v| v.as_bool()))
-        .unwrap_or(false);
-
-    // s6 — caller has already cleared s5 and is asking us to execute.
-    if approved_plan_id.is_some() {
-        if !execute_flag {
-            return Err(PlannerError::ApprovedPlanWithoutExecuteFlag);
-        }
-        return Ok(PipelineDecision::PlanExecute {
-            execute_args: build_plan_execute_args(approved_plan_id.unwrap(), args),
-        });
-    }
-    if execute_flag {
-        // execute=true but no approved_plan_id — refuse, never silently
-        // skip ahead.
-        return Err(PlannerError::ExecuteWithoutApprovedPlan);
-    }
-
-    // s4 — caller has cleared s3 and wants the planner to compile a plan.
-    if let Some(did) = approved_directive_id {
-        let board_task_id = nonblank(args.get("board_task_id"));
-        if board_task_id.is_none() {
-            return Err(PlannerError::PlanCompileMissingBoardTask);
-        }
-        return Ok(PipelineDecision::PlanCompile {
-            compile_args: build_plan_compile_args(did, board_task_id.unwrap(), args),
-        });
-    }
-
-    // s1 — fresh message coming in, kick off directive compile.
-    let message = nonblank(args.get("message"));
-    let message = match message {
-        Some(m) => m,
-        None => return Err(PlannerError::MissingMessage),
-    };
-    Ok(PipelineDecision::DirectiveCompile {
-        compile_args: build_directive_compile_args(message, args),
-    })
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// Argument builders — translate the unified entry args into the args each
-// downstream handler already expects. Pure JSON shaping; no IO.
-// ───────────────────────────────────────────────────────────────────────
-
-fn build_directive_compile_args(message: String, args: &Value) -> Value {
-    let mut out = serde_json::Map::new();
-    out.insert("action".into(), json!("compile"));
-    out.insert("utterance".into(), json!(message));
-
-    if let Some(s) = nonblank(args.get("source")) {
-        out.insert("source".into(), json!(s));
-    }
-    if let Some(c) = nonblank(args.get("conversation_id")) {
-        out.insert("conversation_id".into(), json!(c));
-    }
-    if let Some(m) = nonblank(args.get("compiler_mode")) {
-        out.insert("compiler_mode".into(), json!(m));
-    }
-    if let Some(b) = args.get("persist").and_then(|v| v.as_bool()) {
-        out.insert("persist".into(), json!(b));
-    }
-    if let Some(rg) = nonblank(args.get("directive_review_gate")) {
-        out.insert("review_gate".into(), json!(rg));
-    }
-    forward_array(args, "directive_affected_pillars", &mut out, "affected_pillars");
-    forward_array(args, "directive_non_goals", &mut out, "non_goals");
-    forward_array(args, "directive_acceptance", &mut out, "acceptance");
-
-    // wave-14 / Task 04 :: file-first SSOT writer pass-through. The directive
-    // compiler enforces topic-required when write_file=true (no fallback);
-    // we never inject a default here so the failure is loud at the inner
-    // handler instead of being silently masked by the pipeline.
-    forward_file_first_args(args, &mut out);
-    forward_review_gate_args(args, &mut out);
-    Value::Object(out)
-}
-
-fn build_plan_compile_args(approved_directive_id: String, board_task_id: String, args: &Value) -> Value {
-    let mut out = serde_json::Map::new();
-    out.insert("action".into(), json!("compile"));
-    out.insert("directive_id".into(), json!(approved_directive_id));
-    out.insert("board_task_id".into(), json!(board_task_id));
-
-    if let Some(v) = args.get("directive_version").and_then(|v| v.as_i64()) {
-        out.insert("directive_version".into(), json!(v));
-    }
-    if let Some(m) = nonblank(args.get("compiler_mode")) {
-        out.insert("compiler_mode".into(), json!(m));
-    }
-    if let Some(b) = args.get("persist").and_then(|v| v.as_bool()) {
-        out.insert("persist".into(), json!(b));
-    }
-    if let Some(t) = nonblank(args.get("target")) {
-        out.insert("target".into(), json!(t));
-    }
-    if let Some(tp) = nonblank(args.get("target_project")) {
-        out.insert("target_project".into(), json!(tp));
-    }
-    if let Some(ds) = nonblank(args.get("dispatch_strategy")) {
-        out.insert("dispatch_strategy".into(), json!(ds));
-    }
-    if let Some(p) = nonblank(args.get("parallelism")) {
-        out.insert("parallelism".into(), json!(p));
-    }
-    if let Some(o) = nonblank(args.get("objective")) {
-        out.insert("objective".into(), json!(o));
-    }
-    if let Some(cwd) = nonblank(args.get("requested_cwd")) {
-        out.insert("requested_cwd".into(), json!(cwd));
-    }
-    if let Some(flow_id) = nonblank(args.get("flow_id")) {
-        out.insert("flow_id".into(), json!(flow_id));
-    }
-    forward_array(args, "plan_acceptance", &mut out, "acceptance");
-    forward_array(args, "plan_constraints", &mut out, "constraints");
-
-    // wave-14 / Task 04 :: file-first SSOT writer pass-through. The plan
-    // compiler defaults the topic to `board_task_id` when omitted so the
-    // pipeline does not need to inject one — forwarding is straight-through.
-    forward_file_first_args(args, &mut out);
-    forward_review_gate_args(args, &mut out);
-    Value::Object(out)
-}
-
-fn build_plan_execute_args(approved_plan_id: String, args: &Value) -> Value {
-    let mut out = serde_json::Map::new();
-    out.insert("action".into(), json!("execute"));
-    out.insert("plan_id".into(), json!(approved_plan_id));
-
-    // Forward execute-time knobs — the underlying mission_plan execute
-    // branch already validates these; we don't re-validate here (single
-    // source of truth for the execute schema lives in plan.rs).
-    //
-    // wave-14 / Task 04 :: extended forwarding so the v1 caller can drive
-    // the plan-runner through the unified entry without dropping back to a
-    // direct `mission_plan(action=execute)` call. Every key listed here is
-    // documented on `mission_plan` (see crates/missiond-mcp/src/tools/
-    // knowledge/plan.rs); the pipeline never invents new schema slots.
-    for key in [
-        // wave-13 v0 keys (preserved)
-        "execute_mode",
-        "scheduler_mode",
-        "max_parallel_nodes",
-        "target",
-        "dispatch_strategy",
-        "target_project",
-        "objective",
-        // wave-14 v1 additions — runner / dispatcher knobs
-        "cwd",
-        "requested_cwd",
-        "project",
-        "execution_id",
-        "parent_design",
-        "scope",
-        "owner",
-        "intent",
-        "flow_id",
-        "params",
-        "priority",
-        "timeout_secs",
-        "dry_run",
-        // wave-14 v1 addition — review-gate resolution emit on s6
-        "review_question_id",
-        // wave-17 / task 01 — paused-node resume hook. The four resume_*
-        // keys travel together; the inner `mission_plan(action=execute)`
-        // routes through `plan_dag::action_execute_resume` only when
-        // `resume_review_question_id` is present. We forward verbatim so
-        // unified-entry callers can drive a resume without dropping back
-        // to a direct `mission_plan` call.
-        "resume_review_question_id",
-        "resume_review_decision",
-        "resume_actor",
-        "resume_note",
-        // wave-17 / task 05 — finalize / distill opt-ins. Off by default
-        // on the inner handler; forwarded verbatim so unified-entry
-        // callers can opt into the wave-17 finalization pass without
-        // dropping back to a direct `mission_plan(action=execute)` call.
-        // `distill_on_success` requires `finalize_plan=true`; the inner
-        // handler's `validate_finalize_args` enforces that — we don't
-        // re-validate at the pipeline layer.
-        "finalize_plan",
-        "distill_on_success",
-        "distill_mode",
-        // wave-18 / task 05 — cross-plan distill chain opt-ins. All
-        // three knobs are forwarded together so the inner
-        // `validate_distill_chain_args` can enforce the cross-field
-        // rule (chain knobs require `finalize_plan=true`); we never
-        // re-validate at the pipeline layer.
-        "distill_chain_id",
-        "distill_chain_mode",
-        "distill_chain_name",
-        // wave-18 / task 06 — autonomous PLAN field inference opt-in.
-        // Default "off" on the inner handler. Strict allowlist
-        // (off/preview/apply_safe) is enforced by
-        // `parse_infer_plan_fields_mode` so a typo fails fast there
-        // rather than silently degrading to "off" at the pipeline
-        // layer.
-        "infer_plan_fields",
-        // wave-19 / task 06 — task-contract emitter knobs. Off by
-        // default; forwarded verbatim so a unified-entry caller can
-        // opt the workstation substrate into the wave-19 emitter
-        // without dropping back to a direct mission_plan call. The
-        // inner `parse_task_contract_emit_mode` enforces the
-        // (off|emit|emit_dry_run) allowlist.
-        "task_contract_mode",
-        "emit_task_contract",
-        // wave-20 / task 04 — machine-driven dispatch knobs. Default
-        // `rendered` preserves the wave-15..19 byte-shape; `machine`
-        // (or `render_markdown=false`) instructs the workstation
-        // substrate to consume the emitted task.lisp directly.
-        // Forwarded verbatim so the inner
-        // `parse_dispatch_contract_mode` enforces the
-        // (rendered|machine) allowlist.
-        "dispatch_contract_mode",
-        "render_markdown",
-        // wave-20 / task 08 — review-question listener auto-answer
-        // knob. Default `off` preserves the wave-15..19 byte-shape;
-        // `deterministic_safe` MAY auto-answer Approved on the
-        // wave-16/02 listener path when every safety rule passes AND
-        // the action is non-destructive; `dry_run` computes the
-        // deterministic outcome without ever mutating state. The
-        // pipeline never re-validates — `parse_auto_answer_policy`
-        // owns the strict allowlist (off|deterministic_safe|dry_run).
-        // Live LLM auto-approval is forbidden (the policy is pure
-        // deterministic). Destructive actions (archive/supersede/
-        // remove) NEVER auto-promote even under deterministic_safe.
-        "auto_answer_policy",
-    ] {
-        if let Some(v) = args.get(key) {
-            if !v.is_null() {
-                out.insert(key.into(), v.clone());
-            }
-        }
-    }
-    Value::Object(out)
-}
-
-/// Forward the wave-14 file-first SSOT writer args
-/// (`write_file / topic / overwrite_file / project / cwd / target_project`)
-/// from the unified entry input bag to a downstream compile call. Pure
-/// pass-through: blank strings are dropped (`nonblank`) so the inner
-/// handler sees the same "absent" semantics it would from a direct call;
-/// boolean fields default to absent (let the inner handler pick its own
-/// default of `false`).
-///
-/// We deliberately do NOT inject a `topic` / `project` default here —
-/// the inner handlers carry the canonical defaulting policy
-/// (directive: topic required; plan: topic falls back to `board_task_id`),
-/// and silently filling either at the pipeline layer would mask schema
-/// errors that should fail loudly.
-fn forward_file_first_args(args: &Value, out: &mut serde_json::Map<String, Value>) {
-    if let Some(b) = args.get("write_file").and_then(|v| v.as_bool()) {
-        out.insert("write_file".into(), json!(b));
-    }
-    if let Some(b) = args.get("overwrite_file").and_then(|v| v.as_bool()) {
-        out.insert("overwrite_file".into(), json!(b));
-    }
-    if let Some(t) = nonblank(args.get("topic")) {
-        out.insert("topic".into(), json!(t));
-    }
-    if let Some(p) = nonblank(args.get("project")) {
-        out.insert("project".into(), json!(p));
-    }
-    if let Some(c) = nonblank(args.get("cwd")) {
-        out.insert("cwd".into(), json!(c));
-    }
-    if let Some(tp) = nonblank(args.get("target_project")) {
-        out.insert("target_project".into(), json!(tp));
-    }
-}
-
-/// Forward the wave-14 review-gate args
-/// (`review_gate_policy / emit_review_question / review_question_text /
-///  review_question_id`) from the unified entry input bag to a downstream
-/// compile call.
-///
-/// `review_gate_policy` is forwarded verbatim (including unknown values) so
-/// the inner `parse_review_gate_policy` can stamp the resolved policy on
-/// the response — masking unknown values here would hide caller typos.
-/// `emit_review_question` defaults to absent (let the inner handler pick
-/// `false`); `review_question_text` / `review_question_id` are blank-filtered
-/// so an empty string never overrides a derived id.
-fn forward_review_gate_args(args: &Value, out: &mut serde_json::Map<String, Value>) {
-    if let Some(p) = nonblank(args.get("review_gate_policy")) {
-        out.insert("review_gate_policy".into(), json!(p));
-    }
-    if let Some(b) = args.get("emit_review_question").and_then(|v| v.as_bool()) {
-        out.insert("emit_review_question".into(), json!(b));
-    }
-    if let Some(t) = nonblank(args.get("review_question_text")) {
-        out.insert("review_question_text".into(), json!(t));
-    }
-    if let Some(id) = nonblank(args.get("review_question_id")) {
-        out.insert("review_question_id".into(), json!(id));
-    }
-}
-
-fn forward_array(
-    args: &Value,
-    src_key: &str,
-    out: &mut serde_json::Map<String, Value>,
-    dst_key: &str,
-) {
-    if let Some(arr) = args.get(src_key) {
-        if !arr.is_null() {
-            out.insert(dst_key.into(), arr.clone());
-        }
-    }
-}
-
-fn nonblank(v: Option<&Value>) -> Option<String> {
-    v.and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-// ───────────────────────────────────────────────────────────────────────
 // Stage runners — thin wrappers that call the existing handlers and then
 // decorate the returned `ToolResult` payload with `pipeline_stage` +
 // `next_step` + (when meaningful) `next_call`.
@@ -706,8 +290,7 @@ async fn run_directive_compile_stage(state: &AppState, compile_args: Value) -> R
         DecorateContext {
             stage: stages::MESSAGE_INTAKE,
             scope: ArtifactScope::Directive,
-            next_step:
-                "review the compiled directive then re-call this pipeline with `approved_directive_id` \
+            next_step: "review the compiled directive then re-call this pipeline with `approved_directive_id` \
                  (and the directive's `version`) once the human gate passes",
             next_call: Some(json!({
                 "tool": "mission_directive",
@@ -764,348 +347,6 @@ async fn run_plan_execute_stage(state: &AppState, execute_args: Value) -> Result
             expects_next_inputs: json!({}),
         },
     ))
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// decorate — append unified-entry breadcrumbs (pipeline_stage, flow_ref,
-// artifact_refs, next_step, next_call) to the inner handler's response.
-//
-// wave-14 / Task 04 :: artifact_refs is the new top-level surface — we
-// project the inner handler's payload (file_* / review_question_* / id +
-// version pointers) into a single flat object so callers can correlate
-// without re-parsing the inner JSON. Legacy callers (no write_file, no
-// review_gate_policy) see only the row-id pointers; we never fabricate a
-// `file_written=false` for callers that didn't ask.
-// ───────────────────────────────────────────────────────────────────────
-
-/// Which scope label the decorator should stamp into `artifact_refs.scope`.
-/// Matches the deterministic review-question id `<scope>` slot
-/// (`derive_review_question_id_for_artifact`) so retro queries can join
-/// `pipeline_stage` ↔ `review_question_id` without a translation table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ArtifactScope {
-    Directive,
-    Plan,
-    Execution,
-}
-
-impl ArtifactScope {
-    fn as_str(self) -> &'static str {
-        match self {
-            ArtifactScope::Directive => "directive",
-            ArtifactScope::Plan => "plan",
-            ArtifactScope::Execution => "execution",
-        }
-    }
-}
-
-/// All metadata the decorator needs in one bag — keeps the per-stage
-/// runners terse and stops a future `next_step` addition from forcing a
-/// signature churn.
-struct DecorateContext<'a> {
-    stage: &'a str,
-    scope: ArtifactScope,
-    next_step: &'a str,
-    next_call: Option<Value>,
-    expects_next_inputs: Value,
-}
-
-/// Append unified-entry breadcrumbs to whatever the inner handler returned.
-///
-/// Important: when the inner handler itself returned a `structured_error`,
-/// we keep `is_error=true` and *still* surface the stage labels so the
-/// caller's pipeline-step UI doesn't lose context. The error payload from
-/// the inner handler is the first content element; the meta payload is
-/// appended as a sibling so introspection remains lossless.
-fn decorate(mut inner: ToolResult, ctx: DecorateContext<'_>) -> ToolResult {
-    // We don't reach into the inner ToolResult's structured fields — the
-    // public ToolResult contract here is "JSON in the first content
-    // element". We *read* that element to project artifact_refs, then
-    // append a sibling content element carrying the pipeline metadata;
-    // this guarantees zero behavioural change for callers that just want
-    // the inner JSON.
-    let inner_payload = first_content_as_json(&inner);
-    let artifact_refs = build_artifact_refs(ctx.scope, &inner_payload);
-
-    let mut meta = serde_json::Map::new();
-    meta.insert("pipeline_stage".into(), json!(ctx.stage));
-    meta.insert("flow_ref".into(), json!(FLOW_REF));
-    meta.insert("artifact_refs".into(), artifact_refs);
-    meta.insert("next_step".into(), json!(ctx.next_step));
-    meta.insert("expects_next_inputs".into(), ctx.expects_next_inputs);
-    if let Some(nc) = ctx.next_call {
-        meta.insert("next_call".into(), nc);
-    }
-    meta.insert(
-        "v0_non_goals".into(),
-        json!([
-            "auto_approve_directive",
-            "auto_approve_plan",
-            "auto_answer_review_question",
-            "autonomous_workstation_dispatch",
-        ]),
-    );
-
-    inner.content.push(missiond_mcp::tools::ToolContent::Text {
-        text: serde_json::to_string_pretty(&Value::Object(meta))
-            .unwrap_or_else(|_| "{}".to_string()),
-    });
-    inner
-}
-
-/// Best-effort projection of the inner handler's first JSON content into a
-/// `Value`. When the inner element is not parsable JSON (e.g. structured
-/// error path that already serialises to a JSON string), we still return a
-/// `Value::Null` so the decorator can keep going — `build_artifact_refs`
-/// gracefully degrades when the input is `Null` or an empty object.
-fn first_content_as_json(result: &ToolResult) -> Value {
-    match result.content.first() {
-        Some(missiond_mcp::tools::ToolContent::Text { text }) => {
-            serde_json::from_str::<Value>(text).unwrap_or(Value::Null)
-        }
-        None => Value::Null,
-    }
-}
-
-/// Build the `artifact_refs` object surfaced by every v1 response.
-///
-/// Layout (omitted keys never appear → easy `serde_json::from_value` round
-/// trip + cheap-to-grep responses):
-///
-/// ```text
-/// {
-///   "scope":               "directive" | "plan" | "execution",
-///   // Row-id pointers (always when the inner handler stamped them):
-///   "directive_id":        "uuid",
-///   "plan_id":             "uuid",
-///   "version":             1,
-///   "board_task_id":       "btk-…",
-///   "status":              "compiled" | "partial" | …,
-///   // file-first SSOT splice (only when write_file=true was forwarded):
-///   "file_written":        true,
-///   "file_path":           "<project_root>/.missiond/…/<artifact>.lisp",
-///   "file_sha256":         "<hex>",
-///   "file_bytes":          1234,
-///   "file_created":        true,
-///   "file_overwritten":    false,
-///   "file_write_error":    "<reason>",          // partial path only
-///   // review-gate splice (only when review_gate_policy ≠ Manual or the
-///   // legacy `emit_review_question=true` opt-in fired):
-///   "review_gate_policy":      "manual" | "emit_question" | "off",
-///   "review_question_emitted": true,
-///   "review_question_id":      "review:<scope>:<id>:v<v>:compile:<topic-hash>",
-///   "review_question_text":    "<echoed text>",
-///   "review_question_warning": { "code": …, "reason": …, … },
-///   // wave-19/06 + wave-20/04 machine-contract splice (only when the
-///   // inner handler stamped one of these keys — wave-15..19 shape is
-///   // preserved for callers that never opt in):
-///   "task_contract_mode":          "emit" | "emit_dry_run" | "off",
-///   "task_contract_eligible":      true,
-///   "task_contract_path":          "<project_root>/.missiond/tasks/generated/…/root.lisp",
-///   "task_contract_source_path":   "<same path the workstation consumed>",
-///   "dispatch_contract_mode":      "rendered" | "machine",
-///   "render_command":              "node scripts/render-claudecode-task.mjs <path>",
-///   "task_contract_skip_reason":   "<reason node was ineligible>",
-///   "task_contract_error":         "<reason emission failed>"
-/// }
-/// ```
-///
-/// Pure projection — no IO, no derivation. The inner handler is the SSOT
-/// for whether a field exists; we just *lift* it. Legacy callers that omit
-/// every wave-14 opt-in see only `scope` + the row-id pointers.
-fn build_artifact_refs(scope: ArtifactScope, payload: &Value) -> Value {
-    let mut refs = serde_json::Map::new();
-    refs.insert("scope".into(), json!(scope.as_str()));
-    let map = match payload.as_object() {
-        Some(m) => m,
-        None => return Value::Object(refs),
-    };
-
-    // Row-id pointers — wave-13 surfaces these on every persist=true compile
-    // and on every successful execute. We surface whichever subset the inner
-    // payload carries (directive emits `directive_id`; plan emits `plan_id`
-    // + `board_task_id`; execute emits `plan_id` + `board_task_id`).
-    for key in [
-        "directive_id",
-        "plan_id",
-        "version",
-        "board_task_id",
-        "status",
-        "compiler_mode",
-        "compiler_model",
-    ] {
-        if let Some(v) = map.get(key) {
-            if !v.is_null() {
-                refs.insert(key.into(), v.clone());
-            }
-        }
-    }
-
-    // File-first SSOT splice — present only when the inner handler ran the
-    // wave-14 writer. We never fabricate `file_written=false` for callers
-    // that didn't opt in (write_file=false → no file_* fields anywhere).
-    for key in [
-        "file_written",
-        "file_path",
-        "file_sha256",
-        "file_bytes",
-        "file_created",
-        "file_overwritten",
-        "file_write_error",
-    ] {
-        if let Some(v) = map.get(key) {
-            if !v.is_null() {
-                refs.insert(key.into(), v.clone());
-            }
-        }
-    }
-
-    // Review-gate splice — present only when the policy was non-default OR
-    // the legacy `emit_review_question=true` bool fired.
-    for key in [
-        "review_gate_policy",
-        "review_question_emitted",
-        "review_question_id",
-        "review_question_text",
-        "review_question_warning",
-    ] {
-        if let Some(v) = map.get(key) {
-            if !v.is_null() {
-                refs.insert(key.into(), v.clone());
-            }
-        }
-    }
-
-    // wave-19 / task 06 + wave-20 / task 04 — machine-contract splice.
-    // Surfaced only when the inner handler stamped one of these keys (the
-    // wave-15..19 byte-shape stays identical for callers that never opt
-    // into `task_contract_mode` / `dispatch_contract_mode`). Lifting them
-    // here means a single envelope shape covers the machine handoff:
-    //   * `task_contract_mode`         — emit | emit_dry_run | off
-    //   * `task_contract_eligible`     — bus the emitter judged the node on
-    //   * `task_contract_path`         — on-disk Lisp written by the emitter
-    //   * `task_contract_source_path`  — path the workstation consumer read
-    //                                     (proves the Lisp drove the brief)
-    //   * `dispatch_contract_mode`     — rendered (default) | machine
-    //   * `render_command`             — optional compatibility metadata for
-    //                                     out-of-process Markdown rendering
-    //   * `task_contract_skip_reason`  — explains why eligibility failed
-    //   * `task_contract_error`        — explains why emission failed
-    //
-    // wave-20 / task 05 — these fields are the proof that the machine
-    // handoff is the SSOT: a caller observing the unified-entry envelope
-    // can verify `dispatch_contract_mode == "machine"` AND
-    // `task_contract_source_path == task_contract_path` without diving
-    // back into the inner JSON payload.
-    for key in [
-        "task_contract_mode",
-        "task_contract_eligible",
-        "task_contract_path",
-        "task_contract_source_path",
-        "dispatch_contract_mode",
-        "render_command",
-        "task_contract_skip_reason",
-        "task_contract_error",
-    ] {
-        if let Some(v) = map.get(key) {
-            if !v.is_null() {
-                refs.insert(key.into(), v.clone());
-            }
-        }
-    }
-
-    // wave-20 / task 08 — review auto-answer policy splice. Surfaced
-    // only when the inner handler stamped one of these keys (default
-    // `off` produces no fields under `Off`, so the wave-15..19
-    // byte-shape stays identical for callers that never opt into
-    // `auto_answer_policy`). Lifting the four invariant fields here
-    // means a single envelope shape covers the listener-path policy
-    // outcome:
-    //   * `auto_answer_policy`     — resolved policy label
-    //                                 (off|deterministic_safe|dry_run)
-    //   * `policy_result`          — outcome status label
-    //                                 (not_evaluated|auto_answered|
-    //                                  skipped_rules_failed|
-    //                                  skipped_destructive_action|
-    //                                  dry_run_preview)
-    //   * `selected_decision`      — `approved | needs_changes` (NEVER
-    //                                  `rejected` — invariant I1)
-    //   * `safety_rule_results`    — array of `code:detail` strings
-    //                                  from the wave-18/07 inspector
-    //                                  + the wave-20/08 destructive-
-    //                                  action rule
-    //   * `requires_human`         — `true` whenever the listener
-    //                                  must defer to a human reviewer
-    for key in [
-        "auto_answer_policy",
-        "policy_result",
-        "selected_decision",
-        "safety_rule_results",
-        "requires_human",
-    ] {
-        if let Some(v) = map.get(key) {
-            if !v.is_null() {
-                refs.insert(key.into(), v.clone());
-            }
-        }
-    }
-
-    Value::Object(refs)
-}
-
-fn planner_error_response(err: PlannerError) -> ToolResult {
-    // ToolError schema is `{error_code, reason, suggestion?, trace_id?}` —
-    // no `context` slot today. We surface the pipeline-stage breadcrumb
-    // by appending a sibling `ToolContent::Text` carrying the metadata,
-    // mirroring how `decorate` augments successful responses.
-    let tool_err = ToolError::new(err.code(), err.message().to_string())
-        .with_suggestion(err.suggestion());
-    let mut res = ToolResult::structured_error(tool_err);
-    // wave-14 / Task 04 :: planner errors carry the same skeleton as a
-    // successful decoration so consumer dashboards can rely on a single
-    // shape. `artifact_refs` is just the scope marker — no rows / files
-    // / review questions exist yet because the planner short-circuited
-    // before any handler ran.
-    let stage = planner_error_stage(&err);
-    let scope = planner_error_scope(&err);
-    let meta = json!({
-        "pipeline_stage": stage,
-        "flow_ref": FLOW_REF,
-        "artifact_refs": { "scope": scope.as_str() },
-        "next_step": err.suggestion(),
-        "v0_non_goals": [
-            "auto_approve_directive",
-            "auto_approve_plan",
-            "auto_answer_review_question",
-            "autonomous_workstation_dispatch",
-        ],
-    });
-    res.content.push(missiond_mcp::tools::ToolContent::Text {
-        text: serde_json::to_string_pretty(&meta).unwrap_or_else(|_| "{}".to_string()),
-    });
-    res
-}
-
-fn planner_error_stage(err: &PlannerError) -> &'static str {
-    match err {
-        PlannerError::MissingMessage => stages::MESSAGE_INTAKE,
-        PlannerError::PlanCompileMissingBoardTask => stages::PLAN_AUTHORING,
-        PlannerError::ApprovedPlanWithoutExecuteFlag => stages::PLAN_REVIEW_GATE,
-        PlannerError::ExecuteWithoutApprovedPlan => stages::EXECUTION_RUNNER,
-    }
-}
-
-/// Map an early-fail planner error onto the same scope label the decorator
-/// would have stamped if the matching stage had run. Keeps the
-/// `artifact_refs.scope` field consistent across the success / error
-/// branches so consumer dashboards can pivot on a single field.
-fn planner_error_scope(err: &PlannerError) -> ArtifactScope {
-    match err {
-        PlannerError::MissingMessage => ArtifactScope::Directive,
-        PlannerError::PlanCompileMissingBoardTask => ArtifactScope::Plan,
-        PlannerError::ApprovedPlanWithoutExecuteFlag => ArtifactScope::Plan,
-        PlannerError::ExecuteWithoutApprovedPlan => ArtifactScope::Execution,
-    }
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -1338,8 +579,14 @@ mod tests {
         };
         let err_json: Value = serde_json::from_str(&err_text).expect("structured error parses");
         assert_eq!(err_json["error_code"], "INVALID_PARAM");
-        assert!(err_json["reason"].as_str().unwrap().contains("approved_plan_id"));
-        assert!(err_json["suggestion"].as_str().unwrap().contains("execute=true"));
+        assert!(err_json["reason"]
+            .as_str()
+            .unwrap()
+            .contains("approved_plan_id"));
+        assert!(err_json["suggestion"]
+            .as_str()
+            .unwrap()
+            .contains("execute=true"));
 
         let meta_text = match &res.content[1] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
@@ -1378,7 +625,10 @@ mod tests {
 
     #[test]
     fn nonblank_filters_whitespace_only() {
-        assert_eq!(nonblank(Some(&json!("  hello  "))), Some("hello".to_string()));
+        assert_eq!(
+            nonblank(Some(&json!("  hello  "))),
+            Some("hello".to_string())
+        );
         assert_eq!(nonblank(Some(&json!("   "))), None);
         assert_eq!(nonblank(Some(&json!(""))), None);
         assert_eq!(nonblank(None), None);
@@ -1408,10 +658,7 @@ mod tests {
             &args,
         );
         assert_eq!(out["action"], "compile");
-        assert_eq!(
-            out["directive_id"],
-            "00000000-0000-0000-0000-000000000abc"
-        );
+        assert_eq!(out["directive_id"], "00000000-0000-0000-0000-000000000abc");
         assert_eq!(out["board_task_id"], "btk-1");
         assert!(out.get("compiler_mode").is_none());
         assert!(out.get("persist").is_none());
@@ -1434,10 +681,8 @@ mod tests {
             // single-source-of-truth in plan.rs.
             "totally_unrelated": "value",
         });
-        let out = build_plan_execute_args(
-            "11111111-1111-1111-1111-111111111111".to_string(),
-            &args,
-        );
+        let out =
+            build_plan_execute_args("11111111-1111-1111-1111-111111111111".to_string(), &args);
         assert_eq!(out["action"], "execute");
         assert_eq!(out["plan_id"], "11111111-1111-1111-1111-111111111111");
         assert_eq!(out["execute_mode"], "internal");
@@ -1456,10 +701,8 @@ mod tests {
             "execute_mode": Value::Null,
             "scheduler_mode": "dag_v1",
         });
-        let out = build_plan_execute_args(
-            "11111111-1111-1111-1111-111111111111".to_string(),
-            &args,
-        );
+        let out =
+            build_plan_execute_args("11111111-1111-1111-1111-111111111111".to_string(), &args);
         assert!(out.get("execute_mode").is_none());
         assert_eq!(out["scheduler_mode"], "dag_v1");
     }
@@ -1545,9 +788,18 @@ mod tests {
         let mut out = serde_json::Map::new();
         forward_file_first_args(&args, &mut out);
         assert_eq!(out["write_file"], true);
-        assert!(out.get("topic").is_none(), "blank topic must collapse to absent");
-        assert!(out.get("project").is_none(), "blank project must collapse to absent");
-        assert!(out.get("cwd").is_none(), "blank cwd must collapse to absent");
+        assert!(
+            out.get("topic").is_none(),
+            "blank topic must collapse to absent"
+        );
+        assert!(
+            out.get("project").is_none(),
+            "blank project must collapse to absent"
+        );
+        assert!(
+            out.get("cwd").is_none(),
+            "blank cwd must collapse to absent"
+        );
     }
 
     #[test]
@@ -1571,10 +823,7 @@ mod tests {
         assert_eq!(out["review_gate_policy"], "emit_question");
         assert_eq!(out["emit_review_question"], true);
         assert_eq!(out["review_question_text"], "Confirm alignment scope");
-        assert_eq!(
-            out["review_question_id"],
-            "review:directive:abc:v1:compile"
-        );
+        assert_eq!(out["review_question_id"], "review:directive:abc:v1:compile");
     }
 
     #[test]
@@ -1608,7 +857,10 @@ mod tests {
             panic!("expected DirectiveCompile");
         };
         // Spec args are intact.
-        assert_eq!(compile_args["utterance"], "ship file-first writer integration");
+        assert_eq!(
+            compile_args["utterance"],
+            "ship file-first writer integration"
+        );
         assert_eq!(compile_args["persist"], true);
         // wave-14 v1 file-first forwarding.
         assert_eq!(compile_args["write_file"], true);
@@ -1616,10 +868,7 @@ mod tests {
         assert_eq!(compile_args["topic"], "wave14-04");
         assert_eq!(compile_args["project"], "missiond");
         assert_eq!(compile_args["target_project"], "missiond");
-        assert_eq!(
-            compile_args["cwd"],
-            "/Users/jinchen/Projects/missiond"
-        );
+        assert_eq!(compile_args["cwd"], "/Users/jinchen/Projects/missiond");
     }
 
     #[test]
@@ -1641,7 +890,10 @@ mod tests {
         };
         assert_eq!(compile_args["review_gate_policy"], "emit_question");
         assert_eq!(compile_args["emit_review_question"], false);
-        assert_eq!(compile_args["review_question_text"], "Confirm directive scope");
+        assert_eq!(
+            compile_args["review_question_text"],
+            "Confirm directive scope"
+        );
         assert_eq!(
             compile_args["review_question_id"],
             "review:directive:00000000-0000-0000-0000-000000000abc:v1:compile:deadbeef"
@@ -1727,10 +979,7 @@ mod tests {
         assert_eq!(compile_args["overwrite_file"], true);
         assert_eq!(compile_args["topic"], "wave14-04-plan");
         assert_eq!(compile_args["project"], "missiond");
-        assert_eq!(
-            compile_args["cwd"],
-            "/Users/jinchen/Projects/missiond"
-        );
+        assert_eq!(compile_args["cwd"], "/Users/jinchen/Projects/missiond");
         assert_eq!(compile_args["target_project"], "missiond-fallback");
         // review-gate.
         assert_eq!(compile_args["review_gate_policy"], "emit_question");
@@ -1937,10 +1186,7 @@ mod tests {
         });
         let refs = build_artifact_refs(ArtifactScope::Directive, &payload);
         assert_eq!(refs["scope"], "directive");
-        assert_eq!(
-            refs["directive_id"],
-            "00000000-0000-0000-0000-000000000abc"
-        );
+        assert_eq!(refs["directive_id"], "00000000-0000-0000-0000-000000000abc");
         assert_eq!(refs["version"], 1);
         assert_eq!(refs["status"], "compiled");
         assert_eq!(refs["compiler_mode"], "dry_run");
@@ -1979,10 +1225,7 @@ mod tests {
         });
         let refs = build_artifact_refs(ArtifactScope::Plan, &payload);
         assert_eq!(refs["scope"], "plan");
-        assert_eq!(
-            refs["plan_id"],
-            "11111111-1111-1111-1111-111111111111"
-        );
+        assert_eq!(refs["plan_id"], "11111111-1111-1111-1111-111111111111");
         assert_eq!(refs["version"], 2);
         assert_eq!(refs["board_task_id"], "btk-legacy");
         assert_eq!(refs["status"], "compiled");
@@ -2132,8 +1375,7 @@ mod tests {
         let meta_text = match &decorated.content[1] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
         };
-        let meta: Value =
-            serde_json::from_str(&meta_text).expect("meta must serialise as JSON");
+        let meta: Value = serde_json::from_str(&meta_text).expect("meta must serialise as JSON");
         assert_eq!(meta["pipeline_stage"], stages::MESSAGE_INTAKE);
         assert_eq!(meta["flow_ref"], FLOW_REF);
         assert_eq!(meta["next_step"], "test next step");
@@ -2351,8 +1593,7 @@ mod tests {
             DecorateContext {
                 stage: stages::MESSAGE_INTAKE,
                 scope: ArtifactScope::Directive,
-                next_step:
-                    "review the compiled directive then re-call this pipeline with `approved_directive_id`",
+                next_step: "review the compiled directive then re-call this pipeline with `approved_directive_id`",
                 next_call: Some(json!({
                     "tool": "mission_directive",
                     "action": "approve",
@@ -2424,8 +1665,7 @@ mod tests {
             DecorateContext {
                 stage: stages::PLAN_AUTHORING,
                 scope: ArtifactScope::Plan,
-                next_step:
-                    "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` and `execute=true`",
+                next_step: "review the compiled PLAN.lisp then re-call this pipeline with `approved_plan_id` and `execute=true`",
                 next_call: Some(json!({
                     "tool": "mission_plan",
                     "action": "approve",
@@ -2514,8 +1754,7 @@ mod tests {
             DecorateContext {
                 stage: stages::EXECUTION_RUNNER,
                 scope: ArtifactScope::Execution,
-                next_step:
-                    "execution dispatched (or would-dispatch in dry_run); collect evidence via mission_plan(action=record_evidence)",
+                next_step: "execution dispatched (or would-dispatch in dry_run); collect evidence via mission_plan(action=record_evidence)",
                 next_call: None,
                 expects_next_inputs: json!({}),
             },
@@ -2564,7 +1803,8 @@ mod tests {
         // execution row pointers so a single envelope shape covers the
         // whole loop. We simulate that projection here against the
         // canonical evidence-collector v0 wire shape.
-        let evidence_path = "/tmp/missiond-smoke/.missiond/evidence/wave16-task08/plan-evidence.jsonl";
+        let evidence_path =
+            "/tmp/missiond-smoke/.missiond/evidence/wave16-task08/plan-evidence.jsonl";
         let evidence_inner = smoke_inner_result(json!({
             "status": "recorded",
             "plan_id": plan_id,
@@ -2724,8 +1964,8 @@ mod tests {
         // value the assertions can pin.
         let directive_id = "00000000-0000-0000-0000-0000000000d2";
         let board_task_id = "btk-wave17-task08-paused-smoke";
-        let plan_id_uuid = uuid::Uuid::parse_str("22222222-2222-2222-2222-000000000a17")
-            .expect("valid plan uuid");
+        let plan_id_uuid =
+            uuid::Uuid::parse_str("22222222-2222-2222-2222-000000000a17").expect("valid plan uuid");
         let plan_id = plan_id_uuid.to_string();
         let plan_version: i32 = 1;
         let paused_node_id = "review-gate-node";
@@ -2863,13 +2103,12 @@ mod tests {
         // the inner payload so the smoke proves the id the simulated
         // payload carries is the SAME id a live `emit_paused_review_gate`
         // would have produced for this plan/version/node.
-        let pause_review_qid =
-            super::super::review_gate::derive_plan_node_review_question_id(
-                &plan_id,
-                plan_version,
-                paused_node_id,
-                Some("plan-node"),
-            );
+        let pause_review_qid = super::super::review_gate::derive_plan_node_review_question_id(
+            &plan_id,
+            plan_version,
+            paused_node_id,
+            Some("plan-node"),
+        );
         // Layer 1: envelope shape.
         let parsed_qid =
             super::super::review_gate::parse_review_question_id_struct(&pause_review_qid)
@@ -2880,10 +2119,7 @@ mod tests {
         assert_eq!(parsed_qid.version, plan_version);
         assert_eq!(
             parsed_qid.topic_hash.as_deref(),
-            Some(
-                super::super::review_gate::derive_plan_node_topic_hash(paused_node_id)
-                    .as_str()
-            )
+            Some(super::super::review_gate::derive_plan_node_topic_hash(paused_node_id).as_str())
         );
 
         // Layer 2: validator confirms the qid maps back to the originating
@@ -2991,8 +2227,7 @@ mod tests {
             DecorateContext {
                 stage: stages::EXECUTION_RUNNER,
                 scope: ArtifactScope::Execution,
-                next_step:
-                    "DAG paused at review gate; resolve via mission_review then re-call this pipeline with `resume_review_question_id`",
+                next_step: "DAG paused at review gate; resolve via mission_review then re-call this pipeline with `resume_review_question_id`",
                 next_call: Some(json!({
                     "tool": "mission_review",
                     "action": "resolve",
@@ -3013,15 +2248,18 @@ mod tests {
         // Pause-side evidence sidecar pointer surfaces via `file_*`.
         assert_eq!(s6a_meta["artifact_refs"]["file_written"], true);
         assert_eq!(s6a_meta["artifact_refs"]["file_path"], pause_evidence_path);
-        assert_eq!(s6a_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe1111");
+        assert_eq!(
+            s6a_meta["artifact_refs"]["file_sha256"],
+            "deadbeefcafebabe1111"
+        );
 
         // Inner payload (preserved byte-for-byte by `decorate`) carries
         // the paused-node surface + finalization "no lie" block.
         let s6a_inner_text = match &s6a_decorated.content[0] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
         };
-        let s6a_inner_payload: Value = serde_json::from_str(&s6a_inner_text)
-            .expect("s6a inner payload parses");
+        let s6a_inner_payload: Value =
+            serde_json::from_str(&s6a_inner_text).expect("s6a inner payload parses");
         assert_eq!(s6a_inner_payload["aggregate_status"], "dag_paused");
         assert_eq!(s6a_inner_payload["runner_status"], "review_gate_paused");
         assert_eq!(s6a_inner_payload["paused_node_ids"][0], paused_node_id);
@@ -3036,8 +2274,7 @@ mod tests {
             "dag_paused"
         );
         assert_ne!(
-            s6a_inner_payload["finalization"]["final_plan_status"],
-            "succeeded",
+            s6a_inner_payload["finalization"]["final_plan_status"], "succeeded",
             "wave-17 / Task 05 invariant: dag_paused MUST NOT lie about success"
         );
         assert_eq!(
@@ -3162,20 +2399,22 @@ mod tests {
         // Resume-side evidence sidecar pointer surfaces via `file_*`.
         assert_eq!(s6b_meta["artifact_refs"]["file_written"], true);
         assert_eq!(s6b_meta["artifact_refs"]["file_path"], resume_evidence_path);
-        assert_eq!(s6b_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe2222");
+        assert_eq!(
+            s6b_meta["artifact_refs"]["file_sha256"],
+            "deadbeefcafebabe2222"
+        );
 
         let s6b_inner_text = match &s6b_decorated.content[0] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
         };
-        let s6b_inner_payload: Value = serde_json::from_str(&s6b_inner_text)
-            .expect("s6b inner payload parses");
+        let s6b_inner_payload: Value =
+            serde_json::from_str(&s6b_inner_text).expect("s6b inner payload parses");
         // Aggregate flips to `dag_succeeded` and the previously-paused
         // node has reached the `succeeded` terminal state.
         assert_eq!(s6b_inner_payload["aggregate_status"], "dag_succeeded");
         assert_eq!(s6b_inner_payload["runner_status"], "all_nodes_dispatched");
         assert_eq!(
-            s6b_inner_payload["node_results"][0]["state"],
-            "succeeded",
+            s6b_inner_payload["node_results"][0]["state"], "succeeded",
             "previously-paused node must reach terminal succeeded"
         );
         // Resume metadata is preserved on the inner payload so observers
@@ -3220,8 +2459,7 @@ mod tests {
         // `artifact_refs.file_path` projections to prove the smoke holds
         // that invariant end-to-end.
         assert_eq!(
-            s6a_meta["artifact_refs"]["file_path"],
-            s6b_meta["artifact_refs"]["file_path"],
+            s6a_meta["artifact_refs"]["file_path"], s6b_meta["artifact_refs"]["file_path"],
             "pause + resume must share one evidence sidecar file"
         );
     }
@@ -3368,8 +2606,8 @@ mod tests {
         // Authoritative ids for the smoke.
         let directive_id = "00000000-0000-0000-0000-000000000d18";
         let board_task_id = "btk-wave18-task09-smoke";
-        let plan_id_uuid = uuid::Uuid::parse_str("44444444-4444-4444-4444-000000000a18")
-            .expect("valid plan uuid");
+        let plan_id_uuid =
+            uuid::Uuid::parse_str("44444444-4444-4444-4444-000000000a18").expect("valid plan uuid");
         let plan_id = plan_id_uuid.to_string();
         let plan_version: i32 = 1;
         let dep_node_id = "preflight-node";
@@ -3491,13 +2729,12 @@ mod tests {
         // Round-trip the deterministic review-question id BEFORE building
         // the s6 inner payload so the assertion can pin the SAME id a
         // live `emit_paused_review_gate` would produce.
-        let pause_review_qid =
-            super::super::review_gate::derive_plan_node_review_question_id(
-                &plan_id,
-                plan_version,
-                paused_node_id,
-                Some("plan-node"),
-            );
+        let pause_review_qid = super::super::review_gate::derive_plan_node_review_question_id(
+            &plan_id,
+            plan_version,
+            paused_node_id,
+            Some("plan-node"),
+        );
         let parsed_qid =
             super::super::review_gate::parse_review_question_id_struct(&pause_review_qid)
                 .expect("derived qid must parse");
@@ -3541,8 +2778,7 @@ mod tests {
 
         // Sidecar evidence path — same file the resume run will append
         // to so the round-trip proves both rows landed in one sidecar.
-        let evidence_path =
-            "/tmp/missiond-smoke/.missiond/v2/plans/wave18-task09.evidence.json";
+        let evidence_path = "/tmp/missiond-smoke/.missiond/v2/plans/wave18-task09.evidence.json";
         let lease_iso = "2026-04-26T00:30:00Z";
         // wave-18 / task 02 — `ExecutionEvent::Claimed` carries
         // dispatch_strategy / target_project / requested_cwd. We mirror
@@ -3703,14 +2939,17 @@ mod tests {
         // Pause-side evidence sidecar pointer surfaces via file_*.
         assert_eq!(s6a_meta["artifact_refs"]["file_written"], true);
         assert_eq!(s6a_meta["artifact_refs"]["file_path"], evidence_path);
-        assert_eq!(s6a_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe1818");
+        assert_eq!(
+            s6a_meta["artifact_refs"]["file_sha256"],
+            "deadbeefcafebabe1818"
+        );
 
         // Inner payload assertions — wave-18 features pinned here.
         let s6a_inner_text = match &s6a_decorated.content[0] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
         };
-        let s6a_inner_payload: Value = serde_json::from_str(&s6a_inner_text)
-            .expect("s6a inner payload parses");
+        let s6a_inner_payload: Value =
+            serde_json::from_str(&s6a_inner_text).expect("s6a inner payload parses");
         assert_eq!(s6a_inner_payload["aggregate_status"], "dag_paused");
         // wave-18 / task 06 inference block surfaced with mode=off.
         assert_eq!(s6a_inner_payload["plan_field_inference"]["mode"], "off");
@@ -3732,7 +2971,10 @@ mod tests {
             s6a_inner_payload["finalization"]["distill_chain"]["chain_mode"],
             "record_only"
         );
-        assert_eq!(s6a_inner_payload["distill_chain_status"], "skipped_plan_not_succeeded");
+        assert_eq!(
+            s6a_inner_payload["distill_chain_status"],
+            "skipped_plan_not_succeeded"
+        );
         assert_eq!(s6a_inner_payload["distill_chain_id"], chain_id);
         // wave-18 / task 02 dispatch metadata surfaces via event_refs.
         let dep_event_refs = &s6a_inner_payload["node_results"][0]["event_refs"];
@@ -3748,7 +2990,10 @@ mod tests {
         assert_eq!(dep_event_refs[1]["kind"], "completed");
         assert_eq!(dep_event_refs[1]["dispatch_strategy"], "agent-team");
         // wave-16 / task 05 retry surface present (max_attempts > 1).
-        assert_eq!(s6a_inner_payload["node_results"][0]["retry"]["max_attempts"], 2);
+        assert_eq!(
+            s6a_inner_payload["node_results"][0]["retry"]["max_attempts"],
+            2
+        );
         assert_eq!(s6a_inner_payload["node_results"][0]["retry"]["attempts"], 1);
         // wave-17 / task 04 rollback descriptor surface — recorded but
         // never dispatched on the success path.
@@ -3920,13 +3165,16 @@ mod tests {
         assert_eq!(s6b_meta["artifact_refs"]["status"], "dag_succeeded");
         assert_eq!(s6b_meta["artifact_refs"]["file_written"], true);
         assert_eq!(s6b_meta["artifact_refs"]["file_path"], evidence_path);
-        assert_eq!(s6b_meta["artifact_refs"]["file_sha256"], "deadbeefcafebabe2828");
+        assert_eq!(
+            s6b_meta["artifact_refs"]["file_sha256"],
+            "deadbeefcafebabe2828"
+        );
 
         let s6b_inner_text = match &s6b_decorated.content[0] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
         };
-        let s6b_inner_payload: Value = serde_json::from_str(&s6b_inner_text)
-            .expect("s6b inner payload parses");
+        let s6b_inner_payload: Value =
+            serde_json::from_str(&s6b_inner_text).expect("s6b inner payload parses");
 
         // ── Acceptance fan-in (wave-18 / task 03) ──────────────────────
         let gate_acceptance = &s6b_inner_payload["node_results"][1]["acceptance"];
@@ -3936,10 +3184,7 @@ mod tests {
         assert_eq!(fan_in["mode"], "all-succeeded");
         assert_eq!(fan_in["source_nodes"][0], dep_node_id);
         assert_eq!(fan_in["passed"], true);
-        assert!(fan_in["reason"]
-            .as_str()
-            .unwrap()
-            .contains("succeeded"));
+        assert!(fan_in["reason"].as_str().unwrap().contains("succeeded"));
 
         // ── Finalization (wave-17 / task 05) ───────────────────────────
         assert_eq!(
@@ -3997,8 +3242,7 @@ mod tests {
 
         // ── Sidecar invariant: pause + resume + chain rows share one file
         assert_eq!(
-            s6a_meta["artifact_refs"]["file_path"],
-            s6b_meta["artifact_refs"]["file_path"],
+            s6a_meta["artifact_refs"]["file_path"], s6b_meta["artifact_refs"]["file_path"],
             "pause + resume + chain rows must share one evidence sidecar"
         );
 
@@ -4234,8 +3478,7 @@ mod tests {
         use super::super::workstation_dispatch::{
             self as wd, parse_task_contract, WorkstationDispatchHints,
         };
-        let parsed = parse_task_contract(SMOKE_MACHINE_CONTRACT)
-            .expect("smoke fixture must parse");
+        let parsed = parse_task_contract(SMOKE_MACHINE_CONTRACT).expect("smoke fixture must parse");
         // Pin every consumed field so a renderer/parser drift surfaces.
         assert_eq!(parsed.schema, "missiond.task-contract.v1");
         assert_eq!(parsed.goal, "ship the wave-20 machine loop smoke");
@@ -4279,7 +3522,11 @@ mod tests {
             Some("wave 20 task 05 only"),
             "contract :scope must beat caller scope"
         );
-        assert_eq!(hints.owned_files.len(), 3, "contract :write-scope must beat stale owned_files");
+        assert_eq!(
+            hints.owned_files.len(),
+            3,
+            "contract :write-scope must beat stale owned_files"
+        );
         assert!(hints
             .owned_files
             .iter()
@@ -4320,8 +3567,9 @@ mod tests {
             approved_at: None,
             finished_at: None,
         };
-        let contract_path =
-            std::path::Path::new("/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp");
+        let contract_path = std::path::Path::new(
+            "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp",
+        );
         let brief = wd::build_task_brief_with_source(
             &plan_for_brief,
             &hints,
@@ -4361,15 +3609,13 @@ mod tests {
     fn smoke_wave20_machine_loop_canonical_contract_handoff() {
         let directive_id = "00000000-0000-0000-0000-000000000d20";
         let board_task_id = "btk-wave20-task05-smoke";
-        let plan_id_uuid = uuid::Uuid::parse_str("55555555-5555-5555-5555-000000000020")
-            .expect("valid plan uuid");
+        let plan_id_uuid =
+            uuid::Uuid::parse_str("55555555-5555-5555-5555-000000000020").expect("valid plan uuid");
         let plan_id = plan_id_uuid.to_string();
         let plan_version: i32 = 1;
-        let contract_path =
-            "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp";
+        let contract_path = "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp";
         let render_command = format!("node scripts/render-claudecode-task.mjs {}", contract_path);
-        let evidence_path =
-            "/tmp/missiond-smoke/.missiond/v2/plans/wave20-task05.evidence.json";
+        let evidence_path = "/tmp/missiond-smoke/.missiond/v2/plans/wave20-task05.evidence.json";
 
         // ── Stage s4 :: plan compile (dry_run, no LLM) ─────────────────
         let s4_args = json!({
@@ -4493,8 +3739,7 @@ mod tests {
             DecorateContext {
                 stage: stages::EXECUTION_RUNNER,
                 scope: ArtifactScope::Execution,
-                next_step:
-                    "machine-mode dispatch landed; collect evidence via mission_plan(action=record_evidence)",
+                next_step: "machine-mode dispatch landed; collect evidence via mission_plan(action=record_evidence)",
                 next_call: None,
                 expects_next_inputs: json!({}),
             },
@@ -4506,10 +3751,16 @@ mod tests {
         assert_eq!(s6_meta["artifact_refs"]["board_task_id"], board_task_id);
         assert_eq!(s6_meta["artifact_refs"]["status"], "executing");
         // ── Machine-contract fields lifted into artifact_refs ──────────
-        assert_eq!(s6_meta["artifact_refs"]["dispatch_contract_mode"], "machine");
+        assert_eq!(
+            s6_meta["artifact_refs"]["dispatch_contract_mode"],
+            "machine"
+        );
         assert_eq!(s6_meta["artifact_refs"]["task_contract_mode"], "emit");
         assert_eq!(s6_meta["artifact_refs"]["task_contract_eligible"], true);
-        assert_eq!(s6_meta["artifact_refs"]["task_contract_path"], contract_path);
+        assert_eq!(
+            s6_meta["artifact_refs"]["task_contract_path"],
+            contract_path
+        );
         assert_eq!(
             s6_meta["artifact_refs"]["task_contract_source_path"],
             contract_path
@@ -4535,7 +3786,10 @@ mod tests {
         };
         let s6_inner_payload: Value =
             serde_json::from_str(&s6_inner_text).expect("inner payload parses");
-        assert_eq!(s6_inner_payload["workstation_dispatch_status"], "dispatched");
+        assert_eq!(
+            s6_inner_payload["workstation_dispatch_status"],
+            "dispatched"
+        );
         assert_eq!(s6_inner_payload["dispatch_contract_mode"], "machine");
         assert_eq!(s6_inner_payload["task_contract_source_path"], contract_path);
 
@@ -4565,8 +3819,7 @@ mod tests {
     /// without touching the brief preview.
     #[test]
     fn smoke_wave20_machine_mode_markdown_brief_is_non_load_bearing() {
-        let contract_path =
-            "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp";
+        let contract_path = "/tmp/missiond-smoke/.missiond/tasks/generated/plan/55555555/root.lisp";
         let render_command = format!("node scripts/render-claudecode-task.mjs {}", contract_path);
 
         // Machine-mode dispatched payload (mirrors
@@ -4602,7 +3855,9 @@ mod tests {
             },
         );
         let meta = smoke_meta_of(&decorated);
-        let refs = meta["artifact_refs"].as_object().expect("artifact_refs is object");
+        let refs = meta["artifact_refs"]
+            .as_object()
+            .expect("artifact_refs is object");
 
         // ── Load-bearing: the contract source path must be lifted ─────
         assert!(
@@ -4733,8 +3988,7 @@ mod tests {
             DecorateContext {
                 stage: stages::EXECUTION_RUNNER,
                 scope: ArtifactScope::Execution,
-                next_step:
-                    "machine-mode dispatch refused: malformed task contract — fix the on-disk file and retry",
+                next_step: "machine-mode dispatch refused: malformed task contract — fix the on-disk file and retry",
                 next_call: None,
                 expects_next_inputs: json!({}),
             },
@@ -4763,8 +4017,7 @@ mod tests {
         let inner_payload: Value = serde_json::from_str(&inner_text).unwrap();
         assert_eq!(inner_payload["status"], "dispatch_skipped");
         assert_eq!(
-            inner_payload["workstation_dispatch_status"],
-            "skipped_malformed_task_contract",
+            inner_payload["workstation_dispatch_status"], "skipped_malformed_task_contract",
             "refusal MUST stay loud — no silent downgrade to the legacy brief"
         );
         let refusal_reason = inner_payload["workstation_dispatch_reason"]
@@ -5041,8 +4294,7 @@ mod tests {
             DecorateContext {
                 stage: stages::EXECUTION_RUNNER,
                 scope: ArtifactScope::Execution,
-                next_step:
-                    "auto-answer policy dry-run preview computed; defer to human reviewer",
+                next_step: "auto-answer policy dry-run preview computed; defer to human reviewer",
                 next_call: None,
                 expects_next_inputs: json!({}),
             },
@@ -5212,7 +4464,8 @@ mod tests {
     fn wave21_08_smoke_payload() -> Value {
         let plan_id = "77777777-7777-7777-7777-000000000021";
         let board_task_id = "btk-wave21-08-smoke";
-        let contract_path = "/tmp/missiond-wave21-08/.missiond/tasks/wave21/wave21-08-dispatch.lisp";
+        let contract_path =
+            "/tmp/missiond-wave21-08/.missiond/tasks/wave21/wave21-08-dispatch.lisp";
         let render_command = format!("node scripts/render-claudecode-task.mjs {}", contract_path);
         let evidence_path = "/tmp/missiond-wave21-08/.missiond/v2/plans/wave21-08.evidence.json";
         json!({
@@ -5329,7 +4582,9 @@ mod tests {
         );
         let meta = smoke_meta_of(&decorated);
         assert_eq!(meta["pipeline_stage"], stages::EXECUTION_RUNNER);
-        let refs = meta["artifact_refs"].as_object().expect("artifact_refs object");
+        let refs = meta["artifact_refs"]
+            .as_object()
+            .expect("artifact_refs object");
 
         // ── Wave 13/14 row-id pointers preserved ──────────────────────
         assert_eq!(refs["scope"], "execution");
@@ -5370,8 +4625,7 @@ mod tests {
         let inner_text = match &decorated.content[0] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
         };
-        let inner_json: Value =
-            serde_json::from_str(&inner_text).expect("inner JSON parses");
+        let inner_json: Value = serde_json::from_str(&inner_text).expect("inner JSON parses");
 
         // I3-04 (workstation proposals): every proposal MUST carry
         // applied=false AND the bundle MUST pin auto_spawn=false.
@@ -5384,7 +4638,10 @@ mod tests {
         let props = proposals_block["proposals"]
             .as_array()
             .expect("proposals array");
-        assert!(!props.is_empty(), "wave21-08 fixture must surface proposals");
+        assert!(
+            !props.is_empty(),
+            "wave21-08 fixture must surface proposals"
+        );
         for p in props {
             assert_eq!(
                 p["applied"], false,
@@ -5555,7 +4812,9 @@ mod tests {
             },
         );
         let meta = smoke_meta_of(&decorated);
-        let refs = meta["artifact_refs"].as_object().expect("artifact_refs object");
+        let refs = meta["artifact_refs"]
+            .as_object()
+            .expect("artifact_refs object");
 
         // Load-bearing surface — observers MUST be able to drive the
         // machine handoff entirely from these keys.
@@ -5757,8 +5016,7 @@ mod tests {
         let inner_text = match &decorated.content[0] {
             missiond_mcp::tools::ToolContent::Text { text } => text.clone(),
         };
-        let inner_json: Value =
-            serde_json::from_str(&inner_text).expect("inner JSON parses");
+        let inner_json: Value = serde_json::from_str(&inner_text).expect("inner JSON parses");
         assert!(
             inner_json["task_brief_preview"]
                 .as_str()
@@ -5822,8 +5080,7 @@ mod tests {
         // I2 strict bool/string shape — applied_fields[] / skipped_fields[]
         // shapes stay arrays even when empty (no string fallback).
         assert!(
-            persisted["applied_fields"].is_array()
-                && persisted["skipped_fields"].is_array(),
+            persisted["applied_fields"].is_array() && persisted["skipped_fields"].is_array(),
             "wave21-05 I2: applied / skipped shapes MUST stay arrays"
         );
         // I3 conflicts NEVER apply — applied_count=0 on the
@@ -5954,7 +5211,12 @@ mod tests {
         // `chain_index_in_plan` (wave-19). Pinning all three proves
         // the wave-19/20 surface is intact under the wave22 apply-gate
         // overlay.
-        for key in ["chain_id", "chain_mode", "chain_index_in_plan", "evidence_path"] {
+        for key in [
+            "chain_id",
+            "chain_mode",
+            "chain_index_in_plan",
+            "evidence_path",
+        ] {
             assert!(
                 chain.get(key).is_some(),
                 "wave21-07 I7: distill_chain MUST keep wave-19/20 field `{}`",
