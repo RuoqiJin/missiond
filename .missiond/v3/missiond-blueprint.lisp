@@ -678,12 +678,12 @@
       :surface conversation-ingestion
       :note "Conversation, timeline, retrospective, and embedding ingestion remain designed V3 surfaces.")
     (v2-item router-policy-dry-run-chain
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: router-policy-v1 / router-backend-readiness-loop / router-dispatch-descriptor-loop"
       :v3-pillar communication
       :v3-function router-policy
       :surface router-policy
-      :note "Router policy remains advisory/dry-run; V3 records the destination before any runtime replacement work.")
+      :note "Router chat runtime and mission_plan advisory router-policy dry-run chain are physically split and pinned under the V3 router-policy surface.")
     (v2-item question-incident-governance
       :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: system-support/incidents + question flow"
@@ -830,7 +830,7 @@
         :tools [mission_conversation_query mission_conversation_analyze mission_conversation_reconcile
                 mission_timeline mission_retrospective_manage mission_embedding_ops])
       (tool-group router-policy-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent.lisp :: router-policy-v1"
         :v3-pillar communication
         :v3-function router-policy
@@ -1598,9 +1598,13 @@
       :note "Designed V3 destination for conversation/session/timeline/retrospective/embedding public tools. The current code remains legacy-shaped and must be brought under Lisp artifact/event projection before graduation.")
 
     (surface router-policy
-      :status "designed"
+      :status "code-aligned"
       :implements [router-policy-dry-run router-backend-readiness router-dispatch-descriptor]
       :code ["crates/missiond-mcp/src/tools/comm/router_chat.rs"
+             "crates/missiond-daemon/src/handlers/comm/router_chat.rs"
+             "crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs"
+             "crates/missiond-daemon/src/handlers/comm/router_chat/files.rs"
+             "crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs"
@@ -1608,8 +1612,9 @@
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs"
              "scripts/check-router-policy.mjs"
              "scripts/check-router-backend-registry.mjs"
-             "scripts/check-router-dispatch-descriptor.mjs"]
-      :note "Designed V3 destination for the V2 router-policy dry-run chain. plan/router_policy_dry_run.rs is already physically split as mission_plan's advisory runtime adapter, with predicate.rs owning rule matching, readiness.rs owning trace-index/backend-readiness projection, and descriptor.rs owning dispatch-descriptor projection; this surface remains designed rather than code-aligned until the public mission_router_chat tooling is also brought under the same V3 contract. This deliberately does not claim runtime backend replacement; it only prevents router public behavior from remaining unmapped.")
+             "scripts/check-router-dispatch-descriptor.mjs"
+             "scripts/check-v3-router-policy-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for the V2 router-policy dry-run chain and public router chat tools. router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat request normalization, context injection, LLM dispatch, persistence, and response projection; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage history/list/delete/clear/delete_message/restore/stats/compress. plan/router_policy_dry_run.rs owns the advisory dry-run adapter, predicate.rs owns rule matching, readiness.rs owns trace-index/backend-readiness projection, descriptor.rs owns router dispatch descriptor projection, and schema_parser.rs owns router-policy/backend-registry Lisp parsing. The surface preserves dry_run_only/runtime_replacement/no_execution invariants and deliberately does not claim runtime backend replacement.")
 
     (surface incident-governance
       :status "code-aligned"
@@ -1690,6 +1695,7 @@
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-v2-coverage.mjs"
+             "node scripts/check-v3-router-policy-isomorphism.mjs"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"
              "node scripts/check-v3-file-artifacts-isomorphism.mjs"

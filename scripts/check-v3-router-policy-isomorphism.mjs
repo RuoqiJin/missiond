@@ -1,0 +1,356 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const usage = `Usage:
+  node scripts/check-v3-router-policy-isomorphism.mjs [--json] [--dry-fixture]
+
+Checks the V3 router-policy Lisp/code isomorphism contract:
+  - mission_router_chat public runtime is split into facade/chat/files/manage.
+  - mission_plan router-policy dry-run remains advisory-only.
+  - router-policy/backend-registry/dispatch-descriptor checker scripts stay pinned.
+`;
+
+const DEFAULT_FILES = {
+  blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  facade: 'crates/missiond-daemon/src/handlers/comm/router_chat.rs',
+  chat: 'crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs',
+  files: 'crates/missiond-daemon/src/handlers/comm/router_chat/files.rs',
+  manage: 'crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs',
+  mcp: 'crates/missiond-mcp/src/tools/comm/router_chat.rs',
+  planAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
+  predicate: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs',
+  readiness: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs',
+  descriptor: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/descriptor.rs',
+  schemaParser: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs',
+  policyChecker: 'scripts/check-router-policy.mjs',
+  registryChecker: 'scripts/check-router-backend-registry.mjs',
+  descriptorChecker: 'scripts/check-router-dispatch-descriptor.mjs',
+};
+
+function main() {
+  const args = process.argv.slice(2);
+  let json = false;
+  let dryFixture = false;
+  for (const arg of args) {
+    if (arg === '--help' || arg === '-h') {
+      console.log(usage);
+      process.exit(0);
+    } else if (arg === '--json') {
+      json = true;
+    } else if (arg === '--dry-fixture') {
+      dryFixture = true;
+    } else {
+      console.error(`unknown arg: ${arg}`);
+      console.error(usage);
+      process.exit(2);
+    }
+  }
+
+  const repoRoot = dryFixture ? buildFixture() : process.cwd();
+  const diagnostics = checkFiles(repoRoot, DEFAULT_FILES);
+  const result = {
+    ok: diagnostics.length === 0,
+    files: Object.keys(DEFAULT_FILES).length,
+    diagnostics,
+  };
+
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.ok) {
+    console.log('v3 router-policy Lisp/code isomorphism check OK');
+  } else {
+    for (const d of diagnostics) {
+      console.error(`${d.file}: ${d.message}`);
+    }
+    console.error(
+      `v3 router-policy Lisp/code isomorphism check FAILED -- ${diagnostics.length} diagnostic(s)`,
+    );
+  }
+
+  process.exit(result.ok ? 0 : 1);
+}
+
+function checkFiles(root, files) {
+  const diagnostics = [];
+  const sources = {};
+  for (const [key, rel] of Object.entries(files)) {
+    const abs = path.join(root, rel);
+    try {
+      sources[key] = fs.readFileSync(abs, 'utf8');
+    } catch (err) {
+      diagnostics.push({ file: rel, message: `cannot read: ${err.message}` });
+    }
+  }
+  if (diagnostics.length > 0) return diagnostics;
+
+  requireAll(diagnostics, files.blueprint, sources.blueprint, [
+    'router-policy',
+    '(surface router-policy',
+    ':status "code-aligned"',
+    'crates/missiond-daemon/src/handlers/comm/router_chat.rs',
+    'crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs',
+    'crates/missiond-daemon/src/handlers/comm/router_chat/files.rs',
+    'crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs',
+    'crates/missiond-mcp/src/tools/comm/router_chat.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/descriptor.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs',
+    'scripts/check-router-policy.mjs',
+    'scripts/check-router-backend-registry.mjs',
+    'scripts/check-router-dispatch-descriptor.mjs',
+    'scripts/check-v3-router-policy-isomorphism.mjs',
+    'router_chat.rs is the thin router-policy facade',
+    'router_chat/chat.rs owns mission_router_chat',
+    'router_chat/files.rs owns attachment denylist and Gemini File API policy',
+    'router_chat/manage.rs owns mission_router_chat_manage',
+    'plan/router_policy_dry_run.rs owns the advisory dry-run adapter',
+    'dry_run_only/runtime_replacement/no_execution invariants',
+    'node scripts/check-v3-router-policy-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.facade, sources.facade, [
+    'mod chat;',
+    'mod files;',
+    'mod manage;',
+    '"mission_router_chat" => chat::handle_chat(state, args).await',
+    '"mission_router_chat_manage" => manage::handle_consolidated(state, args).await',
+    '"mission_router_chat_history"',
+    '"mission_router_chat_compress"',
+    'manage::handle_legacy',
+    'Unknown router_chat tool',
+  ]);
+
+  requireAll(diagnostics, files.chat, sources.chat, [
+    'handle_chat',
+    'apply_context_budget',
+    'MAX_ROUTER_PAYLOAD_BYTES',
+    'resolve_llm_credentials',
+    'REQUEST_CALLER',
+    'GeminiFileApi',
+    'PreparedFile',
+    'resolve_gemini_api_key',
+    'is_file_denied',
+    'FILE_MAX_SIZE_BINARY',
+    'FILE_MAX_SIZE_TEXT',
+    'router_chat_get_or_create',
+    'router_chat_get_summary',
+    'router_chat_load_active_history',
+    'kb_list',
+    'list_board_tasks',
+    'send_with_timeout',
+    'router_chat_append_messages',
+    'finish_reason',
+    'context_budget',
+  ]);
+
+  requireAll(diagnostics, files.files, sources.files, [
+    'FILE_DENY_PATTERNS',
+    'FILE_DENY_NAMES',
+    'FILE_MAX_SIZE_TEXT',
+    'FILE_MAX_SIZE_BINARY',
+    'resolve_gemini_api_key',
+    'is_file_denied',
+    '/.ssh/',
+    '.env',
+    'credentials.json',
+  ]);
+
+  requireAll(diagnostics, files.manage, sources.manage, [
+    'handle_consolidated',
+    'handle_legacy',
+    'mission_router_chat_history',
+    'mission_router_chat_list',
+    'mission_router_chat_stats',
+    'mission_router_chat_clear',
+    'mission_router_chat_delete',
+    'mission_router_chat_delete_message',
+    'mission_router_chat_restore',
+    'mission_router_chat_compress',
+    'router_chat_load_history',
+    'router_chat_list',
+    'router_chat_stats',
+    'router_chat_clear',
+    'router_chat_delete',
+    'router_chat_delete_message',
+    'router_chat_restore',
+    'router_chat_update_summary',
+    'REQUEST_CALLER',
+    'router_chat_compress',
+  ]);
+
+  requireAll(diagnostics, files.mcp, sources.mcp, [
+    'ToolDefinition::new',
+    '"mission_router_chat"',
+    '"mission_router_chat_manage"',
+    '"history"',
+    '"list"',
+    '"delete"',
+    '"clear"',
+    '"delete_message"',
+    '"restore"',
+    '"stats"',
+    '"compress"',
+  ]);
+
+  requireAll(diagnostics, files.planAdapter, sources.planAdapter, [
+    'RouterPolicyMode',
+    'parse_router_policy_mode',
+    'attach_router_recommendation_block',
+    'compute_recommendation',
+    'DEFAULT_POLICY_PATH',
+    'missiond.router-recommendation.v0',
+    'applied=false',
+    'dry_run',
+    'runtime_replacement',
+  ]);
+
+  requireAll(diagnostics, files.predicate, sources.predicate, [
+    'project_context',
+    'evaluate_clause',
+    'arg_string',
+    'glob_match',
+  ]);
+
+  requireAll(diagnostics, files.readiness, sources.readiness, [
+    'load_trace_index',
+    'load_backend_registry',
+    'attach_trace_index_fields',
+    'attach_backend_readiness_fields',
+    'RICH_TRACE_THRESHOLD',
+    'BackendRegistryInfo',
+  ]);
+
+  requireAll(diagnostics, files.descriptor, sources.descriptor, [
+    'attach_router_dispatch_descriptor',
+    'dry_run_only',
+    'runtime_replacement',
+    'no_execution',
+    'router_apply_eligible',
+  ]);
+
+  requireAll(diagnostics, files.schemaParser, sources.schemaParser, [
+    'parse_router_policy',
+    'parse_backend_registry',
+    'router-policy',
+    'router-backend-registry',
+  ]);
+
+  requireAll(diagnostics, files.policyChecker, sources.policyChecker, [
+    'missiond.router-policy.v1',
+    'dry-run-only true',
+    'runtime-replacement false',
+  ]);
+
+  requireAll(diagnostics, files.registryChecker, sources.registryChecker, [
+    'missiond.router-backend-registry.v1',
+    'runtime_allowed',
+    'readiness_status',
+  ]);
+
+  requireAll(diagnostics, files.descriptorChecker, sources.descriptorChecker, [
+    'missiond.router-dispatch-descriptor.v1',
+    'dry_run_only',
+    'runtime_replacement',
+    'no_execution',
+  ]);
+
+  return diagnostics;
+}
+
+function requireAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (!source.includes(needle)) {
+      diagnostics.push({ file, message: `missing required contract text: ${needle}` });
+    }
+  }
+}
+
+function buildFixture() {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-router-policy-isomorphism-'));
+  writeFixture(root, DEFAULT_FILES.blueprint, `
+(missiond-blueprint
+  (implementation-map
+    (surface router-policy
+      :status "code-aligned"
+      :code ["crates/missiond-daemon/src/handlers/comm/router_chat.rs"
+             "crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs"
+             "crates/missiond-daemon/src/handlers/comm/router_chat/files.rs"
+             "crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs"
+             "crates/missiond-mcp/src/tools/comm/router_chat.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/descriptor.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs"
+             "scripts/check-router-policy.mjs"
+             "scripts/check-router-backend-registry.mjs"
+             "scripts/check-router-dispatch-descriptor.mjs"
+             "scripts/check-v3-router-policy-isomorphism.mjs"]
+      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
+  (compression-contract
+    :checks ["node scripts/check-v3-router-policy-isomorphism.mjs"]))`);
+
+  writeFixture(root, DEFAULT_FILES.facade, `
+mod chat;
+mod files;
+mod manage;
+"mission_router_chat" => chat::handle_chat(state, args).await
+"mission_router_chat_manage" => manage::handle_consolidated(state, args).await
+"mission_router_chat_history" "mission_router_chat_compress" manage::handle_legacy
+Unknown router_chat tool
+`);
+
+  writeFixture(root, DEFAULT_FILES.chat, `
+handle_chat apply_context_budget MAX_ROUTER_PAYLOAD_BYTES resolve_llm_credentials REQUEST_CALLER
+GeminiFileApi PreparedFile resolve_gemini_api_key is_file_denied FILE_MAX_SIZE_BINARY FILE_MAX_SIZE_TEXT
+router_chat_get_or_create router_chat_get_summary router_chat_load_active_history
+kb_list list_board_tasks send_with_timeout router_chat_append_messages finish_reason context_budget
+`);
+
+  writeFixture(root, DEFAULT_FILES.files, `
+FILE_DENY_PATTERNS FILE_DENY_NAMES FILE_MAX_SIZE_TEXT FILE_MAX_SIZE_BINARY resolve_gemini_api_key
+is_file_denied /.ssh/ .env credentials.json
+`);
+
+  writeFixture(root, DEFAULT_FILES.manage, `
+handle_consolidated handle_legacy mission_router_chat_history mission_router_chat_list mission_router_chat_stats
+mission_router_chat_clear mission_router_chat_delete mission_router_chat_delete_message
+mission_router_chat_restore mission_router_chat_compress router_chat_load_history router_chat_list
+router_chat_stats router_chat_clear router_chat_delete router_chat_delete_message router_chat_restore
+router_chat_update_summary REQUEST_CALLER router_chat_compress
+`);
+
+  writeFixture(root, DEFAULT_FILES.mcp, `
+ToolDefinition::new "mission_router_chat" "mission_router_chat_manage"
+"history" "list" "delete" "clear" "delete_message" "restore" "stats" "compress"
+`);
+
+  writeFixture(root, DEFAULT_FILES.planAdapter, `
+RouterPolicyMode parse_router_policy_mode attach_router_recommendation_block compute_recommendation
+DEFAULT_POLICY_PATH missiond.router-recommendation.v0 applied=false dry_run runtime_replacement
+`);
+  writeFixture(root, DEFAULT_FILES.predicate, 'project_context evaluate_clause arg_string glob_match');
+  writeFixture(root, DEFAULT_FILES.readiness, 'load_trace_index load_backend_registry attach_trace_index_fields attach_backend_readiness_fields RICH_TRACE_THRESHOLD BackendRegistryInfo');
+  writeFixture(root, DEFAULT_FILES.descriptor, 'attach_router_dispatch_descriptor dry_run_only runtime_replacement no_execution router_apply_eligible');
+  writeFixture(root, DEFAULT_FILES.schemaParser, 'parse_router_policy parse_backend_registry router-policy router-backend-registry');
+  writeFixture(root, DEFAULT_FILES.policyChecker, 'missiond.router-policy.v1 dry-run-only true runtime-replacement false');
+  writeFixture(root, DEFAULT_FILES.registryChecker, 'missiond.router-backend-registry.v1 runtime_allowed readiness_status');
+  writeFixture(root, DEFAULT_FILES.descriptorChecker, 'missiond.router-dispatch-descriptor.v1 dry_run_only runtime_replacement no_execution');
+
+  return root;
+}
+
+function writeFixture(root, rel, source) {
+  const abs = path.join(root, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, source);
+}
+
+if (import.meta.url === `file://${process.argv[1]}`) {
+  main();
+}
