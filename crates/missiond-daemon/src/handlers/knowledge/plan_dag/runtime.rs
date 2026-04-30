@@ -15,7 +15,7 @@ use super::claim_lease::{
     parse_claim_lease_secs, parse_claimer_name, parse_enforce_claims, ClaimRegistry,
 };
 use super::dispatch::{DispatchOutcome, TaskContractDispatchCtx};
-use super::lifecycle::{emit_evidence_finished, EvidenceCtx};
+use super::lifecycle::EvidenceCtx;
 use super::outcome::{ExecutionOutcome, NodeResult};
 use super::parser::ParsedDag;
 
@@ -23,6 +23,7 @@ mod acceptance;
 mod bookkeeping;
 mod claiming;
 mod claims;
+mod drain;
 mod failures;
 mod gates;
 mod retry;
@@ -35,12 +36,10 @@ use bookkeeping::{
     initialize_lifecycle, stitch_results_topologically,
 };
 use claiming::{prepare_dispatch_claim, DispatchClaimDecision};
-use failures::record_final_failure;
+use drain::drain_dispatch_wave;
 use gates::filter_ready_nodes_for_gates;
-use retry::retry_failed_node_if_allowed;
 use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
 use spawn::spawn_dispatch_attempt;
-use success::record_successful_dispatch;
 
 pub(super) async fn execute_with_concurrency(
     state: &AppState,
@@ -246,148 +245,34 @@ pub(super) async fn execute_with_concurrency(
             .await;
         }
 
-        // 7. Drain wave; for each result decide success/failure, update
-        //    lifecycle + taint, write finish evidence.
-        //
-        // wave-16 / task 05 — on failure, consult the per-node retry
-        // policy. If the node opted in (`effective_max_attempts > 1`)
-        // AND the failure is retryable (not a deterministic
-        // safe-descriptor refusal) AND attempts remain, re-spawn the
-        // node into the SAME wave's JoinSet with the next attempt
-        // number. The node stays `Running`; only when retries are
-        // exhausted (or the failure is non-retryable) do we mark it
-        // `Failed` + propagate taint + maybe trip fail-fast.
-        while let Some(joined) = join_set.join_next().await {
-            let dispatch_outcome = match joined {
-                Ok(Ok(o)) => o,
-                Ok(Err(e)) => {
-                    // Rare: the inner handler returned an `anyhow::Error`
-                    // (panic-equivalent). Treat as a fatal scheduler error so
-                    // the caller sees something — bubbling up here aborts the
-                    // whole dispatch, which is the right thing for an
-                    // unhandled exception.
-                    return Err(e);
-                }
-                Err(join_err) => {
-                    // tokio task panicked. Same reasoning as above.
-                    return Err(anyhow::anyhow!(
-                        "DAG scheduler: dispatch task join failed: {}",
-                        join_err
-                    ));
-                }
-            };
-            let DispatchOutcome {
-                node_id,
-                target,
-                dispatch_strategy,
-                inner_payload,
-                classification,
-                non_retryable,
-            } = dispatch_outcome;
-            let node = match by_id.get(&node_id) {
-                Some(n) => n.clone(),
-                None => continue,
-            };
-            let succeeded = classification.is_ok();
-            // The attempt # we are currently finishing. Authoritative
-            // because it was bumped at spawn time.
-            let current_attempt = attempts_made.get(&node_id).copied().unwrap_or(1);
-            let max_attempts = node.effective_max_attempts();
-            emit_evidence_finished(
-                state,
-                &ctx,
-                &node,
-                &dispatch_strategy,
-                &inner_payload,
-                succeeded,
-                current_attempt,
-                &mut outcome,
-            )
-            .await;
-            if succeeded {
-                if record_successful_dispatch(
-                    state,
-                    &ctx,
-                    plan,
-                    parsed,
-                    order,
-                    &node,
-                    &node_id,
-                    target,
-                    dispatch_strategy,
-                    inner_payload,
-                    current_attempt,
-                    max_attempts,
-                    &mut claim_registry,
-                    &mut active_claims_by_node,
-                    &mut lifecycle,
-                    &mut results_by_id,
-                    &mut tainted_by,
-                    &succs,
-                    &mut outcome,
-                )
-                .await
-                {
-                    abort_new_dispatch = true;
-                    abort_aborter = Some(node_id.clone());
-                }
-                continue;
-            }
-
-            if retry_failed_node_if_allowed(
-                state,
-                &ctx,
-                plan,
-                node.clone(),
-                &node_id,
-                &dispatch_strategy,
-                current_attempt,
-                max_attempts,
-                non_retryable,
-                abort_new_dispatch,
-                claim_lease_secs,
-                &claimer_name,
-                &mut attempts_made,
-                &mut claim_registry,
-                &mut active_claims_by_node,
-                &task_contract_ctx,
-                &mut lifecycle,
-                &mut outcome,
-                &mut join_set,
-            )
-            .await
-            {
-                continue;
-            }
-
-            if record_final_failure(
-                state,
-                &ctx,
-                plan,
-                parsed,
-                order,
-                &node,
-                &node_id,
-                target,
-                dispatch_strategy,
-                inner_payload,
-                classification,
-                non_retryable,
-                current_attempt,
-                max_attempts,
-                &mut claim_registry,
-                &mut active_claims_by_node,
-                &mut lifecycle,
-                &mut results_by_id,
-                &mut tainted_by,
-                &succs,
-                &mut outcome,
-            )
-            .await
-            {
-                abort_new_dispatch = true;
-                abort_aborter = Some(node_id.clone());
-            }
+        // 7. Drain wave; the drain stage owns finish evidence plus
+        //    success/retry/failure routing while this facade keeps the
+        //    high-level wave loop readable.
+        if let Some(aborter) = drain_dispatch_wave(
+            state,
+            &ctx,
+            plan,
+            parsed,
+            order,
+            &by_id,
+            &mut join_set,
+            &mut attempts_made,
+            claim_lease_secs,
+            &claimer_name,
+            abort_new_dispatch,
+            &task_contract_ctx,
+            &mut claim_registry,
+            &mut active_claims_by_node,
+            &mut lifecycle,
+            &mut results_by_id,
+            &mut tainted_by,
+            &succs,
+            &mut outcome,
+        )
+        .await?
+        {
+            abort_new_dispatch = true;
+            abort_aborter = Some(aborter);
         }
     }
 
