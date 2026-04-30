@@ -1,7 +1,9 @@
 //! Facade for the mission_plan DAG parser/validator core.
 //!
 //! The submodules keep the V3 entry/core/egress boundary explicit:
-//! - types.rs owns DAG node/error shapes and typed hint projections.
+//! - types.rs is the facade for DAG node/error shapes.
+//! - types/node.rs owns node shapes and typed hint projections.
+//! - types/errors.rs owns build-error egress.
 //! - scanner.rs owns PLAN.lisp S-expression scanning and node parsing.
 //! - validation.rs owns DAG contract validation and topological ordering.
 
