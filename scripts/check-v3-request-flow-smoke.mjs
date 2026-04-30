@@ -137,7 +137,10 @@ import {
 import { callToolViaIpc } from './task-runner-submit-dispatch.mjs';
 
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
-const REQUEST_HANDLER_PATH = 'crates/missiond-daemon/src/handlers/knowledge/request.rs';
+const REQUEST_HANDLER_PATHS = [
+  'crates/missiond-daemon/src/handlers/knowledge/request.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/request/request_artifacts.rs',
+];
 const MCP_REQUEST_PATH = 'crates/missiond-mcp/src/tools/knowledge/request.rs';
 
 export const EXPECTED_STATES = [
@@ -1420,13 +1423,16 @@ async function main() {
       }
     }
 
-    const handlerAbs = path.resolve(opts.repo, REQUEST_HANDLER_PATH);
     try {
-      const src = fs.readFileSync(handlerAbs, 'utf8');
-      handlerResult = validateRequestHandlerSource(src, REQUEST_HANDLER_PATH);
+      const sources = REQUEST_HANDLER_PATHS.map((rel) => {
+        const abs = path.resolve(opts.repo, rel);
+        return fs.readFileSync(abs, 'utf8');
+      });
+      const surfaceLabel = REQUEST_HANDLER_PATHS.join(' + ');
+      handlerResult = validateRequestHandlerSource(sources.join('\n'), surfaceLabel);
       diagnostics.push(...handlerResult.diagnostics);
     } catch (err) {
-      diagnostics.push({ file: REQUEST_HANDLER_PATH, message: `cannot read: ${err.message}` });
+      diagnostics.push({ file: REQUEST_HANDLER_PATHS.join(' + '), message: `cannot read: ${err.message}` });
       handlerResult = { ok: false };
     }
 

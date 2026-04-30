@@ -17,6 +17,7 @@ Checks the narrow V3 mission_request Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   requestHandler: 'crates/missiond-daemon/src/handlers/knowledge/request.rs',
+  requestArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/request/request_artifacts.rs',
   directiveHandler: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   mcpRequest: 'crates/missiond-mcp/src/tools/knowledge/request.rs',
 };
@@ -85,10 +86,12 @@ function checkFiles(root, files) {
   requireText(diagnostics, files.directiveHandler, sources.directiveHandler, 'payload["compiled_sexp_preview"] = json!(persisted_preview_sexp)');
   requireText(diagnostics, files.directiveHandler, sources.directiveHandler, 'payload["compiled_sexp"] = json!(persisted_compiled_sexp)');
 
-  requireText(diagnostics, files.requestHandler, sources.requestHandler, 'fn enrich_intent_alignment_projection');
-  requireText(diagnostics, files.requestHandler, sources.requestHandler, 'fn enrich_materialized_plan_lisp');
-  requireText(diagnostics, files.requestHandler, sources.requestHandler, 'atomic_write_artifact(&paths.plan, &enriched_plan_text, true)');
-  requireText(diagnostics, files.requestHandler, sources.requestHandler, 'respond_result.insert("plan_materialized"');
+  const requestSurface = `${sources.requestHandler}\n${sources.requestArtifacts}`;
+  const requestSurfaceLabel = `${files.requestHandler} + ${files.requestArtifacts}`;
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_intent_alignment_projection');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_materialized_plan_lisp');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'atomic_write_artifact(&paths.plan, &enriched_plan_text, true)');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'respond_result.insert("plan_materialized"');
 
   requireText(diagnostics, files.mcpRequest, sources.mcpRequest, ':plan_id/:version/:board_task_id');
   requireText(diagnostics, files.mcpRequest, sources.mcpRequest, 'writes the persisted ref back into plan.lisp');
@@ -123,10 +126,11 @@ fn enrich_persisted_directive_sexp() {}
 payload["compiled_sexp_preview"] = json!(persisted_preview_sexp);
 payload["compiled_sexp"] = json!(persisted_compiled_sexp);`);
   writeFixture(root, DEFAULT_FILES.requestHandler, `
-fn enrich_intent_alignment_projection() {}
 fn enrich_materialized_plan_lisp() {}
 atomic_write_artifact(&paths.plan, &enriched_plan_text, true);
 respond_result.insert("plan_materialized", json!(true));`);
+  writeFixture(root, DEFAULT_FILES.requestArtifacts, `
+fn enrich_intent_alignment_projection() {}`);
   writeFixture(root, DEFAULT_FILES.mcpRequest, `
 "stamps :plan_id/:version/:board_task_id back into request-local plan.lisp"
 "writes the persisted ref back into plan.lisp"`);

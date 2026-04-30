@@ -18,18 +18,32 @@
 //!     mission_plan.
 
 use anyhow::Result;
-use chrono::{SecondsFormat, Utc};
-use missiond_core::util::safe_byte_truncate;
 use missiond_core::types::{CreateBoardTaskInput, PlanStatus};
-use missiond_mcp::tools::{error_codes, ToolContent, ToolError, ToolResult};
+use missiond_core::util::safe_byte_truncate;
+use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
-use crate::handlers::knowledge::file_artifacts::{
-    atomic_write_artifact, resolve_writer_project_root, sanitize_topic_segment,
-};
+use crate::handlers::knowledge::file_artifacts::atomic_write_artifact;
 use crate::state::AppState;
+
+mod request_artifacts;
+
+#[cfg(test)]
+use missiond_mcp::tools::ToolContent;
+use request_artifacts::{
+    build_artifact_existence, build_artifact_paths_json, build_event_lisp, build_request_lisp,
+    extract_projected_sexp, nonblank, now_rfc3339, parse_mode, path_json, projection_to_json,
+    request_id_from_args, request_paths_for, resolve_request_project_root, run_projection,
+    sanitize_request_id, tool_result_payload, ProjectionOutcome, ProjectionStatus, RequestDoc,
+    RequestMode, RequestPaths,
+};
+#[cfg(test)]
+use request_artifacts::{
+    build_artifact_existence_with, classify_projection_target, extract_pipeline_meta,
+    plan_projection, PipelineMeta, ProjectionPlan, ProjectionTarget,
+};
 
 const REQUEST_SCHEMA: &str = "missiond.request.v1";
 const EVENT_SCHEMA: &str = "missiond.lifecycle-event.v1";
@@ -194,7 +208,10 @@ async fn action_advance(state: &AppState, args: &Value) -> Result<ToolResult> {
         .unwrap_or(false);
 
     let project_root_result = resolve_request_project_root(state, args).await;
-    let request_paths = match (sanitized_request_id.as_deref(), project_root_result.as_ref()) {
+    let request_paths = match (
+        sanitized_request_id.as_deref(),
+        project_root_result.as_ref(),
+    ) {
         (Some(id), Ok(root)) => Some(request_paths_for(root, id)),
         _ => None,
     };
@@ -202,7 +219,12 @@ async fn action_advance(state: &AppState, args: &Value) -> Result<ToolResult> {
     let inner = super::unified_entry::run_pipeline(state, args.clone()).await?;
 
     let request_id_present = sanitized_request_id.is_some();
-    let projection = run_projection(&inner, request_paths.as_ref(), overwrite, request_id_present);
+    let projection = run_projection(
+        &inner,
+        request_paths.as_ref(),
+        overwrite,
+        request_id_present,
+    );
     let execute_requested = parse_execute_requested(args);
 
     let file_payload = json!({
@@ -436,9 +458,12 @@ fn is_uuid_shaped(id: &str) -> bool {
     uuid::Uuid::parse_str(id).is_ok()
 }
 
-fn resolve_directive_ref(args: &Value, intent_alignment_text: Option<&str>) -> Option<DirectiveRef> {
-    let id = nonblank(args.get("approved_directive_id"))
-        .or_else(|| nonblank(args.get("directive_id")));
+fn resolve_directive_ref(
+    args: &Value,
+    intent_alignment_text: Option<&str>,
+) -> Option<DirectiveRef> {
+    let id =
+        nonblank(args.get("approved_directive_id")).or_else(|| nonblank(args.get("directive_id")));
     let version = args
         .get("directive_version")
         .and_then(|v| v.as_i64())
@@ -993,10 +1018,7 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     let execute_flag_explicit = args
         .get("execute")
         .and_then(|v| v.as_bool())
-        .or_else(|| {
-            args.get("execute_after_approval")
-                .and_then(|v| v.as_bool())
-        });
+        .or_else(|| args.get("execute_after_approval").and_then(|v| v.as_bool()));
 
     // Pure decision routing — pick outcome / inner action / blocked reason
     // before any IO so unit tests can pin the routing without AppState.
@@ -1019,7 +1041,10 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    if outcome != RespondOutcome::Blocked && decision.requires_directive_ref() && directive_ref.is_none() {
+    if outcome != RespondOutcome::Blocked
+        && decision.requires_directive_ref()
+        && directive_ref.is_none()
+    {
         outcome = RespondOutcome::Blocked;
         blocked_reason = Some(
             "directive ref missing; pass approved_directive_id (or directive_id) + directive_version, or wait for intent-alignment.lisp to carry a persisted ref".into(),
@@ -1031,16 +1056,21 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
         && plan_ref.is_none()
     {
         match plan_text.as_deref() {
-            Some(text) => match materialize_request_plan(state, args, &request_id, &paths, text).await {
-                Ok(materialized) => {
-                    plan_ref = Some(materialized.plan_ref.clone());
-                    plan_materialization = Some(materialized);
+            Some(text) => {
+                match materialize_request_plan(state, args, &request_id, &paths, text).await {
+                    Ok(materialized) => {
+                        plan_ref = Some(materialized.plan_ref.clone());
+                        plan_materialization = Some(materialized);
+                    }
+                    Err(e) => {
+                        outcome = RespondOutcome::Blocked;
+                        blocked_reason = Some(format!(
+                            "failed to materialize request-local plan.lisp: {:#}",
+                            e
+                        ));
+                    }
                 }
-                Err(e) => {
-                    outcome = RespondOutcome::Blocked;
-                    blocked_reason = Some(format!("failed to materialize request-local plan.lisp: {:#}", e));
-                }
-            },
+            }
             None => {}
         }
     }
@@ -1232,7 +1262,11 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(
                 ToolError::new(
                     error_codes::INVALID_PARAM,
-                    format!("failed to append review event {}: {:#}", event_path.display(), e),
+                    format!(
+                        "failed to append review event {}: {:#}",
+                        event_path.display(),
+                        e
+                    ),
                 )
                 .with_suggestion("ensure the request_id and project root are correct"),
             ))
@@ -1274,7 +1308,10 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
         respond_result.insert("plan_id".into(), json!(p.id));
     }
     if let Some(b) = board_task_materialization.as_ref() {
-        respond_result.insert("board_task_materialized".into(), json!(b.board_task_created));
+        respond_result.insert(
+            "board_task_materialized".into(),
+            json!(b.board_task_created),
+        );
         respond_result.insert(
             "board_task_materialization".into(),
             board_task_materialization_to_json(b),
@@ -1282,7 +1319,10 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     if let Some(m) = plan_materialization.as_ref() {
         respond_result.insert("plan_materialized".into(), json!(true));
-        respond_result.insert("plan_materialization".into(), plan_materialization_to_json(m));
+        respond_result.insert(
+            "plan_materialization".into(),
+            plan_materialization_to_json(m),
+        );
     }
     if let Some(inner) = inner_action {
         respond_result.insert("inner_action".into(), json!(inner));
@@ -1326,7 +1366,10 @@ async fn action_respond(state: &AppState, args: &Value) -> Result<ToolResult> {
     }
     if let Some(m) = plan_materialization.as_ref() {
         if let Some(obj) = response.as_object_mut() {
-            obj.insert("plan_materialization".into(), plan_materialization_to_json(m));
+            obj.insert(
+                "plan_materialization".into(),
+                plan_materialization_to_json(m),
+            );
         }
     }
     if let Some(b) = board_task_materialization.as_ref() {
@@ -1453,591 +1496,6 @@ fn wrap_pipeline_result(
         out.is_error = Some(true);
     }
     out
-}
-
-fn tool_result_payload(result: &ToolResult) -> Value {
-    match result.content.first() {
-        Some(ToolContent::Text { text }) => {
-            serde_json::from_str(text).unwrap_or_else(|_| json!({ "text": text }))
-        }
-        None => json!(null),
-    }
-}
-
-/// Read the unified-entry decorator's sibling JSON (second content element)
-/// to lift `pipeline_stage` + `artifact_refs.scope`. The decorator and the
-/// planner-error path both append exactly this shape; if the inner result
-/// does not carry it (e.g. unexpected ToolResult shape), the meta is empty
-/// and projection routing falls back to `unknown_stage`.
-fn extract_pipeline_meta(inner: &ToolResult) -> PipelineMeta {
-    let meta_value = inner.content.get(1).and_then(|c| match c {
-        ToolContent::Text { text } => serde_json::from_str::<Value>(text).ok(),
-    });
-    let pipeline_stage = meta_value
-        .as_ref()
-        .and_then(|v| v.get("pipeline_stage"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    let artifact_scope = meta_value
-        .as_ref()
-        .and_then(|v| v.pointer("/artifact_refs/scope"))
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-    PipelineMeta {
-        pipeline_stage,
-        artifact_scope,
-    }
-}
-
-async fn resolve_request_project_root(
-    state: &AppState,
-    args: &Value,
-) -> std::result::Result<PathBuf, String> {
-    resolve_writer_project_root(
-        &state.project_registry,
-        nonblank(args.get("project")).as_deref(),
-        nonblank(args.get("cwd")).as_deref(),
-        nonblank(args.get("target_project")).as_deref(),
-    )
-    .await
-}
-
-#[derive(Debug, Clone)]
-struct RequestPaths {
-    request: PathBuf,
-    intent_alignment: PathBuf,
-    plan: PathBuf,
-    events_dir: PathBuf,
-    receipts_dir: PathBuf,
-    reports_dir: PathBuf,
-    initial_event: PathBuf,
-}
-
-fn request_paths_for(project_root: &Path, request_id: &str) -> RequestPaths {
-    let base = project_root
-        .join(".missiond")
-        .join("requests")
-        .join(sanitize_request_id(request_id));
-    let events_dir = base.join("events");
-    RequestPaths {
-        request: base.join("request.lisp"),
-        intent_alignment: base.join("intent-alignment.lisp"),
-        plan: base.join("plan.lisp"),
-        receipts_dir: base.join("receipts"),
-        reports_dir: base.join("reports"),
-        initial_event: events_dir.join("000001.event.lisp"),
-        events_dir,
-    }
-}
-
-fn build_artifact_paths_json(paths: &RequestPaths) -> Value {
-    json!({
-        "request": path_json(&paths.request),
-        "intent_alignment": path_json(&paths.intent_alignment),
-        "plan": path_json(&paths.plan),
-        "events_dir": path_json(&paths.events_dir),
-        "receipts_dir": path_json(&paths.receipts_dir),
-        "reports_dir": path_json(&paths.reports_dir),
-    })
-}
-
-fn build_artifact_existence(paths: &RequestPaths) -> Value {
-    build_artifact_existence_with(paths, |p| p.exists())
-}
-
-fn build_artifact_existence_with<F: Fn(&Path) -> bool>(paths: &RequestPaths, exists: F) -> Value {
-    json!({
-        "request": exists(&paths.request),
-        "intent_alignment": exists(&paths.intent_alignment),
-        "plan": exists(&paths.plan),
-        "events_dir": exists(&paths.events_dir),
-        "receipts_dir": exists(&paths.receipts_dir),
-        "reports_dir": exists(&paths.reports_dir),
-    })
-}
-
-fn path_json(path: &Path) -> String {
-    path.to_string_lossy().to_string()
-}
-
-// ───────────────────────────────────────────────────────────────────────
-// Request-local projection — mirrors stable inner compile payloads into
-// .missiond/requests/<request_id>/{intent-alignment,plan}.lisp.
-// ───────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-struct PipelineMeta {
-    pipeline_stage: Option<String>,
-    artifact_scope: Option<String>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectionTarget {
-    IntentAlignment,
-    Plan,
-    Execute,
-    Unknown,
-}
-
-impl ProjectionTarget {
-    fn artifact_kind(self) -> Option<&'static str> {
-        match self {
-            Self::IntentAlignment => Some("intent_alignment"),
-            Self::Plan => Some("plan"),
-            Self::Execute | Self::Unknown => None,
-        }
-    }
-}
-
-fn classify_projection_target(meta: &PipelineMeta) -> ProjectionTarget {
-    if let Some(stage) = meta.pipeline_stage.as_deref() {
-        match stage {
-            "s1_message_intake" | "s3_alignment_review_gate" => {
-                return ProjectionTarget::IntentAlignment
-            }
-            "s4_plan_authoring" | "s5_plan_review_gate" => return ProjectionTarget::Plan,
-            "s6_execution_runner" => return ProjectionTarget::Execute,
-            _ => {}
-        }
-    }
-    match meta.artifact_scope.as_deref() {
-        Some("directive") => ProjectionTarget::IntentAlignment,
-        Some("plan") => ProjectionTarget::Plan,
-        Some("execution") => ProjectionTarget::Execute,
-        _ => ProjectionTarget::Unknown,
-    }
-}
-
-fn extract_projected_sexp(inner_payload: &Value) -> Option<(String, &'static str)> {
-    if let Some(s) = inner_payload.get("compiled_sexp").and_then(|v| v.as_str()) {
-        if !s.is_empty() {
-            return Some((s.to_string(), "compiled_sexp"));
-        }
-    }
-    if let Some(s) = inner_payload
-        .get("compiled_sexp_preview")
-        .and_then(|v| v.as_str())
-    {
-        if !s.is_empty() {
-            return Some((s.to_string(), "compiled_sexp_preview"));
-        }
-    }
-    None
-}
-
-fn enrich_intent_alignment_projection(body: String, inner_payload: &Value) -> String {
-    let directive_id = match nonblank(inner_payload.get("directive_id")) {
-        Some(id) => id,
-        None => return body,
-    };
-    let version = match inner_payload.get("version").and_then(|v| v.as_i64()) {
-        Some(v) => v,
-        None => return body,
-    };
-    if body.contains(":directive_id")
-        && (body.contains(":version") || body.contains(":directive_version"))
-    {
-        return body;
-    }
-
-    let trimmed_len = body.trim_end().len();
-    let trailing = body[trimmed_len..].to_string();
-    let mut core = body[..trimmed_len].to_string();
-    if !core.ends_with(')') {
-        return body;
-    }
-    core.pop();
-    if !core.contains(":directive_id") {
-        let _ = write!(core, "\n  :directive_id {}", lisp_string(&directive_id));
-    }
-    if !core.contains(":version") && !core.contains(":directive_version") {
-        let _ = write!(core, "\n  :version {}", version);
-    }
-    core.push(')');
-    core.push_str(&trailing);
-    core
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProjectionStatus {
-    Written,
-    SkippedExecuteStage,
-    SkippedPipelineError,
-    SkippedUnknownStage,
-    SkippedNoSexp,
-    SkippedNoRequestId,
-    SkippedNoProjectRoot,
-    WriteFailed,
-}
-
-impl ProjectionStatus {
-    fn wire(self) -> &'static str {
-        match self {
-            Self::Written => "written",
-            Self::SkippedExecuteStage => "skipped_execute_stage",
-            Self::SkippedPipelineError => "skipped_pipeline_error",
-            Self::SkippedUnknownStage => "skipped_unknown_stage",
-            Self::SkippedNoSexp => "skipped_no_sexp",
-            Self::SkippedNoRequestId => "skipped_no_request_id",
-            Self::SkippedNoProjectRoot => "skipped_no_project_root",
-            Self::WriteFailed => "write_failed",
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ProjectionPlan {
-    /// Pure decision: the projection cannot or should not write. `kind`
-    /// echoes the projection target when one matched the pipeline stage but
-    /// the inner payload lacked a sexp.
-    Skip {
-        status: ProjectionStatus,
-        kind: Option<&'static str>,
-    },
-    /// The pipeline produced a stable sexp and a projection target. The
-    /// caller still needs `RequestPaths` + overwrite to actually write it.
-    Write {
-        kind: &'static str,
-        body: String,
-        sexp_source: &'static str,
-    },
-}
-
-/// Pure projection planner — no IO, no AppState. The outcome maps directly
-/// onto the `projection.status` field surfaced in the wrapper response.
-fn plan_projection(
-    target: ProjectionTarget,
-    inner_payload: &Value,
-    inner_is_error: bool,
-) -> ProjectionPlan {
-    if inner_is_error {
-        return ProjectionPlan::Skip {
-            status: ProjectionStatus::SkippedPipelineError,
-            kind: None,
-        };
-    }
-    let kind = match target {
-        ProjectionTarget::IntentAlignment => "intent_alignment",
-        ProjectionTarget::Plan => "plan",
-        ProjectionTarget::Execute => {
-            return ProjectionPlan::Skip {
-                status: ProjectionStatus::SkippedExecuteStage,
-                kind: None,
-            }
-        }
-        ProjectionTarget::Unknown => {
-            return ProjectionPlan::Skip {
-                status: ProjectionStatus::SkippedUnknownStage,
-                kind: None,
-            }
-        }
-    };
-    match extract_projected_sexp(inner_payload) {
-        Some((body, source)) => {
-            let body = if target == ProjectionTarget::IntentAlignment {
-                enrich_intent_alignment_projection(body, inner_payload)
-            } else {
-                body
-            };
-            ProjectionPlan::Write {
-                kind,
-                body,
-                sexp_source: source,
-            }
-        }
-        None => ProjectionPlan::Skip {
-            status: ProjectionStatus::SkippedNoSexp,
-            kind: Some(kind),
-        },
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct ProjectionOutcome {
-    status: ProjectionStatus,
-    target: Option<&'static str>,
-    sexp_source: Option<&'static str>,
-    path: Option<PathBuf>,
-    sha256: Option<String>,
-    bytes: Option<u64>,
-    created: Option<bool>,
-    overwritten: Option<bool>,
-    error: Option<String>,
-}
-
-impl ProjectionOutcome {
-    fn skipped(status: ProjectionStatus, kind: Option<&'static str>) -> Self {
-        Self {
-            status,
-            target: kind,
-            sexp_source: None,
-            path: None,
-            sha256: None,
-            bytes: None,
-            created: None,
-            overwritten: None,
-            error: None,
-        }
-    }
-}
-
-fn projection_to_json(outcome: &ProjectionOutcome) -> Value {
-    let mut obj = serde_json::Map::new();
-    obj.insert("status".into(), json!(outcome.status.wire()));
-    if let Some(t) = outcome.target {
-        obj.insert("target".into(), json!(t));
-    }
-    if let Some(src) = outcome.sexp_source {
-        obj.insert("sexp_source".into(), json!(src));
-    }
-    if let Some(p) = outcome.path.as_ref() {
-        obj.insert("path".into(), json!(path_json(p)));
-    }
-    if let Some(s) = outcome.sha256.as_ref() {
-        obj.insert("sha256".into(), json!(s));
-    }
-    if let Some(b) = outcome.bytes {
-        obj.insert("bytes".into(), json!(b));
-    }
-    if let Some(c) = outcome.created {
-        obj.insert("created".into(), json!(c));
-    }
-    if let Some(o) = outcome.overwritten {
-        obj.insert("overwritten".into(), json!(o));
-    }
-    if let Some(e) = outcome.error.as_ref() {
-        obj.insert("error".into(), json!(e));
-    }
-    Value::Object(obj)
-}
-
-/// Glue between the pipeline result and request-local IO. Splits cleanly
-/// into the pure planner (`plan_projection`) and the side-effecting writer
-/// (`atomic_write_artifact`) so unit tests can pin the planner without
-/// touching disk.
-fn run_projection(
-    inner: &ToolResult,
-    request_paths: Option<&RequestPaths>,
-    overwrite: bool,
-    request_id_known: bool,
-) -> ProjectionOutcome {
-    let inner_is_error = inner.is_error.unwrap_or(false);
-    let inner_payload = tool_result_payload(inner);
-    let pipeline_meta = extract_pipeline_meta(inner);
-    let target = classify_projection_target(&pipeline_meta);
-    let plan = plan_projection(target, &inner_payload, inner_is_error);
-
-    match plan {
-        ProjectionPlan::Skip { status, kind } => ProjectionOutcome::skipped(status, kind),
-        ProjectionPlan::Write {
-            kind,
-            body,
-            sexp_source,
-        } => {
-            let paths = match request_paths {
-                Some(p) => p,
-                None => {
-                    let status = if request_id_known {
-                        ProjectionStatus::SkippedNoProjectRoot
-                    } else {
-                        ProjectionStatus::SkippedNoRequestId
-                    };
-                    return ProjectionOutcome::skipped(status, Some(kind));
-                }
-            };
-            let target_path = match kind {
-                "intent_alignment" => &paths.intent_alignment,
-                "plan" => &paths.plan,
-                _ => unreachable!("plan_projection guards kind to known targets"),
-            };
-            match atomic_write_artifact(target_path, &body, overwrite) {
-                Ok(write) => ProjectionOutcome {
-                    status: ProjectionStatus::Written,
-                    target: Some(kind),
-                    sexp_source: Some(sexp_source),
-                    path: Some(write.path),
-                    sha256: Some(write.sha256),
-                    bytes: Some(write.bytes),
-                    created: Some(write.created),
-                    overwritten: Some(write.overwritten),
-                    error: None,
-                },
-                Err(e) => ProjectionOutcome {
-                    status: ProjectionStatus::WriteFailed,
-                    target: Some(kind),
-                    sexp_source: Some(sexp_source),
-                    path: Some(target_path.clone()),
-                    sha256: None,
-                    bytes: None,
-                    created: None,
-                    overwritten: None,
-                    error: Some(format!("{:#}", e)),
-                },
-            }
-        }
-    }
-}
-
-struct RequestDoc<'a> {
-    request_id: &'a str,
-    mode: RequestMode,
-    source: &'a str,
-    objective: &'a str,
-    created_at: &'a str,
-    paths: &'a RequestPaths,
-}
-
-fn build_request_lisp(doc: &RequestDoc<'_>) -> String {
-    let mut out = String::new();
-    let requires_intent = doc.mode == RequestMode::HumanInteractive;
-    let requires_plan = doc.mode == RequestMode::HumanInteractive;
-    let _ = writeln!(out, ";; MissionD request artifact.");
-    let _ = writeln!(out, ";; Schema: {}", REQUEST_SCHEMA);
-    let _ = writeln!(out, "(mission-request {}", doc.request_id);
-    let _ = writeln!(out, "  :schema {}", lisp_string(REQUEST_SCHEMA));
-    let _ = writeln!(out, "  :request_id {}", lisp_string(doc.request_id));
-    let _ = writeln!(out, "  :source {}", lisp_string(doc.source));
-    let _ = writeln!(out, "  :mode :{}", doc.mode.lisp());
-    let _ = writeln!(out, "  :state :received");
-    let _ = writeln!(out, "  :created_at {}", lisp_string(doc.created_at));
-    let _ = writeln!(out, "  :objective {}", lisp_string(doc.objective));
-    let _ = writeln!(out, "  :artifacts");
-    let _ = writeln!(
-        out,
-        "    ((request :path {})",
-        lisp_string(&doc.paths.request.to_string_lossy())
-    );
-    let _ = writeln!(
-        out,
-        "     (intent-alignment :path {})",
-        lisp_string(&doc.paths.intent_alignment.to_string_lossy())
-    );
-    let _ = writeln!(
-        out,
-        "     (plan :path {})",
-        lisp_string(&doc.paths.plan.to_string_lossy())
-    );
-    let _ = writeln!(
-        out,
-        "     (events :path {})",
-        lisp_string(&doc.paths.events_dir.to_string_lossy())
-    );
-    let _ = writeln!(
-        out,
-        "     (receipts :path {})",
-        lisp_string(&doc.paths.receipts_dir.to_string_lossy())
-    );
-    let _ = writeln!(
-        out,
-        "     (reports :path {}))",
-        lisp_string(&doc.paths.reports_dir.to_string_lossy())
-    );
-    let _ = writeln!(out, "  :policy");
-    let _ = writeln!(
-        out,
-        "    (:requires_intent_approval {}",
-        if requires_intent { "true" } else { "false" }
-    );
-    let _ = writeln!(
-        out,
-        "     :requires_plan_approval {}",
-        if requires_plan { "true" } else { "false" }
-    );
-    let _ = writeln!(
-        out,
-        "     :trusted_agent_fast_path {})",
-        if doc.mode == RequestMode::TrustedAgent {
-            "true"
-        } else {
-            "false"
-        }
-    );
-    let _ = writeln!(out, "  :next_surface mission_directive");
-    let _ = writeln!(
-        out,
-        "  :blueprint \".missiond/v3/missiond-blueprint.lisp\")"
-    );
-    out
-}
-
-fn build_event_lisp(request_id: &str, created_at: &str, kind: &str, objective: &str) -> String {
-    format!(
-        ";; MissionD lifecycle event.\n\
-         ;; Schema: {schema}\n\
-         (lifecycle-event {event_id}\n\
-           :schema {schema_s}\n\
-           :seq 1\n\
-           :event_id {event_id}\n\
-           :request_id {request_id_s}\n\
-           :kind :{kind}\n\
-           :actor (:role :orchestrator :id \"mission_request\")\n\
-           :time {created_at_s}\n\
-           :payload (:objective {objective_s})\n\
-           :idempotency_key {idem})\n",
-        schema = EVENT_SCHEMA,
-        schema_s = lisp_string(EVENT_SCHEMA),
-        event_id = lisp_string(&format!("evt-{}-000001", request_id)),
-        request_id_s = lisp_string(request_id),
-        kind = kind,
-        created_at_s = lisp_string(created_at),
-        objective_s = lisp_string(objective),
-        idem = lisp_string(&format!("{}/{}", request_id, kind)),
-    )
-}
-
-fn request_id_from_args(args: &Value) -> String {
-    match nonblank(args.get("request_id")) {
-        Some(id) => sanitize_request_id(&id),
-        None => format!("req-{}", &uuid::Uuid::new_v4().simple().to_string()[..12]),
-    }
-}
-
-fn sanitize_request_id(raw: &str) -> String {
-    let sanitized = sanitize_topic_segment(raw);
-    if sanitized == "anonymous" {
-        format!("req-{}", &uuid::Uuid::new_v4().simple().to_string()[..12])
-    } else {
-        sanitized
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RequestMode {
-    HumanInteractive,
-    TrustedAgent,
-}
-
-impl RequestMode {
-    fn wire(self) -> &'static str {
-        match self {
-            Self::HumanInteractive => "human_interactive",
-            Self::TrustedAgent => "trusted_agent",
-        }
-    }
-
-    fn lisp(self) -> &'static str {
-        match self {
-            Self::HumanInteractive => "human-interactive",
-            Self::TrustedAgent => "trusted-agent",
-        }
-    }
-}
-
-fn parse_mode(raw: Option<&str>) -> RequestMode {
-    match raw.unwrap_or("human_interactive").trim() {
-        "trusted_agent" | "trusted-agent" => RequestMode::TrustedAgent,
-        _ => RequestMode::HumanInteractive,
-    }
-}
-
-fn nonblank(v: Option<&Value>) -> Option<String> {
-    v.and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-}
-
-fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -2270,7 +1728,9 @@ where
 }
 
 fn parse_execute_requested(args: &Value) -> bool {
-    args.get("execute").and_then(|v| v.as_bool()).unwrap_or(false)
+    args.get("execute")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
         || args
             .get("execute_after_approval")
             .and_then(|v| v.as_bool())
@@ -2455,8 +1915,7 @@ mod tests {
             "status": "dry_run",
             "compiled_sexp_preview": "(directive-draft\n  :utterance \"do x\")\n",
         });
-        let plan =
-            plan_projection(ProjectionTarget::IntentAlignment, &payload, false);
+        let plan = plan_projection(ProjectionTarget::IntentAlignment, &payload, false);
         match plan {
             ProjectionPlan::Write {
                 kind,
@@ -2546,8 +2005,7 @@ mod tests {
     #[test]
     fn plan_projection_skips_on_pipeline_error() {
         let payload = json!({});
-        let plan =
-            plan_projection(ProjectionTarget::IntentAlignment, &payload, true);
+        let plan = plan_projection(ProjectionTarget::IntentAlignment, &payload, true);
         assert_eq!(
             plan,
             ProjectionPlan::Skip {
@@ -2633,9 +2091,7 @@ mod tests {
     fn build_artifact_existence_with_predicate_drives_booleans() {
         let paths = request_paths_for(Path::new("/repo"), "req-x");
         // Pin only request.lisp + events_dir as existing; everything else absent.
-        let exists = |p: &Path| {
-            p == paths.request.as_path() || p == paths.events_dir.as_path()
-        };
+        let exists = |p: &Path| p == paths.request.as_path() || p == paths.events_dir.as_path();
         let v = build_artifact_existence_with(&paths, exists);
         assert_eq!(v["request"], true);
         assert_eq!(v["events_dir"], true);
@@ -2817,8 +2273,7 @@ mod tests {
 
     #[test]
     fn build_review_artifact_preview_returns_none_without_data() {
-        let preview =
-            build_review_artifact_preview(Path::new("/x"), false, None, no_read, 480);
+        let preview = build_review_artifact_preview(Path::new("/x"), false, None, no_read, 480);
         assert!(preview.is_none());
     }
 
@@ -2857,7 +2312,10 @@ mod tests {
             .iter()
             .map(|v| v.as_str().unwrap())
             .collect();
-        assert_eq!(allowed, vec!["approve_intent", "reject_intent", "ask_question"]);
+        assert_eq!(
+            allowed,
+            vec!["approve_intent", "reject_intent", "ask_question"]
+        );
     }
 
     #[test]
@@ -2921,16 +2379,13 @@ mod tests {
     #[test]
     fn latest_review_event_checkpoint_uses_latest_relevant_event() {
         let events = vec![
-            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))"
-                .to_string(),
-            "(lifecycle-event :payload (:decision :ask_question :outcome :recorded))"
-                .to_string(),
+            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))".to_string(),
+            "(lifecycle-event :payload (:decision :ask_question :outcome :recorded))".to_string(),
         ];
         assert_eq!(latest_review_event_checkpoint(&events), None);
 
         let events = vec![
-            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))"
-                .to_string(),
+            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))".to_string(),
         ];
         assert_eq!(
             latest_review_event_checkpoint(&events),
@@ -2938,10 +2393,8 @@ mod tests {
         );
 
         let events = vec![
-            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))"
-                .to_string(),
-            "(lifecycle-event :payload (:decision :execute_plan :outcome :blocked))"
-                .to_string(),
+            "(lifecycle-event :payload (:decision :approve_plan :outcome :dispatched))".to_string(),
+            "(lifecycle-event :payload (:decision :execute_plan :outcome :blocked))".to_string(),
         ];
         assert_eq!(
             latest_review_event_checkpoint(&events),
@@ -3035,7 +2488,9 @@ mod tests {
             review_checkpoint: None,
         };
         let packet = derive_review_packet(&inputs, no_read);
-        let preview = packet["artifact_preview"].as_str().expect("preview present");
+        let preview = packet["artifact_preview"]
+            .as_str()
+            .expect("preview present");
         assert!(preview.len() <= REVIEW_PREVIEW_MAX_BYTES);
         for (i, _) in preview.char_indices() {
             assert!(preview.is_char_boundary(i));
@@ -3179,7 +2634,10 @@ mod tests {
     #[test]
     fn respond_decision_classification_matches_routing_table() {
         // approve_intent / reject_intent need a directive ref.
-        for d in [RespondDecision::ApproveIntent, RespondDecision::RejectIntent] {
+        for d in [
+            RespondDecision::ApproveIntent,
+            RespondDecision::RejectIntent,
+        ] {
             assert!(d.requires_directive_ref());
             assert!(!d.requires_plan_ref());
         }
@@ -3275,8 +2733,7 @@ mod tests {
 
     #[test]
     fn resolve_directive_ref_accepts_uuid_generic_id_for_legacy_artifacts() {
-        let artifact =
-            "(intent-alignment :id \"00000000-0000-0000-0000-000000000abc\" :version 2)";
+        let artifact = "(intent-alignment :id \"00000000-0000-0000-0000-000000000abc\" :version 2)";
         let resolved = resolve_directive_ref(&json!({}), Some(artifact)).expect("ref resolves");
         assert_eq!(resolved.id, "00000000-0000-0000-0000-000000000abc");
         assert_eq!(resolved.version, 2);
@@ -3298,14 +2755,12 @@ mod tests {
     fn resolve_plan_ref_prefers_args_then_artifact_then_blocks() {
         // Explicit arg wins.
         let args = json!({ "approved_plan_id": "explicit-plan" });
-        let resolved =
-            resolve_plan_ref(&args, Some("(plan :plan_id \"artifact-plan\")"), &[])
-                .expect("plan ref");
+        let resolved = resolve_plan_ref(&args, Some("(plan :plan_id \"artifact-plan\")"), &[])
+            .expect("plan ref");
         assert_eq!(resolved.id, "explicit-plan");
         // Falls back to artifact when args missing.
-        let resolved =
-            resolve_plan_ref(&json!({}), Some("(plan :plan_id \"artifact-plan\")"), &[])
-                .expect("plan ref");
+        let resolved = resolve_plan_ref(&json!({}), Some("(plan :plan_id \"artifact-plan\")"), &[])
+            .expect("plan ref");
         assert_eq!(resolved.id, "artifact-plan");
         // Blocked when both missing.
         assert!(resolve_plan_ref(&json!({}), Some("(plan :goal :ship)"), &[]).is_none());
@@ -3326,8 +2781,8 @@ mod tests {
             "(event :plan_id \"old-plan\")".to_string(),
             "(event :decision :approve_plan :plan_id \"new-plan\")".to_string(),
         ];
-        let resolved = resolve_plan_ref(&json!({}), Some("(plan :goal :ship)"), &events)
-            .expect("event ref");
+        let resolved =
+            resolve_plan_ref(&json!({}), Some("(plan :goal :ship)"), &events).expect("event ref");
         assert_eq!(resolved.id, "new-plan");
     }
 
@@ -3352,12 +2807,7 @@ mod tests {
     fn enrich_materialized_plan_lisp_preserves_existing_ref() {
         let body = "(plan-draft :plan_id \"existing\" :version 2 :board_task_id \"b\")";
         assert_eq!(
-            enrich_materialized_plan_lisp(
-                body,
-                &PlanRef { id: "new".into() },
-                3,
-                "new-board",
-            ),
+            enrich_materialized_plan_lisp(body, &PlanRef { id: "new".into() }, 3, "new-board",),
             body
         );
     }
@@ -3677,21 +3127,18 @@ mod tests {
 
     #[test]
     fn next_action_dispatched_paths_describe_continuation() {
-        assert!(next_action_for(
-            RespondDecision::ApproveIntent,
-            RespondOutcome::Dispatched,
-        )
-        .contains("plan.lisp"));
-        assert!(next_action_for(
-            RespondDecision::ApprovePlan,
-            RespondOutcome::Dispatched,
-        )
-        .contains("execute_plan"));
-        assert!(next_action_for(
-            RespondDecision::ExecutePlan,
-            RespondOutcome::Dispatched,
-        )
-        .contains("execute"));
+        assert!(
+            next_action_for(RespondDecision::ApproveIntent, RespondOutcome::Dispatched,)
+                .contains("plan.lisp")
+        );
+        assert!(
+            next_action_for(RespondDecision::ApprovePlan, RespondOutcome::Dispatched,)
+                .contains("execute_plan")
+        );
+        assert!(
+            next_action_for(RespondDecision::ExecutePlan, RespondOutcome::Dispatched,)
+                .contains("execute")
+        );
     }
 
     #[test]
@@ -3702,16 +3149,14 @@ mod tests {
 
     #[test]
     fn next_action_record_only_paths_describe_followup() {
-        assert!(next_action_for(
-            RespondDecision::RejectIntent,
-            RespondOutcome::Recorded,
-        )
-        .contains("revise"));
-        assert!(next_action_for(
-            RespondDecision::AskQuestion,
-            RespondOutcome::Recorded,
-        )
-        .contains("question"));
+        assert!(
+            next_action_for(RespondDecision::RejectIntent, RespondOutcome::Recorded,)
+                .contains("revise")
+        );
+        assert!(
+            next_action_for(RespondDecision::AskQuestion, RespondOutcome::Recorded,)
+                .contains("question")
+        );
     }
 
     // ── parse_event_seq_from_filename strictness ──────────────────────
@@ -3719,7 +3164,10 @@ mod tests {
     #[test]
     fn parse_event_seq_only_accepts_numeric_stem() {
         assert_eq!(parse_event_seq_from_filename("000001.event.lisp"), Some(1));
-        assert_eq!(parse_event_seq_from_filename("999999.event.lisp"), Some(999999));
+        assert_eq!(
+            parse_event_seq_from_filename("999999.event.lisp"),
+            Some(999999)
+        );
         assert!(parse_event_seq_from_filename("abc.event.lisp").is_none());
         assert!(parse_event_seq_from_filename("000001.event.lisp.bak").is_none());
         assert!(parse_event_seq_from_filename("000001.lisp").is_none());
