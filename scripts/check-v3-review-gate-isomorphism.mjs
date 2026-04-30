@@ -46,6 +46,8 @@ const DEFAULT_FILES = {
     'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/proposer.rs',
   planApprovalSubscriber:
     'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs',
+  planApprovalSupersede:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/supersede.rs',
   workflow: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   mcpDirective: 'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -117,6 +119,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/mark.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/proposer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/supersede.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   'crates/missiond-mcp/src/tools/knowledge/plan.rs',
@@ -188,12 +191,13 @@ const PLAN_APPROVAL_REVIEW_RS_NEEDLES = [
   'mod mark;',
   'mod proposer;',
   'mod subscriber;',
+  'mod supersede;',
   'pub(super) use self::approve::action_approve;',
   'pub(super) use self::mark::action_mark;',
   'use self::proposer::{',
   'request_plan_auto_approve_proposal',
   'pub(crate) use self::subscriber::{handle_review_resolved_event, PlanSubscriberOutcome};',
-  'pub(super) async fn action_supersede',
+  'pub(super) use self::supersede::action_supersede;',
 ];
 
 const PLAN_APPROVAL_APPROVE_RS_NEEDLES = [
@@ -215,6 +219,17 @@ const PLAN_APPROVAL_MARK_RS_NEEDLES = [
   'maybe_emit_review_question_resolved(',
   'target_raw',
   'PlanStatus::Approved',
+];
+
+const PLAN_APPROVAL_SUPERSEDE_RS_NEEDLES = [
+  'use super::*;',
+  'async fn action_supersede',
+  'async fn action_supersede_with_resolution',
+  'async fn plan_action_supersede_with_policy_only',
+  'parse_review_resolution_input(args)',
+  'maybe_emit_review_question_resolved(',
+  'PlanStatus::Superseded',
+  'destructive',
 ];
 
 const PLAN_APPROVAL_PROPOSER_RS_NEEDLES = [
@@ -378,6 +393,12 @@ function checkFiles(root, files) {
   );
   requireAll(
     diagnostics,
+    files.planApprovalSupersede,
+    sources.planApprovalSupersede,
+    PLAN_APPROVAL_SUPERSEDE_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
     files.planApprovalProposer,
     sources.planApprovalProposer,
     PLAN_APPROVAL_PROPOSER_RS_NEEDLES,
@@ -470,6 +491,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.planApprovalMark]: buildGoodPlanApprovalMarkRs(),
     [DEFAULT_FILES.planApprovalProposer]: buildGoodPlanApprovalProposerRs(),
     [DEFAULT_FILES.planApprovalSubscriber]: buildGoodPlanApprovalSubscriberRs(),
+    [DEFAULT_FILES.planApprovalSupersede]: buildGoodPlanApprovalSupersedeRs(),
     [DEFAULT_FILES.workflow]: buildGoodWorkflowRs(),
     [DEFAULT_FILES.mcpDirective]: buildGoodMcpRs({ neverAutoApprove: true }),
     [DEFAULT_FILES.mcpPlan]: buildGoodMcpRs({ neverAutoApprove: true }),
@@ -621,6 +643,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/mark.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/proposer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/supersede.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"
@@ -752,11 +775,12 @@ mod approve;
 mod mark;
 mod proposer;
 mod subscriber;
+mod supersede;
 pub(super) use self::approve::action_approve;
 pub(super) use self::mark::action_mark;
 use self::proposer::{request_plan_auto_approve_proposal};
 pub(crate) use self::subscriber::{handle_review_resolved_event, PlanSubscriberOutcome};
-pub(super) async fn action_supersede() {}
+pub(super) use self::supersede::action_supersede;
 fn caller(args: &serde_json::Value) {
     request_plan_auto_approve_proposal();
 }
@@ -787,6 +811,20 @@ pub(super) async fn action_mark() {
 }
 async fn action_mark_with_resolution() {}
 async fn plan_action_mark_with_policy_only() {}
+`;
+}
+
+function buildGoodPlanApprovalSupersedeRs() {
+  return `// fixture
+use super::*;
+pub(in crate::handlers::knowledge::plan) async fn action_supersede() {
+    parse_review_resolution_input(args);
+    maybe_emit_review_question_resolved();
+    PlanStatus::Superseded;
+    destructive;
+}
+async fn action_supersede_with_resolution() {}
+async fn plan_action_supersede_with_policy_only() {}
 `;
 }
 
