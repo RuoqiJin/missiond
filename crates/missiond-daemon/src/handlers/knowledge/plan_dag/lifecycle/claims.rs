@@ -1,5 +1,9 @@
 use super::super::claim_lease::PlanDagClaim;
-use super::*;
+use super::super::{DagNode, ExecutionOutcome};
+use super::{publish_plan_node_state_change, EvidenceCtx};
+use crate::handlers::knowledge::evidence_collector::{self, AppendOutcome, EvidenceEntry};
+use crate::state::AppState;
+use serde_json::json;
 
 /// wave-17 / task 02 — emit a `pending -> claimed` evidence row + bus
 /// event for a node whose claim was successfully registered (or
