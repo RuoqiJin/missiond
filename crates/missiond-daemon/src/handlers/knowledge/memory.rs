@@ -4,6 +4,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tracing::info;
 
+use crate::context::v3_blueprint_runtime::MemoryKbRuntimeConfig;
 use crate::events_sync;
 use crate::helpers::default_mission_home;
 use crate::lenient;
@@ -31,6 +32,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     handle_inner(state, name, args).await
 }
 
+fn load_memory_kb_config() -> Result<MemoryKbRuntimeConfig> {
+    MemoryKbRuntimeConfig::load_for_current_dir()
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
+
 async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         // ===== Memory Extraction =====
@@ -56,10 +62,11 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 }
             }
 
-            const PENDING_MSG_LIMIT: usize = 60;
+            let config = load_memory_kb_config()?;
+            let pending_msg_limit = config.pending_message_limit;
             let pending = state
                 .store
-                .get_pending_realtime_messages_with_limit(PENDING_MSG_LIMIT)
+                .get_pending_realtime_messages_with_limit(pending_msg_limit)
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -84,9 +91,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             msg.id, msg.timestamp, msg.content
                         ));
                     } else if msg.role == "tool_result" {
-                        // Tool results: file contents, command outputs — truncate to 1000 chars
-                        let content = if msg.content.len() > 1000 {
-                            let end = events_sync::floor_char_boundary(&msg.content, 1000);
+                        let max_chars = config.tool_result_preview_chars;
+                        let content = if msg.content.len() > max_chars {
+                            let end = events_sync::floor_char_boundary(&msg.content, max_chars);
                             format!("{}…({}字符)", &msg.content[..end], msg.content.len())
                         } else {
                             msg.content.clone()
@@ -96,9 +103,9 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                             msg.id, msg.timestamp, content
                         ));
                     } else {
-                        // Assistant messages: truncate to reduce payload
-                        let content = if msg.content.len() > 500 {
-                            let end = events_sync::floor_char_boundary(&msg.content, 500);
+                        let max_chars = config.assistant_preview_chars;
+                        let content = if msg.content.len() > max_chars {
+                            let end = events_sync::floor_char_boundary(&msg.content, max_chars);
                             format!("{}…", &msg.content[..end])
                         } else {
                             msg.content.clone()
@@ -113,8 +120,8 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             let session_count = pending.len();
             let msg_count = all_msg_ids.len();
-            let truncated_note = if msg_count >= PENDING_MSG_LIMIT {
-                format!(" ⚠️ 已达上限 {}，可能还有更多未显示的消息。处理完当前批次后系统将自动推送下一批。", PENDING_MSG_LIMIT)
+            let truncated_note = if msg_count >= pending_msg_limit {
+                format!(" ⚠️ 已达上限 {}，可能还有更多未显示的消息。处理完当前批次后系统将自动推送下一批。", pending_msg_limit)
             } else {
                 String::new()
             };

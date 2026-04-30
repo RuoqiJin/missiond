@@ -14,6 +14,7 @@ the corresponding V3 function boundaries.
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   kbFacade: 'crates/missiond-daemon/src/handlers/knowledge/kb.rs',
   kbArgs: 'crates/missiond-daemon/src/handlers/knowledge/kb/args.rs',
   kbRemember: 'crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs',
@@ -29,6 +30,7 @@ const DEFAULT_FILES = {
   kbOps: 'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
   kbBeacon: 'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
   kbCodeSearch: 'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
+  memory: 'crates/missiond-daemon/src/handlers/knowledge/memory.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
 };
 
@@ -90,7 +92,12 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     '(surface memory-kb',
+    '(memory-kb-policy',
+    ':pending-message-limit 60',
+    ':tool-result-preview-chars 1000',
+    ':assistant-preview-chars 500',
     ':status "code-aligned"',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/args.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs',
@@ -107,6 +114,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
     'scripts/check-v3-memory-kb-isomorphism.mjs',
+    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
     'kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting',
@@ -123,6 +131,18 @@ function checkFiles(root, files) {
     'kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate',
     'kb/code_search.rs owns AST code-search egress',
     'node scripts/check-v3-memory-kb-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'MemoryKbRuntimeConfig',
+    'parse_memory_kb_policy',
+    'DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT',
+    'DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS',
+    'DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS',
+    'memory-kb-policy',
+    ':pending-message-limit',
+    ':tool-result-preview-chars',
+    ':assistant-preview-chars',
   ]);
 
   requireAll(diagnostics, files.kbFacade, sources.kbFacade, [
@@ -162,6 +182,16 @@ function checkFiles(root, files) {
     '"mission_kb_ops"',
     '"mission_beacon"',
     '"mission_kb_remember"',
+  ]);
+
+  requireAll(diagnostics, files.memory, sources.memory, [
+    'MemoryKbRuntimeConfig',
+    'load_memory_kb_config',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'pending_message_limit',
+    'tool_result_preview_chars',
+    'assistant_preview_chars',
+    'get_pending_realtime_messages_with_limit(pending_msg_limit)',
   ]);
 
   requireAll(diagnostics, files.kbArgs, sources.kbArgs, [
@@ -383,10 +413,15 @@ function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-memory-kb-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
+  (memory-kb-policy
+    :pending-message-limit 60
+    :tool-result-preview-chars 1000
+    :assistant-preview-chars 500)
   (implementation-map
     (surface memory-kb
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/args.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs"
@@ -401,8 +436,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
+      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
@@ -435,6 +471,9 @@ use query::{handle_kb_get, handle_kb_list, handle_kb_search};
 pub(crate) async fn handle() {
   "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_kb_remember";
 }`);
+  writeFixture(root, DEFAULT_FILES.v3Runtime, `
+MemoryKbRuntimeConfig; parse_memory_kb_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars;
+`);
   writeFixture(root, DEFAULT_FILES.kbArgs, `
 pub(super) struct KBRememberArgs;
 pub(super) struct KBKeyArgs;
@@ -514,6 +553,9 @@ pub(super) async fn handle_beacon_annotate() { beacon_node_annotate(); }
 pub(super) async fn handle_code_search() {
   CodeSearchArgs; ast_search(); node_type; ast_find_related(); No code nodes found matching query; No code nodes matched filters;
 }`);
+  writeFixture(root, DEFAULT_FILES.memory, `
+MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit);
+`);
   writeFixture(root, DEFAULT_FILES.mcpKb, `
 "mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_code_search";
 `);

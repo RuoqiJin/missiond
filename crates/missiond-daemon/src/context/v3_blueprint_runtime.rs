@@ -47,6 +47,9 @@ pub(crate) const DEFAULT_PROTECTED_FLOW_PATTERNS: [&str; 4] = [
     "F-incident-reaction",
     "F-capability-usage-monitoring",
 ];
+pub(crate) const DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT: usize = 60;
+pub(crate) const DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS: usize = 1000;
+pub(crate) const DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS: usize = 500;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -91,6 +94,13 @@ pub(crate) struct CapabilityGovernanceRuntimeConfig {
     pub review_sidecar_path: PathBuf,
     pub protected_tool_patterns: Vec<String>,
     pub protected_flow_patterns: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MemoryKbRuntimeConfig {
+    pub pending_message_limit: usize,
+    pub tool_result_preview_chars: usize,
+    pub assistant_preview_chars: usize,
 }
 
 #[derive(Debug)]
@@ -195,6 +205,16 @@ impl Default for CapabilityGovernanceRuntimeConfig {
                 .iter()
                 .map(|value| value.to_string())
                 .collect(),
+        }
+    }
+}
+
+impl Default for MemoryKbRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            pending_message_limit: DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT,
+            tool_result_preview_chars: DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS,
+            assistant_preview_chars: DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS,
         }
     }
 }
@@ -385,6 +405,40 @@ impl CapabilityGovernanceRuntimeConfig {
     }
 }
 
+impl MemoryKbRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_memory_kb_policy(&source)
+    }
+}
+
 pub(crate) fn parse_workstation_config(
     source: &str,
 ) -> Result<WorkstationRuntimeConfig, BlueprintConfigError> {
@@ -524,6 +578,32 @@ pub(crate) fn parse_capability_governance_policy(
         review_sidecar_path: PathBuf::from(review_sidecar_path),
         protected_tool_patterns,
         protected_flow_patterns,
+    })
+}
+
+pub(crate) fn parse_memory_kb_policy(
+    source: &str,
+) -> Result<MemoryKbRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "memory-kb-policy")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing (memory-kb-policy ...)".into()))?;
+    let tokens = tokenize_lisp(&block);
+    let pending_message_limit = usize_keyword(&tokens, ":pending-message-limit")?;
+    let tool_result_preview_chars = usize_keyword(&tokens, ":tool-result-preview-chars")?;
+    let assistant_preview_chars = usize_keyword(&tokens, ":assistant-preview-chars")?;
+    if pending_message_limit == 0 {
+        return Err(BlueprintConfigError::Parse(
+            ":pending-message-limit must be positive".into(),
+        ));
+    }
+    if tool_result_preview_chars == 0 || assistant_preview_chars == 0 {
+        return Err(BlueprintConfigError::Parse(
+            "memory preview char limits must be positive".into(),
+        ));
+    }
+    Ok(MemoryKbRuntimeConfig {
+        pending_message_limit,
+        tool_result_preview_chars,
+        assistant_preview_chars,
     })
 }
 
@@ -761,7 +841,11 @@ mod tests {
   (capability-governance-policy
     :review-sidecar ".missiond/v2/capability-usage-review.json"
     :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_confirm" "mission_incident"]
-    :protected-flow-patterns ["engineering" "F-execution-log-governance" "F-incident-reaction" "F-capability-usage-monitoring"]))
+    :protected-flow-patterns ["engineering" "F-execution-log-governance" "F-incident-reaction" "F-capability-usage-monitoring"])
+  (memory-kb-policy
+    :pending-message-limit 60
+    :tool-result-preview-chars 1000
+    :assistant-preview-chars 500))
 "#;
 
     #[test]
@@ -900,5 +984,29 @@ mod tests {
         let err = parse_capability_governance_policy("(missiond-blueprint)")
             .expect_err("missing capability governance policy should fail");
         assert!(err.to_string().contains("capability-governance-policy"));
+    }
+
+    #[test]
+    fn parses_memory_kb_policy_defaults() {
+        let cfg = parse_memory_kb_policy(BLUEPRINT).expect("parse memory kb policy");
+        assert_eq!(
+            cfg.pending_message_limit,
+            DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT
+        );
+        assert_eq!(
+            cfg.tool_result_preview_chars,
+            DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS
+        );
+        assert_eq!(
+            cfg.assistant_preview_chars,
+            DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS
+        );
+    }
+
+    #[test]
+    fn missing_memory_kb_policy_is_rejected() {
+        let err = parse_memory_kb_policy("(missiond-blueprint)")
+            .expect_err("missing memory kb policy should fail");
+        assert!(err.to_string().contains("memory-kb-policy"));
     }
 }

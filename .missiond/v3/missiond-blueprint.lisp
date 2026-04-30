@@ -561,6 +561,15 @@
        "Protected pattern semantics stay explicit: tool patterns ending '_' are prefixes; other tool patterns are exact; flow patterns match exact or prefix."
        "A real MissionD project with .missiond but no capability-governance-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (memory-kb-policy
+    :desc "Lisp-owned memory extraction budget for the memory-kb surface."
+    :pending-message-limit 60
+    :tool-result-preview-chars 1000
+    :assistant-preview-chars 500
+    :invariants
+      ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
+       "A real MissionD project with .missiond but no memory-kb-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
+
   (ops-infra
     :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
     :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
@@ -709,12 +718,12 @@
       :surface ops-infra
       :note "Local deploy, smoke, and scoped formatting are code-aligned V3 operations.")
     (v2-item knowledge-memory-and-kb
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent.lisp :: memory/kb-manager"
       :v3-pillar memory
       :v3-function knowledge-memory
       :surface memory-kb
-      :note "KB, beacon, memory, insight, and intent snapshot tools are physically split under the V3 memory-kb surface; runtime projection remains a separate future graduation step.")
+      :note "KB, beacon, memory, insight, and intent snapshot tools are physically split under the V3 memory-kb surface; memory-kb-policy now projects realtime memory pending batch size and preview truncation budgets into mission_memory runtime.")
     (v2-item project-registry
       :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: project-root-spawn-cwd / ProjectRegistry"
@@ -1070,9 +1079,10 @@
       (function knowledge-memory
         :surface memory-kb
         :entry [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
-        :core ((step s1 :logic "resolve project/global memory scope and normalize KB or intent query")
-               (step s2 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
-               (step s3 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
+        :core ((step s1 :logic "load memory-kb-policy for realtime extraction batch and preview budgets")
+               (step s2 :logic "resolve project/global memory scope and normalize KB or intent query")
+               (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
+               (step s4 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
         :egress [kb_result memory_projection search_hits insight_summary])
       (function project-registry
         :surface project-registry
@@ -1606,7 +1616,8 @@
     (surface memory-kb
       :status "code-aligned"
       :implements [knowledge-memory kb-manager memory insight intent-snapshot]
-      :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/args.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/remember.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs"
@@ -1629,7 +1640,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for the legacy memory/KB public tools. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress. Runtime projection remains a later runtime-projected graduation.")
+      :note "Runtime-projected V3 destination for the legacy memory/KB public tools. context/v3_blueprint_runtime.rs projects memory-kb-policy realtime extraction batch size and preview truncation budgets into mission_memory runtime. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress; memory.rs owns mission_memory pending/pause/status with V3 memory-kb-policy projection.")
 
     (surface project-registry
       :status "code-aligned"
