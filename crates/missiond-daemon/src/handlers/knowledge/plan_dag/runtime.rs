@@ -16,9 +16,7 @@ use super::claim_lease::{
     parse_enforce_claims, ClaimAcquire, ClaimRegistry, PlanDagClaim,
 };
 use super::dispatch::{DispatchOutcome, TaskContractDispatchCtx};
-use super::lifecycle::{
-    emit_evidence_claim_conflict, emit_evidence_finished, plan_node_should_retry, EvidenceCtx,
-};
+use super::lifecycle::{emit_evidence_claim_conflict, emit_evidence_finished, EvidenceCtx};
 use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
 use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
 use super::scheduler::propagate_taint;
@@ -27,6 +25,7 @@ mod acceptance;
 mod bookkeeping;
 mod claims;
 mod gates;
+mod retry;
 mod rollbacks;
 mod skips;
 mod spawn;
@@ -37,6 +36,7 @@ use bookkeeping::{
 };
 use claims::{record_acquired_claim, record_compat_claim, release_claim_if_recorded};
 use gates::filter_ready_nodes_for_gates;
+use retry::retry_failed_node_if_allowed;
 use rollbacks::evaluate_and_emit_rollback;
 use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
 use spawn::spawn_dispatch_attempt;
@@ -537,136 +537,29 @@ pub(super) async fn execute_with_concurrency(
                 continue;
             }
 
-            // Failure path — decide retry vs final failure. The
-            // predicate is `plan_node_should_retry` so unit tests can
-            // pin the decision without standing up the wave loop.
-            let should_retry = plan_node_should_retry(
+            if retry_failed_node_if_allowed(
+                state,
+                &ctx,
+                plan,
+                node.clone(),
+                &node_id,
+                &dispatch_strategy,
                 current_attempt,
                 max_attempts,
                 non_retryable,
                 abort_new_dispatch,
-            );
-            if should_retry {
-                // wave-17 / task 02 — release the failed-attempt
-                // claim BEFORE re-acquiring on retry so the new
-                // attempt's claim id (with the bumped attempt
-                // suffix) replaces the prior one in the registry
-                // without overlap. Best-effort: skip if the original
-                // attempt never registered a claim (compat-mode
-                // conflict).
-                release_claim_if_recorded(
-                    state,
-                    &ctx,
-                    &node,
-                    &dispatch_strategy,
-                    current_attempt,
-                    "failed_will_retry",
-                    &mut claim_registry,
-                    &mut active_claims_by_node,
-                    &mut outcome,
-                )
-                .await;
-                // Optional sleep between attempts. Skipped when absent
-                // / 0 so the common no-back-off case stays cheap.
-                if let Some(delay_ms) = node.effective_retry_delay_ms() {
-                    tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-                }
-                // Bump the attempt counter, re-emit `ready -> running`
-                // for the retry attempt, and re-spawn into the SAME
-                // JoinSet so the wave loop drains it without
-                // reshuffling the ready set. Lifecycle stays Running.
-                let next_attempt = {
-                    let entry = attempts_made.entry(node_id.clone()).or_insert(0);
-                    *entry += 1;
-                    *entry
-                };
-                // wave-17 / task 02 — re-acquire claim for retry
-                // attempt. Fresh claim id includes the bumped
-                // attempt suffix so the audit trail captures every
-                // attempt's claim metadata distinctly.
-                let (retry_scopes, retry_scope_source) = derive_node_claim_scopes(&node, plan.id);
-                let retry_claim_id = derive_plan_dag_claim_id(plan.id, &node_id, next_attempt);
-                let retry_now = chrono::Utc::now();
-                let retry_acquire = claim_registry.try_acquire(
-                    retry_claim_id.clone(),
-                    claimer_name.clone(),
-                    retry_scopes.clone(),
-                    retry_scope_source,
-                    claim_lease_secs,
-                    retry_now,
-                );
-                match retry_acquire {
-                    ClaimAcquire::Acquired(retry_claim) => {
-                        record_acquired_claim(
-                            state,
-                            &ctx,
-                            &node,
-                            &dispatch_strategy,
-                            next_attempt,
-                            &retry_claim,
-                            &mut lifecycle,
-                            &mut active_claims_by_node,
-                            &mut outcome,
-                        )
-                        .await;
-                    }
-                    ClaimAcquire::Conflict {
-                        attempted_scopes,
-                        attempted_scope_source,
-                        conflicting_claim_id,
-                        conflicting_claimer,
-                        conflicting_scope,
-                        offending_scope,
-                        ..
-                    } => {
-                        // Compat / enforce both end here for retries
-                        // — we already mid-flight and cannot fail
-                        // the prior attempt over a retry-claim
-                        // conflict. Surface the audit row as
-                        // recorded_compat (the claim is informational
-                        // only on retries) and continue.
-                        let synthetic = PlanDagClaim {
-                            claim_id: retry_claim_id.clone(),
-                            claimer: claimer_name.clone(),
-                            scopes: attempted_scopes,
-                            scope_source: attempted_scope_source,
-                            acquired_at: retry_now,
-                            lease_expires_at: retry_now
-                                + chrono::Duration::seconds(claim_lease_secs),
-                            released_at: None,
-                        };
-                        record_compat_claim(
-                            state,
-                            &ctx,
-                            &node,
-                            &dispatch_strategy,
-                            next_attempt,
-                            &synthetic,
-                            (
-                                conflicting_claim_id,
-                                conflicting_claimer,
-                                conflicting_scope,
-                                offending_scope,
-                            ),
-                            &mut lifecycle,
-                            &mut outcome,
-                        )
-                        .await;
-                    }
-                }
-                spawn_dispatch_attempt(
-                    state,
-                    &ctx,
-                    plan,
-                    node,
-                    &dispatch_strategy,
-                    next_attempt,
-                    &task_contract_ctx,
-                    &mut lifecycle,
-                    &mut outcome,
-                    &mut join_set,
-                )
-                .await;
+                claim_lease_secs,
+                &claimer_name,
+                &mut attempts_made,
+                &mut claim_registry,
+                &mut active_claims_by_node,
+                &task_contract_ctx,
+                &mut lifecycle,
+                &mut outcome,
+                &mut join_set,
+            )
+            .await
+            {
                 continue;
             }
 
