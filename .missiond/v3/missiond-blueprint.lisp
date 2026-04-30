@@ -636,12 +636,12 @@
       :surface mission_board
       :note "V2 board task lifecycle and claim mechanics converge into mission_board.")
     (v2-item claudecode-workstation-config
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: claudecode-workstation-orchestration"
       :v3-pillar workstation
       :v3-function workstation-config
       :surface workstation-config
-      :note "V2 workstation policy now has explicit V3 model/profile, timeout, prompt, ownership, and close-owner contracts.")
+      :note "V2 workstation policy now has explicit V3 model/profile, timeout, prompt, ownership, and close-owner contracts; mission_task_delegate reads V3 workstation-config through WorkstationRuntimeConfig::load_for_project_root for model-profile and timeout projection.")
     (v2-item workstation-dispatch-substrate
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: workstation-dispatch-v0"
@@ -775,7 +775,7 @@
                 mission_board_claim mission_board_note_add mission_board_decompose mission_board_retry
                 mission_submit_phase_result])
       (tool-group workstation-entry
-        :status code-aligned
+        :status runtime-projected
         :v2-source ".missiond/v2/intent-worker.lisp :: claudecode-workstation-orchestration"
         :v3-pillar workstation
         :v3-function workstation-config
@@ -1500,11 +1500,12 @@
       :code ["crates/missiond-daemon/src/handlers/compute/compute_slot.rs"
              "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
              "crates/missiond-daemon/src/context/slot_env.rs"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/slot_orchestrator/spawner.rs"
              "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-mcp/src/tools/compute/compute_slot.rs"
              "crates/missiond-mcp/src/tools/compute/task_delegate.rs"]
-      :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. compute_slot objective is metadata only; direct warmup requires explicit initial_prompt, and delegated task_delegate auto-provision still carries suppress_initial_prompt=true. spawn_tracked_slot now syncs MissionD Claude hooks project-locally via slot_env::sync_slot_hooks_to_local_settings, preserving permissions and existing hooks while adding SessionStart session-register + UserPromptSubmit context-prefetch before PTY start; build_slot_tracking_env injects MISSION_IPC_ENDPOINT so hooks reconnect to the active daemon instead of relying on stale global defaults. Autopilot pty.send budget, smart-watchdog idle-recovery threshold, and Autopilot BoardTask claim lease are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs / derive_board_task_lease_secs in autopilot.rs. The fixed 20-minute claim lease is gone; the lease now equals idle_watchdog_threshold_secs so the watchdog cannot reclaim a slot whose claim is still legitimately ticking inside its declared timeout. Autopilot prompt assembly projects the V3 prompt-tool-contract via build_base_prompt (objective dedupe) and append_board_task_id_suffix (conditional board self-close); the prompt no longer hardcodes mission_board_update / mission_board_note_add as unconditional must-calls. The V3 execution-ownership rule for delegated BoardTasks projects to: compute_slot::effective_initial_prompt + explicit initial_prompt + suppress_initial_prompt arg (delegated path starts the slot idle), task_delegate::auto_provision_slot create_args carrying suppress_initial_prompt=true, and autopilot dispatch_board_tasks holding an OwnedSlotDispatchGuard across state.pty.send + post-send tail inside a tokio::task::JoinSet send-task so different-slot sends run concurrently within a single dispatch tick while same-slot exclusion still covers the full close-owner / KB-feedback / deploy-review sequence, with decide_close_action preserving Done self-close and Blocked question states. Restart recovery clears stale slot-dyn-* BoardTask assignee pins via BoardStore::clear_board_task_assignee before normal no-assignee routing resumes.")
+      :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. task_delegate loads .missiond/v3/missiond-blueprint.lisp via context/v3_blueprint_runtime.rs and projects workstation-config slot-template default-model-profile plus timeout-policy boardtask-dispatch into delegated BoardTask rows; if a real MissionD project has .missiond but lacks V3 blueprint/workstation-config, dispatch returns V3_BLUEPRINT_CONFIG_ERROR instead of silently falling back. compute_slot objective is metadata only; direct warmup requires explicit initial_prompt, and delegated task_delegate auto-provision still carries suppress_initial_prompt=true. spawn_tracked_slot now syncs MissionD Claude hooks project-locally via slot_env::sync_slot_hooks_to_local_settings, preserving permissions and existing hooks while adding SessionStart session-register + UserPromptSubmit context-prefetch before PTY start; build_slot_tracking_env injects MISSION_IPC_ENDPOINT so hooks reconnect to the active daemon instead of relying on stale global defaults. Autopilot pty.send budget, smart-watchdog idle-recovery threshold, and Autopilot BoardTask claim lease are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs / derive_board_task_lease_secs in autopilot.rs. The fixed 20-minute claim lease is gone; the lease now equals idle_watchdog_threshold_secs so the watchdog cannot reclaim a slot whose claim is still legitimately ticking inside its declared timeout. Autopilot prompt assembly projects the V3 prompt-tool-contract via build_base_prompt (objective dedupe) and append_board_task_id_suffix (conditional board self-close); the prompt no longer hardcodes mission_board_update / mission_board_note_add as unconditional must-calls. The V3 execution-ownership rule for delegated BoardTasks projects to: compute_slot::effective_initial_prompt + explicit initial_prompt + suppress_initial_prompt arg (delegated path starts the slot idle), task_delegate::auto_provision_slot create_args carrying suppress_initial_prompt=true, and autopilot dispatch_board_tasks holding an OwnedSlotDispatchGuard across state.pty.send + post-send tail inside a tokio::task::JoinSet send-task so different-slot sends run concurrently within a single dispatch tick while same-slot exclusion still covers the full close-owner / KB-feedback / deploy-review sequence, with decide_close_action preserving Done self-close and Blocked question states. Restart recovery clears stale slot-dyn-* BoardTask assignee pins via BoardStore::clear_board_task_assignee before normal no-assignee routing resumes.")
 
     (surface workstation-dispatch
       :status "code-aligned"

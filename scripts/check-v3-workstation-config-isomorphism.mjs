@@ -87,8 +87,14 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'workstation-config',
+    '(v2-item claudecode-workstation-config',
+    ':status runtime-projected',
+    '(tool-group workstation-entry',
     '(surface workstation-config',
     ':status "code-aligned"',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'V3_BLUEPRINT_CONFIG_ERROR',
     'coding-default-opus-4-7',
     ':effective-model "Opus 4.7 with 1M context"',
     ':spawn-model-arg nil',
@@ -247,6 +253,12 @@ function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-workstation-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
+  (v2-convergence-map
+    (v2-item claudecode-workstation-config
+      :status runtime-projected))
+  (public-surface-map
+    (tool-group workstation-entry
+      :status runtime-projected))
   (workstation-config
     (model-profile coding-default-opus-4-7
       :effective-model "Opus 4.7 with 1M context"
@@ -275,7 +287,8 @@ function buildFixture() {
   (implementation-map
     (surface workstation-config
       :status "code-aligned"
-      :note "fixture"))
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"]
+      :note "WorkstationRuntimeConfig::load_for_project_root projects V3 workstation-config and surfaces V3_BLUEPRINT_CONFIG_ERROR."))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-config-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.computeSlot, `
