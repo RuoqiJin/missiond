@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   kbConflicts: 'crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs',
   kbQuery: 'crates/missiond-daemon/src/handlers/knowledge/kb/query.rs',
   kbDiscovery: 'crates/missiond-daemon/src/handlers/knowledge/kb/discovery.rs',
+  kbAnalyze: 'crates/missiond-daemon/src/handlers/knowledge/kb/analyze.rs',
   kbMutate: 'crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs',
   kbImport: 'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
   kbGc: 'crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs',
@@ -95,6 +96,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/query.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/discovery.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/analyze.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs',
@@ -107,6 +109,7 @@ function checkFiles(root, files) {
     'kb/conflicts.rs owns semantic conflict detection',
     'kb/query.rs owns search/get/list retrieval egress',
     'kb/discovery.rs owns SSH probe discovery and infra KB projection',
+    'kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection',
     'kb/mutate.rs owns forget/update/project mutation side effects',
     'kb/import.rs owns servers_yaml import projection',
     'kb/gc.rs owns stats/stale/duplicates cleanup actions',
@@ -115,6 +118,7 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.kbFacade, sources.kbFacade, [
+    'mod analyze;',
     'mod args;',
     'mod compact;',
     'mod conflicts;',
@@ -126,6 +130,7 @@ function checkFiles(root, files) {
     'mod quality;',
     'mod query;',
     'use args::KBRememberArgs;',
+    'use analyze::handle_kb_analyze;',
     'use compact::handle_kb_compact;',
     'use conflicts::detect_kb_conflicts;',
     'use discovery::handle_kb_discover;',
@@ -137,6 +142,7 @@ function checkFiles(root, files) {
     'handle_kb_update',
     'handle_kb_execute_plan',
     'handle_kb_queue_status',
+    'handle_kb_analyze',
     'use quality::check_content_quality;',
     'use query::{handle_kb_get, handle_kb_list, handle_kb_search};',
     'pub(crate) async fn handle',
@@ -229,6 +235,24 @@ function checkFiles(root, files) {
     'SSH probe failed',
   ]);
 
+  requireAll(diagnostics, files.kbAnalyze, sources.kbAnalyze, [
+    'pub(super) async fn handle_kb_analyze',
+    'kb_list_paginated',
+    'redact_sensitive',
+    'include_board_context',
+    'BoardTaskStatus::Done',
+    'response_format',
+    'kb_consolidation_actions',
+    'apply_context_budget',
+    'MAX_ROUTER_PAYLOAD_BYTES',
+    'resolve_llm_credentials',
+    'REQUEST_CALLER',
+    'send_with_timeout',
+    'kb_ops_save_plan',
+    'KBOperation',
+    'context_budget',
+  ]);
+
   requireAll(diagnostics, files.kbMutate, sources.kbMutate, [
     'pub(super) async fn handle_kb_forget',
     'pub(super) async fn handle_kb_batch_forget',
@@ -312,16 +336,18 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/query.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/discovery.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/analyze.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/import.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress."))
+      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
   writeFixture(root, DEFAULT_FILES.kbFacade, `
+mod analyze;
 mod args;
 mod compact;
 mod conflicts;
@@ -333,6 +359,7 @@ mod ops;
 mod quality;
 mod query;
 use args::KBRememberArgs;
+use analyze::handle_kb_analyze;
 use compact::handle_kb_compact;
 use conflicts::detect_kb_conflicts;
 use discovery::handle_kb_discover;
@@ -340,6 +367,7 @@ use gc::handle_kb_gc;
 use import::handle_kb_import;
 handle_kb_batch_forget; handle_kb_batch_set_project; handle_kb_forget; handle_kb_update;
 handle_kb_execute_plan; handle_kb_queue_status;
+handle_kb_analyze;
 use quality::check_content_quality;
 use query::{handle_kb_get, handle_kb_list, handle_kb_search};
 pub(crate) async fn handle() {
@@ -382,6 +410,10 @@ pub(super) async fn handle_kb_list() {
   writeFixture(root, DEFAULT_FILES.kbDiscovery, `
 pub(super) async fn handle_kb_discover() {
   KBDiscoverArgs; state.infra.read(); kb_search(&format!("{} password", host), Some("credential")); tokio::process::Command; AsyncWriteExt; StrictHostKeyChecking=no; ConnectTimeout=10; KBRememberInput; source: Some("discovery".to_string()); SSH probe failed;
+}`);
+  writeFixture(root, DEFAULT_FILES.kbAnalyze, `
+pub(super) async fn handle_kb_analyze() {
+  kb_list_paginated(); redact_sensitive(); include_board_context; BoardTaskStatus::Done; response_format; kb_consolidation_actions; apply_context_budget(); MAX_ROUTER_PAYLOAD_BYTES; resolve_llm_credentials(); REQUEST_CALLER; send_with_timeout(); kb_ops_save_plan(); KBOperation; context_budget;
 }`);
   writeFixture(root, DEFAULT_FILES.kbMutate, `
 pub(super) async fn handle_kb_forget() { kb_get_id_by_key(); KBBatchMutated; }
