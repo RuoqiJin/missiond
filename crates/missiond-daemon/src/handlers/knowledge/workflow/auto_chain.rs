@@ -15,9 +15,8 @@ use super::auto_sonnet::{
     maybe_apply_auto_sonnet_policy, parse_auto_sonnet_policy, AutoSonnetPolicy,
     AutoSonnetTriggerContext,
 };
-use super::{
-    evidence_sidecar_path, read_evidence_sidecar, resolve_project_root_from_args, EvidenceOutcome,
-};
+use super::distill::{evidence_sidecar_path, read_evidence_sidecar, EvidenceOutcome};
+use super::resolve_project_root_from_args;
 
 // ───────────────────────────────────────────────────────────────────────
 // wave-19 / task 09 :: cross-plan distill auto-chain

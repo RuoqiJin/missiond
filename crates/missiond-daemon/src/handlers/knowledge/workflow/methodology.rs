@@ -3,9 +3,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{
-    paren_balanced_ignoring_strings, COMPILER_VERSION, GENERATED_FLOWS_DIR, WORKFLOWS_DIR,
-};
+use super::distill::paren_balanced_ignoring_strings;
+use super::{COMPILER_VERSION, GENERATED_FLOWS_DIR, WORKFLOWS_DIR};
 
 // ───────────────────────────────────────────────────────────────────────
 // helpers — methodology compiler v0 (pure, covered by unit tests)
