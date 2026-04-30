@@ -42,6 +42,7 @@ mod completion_gates;
 mod completion_handoff_audit;
 mod completion_id_audit;
 mod completion_indexes;
+mod completion_inputs;
 mod completion_maintenance;
 mod completion_records;
 mod completion_response;

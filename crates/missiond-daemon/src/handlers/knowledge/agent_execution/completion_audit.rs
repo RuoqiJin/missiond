@@ -1,17 +1,13 @@
 use anyhow::Result;
 use missiond_core::event::events::ExecutionEvent;
-use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
+use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 
 use crate::state::AppState;
 
 use super::completion_entry::{render_completion_entry, CompletionEntryFields};
-use super::completion_fields::{
-    collect_string_list, normalize_commit_status, normalize_task_run_verifier_status,
-    normalize_verifier_status, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
-    VALID_VERIFIER_STATUSES,
-};
 use super::completion_gates::{enforce_scoped_commit_completion, enforce_task_contract_completion};
+use super::completion_inputs::{parse_completion_request, CompletionRequest};
 use super::completion_response::{build_completion_response, CompletionResponseFields};
 use super::completion_trace::append_completion_trace_if_requested;
 use super::completion_verification::evaluate_completion_verification;
@@ -19,194 +15,37 @@ use super::log_counters::{allocate_id, Counter};
 use super::log_dispatch::read_dispatch_metadata_from_log;
 use super::log_store::{
     append_to_block, companion_path, now_iso, project_or_target_project, read_log_file,
-    require_str, resolve_project_root, touch_last_updated, write_log_file,
+    resolve_project_root, touch_last_updated, write_log_file,
 };
 use super::log_surface::emit_execution_event;
 
 pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
-    let execution_id = match require_str(args, "execution_id") {
-        Ok(s) => s,
+    let request = match parse_completion_request(args) {
+        Ok(r) => r,
         Err(r) => return Ok(r),
     };
-    let phase = match require_str(args, "phase") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let agent = match require_str(args, "agent_name") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let summary = match require_str(args, "summary") {
-        Ok(s) => s,
-        Err(r) => return Ok(r),
-    };
-    let deliverables = args
-        .get("deliverables")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let verification = args
-        .get("verification")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    // ── scoped-commit handoff fields (intent-memory.lisp :: helper
-    // agent-execution-coordination :: shared-memory-slots :: completions —
-    // :fields "... changed_files / staged_files / commit_hash / commit_status").
-    // All five are optional so legacy callers that omit them still write a
-    // backward-compatible completion entry; only the keys actually supplied
-    // are emitted into the Lisp slot. `commit_status` is normalized against
-    // the canonical enum from the protocol's :commit-status-values.
-    let changed_files = collect_string_list(args, "changed_files");
-    let staged_files = collect_string_list(args, "staged_files");
-    let commit_hash = args
-        .get("commit_hash")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let commit_status_raw = args
-        .get("commit_status")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-    let commit_status = match commit_status_raw {
-        Some(s) => match normalize_commit_status(s) {
-            Some(canonical) => Some(canonical.to_string()),
-            None => {
-                return Ok(ToolResult::structured_error(
-                    ToolError::new(
-                        error_codes::INVALID_PARAM,
-                        format!(
-                            "commit_status must be one of {:?}, got `{}`",
-                            VALID_COMMIT_STATUSES, s
-                        ),
-                    )
-                    .with_suggestion("see intent-memory.lisp :: completions :commit-status-values"),
-                ));
-            }
-        },
-        None => None,
-    };
-    let commit_blocker = args
-        .get("commit_blocker")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    // ── wave-19 / task 08 — task-contract completion metadata.
-    //
-    // All four fields are optional and recorded verbatim into the
-    // companion log when supplied. `verifier_status` is normalized
-    // against the canonical enum so audit / dashboard consumers can key
-    // off the exact string; unknown labels reject with `INVALID_PARAM`
-    // BEFORE any file mutation. `task_contract_path` doubles as the
-    // trigger for the contract-level enforcement gate further below
-    // when paired with `enforce_scoped_commit=true`.
-    let task_contract_path = args
-        .get("task_contract_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let task_report_path = args
-        .get("task_report_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let verifier_status_raw = args
-        .get("verifier_status")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-    let verifier_status = match verifier_status_raw {
-        Some(s) => match normalize_verifier_status(s) {
-            Some(canonical) => Some(canonical.to_string()),
-            None => {
-                return Ok(ToolResult::structured_error(
-                    ToolError::new(
-                        error_codes::INVALID_PARAM,
-                        format!(
-                            "verifier_status must be one of {:?}, got `{}`",
-                            VALID_VERIFIER_STATUSES, s
-                        ),
-                    )
-                    .with_suggestion(
-                        "see wave19-08 :: verifier-status enum (passed|failed|skipped|unknown)",
-                    ),
-                ));
-            }
-        },
-        None => None,
-    };
-    let verifier_notes = args
-        .get("verifier_notes")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-
-    // ── wave-21 / task 03 — task-run verifier completion metadata.
-    //
-    // `task_run_verifier_status` / `shared_memory_path` /
-    // `verifier_diagnostics` / `verified` mirror the wave19-08 fields
-    // but capture the END-TO-END verifier outcome (task contract +
-    // report + shared-memory completion + commit scope all proven in
-    // one pass — see wave21-02 :: scripts/verify-task-run.mjs). All
-    // four are optional and recorded verbatim into the companion log;
-    // `task_run_verifier_status` rejects unknown labels at parse time
-    // so audit / dashboard consumers can key off the canonical enum.
-    let task_run_verifier_status_raw = args
-        .get("task_run_verifier_status")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty());
-    let task_run_verifier_status = match task_run_verifier_status_raw {
-        Some(s) => match normalize_task_run_verifier_status(s) {
-            Some(canonical) => Some(canonical.to_string()),
-            None => {
-                return Ok(ToolResult::structured_error(
-                    ToolError::new(
-                        error_codes::INVALID_PARAM,
-                        format!(
-                            "task_run_verifier_status must be one of {:?}, got `{}`",
-                            VALID_TASK_RUN_VERIFIER_STATUSES, s
-                        ),
-                    )
-                    .with_suggestion(
-                        "see wave21-03 :: task-run-verifier-status enum (passed|failed|skipped|unknown)",
-                    ),
-                ));
-            }
-        },
-        None => None,
-    };
-    let shared_memory_path = args
-        .get("shared_memory_path")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    let verifier_diagnostics = args
-        .get("verifier_diagnostics")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
-    // `verified` is a tri-state at parse time: absent → None (legacy
-    // shape, no extra gate), false → Some(false) (caller explicitly
-    // recorded a non-verified completion), true → Some(true) (gate
-    // runs). We persist the explicit `false` so audit can tell "writer
-    // intentionally skipped verification" from "writer omitted the
-    // field because they're a legacy caller".
-    let verified_flag = args.get("verified").and_then(|v| v.as_bool());
-
-    // ── Optional fail-fast enforcement (wave16-06).
-    //
-    // `enforce_scoped_commit=true` flips the existing audit-only handoff
-    // checks into hard rejects at completion-time. Default `false` keeps
-    // legacy callers byte-identical: they still get the audit-only path
-    // wired through `mission_execution(action=audit)` later. We resolve
-    // the flag here so the validation step (run BEFORE id allocation)
-    // sees the caller's intent without paying the read cost twice.
-    let enforce_scoped_commit = args
-        .get("enforce_scoped_commit")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+    let CompletionRequest {
+        execution_id,
+        phase,
+        agent,
+        summary,
+        deliverables,
+        verification,
+        changed_files,
+        staged_files,
+        commit_hash,
+        commit_status,
+        commit_blocker,
+        task_contract_path,
+        task_report_path,
+        verifier_status,
+        verifier_notes,
+        task_run_verifier_status,
+        shared_memory_path,
+        verifier_diagnostics,
+        verified_flag,
+        enforce_scoped_commit,
+    } = request;
 
     let root = resolve_project_root(state, project_or_target_project(args)).await?;
     let path = companion_path(&root, execution_id);
