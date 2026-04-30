@@ -51,6 +51,8 @@ mod completion_response;
 mod completion_trace;
 mod completion_verification;
 mod lisp_syntax;
+mod lisp_syntax_balance;
+mod lisp_syntax_node;
 mod log_counters;
 mod log_dispatch;
 mod log_governance;

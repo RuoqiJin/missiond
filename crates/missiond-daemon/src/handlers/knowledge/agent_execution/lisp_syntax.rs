@@ -1,53 +1,7 @@
 use anyhow::{anyhow, Result};
 
-#[derive(Debug, Clone)]
-pub struct Node {
-    pub kind: NodeKind,
-    pub start: usize,
-    pub end: usize,
-}
-
-#[derive(Debug, Clone)]
-pub enum NodeKind {
-    List(Vec<Node>),
-    Bracket(Vec<Node>),
-    Str(String),
-    Atom(String),
-}
-
-impl Node {
-    pub fn head_atom(&self) -> Option<&str> {
-        match &self.kind {
-            NodeKind::List(children) | NodeKind::Bracket(children) => match children.first() {
-                Some(n) => match &n.kind {
-                    NodeKind::Atom(s) => Some(s.as_str()),
-                    _ => None,
-                },
-                None => None,
-            },
-            _ => None,
-        }
-    }
-
-    pub fn children(&self) -> &[Node] {
-        match &self.kind {
-            NodeKind::List(c) | NodeKind::Bracket(c) => c.as_slice(),
-            _ => &[],
-        }
-    }
-
-    pub fn as_atom(&self) -> Option<&str> {
-        match &self.kind {
-            NodeKind::Atom(s) => Some(s.as_str()),
-            _ => None,
-        }
-    }
-
-    /// Render this node's literal source slice from the original text.
-    pub fn slice<'a>(&self, src: &'a str) -> &'a str {
-        &src[self.start..self.end]
-    }
-}
+pub use super::lisp_syntax_balance::check_balance;
+pub use super::lisp_syntax_node::{Node, NodeKind};
 
 pub fn parse(src: &str) -> Result<Vec<Node>> {
     let mut p = Parser {
@@ -206,72 +160,4 @@ impl<'a> Parser<'a> {
             }
         }
     }
-}
-
-/// Verify the source has balanced delimiters and no unterminated string.
-/// Returns Ok(()) on success or the byte offset of the first error.
-pub fn check_balance(src: &str) -> Result<()> {
-    let mut stack: Vec<(u8, usize)> = Vec::new();
-    let bytes = src.as_bytes();
-    let mut i = 0;
-    let mut in_str = false;
-    let mut esc = false;
-    let mut comment = false;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if comment {
-            if c == b'\n' {
-                comment = false;
-            }
-        } else if in_str {
-            if esc {
-                esc = false;
-            } else if c == b'\\' {
-                esc = true;
-            } else if c == b'"' {
-                in_str = false;
-            }
-        } else {
-            match c {
-                b';' => comment = true,
-                b'"' => in_str = true,
-                b'(' | b'[' => stack.push((c, i)),
-                b')' | b']' => {
-                    let want = if c == b')' { b'(' } else { b'[' };
-                    match stack.pop() {
-                        Some((open, _)) if open == want => {}
-                        Some((open, pos)) => {
-                            return Err(anyhow!(
-                                "mismatched delimiter at byte {}: '{}' closes '{}' opened at {}",
-                                i,
-                                c as char,
-                                open as char,
-                                pos
-                            ))
-                        }
-                        None => {
-                            return Err(anyhow!(
-                                "stray closing delimiter '{}' at byte {}",
-                                c as char,
-                                i
-                            ))
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        i += 1;
-    }
-    if in_str {
-        return Err(anyhow!("unterminated string"));
-    }
-    if let Some((open, pos)) = stack.last() {
-        return Err(anyhow!(
-            "unterminated '{}' opened at byte {}",
-            *open as char,
-            pos
-        ));
-    }
-    Ok(())
 }
