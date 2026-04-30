@@ -1,0 +1,35 @@
+use super::*;
+
+#[derive(Deserialize)]
+struct BoardIdArgs {
+    id: String,
+}
+
+pub(super) async fn handle_delete(state: &AppState, args: Value) -> Result<ToolResult> {
+    let BoardIdArgs { id } = serde_json::from_value(args)?;
+    // Fetch task info before deletion for event.
+    let task_title = state
+        .store
+        .get_board_task(&id)
+        .await
+        .ok()
+        .flatten()
+        .map(|t| t.title.clone())
+        .unwrap_or_default();
+    let deleted = state
+        .store
+        .delete_board_task(&id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?;
+    if deleted > 0 {
+        let ev = BoardEvent::Deleted {
+            task_id: id.clone(),
+            title: task_title.clone(),
+        };
+        let _ = state.bus.publish_board(ev).await;
+    }
+    Ok(ToolResult::json(&serde_json::json!({
+        "deleted": deleted,
+        "id": id,
+    })))
+}

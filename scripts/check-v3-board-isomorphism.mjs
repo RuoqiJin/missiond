@@ -17,6 +17,16 @@ Checks the V3 mission_board Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   handler: 'crates/missiond-daemon/src/handlers/knowledge/board.rs',
+  handlerClaim: 'crates/missiond-daemon/src/handlers/knowledge/board/claim.rs',
+  handlerCreate: 'crates/missiond-daemon/src/handlers/knowledge/board/create.rs',
+  handlerDecompose: 'crates/missiond-daemon/src/handlers/knowledge/board/decompose.rs',
+  handlerDelete: 'crates/missiond-daemon/src/handlers/knowledge/board/delete.rs',
+  handlerEvents: 'crates/missiond-daemon/src/handlers/knowledge/board/events.rs',
+  handlerNote: 'crates/missiond-daemon/src/handlers/knowledge/board/note.rs',
+  handlerQuery: 'crates/missiond-daemon/src/handlers/knowledge/board/query.rs',
+  handlerRetry: 'crates/missiond-daemon/src/handlers/knowledge/board/retry.rs',
+  handlerSession: 'crates/missiond-daemon/src/handlers/knowledge/board/session.rs',
+  handlerUpdate: 'crates/missiond-daemon/src/handlers/knowledge/board/update.rs',
   types: 'crates/missiond-core/src/types/board.rs',
   traits: 'crates/missiond-core/src/db/traits.rs',
   pgStore: 'crates/missiond-core/src/db/pg/board.rs',
@@ -80,6 +90,16 @@ function checkFiles(root, files) {
     '(surface mission_board',
     ':status "code-aligned"',
     'crates/missiond-daemon/src/handlers/knowledge/board.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/claim.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/create.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/decompose.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/delete.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/events.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/note.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/query.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/retry.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/session.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/board/update.rs',
     'crates/missiond-core/src/types/board.rs',
     'crates/missiond-core/src/db/traits.rs',
     'crates/missiond-core/src/db/pg/board.rs',
@@ -92,17 +112,113 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.handler, sources.handler, [
-    'record_session_task_binding',
-    'publish_board_created',
-    'publish_board_update',
-    'publish_board_status_changed',
+    'mod claim;',
+    'mod create;',
+    'mod decompose;',
+    'mod delete;',
+    'mod events;',
+    'mod note;',
+    'mod query;',
+    'mod retry;',
+    'mod session;',
+    'mod update;',
     '"mission_board_query"',
     '"mission_board_create"',
     '"mission_board_update"',
     '"mission_board_claim"',
     '"mission_board_note_add"',
     '"mission_board_retry"',
+    'claim::handle_claim',
+    'create::handle_create',
+    'query::handle_query',
+    'retry::handle_retry',
+  ]);
+
+  requireAll(diagnostics, files.handlerSession, sources.handlerSession, [
+    'record_session_task_binding',
+    'current_session_id()',
+    'SessionTaskBinding',
+    'bound_at: chrono::Utc::now().timestamp()',
+  ]);
+
+  requireAll(diagnostics, files.handlerEvents, sources.handlerEvents, [
+    'publish_board_created',
+    'publish_board_update',
+    'publish_board_status_changed',
+    'BoardEvent::TaskCreated',
+    'BoardEvent::Updated',
+    'BoardEvent::StatusChanged',
+  ]);
+
+  requireAll(diagnostics, files.handlerQuery, sources.handlerQuery, [
+    'handle_query',
+    'board_get',
+    'BoardListArgs',
+    'get_board_tasks_with_context',
+    'get_board_task_with_notes',
+    'list_board_tasks',
+    'search_board_tasks',
+    'board_summary',
+    'clear_done_board_tasks',
+  ]);
+
+  requireAll(diagnostics, files.handlerCreate, sources.handlerCreate, [
+    'handle_create',
+    'CreateBoardTaskInput',
+    'create_board_task',
+    'flow_template',
+    'FlowContext::default',
+    'publish_board_created',
+  ]);
+
+  requireAll(diagnostics, files.handlerUpdate, sources.handlerUpdate, [
+    'handle_update',
+    'handle_batch_update',
+    'handle_toggle',
+    'handle_single_update',
+    'UpdateBoardTaskInput',
+    'toggle_board_task',
+    'harvest_decisions_for_task',
+    'publish_board_status_changed',
+    'publish_board_update',
+  ]);
+
+  requireAll(diagnostics, files.handlerDelete, sources.handlerDelete, [
+    'handle_delete',
+    'delete_board_task',
+    'BoardEvent::Deleted',
+  ]);
+
+  requireAll(diagnostics, files.handlerClaim, sources.handlerClaim, [
+    'handle_claim',
     '.claim_board_task(task_id, executor_id, executor_type)',
+    'current_session_id',
+    'BoardEvent::Claimed',
+    'record_session_task_binding',
+  ]);
+
+  requireAll(diagnostics, files.handlerNote, sources.handlerNote, [
+    'handle_note_add',
+    'BoardNoteAddArgs',
+    'add_board_task_note',
+    'BoardEvent::NoteAdded',
+    'record_session_task_binding',
+  ]);
+
+  requireAll(diagnostics, files.handlerDecompose, sources.handlerDecompose, [
+    'handle_decompose',
+    'DecomposeArgs',
+    'mission_board_create',
+    'mission_board_note_add',
+    'submit_task',
+    'SlotEvent::TaskDispatched',
+    'add_board_task_note',
+  ]);
+
+  requireAll(diagnostics, files.handlerRetry, sources.handlerRetry, [
+    'handle_retry',
+    'RetryArgs',
+    'retry_board_task',
     'add_board_task_note',
   ]);
 
@@ -200,6 +316,16 @@ function buildFixture() {
     (surface mission_board
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/board.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/claim.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/create.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/decompose.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/delete.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/events.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/note.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/query.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/retry.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/session.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/update.rs"
              "crates/missiond-core/src/types/board.rs"
              "crates/missiond-core/src/db/traits.rs"
              "crates/missiond-core/src/db/pg/board.rs"
@@ -209,17 +335,113 @@ function buildFixture() {
     :checks ["node scripts/check-v3-board-isomorphism.mjs"]))`);
 
   writeFixture(root, DEFAULT_FILES.handler, `
-record_session_task_binding
-publish_board_created
-publish_board_update
-publish_board_status_changed
+mod claim;
+mod create;
+mod decompose;
+mod delete;
+mod events;
+mod note;
+mod query;
+mod retry;
+mod session;
+mod update;
 "mission_board_query"
 "mission_board_create"
 "mission_board_update"
 "mission_board_claim"
 "mission_board_note_add"
 "mission_board_retry"
+claim::handle_claim
+create::handle_create
+query::handle_query
+retry::handle_retry
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerSession, `
+record_session_task_binding
+current_session_id()
+SessionTaskBinding
+bound_at: chrono::Utc::now().timestamp()
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerEvents, `
+publish_board_created
+publish_board_update
+publish_board_status_changed
+BoardEvent::TaskCreated
+BoardEvent::Updated
+BoardEvent::StatusChanged
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerQuery, `
+handle_query
+board_get
+BoardListArgs
+get_board_tasks_with_context
+get_board_task_with_notes
+list_board_tasks
+search_board_tasks
+board_summary
+clear_done_board_tasks
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerCreate, `
+handle_create
+CreateBoardTaskInput
+create_board_task
+flow_template
+FlowContext::default
+publish_board_created
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerUpdate, `
+handle_update
+handle_batch_update
+handle_toggle
+handle_single_update
+UpdateBoardTaskInput
+toggle_board_task
+harvest_decisions_for_task
+publish_board_status_changed
+publish_board_update
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerDelete, `
+handle_delete
+delete_board_task
+BoardEvent::Deleted
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerClaim, `
+handle_claim
 .claim_board_task(task_id, executor_id, executor_type)
+current_session_id
+BoardEvent::Claimed
+record_session_task_binding
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerNote, `
+handle_note_add
+BoardNoteAddArgs
+add_board_task_note
+BoardEvent::NoteAdded
+record_session_task_binding
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerDecompose, `
+handle_decompose
+DecomposeArgs
+mission_board_create
+mission_board_note_add
+submit_task
+SlotEvent::TaskDispatched
+add_board_task_note
+`);
+
+  writeFixture(root, DEFAULT_FILES.handlerRetry, `
+handle_retry
+RetryArgs
+retry_board_task
 add_board_task_note
 `);
 
