@@ -31,6 +31,7 @@ Checks the V3 evidence-collector Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   evidenceCollector: 'crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs',
+  evidenceCollectorTests: 'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
   planEvidenceSidecar: 'crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
 };
@@ -87,6 +88,7 @@ const BLUEPRINT_NEEDLES = [
   '(surface evidence-collector',
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs',
   'verification-receipt',
   'EventRefStatus',
   'EventRefProvenance',
@@ -130,6 +132,15 @@ const EVIDENCE_COLLECTOR_RS_NEEDLES = [
   '"unavailable"',
   '"passive_cache"',
   '"event_log_query"',
+  'mod tests;',
+];
+
+const EVIDENCE_COLLECTOR_TESTS_NEEDLES = [
+  'entry_always_carries_canonical_stamps',
+  'resolver_log_query_returns_log_ref_after_cache_miss',
+  'wrap_legacy_keeps_inner_evidence_under_evidence_key',
+  'sidecar_append_preserves_order_and_schema_version',
+  'distill_chain_records_are_strictly_additive_per_plan',
 ];
 
 const PLAN_EXECUTION_RUNTIME_RS_NEEDLES = [
@@ -168,6 +179,12 @@ function checkFiles(root, files) {
     files.evidenceCollector,
     sources.evidenceCollector,
     EVIDENCE_COLLECTOR_RS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
+    files.evidenceCollectorTests,
+    sources.evidenceCollectorTests,
+    EVIDENCE_COLLECTOR_TESTS_NEEDLES,
   );
   requireAll(
     diagnostics,
@@ -240,6 +257,7 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.evidenceCollector]: buildGoodEvidenceCollector(),
+    [DEFAULT_FILES.evidenceCollectorTests]: buildGoodEvidenceCollectorTests(),
     [DEFAULT_FILES.planExecutionRuntime]: buildGoodPlanExecutionRuntime(),
     [DEFAULT_FILES.planEvidenceSidecar]: buildGoodPlanEvidenceSidecar(),
   };
@@ -367,6 +385,7 @@ function buildGoodBlueprint() {
       :status "code-aligned"
       :implements [verification-receipt]
       :code ["crates/missiond-daemon/src/handlers/knowledge/evidence_collector.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/evidence_collector/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"]
       :note "EVIDENCE_SCHEMA_VERSION = \\"v0\\" pins the wire shape; EventRefStatus is the closed enum live | log | unavailable describing whether the ref is live-from-publish, log-recovered post hoc, or simply unavailable. EventRefProvenance further pivots the recovery tier as live | passive_cache | event_log_query | unavailable so consumers can attribute lookups to the wave-16 in-memory passive cache (EVENT_REF_CACHE_CAP = 1024 FIFO entries) vs the wave-18 bounded event_log_query path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, so the verification-receipt artifact stays consistent with what plan.rs already wrote."))
@@ -418,6 +437,17 @@ pub(crate) const EVENT_REF_LOG_QUERY_ERROR_REASON_PREFIX: &str = "log_query_erro
 pub(crate) const EVENT_REF_LOG_QUERY_SCAN_LIMIT: usize = 512;
 
 pub(crate) struct EventRefResolver {}
+mod tests;
+`;
+}
+
+function buildGoodEvidenceCollectorTests() {
+  return `// fixture
+fn entry_always_carries_canonical_stamps() {}
+fn resolver_log_query_returns_log_ref_after_cache_miss() {}
+fn wrap_legacy_keeps_inner_evidence_under_evidence_key() {}
+fn sidecar_append_preserves_order_and_schema_version() {}
+fn distill_chain_records_are_strictly_additive_per_plan() {}
 `;
 }
 
