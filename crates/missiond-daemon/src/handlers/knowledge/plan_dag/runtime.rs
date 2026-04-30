@@ -24,6 +24,7 @@ use super::scheduler::propagate_taint;
 mod acceptance;
 mod bookkeeping;
 mod claims;
+mod failures;
 mod gates;
 mod retry;
 mod rollbacks;
@@ -35,6 +36,7 @@ use bookkeeping::{
     initialize_lifecycle, stitch_results_topologically,
 };
 use claims::{record_acquired_claim, record_compat_claim, release_claim_if_recorded};
+use failures::record_final_failure;
 use gates::filter_ready_nodes_for_gates;
 use retry::retry_failed_node_if_allowed;
 use rollbacks::evaluate_and_emit_rollback;
@@ -563,93 +565,31 @@ pub(super) async fn execute_with_concurrency(
                 continue;
             }
 
-            // Final failure — exhausted retries OR non-retryable OR
-            // fail-fast already aborted this wave.
-            lifecycle.insert(node_id.clone(), NodeLifecycle::Failed);
-            // wave-17 / task 02 — release the claim on terminal
-            // failure (best-effort, compat-mode conflicts skip).
-            release_claim_if_recorded(
-                state,
-                &ctx,
-                &node,
-                &dispatch_strategy,
-                current_attempt,
-                "failed",
-                &mut claim_registry,
-                &mut active_claims_by_node,
-                &mut outcome,
-            )
-            .await;
-            let reason = classification
-                .err()
-                .unwrap_or_else(|| "inner handler returned error".to_string());
-            // wave-17 / task 04 — conservative rollback pass. Runs
-            // AFTER the final failed attempt and BEFORE downstream
-            // taint propagation. Skipped entirely when the node did
-            // not opt into a rollback policy so the wave-13 byte
-            // shape stays untouched.
-            //
-            // The rollback evaluator decides one of:
-            //   * NotRequested      — no rollback hints / explicit
-            //                          `:rollback-policy "none"`.
-            //                          Evidence emit suppressed.
-            //   * DescriptorReady   — `:rollback-policy "descriptor"`;
-            //                          captures intent + brief preview,
-            //                          NEVER dispatches.
-            //   * Dispatched        — `:rollback-policy "workstation"`
-            //                          + every safety gate passed +
-            //                          inner handler returned Ok.
-            //   * Refused           — `:rollback-policy "workstation"`
-            //                          + at least one safety gate
-            //                          failed (or substrate-side
-            //                          SafeDescriptor refusal).
-            //   * Failed            — `:rollback-policy "workstation"`
-            //                          dispatched but the inner
-            //                          handler returned an error.
-            //
-            // Downstream taint propagation runs identically afterwards
-            // — the rollback pass NEVER changes failure-policy
-            // semantics. This keeps the wave-13 / wave-16 contract
-            // intact: `:failure-policy fail-fast` still trips the
-            // wave-loop abort flag based on the original failure,
-            // not the rollback outcome.
-            let rollback_eval = evaluate_and_emit_rollback(
+            if record_final_failure(
                 state,
                 &ctx,
                 plan,
-                &node,
                 parsed,
                 order,
-                &dispatch_strategy,
+                &node,
+                &node_id,
+                target,
+                dispatch_strategy,
+                inner_payload,
+                classification,
+                non_retryable,
                 current_attempt,
+                max_attempts,
+                &mut claim_registry,
+                &mut active_claims_by_node,
+                &mut lifecycle,
+                &mut results_by_id,
+                &mut tainted_by,
+                &succs,
                 &mut outcome,
             )
-            .await;
-            results_by_id.insert(
-                node_id.clone(),
-                NodeResult {
-                    id: node_id.clone(),
-                    target,
-                    state: NodeState::Failed { reason },
-                    dispatch_strategy,
-                    inner_payload,
-                    attempts_made: current_attempt,
-                    max_attempts,
-                    retry_skipped_non_retryable: non_retryable,
-                    rollback: rollback_eval,
-                    // wave-17 / task 03 — dispatch-failure path skips
-                    // the acceptance phase (failure dominates).
-                    acceptance: None,
-                },
-            );
-            // Taint propagates regardless of policy — it just changes
-            // whether *unrelated* nodes also get aborted (fail-fast) or
-            // can keep running (continue). wave-17 / task 04: the
-            // rollback evaluation does NOT alter this — downstream
-            // behaviour stays governed by the existing failure-policy
-            // contract.
-            propagate_taint(&node, &succs, &mut tainted_by);
-            if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
+            .await
+            {
                 abort_new_dispatch = true;
                 abort_aborter = Some(node_id.clone());
             }
