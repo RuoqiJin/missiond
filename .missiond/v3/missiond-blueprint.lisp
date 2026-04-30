@@ -1552,14 +1552,19 @@
       :status "designed"
       :implements [knowledge-memory kb-manager memory insight intent-snapshot]
       :code ["crates/missiond-daemon/src/handlers/knowledge/kb.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/args.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs"
              "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
              "crates/missiond-daemon/src/handlers/knowledge/insight.rs"
              "crates/missiond-daemon/src/handlers/knowledge/intent.rs"
              "crates/missiond-mcp/src/tools/knowledge/kb.rs"
              "crates/missiond-mcp/src/tools/knowledge/memory.rs"
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
-             "crates/missiond-mcp/src/tools/knowledge/intent.rs"]
-      :note "Designed V3 destination for the legacy memory/KB public tools. Code exists, but the Rust handlers are not yet physically split or runtime-projected from V3 Lisp, so this surface intentionally remains designed rather than code-aligned.")
+             "crates/missiond-mcp/src/tools/knowledge/intent.rs"
+             "scripts/check-v3-memory-kb-isomorphism.mjs"]
+      :note "Designed V3 destination for the legacy memory/KB public tools. First physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection. The surface intentionally remains designed rather than code-aligned until query/mutate/ops action handlers are split and runtime projection is Lisp-owned.")
 
     (surface project-registry
       :status "designed"
@@ -1658,6 +1663,7 @@
              "node scripts/check-v3-workflow-isomorphism.mjs"
              "node scripts/check-v3-review-gate-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
+             "node scripts/check-v3-memory-kb-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"

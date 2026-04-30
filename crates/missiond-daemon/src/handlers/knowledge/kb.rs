@@ -9,209 +9,21 @@ use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::gemini_client::REQUEST_CALLER;
 use crate::helpers::default_mission_home;
-use crate::lenient;
 use crate::state::AppState;
 use crate::state::EmbeddingTask;
 
-/// Content guard: reject verbose debug logs, stack traces, and narrative-style entries.
-/// Returns Some(rejection_message) if content should be rejected, None if OK.
-fn check_content_quality(
-    summary: &str,
-    detail: &Option<Value>,
-    category: Option<&str>,
-) -> Option<String> {
-    // Rule 1: summary too long — architecture:summary gets 800 chars, others 400
-    let max_chars = match category {
-        Some(c) if c == "architecture:summary" => 800,
-        _ => 400,
-    };
-    if summary.chars().count() > max_chars {
-        return Some(format!(
-            "REJECTED: summary 过长（{}字）。summary 必须 ≤ {} 字，是结论性摘要。高密度技术细节（配置/命令/代码）请存入 detail 字段（JSON）。",
-            summary.chars().count(), max_chars
-        ));
-    }
+mod args;
+mod compact;
+mod conflicts;
+mod quality;
 
-    // Rule 1b: empty or near-empty summary
-    let trimmed = summary.trim();
-    if trimmed.is_empty() {
-        return Some("REJECTED: summary 为空。".to_string());
-    }
-    if trimmed.chars().count() < 5 {
-        return Some(format!(
-            "REJECTED: summary 过短（{}字）。至少需要 5 个字符才能构成有意义的知识。",
-            trimmed.chars().count()
-        ));
-    }
-
-    // Rule 1c: test/probe entries
-    let lower = summary.to_lowercase();
-    let garbage_patterns = ["test write", "test kb write", "probe", "test entry"];
-    for pattern in &garbage_patterns {
-        if lower == *pattern || lower.starts_with(&format!("{} ", pattern)) {
-            return Some(format!(
-                "REJECTED: summary 疑似测试条目（'{}'）。测试数据不应写入知识库。",
-                summary
-            ));
-        }
-    }
-
-    // Rule 1d: batch log entries (e.g., "realtime-extract 批次 batch-20260315-...")
-    if lower.contains("batch-") && (lower.contains("处理完成") || lower.contains("批次")) {
-        return Some(
-            "REJECTED: summary 是批次处理日志，不是知识。操作日志不应存入 KB。".to_string(),
-        );
-    }
-
-    // Rule 2: summary contains stack trace / log indicators
-    let stack_patterns = [
-        "at node_modules/",
-        "Caused by:",
-        "stack trace",
-        "panic at",
-        "RUST_BACKTRACE",
-        "Error:",
-        "    at ",
-        "线程",
-        "thread '",
-    ];
-    for pattern in &stack_patterns {
-        if summary.contains(pattern) {
-            return Some(format!(
-                "REJECTED: summary 包含堆栈/日志片段（'{}'）。summary 应是泛化结论，不要包含原始报错。请提炼后重试。",
-                pattern
-            ));
-        }
-    }
-
-    // Rule 3: narrative indicators — "先...然后...最后..." pattern in summary
-    let narrative_words = [
-        "先查看",
-        "先检查",
-        "然后尝试",
-        "然后发现",
-        "最后发现",
-        "接着",
-        "第一步",
-        "第二步",
-        "第三步",
-        "首先我",
-        "我尝试",
-    ];
-    let narrative_count = narrative_words
-        .iter()
-        .filter(|w| summary.contains(*w))
-        .count();
-    if narrative_count >= 2 {
-        return Some(
-            "REJECTED: summary 是叙事体（含「先...然后...」等流水账结构）。请改写为结论性陈述：\
-             【现象关键字】→【根因】→【解决方案】。"
-                .to_string(),
-        );
-    }
-
-    // Rule 4: detail too large (> 2000 chars of serialized JSON = likely pasting raw logs)
-    if let Some(d) = detail {
-        let detail_str = serde_json::to_string(d).unwrap_or_default();
-        if detail_str.len() > 2000 {
-            return Some(format!(
-                "REJECTED: detail 过长（{}字节）。detail 应是结构化三段式 {{trigger, conclusion, action}}，不要粘贴原始日志。请精简后重试。",
-                detail_str.len()
-            ));
-        }
-    }
-
-    None
-}
-
-#[derive(Deserialize)]
-struct KBRememberArgs {
-    category: String,
-    key: String,
-    summary: String,
-    #[serde(default)]
-    detail: Option<Value>,
-    #[serde(default)]
-    source: Option<String>,
-    #[serde(default)]
-    confidence: Option<f64>,
-    #[serde(default)]
-    project: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct KBKeyArgs {
-    key: String,
-}
-
-#[derive(Deserialize)]
-struct KBUpdateArgs {
-    key: String,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    summary: Option<String>,
-    #[serde(default)]
-    detail: Option<serde_json::Value>,
-    #[serde(default)]
-    confidence: Option<f64>,
-    #[serde(default)]
-    linked_task_id: Option<String>,
-    #[serde(default)]
-    project_id: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct KBSearchArgs {
-    #[serde(default)]
-    query: Option<String>,
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default)]
-    limit: Option<usize>,
-    #[serde(default)]
-    offset: Option<usize>,
-    #[serde(default)]
-    search_mode: Option<String>,
-    #[serde(default)]
-    project: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct KBListArgs {
-    #[serde(default)]
-    category: Option<String>,
-    #[serde(default = "default_list_limit")]
-    limit: u32,
-    #[serde(default)]
-    offset: u32,
-    #[serde(default)]
-    compact: bool,
-}
-fn default_list_limit() -> u32 { 50 }
-
-#[derive(Deserialize)]
-struct KBImportArgs {
-    format: String,
-    #[serde(default)]
-    path: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct KBDiscoverArgs {
-    host: String,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    password: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct KBGCArgs {
-    action: String,
-    #[serde(default, deserialize_with = "lenient::option_i64")]
-    days: Option<i64>,
-}
+use args::{
+    KBDiscoverArgs, KBGCArgs, KBImportArgs, KBKeyArgs, KBListArgs, KBRememberArgs, KBSearchArgs,
+    KBUpdateArgs,
+};
+use compact::handle_kb_compact;
+use conflicts::detect_kb_conflicts;
+use quality::check_content_quality;
 
 // @beacon: knowledge
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
@@ -490,7 +302,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             let mut not_found = Vec::new();
             for a in &args.assignments {
                 let pid = a.project_id.as_deref().filter(|s| !s.is_empty());
-                match state.store.kb_update(&a.key, None, None, None, None, None, pid).await {
+                match state
+                    .store
+                    .kb_update(&a.key, None, None, None, None, None, pid)
+                    .await
+                {
                     Ok(Some(_)) => updated += 1,
                     Ok(None) => not_found.push(a.key.clone()),
                     Err(_) => not_found.push(a.key.clone()),
@@ -591,7 +407,11 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 if ranked.is_empty() {
                     let like = state
                         .store
-                        .kb_search_like_ranked_scoped(&query, category.as_deref(), project.as_deref())
+                        .kb_search_like_ranked_scoped(
+                            &query,
+                            category.as_deref(),
+                            project.as_deref(),
+                        )
                         .await
                         .unwrap_or_default();
                     like.into_iter()
@@ -820,28 +640,38 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
         "mission_kb_list" => {
             let args_parsed: KBListArgs = serde_json::from_value(args).unwrap_or(KBListArgs {
-                category: None, limit: 50, offset: 0, compact: false,
+                category: None,
+                limit: 50,
+                offset: 0,
+                compact: false,
             });
             let entries = state
                 .store
-                .kb_list_paginated(args_parsed.category.as_deref(), args_parsed.limit, args_parsed.offset)
+                .kb_list_paginated(
+                    args_parsed.category.as_deref(),
+                    args_parsed.limit,
+                    args_parsed.offset,
+                )
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
 
             if args_parsed.compact {
-                let compact: Vec<serde_json::Value> = entries.iter().map(|e| {
-                    serde_json::json!({
-                        "key": e.key,
-                        "category": e.category,
-                        "summary": if e.summary.chars().count() > 120 {
-                            format!("{}...", e.summary.chars().take(120).collect::<String>())
-                        } else {
-                            e.summary.clone()
-                        },
-                        "updatedAt": e.updated_at,
-                        "projectId": e.project_id,
+                let compact: Vec<serde_json::Value> = entries
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "key": e.key,
+                            "category": e.category,
+                            "summary": if e.summary.chars().count() > 120 {
+                                format!("{}...", e.summary.chars().take(120).collect::<String>())
+                            } else {
+                                e.summary.clone()
+                            },
+                            "updatedAt": e.updated_at,
+                            "projectId": e.project_id,
+                        })
                     })
-                }).collect();
+                    .collect();
                 Ok(ToolResult::json_pretty(&serde_json::json!({
                     "total": compact.len(),
                     "compact": true,
@@ -2104,270 +1934,5 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
         _ => Err(anyhow!("Unknown kb tool: {name}")),
-    }
-}
-
-/// Programmatic KB compaction: rule-based cleanup beyond auto_gc.
-/// dry_run=true (default) previews what would be deleted.
-async fn handle_kb_compact(state: &AppState, args: serde_json::Value) -> Result<ToolResult> {
-    let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(true);
-    // Load all entries for rule-based filtering
-    let all = state.store.kb_list(None).await?;
-    let now = chrono::Utc::now();
-    let mut candidates: Vec<(String, String, String, f64, &str)> = Vec::new(); // (key, category, summary, confidence, reason)
-
-    for e in &all {
-        let age_days = chrono::DateTime::parse_from_rfc3339(&e.updated_at)
-            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_days())
-            .unwrap_or(0);
-
-        // Exempt categories: architecture:summary, policy:decision, preference — never auto-compact
-        let exempt = e.category.starts_with("architecture:summary")
-            || e.category.starts_with("policy:decision")
-            || e.category.starts_with("preference")
-            || e.category == "infra";
-        if exempt {
-            continue;
-        }
-
-        // Rule 1: Low confidence (< 0.3) — feedback loop has deprioritized
-        if e.confidence < 0.3 {
-            candidates.push((
-                e.key.clone(),
-                e.category.clone(),
-                e.summary.clone(),
-                e.confidence,
-                "low_confidence",
-            ));
-            continue;
-        }
-        // Rule 2: State-type entries older than 30d with 0 access
-        if e.kb_type == "state" && e.access_count == 0 && age_days > 30 {
-            candidates.push((
-                e.key.clone(),
-                e.category.clone(),
-                e.summary.clone(),
-                e.confidence,
-                "stale_state",
-            ));
-            continue;
-        }
-        // Rule 3: memory:ops older than 7 days
-        if e.category.starts_with("memory:ops") && age_days > 7 {
-            candidates.push((
-                e.key.clone(),
-                e.category.clone(),
-                e.summary.clone(),
-                e.confidence,
-                "stale_ops",
-            ));
-            continue;
-        }
-        // Rule 4: memory:debug older than 30 days
-        if e.category.starts_with("memory:debug") && age_days > 30 {
-            candidates.push((
-                e.key.clone(),
-                e.category.clone(),
-                e.summary.clone(),
-                e.confidence,
-                "stale_debug",
-            ));
-            continue;
-        }
-        // Rule 5: memory:bugfix older than 30 days with no retrieval
-        if e.category.starts_with("memory:bugfix") && e.access_count == 0 && age_days > 30 {
-            candidates.push((
-                e.key.clone(),
-                e.category.clone(),
-                e.summary.clone(),
-                e.confidence,
-                "stale_bugfix",
-            ));
-            continue;
-        }
-        // Rule 6: Low-value facts — confidence < 0.5 and never accessed
-        if e.kb_type == "fact" && e.confidence < 0.5 && e.access_count == 0 {
-            candidates.push((
-                e.key.clone(),
-                e.category.clone(),
-                e.summary.clone(),
-                e.confidence,
-                "low_value_fact",
-            ));
-            continue;
-        }
-        // Rule 7: Expired scratchpad — Working Memory entries older than 7 days
-        if e.scope_task_id.is_some() && age_days > 7 {
-            candidates.push((
-                e.key.clone(),
-                e.category.clone(),
-                e.summary.clone(),
-                e.confidence,
-                "expired_scratchpad",
-            ));
-            continue;
-        }
-    }
-
-    let total = candidates.len();
-
-    if dry_run {
-        let mut by_reason: std::collections::HashMap<&str, usize> =
-            std::collections::HashMap::new();
-        for (_, _, _, _, reason) in &candidates {
-            *by_reason.entry(reason).or_default() += 1;
-        }
-        let preview: Vec<_> = candidates
-            .iter()
-            .take(50)
-            .map(|(key, cat, summary, conf, reason)| {
-                serde_json::json!({
-                    "key": key, "category": cat, "summary": summary,
-                    "confidence": conf, "reason": reason
-                })
-            })
-            .collect();
-        Ok(ToolResult::json_pretty(&serde_json::json!({
-            "dryRun": true,
-            "totalEntries": all.len(),
-            "totalCandidates": total,
-            "byReason": by_reason,
-            "candidates": preview,
-            "hint": "Set dryRun=false to execute deletion."
-        })))
-    } else {
-        let keys: Vec<String> = candidates.iter().map(|(k, _, _, _, _)| k.clone()).collect();
-        let deleted = state.store.kb_batch_forget(&keys).await?;
-        info!(deleted, total, "KB compact: cleaned up entries");
-        Ok(ToolResult::json(&serde_json::json!({
-            "dryRun": false,
-            "deleted": deleted,
-            "total": total
-        })))
-    }
-}
-
-/// Detect semantically similar entries that may conflict with a newly created KB entry.
-/// Uses embedding cosine similarity within the same category prefix.
-async fn detect_kb_conflicts(
-    state: &AppState,
-    new_entry: &missiond_core::types::KnowledgeEntry,
-) -> Vec<serde_json::Value> {
-    const CONFLICT_SIM_THRESHOLD: f32 = 0.82;
-
-    let svc = match state.embedding_service.as_ref() {
-        Some(s) => s,
-        None => return vec![],
-    };
-
-    // Embed the new entry's summary
-    let new_text = format!("{} {}", new_entry.key, new_entry.summary);
-    let new_vec = match svc.embed(&new_text) {
-        Some(v) => v,
-        None => return vec![],
-    };
-
-    // Compare against cached KB embeddings
-    let cache = state.kb_search_cache.read().await;
-    let category_prefix = new_entry
-        .category
-        .split(':')
-        .next()
-        .unwrap_or(&new_entry.category);
-
-    let mut conflicts = Vec::new();
-    for (id, vec) in cache.iter() {
-        if id == &new_entry.id {
-            continue; // skip self
-        }
-        let cosine = missiond_core::embedding::cosine_similarity(&new_vec, vec);
-        // Hybrid conflict detection: pure cosine OR (moderate cosine + Jaccard overlap)
-        // Addresses semantic dilution for long vs short entries
-        let is_conflict = if cosine >= CONFLICT_SIM_THRESHOLD {
-            true
-        } else if cosine >= 0.6 {
-            // Fetch entry to compute Jaccard on summary text
-            if let Ok(Some(existing)) = state.store.kb_get_by_id(id).await {
-                let existing_prefix = existing
-                    .category
-                    .split(':')
-                    .next()
-                    .unwrap_or(&existing.category);
-                if existing_prefix == category_prefix {
-                    let jaccard =
-                        text_jaccard(&new_text, &format!("{} {}", existing.key, existing.summary));
-                    jaccard >= 0.5
-                } else {
-                    false
-                }
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-        if is_conflict {
-            if let Ok(Some(existing)) = state.store.kb_get_by_id(id).await {
-                let existing_prefix = existing
-                    .category
-                    .split(':')
-                    .next()
-                    .unwrap_or(&existing.category);
-                if existing_prefix == category_prefix {
-                    conflicts.push(serde_json::json!({
-                        "id": existing.id,
-                        "category": existing.category,
-                        "key": existing.key,
-                        "summary": existing.summary,
-                        "confidence": existing.confidence,
-                        "similarity": format!("{:.3}", cosine),
-                    }));
-                }
-            }
-        }
-    }
-
-    // Sort by similarity descending, limit to top 5
-    conflicts.sort_by(|a, b| {
-        let sa = a["similarity"].as_str().unwrap_or("0");
-        let sb = b["similarity"].as_str().unwrap_or("0");
-        sb.partial_cmp(sa).unwrap_or(std::cmp::Ordering::Equal)
-    });
-    conflicts.truncate(5);
-    conflicts
-}
-
-/// Lightweight Jaccard similarity on tokenized text (CJK unigrams + ASCII words).
-fn text_jaccard(a: &str, b: &str) -> f64 {
-    use std::collections::HashSet;
-    let tokenize = |text: &str| -> HashSet<String> {
-        let mut tokens = HashSet::new();
-        let mut word = String::new();
-        for ch in text.chars() {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                word.push(ch.to_ascii_lowercase());
-            } else {
-                if word.len() >= 2 {
-                    tokens.insert(word.clone());
-                }
-                word.clear();
-                if ch as u32 > 0x2E80 {
-                    tokens.insert(ch.to_string());
-                }
-            }
-        }
-        if word.len() >= 2 {
-            tokens.insert(word);
-        }
-        tokens
-    };
-    let ta = tokenize(a);
-    let tb = tokenize(b);
-    let intersection = ta.intersection(&tb).count();
-    let union = ta.union(&tb).count();
-    if union == 0 {
-        0.0
-    } else {
-        intersection as f64 / union as f64
     }
 }

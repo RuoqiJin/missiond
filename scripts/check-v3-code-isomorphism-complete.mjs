@@ -72,6 +72,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-workflow-isomorphism.mjs',
   'scripts/check-v3-review-gate-isomorphism.mjs',
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
+  'scripts/check-v3-memory-kb-isomorphism.mjs',
   'scripts/check-v3-source-hygiene-isomorphism.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
