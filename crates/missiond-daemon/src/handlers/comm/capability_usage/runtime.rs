@@ -50,6 +50,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use tracing::warn;
 
+use crate::context::v3_blueprint_runtime::CapabilityGovernanceRuntimeConfig;
 use crate::state::AppState;
 
 /// Forward an `ObservabilityEvent` and log (but never propagate) publish
@@ -60,37 +61,6 @@ async fn emit_observability_event(state: &AppState, ev: ObservabilityEvent) {
         warn!(error = %e, "failed to publish ObservabilityEvent (snapshot already returned)");
     }
 }
-
-const REVIEW_FILE: &str = ".missiond/v2/capability-usage-review.json";
-
-/// Capabilities that must NOT enter delete/deprecate candidates regardless of
-/// usage counts. Mirrors intent-intent-layer.lisp :: capability-evolution-governance
-/// :: policy :: protected-capabilities.
-const PROTECTED_TOOL_PATTERNS: &[&str] = &[
-    "mission_execution",
-    "mission_intent",
-    "mission_forge_",
-    // daemon bootstrap / repair surfaces
-    "mission_sys_",
-    "mission_daemon_update",
-    "mission_health",
-    "mission_power_control",
-    // memory/event-bus repair (KB ops + audit are repair surfaces)
-    "mission_kb_ops",
-    "mission_audit",
-    // manual recovery
-    "mission_pty_signal",
-    "mission_pty_confirm",
-    "mission_incident",
-];
-
-const PROTECTED_FLOW_PATTERNS: &[&str] = &[
-    // engineering / recovery flows kept indefinitely
-    "engineering",
-    "F-execution-log-governance",
-    "F-incident-reaction",
-    "F-capability-usage-monitoring",
-];
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let action = match args.get("action").and_then(|v| v.as_str()) {
@@ -229,6 +199,15 @@ async fn resolve_project_root(state: &AppState, project_id: Option<&str>) -> Res
     Ok(std::env::current_dir().map_err(|e| anyhow!("cannot read CWD: {}", e))?)
 }
 
+fn load_governance_config(project_root: &Path) -> Result<CapabilityGovernanceRuntimeConfig> {
+    // Projects review_sidecar_path plus protected_tool_patterns /
+    // protected_flow_patterns from V3 capability-governance-policy.
+    CapabilityGovernanceRuntimeConfig::load_for_project_root(Some(
+        project_root.to_string_lossy().as_ref(),
+    ))
+    .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
+
 async fn collect_tool_usage(
     state: &AppState,
     windows: &[WindowSpec],
@@ -320,20 +299,12 @@ fn registered_flows() -> Vec<String> {
     crate::engine::flow::loader::list_flows().unwrap_or_default()
 }
 
-fn is_protected_tool(name: &str) -> bool {
-    PROTECTED_TOOL_PATTERNS.iter().any(|p| {
-        if p.ends_with('_') {
-            name.starts_with(p)
-        } else {
-            name == *p
-        }
-    })
+fn is_protected_tool(name: &str, config: &CapabilityGovernanceRuntimeConfig) -> bool {
+    config.is_protected_tool(name)
 }
 
-fn is_protected_flow(name: &str) -> bool {
-    PROTECTED_FLOW_PATTERNS
-        .iter()
-        .any(|p| name == *p || name.starts_with(p))
+fn is_protected_flow(name: &str, config: &CapabilityGovernanceRuntimeConfig) -> bool {
+    config.is_protected_flow(name)
 }
 
 fn classify_tool(stats: &ToolStats, registered: bool, protected: bool) -> (String, Vec<String>) {
@@ -418,6 +389,7 @@ async fn build_capability_rows(
     windows: &[WindowSpec],
     scope: &str,
     project_root: &Path,
+    governance_config: &CapabilityGovernanceRuntimeConfig,
 ) -> Result<(
     Vec<CapabilityRow>,
     SourceCoverage,
@@ -444,7 +416,7 @@ async fn build_capability_rows(
         for id in all_ids {
             let stats = tool_stats.get(&id).cloned().unwrap_or_default();
             let registered_flag = registered_tools_set.contains(&id);
-            let protected = is_protected_tool(&id);
+            let protected = is_protected_tool(&id, governance_config);
             let (base_class, base_evidence) = classify_tool(&stats, registered_flag, protected);
             let hints = hint_index.for_source("tool", &id);
             let overlay = apply_hint_overlay(
@@ -454,6 +426,7 @@ async fn build_capability_rows(
                 &hints,
                 &registered_tools_set,
                 &registered_flows_set,
+                governance_config,
             );
             let total = stats.success + stats.error;
             let success_rate = if total > 0 {
@@ -509,7 +482,7 @@ async fn build_capability_rows(
         for id in all_ids {
             let stats = flow_stats.get(&id).cloned().unwrap_or_default();
             let registered_flag = registered_flows_set.contains(&id);
-            let protected = is_protected_flow(&id);
+            let protected = is_protected_flow(&id, governance_config);
             let (base_class, mut base_evidence) = classify_flow(&stats, registered_flag, protected);
             if stats.event_log_observed > 0 {
                 base_evidence.push(format!(
@@ -562,6 +535,7 @@ async fn build_capability_rows(
                 &hints,
                 &registered_tools_set,
                 &registered_flows_set,
+                governance_config,
             );
             let mut counts = HashMap::new();
             counts.insert("all".to_string(), stats.total);
@@ -631,19 +605,20 @@ async fn take_snapshot(
         Err(_) => return Err(anyhow!("invalid window — expected 7d|30d|90d|all")),
     };
     let project_root = resolve_project_root(state, project_arg(args)).await?;
+    let governance_config = load_governance_config(&project_root)?;
     let (rows, mut coverage, hint_index, event_probe, workflow_probe) =
-        build_capability_rows(state, &windows, scope, &project_root).await?;
+        build_capability_rows(state, &windows, scope, &project_root, &governance_config).await?;
     coverage.persistence_mode = "read-only".to_string();
     coverage.persistence_note =
         "snapshot is recomputed each call; daemon_state is i64-only so no JSON cache. \
-         mark/ack writes a JSON sidecar at .missiond/v2/capability-usage-review.json"
+         mark/ack writes the JSON sidecar projected by capability-governance-policy"
             .to_string();
     coverage.sources = build_source_coverage_dict(
         &rows,
         &hint_index,
         &event_probe,
         &workflow_probe,
-        ReviewState::load(&project_root)
+        ReviewState::load(&project_root, &governance_config)
             .map(|s| s.entries.len())
             .ok(),
     );
@@ -855,6 +830,8 @@ async fn action_snapshot(state: &AppState, args: &Value) -> Result<ToolResult> {
 
 async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
     let (snapshot, rows, _, _) = take_snapshot(state, args).await?;
+    let project_root = resolve_project_root(state, project_arg(args)).await?;
+    let governance_config = load_governance_config(&project_root)?;
     let mut by_class: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for r in &rows {
         by_class
@@ -876,7 +853,7 @@ async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
                 "replacement_confidence": r.replacement_confidence,
                 "semantic_hint_source": r.semantic_hint_source,
                 "review_required": compute_review_required(r),
-                "protected_target_policy": compute_protected_target_policy(r),
+                "protected_target_policy": compute_protected_target_policy(r, &governance_config),
                 "hint_evidence": r.hint_evidence,
             }));
     }
@@ -899,13 +876,16 @@ async fn action_report(state: &AppState, args: &Value) -> Result<ToolResult> {
 ///     should be persisted
 ///   - `"destructive-allowed"` — neither side is protected, so the operator
 ///     may proceed with `merge` / `deprecate` / `remove-after-compat-window`
-fn compute_protected_target_policy(row: &CapabilityRow) -> &'static str {
+fn compute_protected_target_policy(
+    row: &CapabilityRow,
+    governance_config: &CapabilityGovernanceRuntimeConfig,
+) -> &'static str {
     let Some(target) = row.merge_target.as_deref() else {
         return "n/a";
     };
     let target_protected = match row.kind.as_str() {
-        "flow" => is_protected_flow(target),
-        _ => is_protected_tool(target),
+        "flow" => is_protected_flow(target, governance_config),
+        _ => is_protected_tool(target, governance_config),
     };
     if row.protected || target_protected {
         "review-only"
@@ -936,7 +916,8 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
         .to_string();
 
     let project_root = resolve_project_root(state, project_arg(args)).await?;
-    let review = ReviewState::load(&project_root).unwrap_or_default();
+    let governance_config = load_governance_config(&project_root)?;
+    let review = ReviewState::load(&project_root, &governance_config).unwrap_or_default();
 
     let mut buckets: BTreeMap<String, Vec<Value>> = BTreeMap::new();
     for r in &rows {
@@ -947,7 +928,7 @@ async fn action_candidates(state: &AppState, args: &Value) -> Result<ToolResult>
             continue;
         }
         let entry = review.entries.get(&r.capability_id);
-        let protected_target_policy = compute_protected_target_policy(r);
+        let protected_target_policy = compute_protected_target_policy(r, &governance_config);
         let review_required = compute_review_required(r);
         let payload = json!({
             "capability_id": r.capability_id,
@@ -1059,11 +1040,14 @@ struct ReviewEntry {
 }
 
 impl ReviewState {
-    fn path(project_root: &Path) -> PathBuf {
-        project_root.join(REVIEW_FILE)
+    fn path(project_root: &Path, governance_config: &CapabilityGovernanceRuntimeConfig) -> PathBuf {
+        project_root.join(&governance_config.review_sidecar_path)
     }
-    fn load(project_root: &Path) -> Result<Self> {
-        let p = Self::path(project_root);
+    fn load(
+        project_root: &Path,
+        governance_config: &CapabilityGovernanceRuntimeConfig,
+    ) -> Result<Self> {
+        let p = Self::path(project_root, governance_config);
         if !p.exists() {
             return Ok(Self::default());
         }
@@ -1072,8 +1056,12 @@ impl ReviewState {
             .map_err(|e| anyhow!("review state at {} is malformed: {}", p.display(), e))?;
         Ok(parsed)
     }
-    fn save(&self, project_root: &Path) -> Result<PathBuf> {
-        let p = Self::path(project_root);
+    fn save(
+        &self,
+        project_root: &Path,
+        governance_config: &CapabilityGovernanceRuntimeConfig,
+    ) -> Result<PathBuf> {
+        let p = Self::path(project_root, governance_config);
         if let Some(parent) = p.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -1120,10 +1108,13 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
         .unwrap_or("unspecified");
     let rationale = args.get("rationale").and_then(|v| v.as_str()).unwrap_or("");
 
+    let project_root = resolve_project_root(state, project_arg(args)).await?;
+    let governance_config = load_governance_config(&project_root)?;
+
     let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("tool");
     let protected = match kind {
-        "flow" => is_protected_flow(candidate_id),
-        _ => is_protected_tool(candidate_id),
+        "flow" => is_protected_flow(candidate_id, &governance_config),
+        _ => is_protected_tool(candidate_id, &governance_config),
     };
     if protected
         && matches!(
@@ -1142,9 +1133,6 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
             .with_suggestion("only `keep` / `monitor` / `review` are valid for protected ids"),
         ));
     }
-
-    let project_root = resolve_project_root(state, project_arg(args)).await?;
-
     // Resolve replacement_target for merge decisions.
     //
     // Validation ordering (fail fast, most specific first):
@@ -1229,8 +1217,8 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
             ));
         }
         let target_protected = match kind {
-            "flow" => is_protected_flow(target),
-            _ => is_protected_tool(target),
+            "flow" => is_protected_flow(target, &governance_config),
+            _ => is_protected_tool(target, &governance_config),
         };
         if target_protected {
             return Ok(ToolResult::structured_error(
@@ -1276,16 +1264,16 @@ async fn action_mark(state: &AppState, args: &Value) -> Result<ToolResult> {
                 "kind": kind,
                 "entry": entry,
             },
-            "path": ReviewState::path(&project_root).display().to_string(),
+            "path": ReviewState::path(&project_root, &governance_config).display().to_string(),
             "note": "set dry_run=false to persist (writes JSON sidecar; no DB schema involved)",
         })));
     }
 
-    let mut review = ReviewState::load(&project_root).unwrap_or_default();
+    let mut review = ReviewState::load(&project_root, &governance_config).unwrap_or_default();
     review
         .entries
         .insert(candidate_id.to_string(), entry.clone());
-    let path = review.save(&project_root)?;
+    let path = review.save(&project_root, &governance_config)?;
     Ok(ToolResult::json_pretty(&json!({
         "status": "marked",
         "capability_id": candidate_id,
@@ -1314,8 +1302,9 @@ async fn action_ack(state: &AppState, args: &Value) -> Result<ToolResult> {
         .and_then(|v| v.as_str())
         .unwrap_or("");
     let project_root = resolve_project_root(state, project_arg(args)).await?;
+    let governance_config = load_governance_config(&project_root)?;
 
-    let mut review = ReviewState::load(&project_root).unwrap_or_default();
+    let mut review = ReviewState::load(&project_root, &governance_config).unwrap_or_default();
     let entry = match review.entries.get_mut(candidate_id) {
         Some(e) => e,
         None => {
@@ -1343,7 +1332,7 @@ async fn action_ack(state: &AppState, args: &Value) -> Result<ToolResult> {
     entry.ack_by = Some(ack_by.to_string());
     entry.follow_up_ref = Some(follow_up_ref.to_string());
     let saved = entry.clone();
-    let path = review.save(&project_root)?;
+    let path = review.save(&project_root, &governance_config)?;
     Ok(ToolResult::json_pretty(&json!({
         "status": "acked",
         "capability_id": candidate_id,
@@ -1686,6 +1675,7 @@ fn apply_hint_overlay(
     hints: &[&SemanticHint],
     registered_tools: &BTreeSet<String>,
     registered_flows: &BTreeSet<String>,
+    governance_config: &CapabilityGovernanceRuntimeConfig,
 ) -> HintOverlay {
     if hints.is_empty() {
         return HintOverlay {
@@ -1735,8 +1725,8 @@ fn apply_hint_overlay(
     let target_id = target_hint.target_id.as_deref().unwrap_or("").to_string();
     let target_kind = target_hint.target_kind.clone();
     let target_protected = match target_kind.as_str() {
-        "flow" => is_protected_flow(&target_id),
-        _ => is_protected_tool(&target_id),
+        "flow" => is_protected_flow(&target_id, governance_config),
+        _ => is_protected_tool(&target_id, governance_config),
     };
     evidence.push(format!(
         "merge-candidate: {} {} {} -> {}",
@@ -1932,22 +1922,28 @@ fn extract_match_references(match_rules: &Value) -> Vec<String> {
 mod tests {
     use super::*;
 
+    fn test_governance_config() -> CapabilityGovernanceRuntimeConfig {
+        CapabilityGovernanceRuntimeConfig::default()
+    }
+
     #[test]
     fn protected_tool_pattern_matches_prefix_and_exact() {
-        assert!(is_protected_tool("mission_intent"));
-        assert!(is_protected_tool("mission_forge_build"));
-        assert!(is_protected_tool("mission_forge_lint"));
-        assert!(is_protected_tool("mission_execution"));
-        assert!(is_protected_tool("mission_audit"));
-        assert!(!is_protected_tool("mission_kb_query"));
-        assert!(!is_protected_tool("mission_board_query"));
+        let config = test_governance_config();
+        assert!(is_protected_tool("mission_intent", &config));
+        assert!(is_protected_tool("mission_forge_build", &config));
+        assert!(is_protected_tool("mission_forge_lint", &config));
+        assert!(is_protected_tool("mission_execution", &config));
+        assert!(is_protected_tool("mission_audit", &config));
+        assert!(!is_protected_tool("mission_kb_query", &config));
+        assert!(!is_protected_tool("mission_board_query", &config));
     }
 
     #[test]
     fn protected_flow_includes_governance_flows() {
-        assert!(is_protected_flow("engineering"));
-        assert!(is_protected_flow("F-execution-log-governance"));
-        assert!(!is_protected_flow("hello-parallel"));
+        let config = test_governance_config();
+        assert!(is_protected_flow("engineering", &config));
+        assert!(is_protected_flow("F-execution-log-governance", &config));
+        assert!(!is_protected_flow("hello-parallel", &config));
     }
 
     #[test]
@@ -2028,9 +2024,10 @@ mod tests {
                 replacement_target_source: None,
             },
         );
-        let path = s.save(dir.path()).unwrap();
+        let config = test_governance_config();
+        let path = s.save(dir.path(), &config).unwrap();
         assert!(path.exists());
-        let loaded = ReviewState::load(dir.path()).unwrap();
+        let loaded = ReviewState::load(dir.path(), &config).unwrap();
         assert_eq!(loaded.entries.len(), 1);
         assert_eq!(
             loaded
@@ -2165,6 +2162,7 @@ mod tests {
             &hint_refs,
             &tools,
             &flows,
+            &test_governance_config(),
         );
         assert_eq!(overlay.classification, "merge-candidate");
         assert_eq!(overlay.merge_target.as_deref(), Some("mission_new"));
@@ -2198,7 +2196,15 @@ mod tests {
         let mut tools = BTreeSet::new();
         tools.insert("mission_y".to_string());
         let flows = BTreeSet::new();
-        let overlay = apply_hint_overlay("active", vec![], "mission_x", &hint_refs, &tools, &flows);
+        let overlay = apply_hint_overlay(
+            "active",
+            vec![],
+            "mission_x",
+            &hint_refs,
+            &tools,
+            &flows,
+            &test_governance_config(),
+        );
         assert_eq!(overlay.classification, "active");
         assert_eq!(overlay.merge_target, None);
         assert_eq!(overlay.replacement_confidence, None);
@@ -2228,6 +2234,7 @@ mod tests {
             &hint_refs,
             &tools,
             &flows,
+            &test_governance_config(),
         );
         assert_eq!(overlay.classification, "merge-candidate");
         assert_eq!(overlay.merge_target.as_deref(), Some("mission_audit"));
@@ -2265,6 +2272,7 @@ mod tests {
             &hint_refs,
             &tools,
             &flows,
+            &test_governance_config(),
         );
         assert_eq!(overlay.classification, "stale");
         assert_eq!(overlay.merge_target, None);
@@ -2310,6 +2318,7 @@ mod tests {
             &hint_refs,
             &tools,
             &flows,
+            &test_governance_config(),
         );
         assert_eq!(overlay.classification, "quiet");
         assert_eq!(overlay.merge_target, None);
@@ -2529,7 +2538,10 @@ mod tests {
     #[test]
     fn protected_target_policy_n_a_when_no_merge_target() {
         let row = make_row("mission_old", "tool", "stale", false, None, None, None);
-        assert_eq!(compute_protected_target_policy(&row), "n/a");
+        assert_eq!(
+            compute_protected_target_policy(&row, &test_governance_config()),
+            "n/a"
+        );
     }
 
     #[test]
@@ -2543,7 +2555,10 @@ mod tests {
             Some("high"),
             Some("intent-tools.lisp:1 replacement"),
         );
-        assert_eq!(compute_protected_target_policy(&row), "destructive-allowed");
+        assert_eq!(
+            compute_protected_target_policy(&row, &test_governance_config()),
+            "destructive-allowed"
+        );
     }
 
     #[test]
@@ -2559,7 +2574,10 @@ mod tests {
             Some("high"),
             Some("intent-tools.lisp:1 replacement"),
         );
-        assert_eq!(compute_protected_target_policy(&row), "review-only");
+        assert_eq!(
+            compute_protected_target_policy(&row, &test_governance_config()),
+            "review-only"
+        );
     }
 
     #[test]
@@ -2575,7 +2593,10 @@ mod tests {
             Some("high"),
             Some("intent-tools.lisp:1 replacement"),
         );
-        assert_eq!(compute_protected_target_policy(&row), "review-only");
+        assert_eq!(
+            compute_protected_target_policy(&row, &test_governance_config()),
+            "review-only"
+        );
     }
 
     #[test]
@@ -2589,7 +2610,10 @@ mod tests {
             Some("high"),
             Some("intent-flow.lisp:1 replacement"),
         );
-        assert_eq!(compute_protected_target_policy(&row), "review-only");
+        assert_eq!(
+            compute_protected_target_policy(&row, &test_governance_config()),
+            "review-only"
+        );
     }
 
     #[test]
@@ -2656,7 +2680,7 @@ mod tests {
             }
         }"#;
         std::fs::write(v2.join("capability-usage-review.json"), raw).unwrap();
-        let loaded = ReviewState::load(dir.path()).unwrap();
+        let loaded = ReviewState::load(dir.path(), &test_governance_config()).unwrap();
         assert_eq!(loaded.entries.len(), 1);
         let entry = loaded.entries.get("mission_old").unwrap();
         assert_eq!(entry.decision, "merge");
@@ -2683,8 +2707,9 @@ mod tests {
                 replacement_target_source: Some("operator".to_string()),
             },
         );
-        s.save(dir.path()).unwrap();
-        let loaded = ReviewState::load(dir.path()).unwrap();
+        let config = test_governance_config();
+        s.save(dir.path(), &config).unwrap();
+        let loaded = ReviewState::load(dir.path(), &config).unwrap();
         let entry = loaded.entries.get("mission_old").unwrap();
         assert_eq!(entry.replacement_target.as_deref(), Some("mission_new"));
         assert_eq!(entry.replacement_target_source.as_deref(), Some("operator"));
@@ -2732,7 +2757,11 @@ mod tests {
             "mission_sys_logs",
             "mission_forge_build",
         ] {
-            assert!(is_protected_tool(tool), "{} should remain protected", tool);
+            assert!(
+                is_protected_tool(tool, &test_governance_config()),
+                "{} should remain protected",
+                tool
+            );
         }
         for flow in [
             "engineering",
@@ -2741,7 +2770,7 @@ mod tests {
             "F-capability-usage-monitoring",
         ] {
             assert!(
-                is_protected_flow(flow),
+                is_protected_flow(flow, &test_governance_config()),
                 "{} should remain a protected flow",
                 flow
             );

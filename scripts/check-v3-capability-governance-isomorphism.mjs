@@ -18,6 +18,7 @@ const DEFAULT_FILES = {
   dispatcher: 'crates/missiond-daemon/src/handlers/mod.rs',
   capabilityFacade: 'crates/missiond-daemon/src/handlers/comm/capability_usage.rs',
   capabilityRuntime: 'crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs',
+  v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   audit: 'crates/missiond-daemon/src/handlers/comm/audit.rs',
   codexOps: 'crates/missiond-daemon/src/handlers/comm/codex_ops.rs',
   mcpCapability: 'crates/missiond-mcp/src/tools/comm/capability_usage.rs',
@@ -85,10 +86,15 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'capability-governance',
     '(v2-item capability-governance',
-    ':status code-aligned',
+    ':status runtime-projected',
+    '(capability-governance-policy',
+    ':review-sidecar ".missiond/v2/capability-usage-review.json"',
+    ':protected-tool-patterns',
+    ':protected-flow-patterns',
     '(tool-group capability-audit-tools',
     '(surface capability-governance',
     ':status "code-aligned"',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/handlers/comm/capability_usage.rs',
     'crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs',
     'crates/missiond-daemon/src/handlers/comm/audit.rs',
@@ -122,9 +128,12 @@ function checkFiles(root, files) {
     'snapshot|report|candidates|mark|ack',
     'CapabilityUsageSnapshot',
     'CapabilityStaleCandidate',
-    'REVIEW_FILE',
-    'PROTECTED_TOOL_PATTERNS',
-    'PROTECTED_FLOW_PATTERNS',
+    'CapabilityGovernanceRuntimeConfig',
+    'load_governance_config',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'review_sidecar_path',
+    'protected_tool_patterns',
+    'protected_flow_patterns',
     'action_snapshot',
     'action_report',
     'action_candidates',
@@ -142,6 +151,18 @@ function checkFiles(root, files) {
     'pick_merge_target',
     'apply_hint_overlay',
     'observability',
+  ]);
+
+  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'CapabilityGovernanceRuntimeConfig',
+    'parse_capability_governance_policy',
+    'DEFAULT_CAPABILITY_REVIEW_SIDECAR',
+    'DEFAULT_PROTECTED_TOOL_PATTERNS',
+    'DEFAULT_PROTECTED_FLOW_PATTERNS',
+    'capability-governance-policy',
+    ':review-sidecar',
+    ':protected-tool-patterns',
+    ':protected-flow-patterns',
   ]);
 
   requireAll(diagnostics, files.audit, sources.audit, [
@@ -219,14 +240,19 @@ function buildFixture() {
     path.join(root, DEFAULT_FILES.blueprint),
     `
 (missiond-blueprint
+  (capability-governance-policy
+    :review-sidecar ".missiond/v2/capability-usage-review.json"
+    :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_"]
+    :protected-flow-patterns ["engineering" "F-execution-log-governance"])
   (v2-convergence-map
-    (v2-item capability-governance :status code-aligned))
+    (v2-item capability-governance :status runtime-projected))
   (public-surface-map
     (tool-group capability-audit-tools :status code-aligned))
   (implementation-map
     (surface capability-governance
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/audit.rs"
              "crates/missiond-daemon/src/handlers/comm/codex_ops.rs"
@@ -248,7 +274,11 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.capabilityRuntime),
-    'mission_capability_usage snapshot|report|candidates|mark|ack CapabilityUsageSnapshot CapabilityStaleCandidate REVIEW_FILE PROTECTED_TOOL_PATTERNS PROTECTED_FLOW_PATTERNS action_snapshot action_report action_candidates action_mark action_ack source_coverage conversation_tool_calls board_tasks_flow_template event_log_flow_events lisp_semantic_hints review_sidecar workflow_execution_stats compute_protected_target_policy compute_review_required pick_merge_target apply_hint_overlay observability',
+    'mission_capability_usage snapshot|report|candidates|mark|ack CapabilityUsageSnapshot CapabilityStaleCandidate CapabilityGovernanceRuntimeConfig load_governance_config V3_BLUEPRINT_CONFIG_ERROR review_sidecar_path protected_tool_patterns protected_flow_patterns action_snapshot action_report action_candidates action_mark action_ack source_coverage conversation_tool_calls board_tasks_flow_template event_log_flow_events lisp_semantic_hints review_sidecar workflow_execution_stats compute_protected_target_policy compute_review_required pick_merge_target apply_hint_overlay observability',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.v3Runtime),
+    'CapabilityGovernanceRuntimeConfig parse_capability_governance_policy DEFAULT_CAPABILITY_REVIEW_SIDECAR DEFAULT_PROTECTED_TOOL_PATTERNS DEFAULT_PROTECTED_FLOW_PATTERNS capability-governance-policy :review-sidecar :protected-tool-patterns :protected-flow-patterns',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.audit),

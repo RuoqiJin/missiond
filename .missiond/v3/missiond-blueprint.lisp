@@ -537,6 +537,30 @@
        "mission_project import_universe MUST project its default manifest from project-registry-policy; UNIVERSE_MANIFEST is only an explicit override."
        "A real MissionD project with .missiond but no project-registry-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (capability-governance-policy
+    :desc "Lisp-owned capability audit policy; runtime review paths and protected lists are projections, not Rust-only constants."
+    :review-sidecar ".missiond/v2/capability-usage-review.json"
+    :protected-tool-patterns ["mission_execution"
+                              "mission_intent"
+                              "mission_forge_"
+                              "mission_sys_"
+                              "mission_daemon_update"
+                              "mission_health"
+                              "mission_power_control"
+                              "mission_kb_ops"
+                              "mission_audit"
+                              "mission_pty_signal"
+                              "mission_pty_confirm"
+                              "mission_incident"]
+    :protected-flow-patterns ["engineering"
+                              "F-execution-log-governance"
+                              "F-incident-reaction"
+                              "F-capability-usage-monitoring"]
+    :invariants
+      ["mission_capability_usage snapshot/report/candidates/mark/ack MUST project review sidecar location and protected source/target policy from capability-governance-policy."
+       "Protected pattern semantics stay explicit: tool patterns ending '_' are prefixes; other tool patterns are exact; flow patterns match exact or prefix."
+       "A real MissionD project with .missiond but no capability-governance-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
+
   (ops-infra
     :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
     :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
@@ -720,12 +744,12 @@
       :surface incident-governance
       :note "Question CRUD, decision stats, LLM trace, Gemini auth, and incident routing are physically split and pinned under the V3 incident-governance surface.")
     (v2-item capability-governance
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent-capability-governance.lisp"
       :v3-pillar communication
       :v3-function capability-governance
       :surface capability-governance
-      :note "Capability usage, audit, and Codex ops are physically pinned under the V3 capability-governance surface; runtime projection remains a separate future graduation step.")
+      :note "Capability usage, audit, and Codex ops are physically pinned under the V3 capability-governance surface; capability-governance-policy now projects review sidecar location plus protected source/target lists into mission_capability_usage runtime.")
     (v2-item compute-primitives
       :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: pty / llm / worker / engine runtime"
@@ -1083,9 +1107,10 @@
       (function capability-governance
         :surface capability-governance
         :entry [mission_capability_usage mission_audit mission_codex_ops]
-        :core ((step s1 :logic "record capability usage, audit facts, and Codex operation acknowledgements")
-               (step s2 :logic "bind evidence to plan/execution ids without becoming the primary execution gate")
-               (step s3 :logic "return traceable receipts for later learning and report finalization"))
+        :core ((step s1 :logic "load capability-governance-policy for review sidecar path and protected source/target lists")
+               (step s2 :logic "record capability usage, audit facts, and Codex operation acknowledgements")
+               (step s3 :logic "bind evidence to plan/execution ids without becoming the primary execution gate")
+               (step s4 :logic "return traceable receipts for later learning and report finalization"))
         :egress [capability_receipt audit_record codex_ops_result]))
 
     (pillar worker-runtime
@@ -1678,12 +1703,13 @@
              "crates/missiond-mcp/src/tools/comm/audit.rs"
              "crates/missiond-mcp/src/tools/comm/codex_ops.rs"
              "crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage.rs"
              "crates/missiond-daemon/src/handlers/comm/capability_usage/runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/audit.rs"
              "crates/missiond-daemon/src/handlers/comm/codex_ops.rs"
              "scripts/check-v3-capability-governance-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for capability usage, audit, and Codex ops surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations.")
+      :note "Runtime-projected V3 destination for capability usage, audit, and Codex ops surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; context/v3_blueprint_runtime.rs projects capability-governance-policy review sidecar path plus protected source/target lists into mission_capability_usage runtime; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations.")
 
     (surface compute-primitives
       :status "code-aligned"

@@ -25,6 +25,28 @@ pub(crate) const DEFAULT_PROJECT_INTENT_PATH_CANDIDATES: [&str; 3] = [
     ".jarvis/intent.lisp",
     "intent.lisp",
 ];
+pub(crate) const DEFAULT_CAPABILITY_REVIEW_SIDECAR: &str =
+    ".missiond/v2/capability-usage-review.json";
+pub(crate) const DEFAULT_PROTECTED_TOOL_PATTERNS: [&str; 12] = [
+    "mission_execution",
+    "mission_intent",
+    "mission_forge_",
+    "mission_sys_",
+    "mission_daemon_update",
+    "mission_health",
+    "mission_power_control",
+    "mission_kb_ops",
+    "mission_audit",
+    "mission_pty_signal",
+    "mission_pty_confirm",
+    "mission_incident",
+];
+pub(crate) const DEFAULT_PROTECTED_FLOW_PATTERNS: [&str; 4] = [
+    "engineering",
+    "F-execution-log-governance",
+    "F-incident-reaction",
+    "F-capability-usage-monitoring",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -62,6 +84,13 @@ pub(crate) struct CascadeRuntimeConfig {
 pub(crate) struct ProjectRegistryRuntimeConfig {
     pub intent_path_candidates: Vec<String>,
     pub default_universe_manifest: PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CapabilityGovernanceRuntimeConfig {
+    pub review_sidecar_path: PathBuf,
+    pub protected_tool_patterns: Vec<String>,
+    pub protected_flow_patterns: Vec<String>,
 }
 
 #[derive(Debug)]
@@ -150,6 +179,22 @@ impl Default for ProjectRegistryRuntimeConfig {
                 .map(|value| value.to_string())
                 .collect(),
             default_universe_manifest: PathBuf::from(DEFAULT_PROJECT_UNIVERSE_MANIFEST),
+        }
+    }
+}
+
+impl Default for CapabilityGovernanceRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            review_sidecar_path: PathBuf::from(DEFAULT_CAPABILITY_REVIEW_SIDECAR),
+            protected_tool_patterns: DEFAULT_PROTECTED_TOOL_PATTERNS
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            protected_flow_patterns: DEFAULT_PROTECTED_FLOW_PATTERNS
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
         }
     }
 }
@@ -299,6 +344,47 @@ impl ProjectRegistryRuntimeConfig {
     }
 }
 
+impl CapabilityGovernanceRuntimeConfig {
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_capability_governance_policy(&source)
+    }
+
+    pub(crate) fn is_protected_tool(&self, name: &str) -> bool {
+        self.protected_tool_patterns.iter().any(|pattern| {
+            if pattern.ends_with('_') {
+                name.starts_with(pattern)
+            } else {
+                name == pattern
+            }
+        })
+    }
+
+    pub(crate) fn is_protected_flow(&self, name: &str) -> bool {
+        self.protected_flow_patterns
+            .iter()
+            .any(|pattern| name == pattern || name.starts_with(pattern))
+    }
+}
+
 pub(crate) fn parse_workstation_config(
     source: &str,
 ) -> Result<WorkstationRuntimeConfig, BlueprintConfigError> {
@@ -410,6 +496,34 @@ pub(crate) fn parse_cascade_policy(
         trigger_enabled,
         default_max_cycles,
         max_cycles_limit,
+    })
+}
+
+pub(crate) fn parse_capability_governance_policy(
+    source: &str,
+) -> Result<CapabilityGovernanceRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "capability-governance-policy").ok_or_else(|| {
+        BlueprintConfigError::Parse("missing (capability-governance-policy ...)".into())
+    })?;
+    let tokens = tokenize_lisp(&block);
+    let review_sidecar_path = keyword_value(&tokens, ":review-sidecar")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing :review-sidecar".into()))?;
+    let protected_tool_patterns = string_list_keyword(&tokens, ":protected-tool-patterns")?;
+    if protected_tool_patterns.is_empty() {
+        return Err(BlueprintConfigError::Parse(
+            ":protected-tool-patterns must not be empty".into(),
+        ));
+    }
+    let protected_flow_patterns = string_list_keyword(&tokens, ":protected-flow-patterns")?;
+    if protected_flow_patterns.is_empty() {
+        return Err(BlueprintConfigError::Parse(
+            ":protected-flow-patterns must not be empty".into(),
+        ));
+    }
+    Ok(CapabilityGovernanceRuntimeConfig {
+        review_sidecar_path: PathBuf::from(review_sidecar_path),
+        protected_tool_patterns,
+        protected_flow_patterns,
     })
 }
 
@@ -643,7 +757,11 @@ mod tests {
     :max-cycles-limit 12)
   (project-registry-policy
     :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
-    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp"))
+    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
+  (capability-governance-policy
+    :review-sidecar ".missiond/v2/capability-usage-review.json"
+    :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_confirm" "mission_incident"]
+    :protected-flow-patterns ["engineering" "F-execution-log-governance" "F-incident-reaction" "F-capability-usage-monitoring"]))
 "#;
 
     #[test]
@@ -758,5 +876,29 @@ mod tests {
         let err = parse_project_registry_policy("(missiond-blueprint)")
             .expect_err("missing project registry policy should fail");
         assert!(err.to_string().contains("project-registry-policy"));
+    }
+
+    #[test]
+    fn parses_capability_governance_policy_defaults() {
+        let cfg = parse_capability_governance_policy(BLUEPRINT)
+            .expect("parse capability governance policy");
+        assert_eq!(
+            cfg.review_sidecar_path,
+            PathBuf::from(DEFAULT_CAPABILITY_REVIEW_SIDECAR)
+        );
+        assert!(cfg.is_protected_tool("mission_intent"));
+        assert!(cfg.is_protected_tool("mission_forge_build"));
+        assert!(cfg.is_protected_tool("mission_audit"));
+        assert!(!cfg.is_protected_tool("mission_board_query"));
+        assert!(cfg.is_protected_flow("engineering"));
+        assert!(cfg.is_protected_flow("F-execution-log-governance"));
+        assert!(!cfg.is_protected_flow("hello-parallel"));
+    }
+
+    #[test]
+    fn missing_capability_governance_policy_is_rejected() {
+        let err = parse_capability_governance_policy("(missiond-blueprint)")
+            .expect_err("missing capability governance policy should fail");
+        assert!(err.to_string().contains("capability-governance-policy"));
     }
 }
