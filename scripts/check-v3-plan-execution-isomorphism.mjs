@@ -50,6 +50,10 @@ const DEFAULT_FILES = {
   planDispatchResponse: 'crates/missiond-daemon/src/handlers/knowledge/plan/dispatch_response.rs',
   planEvidenceSidecar: 'crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs',
   planRouterPolicyAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
+  planRouterPolicyReadiness:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs',
+  planRouterPolicyDescriptor:
+    'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/descriptor.rs',
   planRouterPolicySchemaParser:
     'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs',
   planTaskRunnerAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/task_runner_dry_run.rs',
@@ -164,6 +168,8 @@ function checkFiles(root, files) {
     'plan/dispatch_response.rs owns mission_plan execution response egress',
     'plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress',
     'plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter',
+    'plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection',
+    'plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection',
     'plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser',
     'plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter',
     'plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade',
@@ -486,16 +492,42 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.planRouterPolicyAdapter, sources.planRouterPolicyAdapter, [
+    'mod descriptor',
+    'mod readiness',
     'mod schema_parser',
+    'use descriptor::attach_router_dispatch_descriptor',
     'schema_parser::parse_backend_registry(input)',
     'schema_parser::parse_router_policy(input)',
     'pub(super) enum RouterPolicyMode',
     'pub(super) fn parse_router_policy_mode',
     'pub(super) fn attach_router_recommendation_block',
     'fn compute_recommendation_block',
+    'load_trace_index',
+    'load_backend_registry',
+  ]);
+
+  requireAll(diagnostics, files.planRouterPolicyReadiness, sources.planRouterPolicyReadiness, [
+    'pub(super) enum TraceIndexInfo',
+    'pub(super) enum BackendRegistryInfo',
+    'pub(super) struct BackendEntry',
+    'pub(super) fn load_trace_index',
+    'pub(super) fn load_backend_registry',
+    'pub(super) fn attach_backend_readiness_fields',
+    'pub(super) fn attach_trace_index_fields',
+    'pub(super) fn computed_block',
+    'RICH_TRACE_THRESHOLD',
     'router_apply_eligible',
-    'router_dispatch_descriptor',
     'backend_readiness_status',
+  ]);
+
+  requireAll(diagnostics, files.planRouterPolicyDescriptor, sources.planRouterPolicyDescriptor, [
+    'pub(super) fn attach_router_dispatch_descriptor',
+    'missiond.router-dispatch-descriptor.v1',
+    'descriptor_status',
+    'registry_missing',
+    'source_backend_registry_path',
+    'router_dispatch_descriptor',
+    'Value::Bool(true)',
     'Value::Bool(false)',
   ]);
 
@@ -872,6 +904,8 @@ function buildFixture() {
     (surface mission_plan
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/descriptor.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review.rs"
@@ -917,7 +951,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs owns DAG node/error shapes; plan_dag/parser/scanner.rs owns PLAN.lisp S-expression scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG node-local rollback core; plan_dag/rollback/cascade.rs owns the DAG cascade rollback planner/dispatcher; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/outcome.rs owns the DAG node outcome/state response projection core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection; plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs owns DAG node/error shapes; plan_dag/parser/scanner.rs owns PLAN.lisp S-expression scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG node-local rollback core; plan_dag/rollback/cascade.rs owns the DAG cascade rollback planner/dispatcher; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/outcome.rs owns the DAG node outcome/state response projection core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -1231,18 +1265,44 @@ pub(crate) async fn append_plan_evidence_entry() {
   "COMPANION_DIR";
 }`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
+mod descriptor;
+mod readiness;
 mod schema_parser;
-pub(super) fn parse_backend_registry(input: &str) { schema_parser::parse_backend_registry(input); }
+use descriptor::attach_router_dispatch_descriptor;
+fn parse_backend_registry(input: &str) { schema_parser::parse_backend_registry(input); }
 pub(super) fn parse_router_policy(input: &str) { schema_parser::parse_router_policy(input); }
 pub(super) enum RouterPolicyMode { Off, DryRun }
 pub(super) fn parse_router_policy_mode() {}
 pub(super) fn attach_router_recommendation_block() {}
 fn compute_recommendation_block() {
-  "router_apply_eligible";
-  "router_dispatch_descriptor";
-  "backend_readiness_status";
-  Value::Bool(false);
+  "load_trace_index";
+  "load_backend_registry";
 }`);
+  writeFixture(root, DEFAULT_FILES.planRouterPolicyReadiness, `
+pub(super) const RICH_TRACE_THRESHOLD: u64 = 5;
+pub(super) enum TraceIndexInfo {}
+pub(super) enum BackendRegistryInfo {}
+pub(super) struct BackendEntry;
+pub(super) fn load_trace_index() {}
+pub(super) fn load_backend_registry() {}
+pub(super) fn attach_backend_readiness_fields() {
+  "router_apply_eligible";
+  "backend_readiness_status";
+}
+pub(super) fn attach_trace_index_fields() {}
+pub(super) fn computed_block() {}
+`);
+  writeFixture(root, DEFAULT_FILES.planRouterPolicyDescriptor, `
+pub(super) fn attach_router_dispatch_descriptor() {
+  "missiond.router-dispatch-descriptor.v1";
+  "descriptor_status";
+  "registry_missing";
+  "source_backend_registry_path";
+  "router_dispatch_descriptor";
+  Value::Bool(true);
+  Value::Bool(false);
+}
+`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicySchemaParser, `
 pub(super) fn parse_router_policy() {}
 pub(super) fn parse_backend_registry() {}

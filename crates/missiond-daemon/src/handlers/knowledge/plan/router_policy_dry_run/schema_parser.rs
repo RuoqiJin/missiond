@@ -1,4 +1,4 @@
-use super::{BackendEntry, Clause, PolicyDoc, RuleDoc};
+use super::{readiness::BackendEntry, Clause, PolicyDoc, RuleDoc};
 
 /// Allowed readiness status values mirrored from the wave26-01 schema.
 /// Anything outside this set is treated as malformed (the wave26-01
