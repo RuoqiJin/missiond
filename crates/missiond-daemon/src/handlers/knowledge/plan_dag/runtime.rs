@@ -11,28 +11,26 @@ use std::collections::HashMap;
 
 use crate::state::AppState;
 
-use super::acceptance::{
-    apply_acceptance_fan_in, derive_acceptance_pause_id, evaluate_node_acceptance, AcceptanceStatus,
-};
 use super::claim_lease::{
     derive_node_claim_scopes, derive_plan_dag_claim_id, parse_claim_lease_secs, parse_claimer_name,
     parse_enforce_claims, ClaimAcquire, ClaimRegistry, PlanDagClaim,
 };
 use super::dispatch::{DispatchOutcome, TaskContractDispatchCtx};
 use super::lifecycle::{
-    emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_finished,
-    plan_node_should_retry, EvidenceCtx,
+    emit_evidence_claim_conflict, emit_evidence_finished, plan_node_should_retry, EvidenceCtx,
 };
 use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
 use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
 use super::scheduler::propagate_taint;
 
+mod acceptance;
 mod bookkeeping;
 mod claims;
 mod gates;
 mod rollbacks;
 mod skips;
 mod spawn;
+use acceptance::evaluate_success_acceptance;
 use bookkeeping::{
     build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
     initialize_lifecycle, stitch_results_topologically,
@@ -452,52 +450,20 @@ pub(super) async fn execute_with_concurrency(
                 // is a transitive `:depends-on` ancestor, so the prior
                 // node's result is guaranteed to live in `results_by_id`
                 // by the time this branch runs.
-                let acceptance_base = evaluate_node_acceptance(&node, &inner_payload, true);
-                let prior_results_view: HashMap<String, &NodeResult> =
-                    results_by_id.iter().map(|(k, v)| (k.clone(), v)).collect();
-                let acceptance =
-                    apply_acceptance_fan_in(acceptance_base, &node, &prior_results_view);
-                let acceptance_active = !acceptance.is_inactive();
-                if acceptance_active {
-                    emit_evidence_acceptance(
-                        state,
-                        &ctx,
-                        &node,
-                        &dispatch_strategy,
-                        current_attempt,
-                        &acceptance,
-                        &mut outcome,
-                    )
-                    .await;
-                }
-                let terminal_state_label = match acceptance.status {
-                    AcceptanceStatus::NotEvaluated | AcceptanceStatus::Accepted => "succeeded",
-                    AcceptanceStatus::Rejected => "failed",
-                    AcceptanceStatus::ManualRequired => "paused",
-                };
-                let next_node_state: NodeState = match acceptance.status {
-                    AcceptanceStatus::NotEvaluated | AcceptanceStatus::Accepted => {
-                        NodeState::Succeeded
-                    }
-                    AcceptanceStatus::Rejected => NodeState::Failed {
-                        reason: format!("acceptance_rejected: {}", acceptance.reason),
-                    },
-                    AcceptanceStatus::ManualRequired => {
-                        let qid = derive_acceptance_pause_id(plan.id, plan.version, &node.id);
-                        NodeState::Paused {
-                            question_id: qid,
-                            bus_publish_warning: None,
-                        }
-                    }
-                };
-                let next_lifecycle = match acceptance.status {
-                    AcceptanceStatus::NotEvaluated | AcceptanceStatus::Accepted => {
-                        NodeLifecycle::Succeeded
-                    }
-                    AcceptanceStatus::Rejected => NodeLifecycle::Failed,
-                    AcceptanceStatus::ManualRequired => NodeLifecycle::Paused,
-                };
-                lifecycle.insert(node_id.clone(), next_lifecycle);
+                let acceptance_outcome = evaluate_success_acceptance(
+                    state,
+                    &ctx,
+                    plan,
+                    &node,
+                    &dispatch_strategy,
+                    current_attempt,
+                    &inner_payload,
+                    &results_by_id,
+                    &mut outcome,
+                )
+                .await;
+                let acceptance_rejected = acceptance_outcome.is_rejected();
+                lifecycle.insert(node_id.clone(), acceptance_outcome.next_lifecycle);
                 // wave-17 / task 02 — release the claim now that the
                 // terminal state is set. Best-effort: we only release
                 // when the registry actually recorded the claim
@@ -508,7 +474,7 @@ pub(super) async fn execute_with_concurrency(
                     &node,
                     &dispatch_strategy,
                     current_attempt,
-                    terminal_state_label,
+                    acceptance_outcome.terminal_state_label,
                     &mut claim_registry,
                     &mut active_claims_by_node,
                     &mut outcome,
@@ -522,7 +488,7 @@ pub(super) async fn execute_with_concurrency(
                 // Skipped for accepted / paused / not-evaluated
                 // branches (the node is not in a "final failed"
                 // state for those).
-                let acc_rollback_eval = if matches!(acceptance.status, AcceptanceStatus::Rejected) {
+                let acc_rollback_eval = if acceptance_rejected {
                     evaluate_and_emit_rollback(
                         state,
                         &ctx,
@@ -542,7 +508,7 @@ pub(super) async fn execute_with_concurrency(
                 // downstream and may trip fail-fast (matches the
                 // dispatch-failure path so consumers get one shape for
                 // any non-success terminal state).
-                if matches!(acceptance.status, AcceptanceStatus::Rejected) {
+                if acceptance_rejected {
                     propagate_taint(&node, &succs, &mut tainted_by);
                     if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
                         abort_new_dispatch = true;
@@ -554,15 +520,15 @@ pub(super) async fn execute_with_concurrency(
                     NodeResult {
                         id: node_id,
                         target,
-                        state: next_node_state,
+                        state: acceptance_outcome.next_node_state,
                         dispatch_strategy,
                         inner_payload,
                         attempts_made: current_attempt,
                         max_attempts,
                         retry_skipped_non_retryable: false,
                         rollback: acc_rollback_eval,
-                        acceptance: if acceptance_active {
-                            Some(acceptance)
+                        acceptance: if acceptance_outcome.acceptance_active {
+                            Some(acceptance_outcome.acceptance)
                         } else {
                             None
                         },
