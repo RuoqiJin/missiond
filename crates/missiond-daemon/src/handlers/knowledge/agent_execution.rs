@@ -52,6 +52,7 @@ mod lisp_syntax;
 mod log_counters;
 mod log_dispatch;
 mod log_governance;
+mod log_paths;
 mod log_status;
 mod log_store;
 mod log_surface;
