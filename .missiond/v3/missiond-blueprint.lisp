@@ -1269,6 +1269,7 @@
       :status "code-aligned"
       :implements [alignment-review-gate plan-review-gate workflow-review-gate two-gate-default]
       :code ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
@@ -1278,7 +1279,7 @@
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"
              "crates/missiond-mcp/src/tools/knowledge/workflow.rs"
              "scripts/check-v3-review-gate-isomorphism.mjs"]
-      :note "review-gate is the shared event-bus review layer behind alignment-review-gate, plan-review-gate, workflow review, and the V3 two-gate-default axiom. review_gate.rs owns ReviewGatePolicy manual | emit_question | off and ReviewDecision approved | rejected | needs_changes; parse_review_gate_policy / parse_compile_review_gate normalize caller inputs, apply_compile_review_gates fans out to maybe_emit_review_question_created or auto_emit_review_question_after_artifact_write, and maybe_emit_review_question_resolved records explicit review decisions. The gate must never auto-approve intent or plan, never wait for a human in the primary compile/approve path, and never roll back a committed DB/file artifact because the bus failed; failures surface review_question_warning with deterministic review_question_id so callers can retry or resolve manually. directive.rs, plan/compile_authoring.rs, plan/approval_review.rs, plan.rs, and workflow.rs are the only callers for these gate helpers and their MCP schemas expose review_gate_policy plus review_question_id / review_decision so the Lisp-level review packet can stay a pure request-local projection.")
+      :note "review-gate is the shared event-bus review layer behind alignment-review-gate, plan-review-gate, workflow review, and the V3 two-gate-default axiom. review_gate.rs remains the facade and decision-time review-resolution core: ReviewDecision approved | rejected | needs_changes, maybe_emit_review_question_resolved, subscriber dispatch classification, auto-answer, LLM proposal, and apply-gate helpers. review_gate/created.rs owns ReviewGatePolicy manual | emit_question | off, parse_review_gate_policy / parse_compile_review_gate, deterministic review_question_id and plan-node review ids, maybe_emit_review_question_created, auto_emit_review_question_after_artifact_write, and apply_compile_review_gates. The gate must never auto-approve intent or plan, never wait for a human in the primary compile/approve path, and never roll back a committed DB/file artifact because the bus failed; failures surface review_question_warning with deterministic review_question_id so callers can retry or resolve manually. directive.rs, plan/compile_authoring.rs, plan/approval_review.rs, plan.rs, and workflow.rs are the only callers for these gate helpers and their MCP schemas expose review_gate_policy plus review_question_id / review_decision so the Lisp-level review packet can stay a pure request-local projection.")
 
     (surface task-runner-cli
       :status "code-aligned"
