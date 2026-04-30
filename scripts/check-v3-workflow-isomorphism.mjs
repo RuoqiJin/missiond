@@ -118,6 +118,8 @@ function checkFiles(root, files) {
     'compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp',
     'persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp',
     'source_kind=methodology',
+    'artifact_only_no_workflow_row',
+    'workflow_record_execution(success=true,cost_usd?)',
     ':status compiled',
     'no Workflow DB row',
     'instead of canonicalizing the raw methodology source',
@@ -177,6 +179,8 @@ function checkFiles(root, files) {
     'validate_methodology_source(content)',
     'extract_steps_with_lines(content)',
     'async fn action_run_methodology',
+    'parse_run_methodology_record_intent',
+    'methodology_execution_record_payload',
     'fn extract_workflow_file_args',
     'ArtifactKind::Workflow',
     'attempt_artifact_write(',
@@ -239,10 +243,14 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.workflowRunMethodology, sources.workflowRunMethodology, [
     'pub(super) async fn action_run_methodology',
+    'parse_run_methodology_record_intent',
+    'methodology_execution_record_payload',
     'resolve_compiled_flow',
     'MISSING_COMPILED_FLOW',
     'CreateBoardTaskInput',
     'runner::run_flow',
+    'workflow_record_execution',
+    'artifact_only_no_workflow_row',
   ]);
 
   requireAll(diagnostics, files.workflowProjectRoot, sources.workflowProjectRoot, [
@@ -391,6 +399,8 @@ function checkFiles(root, files) {
     'methodology_compile_renders_v3_workflow_artifact_not_raw_source',
     'methodology_compile_review_required_status_when_no_steps',
     'build_methodology_match_rules_includes_flow_id_and_source_hash',
+    'run_methodology_record_intent_defaults_to_artifact_only',
+    'run_methodology_record_intent_accepts_workflow_row_target',
   ]);
 
   requireAll(diagnostics, files.mcpWorkflow, sources.mcpWorkflow, [
@@ -399,6 +409,8 @@ function checkFiles(root, files) {
     '"compile_methodology"',
     '"run_methodology"',
     '"resolve_review"',
+    'artifact_only_no_workflow_row',
+    'workflow_record_execution(success=true,cost_usd?)',
     '"distill_mode"',
     '&["dry_run", "sonnet"]',
     '"compile_mode"',
@@ -462,7 +474,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/workflow/run_methodology.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/store_actions.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs"]
-      :note "workflow/distill.rs owns DistillMode and action_distill. distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; workflow/methodology.rs is the compile_methodology facade; methodology/types.rs owns methodology compiler data shapes; methodology/source.rs owns methodology path/source/hash/flow resolution; methodology/extract.rs owns step and higher-order form lifting; methodology/yaml.rs owns generated executable YAML projection; methodology/io.rs owns unique temp path and atomic write. compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; workflow/auto_chain/recorder.rs owns the wave-19 explicit recorder; workflow/auto_chain/rules.rs owns deterministic auto-trigger rule evaluation; workflow/auto_sonnet.rs owns the wave-21 dual opt-in gate; workflow/auto_sonnet/policy.rs owns auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
+      :note "workflow/distill.rs owns DistillMode and action_distill. distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; workflow/run_methodology.rs owns parse_run_methodology_record_intent and methodology_execution_record_payload; workflow/methodology.rs is the compile_methodology facade; methodology/types.rs owns methodology compiler data shapes; methodology/source.rs owns methodology path/source/hash/flow resolution; methodology/extract.rs owns step and higher-order form lifting; methodology/yaml.rs owns generated executable YAML projection; methodology/io.rs owns unique temp path and atomic write. compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; run_methodology returns artifact_only_no_workflow_row unless caller supplies workflow_id, then records workflow_record_execution(success=true,cost_usd?); workflow/auto_chain/recorder.rs owns the wave-19 explicit recorder; workflow/auto_chain/rules.rs owns deterministic auto-trigger rule evaluation; workflow/auto_sonnet.rs owns the wave-21 dual opt-in gate; workflow/auto_sonnet/policy.rs owns auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
@@ -521,11 +533,14 @@ pub(super) async fn action_compile_deterministic() {
 pub(super) fn count_top_form() {}
 `);
   writeFixture(root, DEFAULT_FILES.workflowRunMethodology, `
+pub(super) fn parse_run_methodology_record_intent() {}
+pub(super) fn methodology_execution_record_payload() { "artifact_only_no_workflow_row"; }
 pub(super) async fn action_run_methodology() {
   resolve_compiled_flow();
   "MISSING_COMPILED_FLOW";
   CreateBoardTaskInput;
   runner::run_flow();
+  workflow_record_execution();
 }
 `);
   writeFixture(root, DEFAULT_FILES.workflowProjectRoot, `
@@ -584,7 +599,9 @@ pub(super) fn paren_balanced_ignoring_strings() {}
 use super::*;
 fn methodology_compile_renders_v3_workflow_artifact_not_raw_source() {}
 fn methodology_compile_review_required_status_when_no_steps() {}
-fn build_methodology_match_rules_includes_flow_id_and_source_hash() {}`);
+fn build_methodology_match_rules_includes_flow_id_and_source_hash() {}
+fn run_methodology_record_intent_defaults_to_artifact_only() {}
+fn run_methodology_record_intent_accepts_workflow_row_target() {}`);
   writeFixture(root, DEFAULT_FILES.workflowArtifacts, `
 pub(super) fn extract_workflow_file_args() {}
 pub(super) async fn maybe_write_workflow_artifact() {}
@@ -702,6 +719,7 @@ manager action — see Lisp implemented-surface mission_workflow
 "distill_mode" &["dry_run", "sonnet"]
 "compile_mode" &["dry_run", "deterministic"]
 "write_file" enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp; compile_methodology has no Workflow DB row and stamps :workflow_id with the deterministic generated flow_id, packing source_kind=\\"methodology\\" / compiler / compiler_version / source_hash / flow_id / source_path / generated_at into :match_rules
+"run_methodology" artifact_only_no_workflow_row workflow_record_execution(success=true,cost_usd?)
 "overwrite_file" "review_gate_policy" "review_automation_policy"
 "auto_sonnet_policy" &["off", "safe_after_rules", "dry_run"]
 Lisp 源: intent-flow.lisp`);

@@ -4,6 +4,47 @@ use super::*;
 // run_methodology — resolve compiled YAML, dispatch into flow engine
 // ───────────────────────────────────────────────────────────────────────
 
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct RunMethodologyRecordIntent {
+    pub workflow_id: Option<uuid::Uuid>,
+    pub cost_usd: Option<f64>,
+}
+
+pub(super) fn parse_run_methodology_record_intent(
+    args: &Value,
+) -> Result<RunMethodologyRecordIntent> {
+    let workflow_id = match args.get("workflow_id").and_then(|v| v.as_str()) {
+        Some(s) if !s.trim().is_empty() => Some(parse_id_arg(args, "workflow_id")?),
+        _ => None,
+    };
+    Ok(RunMethodologyRecordIntent {
+        workflow_id,
+        cost_usd: args.get("cost_usd").and_then(|v| v.as_f64()),
+    })
+}
+
+pub(super) fn methodology_execution_record_payload(
+    flow_id: &str,
+    intent: &RunMethodologyRecordIntent,
+) -> Value {
+    match intent.workflow_id {
+        Some(workflow_id) => json!({
+            "status": "recorded",
+            "mode": "workflow_row",
+            "workflow_id": workflow_id,
+            "success": true,
+            "cost_usd": intent.cost_usd,
+        }),
+        None => json!({
+            "status": "artifact_only_no_workflow_row",
+            "mode": "methodology_flow",
+            "flow_id": flow_id,
+            "success": true,
+            "note": "run_methodology executed the compiled methodology YAML and recorded the BoardTask result; pass workflow_id when this methodology flow is linked to a persisted Workflow row and MissionD should update workflow execution statistics.",
+        }),
+    }
+}
+
 pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Result<ToolResult> {
     let project_root = match super::project_root::resolve_project_root_from_args(state, args).await
     {
@@ -25,6 +66,7 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
     let flow_id_arg = args.get("flow_id").and_then(|v| v.as_str());
     let flow_path_arg = args.get("flow_path").and_then(|v| v.as_str());
     let name_arg = args.get("name").and_then(|v| v.as_str());
+    let record_intent = parse_run_methodology_record_intent(args)?;
 
     let resolved = match resolve_compiled_flow(&project_root, flow_id_arg, flow_path_arg, name_arg)
     {
@@ -66,6 +108,7 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
             "node_count": flow.nodes.len(),
             "node_ids": flow.nodes.iter().map(|n| n.id.clone()).collect::<Vec<_>>(),
             "params_echo": args.get("params").cloned().unwrap_or(Value::Null),
+            "record_execution_preview": methodology_execution_record_payload(&flow.id, &record_intent),
             "next_step": "pass dry_run=false to dispatch into mission_flow_run on this compiled YAML",
         })));
     }
@@ -128,6 +171,14 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
                     },
                 )
                 .await;
+            if let Some(workflow_id) = record_intent.workflow_id {
+                state
+                    .store
+                    .workflow_record_execution(workflow_id, true, record_intent.cost_usd)
+                    .await
+                    .map_err(|e| anyhow!("DB record_execution: {}", e))?;
+            }
+            let record_execution = methodology_execution_record_payload(&flow.id, &record_intent);
             Ok(ToolResult::json_pretty(&json!({
                 "status": "dispatched",
                 "flow_ref": "F-methodology-to-executable-compile :: s6 dry-run-or-run (run)",
@@ -135,7 +186,8 @@ pub(super) async fn action_run_methodology(state: &AppState, args: &Value) -> Re
                 "flow_path": resolved.path.display().to_string(),
                 "task_id": task_id,
                 "completed_nodes": ctx.completed_nodes,
-                "record_execution_status": "TODO_external — methodology compile flows are not yet linked to a workflow row; call mission_workflow(action=record_execution) manually with the matching workflow_id once distilled",
+                "record_execution_status": record_execution["status"].clone(),
+                "record_execution": record_execution,
             })))
         }
         Err(e) => {

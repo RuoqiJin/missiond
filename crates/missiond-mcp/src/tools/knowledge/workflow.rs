@@ -27,16 +27,24 @@ fn prop_oneof_string_or_array(description: &str) -> Value {
 fn build_properties() -> Value {
     let mut p: Map<String, Value> = Map::new();
 
-    p.insert("action".into(), prop_enum(
-        "string",
-        "manager action — see Lisp implemented-surface mission_workflow",
-        &[
-            "list", "get", "match", "apply",
-            "distill", "record_execution",
-            "compile_methodology", "run_methodology",
-            "resolve_review",
-        ],
-    ));
+    p.insert(
+        "action".into(),
+        prop_enum(
+            "string",
+            "manager action — see Lisp implemented-surface mission_workflow",
+            &[
+                "list",
+                "get",
+                "match",
+                "apply",
+                "distill",
+                "record_execution",
+                "compile_methodology",
+                "run_methodology",
+                "resolve_review",
+            ],
+        ),
+    );
 
     p.insert("name".into(), prop(
         "string",
@@ -45,23 +53,26 @@ fn build_properties() -> Value {
 
     p.insert("workflow_id".into(), prop(
         "string",
-        "[get|apply] workflow UUID",
+        "[get|apply|record_execution|run_methodology] persisted workflow UUID. run_methodology records success/cost against this row when supplied; without it methodology runs return artifact_only_no_workflow_row instead of faking a DB linkage.",
     ));
 
-    p.insert("utterance".into(), prop(
-        "string",
-        "[match] free-form query — currently substring match over match_rules",
-    ));
+    p.insert(
+        "utterance".into(),
+        prop(
+            "string",
+            "[match] free-form query — currently substring match over match_rules",
+        ),
+    );
 
-    p.insert("limit".into(), prop(
-        "integer",
-        "[list] cap result count (1-500, default 50)",
-    ));
+    p.insert(
+        "limit".into(),
+        prop("integer", "[list] cap result count (1-500, default 50)"),
+    );
 
-    p.insert("plan_id".into(), prop(
-        "string",
-        "[distill] succeeded plan UUID to distill from",
-    ));
+    p.insert(
+        "plan_id".into(),
+        prop("string", "[distill] succeeded plan UUID to distill from"),
+    );
 
     p.insert("persist".into(), prop(
         "boolean",
@@ -135,25 +146,34 @@ fn build_properties() -> Value {
         "description": "[distill:sonnet] minimum number of evidence entries required before invoking the distiller (default 1)",
     }));
 
-    p.insert("allow_missing_evidence".into(), prop(
-        "boolean",
-        "[distill:sonnet] when true, bypass the evidence-sidecar gate (default false)",
-    ));
+    p.insert(
+        "allow_missing_evidence".into(),
+        prop(
+            "boolean",
+            "[distill:sonnet] when true, bypass the evidence-sidecar gate (default false)",
+        ),
+    );
 
-    p.insert("success".into(), prop(
-        "boolean",
-        "[record_execution] outcome (rolling avg/cost update)",
-    ));
+    p.insert(
+        "success".into(),
+        prop(
+            "boolean",
+            "[record_execution] outcome (rolling avg/cost update)",
+        ),
+    );
 
     p.insert("cost_usd".into(), prop(
         "number",
-        "[record_execution] optional cost contribution (USD)",
+        "[record_execution|run_methodology] optional cost contribution (USD). run_methodology only applies it when workflow_id is supplied.",
     ));
 
-    p.insert("workflow_path".into(), prop(
-        "string",
-        "[compile_methodology|run_methodology] explicit path to a methodology .lisp file",
-    ));
+    p.insert(
+        "workflow_path".into(),
+        prop(
+            "string",
+            "[compile_methodology|run_methodology] explicit path to a methodology .lisp file",
+        ),
+    );
 
     p.insert("write_file".into(), prop(
         "boolean",
@@ -284,7 +304,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
          phase/principle 时仍只生成单个 manual_review 节点；persist=true 写到 `.missiond/generated/flows/<flow_id>.yaml` \
          (atomic, overwrite 控制) 并附 source_hash + lifted_form_count + lifted_form_breakdown；\
          run_methodology 解析 flow_id|flow_path|name 找 compiled YAML，dry_run=true 返 would_run，\
-         dry_run=false 内部派发到 mission_flow_run 引擎；缺 YAML 时返结构化 MISSING_COMPILED_FLOW + 下一步指引。\
+         dry_run=false 内部派发到 mission_flow_run 引擎；若传 workflow_id 则同步 workflow_record_execution(success=true,cost_usd?)，\
+         未传 workflow_id 则明确返回 artifact_only_no_workflow_row（BoardTask + V3 workflow artifact 为执行回执，不伪造 DB 行）；\
+         缺 YAML 时返结构化 MISSING_COMPILED_FLOW + 下一步指引。\
          wave-14/35 file-first SSOT: distill / compile_methodology persist=true 时再传 write_file=true 即写 \
          `<project_root>/.missiond/workflows/<topic>.lisp` (ArtifactKind::Workflow, atomic, 默认拒覆, \
          overwrite_file=true 替换); distill 写 enriched V3 workflow artifact, 包含 :workflow_id / :source_plans / \

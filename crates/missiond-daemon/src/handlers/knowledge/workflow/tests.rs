@@ -33,6 +33,43 @@ fn parse_id_arg_accepts_uuid() {
 }
 
 #[test]
+fn run_methodology_record_intent_defaults_to_artifact_only() {
+    let args = serde_json::json!({});
+    let intent = parse_run_methodology_record_intent(&args).unwrap();
+    assert_eq!(intent.workflow_id, None);
+    assert_eq!(intent.cost_usd, None);
+
+    let payload = methodology_execution_record_payload("methodology-demo-v0", &intent);
+    assert_eq!(payload["status"], "artifact_only_no_workflow_row");
+    assert_eq!(payload["mode"], "methodology_flow");
+    assert_eq!(payload["flow_id"], "methodology-demo-v0");
+}
+
+#[test]
+fn run_methodology_record_intent_accepts_workflow_row_target() {
+    let id = uuid::Uuid::new_v4();
+    let args = serde_json::json!({
+        "workflow_id": id.to_string(),
+        "cost_usd": 0.25,
+    });
+    let intent = parse_run_methodology_record_intent(&args).unwrap();
+    assert_eq!(intent.workflow_id, Some(id));
+    assert_eq!(intent.cost_usd, Some(0.25));
+
+    let payload = methodology_execution_record_payload("methodology-demo-v0", &intent);
+    assert_eq!(payload["status"], "recorded");
+    assert_eq!(payload["mode"], "workflow_row");
+    assert_eq!(payload["workflow_id"], id.to_string());
+    assert_eq!(payload["cost_usd"], 0.25);
+}
+
+#[test]
+fn run_methodology_record_intent_rejects_bad_workflow_id() {
+    let args = serde_json::json!({"workflow_id": "not-a-uuid"});
+    assert!(parse_run_methodology_record_intent(&args).is_err());
+}
+
+#[test]
 fn parse_distill_mode_default_and_explicit() {
     // Backwards-compat: missing or empty → dry_run keeps legacy callers working.
     assert_eq!(parse_distill_mode(None), Ok(DistillMode::DryRun));

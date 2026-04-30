@@ -31,6 +31,9 @@
 //!                         dry_run=true (default) returns a `would_run` descriptor;
 //!                         dry_run=false dispatches into the existing flow engine
 //!                         (load FlowDefinition + spawn board task + runner::run_flow).
+//!                         If caller supplies workflow_id, success is recorded
+//!                         against that Workflow row; otherwise the response is
+//!                         explicit artifact_only_no_workflow_row.
 //!                         Missing compiled YAML returns structured
 //!                         MISSING_COMPILED_FLOW + next-step pointer.
 
@@ -93,6 +96,8 @@ pub(crate) use review_resolution::{handle_review_resolved_event, WorkflowSubscri
 #[cfg(test)]
 use review_resolution::{WORKFLOW_REVIEW_ACTIONS, WORKFLOW_REVIEW_VERSION};
 use run_methodology::action_run_methodology;
+#[cfg(test)]
+use run_methodology::{methodology_execution_record_payload, parse_run_methodology_record_intent};
 use store_actions::parse_id_arg;
 use store_actions::{action_apply, action_get, action_list, action_match, action_record_execution};
 
