@@ -12,13 +12,13 @@ use super::completion_records::{
     VALID_TASK_RUN_VERIFIER_STATUSES, VALID_VERIFIER_STATUSES,
 };
 use super::completion_trace::append_completion_trace_if_requested;
+use super::completion_verification::evaluate_completion_verification;
 use super::log_counters::{allocate_id, Counter};
 use super::log_store::{
     append_to_block, companion_path, lisp_quote_string, now_iso, project_or_target_project,
     read_log_file, require_str, resolve_project_root, touch_last_updated, write_log_file,
 };
 use super::log_surface::{emit_execution_event, read_dispatch_metadata_from_log};
-use super::task_verifier_auto::auto_run_task_run_verifier;
 
 pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<ToolResult> {
     let execution_id = match require_str(args, "execution_id") {
@@ -249,90 +249,22 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
         None
     };
 
-    // wave-22 / task 02 — auto task-run verifier dispatch.
-    //
-    // The wave21-03 caller-supplied `verified=true` escape hatch is now
-    // a legacy-compat fallback. The new contract: when the writer hands
-    // every path the daemon needs for an end-to-end proof
-    // (`task_contract_path`, `task_report_path`, `shared_memory_path`,
-    // `commit_hash`) the daemon runs the in-tree task-run verifier
-    // ITSELF and computes the verified status from the on-disk inputs
-    // — no Node spawn, no shell, no mutating git, no caller assertion
-    // accepted at face value. The wave21-02 script-side verifier
-    // remains the out-of-process truth; this in-process projection just
-    // closes the action-complete window so dashboards stop relying on
-    // a writer-asserted boolean.
-    //
-    // Three-state `verification_source` summarises what happened:
-    //   * `daemon-auto-verifier` — all four paths present, daemon ran
-    //     the in-tree verifier and produced the verdict in
-    //     `verifier_status` / `verified_scope_summary`.
-    //   * `legacy-caller-claim` — caller passed `verified=true` but at
-    //     least one of the four paths is absent. We honour the legacy
-    //     posture (no hard reject), record the claim into the companion
-    //     log verbatim, and surface `verifier_status="unknown"` plus a
-    //     diagnostic explaining which path was missing so reviewers can
-    //     migrate the caller off the escape hatch.
-    //   * `none` — no auto-verifier run AND no legacy claim; absent in
-    //     the response so legacy completions stay byte-identical.
-    //
-    // Backward compat: the wave21-03 helper `enforce_verified_completion`
-    // is preserved verbatim and still callable from tests, but
-    // `action_complete` no longer routes through it — the v2 dispatch
-    // either runs the auto-verifier or downgrades the legacy claim.
-    let auto_verifier_inputs_present = task_contract_path.is_some()
-        && task_report_path.is_some()
-        && shared_memory_path.is_some()
-        && commit_hash.is_some();
-
-    let mut verification_source: Option<&'static str> = None;
-    let mut auto_verifier_summary: Option<Value> = None;
-    let mut auto_verifier_status: Option<&'static str> = None;
-    let mut auto_verifier_diagnostics: Option<String> = None;
-
-    if auto_verifier_inputs_present {
-        // unwraps are safe — we just checked all four are Some.
-        let tcp = task_contract_path.as_deref().unwrap();
-        let trp = task_report_path.as_deref().unwrap();
-        let smp = shared_memory_path.as_deref().unwrap();
-        let hash = commit_hash.as_deref().unwrap();
-        match auto_run_task_run_verifier(&root, tcp, trp, smp, hash) {
-            Ok(summary) => {
-                auto_verifier_status = Some("passed");
-                auto_verifier_summary = Some(summary);
-                verification_source = Some("daemon-auto-verifier");
-            }
-            Err(err) => return Ok(err),
-        }
-    } else if verified_flag == Some(true) {
-        // Legacy caller-supplied claim. Record it but flag in the
-        // diagnostic which path was missing so the writer agent can
-        // upgrade the next dispatch.
-        let mut missing: Vec<&'static str> = Vec::new();
-        if task_contract_path.is_none() {
-            missing.push("task_contract_path");
-        }
-        if task_report_path.is_none() {
-            missing.push("task_report_path");
-        }
-        if shared_memory_path.is_none() {
-            missing.push("shared_memory_path");
-        }
-        if commit_hash.is_none() {
-            missing.push("commit_hash");
-        }
-        verification_source = Some("legacy-caller-claim");
-        auto_verifier_status = Some("unknown");
-        auto_verifier_diagnostics = Some(format!(
-            "verified=true accepted as legacy_verified_claim because the daemon-side auto-verifier requires all four of [task_contract_path, task_report_path, shared_memory_path, commit_hash]; missing: {:?}. Migrate the dispatch envelope to supply every path so the daemon can compute the verdict itself (wave22-02).",
-            missing,
-        ));
-    }
+    let verification_outcome = match evaluate_completion_verification(
+        &root,
+        task_contract_path.as_deref(),
+        task_report_path.as_deref(),
+        shared_memory_path.as_deref(),
+        commit_hash.as_deref(),
+        verified_flag,
+    ) {
+        Ok(outcome) => outcome,
+        Err(err) => return Ok(err),
+    };
     // Tri-state placeholder kept in sync with the wave21-03 response
     // shape: when the auto-verifier ran the response surfaces the
     // structured summary; when only the legacy claim was made it stays
     // None and the diagnostic prose above carries the explanation.
-    let verified_validation: Option<Value> = auto_verifier_summary.clone();
+    let verified_validation: Option<Value> = verification_outcome.auto_verifier_summary.clone();
 
     let id = allocate_id(&mut file, Counter::Completion)?;
     let date = now_iso();
@@ -548,17 +480,17 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
     //
     // Absent `verification_source` (legacy callers) keeps the response
     // shape byte-identical to the wave21-03 surface.
-    if let Some(src) = verification_source {
+    if let Some(src) = verification_outcome.verification_source {
         response["verification_source"] = json!(src);
     }
-    if let Some(status) = auto_verifier_status {
+    if let Some(status) = verification_outcome.auto_verifier_status {
         // Daemon-computed verdict wins over the caller-supplied
         // wave19-08 / wave21-03 statuses. Reviewers can still see the
         // caller-supplied values inside `task_run_verifier_status` /
         // the companion log.
         response["verifier_status"] = json!(status);
     }
-    if let Some(diag) = auto_verifier_diagnostics {
+    if let Some(diag) = verification_outcome.auto_verifier_diagnostics {
         response["verifier_diagnostics"] = json!(diag);
     }
     if let Some(scope_summary) = verified_validation {
