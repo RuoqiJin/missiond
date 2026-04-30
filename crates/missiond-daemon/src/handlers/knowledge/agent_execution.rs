@@ -64,6 +64,7 @@ mod preflight_contract;
 mod preflight_patterns;
 mod preflight_porcelain;
 mod preflight_scope;
+mod preflight_trace;
 mod session_trace;
 mod task_verifier;
 mod task_verifier_auto;
