@@ -18,10 +18,10 @@ use super::claim_lease::{
     derive_node_claim_scopes, derive_plan_dag_claim_id, parse_claim_lease_secs, parse_claimer_name,
     parse_enforce_claims, ClaimAcquire, ClaimRegistry, PlanDagClaim,
 };
-use super::dispatch::{dispatch_node, DispatchOutcome, TaskContractDispatchCtx};
+use super::dispatch::{DispatchOutcome, TaskContractDispatchCtx};
 use super::lifecycle::{
     emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_finished,
-    emit_evidence_running, plan_node_should_retry, EvidenceCtx,
+    plan_node_should_retry, EvidenceCtx,
 };
 use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
 use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
@@ -32,6 +32,7 @@ mod claims;
 mod gates;
 mod rollbacks;
 mod skips;
+mod spawn;
 use bookkeeping::{
     build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
     initialize_lifecycle, stitch_results_topologically,
@@ -40,6 +41,7 @@ use claims::{record_acquired_claim, record_compat_claim, release_claim_if_record
 use gates::filter_ready_nodes_for_gates;
 use rollbacks::evaluate_and_emit_rollback;
 use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
+use spawn::spawn_dispatch_attempt;
 
 pub(super) async fn execute_with_concurrency(
     state: &AppState,
@@ -361,22 +363,19 @@ pub(super) async fn execute_with_concurrency(
                 }
             }
 
-            lifecycle.insert(node.id.clone(), NodeLifecycle::Running);
-            emit_evidence_running(
+            spawn_dispatch_attempt(
                 state,
                 &ctx,
-                &node,
+                plan,
+                node,
                 &dispatch_strategy,
                 attempt,
+                &task_contract_ctx,
+                &mut lifecycle,
                 &mut outcome,
+                &mut join_set,
             )
             .await;
-            let state_clone = state.clone();
-            let plan_clone = plan.clone();
-            let task_contract_ctx_clone = task_contract_ctx.clone();
-            join_set.spawn(async move {
-                dispatch_node(state_clone, plan_clone, node, task_contract_ctx_clone).await
-            });
         }
 
         // 7. Drain wave; for each result decide success/failure, update
@@ -689,24 +688,19 @@ pub(super) async fn execute_with_concurrency(
                         .await;
                     }
                 }
-                lifecycle.insert(node_id.clone(), NodeLifecycle::Running);
-                emit_evidence_running(
+                spawn_dispatch_attempt(
                     state,
                     &ctx,
-                    &node,
+                    plan,
+                    node,
                     &dispatch_strategy,
                     next_attempt,
+                    &task_contract_ctx,
+                    &mut lifecycle,
                     &mut outcome,
+                    &mut join_set,
                 )
                 .await;
-                let state_clone = state.clone();
-                let plan_clone = plan.clone();
-                let node_clone = node.clone();
-                let task_contract_ctx_clone = task_contract_ctx.clone();
-                join_set.spawn(async move {
-                    dispatch_node(state_clone, plan_clone, node_clone, task_contract_ctx_clone)
-                        .await
-                });
                 continue;
             }
 
