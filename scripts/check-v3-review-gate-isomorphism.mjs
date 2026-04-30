@@ -34,6 +34,7 @@ const DEFAULT_FILES = {
   reviewGateCreated: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
   reviewGateResolution: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   reviewGateAutoAnswer: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
+  reviewGateLlmApproval: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -99,6 +100,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -254,8 +256,8 @@ function checkFiles(root, files) {
     ['alignment-review-gate', 'plan-review-gate', 'never auto-approve'],
   );
 
-  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}\n${sources.reviewGateAutoAnswer}`;
-  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution} + ${files.reviewGateAutoAnswer}`;
+  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}\n${sources.reviewGateAutoAnswer}\n${sources.reviewGateLlmApproval}`;
+  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution} + ${files.reviewGateAutoAnswer} + ${files.reviewGateLlmApproval}`;
   requireAll(diagnostics, reviewGateSurfaceLabel, reviewGateSurface, REVIEW_GATE_RS_NEEDLES);
   requireAll(diagnostics, files.reviewGateCreated, sources.reviewGateCreated, [
     'pub(crate) fn derive_review_question_id',
@@ -283,6 +285,21 @@ function checkFiles(root, files) {
     'pub(crate) fn stamp_auto_answer_payload',
     'pub(crate) fn is_destructive_review_action',
     'NEVER auto-reject',
+  ]);
+  requireAll(diagnostics, files.reviewGateLlmApproval, sources.reviewGateLlmApproval, [
+    'pub(crate) enum LlmAutoApproveProposalMode',
+    'pub(crate) fn parse_llm_auto_approve_proposal_mode',
+    'pub(crate) fn parse_llm_auto_approve_proposal',
+    'pub(crate) fn enforce_proposal_invariants',
+    'pub(crate) fn build_llm_auto_approve_proposal_system_prompt',
+    'pub(crate) fn stamp_llm_auto_approve_proposal_payload',
+    'pub(crate) enum LlmApproveApplyStatus',
+    'pub(crate) fn parse_llm_approve_apply_gate_input',
+    'pub(crate) fn compute_proposal_hash',
+    'pub(crate) fn evaluate_llm_approve_apply_gate',
+    'pub(crate) fn enforce_apply_gate_preflight',
+    'pub(crate) fn stamp_llm_approve_apply_gate_payload',
+    'never auto-approve',
   ]);
   requireAll(diagnostics, files.directive, sources.directive, DIRECTIVE_RS_NEEDLES);
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
@@ -360,6 +377,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.reviewGateCreated]: buildGoodReviewGateCreated(),
     [DEFAULT_FILES.reviewGateResolution]: buildGoodReviewGateResolution(),
     [DEFAULT_FILES.reviewGateAutoAnswer]: buildGoodReviewGateAutoAnswer(),
+    [DEFAULT_FILES.reviewGateLlmApproval]: buildGoodReviewGateLlmApproval(),
     [DEFAULT_FILES.directive]: buildGoodCallerRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
@@ -505,6 +523,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
@@ -524,9 +543,11 @@ function buildGoodReviewGate() {
 mod created;
 mod resolution;
 mod auto_answer;
+mod llm_approval;
 pub(crate) use created::{ReviewGatePolicy, apply_compile_review_gates};
 pub(crate) use resolution::{ReviewDecision, maybe_emit_review_question_resolved};
 pub(crate) use auto_answer::{AutoAnswerPolicy, evaluate_auto_answer_policy};
+pub(crate) use llm_approval::{LlmAutoApproveProposalMode, LlmApproveApplyStatus};
 // payload markers: review_question_warning + BUS_PUBLISH_FAILED
 // "persisted artifact remains intact" / "DB action already committed"
 `;
@@ -574,6 +595,24 @@ pub(crate) fn evaluate_auto_answer_policy() {}
 pub(crate) fn stamp_auto_answer_payload() {}
 pub(crate) fn is_destructive_review_action() {}
 // NEVER auto-reject
+`;
+}
+
+function buildGoodReviewGateLlmApproval() {
+  return `// fixture
+pub(crate) enum LlmAutoApproveProposalMode { Off, SonnetSuggest }
+pub(crate) fn parse_llm_auto_approve_proposal_mode() {}
+pub(crate) fn parse_llm_auto_approve_proposal() {}
+pub(crate) fn enforce_proposal_invariants() {}
+pub(crate) fn build_llm_auto_approve_proposal_system_prompt() {}
+pub(crate) fn stamp_llm_auto_approve_proposal_payload() {}
+pub(crate) enum LlmApproveApplyStatus { NotRequested, Applied }
+pub(crate) fn parse_llm_approve_apply_gate_input() {}
+pub(crate) fn compute_proposal_hash() {}
+pub(crate) fn evaluate_llm_approve_apply_gate() {}
+pub(crate) fn enforce_apply_gate_preflight() {}
+pub(crate) fn stamp_llm_approve_apply_gate_payload() {}
+// never auto-approve
 `;
 }
 
