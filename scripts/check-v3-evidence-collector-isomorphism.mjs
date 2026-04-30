@@ -203,6 +203,7 @@ const EVIDENCE_COLLECTOR_TESTS_NEEDLES = [
 const PLAN_EXECUTION_INTERNAL_RS_NEEDLES = [
   'evidence_collector::EvidenceEntry::new',
   'evidence_collector::append(',
+  'PLAN_RUNNER_EVENT_REF_UNAVAILABLE_REASON',
 ];
 
 const PLAN_EVIDENCE_SIDECAR_RS_NEEDLES = [
@@ -628,6 +629,7 @@ fn facade_only() {}
 
 function buildGoodPlanExecutionInternal() {
   return `// fixture
+const PLAN_RUNNER_EVENT_REF_UNAVAILABLE_REASON: &str = "without a live ExecutionEvent ref";
 fn dispatch_caller() {
     let entry = evidence_collector::EvidenceEntry::new(
         evidence_collector::source::PLAN_RUNNER_DISPATCH,

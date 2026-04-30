@@ -90,14 +90,14 @@ fn execution_events_array_in_order() {
 #[test]
 fn execution_event_unavailable_records_reason_not_id() {
     let entry = EvidenceEntry::new("test", kind::DISPATCH)
-        .add_execution_event(EventRef::unavailable("bus subscription not yet wired"));
+        .add_execution_event(EventRef::unavailable("event ref unavailable by policy"));
     let v = entry.into_json();
     let arr = v["execution_events"].as_array().unwrap();
     assert_eq!(arr.len(), 1);
     assert_eq!(arr[0]["unavailable"], true);
     assert_eq!(
         arr[0]["unavailable_reason"],
-        "bus subscription not yet wired"
+        "event ref unavailable by policy"
     );
     assert_eq!(arr[0]["status"], "unavailable");
     assert!(arr[0].get("event_id").is_none());

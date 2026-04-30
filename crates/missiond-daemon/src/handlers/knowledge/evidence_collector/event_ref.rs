@@ -117,9 +117,9 @@ impl EventRef {
     /// `BusServices::publish_execution_with_seq(...)` or the deterministic
     /// `plan-node:<plan_id>:<node_id>:<attempt>:<from>-<to>` fallback id
     /// when the bus publish fails. Plan-runner v0 (`plan.rs`) keeps using
-    /// `EventRef::unavailable(...)` because the single-node runner does not
-    /// yet propagate the inner `mission_execution` seq back to the
-    /// evidence-write call site — that wiring is a separate follow-up.
+    /// `EventRef::unavailable(...)` because the single-node runner records
+    /// dispatch evidence without a live `mission_execution` seq at the
+    /// evidence-write call site; consumers correlate by plan_id + board_task_id.
     ///
     /// Wave-16 / task 07: alias for [`EventRef::live`]. Kept on the public
     /// surface for byte-compat with the wave-13/14 call sites and tests

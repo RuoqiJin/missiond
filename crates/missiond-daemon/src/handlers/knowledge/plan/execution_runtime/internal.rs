@@ -1,4 +1,8 @@
 use super::*;
+
+pub(in crate::handlers::knowledge::plan) const PLAN_RUNNER_EVENT_REF_UNAVAILABLE_REASON: &str =
+    "single-node internal dispatch records dispatch evidence without a live ExecutionEvent ref; \
+     correlate by plan_id + board_task_id";
 use crate::handlers::compute::{flow_run, task_delegate};
 use crate::handlers::knowledge::{agent_execution, evidence_collector, workstation_dispatch};
 
@@ -347,8 +351,7 @@ pub(in crate::handlers::knowledge::plan) async fn action_execute_internal(
     )
     .with_inner_dispatch(inner_payload.clone())
     .add_execution_event(evidence_collector::EventRef::unavailable(
-        "plan-runner v0 does not yet subscribe to the live ExecutionEvent bus; \
-         caller correlates by plan_id + board_task_id",
+        PLAN_RUNNER_EVENT_REF_UNAVAILABLE_REASON,
     ))
     .with_extra("execute_mode", json!("internal"))
     .with_extra("target_tool", json!(resolved.target))

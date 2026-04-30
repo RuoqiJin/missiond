@@ -1627,8 +1627,7 @@ fn build_plan_runner_evidence_entry(resolved: &ResolvedExec, inner_payload: Valu
     )
     .with_inner_dispatch(inner_payload.clone())
     .add_execution_event(super::super::evidence_collector::EventRef::unavailable(
-        "plan-runner v0 does not yet subscribe to the live ExecutionEvent bus; \
-         caller correlates by plan_id + board_task_id",
+        PLAN_RUNNER_EVENT_REF_UNAVAILABLE_REASON,
     ))
     .with_extra("execute_mode", json!("internal"))
     .with_extra("target_tool", json!(resolved.target))
@@ -1680,9 +1679,10 @@ fn plan_runner_dispatch_evidence_keeps_legacy_passthrough_keys_flat() {
 
 #[test]
 fn plan_runner_dispatch_evidence_records_event_unavailability_reason() {
-    // The runner does not yet subscribe to the live ExecutionEvent bus;
-    // `EventRef::unavailable(...)` documents that explicitly so consumers
-    // can tell "no events" apart from "we tried but couldn't correlate".
+    // Single-node internal dispatch records the dispatch receipt, while
+    // `EventRef::unavailable(...)` documents the deliberate correlation mode
+    // so consumers can tell "no events" apart from "we tried but couldn't
+    // correlate".
     let resolved = fixture_resolved("mission_execution", "resident-lisp");
     let entry = build_plan_runner_evidence_entry(&resolved, json!({"ok": true}));
     let events = entry["execution_events"]
@@ -1694,8 +1694,8 @@ fn plan_runner_dispatch_evidence_records_event_unavailability_reason() {
         .as_str()
         .expect("reason recorded as string");
     assert!(
-        reason.contains("ExecutionEvent bus"),
-        "reason must mention the bus subscription gap so consumers can route on it: {}",
+        reason.contains("without a live ExecutionEvent ref"),
+        "reason must mention the V3 unavailable event-ref mode so consumers can route on it: {}",
         reason
     );
     // No real event id leaked through.
