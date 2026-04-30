@@ -90,6 +90,8 @@ const DEFAULT_FILES = {
   planApprovalSupersede:
     'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/supersede.rs',
   workflow: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
+  workflowCompileMethodology:
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/compile_methodology.rs',
   mcpDirective: 'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   mcpPlan: 'crates/missiond-mcp/src/tools/knowledge/plan.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
@@ -181,6 +183,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/supersede.rs',
   'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/workflow/compile_methodology.rs',
   'crates/missiond-mcp/src/tools/knowledge/directive.rs',
   'crates/missiond-mcp/src/tools/knowledge/plan.rs',
   'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
@@ -365,6 +368,11 @@ const PLAN_APPROVAL_SUBSCRIBER_RS_NEEDLES = [
 
 const WORKFLOW_RS_NEEDLES = [
   'use crate::handlers::knowledge::review_gate::',
+  'mod compile_methodology;',
+  'use compile_methodology::action_compile_methodology;',
+];
+
+const WORKFLOW_COMPILE_METHODOLOGY_RS_NEEDLES = [
   'parse_review_gate_policy(args)',
   'review_gate_policy_was_explicit(args)',
   'parse_compile_review_gate(args)',
@@ -664,6 +672,12 @@ function checkFiles(root, files) {
     PLAN_APPROVAL_SUBSCRIBER_RS_NEEDLES,
   );
   requireAll(diagnostics, files.workflow, sources.workflow, WORKFLOW_RS_NEEDLES);
+  requireAll(
+    diagnostics,
+    files.workflowCompileMethodology,
+    sources.workflowCompileMethodology,
+    WORKFLOW_COMPILE_METHODOLOGY_RS_NEEDLES,
+  );
   requireAll(diagnostics, files.mcpDirective, sources.mcpDirective, MCP_DIRECTIVE_NEEDLES);
   requireAll(diagnostics, files.mcpPlan, sources.mcpPlan, MCP_PLAN_NEEDLES);
   requireAll(diagnostics, files.mcpWorkflow, sources.mcpWorkflow, MCP_WORKFLOW_NEEDLES);
@@ -767,6 +781,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.planApprovalSubscriber]: buildGoodPlanApprovalSubscriberRs(),
     [DEFAULT_FILES.planApprovalSupersede]: buildGoodPlanApprovalSupersedeRs(),
     [DEFAULT_FILES.workflow]: buildGoodWorkflowRs(),
+    [DEFAULT_FILES.workflowCompileMethodology]: buildGoodWorkflowCompileMethodologyRs(),
     [DEFAULT_FILES.mcpDirective]: buildGoodMcpRs({ neverAutoApprove: true }),
     [DEFAULT_FILES.mcpPlan]: buildGoodMcpRs({ neverAutoApprove: true }),
     [DEFAULT_FILES.mcpWorkflow]: buildGoodMcpRs({ workflow: true }),
@@ -940,6 +955,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/subscriber.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/approval_review/supersede.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/compile_methodology.rs"
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"
              "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
@@ -1370,7 +1386,13 @@ use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, parse_compile_review_gate, parse_review_gate_policy,
     review_gate_policy_was_explicit,
 };
+mod compile_methodology;
+use compile_methodology::action_compile_methodology;
+`;
+}
 
+function buildGoodWorkflowCompileMethodologyRs() {
+  return `// fixture
 fn caller(args: &serde_json::Value) {
     let policy = parse_review_gate_policy(args);
     let policy_explicit = review_gate_policy_was_explicit(args);

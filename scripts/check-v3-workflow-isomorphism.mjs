@@ -28,6 +28,8 @@ const DEFAULT_FILES = {
   workflowAutoSonnet: 'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs',
   workflowAutoSonnetPolicy:
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet/policy.rs',
+  workflowCompileMethodology:
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/compile_methodology.rs',
   workflowDistill: 'crates/missiond-daemon/src/handlers/knowledge/workflow/distill.rs',
   workflowMethodology: 'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
   workflowMethodologyExtract:
@@ -39,7 +41,11 @@ const DEFAULT_FILES = {
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/types.rs',
   workflowMethodologyYaml:
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/yaml.rs',
+  workflowProjectRoot: 'crates/missiond-daemon/src/handlers/knowledge/workflow/project_root.rs',
   workflowReviewResolution: 'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
+  workflowRunMethodology:
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/run_methodology.rs',
+  workflowStoreActions: 'crates/missiond-daemon/src/handlers/knowledge/workflow/store_actions.rs',
   workflowTests: 'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
 };
@@ -123,6 +129,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_chain/rules.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet/policy.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/compile_methodology.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/distill.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/extract.rs',
@@ -130,7 +137,10 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/source.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/types.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/yaml.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/project_root.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/run_methodology.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/store_actions.rs',
     'workflow/distill.rs owns DistillMode',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
     'workflow/review_resolution.rs owns resolve_review',
@@ -138,8 +148,8 @@ function checkFiles(root, files) {
     'node scripts/check-v3-workflow-isomorphism.mjs',
   ]);
 
-  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowMethodologyExtract}\n${sources.workflowMethodologyIo}\n${sources.workflowMethodologySource}\n${sources.workflowMethodologyTypes}\n${sources.workflowMethodologyYaml}\n${sources.workflowReviewResolution}\n${sources.workflowTests}`;
-  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowAutoChain} + ${files.workflowAutoChainRecorder} + ${files.workflowAutoChainRules} + ${files.workflowAutoSonnet} + ${files.workflowAutoSonnetPolicy} + ${files.workflowDistill} + ${files.workflowMethodology} + ${files.workflowMethodologyExtract} + ${files.workflowMethodologyIo} + ${files.workflowMethodologySource} + ${files.workflowMethodologyTypes} + ${files.workflowMethodologyYaml} + ${files.workflowReviewResolution} + ${files.workflowTests}`;
+  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowCompileMethodology}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowMethodologyExtract}\n${sources.workflowMethodologyIo}\n${sources.workflowMethodologySource}\n${sources.workflowMethodologyTypes}\n${sources.workflowMethodologyYaml}\n${sources.workflowProjectRoot}\n${sources.workflowReviewResolution}\n${sources.workflowRunMethodology}\n${sources.workflowStoreActions}\n${sources.workflowTests}`;
+  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowAutoChain} + ${files.workflowAutoChainRecorder} + ${files.workflowAutoChainRules} + ${files.workflowAutoSonnet} + ${files.workflowAutoSonnetPolicy} + ${files.workflowCompileMethodology} + ${files.workflowDistill} + ${files.workflowMethodology} + ${files.workflowMethodologyExtract} + ${files.workflowMethodologyIo} + ${files.workflowMethodologySource} + ${files.workflowMethodologyTypes} + ${files.workflowMethodologyYaml} + ${files.workflowProjectRoot} + ${files.workflowReviewResolution} + ${files.workflowRunMethodology} + ${files.workflowStoreActions} + ${files.workflowTests}`;
   requireAll(diagnostics, workflowSurfaceLabel, workflowSurface, [
     'enum DistillMode',
     'fn parse_distill_mode',
@@ -195,8 +205,51 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.workflowHandler, sources.workflowHandler, [
+    'mod compile_methodology;',
     'mod distill;',
+    'mod project_root;',
+    'mod run_methodology;',
+    'mod store_actions;',
+    'use compile_methodology::action_compile_methodology;',
     'use distill::action_distill;',
+    'use run_methodology::action_run_methodology;',
+  ]);
+
+  requireAll(diagnostics, files.workflowStoreActions, sources.workflowStoreActions, [
+    'pub(super) async fn action_list',
+    'pub(super) async fn action_get',
+    'pub(super) async fn action_match',
+    'pub(super) async fn action_apply',
+    'pub(super) async fn action_record_execution',
+    'pub(super) fn parse_id_arg',
+    'workflow_record_execution',
+  ]);
+
+  requireAll(diagnostics, files.workflowCompileMethodology, sources.workflowCompileMethodology, [
+    'pub(super) enum CompileMode',
+    'pub(super) fn parse_compile_mode',
+    'pub(super) async fn action_compile_methodology',
+    'pub(super) fn action_compile_dry_run',
+    'pub(super) async fn action_compile_deterministic',
+    'validate_methodology_source(content)',
+    'extract_steps_with_lines(content)',
+    'methodology_match_rules = build_methodology_match_rules(&meta)',
+    'pub(super) fn count_top_form',
+  ]);
+
+  requireAll(diagnostics, files.workflowRunMethodology, sources.workflowRunMethodology, [
+    'pub(super) async fn action_run_methodology',
+    'resolve_compiled_flow',
+    'MISSING_COMPILED_FLOW',
+    'CreateBoardTaskInput',
+    'runner::run_flow',
+  ]);
+
+  requireAll(diagnostics, files.workflowProjectRoot, sources.workflowProjectRoot, [
+    'pub(super) async fn resolve_project_root_from_args',
+    'pub(super) async fn resolve_project_root_with_registry',
+    'resolve_target_project_root',
+    'refuses process-cwd fallback',
   ]);
 
   requireAll(diagnostics, files.workflowDistill, sources.workflowDistill, [
@@ -396,6 +449,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_chain/rules.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/auto_sonnet/policy.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/compile_methodology.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/distill.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/extract.rs"
@@ -403,14 +457,35 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/source.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/types.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology/yaml.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/project_root.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/run_methodology.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/store_actions.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs"]
       :note "workflow/distill.rs owns DistillMode and action_distill. distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; workflow/methodology.rs is the compile_methodology facade; methodology/types.rs owns methodology compiler data shapes; methodology/source.rs owns methodology path/source/hash/flow resolution; methodology/extract.rs owns step and higher-order form lifting; methodology/yaml.rs owns generated executable YAML projection; methodology/io.rs owns unique temp path and atomic write. compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; workflow/auto_chain/recorder.rs owns the wave-19 explicit recorder; workflow/auto_chain/rules.rs owns deterministic auto-trigger rule evaluation; workflow/auto_sonnet.rs owns the wave-21 dual opt-in gate; workflow/auto_sonnet/policy.rs owns auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
+mod compile_methodology;
 mod distill;
+mod project_root;
+mod run_methodology;
+mod store_actions;
+use compile_methodology::action_compile_methodology;
 use distill::action_distill;
+use run_methodology::action_run_methodology;
+#[cfg(test)]
+mod tests;
+`);
+  writeFixture(root, DEFAULT_FILES.workflowStoreActions, `
+pub(super) async fn action_list() {}
+pub(super) async fn action_get() {}
+pub(super) async fn action_match() {}
+pub(super) async fn action_apply() {}
+pub(super) async fn action_record_execution() { workflow_record_execution(); }
+pub(super) fn parse_id_arg() {}
+`);
+  writeFixture(root, DEFAULT_FILES.workflowCompileMethodology, `
 enum DistillMode {}
 fn parse_distill_mode() {
   Some("dry_run") => Ok(DistillMode::DryRun);
@@ -431,17 +506,36 @@ async fn action_distill_sonnet() {
   .workflow_insert(name, &workflow_sexp, &match_rules, Some(plan.id));
 }
 fn validate_workflow_sexp() { paren_balanced_ignoring_strings(trimmed); }
-enum CompileMode {}
-fn parse_compile_mode() {}
-async fn action_compile_methodology() {}
-fn action_compile_dry_run() {}
-async fn action_compile_deterministic() {
+pub(super) enum CompileMode {}
+pub(super) fn parse_compile_mode() {}
+pub(super) async fn action_compile_methodology() {}
+pub(super) fn action_compile_dry_run() {}
+pub(super) async fn action_compile_deterministic() {
   validate_methodology_source(content);
   extract_steps_with_lines(content);
   let methodology_match_rules = build_methodology_match_rules(&meta);
   render_workflow_artifact_sexp(&meta.flow_id, &[], &methodology_match_rules, "compiled", content);
+  parse_review_gate_policy(args);
+  apply_compile_review_gates();
 }
-async fn action_run_methodology() {}
+pub(super) fn count_top_form() {}
+`);
+  writeFixture(root, DEFAULT_FILES.workflowRunMethodology, `
+pub(super) async fn action_run_methodology() {
+  resolve_compiled_flow();
+  "MISSING_COMPILED_FLOW";
+  CreateBoardTaskInput;
+  runner::run_flow();
+}
+`);
+  writeFixture(root, DEFAULT_FILES.workflowProjectRoot, `
+pub(super) async fn resolve_project_root_from_args() {}
+pub(super) async fn resolve_project_root_with_registry() {
+  resolve_target_project_root();
+  "refuses process-cwd fallback";
+}
+`);
+  writeFixture(root, DEFAULT_FILES.workflowArtifacts, `
 fn extract_workflow_file_args() {}
 ArtifactKind::Workflow;
 attempt_artifact_write();
@@ -494,6 +588,8 @@ fn build_methodology_match_rules_includes_flow_id_and_source_hash() {}`);
   writeFixture(root, DEFAULT_FILES.workflowArtifacts, `
 pub(super) fn extract_workflow_file_args() {}
 pub(super) async fn maybe_write_workflow_artifact() {}
+ArtifactKind::Workflow;
+attempt_artifact_write();
 pub(super) fn render_workflow_artifact_sexp() { ":workflow_id"; ":source_plans"; ":match_rules"; ":steps"; ":body"; }
 pub(super) fn build_methodology_match_rules() {
   "source_kind": "methodology";
