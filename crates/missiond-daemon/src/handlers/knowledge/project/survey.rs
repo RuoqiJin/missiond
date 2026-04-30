@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 
+use crate::context::v3_blueprint_runtime::ProjectRegistryRuntimeConfig;
 use crate::state::AppState;
 
 pub(super) async fn handle_survey(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -12,6 +13,14 @@ pub(super) async fn handle_survey(state: &AppState, args: Value) -> Result<ToolR
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?
         .ok_or_else(|| anyhow!("Project not found: {}", id))?;
+    let runtime_config = match ProjectRegistryRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            return Ok(ToolResult::error(format!(
+                "V3_BLUEPRINT_CONFIG_ERROR: {err}"
+            )));
+        }
+    };
 
     let level = args.get("level").and_then(|v| v.as_str()).unwrap_or("L3");
     let check_only = args.get("check").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -44,7 +53,7 @@ pub(super) async fn handle_survey(state: &AppState, args: Value) -> Result<ToolR
 
     if success && !check_only && !dry_run {
         let sp = std::path::Path::new(project_path);
-        let new_intent = super::registry::discover_intent_path(sp);
+        let new_intent = super::registry::discover_intent_path(sp, &runtime_config);
         if new_intent.is_some() && new_intent != project.intent_path {
             let mut updated = project.clone();
             updated.intent_path = new_intent;

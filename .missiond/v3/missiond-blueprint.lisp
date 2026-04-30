@@ -527,6 +527,16 @@
        "mission_cascade_trigger MUST project trigger-enabled and max-cycle bounds from cascade-policy; CASCADE_TRIGGER_ENABLED may only override the V3 switch explicitly."
        "A real MissionD project with .missiond but no V3 cascade-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (project-registry-policy
+    :desc "Lisp-owned project registry defaults for intent discovery and universe import."
+    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
+    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp"
+    :env-overrides [UNIVERSE_MANIFEST]
+    :invariants
+      ["mission_project init/import_universe/survey MUST project intent-path candidates from project-registry-policy."
+       "mission_project import_universe MUST project its default manifest from project-registry-policy; UNIVERSE_MANIFEST is only an explicit override."
+       "A real MissionD project with .missiond but no project-registry-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
+
   (ops-infra
     :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
     :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
@@ -682,12 +692,12 @@
       :surface memory-kb
       :note "KB, beacon, memory, insight, and intent snapshot tools are physically split under the V3 memory-kb surface; runtime projection remains a separate future graduation step.")
     (v2-item project-registry
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: project-root-spawn-cwd / ProjectRegistry"
       :v3-pillar memory
       :v3-function project-registry
       :surface project-registry
-      :note "Project root resolution and registry behavior are physically split and pinned under the V3 project-registry surface; runtime projection remains a separate future graduation step.")
+      :note "Project root resolution and registry behavior are physically split and pinned under the V3 project-registry surface; project-registry-policy now projects intent-path candidates and default universe manifest into mission_project init/import_universe/survey runtime.")
     (v2-item conversation-ingestion
       :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest / session organizer"
@@ -1599,7 +1609,8 @@
     (surface project-registry
       :status "code-aligned"
       :implements [project-registry project-root-resolution]
-      :code ["crates/missiond-daemon/src/handlers/knowledge/project.rs"
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
@@ -1608,7 +1619,7 @@
              "crates/missiond-daemon/src/slot_orchestrator/project_root.rs"
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
              "scripts/check-v3-project-registry-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for project registry and root-resolution behavior inherited from V2. project.rs is the thin mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe, lisp file scan enrichment, git remote discovery, project upsert, conversation backfill, registry reload, and universe manifest import; project/context.rs owns context and memories egress including intent metadata, github normalization, conversation stats, KB stats, memory index, and configured slot status; project/survey.rs owns forge survey invocation, dry/check flags, output truncation, and intent-path refresh; project/vault.rs owns vault_sync copy and reference metadata; missiond-core ProjectRegistry::resolve owns longest-prefix project lookup and exclusive slot projection; resolve_target_project_root owns project-root spawn cwd policy in slot_orchestrator/project_root.rs with explicit project id, cwd longest-prefix, fallback project id, requested_cwd metadata, and no-signal errors. Runtime projection remains a later runtime-projected graduation so V3 can own project-root policy defaults directly.")
+      :note "Code-aligned V3 destination for project registry and root-resolution behavior inherited from V2. project.rs is the thin mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe, lisp file scan enrichment, git remote discovery, project upsert, conversation backfill, registry reload, and universe manifest import; ProjectRegistryRuntimeConfig loads V3 project-registry-policy so init/import_universe/survey project intent-path discovery and default universe manifest are runtime projections, with UNIVERSE_MANIFEST as explicit override only; project/context.rs owns context and memories egress including intent metadata, github normalization, conversation stats, KB stats, memory index, and configured slot status; project/survey.rs owns forge survey invocation, dry/check flags, output truncation, and intent-path refresh; project/vault.rs owns vault_sync copy and reference metadata; missiond-core ProjectRegistry::resolve owns longest-prefix project lookup and exclusive slot projection; resolve_target_project_root owns project-root spawn cwd policy in slot_orchestrator/project_root.rs with explicit project id, cwd longest-prefix, fallback project id, requested_cwd metadata, and no-signal errors.")
 
     (surface conversation-ingestion
       :status "code-aligned"

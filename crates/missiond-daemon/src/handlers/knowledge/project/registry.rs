@@ -5,6 +5,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
+use crate::context::v3_blueprint_runtime::ProjectRegistryRuntimeConfig;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -133,6 +134,14 @@ pub(super) async fn handle_sync(state: &AppState) -> Result<ToolResult> {
 }
 
 pub(super) async fn handle_init(state: &AppState, args: Value) -> Result<ToolResult> {
+    let runtime_config = match ProjectRegistryRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            return Ok(ToolResult::error(format!(
+                "V3_BLUEPRINT_CONFIG_ERROR: {err}"
+            )));
+        }
+    };
     let path = required_str(&args, "path")?;
     let path = Path::new(path)
         .canonicalize()
@@ -151,7 +160,7 @@ pub(super) async fn handle_init(state: &AppState, args: Value) -> Result<ToolRes
         });
 
     let github_url = github_url_for_path(&path);
-    let intent_path = discover_intent_path(&path);
+    let intent_path = discover_intent_path(&path, &runtime_config);
     let slots: Vec<String> = args
         .get("slots")
         .and_then(|v| v.as_array())
@@ -207,15 +216,25 @@ pub(super) async fn handle_init(state: &AppState, args: Value) -> Result<ToolRes
 }
 
 pub(super) async fn handle_import_universe(state: &AppState, args: Value) -> Result<ToolResult> {
+    let runtime_config = match ProjectRegistryRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            return Ok(ToolResult::error(format!(
+                "V3_BLUEPRINT_CONFIG_ERROR: {err}"
+            )));
+        }
+    };
     let manifest_path = args
         .get("manifest")
         .and_then(|v| v.as_str())
-        .unwrap_or("~/Projects/universe.intent.lisp");
-    let manifest_path = manifest_path.replace(
-        "~",
-        &dirs::home_dir().unwrap_or_default().display().to_string(),
-    );
-    let manifest_path = Path::new(&manifest_path);
+        .map(expand_tilde_path)
+        .unwrap_or_else(|| {
+            expand_tilde_path(
+                &runtime_config
+                    .env_or_default_universe_manifest()
+                    .to_string_lossy(),
+            )
+        });
 
     if !manifest_path.exists() {
         return Ok(ToolResult::error(format!(
@@ -223,7 +242,7 @@ pub(super) async fn handle_import_universe(state: &AppState, args: Value) -> Res
             manifest_path.display()
         )));
     }
-    let content = std::fs::read_to_string(manifest_path)
+    let content = std::fs::read_to_string(&manifest_path)
         .map_err(|e| anyhow!("Failed to read manifest: {}", e))?;
 
     let base_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
@@ -279,7 +298,7 @@ pub(super) async fn handle_import_universe(state: &AppState, args: Value) -> Res
             let is_reference = service_path.contains("reference") || service_id.ends_with("-ref");
             let kind = if is_reference { "reference" } else { "managed" };
             let sp = Path::new(&service_path);
-            let intent_path = discover_intent_path(sp);
+            let intent_path = discover_intent_path(sp, &runtime_config);
             let github_url = github_url_for_path(sp);
             let existed = state
                 .store
@@ -325,15 +344,25 @@ pub(super) async fn handle_import_universe(state: &AppState, args: Value) -> Res
     })))
 }
 
-pub(super) fn discover_intent_path(path: &Path) -> Option<String> {
-    [
-        ".missiond/intent.lisp",
-        ".jarvis/intent.lisp",
-        "intent.lisp",
-    ]
-    .iter()
-    .find(|p| path.join(p).exists())
-    .map(|p| p.to_string())
+pub(super) fn discover_intent_path(
+    path: &Path,
+    config: &ProjectRegistryRuntimeConfig,
+) -> Option<String> {
+    config
+        .intent_path_candidates
+        .iter()
+        .find(|p| path.join(p).exists())
+        .map(|p| p.to_string())
+}
+
+fn expand_tilde_path(raw: &str) -> PathBuf {
+    if raw == "~" {
+        return dirs::home_dir().unwrap_or_default();
+    }
+    if let Some(rest) = raw.strip_prefix("~/") {
+        return dirs::home_dir().unwrap_or_default().join(rest);
+    }
+    PathBuf::from(raw)
 }
 
 async fn reload_project_registry(state: &AppState) {

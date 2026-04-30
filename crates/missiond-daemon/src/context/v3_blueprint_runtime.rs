@@ -18,6 +18,13 @@ pub(crate) const DEFAULT_CASCADE_ALLOWED_ROOT: &str = "/Users/jinchen/Projects";
 pub(crate) const DEFAULT_CASCADE_TRIGGER_ENABLED: bool = true;
 pub(crate) const DEFAULT_CASCADE_MAX_CYCLES: usize = 3;
 pub(crate) const MAX_CASCADE_MAX_CYCLES: usize = 12;
+pub(crate) const DEFAULT_PROJECT_UNIVERSE_MANIFEST: &str =
+    "/Users/jinchen/Projects/universe.intent.lisp";
+pub(crate) const DEFAULT_PROJECT_INTENT_PATH_CANDIDATES: [&str; 3] = [
+    ".missiond/intent.lisp",
+    ".jarvis/intent.lisp",
+    "intent.lisp",
+];
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -49,6 +56,12 @@ pub(crate) struct CascadeRuntimeConfig {
     pub trigger_enabled: bool,
     pub default_max_cycles: usize,
     pub max_cycles_limit: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ProjectRegistryRuntimeConfig {
+    pub intent_path_candidates: Vec<String>,
+    pub default_universe_manifest: PathBuf,
 }
 
 #[derive(Debug)]
@@ -125,6 +138,18 @@ impl Default for CascadeRuntimeConfig {
             trigger_enabled: DEFAULT_CASCADE_TRIGGER_ENABLED,
             default_max_cycles: DEFAULT_CASCADE_MAX_CYCLES,
             max_cycles_limit: MAX_CASCADE_MAX_CYCLES,
+        }
+    }
+}
+
+impl Default for ProjectRegistryRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            intent_path_candidates: DEFAULT_PROJECT_INTENT_PATH_CANDIDATES
+                .iter()
+                .map(|value| value.to_string())
+                .collect(),
+            default_universe_manifest: PathBuf::from(DEFAULT_PROJECT_UNIVERSE_MANIFEST),
         }
     }
 }
@@ -234,6 +259,46 @@ impl CascadeRuntimeConfig {
     }
 }
 
+impl ProjectRegistryRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_project_registry_policy(&source)
+    }
+
+    pub(crate) fn env_or_default_universe_manifest(&self) -> PathBuf {
+        std::env::var("UNIVERSE_MANIFEST")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| self.default_universe_manifest.clone())
+    }
+}
+
 pub(crate) fn parse_workstation_config(
     source: &str,
 ) -> Result<WorkstationRuntimeConfig, BlueprintConfigError> {
@@ -291,6 +356,27 @@ pub(crate) fn parse_workstation_config(
     Ok(config)
 }
 
+pub(crate) fn parse_project_registry_policy(
+    source: &str,
+) -> Result<ProjectRegistryRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "project-registry-policy").ok_or_else(|| {
+        BlueprintConfigError::Parse("missing (project-registry-policy ...)".into())
+    })?;
+    let tokens = tokenize_lisp(&block);
+    let intent_path_candidates = string_list_keyword(&tokens, ":intent-path-candidates")?;
+    if intent_path_candidates.is_empty() {
+        return Err(BlueprintConfigError::Parse(
+            ":intent-path-candidates must not be empty".into(),
+        ));
+    }
+    let default_universe_manifest = keyword_value(&tokens, ":default-universe-manifest")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing :default-universe-manifest".into()))?;
+    Ok(ProjectRegistryRuntimeConfig {
+        intent_path_candidates,
+        default_universe_manifest: PathBuf::from(default_universe_manifest),
+    })
+}
+
 pub(crate) fn parse_cascade_policy(
     source: &str,
 ) -> Result<CascadeRuntimeConfig, BlueprintConfigError> {
@@ -325,6 +411,32 @@ pub(crate) fn parse_cascade_policy(
         default_max_cycles,
         max_cycles_limit,
     })
+}
+
+fn string_list_keyword(tokens: &[String], key: &str) -> Result<Vec<String>, BlueprintConfigError> {
+    let Some(pos) = tokens.iter().position(|token| token == key) else {
+        return Err(BlueprintConfigError::Parse(format!("missing {}", key)));
+    };
+    let Some(next) = tokens.get(pos + 1) else {
+        return Err(BlueprintConfigError::Parse(format!(
+            "missing value for {}",
+            key
+        )));
+    };
+    if next != "[" {
+        return Ok(vec![next.clone()]);
+    }
+    let mut out = Vec::new();
+    for token in tokens.iter().skip(pos + 2) {
+        if token == "]" {
+            return Ok(out);
+        }
+        out.push(token.clone());
+    }
+    Err(BlueprintConfigError::Parse(format!(
+        "{} list must close with ]",
+        key
+    )))
 }
 
 fn int_keyword(tokens: &[String], key: &str) -> Result<i64, BlueprintConfigError> {
@@ -528,7 +640,10 @@ mod tests {
     :allowed-root "/Users/jinchen/Projects"
     :trigger-enabled true
     :default-max-cycles 3
-    :max-cycles-limit 12))
+    :max-cycles-limit 12)
+  (project-registry-policy
+    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
+    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp"))
 "#;
 
     #[test]
@@ -619,5 +734,29 @@ mod tests {
         let err = parse_cascade_policy("(missiond-blueprint)")
             .expect_err("missing cascade policy should fail");
         assert!(err.to_string().contains("cascade-policy"));
+    }
+
+    #[test]
+    fn parses_project_registry_policy_defaults() {
+        let cfg = parse_project_registry_policy(BLUEPRINT).expect("parse project policy");
+        assert_eq!(
+            cfg.intent_path_candidates,
+            vec![
+                ".missiond/intent.lisp".to_string(),
+                ".jarvis/intent.lisp".to_string(),
+                "intent.lisp".to_string()
+            ]
+        );
+        assert_eq!(
+            cfg.default_universe_manifest,
+            PathBuf::from(DEFAULT_PROJECT_UNIVERSE_MANIFEST)
+        );
+    }
+
+    #[test]
+    fn missing_project_registry_policy_is_rejected() {
+        let err = parse_project_registry_policy("(missiond-blueprint)")
+            .expect_err("missing project registry policy should fail");
+        assert!(err.to_string().contains("project-registry-policy"));
     }
 }

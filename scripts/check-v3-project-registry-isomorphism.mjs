@@ -10,12 +10,14 @@ const usage = `Usage:
 Checks the V3 project-registry Lisp/code isomorphism contract:
   - mission_project stays a thin public facade.
   - project registry actions are split into registry/context/survey/vault modules.
+  - intent discovery and default universe import manifest project from V3.
   - ProjectRegistry::resolve keeps longest-prefix semantics.
   - resolve_target_project_root keeps explicit project, cwd, fallback, and no-signal behavior.
 `;
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  runtimeConfig: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   facade: 'crates/missiond-daemon/src/handlers/knowledge/project.rs',
   registry: 'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
   context: 'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
@@ -84,8 +86,14 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'project-registry',
+    '(v2-item project-registry',
+    ':status runtime-projected',
+    '(project-registry-policy',
+    ':intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]',
+    ':default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp"',
     '(surface project-registry',
     ':status "code-aligned"',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
     'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
@@ -96,9 +104,26 @@ function checkFiles(root, files) {
     'crates/missiond-mcp/src/tools/knowledge/project.rs',
     'scripts/check-v3-project-registry-isomorphism.mjs',
     'project.rs is the thin mission_project facade',
+    'ProjectRegistryRuntimeConfig loads V3 project-registry-policy',
     'ProjectRegistry::resolve owns longest-prefix project lookup',
     'resolve_target_project_root owns project-root spawn cwd policy',
     'node scripts/check-v3-project-registry-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.runtimeConfig, sources.runtimeConfig, [
+    'ProjectRegistryRuntimeConfig',
+    'DEFAULT_PROJECT_UNIVERSE_MANIFEST',
+    'DEFAULT_PROJECT_INTENT_PATH_CANDIDATES',
+    '.missiond/intent.lisp',
+    '.jarvis/intent.lisp',
+    'intent.lisp',
+    'parse_project_registry_policy',
+    'project-registry-policy',
+    'intent-path-candidates',
+    'default-universe-manifest',
+    'env_or_default_universe_manifest',
+    'nearest_missiond_root',
+    'UNIVERSE_MANIFEST',
   ]);
 
   requireAll(diagnostics, files.facade, sources.facade, [
@@ -126,15 +151,17 @@ function checkFiles(root, files) {
     'handle_sync',
     'handle_init',
     'handle_import_universe',
+    'ProjectRegistryRuntimeConfig::load_for_current_dir',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'env_or_default_universe_manifest',
     'discover_intent_path',
+    'intent_path_candidates',
+    'expand_tilde_path',
     'reload_project_registry',
     'scan_lisp_files',
     'github_url_for_path',
     'backfill_project_id',
     'ProjectRegistry::new(projects)',
-    '.missiond/intent.lisp',
-    '.jarvis/intent.lisp',
-    'intent.lisp',
   ]);
 
   requireAll(diagnostics, files.context, sources.context, [
@@ -157,6 +184,8 @@ function checkFiles(root, files) {
     'cmd.arg("--level")',
     'cmd.arg("--check")',
     'cmd.arg("--dry-run")',
+    'ProjectRegistryRuntimeConfig::load_for_current_dir',
+    'V3_BLUEPRINT_CONFIG_ERROR',
     'discover_intent_path',
     'truncate_chars',
   ]);
@@ -225,10 +254,17 @@ function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-project-registry-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
+  (v2-convergence-map
+    (v2-item project-registry
+      :status runtime-projected))
+  (project-registry-policy
+    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
+    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
   (implementation-map
     (surface project-registry
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/project.rs"
+      :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
@@ -237,9 +273,16 @@ function buildFixture() {
              "crates/missiond-daemon/src/slot_orchestrator/project_root.rs"
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
              "scripts/check-v3-project-registry-isomorphism.mjs"]
-      :note "project.rs is the thin mission_project facade. ProjectRegistry::resolve owns longest-prefix project lookup. resolve_target_project_root owns project-root spawn cwd policy."))
+      :note "project.rs is the thin mission_project facade. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest-prefix project lookup. resolve_target_project_root owns project-root spawn cwd policy."))
   (compression-contract
     :checks ["node scripts/check-v3-project-registry-isomorphism.mjs"]))`);
+
+  writeFixture(root, DEFAULT_FILES.runtimeConfig, `
+ProjectRegistryRuntimeConfig DEFAULT_PROJECT_UNIVERSE_MANIFEST DEFAULT_PROJECT_INTENT_PATH_CANDIDATES
+.missiond/intent.lisp .jarvis/intent.lisp intent.lisp
+parse_project_registry_policy project-registry-policy intent-path-candidates default-universe-manifest
+env_or_default_universe_manifest nearest_missiond_root UNIVERSE_MANIFEST
+`);
 
   writeFixture(root, DEFAULT_FILES.facade, `
 mod context;
@@ -261,9 +304,10 @@ Unknown project action
 
   writeFixture(root, DEFAULT_FILES.registry, `
 handle_list handle_get handle_set_active handle_sync handle_init handle_import_universe
-discover_intent_path reload_project_registry scan_lisp_files github_url_for_path
+ProjectRegistryRuntimeConfig::load_for_current_dir V3_BLUEPRINT_CONFIG_ERROR
+env_or_default_universe_manifest discover_intent_path intent_path_candidates expand_tilde_path
+reload_project_registry scan_lisp_files github_url_for_path
 backfill_project_id ProjectRegistry::new(projects)
-.missiond/intent.lisp .jarvis/intent.lisp intent.lisp
 `);
 
   writeFixture(root, DEFAULT_FILES.context, `
@@ -279,6 +323,8 @@ cmd.arg("survey")
 cmd.arg("--level")
 cmd.arg("--check")
 cmd.arg("--dry-run")
+ProjectRegistryRuntimeConfig::load_for_current_dir
+V3_BLUEPRINT_CONFIG_ERROR
 discover_intent_path
 truncate_chars
 `);
