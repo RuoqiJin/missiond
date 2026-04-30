@@ -21,6 +21,7 @@ const DEFAULT_FILES = {
   planTests: 'crates/missiond-daemon/src/handlers/knowledge/plan/tests.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
   planFieldInference: 'crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs',
+  planFieldInferenceLlm: 'crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/llm.rs',
   planExecutionRuntime: 'crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs',
   planInternalDispatch: 'crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs',
   planExecuteHints: 'crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs',
@@ -109,6 +110,7 @@ function checkFiles(root, files) {
     'compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold',
     'plan/compile_authoring.rs owns mission_plan plan-authoring entry/core',
     'plan/field_inference.rs owns mission_plan execute preflight field inference/core',
+    'plan/field_inference/llm.rs owns Sonnet proposal parsing',
     'plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration',
     'plan/internal_dispatch.rs owns mission_plan inner target argument projection',
     'plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing',
@@ -202,7 +204,8 @@ function checkFiles(root, files) {
     'pub(crate) fn parse_infer_plan_fields_mode',
     'pub(super) struct PlanFieldInference',
     'pub(super) fn compute_plan_field_inference',
-    'pub(super) async fn request_llm_proposals',
+    'mod llm;',
+    'pub(super) use llm::*;',
     'pub(super) fn apply_safe_augmentation',
     'pub(super) fn compute_apply_gate',
     'pub(super) async fn execute_persisted_apply',
@@ -211,6 +214,18 @@ function checkFiles(root, files) {
     'pub(super) fn refuse_workstation_inference_in_dag_mode',
     'plan_field_inference',
     'persisted_apply',
+  ]);
+
+  requireAll(diagnostics, files.planFieldInferenceLlm, sources.planFieldInferenceLlm, [
+    'const LLM_ALLOWED_FIELDS',
+    'struct LlmProposal',
+    'struct LlmProposalBundle',
+    'fn parse_llm_proposals',
+    'fn reconcile_llm_conflicts',
+    'fn build_llm_inference_prompt',
+    'async fn request_llm_proposals',
+    'fn deterministic_covers_all_fields',
+    'async fn read_recent_evidence_entries',
   ]);
 
   requireAll(diagnostics, files.planExecuteHints, sources.planExecuteHints, [
@@ -558,6 +573,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan/field_inference/llm.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/internal_dispatch.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execute_hints.rs"
@@ -578,7 +594,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/execution_runtime.rs owns mission_plan execute entry/core/egress orchestration; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/parser.rs owns the DAG parser/validator core; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/rollback.rs owns the DAG rollback/cascade core; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -648,7 +664,8 @@ pub(crate) enum InferPlanFieldsMode {}
 pub(crate) fn parse_infer_plan_fields_mode() {}
 pub(super) struct PlanFieldInference {}
 pub(super) fn compute_plan_field_inference() {}
-pub(super) async fn request_llm_proposals() {}
+mod llm;
+pub(super) use llm::*;
 pub(super) fn apply_safe_augmentation() {}
 pub(super) fn compute_apply_gate() {}
 pub(super) async fn execute_persisted_apply() {}
@@ -656,6 +673,17 @@ pub(super) const WORKSTATION_INFER_MODE_SONNET_SUGGEST: &str = "sonnet_suggest";
 pub(super) fn parse_workstation_inference_mode() {}
 pub(super) fn refuse_workstation_inference_in_dag_mode() {}
 const RESPONSE_KEYS: &[&str] = &["plan_field_inference", "persisted_apply"];
+`);
+  writeFixture(root, DEFAULT_FILES.planFieldInferenceLlm, `
+pub(super) const LLM_ALLOWED_FIELDS: &[&str] = &["target"];
+pub(super) struct LlmProposal {}
+pub(super) struct LlmProposalBundle {}
+pub(super) fn parse_llm_proposals() {}
+pub(super) fn reconcile_llm_conflicts() {}
+pub(super) fn build_llm_inference_prompt() {}
+pub(super) async fn request_llm_proposals() {}
+pub(super) fn deterministic_covers_all_fields() {}
+pub(super) async fn read_recent_evidence_entries() {}
 `);
   writeFixture(root, DEFAULT_FILES.planExecuteHints, `
 pub(crate) struct ParsedPlanHints {}
