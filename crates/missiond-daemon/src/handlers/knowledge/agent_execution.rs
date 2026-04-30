@@ -46,6 +46,7 @@ mod log_status;
 mod log_store;
 mod log_surface;
 mod preflight;
+mod preflight_patterns;
 mod preflight_porcelain;
 mod preflight_scope;
 mod session_trace;
@@ -90,11 +91,13 @@ use self::log_surface::{
 };
 use self::preflight::action_preflight_commit;
 #[cfg(test)]
+use self::preflight_patterns::pattern_matches_path;
+#[cfg(test)]
 use self::preflight_porcelain::{parse_porcelain_status, PorcelainEntry};
 #[cfg(test)]
 use self::preflight_scope::{
     build_contract_scope_summary, build_preflight_summary, collect_all_claim_scopes,
-    collect_specific_claim_scope, evaluate_task_contract_for_preflight, pattern_matches_path,
+    collect_specific_claim_scope, evaluate_task_contract_for_preflight,
 };
 #[cfg(test)]
 use self::session_trace::{

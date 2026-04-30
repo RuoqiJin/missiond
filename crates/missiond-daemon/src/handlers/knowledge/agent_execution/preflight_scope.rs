@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use super::claim_lease::{parse_claims, scopes_overlap_pure};
 use super::log_store::LogFile;
+use super::preflight_patterns::pattern_matches_path;
 use super::preflight_porcelain::PorcelainEntry;
 
 /// Collect every claim scope on the companion log, regardless of
@@ -46,104 +47,6 @@ pub(super) fn collect_specific_claim_scope(
             .with_suggestion("call action=status to list active claim ids"),
         )),
     }
-}
-
-/// wave-20 / task 03 — repo-relative path-vs-pattern matcher used by the
-/// task-contract scope projection in preflight. Mirrors the JS helper in
-/// `scripts/lib/missiond_lisp.mjs::pathMatchesPattern` so daemon-side
-/// preflight, the post-commit guard (`scripts/task-scope-guard.mjs`), and
-/// the verifier (`scripts/verify-task-contract.mjs`) all key off the same
-/// glob semantics. The contract is intentionally narrow:
-///
-///   * Patterns and paths are normalised by stripping `\\` → `/`,
-///     leading `./`, and leading `/` so the comparison is repo-relative.
-///   * A pattern with no glob meta-characters matches either the exact
-///     path OR any file under that path when the pattern names a
-///     directory prefix (e.g. `crates/` or `crates` matches
-///     `crates/foo/bar.rs`).
-///   * `*` matches any sequence of characters except `/`.
-///   * `**` matches any sequence including `/` (folder hops).
-///   * `?` matches a single character except `/`.
-///   * Other regex meta-characters are escaped — the matcher is glob-only,
-///     never a full regex evaluator.
-///
-/// Daemon-only fail-fast posture: an empty pattern OR an empty path never
-/// matches. Empty inputs are a contract bug upstream; we surface them as
-/// "no match" so the caller sees the path land in `staged_out_of_scope`
-/// rather than silently coercing them through.
-pub(super) fn pattern_matches_path(file_path: &str, pattern: &str) -> bool {
-    if file_path.is_empty() || pattern.is_empty() {
-        return false;
-    }
-    let norm_path = normalize_repo_relative(file_path);
-    let pat = normalize_repo_relative(pattern);
-    if !pat.contains('*') && !pat.contains('?') {
-        if norm_path == pat {
-            return true;
-        }
-        let prefix = if pat.ends_with('/') {
-            pat.clone()
-        } else {
-            format!("{}/", pat)
-        };
-        return norm_path.starts_with(&prefix);
-    }
-    glob_to_regex(&pat).is_match(&norm_path)
-}
-
-/// Normalise a path or pattern to a repo-relative form: backslash → slash,
-/// strip a single leading `./`, and any leading `/` so absolute-style
-/// patterns (rare in our contracts) still match repo-relative entries.
-fn normalize_repo_relative(input: &str) -> String {
-    let mut s = input.replace('\\', "/");
-    if let Some(stripped) = s.strip_prefix("./") {
-        s = stripped.to_string();
-    }
-    while let Some(stripped) = s.strip_prefix('/') {
-        s = stripped.to_string();
-    }
-    s
-}
-
-/// Compile a glob pattern into a regex anchored on both ends. Mirrors the
-/// JS `globToRegExp` in `scripts/lib/missiond_lisp.mjs` so the JS guard
-/// and the daemon-side preflight stay in lock-step.
-fn glob_to_regex(pattern: &str) -> regex::Regex {
-    let mut out = String::with_capacity(pattern.len() + 4);
-    out.push('^');
-    let bytes: Vec<char> = pattern.chars().collect();
-    let mut i = 0;
-    while i < bytes.len() {
-        let c = bytes[i];
-        if c == '*' {
-            if i + 1 < bytes.len() && bytes[i + 1] == '*' {
-                out.push_str(".*");
-                i += 2;
-                // mirror the JS swallow: a following `/` is consumed by `.*`
-            } else {
-                out.push_str("[^/]*");
-                i += 1;
-            }
-        } else if c == '?' {
-            out.push_str("[^/]");
-            i += 1;
-        } else if matches!(
-            c,
-            '.' | '+' | '^' | '$' | '{' | '}' | '(' | ')' | '|' | '[' | ']' | '\\'
-        ) {
-            out.push('\\');
-            out.push(c);
-            i += 1;
-        } else {
-            out.push(c);
-            i += 1;
-        }
-    }
-    out.push('$');
-    // Pattern is glob-derived so cannot fail; build a permissive fallback
-    // (matches nothing) to preserve fail-fast posture without panicking on
-    // pathological contract input.
-    regex::Regex::new(&out).unwrap_or_else(|_| regex::Regex::new("$.^").unwrap())
 }
 
 /// wave-20 / task 03 — pure projection of staged + changed files against a
