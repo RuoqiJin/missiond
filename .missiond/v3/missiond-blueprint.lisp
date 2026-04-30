@@ -720,12 +720,12 @@
       :surface cascade-governance
       :note "Universe graph, cascade planning, trigger execution, and integrity linting are physically split and pinned under the V3 cascade-governance surface.")
     (v2-item sysinfra-control
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-system-layer.lisp :: system/sysinfra tools"
       :v3-pillar operations
       :v3-function sysinfra-control
       :surface sysinfra-control
-      :note "Permission, power, daemon update, and global instruction tools are mapped for later V3 projection.")
+      :note "Infra query/ops, permission query/mutate, power control, system logs/config/update, and global instruction tools are physically pinned under the V3 sysinfra-control surface.")
 
     (public-surface-map
       :source-scan "crates/missiond-mcp/src/tools/**/*.rs"
@@ -851,7 +851,7 @@
         :surface capability-governance
         :tools [mission_capability_usage mission_audit mission_codex_ops])
       (tool-group sysinfra-control-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-system-layer.lisp :: sysinfra"
         :v3-pillar operations
         :v3-function sysinfra-control
@@ -1708,12 +1708,22 @@
       :note "Code-aligned V3 destination for universe graph and cascade tools. cascade.rs is the thin cascade-governance facade; cascade/path.rs owns UNIVERSE_MANIFEST / UNIVERSE_ROOT path policy; cascade/graph.rs owns mission_universe_graph; cascade/plan.rs owns mission_cascade_plan dry-run; cascade/trigger.rs owns mission_cascade_trigger, CASCADE_TRIGGER_ENABLED kill switch, TaskEvent::CascadeTriggered/Completed, and spawn_blocking execute_plan; cascade/lint.rs owns mission_cascade_lint integrity egress. Runtime projection remains a later runtime-projected graduation so V3 can own cascade policy directly.")
 
     (surface sysinfra-control
-      :status "designed"
+      :status "code-aligned"
       :implements [sysinfra permission power daemon-update global-instruction]
-      :code ["crates/missiond-mcp/src/tools/sysinfra"
-             "crates/missiond-mcp/src/tools/compute/slot.rs"
-             "crates/missiond-mcp/src/tools/compute/worker.rs"]
-      :note "Designed V3 destination for sysinfra MCP behavior not covered by ops-infra scripts: permissions, power, system logs/config, daemon update, global instruction, pause, and control. It remains designed until policy and runtime projection are Lisp-owned.")
+      :code ["crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/mod.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/infra.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/permission.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/power.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/system.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/global_instruction.rs"
+             "crates/missiond-mcp/src/tools/sysinfra/infra.rs"
+             "crates/missiond-mcp/src/tools/sysinfra/permission.rs"
+             "crates/missiond-mcp/src/tools/sysinfra/power.rs"
+             "crates/missiond-mcp/src/tools/sysinfra/system.rs"
+             "crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
+             "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and reachability probes; permission.rs owns mission_permission_query/mutate including get, learned_list, merged_for_slot, set_role, set_slot, auto_allow, reload, and revoke; power.rs owns mission_power_control status/wake/suspend and removes power from the legacy misc hot path; system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update; global_instruction.rs owns mission_global_instruction read/edit/manual-reload.")
 
     (surface ops-infra
       :status "code-aligned"
@@ -1734,6 +1744,7 @@
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-capability-governance-isomorphism.mjs"
              "node scripts/check-v3-compute-primitives-isomorphism.mjs"
+             "node scripts/check-v3-sysinfra-control-isomorphism.mjs"
              "node scripts/check-v3-router-policy-isomorphism.mjs"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"

@@ -5,7 +5,7 @@
 //!   knowledge/ — board, kb, skill, memory
 //!   compute/   — pty, task, process, worker, cc_tasks, minimax, slot, compute_slot
 //!   comm/      — router_chat, question, conversation, timeline, audit, retrospective
-//!   sysinfra/  — infra, permission, system, health, misc
+//!   sysinfra/  — infra, permission, power, system, health, misc
 
 mod comm;
 mod compute;
@@ -31,7 +31,7 @@ use knowledge::{
     agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
     request, skill, workflow,
 };
-use sysinfra::{global_instruction, health, infra, misc, permission, system};
+use sysinfra::{global_instruction, health, infra, misc, permission, power, system};
 
 // @beacon: mcp
 /// Dispatch a tool call to the appropriate handler module.
@@ -83,6 +83,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_sys_logs" | "mission_sys_config" | "mission_daemon_update" => {
             system::handle(state, name, args).await
         }
+        "mission_power_control" => power::handle(state, name, args).await,
         "mission_global_instruction" => global_instruction::handle(state, name, args).await,
         "mission_compute_slot" => compute_slot::handle(state, name, args).await,
         "mission_task_delegate" => task_delegate::handle(state, name, args).await,
@@ -120,9 +121,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         {
             infra::handle(state, n, args).await
         }
-        n if (n == "mission_health") | (n == "mission_power_control") => {
-            health::handle(state, n, args).await
-        }
+        n if n == "mission_health" => health::handle(state, n, args).await,
         "mission_workers" | "mission_worker_control" => worker::handle(state, name, args).await,
 
         // ===== Unchanged tools =====

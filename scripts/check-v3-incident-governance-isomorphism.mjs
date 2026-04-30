@@ -114,7 +114,7 @@ function checkFiles(root, files) {
     '"mission_gemini_auth" => question::handle(state, name, args).await',
     'n if n.starts_with("mission_question_") => question::handle(state, n, args).await',
     'n if n.starts_with("mission_incident_") => question::handle(state, n, args).await',
-    'n if (n == "mission_health") | (n == "mission_power_control")',
+    'n if n == "mission_health"',
   ]);
 
   requireAll(diagnostics, files.facade, sources.facade, [
@@ -259,7 +259,7 @@ function buildFixture() {
 "mission_gemini_auth" => question::handle(state, name, args).await
 n if n.starts_with("mission_question_") => question::handle(state, n, args).await
 n if n.starts_with("mission_incident_") => question::handle(state, n, args).await
-n if (n == "mission_health") | (n == "mission_power_control")
+n if n == "mission_health"
 `);
 
   writeFixture(root, DEFAULT_FILES.facade, `
