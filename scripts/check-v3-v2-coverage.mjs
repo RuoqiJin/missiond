@@ -26,6 +26,12 @@ import { EXPECTED_SURFACES } from './check-v3-code-isomorphism-complete.mjs';
 const BLUEPRINT_PATH = '.missiond/v3/missiond-blueprint.lisp';
 const CHECK_COMMAND = 'node scripts/check-v3-v2-coverage.mjs';
 const ALLOWED_STATUSES = ['missing', 'designed', 'code-aligned', 'runtime-projected'];
+const FORBIDDEN_DEFERRED_RUNTIME_PHRASES = [
+  'runtime projection remains',
+  'future graduation',
+  'later runtime-projected graduation',
+  'runtime-projected graduation',
+];
 
 const usage = `Usage:
   node scripts/check-v3-v2-coverage.mjs [--json] [--dry-fixture]
@@ -40,6 +46,7 @@ Validates V3's V2 convergence and public-surface coverage:
   - Every MCP ToolDefinition::new("mission_*", ...) under crates/missiond-mcp
     appears in exactly one public tool group.
   - compression-contract :checks pins this checker.
+  - V3 notes may not hide deferred runtime projection work behind prose.
 `;
 
 function main() {
@@ -134,6 +141,7 @@ export function validateV2CoverageSource(source, {
     diagnostics.push(diag(file, { line: 1, column: 1 }, 'missing (missiond-blueprint ...) root'));
     return finish(diagnostics);
   }
+  validateNoDeferredRuntimeNotes({ source, file, diagnostics });
 
   const implementationMap = childSection(root, 'implementation-map');
   const flowMap = childSection(root, 'pillar-flow-map');
@@ -258,6 +266,21 @@ export function validateV2CoverageSource(source, {
     public_tools: publicToolSet.size,
     code_aligned_surfaces: codeAlignedCovered.size,
   };
+}
+
+function validateNoDeferredRuntimeNotes({ source, file, diagnostics }) {
+  const lowerSource = source.toLowerCase();
+  for (const phrase of FORBIDDEN_DEFERRED_RUNTIME_PHRASES) {
+    let offset = lowerSource.indexOf(phrase);
+    while (offset !== -1) {
+      diagnostics.push(diag(
+        file,
+        locForOffset(source, offset),
+        `blueprint may not contain deferred runtime projection phrase "${phrase}"; encode the policy in V3 or mark the work designed explicitly`,
+      ));
+      offset = lowerSource.indexOf(phrase, offset + phrase.length);
+    }
+  }
 }
 
 function validateMappedRecord({
@@ -422,6 +445,15 @@ function diag(file, loc, message) {
   };
 }
 
+function locForOffset(source, offset) {
+  const before = source.slice(0, offset);
+  const lines = before.split('\n');
+  return {
+    line: lines.length,
+    column: lines[lines.length - 1].length + 1,
+  };
+}
+
 function finish(diagnostics) {
   return {
     ok: diagnostics.length === 0,
@@ -537,6 +569,13 @@ ${allV2Items}
       expectMessage: /public MCP tool "mission_extra" is not mapped/,
       source: goodSource,
       toolNames: ['mission_request', 'mission_legacy', 'mission_extra'],
+    },
+    {
+      name: 'deferred runtime prose fixture',
+      expectOk: false,
+      expectMessage: /deferred runtime projection phrase "runtime projection remains"/,
+      source: goodSource.replace(':note "visible but not code-aligned"', ':note "runtime projection remains a later runtime-projected graduation"'),
+      toolNames: ['mission_request', 'mission_legacy'],
     },
     {
       name: 'unknown function fixture',
