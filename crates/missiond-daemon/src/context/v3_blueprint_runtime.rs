@@ -9,11 +9,15 @@ pub(crate) const MIN_TIMEOUT_SECS: i64 = 60;
 pub(crate) const MAX_TIMEOUT_SECS: i64 = 7200;
 pub(crate) const WATCHDOG_GRACE_SECS: i64 = 120;
 pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
+pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
+pub(crate) const MIN_SLOT_TTL_SECS: i64 = 300;
+pub(crate) const MAX_SLOT_TTL_SECS: i64 = 28800;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
     pub timeout_policy: TimeoutPolicy,
+    pub slot_ttl_policy: SlotTtlPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +27,13 @@ pub(crate) struct TimeoutPolicy {
     pub max_secs: i64,
     pub watchdog_grace_secs: i64,
     pub missing_session_probe_secs: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SlotTtlPolicy {
+    pub default_secs: i64,
+    pub min_secs: i64,
+    pub max_secs: i64,
 }
 
 #[derive(Debug)]
@@ -63,6 +74,16 @@ impl Default for TimeoutPolicy {
     }
 }
 
+impl Default for SlotTtlPolicy {
+    fn default() -> Self {
+        Self {
+            default_secs: DEFAULT_SLOT_TTL_SECS,
+            min_secs: MIN_SLOT_TTL_SECS,
+            max_secs: MAX_SLOT_TTL_SECS,
+        }
+    }
+}
+
 impl Default for WorkstationRuntimeConfig {
     fn default() -> Self {
         let mut slot_default_profiles = HashMap::new();
@@ -72,6 +93,7 @@ impl Default for WorkstationRuntimeConfig {
         Self {
             slot_default_profiles,
             timeout_policy: TimeoutPolicy::default(),
+            slot_ttl_policy: SlotTtlPolicy::default(),
         }
     }
 }
@@ -111,6 +133,14 @@ impl WorkstationRuntimeConfig {
         };
         raw.clamp(self.timeout_policy.min_secs, self.timeout_policy.max_secs)
     }
+
+    pub(crate) fn clamp_slot_ttl_secs(&self, ttl_secs: Option<i64>) -> i64 {
+        let raw = match ttl_secs {
+            Some(value) if value > 0 => value,
+            _ => self.slot_ttl_policy.default_secs,
+        };
+        raw.clamp(self.slot_ttl_policy.min_secs, self.slot_ttl_policy.max_secs)
+    }
 }
 
 pub(crate) fn parse_workstation_config(
@@ -149,6 +179,23 @@ pub(crate) fn parse_workstation_config(
         max_secs: int_keyword(&timeout_tokens, ":max_secs")?,
         watchdog_grace_secs: int_keyword(&timeout_tokens, ":watchdog_grace_secs")?,
         missing_session_probe_secs: int_keyword(&timeout_tokens, ":missing_session_probe_secs")?,
+    };
+    let ttl_form = find_forms(&block, "ttl-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens.get(2).is_some_and(|name| name == "dynamic-slot")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (ttl-policy dynamic-slot ...) in workstation-config".into(),
+            )
+        })?;
+    let ttl_tokens = tokenize_lisp(&ttl_form);
+    config.slot_ttl_policy = SlotTtlPolicy {
+        default_secs: int_keyword(&ttl_tokens, ":default_secs")?,
+        min_secs: int_keyword(&ttl_tokens, ":min_secs")?,
+        max_secs: int_keyword(&ttl_tokens, ":max_secs")?,
     };
     Ok(config)
 }
@@ -320,7 +367,11 @@ mod tests {
       :min_secs 60
       :max_secs 7200
       :watchdog_grace_secs 120
-      :missing_session_probe_secs 120)))
+      :missing_session_probe_secs 120)
+    (ttl-policy dynamic-slot
+      :default_secs 14400
+      :min_secs 300
+      :max_secs 28800)))
 "#;
 
     #[test]
@@ -342,6 +393,9 @@ mod tests {
         assert_eq!(cfg.timeout_policy.min_secs, 60);
         assert_eq!(cfg.timeout_policy.max_secs, 7200);
         assert_eq!(cfg.timeout_policy.watchdog_grace_secs, 120);
+        assert_eq!(cfg.slot_ttl_policy.default_secs, 14400);
+        assert_eq!(cfg.slot_ttl_policy.min_secs, 300);
+        assert_eq!(cfg.slot_ttl_policy.max_secs, 28800);
     }
 
     #[test]
@@ -351,6 +405,10 @@ mod tests {
         assert_eq!(cfg.clamp_timeout_secs(Some(5)), 60);
         assert_eq!(cfg.clamp_timeout_secs(Some(99999)), 7200);
         assert_eq!(cfg.clamp_timeout_secs(Some(3300)), 3300);
+        assert_eq!(cfg.clamp_slot_ttl_secs(None), 14400);
+        assert_eq!(cfg.clamp_slot_ttl_secs(Some(5)), 300);
+        assert_eq!(cfg.clamp_slot_ttl_secs(Some(99_999)), 28800);
+        assert_eq!(cfg.clamp_slot_ttl_secs(Some(3600)), 3600);
     }
 
     #[test]
@@ -360,5 +418,22 @@ mod tests {
         assert!(err
             .to_string()
             .contains("timeout-policy boardtask-dispatch"));
+    }
+
+    #[test]
+    fn missing_ttl_policy_is_rejected() {
+        let source = r#"
+(missiond-blueprint
+  (workstation-config
+    (slot-template coder :role coder :default-model-profile coding-default-opus-4-7)
+    (timeout-policy boardtask-dispatch
+      :default_secs 1800
+      :min_secs 60
+      :max_secs 7200
+      :watchdog_grace_secs 120
+      :missing_session_probe_secs 120)))
+"#;
+        let err = parse_workstation_config(source).expect_err("missing ttl policy");
+        assert!(err.to_string().contains("ttl-policy dynamic-slot"));
     }
 }

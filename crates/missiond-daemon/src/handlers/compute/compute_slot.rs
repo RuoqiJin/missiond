@@ -6,14 +6,11 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::state::AppState;
 
 /// Max dynamic slots allowed concurrently.
 const MAX_DYNAMIC_SLOTS: i64 = 5;
-/// Default TTL: 4 hours.
-const DEFAULT_TTL_SECS: i64 = 14400;
-/// Max TTL: 8 hours.
-const MAX_TTL_SECS: i64 = 28800;
 /// Max extension per request: 1 hour.
 const MAX_EXTEND_SECS: i64 = 3600;
 
@@ -266,13 +263,6 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         ));
     }
 
-    // TTL
-    let ttl = args
-        .get("max_ttl")
-        .and_then(|v| v.as_i64())
-        .unwrap_or(DEFAULT_TTL_SECS);
-    let ttl = ttl.min(MAX_TTL_SECS).max(300); // min 5 minutes
-
     let objective = args.get("objective").and_then(|v| v.as_str());
     let explicit_initial_prompt =
         string_arg(args, &["initial_prompt", "initialPrompt"]).map(str::to_string);
@@ -327,6 +317,20 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         .requested_cwd
         .as_ref()
         .map(|p| p.to_string_lossy().to_string());
+
+    let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(Some(
+        project_root_str.as_str(),
+    )) {
+        Ok(config) => config,
+        Err(err) => {
+            let tool_error = ToolError::new("V3_BLUEPRINT_CONFIG_ERROR", err.to_string())
+                .with_suggestion(
+                    "ensure <project>/.missiond/v3/missiond-blueprint.lisp contains workstation-config ttl-policy",
+                );
+            return Ok(ToolResult::structured_error(tool_error));
+        }
+    };
+    let ttl = runtime_config.clamp_slot_ttl_secs(args.get("max_ttl").and_then(|v| v.as_i64()));
 
     // Build SlotConfig — `cwd` becomes the canonical project root so that
     // spawn_tracked_slot picks it up as process cwd. The original requested

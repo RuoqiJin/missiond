@@ -16,6 +16,9 @@ export const MIN_TIMEOUT_SECS = 60;
 export const MAX_TIMEOUT_SECS = 7200;
 export const WATCHDOG_GRACE_SECS = 120;
 export const MISSING_SESSION_PROBE_SECS = 120;
+export const DEFAULT_SLOT_TTL_SECS = 14400;
+export const MIN_SLOT_TTL_SECS = 300;
+export const MAX_SLOT_TTL_SECS = 28800;
 
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -31,10 +34,12 @@ export class WorkstationRuntimeConfig {
   constructor({
     slotDefaultProfiles = defaultSlotProfiles(),
     timeoutPolicy = defaultTimeoutPolicy(),
+    slotTtlPolicy = defaultSlotTtlPolicy(),
     source = 'defaults',
   } = {}) {
     this.slotDefaultProfiles = new Map(slotDefaultProfiles);
     this.timeoutPolicy = { ...timeoutPolicy };
+    this.slotTtlPolicy = { ...slotTtlPolicy };
     this.source = source;
   }
 
@@ -47,6 +52,13 @@ export class WorkstationRuntimeConfig {
       ? timeoutSecs
       : this.timeoutPolicy.default_secs;
     return Math.max(this.timeoutPolicy.min_secs, Math.min(this.timeoutPolicy.max_secs, raw));
+  }
+
+  clampSlotTtlSecs(ttlSecs = null) {
+    const raw = Number.isInteger(ttlSecs) && ttlSecs > 0
+      ? ttlSecs
+      : this.slotTtlPolicy.default_secs;
+    return Math.max(this.slotTtlPolicy.min_secs, Math.min(this.slotTtlPolicy.max_secs, raw));
   }
 }
 
@@ -126,9 +138,29 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
     watchdog_grace_secs: readPositiveInt(props, ':watchdog_grace_secs', file),
     missing_session_probe_secs: readPositiveInt(props, ':missing_session_probe_secs', file),
   };
+  const ttlForm = block.children.find((child) => {
+    if (!isList(child) || head(child) !== 'ttl-policy') return false;
+    return nodeText(child.children[1]) === 'dynamic-slot';
+  });
+  if (!ttlForm) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: missing (ttl-policy dynamic-slot ...)',
+    );
+  }
+  const ttlProps = readKeywordProps(ttlForm, { start: 2 });
+  config.slotTtlPolicy = {
+    default_secs: readPositiveInt(ttlProps, ':default_secs', file),
+    min_secs: readPositiveInt(ttlProps, ':min_secs', file),
+    max_secs: readPositiveInt(ttlProps, ':max_secs', file),
+  };
   if (config.timeoutPolicy.min_secs > config.timeoutPolicy.max_secs) {
     throw new V3BlueprintRuntimeConfigError(
       'failed to parse V3 workstation-config: :min_secs exceeds :max_secs',
+    );
+  }
+  if (config.slotTtlPolicy.min_secs > config.slotTtlPolicy.max_secs) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: ttl :min_secs exceeds :max_secs',
     );
   }
 
@@ -139,6 +171,7 @@ function defaultWorkstationRuntimeConfig(source) {
   return new WorkstationRuntimeConfig({
     slotDefaultProfiles: defaultSlotProfiles(),
     timeoutPolicy: defaultTimeoutPolicy(),
+    slotTtlPolicy: defaultSlotTtlPolicy(),
     source,
   });
 }
@@ -158,6 +191,14 @@ function defaultTimeoutPolicy() {
     max_secs: MAX_TIMEOUT_SECS,
     watchdog_grace_secs: WATCHDOG_GRACE_SECS,
     missing_session_probe_secs: MISSING_SESSION_PROBE_SECS,
+  };
+}
+
+function defaultSlotTtlPolicy() {
+  return {
+    default_secs: DEFAULT_SLOT_TTL_SECS,
+    min_secs: MIN_SLOT_TTL_SECS,
+    max_secs: MAX_SLOT_TTL_SECS,
   };
 }
 

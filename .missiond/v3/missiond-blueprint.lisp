@@ -470,6 +470,10 @@
       :max_secs 7200
       :watchdog_grace_secs 120
       :missing_session_probe_secs 120)
+    (ttl-policy dynamic-slot
+      :default_secs 14400
+      :min_secs 300
+      :max_secs 28800)
     :invariants
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
@@ -477,6 +481,7 @@
        "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
        "Project-bound workstation spawn MUST sync MissionD Claude hooks into <project>/.claude/settings.local.json before PTY start and MUST inject MISSION_IPC_ENDPOINT into the slot env; this preserves global ~/.claude/settings.json while making SessionStart UUID capture and UserPromptSubmit context prefetch local, idempotent, and project-scoped"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs (default 1800s, clamped 60..7200) — never a fixed 600_000ms — so a delegated long-running task gets the timeout the delegator already declared"
+       "Dynamic slot TTL MUST project from workstation-config ttl-policy dynamic-slot (default 14400s, clamped 300..28800) — direct mission_compute_slot create must not hardcode the TTL window"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget plus a small grace (default 120s); only the no-PTY-session branch may reclaim sooner so a missing process can never wedge the slot"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold (projected pty.send budget plus grace); the legacy fixed 20-minute lease is forbidden because it lets the watchdog reclaim a slot whose claim is still legitimately ticking inside the declared timeout"]
     (prompt-tool-contract autopilot-claudecode-prompt

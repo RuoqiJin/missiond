@@ -104,9 +104,11 @@ function checkFiles(root, files) {
     'Project-bound workstation spawn MUST sync MissionD Claude hooks',
     'MISSION_IPC_ENDPOINT',
     'Autopilot pty.send budget MUST project from BoardTask.timeout_secs',
+    'Dynamic slot TTL MUST project from workstation-config ttl-policy dynamic-slot',
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
     'timeout-policy boardtask-dispatch',
+    'ttl-policy dynamic-slot',
     ':default_secs 1800',
     ':min_secs 60',
     ':max_secs 7200',
@@ -136,6 +138,9 @@ function checkFiles(root, files) {
     'string_arg(args, &["initial_prompt", "initialPrompt"])',
     'suppress_initial_prompt',
     'initial_prompt_for_spawn',
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'clamp_slot_ttl_secs',
+    'V3_BLUEPRINT_CONFIG_ERROR',
     'PTYSpawnOptions',
   ]);
 
@@ -159,10 +164,12 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'pub(crate) struct WorkstationRuntimeConfig',
     'pub(crate) struct TimeoutPolicy',
+    'pub(crate) struct SlotTtlPolicy',
     'pub(crate) fn load_for_project_root',
     'parse_workstation_config',
     'find_form(source, "workstation-config")',
     'timeout-policy boardtask-dispatch',
+    'ttl-policy dynamic-slot',
     'slot-template',
     'DEFAULT_MODEL_PROFILE',
     'DEFAULT_TIMEOUT_SECS',
@@ -170,6 +177,9 @@ function checkFiles(root, files) {
     'MAX_TIMEOUT_SECS',
     'WATCHDOG_GRACE_SECS',
     'MISSING_SESSION_PROBE_SECS',
+    'DEFAULT_SLOT_TTL_SECS',
+    'MIN_SLOT_TTL_SECS',
+    'MAX_SLOT_TTL_SECS',
     'MissingBlueprint',
   ]);
 
@@ -269,6 +279,10 @@ function buildFixture() {
       :max_secs 7200
       :watchdog_grace_secs 120
       :missing_session_probe_secs 120)
+    (ttl-policy dynamic-slot
+      :default_secs 14400
+      :min_secs 300
+      :max_secs 28800)
     :invariants
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
@@ -276,6 +290,7 @@ function buildFixture() {
        "Project-bound workstation spawn MUST sync MissionD Claude hooks"
        "MISSION_IPC_ENDPOINT"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs"
+       "Dynamic slot TTL MUST project from workstation-config ttl-policy dynamic-slot"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold"
        "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
@@ -303,6 +318,9 @@ string_arg(args, &["model_profile", "modelProfile"]);
 string_arg(args, &["initial_prompt", "initialPrompt"]);
 let suppress_initial_prompt = true;
 let initial_prompt_for_spawn = None;
+WorkstationRuntimeConfig::load_for_project_root();
+clamp_slot_ttl_secs();
+V3_BLUEPRINT_CONFIG_ERROR;
 PTYSpawnOptions;`);
   writeFixture(root, DEFAULT_FILES.taskDelegate, `
 WorkstationRuntimeConfig::load_for_project_root();
@@ -322,11 +340,12 @@ create_args["model_profile"] = v;
   writeFixture(root, DEFAULT_FILES.v3Runtime, `
 pub(crate) struct WorkstationRuntimeConfig {}
 pub(crate) struct TimeoutPolicy {}
+pub(crate) struct SlotTtlPolicy {}
 pub(crate) fn load_for_project_root() {}
 fn parse_workstation_config() {}
 fn x() {
   find_form(source, "workstation-config");
-  let a = "timeout-policy boardtask-dispatch slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS MissingBlueprint";
+  let a = "timeout-policy boardtask-dispatch ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS MissingBlueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';

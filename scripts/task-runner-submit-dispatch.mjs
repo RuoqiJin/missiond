@@ -493,7 +493,11 @@ function fixtureBlueprint() {
       :min_secs 60
       :max_secs 7200
       :watchdog_grace_secs 120
-      :missing_session_probe_secs 120)))`;
+      :missing_session_probe_secs 120)
+    (ttl-policy dynamic-slot
+      :default_secs 14400
+      :min_secs 300
+      :max_secs 28800)))`;
 }
 
 function assert(condition, message) {
