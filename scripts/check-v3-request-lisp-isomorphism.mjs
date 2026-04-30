@@ -18,6 +18,7 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   requestHandler: 'crates/missiond-daemon/src/handlers/knowledge/request.rs',
   requestArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/request/request_artifacts.rs',
+  requestReviewPacket: 'crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs',
   requestTests: 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs',
   directiveHandler: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   directiveCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/directive/compile_authoring.rs',
@@ -83,6 +84,7 @@ function checkFiles(root, files) {
   requireText(diagnostics, files.blueprint, sources.blueprint, 'start/advance/status/respond expose request-local :artifact_paths');
   requireText(diagnostics, files.blueprint, sources.blueprint, '(surface mission_request');
   requireText(diagnostics, files.blueprint, sources.blueprint, ':status "code-aligned"');
+  requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs');
   requireText(diagnostics, files.blueprint, sources.blueprint, 'crates/missiond-daemon/src/handlers/knowledge/request/tests.rs');
 
   const directiveSurface = `${sources.directiveHandler}\n${sources.directiveCompileAuthoring}`;
@@ -91,12 +93,15 @@ function checkFiles(root, files) {
   requireText(diagnostics, directiveSurfaceLabel, directiveSurface, 'payload["compiled_sexp_preview"] = json!(persisted_preview_sexp)');
   requireText(diagnostics, directiveSurfaceLabel, directiveSurface, 'payload["compiled_sexp"] = json!(persisted_compiled_sexp)');
 
-  const requestSurface = `${sources.requestHandler}\n${sources.requestArtifacts}`;
-  const requestSurfaceLabel = `${files.requestHandler} + ${files.requestArtifacts}`;
+  const requestSurface = `${sources.requestHandler}\n${sources.requestArtifacts}\n${sources.requestReviewPacket}`;
+  const requestSurfaceLabel = `${files.requestHandler} + ${files.requestArtifacts} + ${files.requestReviewPacket}`;
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_intent_alignment_projection');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'fn enrich_materialized_plan_lisp');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'atomic_write_artifact(&paths.plan, &enriched_plan_text, true)');
   requireText(diagnostics, requestSurfaceLabel, requestSurface, 'respond_result.insert("plan_materialized"');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn derive_review_packet');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn classify_review_state');
+  requireText(diagnostics, requestSurfaceLabel, requestSurface, 'pub(super) fn latest_review_event_checkpoint');
   requireText(diagnostics, files.requestHandler, sources.requestHandler, 'mod tests;');
   requireText(diagnostics, files.requestTests, sources.requestTests, 'request_lisp_carries_v3_policy');
   requireText(diagnostics, files.requestTests, sources.requestTests, 'derive_review_packet_intent_only_state');
@@ -129,7 +134,8 @@ function buildFixture() {
   (implementation-map
     (surface mission_request
       :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/knowledge/request/tests.rs"]
+      :code ["crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/request/tests.rs"]
       :note "fixture")))`);
   writeFixture(root, DEFAULT_FILES.directiveHandler, `
 mod compile_authoring;`);
@@ -148,6 +154,10 @@ fn derive_review_packet_intent_only_state() {}
 fn respond_plan_compile_args_strips_write_file_by_default() {}`);
   writeFixture(root, DEFAULT_FILES.requestArtifacts, `
 fn enrich_intent_alignment_projection() {}`);
+  writeFixture(root, DEFAULT_FILES.requestReviewPacket, `
+pub(super) fn derive_review_packet() {}
+pub(super) fn classify_review_state() {}
+pub(super) fn latest_review_event_checkpoint() {}`);
   writeFixture(root, DEFAULT_FILES.mcpRequest, `
 "stamps :plan_id/:version/:board_task_id back into request-local plan.lisp"
 "writes the persisted ref back into plan.lisp"`);
