@@ -1194,6 +1194,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/bookkeeping.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claims.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/gates.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/rollbacks.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/skips.rs"
@@ -1261,6 +1262,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
       :runtime-bookkeeping "plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping: node map, successor map, topo index, ready-id selection, running/pending scans, and topological outcome stitching."
+      :runtime-claims "plan_dag/runtime/claims.rs owns DAG runtime claim release projection: recorded claim lookup, lease release, terminal-state label threading, released-claim evidence emission, and compatibility no-op release for unrecorded claims."
       :runtime-gates "plan_dag/runtime/gates.rs owns DAG runtime ready-node gate filtering: condition-gated skips, review-gate pause projection, ready dispatch cap, and gate-local taint propagation."
       :runtime-rollbacks "plan_dag/runtime/rollbacks.rs owns DAG runtime rollback evaluation: node-local rollback, cascade rollback fold-in, inactive rollback suppression, rollback evidence emission, and RollbackEvaluation projection for terminal node results."
       :runtime-skips "plan_dag/runtime/skips.rs owns DAG runtime skip materialization: tainted pending skips, fail-fast pending force-skips, skip evidence emission, and skipped NodeResult projection."

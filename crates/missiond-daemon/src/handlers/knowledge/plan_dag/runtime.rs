@@ -20,15 +20,15 @@ use super::claim_lease::{
 };
 use super::dispatch::{dispatch_node, DispatchOutcome, TaskContractDispatchCtx};
 use super::lifecycle::{
-    emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_claim_released,
-    emit_evidence_claimed, emit_evidence_finished, emit_evidence_running, plan_node_should_retry,
-    EvidenceCtx,
+    emit_evidence_acceptance, emit_evidence_claim_conflict, emit_evidence_claimed,
+    emit_evidence_finished, emit_evidence_running, plan_node_should_retry, EvidenceCtx,
 };
 use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
 use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
 use super::scheduler::propagate_taint;
 
 mod bookkeeping;
+mod claims;
 mod gates;
 mod rollbacks;
 mod skips;
@@ -36,6 +36,7 @@ use bookkeeping::{
     build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
     initialize_lifecycle, stitch_results_topologically,
 };
+use claims::release_claim_if_recorded;
 use gates::filter_ready_nodes_for_gates;
 use rollbacks::evaluate_and_emit_rollback;
 use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
@@ -505,21 +506,18 @@ pub(super) async fn execute_with_concurrency(
                 // terminal state is set. Best-effort: we only release
                 // when the registry actually recorded the claim
                 // (compat-mode conflicts skip the registry insert).
-                if let Some(claim_id) = active_claims_by_node.remove(&node_id) {
-                    if let Some(released) = claim_registry.release(&claim_id, chrono::Utc::now()) {
-                        emit_evidence_claim_released(
-                            state,
-                            &ctx,
-                            &node,
-                            &dispatch_strategy,
-                            current_attempt,
-                            &released,
-                            terminal_state_label,
-                            &mut outcome,
-                        )
-                        .await;
-                    }
-                }
+                release_claim_if_recorded(
+                    state,
+                    &ctx,
+                    &node,
+                    &dispatch_strategy,
+                    current_attempt,
+                    terminal_state_label,
+                    &mut claim_registry,
+                    &mut active_claims_by_node,
+                    &mut outcome,
+                )
+                .await;
                 // wave-17 / task 04 — acceptance-rejected nodes are
                 // node-level failures and warrant the same rollback
                 // pass as a dispatch-time failure. Runs BEFORE
@@ -594,21 +592,18 @@ pub(super) async fn execute_with_concurrency(
                 // without overlap. Best-effort: skip if the original
                 // attempt never registered a claim (compat-mode
                 // conflict).
-                if let Some(claim_id) = active_claims_by_node.remove(&node_id) {
-                    if let Some(released) = claim_registry.release(&claim_id, chrono::Utc::now()) {
-                        emit_evidence_claim_released(
-                            state,
-                            &ctx,
-                            &node,
-                            &dispatch_strategy,
-                            current_attempt,
-                            &released,
-                            "failed_will_retry",
-                            &mut outcome,
-                        )
-                        .await;
-                    }
-                }
+                release_claim_if_recorded(
+                    state,
+                    &ctx,
+                    &node,
+                    &dispatch_strategy,
+                    current_attempt,
+                    "failed_will_retry",
+                    &mut claim_registry,
+                    &mut active_claims_by_node,
+                    &mut outcome,
+                )
+                .await;
                 // Optional sleep between attempts. Skipped when absent
                 // / 0 so the common no-back-off case stays cheap.
                 if let Some(delay_ms) = node.effective_retry_delay_ms() {
@@ -726,21 +721,18 @@ pub(super) async fn execute_with_concurrency(
             lifecycle.insert(node_id.clone(), NodeLifecycle::Failed);
             // wave-17 / task 02 — release the claim on terminal
             // failure (best-effort, compat-mode conflicts skip).
-            if let Some(claim_id) = active_claims_by_node.remove(&node_id) {
-                if let Some(released) = claim_registry.release(&claim_id, chrono::Utc::now()) {
-                    emit_evidence_claim_released(
-                        state,
-                        &ctx,
-                        &node,
-                        &dispatch_strategy,
-                        current_attempt,
-                        &released,
-                        "failed",
-                        &mut outcome,
-                    )
-                    .await;
-                }
-            }
+            release_claim_if_recorded(
+                state,
+                &ctx,
+                &node,
+                &dispatch_strategy,
+                current_attempt,
+                "failed",
+                &mut claim_registry,
+                &mut active_claims_by_node,
+                &mut outcome,
+            )
+            .await;
             let reason = classification
                 .err()
                 .unwrap_or_else(|| "inner handler returned error".to_string());
