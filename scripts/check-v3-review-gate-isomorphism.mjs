@@ -36,6 +36,18 @@ const DEFAULT_FILES = {
   reviewGate: 'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   reviewGateCreated: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
   reviewGateResolution: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
+  reviewGateResolutionAutomation:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/automation.rs',
+  reviewGateResolutionEmitter:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/emitter.rs',
+  reviewGateResolutionEnvelope:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/envelope.rs',
+  reviewGateResolutionInput:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/input.rs',
+  reviewGateResolutionPayload:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/payload.rs',
+  reviewGateResolutionSubscriber:
+    'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/subscriber.rs',
   reviewGateAutoAnswer: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   reviewGateLlmApproval: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
   reviewGateLlmProposal:
@@ -125,6 +137,12 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/automation.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/emitter.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/envelope.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/input.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/payload.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/subscriber.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/proposal.rs',
@@ -400,8 +418,8 @@ function checkFiles(root, files) {
     ['alignment-review-gate', 'plan-review-gate', 'never auto-approve'],
   );
 
-  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}\n${sources.reviewGateAutoAnswer}\n${sources.reviewGateLlmApproval}\n${sources.reviewGateLlmProposal}\n${sources.reviewGateLlmApplyGate}`;
-  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution} + ${files.reviewGateAutoAnswer} + ${files.reviewGateLlmApproval} + ${files.reviewGateLlmProposal} + ${files.reviewGateLlmApplyGate}`;
+  const reviewGateSurface = `${sources.reviewGate}\n${sources.reviewGateCreated}\n${sources.reviewGateResolution}\n${sources.reviewGateResolutionAutomation}\n${sources.reviewGateResolutionEmitter}\n${sources.reviewGateResolutionEnvelope}\n${sources.reviewGateResolutionInput}\n${sources.reviewGateResolutionPayload}\n${sources.reviewGateResolutionSubscriber}\n${sources.reviewGateAutoAnswer}\n${sources.reviewGateLlmApproval}\n${sources.reviewGateLlmProposal}\n${sources.reviewGateLlmApplyGate}`;
+  const reviewGateSurfaceLabel = `${files.reviewGate} + ${files.reviewGateCreated} + ${files.reviewGateResolution} + ${files.reviewGateResolutionAutomation} + ${files.reviewGateResolutionEmitter} + ${files.reviewGateResolutionEnvelope} + ${files.reviewGateResolutionInput} + ${files.reviewGateResolutionPayload} + ${files.reviewGateResolutionSubscriber} + ${files.reviewGateAutoAnswer} + ${files.reviewGateLlmApproval} + ${files.reviewGateLlmProposal} + ${files.reviewGateLlmApplyGate}`;
   requireAll(diagnostics, reviewGateSurfaceLabel, reviewGateSurface, REVIEW_GATE_RS_NEEDLES);
   requireAll(diagnostics, files.reviewGateCreated, sources.reviewGateCreated, [
     'pub(crate) fn derive_review_question_id',
@@ -412,14 +430,59 @@ function checkFiles(root, files) {
     'pub(crate) const PLAN_NODE_REVIEW_DEFAULT_ACTION',
   ]);
   requireAll(diagnostics, files.reviewGateResolution, sources.reviewGateResolution, [
-    'pub(crate) enum ReviewDecision',
+    'mod automation;',
+    'mod emitter;',
+    'mod envelope;',
+    'mod input;',
+    'mod payload;',
+    'mod subscriber;',
+    'pub(crate) use self::automation::*;',
+    'pub(crate) use self::emitter::*;',
+    'pub(crate) use self::envelope::*;',
+    'pub(crate) use self::input::*;',
+    'pub(crate) use self::payload::*;',
+    'pub(crate) use self::subscriber::*;',
+  ]);
+  requireAll(diagnostics, files.reviewGateResolutionEmitter, sources.reviewGateResolutionEmitter, [
+    'pub(crate) fn parse_resolution_review_question_id',
+    'pub(crate) struct ResolutionDecisionMeta',
+    'pub(crate) fn build_resolution_event',
     'pub(crate) async fn maybe_emit_review_question_resolved',
-    'pub(crate) fn parse_review_resolution_input',
-    'pub(crate) fn parse_review_question_id_struct',
-    'pub(crate) fn validate_review_resolution_envelope',
-    'pub(crate) fn plan_review_resolved_dispatch',
-    'pub(crate) fn evaluate_review_automation',
+    'BUS_PUBLISH_FAILED',
     'DB action already committed',
+  ]);
+  requireAll(diagnostics, files.reviewGateResolutionInput, sources.reviewGateResolutionInput, [
+    'pub(crate) enum ReviewDecision',
+    'ReviewDecision::Approved',
+    'ReviewDecision::Rejected',
+    'ReviewDecision::NeedsChanges',
+    'pub(crate) fn parse_review_resolution_input',
+    'pub(crate) fn parse_plan_node_resume_input',
+  ]);
+  requireAll(diagnostics, files.reviewGateResolutionAutomation, sources.reviewGateResolutionAutomation, [
+    'pub(crate) enum ReviewAutomationPolicy',
+    'pub(crate) struct ReviewAutomationContext',
+    'pub(crate) fn evaluate_review_automation',
+    'pub(crate) fn stamp_review_automation_payload',
+  ]);
+  requireAll(diagnostics, files.reviewGateResolutionEnvelope, sources.reviewGateResolutionEnvelope, [
+    'pub(crate) struct ParsedReviewQuestionId',
+    'pub(crate) enum ReviewIdParseError',
+    'pub(crate) fn parse_review_question_id_struct',
+    'pub(crate) enum ResolutionValidationError',
+    'pub(crate) const WAVE14_SUPPORTED_SCOPES',
+    'pub(crate) fn validate_review_resolution_envelope',
+  ]);
+  requireAll(diagnostics, files.reviewGateResolutionPayload, sources.reviewGateResolutionPayload, [
+    'pub(crate) enum ResolutionOutcome',
+    'pub(crate) fn stamp_resolution_payload',
+    'pub(crate) fn stamp_needs_changes_next_step',
+    'pub(crate) fn resolution_wire_string',
+  ]);
+  requireAll(diagnostics, files.reviewGateResolutionSubscriber, sources.reviewGateResolutionSubscriber, [
+    'pub(crate) enum ReviewResolvedDispatch',
+    'pub(crate) fn parse_subscriber_resolution_string',
+    'pub(crate) fn plan_review_resolved_dispatch',
   ]);
   requireAll(diagnostics, files.reviewGateAutoAnswer, sources.reviewGateAutoAnswer, [
     'pub(crate) enum AutoAnswerPolicy',
@@ -597,6 +660,12 @@ function runFixtures(json) {
     [DEFAULT_FILES.reviewGate]: buildGoodReviewGate(),
     [DEFAULT_FILES.reviewGateCreated]: buildGoodReviewGateCreated(),
     [DEFAULT_FILES.reviewGateResolution]: buildGoodReviewGateResolution(),
+    [DEFAULT_FILES.reviewGateResolutionAutomation]: buildGoodReviewGateResolutionAutomation(),
+    [DEFAULT_FILES.reviewGateResolutionEmitter]: buildGoodReviewGateResolutionEmitter(),
+    [DEFAULT_FILES.reviewGateResolutionEnvelope]: buildGoodReviewGateResolutionEnvelope(),
+    [DEFAULT_FILES.reviewGateResolutionInput]: buildGoodReviewGateResolutionInput(),
+    [DEFAULT_FILES.reviewGateResolutionPayload]: buildGoodReviewGateResolutionPayload(),
+    [DEFAULT_FILES.reviewGateResolutionSubscriber]: buildGoodReviewGateResolutionSubscriber(),
     [DEFAULT_FILES.reviewGateAutoAnswer]: buildGoodReviewGateAutoAnswer(),
     [DEFAULT_FILES.reviewGateLlmApproval]: buildGoodReviewGateLlmApproval(),
     [DEFAULT_FILES.reviewGateLlmProposal]: buildGoodReviewGateLlmProposal(),
@@ -759,6 +828,12 @@ function buildGoodBlueprint() {
       :code ["crates/missiond-daemon/src/handlers/knowledge/review_gate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/created.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/automation.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/emitter.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/envelope.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/input.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/payload.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution/subscriber.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval/proposal.rs"
@@ -782,7 +857,7 @@ function buildGoodBlueprint() {
              "crates/missiond-mcp/src/tools/knowledge/directive.rs"
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"
              "crates/missiond-mcp/src/tools/knowledge/workflow.rs"]
-      :note "alignment-review-gate + plan-review-gate event emission for the file-first directive / plan / workflow surfaces. directive/approval_review.rs owns the directive review facade; directive/approval_review/approve.rs owns directive approve transitions; directive/approval_review/archive.rs owns directive archive transitions. ReviewGatePolicy is a closed enum manual | emit_question | off; the dispatcher apply_compile_review_gates fans out to maybe_emit_review_question_created (legacy explicit) or auto_emit_review_question_after_artifact_write (wave-14 auto). ReviewDecision is a closed enum approved | rejected | needs_changes carried by the wave-15 review-resolution input. The gate never auto-approves, never blocks the primary DB / file-write outcome, and never waits for a human; bus failures surface review_question_warning + the deterministic review_question_id so callers can retry or resolve manually with the same id. directive / plan / workflow approve / reject paths route through maybe_emit_review_question_resolved without bypassing the gate."))
+      :note "alignment-review-gate + plan-review-gate event emission for the file-first directive / plan / workflow surfaces. directive/approval_review.rs owns the directive review facade; directive/approval_review/approve.rs owns directive approve transitions; directive/approval_review/archive.rs owns directive archive transitions. ReviewGatePolicy is a closed enum manual | emit_question | off; the dispatcher apply_compile_review_gates fans out to maybe_emit_review_question_created (legacy explicit) or auto_emit_review_question_after_artifact_write (wave-14 auto). review_gate/resolution.rs is the review-resolution facade; resolution/input.rs owns ReviewDecision approved | rejected | needs_changes and explicit resume inputs; resolution/emitter.rs owns maybe_emit_review_question_resolved; resolution/envelope.rs owns review_question_id parsing/validation; resolution/automation.rs owns deterministic review automation; resolution/payload.rs owns response stamping; resolution/subscriber.rs owns Resolved-event dispatch. The gate never auto-approves, never blocks the primary DB / file-write outcome, and never waits for a human; bus failures surface review_question_warning + the deterministic review_question_id so callers can retry or resolve manually with the same id. directive / plan / workflow approve / reject paths route through maybe_emit_review_question_resolved without bypassing the gate."))
   (compression-contract
     :checks ["node scripts/check-v3-review-gate-isomorphism.mjs"]))
 `;
@@ -825,16 +900,75 @@ pub(crate) const PLAN_NODE_REVIEW_DEFAULT_ACTION: &str = "plan-node";
 
 function buildGoodReviewGateResolution() {
   return `// fixture
-pub(crate) enum ReviewDecision { Approved, Rejected, NeedsChanges }
-const DECISIONS: &[&str] = &["ReviewDecision::Approved", "ReviewDecision::Rejected", "ReviewDecision::NeedsChanges"];
-pub(crate) async fn maybe_emit_review_question_resolved() {}
-pub(crate) fn parse_review_resolution_input() {}
-pub(crate) fn parse_review_question_id_struct() {}
-pub(crate) fn validate_review_resolution_envelope() {}
-pub(crate) fn plan_review_resolved_dispatch() {}
+mod automation;
+mod emitter;
+mod envelope;
+mod input;
+mod payload;
+mod subscriber;
+pub(crate) use self::automation::*;
+pub(crate) use self::emitter::*;
+pub(crate) use self::envelope::*;
+pub(crate) use self::input::*;
+pub(crate) use self::payload::*;
+pub(crate) use self::subscriber::*;
+`;
+}
+
+function buildGoodReviewGateResolutionAutomation() {
+  return `// fixture
+pub(crate) enum ReviewAutomationPolicy { Manual, Suggest, AutoSafe }
+pub(crate) struct ReviewAutomationContext;
 pub(crate) fn evaluate_review_automation() {}
+pub(crate) fn stamp_review_automation_payload() {}
+`;
+}
+
+function buildGoodReviewGateResolutionEmitter() {
+  return `// fixture
+pub(crate) fn parse_resolution_review_question_id() {}
+pub(crate) struct ResolutionDecisionMeta;
+pub(crate) fn build_resolution_event() {}
+pub(crate) async fn maybe_emit_review_question_resolved() {}
 // payload markers: review_question_warning + BUS_PUBLISH_FAILED
 // "DB action already committed"
+`;
+}
+
+function buildGoodReviewGateResolutionEnvelope() {
+  return `// fixture
+pub(crate) struct ParsedReviewQuestionId;
+pub(crate) enum ReviewIdParseError { MissingPrefix }
+pub(crate) fn parse_review_question_id_struct() {}
+pub(crate) enum ResolutionValidationError { ScopeMismatch }
+pub(crate) const WAVE14_SUPPORTED_SCOPES: &[&str] = &["directive", "plan", "workflow"];
+pub(crate) fn validate_review_resolution_envelope() {}
+`;
+}
+
+function buildGoodReviewGateResolutionInput() {
+  return `// fixture
+pub(crate) enum ReviewDecision { Approved, Rejected, NeedsChanges }
+const DECISIONS: &[&str] = &["ReviewDecision::Approved", "ReviewDecision::Rejected", "ReviewDecision::NeedsChanges"];
+pub(crate) fn parse_review_resolution_input() {}
+pub(crate) fn parse_plan_node_resume_input() {}
+`;
+}
+
+function buildGoodReviewGateResolutionPayload() {
+  return `// fixture
+pub(crate) enum ResolutionOutcome { PerformTransition, KeepArtifact, RequestChanges }
+pub(crate) fn stamp_resolution_payload() {}
+pub(crate) fn stamp_needs_changes_next_step() {}
+pub(crate) fn resolution_wire_string() {}
+`;
+}
+
+function buildGoodReviewGateResolutionSubscriber() {
+  return `// fixture
+pub(crate) enum ReviewResolvedDispatch { IgnoreNonReviewId }
+pub(crate) fn parse_subscriber_resolution_string() {}
+pub(crate) fn plan_review_resolved_dispatch() {}
 `;
 }
 
