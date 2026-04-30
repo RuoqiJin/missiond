@@ -9,23 +9,26 @@ const usage = `Usage:
 
 Checks the V3 file-artifacts Lisp/code isomorphism contract:
   - .missiond/v3/missiond-blueprint.lisp declares (surface file-artifacts ...)
-    with :status "code-aligned", :code naming
-    crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs, and a
-    :note that anchors ArtifactKind, atomic_write_artifact, the request-local
-    artifact projection contract, the compat path / stable artifact paths
-    (.missiond/alignment, .missiond/plans, .missiond/workflows), and the
-    "no partial writes" atomicity invariant.
+    with :status "code-aligned", :code naming the file_artifacts facade plus
+    its attempt/kind/write submodules, and a :note that anchors ArtifactKind,
+    atomic_write_artifact, the request-local artifact projection contract, the
+    compat path / stable artifact paths (.missiond/alignment, .missiond/plans,
+    .missiond/workflows), and the "no partial writes" atomicity invariant.
   - compression-contract :checks pins this checker so drift surfaces in CI.
-  - file_artifacts.rs exposes the stable writer surface: ArtifactKind enum
-    (IntentAlignment | Plan | Workflow), atomic_write_artifact, the
-    unique_temp_path_in_dir helper, attempt_artifact_write + WriterContext +
-    AttemptOutcome, and the "partial writes do not leak" invariant comment
-    that pairs the temp+fsync+rename sequence with the file-vs-db contract.
+  - file_artifacts.rs is a thin facade over kind.rs, write.rs, and attempt.rs.
+    The combined writer surface exposes the ArtifactKind enum (IntentAlignment
+    | Plan | Workflow), atomic_write_artifact, unique_temp_path_in_dir,
+    attempt_artifact_write + WriterContext + AttemptOutcome, and the "partial
+    writes do not leak" invariant comment that pairs the temp+fsync+rename
+    sequence with the file-vs-db contract.
 `;
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   fileArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs',
+  fileArtifactsAttempt: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/attempt.rs',
+  fileArtifactsKind: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/kind.rs',
+  fileArtifactsWrite: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/write.rs',
   fileArtifactsTests: 'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs',
 };
 
@@ -85,6 +88,9 @@ const BLUEPRINT_NEEDLES = [
   '(surface file-artifacts',
   ':status "code-aligned"',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/attempt.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/kind.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/write.rs',
   'crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs',
   'node scripts/check-v3-file-artifacts-isomorphism.mjs',
 ];
@@ -134,6 +140,52 @@ const FILE_ARTIFACTS_NEEDLES = [
   '.missiond/workflows',
 ];
 
+const FILE_ARTIFACTS_FACADE_NEEDLES = [
+  'mod attempt;',
+  'mod kind;',
+  'mod write;',
+  'pub(crate) use attempt::{',
+  'pub(crate) use kind::{',
+  'pub(crate) use write::{',
+  '#[cfg(test)]',
+  'mod tests;',
+];
+
+const FILE_ARTIFACTS_KIND_NEEDLES = [
+  'pub(crate) enum ArtifactKind',
+  'ArtifactKind::IntentAlignment',
+  'ArtifactKind::Plan',
+  'ArtifactKind::Workflow',
+  'pub(crate) struct ArtifactSpec',
+  'pub(crate) struct WriteOutcome',
+  'pub(crate) struct ArtifactMetadata',
+  'pub(crate) fn sanitize_topic_segment',
+  'pub(crate) fn artifact_path',
+  'pub(crate) fn artifact_path_from_spec',
+  '.missiond/alignment',
+  '.missiond/plans',
+  '.missiond/workflows',
+];
+
+const FILE_ARTIFACTS_WRITE_NEEDLES = [
+  'static TEMP_FILE_COUNTER',
+  'pub(crate) fn unique_temp_path_in_dir',
+  'pub(crate) fn atomic_write_artifact',
+  'pub(crate) fn read_existing_metadata',
+  'flushes + fsyncs the temp file before rename so partial writes do not',
+];
+
+const FILE_ARTIFACTS_ATTEMPT_NEEDLES = [
+  'pub(crate) struct WriterContext',
+  'pub(crate) enum AttemptOutcome',
+  'AttemptOutcome::Written',
+  'AttemptOutcome::ResolveFailed',
+  'AttemptOutcome::WriteFailed',
+  'pub(crate) async fn attempt_artifact_write',
+  'pub(crate) async fn resolve_writer_project_root',
+  'file-first writer refuses process-cwd fallback',
+];
+
 function checkFiles(root, files) {
   const diagnostics = [];
   const sources = {};
@@ -160,7 +212,22 @@ function checkFiles(root, files) {
     SURFACE_NOTE_ANCHORS,
   );
 
-  requireAll(diagnostics, files.fileArtifacts, sources.fileArtifacts, FILE_ARTIFACTS_NEEDLES);
+  requireAll(diagnostics, files.fileArtifacts, sources.fileArtifacts, FILE_ARTIFACTS_FACADE_NEEDLES);
+  requireAll(diagnostics, files.fileArtifactsKind, sources.fileArtifactsKind, FILE_ARTIFACTS_KIND_NEEDLES);
+  requireAll(diagnostics, files.fileArtifactsWrite, sources.fileArtifactsWrite, FILE_ARTIFACTS_WRITE_NEEDLES);
+  requireAll(
+    diagnostics,
+    files.fileArtifactsAttempt,
+    sources.fileArtifactsAttempt,
+    FILE_ARTIFACTS_ATTEMPT_NEEDLES,
+  );
+  const combinedWriterSurface = [
+    sources.fileArtifacts,
+    sources.fileArtifactsKind,
+    sources.fileArtifactsWrite,
+    sources.fileArtifactsAttempt,
+  ].join('\n');
+  requireAll(diagnostics, files.fileArtifacts, combinedWriterSurface, FILE_ARTIFACTS_NEEDLES);
   requireAll(diagnostics, files.fileArtifactsTests, sources.fileArtifactsTests, [
     'use super::*;',
     'fn sanitize_topic_keeps_safe_chars',
@@ -234,10 +301,13 @@ function runFixtures(json) {
   const goodFiles = {
     [DEFAULT_FILES.blueprint]: buildGoodBlueprint(),
     [DEFAULT_FILES.fileArtifacts]: buildGoodFileArtifacts(),
+    [DEFAULT_FILES.fileArtifactsAttempt]: buildGoodFileArtifactsAttempt(),
+    [DEFAULT_FILES.fileArtifactsKind]: buildGoodFileArtifactsKind(),
+    [DEFAULT_FILES.fileArtifactsWrite]: buildGoodFileArtifactsWrite(),
     [DEFAULT_FILES.fileArtifactsTests]: buildGoodFileArtifactsTests(),
   };
   cases.push({
-    name: 'pass: blueprint surface + file_artifacts.rs surface aligned',
+    name: 'pass: blueprint surface + file_artifacts facade/modules aligned',
     expectOk: true,
     files: goodFiles,
   });
@@ -294,38 +364,38 @@ function runFixtures(json) {
     files: downgradedStatus,
   });
 
-  // ── Fail: file_artifacts.rs lost ArtifactKind enum. ──────────────────
+  // ── Fail: file_artifacts/kind.rs lost ArtifactKind enum. ─────────────
   const missingEnum = { ...goodFiles };
-  missingEnum[DEFAULT_FILES.fileArtifacts] = goodFiles[DEFAULT_FILES.fileArtifacts].replace(
+  missingEnum[DEFAULT_FILES.fileArtifactsKind] = goodFiles[DEFAULT_FILES.fileArtifactsKind].replace(
     'pub(crate) enum ArtifactKind',
     'pub(crate) enum ArtifactGHOST',
   );
   cases.push({
-    name: 'fail: file_artifacts.rs lost the ArtifactKind enum',
+    name: 'fail: file_artifacts/kind.rs lost the ArtifactKind enum',
     expectOk: false,
     expectMessage: /pub\(crate\) enum ArtifactKind/,
     files: missingEnum,
   });
 
-  // ── Fail: file_artifacts.rs lost atomic_write_artifact. ──────────────
+  // ── Fail: file_artifacts/write.rs lost atomic_write_artifact. ───────
   const missingAtomic = { ...goodFiles };
-  missingAtomic[DEFAULT_FILES.fileArtifacts] = goodFiles[DEFAULT_FILES.fileArtifacts].replace(
+  missingAtomic[DEFAULT_FILES.fileArtifactsWrite] = goodFiles[DEFAULT_FILES.fileArtifactsWrite].replace(
     'pub(crate) fn atomic_write_artifact',
     'pub(crate) fn atomic_write_GHOST',
   );
   cases.push({
-    name: 'fail: file_artifacts.rs lost atomic_write_artifact',
+    name: 'fail: file_artifacts/write.rs lost atomic_write_artifact',
     expectOk: false,
     expectMessage: /atomic_write_artifact/,
     files: missingAtomic,
   });
 
-  // ── Fail: file_artifacts.rs lost the no-partial-writes invariant. ────
+  // ── Fail: file_artifacts/write.rs lost the no-partial-writes invariant.
   const missingPartialInvariant = { ...goodFiles };
-  missingPartialInvariant[DEFAULT_FILES.fileArtifacts] = goodFiles[DEFAULT_FILES.fileArtifacts]
+  missingPartialInvariant[DEFAULT_FILES.fileArtifactsWrite] = goodFiles[DEFAULT_FILES.fileArtifactsWrite]
     .replace('partial writes do not', 'partial writes are GHOST');
   cases.push({
-    name: 'fail: file_artifacts.rs lost the partial-writes-do-not invariant comment',
+    name: 'fail: file_artifacts/write.rs lost the partial-writes-do-not invariant comment',
     expectOk: false,
     expectMessage: /partial writes do not/,
     files: missingPartialInvariant,
@@ -405,25 +475,38 @@ function buildGoodBlueprint() {
     (surface file-artifacts
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/file_artifacts.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/attempt.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/kind.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/write.rs"
              "crates/missiond-daemon/src/handlers/knowledge/file_artifacts/tests.rs"]
-      :note "file-artifacts is the file-first SSOT writer underneath compile_directive / compile_plan / compile_workflow and the request-local artifact projection that mission_request materializes for review. ArtifactKind is a closed enum IntentAlignment | Plan | Workflow; artifact_path locks the stable artifact paths (.missiond/alignment/<topic>/intent-alignment.lisp, .missiond/plans/<topic>/PLAN.lisp, .missiond/workflows/<topic>.lisp) which are the V3 compat path served when mission_request opt-in compat_write_file=true. atomic_write_artifact wires temp file + fsync + rename so callers see no partial writes on crash, and attempt_artifact_write composes a WriterContext + project-root resolver so the file-vs-db contract never silently rolls back a committed row when the file write fails. file_artifacts/tests.rs holds the writer regression suite outside the runtime facade."))
+      :note "file-artifacts is the file-first SSOT writer underneath compile_directive / compile_plan / compile_workflow and the request-local artifact projection that mission_request materializes for review. file_artifacts.rs is the facade; kind.rs owns ArtifactKind plus artifact_path and the stable artifact paths (.missiond/alignment/<topic>/intent-alignment.lisp, .missiond/plans/<topic>/PLAN.lisp, .missiond/workflows/<topic>.lisp) which are the V3 compat path served when mission_request opt-in compat_write_file=true; write.rs owns atomic_write_artifact and unique_temp_path_in_dir so callers see no partial writes on crash; attempt.rs owns attempt_artifact_write, WriterContext, AttemptOutcome, and project-root resolution so the file-vs-db contract never silently rolls back a committed row when the file write fails. file_artifacts/tests.rs holds the writer regression suite outside the runtime facade."))
   (compression-contract
     :checks ["node scripts/check-v3-file-artifacts-isomorphism.mjs"]))
 `;
 }
 
 function buildGoodFileArtifacts() {
-  // Minimal Rust skeleton that satisfies FILE_ARTIFACTS_NEEDLES. Real
-  // file_artifacts.rs is much larger; the fixture only needs to expose the
-  // stable surface tokens the checker pins.
+  // Minimal facade skeleton; behavior needles live in the split modules.
+  return `// fixture
+mod attempt;
+mod kind;
+mod write;
+
+pub(crate) use attempt::{attempt_artifact_write, AttemptOutcome, WriterContext};
+pub(crate) use kind::{artifact_path, ArtifactKind};
+pub(crate) use write::{atomic_write_artifact, unique_temp_path_in_dir};
+
+#[cfg(test)]
+mod tests;
+`;
+}
+
+function buildGoodFileArtifactsKind() {
   return `// fixture
 //! Path convention:
 //!   - .missiond/alignment/<topic>/intent-alignment.lisp
 //!   - .missiond/plans/<topic>/PLAN.lisp
 //!   - .missiond/workflows/<topic>.lisp
-//!
-//! atomic_write_artifact flushes + fsyncs the temp file before rename so
-//! partial writes do not leak across crashes (wraps in production source).
 
 pub(crate) enum ArtifactKind { IntentAlignment, Plan, Workflow }
 const _: &[&str] = &[
@@ -432,26 +515,37 @@ const _: &[&str] = &[
     "ArtifactKind::Workflow",
 ];
 
+pub(crate) struct ArtifactSpec;
+pub(crate) struct WriteOutcome;
+pub(crate) struct ArtifactMetadata;
+pub(crate) fn sanitize_topic_segment() {}
 pub(crate) fn artifact_path() {}
-pub(crate) fn unique_temp_path_in_dir() {}
-pub(crate) fn atomic_write_artifact() {}
-
-pub(crate) struct WriterContext<'a> { _m: std::marker::PhantomData<&'a ()> }
-
-pub(crate) enum AttemptOutcome {
-    Written,
-    ResolveFailed,
-    WriteFailed,
+pub(crate) fn artifact_path_from_spec() {}
+`;
 }
+
+function buildGoodFileArtifactsWrite() {
+  return `// fixture
+static TEMP_FILE_COUNTER: usize = 0;
+pub(crate) fn unique_temp_path_in_dir() {}
+/// flushes + fsyncs the temp file before rename so partial writes do not leak across crashes
+pub(crate) fn atomic_write_artifact() {}
+pub(crate) fn read_existing_metadata() {}
+`;
+}
+
+function buildGoodFileArtifactsAttempt() {
+  return `// fixture
+pub(crate) struct WriterContext;
+pub(crate) enum AttemptOutcome { Written, ResolveFailed, WriteFailed }
 const _: &[&str] = &[
     "AttemptOutcome::Written",
     "AttemptOutcome::ResolveFailed",
     "AttemptOutcome::WriteFailed",
 ];
-
 pub(crate) async fn attempt_artifact_write() {}
-#[cfg(test)]
-mod tests;
+pub(crate) async fn resolve_writer_project_root() {}
+const _: &str = "file-first writer refuses process-cwd fallback";
 `;
 }
 
