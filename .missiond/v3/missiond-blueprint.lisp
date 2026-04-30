@@ -685,12 +685,12 @@
       :surface router-policy
       :note "Router policy remains advisory/dry-run; V3 records the destination before any runtime replacement work.")
     (v2-item question-incident-governance
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: system-support/incidents + question flow"
       :v3-pillar communication
       :v3-function incident-question-governance
       :surface incident-governance
-      :note "Question, incident, LLM trace, Gemini auth, and decision stats are grouped for later convergence.")
+      :note "Question CRUD, decision stats, LLM trace, Gemini auth, and incident routing are physically split and pinned under the V3 incident-governance surface.")
     (v2-item capability-governance
       :status designed
       :v2-source ".missiond/v2/intent-capability-governance.lisp"
@@ -837,7 +837,7 @@
         :surface router-policy
         :tools [mission_router_chat mission_router_chat_manage])
       (tool-group question-incident-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: incident/question"
         :v3-pillar communication
         :v3-function incident-question-governance
@@ -1612,10 +1612,19 @@
       :note "Designed V3 destination for the V2 router-policy dry-run chain. plan/router_policy_dry_run.rs is already physically split as mission_plan's advisory runtime adapter, with predicate.rs owning rule matching, readiness.rs owning trace-index/backend-readiness projection, and descriptor.rs owning dispatch-descriptor projection; this surface remains designed rather than code-aligned until the public mission_router_chat tooling is also brought under the same V3 contract. This deliberately does not claim runtime backend replacement; it only prevents router public behavior from remaining unmapped.")
 
     (surface incident-governance
-      :status "designed"
+      :status "code-aligned"
       :implements [question incident llm-trace decision-stats auth]
-      :code ["crates/missiond-mcp/src/tools/comm/question.rs"]
-      :note "Designed V3 destination for question, incident, LLM trace, Gemini auth, and decision stats behavior. Later work should bind these facts into request-local events and BoardTask blocked/unblock flows.")
+      :code ["crates/missiond-daemon/src/handlers/comm/question.rs"
+             "crates/missiond-daemon/src/handlers/comm/question/question_flow.rs"
+             "crates/missiond-daemon/src/handlers/comm/question/decision.rs"
+             "crates/missiond-daemon/src/handlers/comm/question/llm_trace.rs"
+             "crates/missiond-daemon/src/handlers/comm/question/auth.rs"
+             "crates/missiond-daemon/src/handlers/comm/question/incident.rs"
+             "crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/handlers/sysinfra/misc.rs"
+             "crates/missiond-mcp/src/tools/comm/question.rs"
+             "scripts/check-v3-incident-governance-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for question, incident, LLM trace, Gemini auth, and decision stats behavior. question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question create/list/get/answer/dismiss, running-autopilot task inference, QuestionEvent::Created/Resolved, and TaskEvent::Completed scheduler wakeup; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace routing to Gemini/Jarvis trace adapters; question/auth.rs owns mission_gemini_auth routing; question/incident.rs owns mission_incident routing plus legacy mission_incident_* routing; handlers/mod.rs sends both consolidated and legacy question/incident public tools through this facade; sysinfra/misc.rs remains the legacy incident and Gemini execution adapter until sysinfra-control is physically split.")
 
     (surface capability-governance
       :status "designed"
@@ -1695,6 +1704,7 @@
              "node scripts/check-v3-project-registry-isomorphism.mjs"
              "node scripts/check-v3-skill-runtime-isomorphism.mjs"
              "node scripts/check-v3-cascade-governance-isomorphism.mjs"
+             "node scripts/check-v3-incident-governance-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"

@@ -23,7 +23,10 @@ pub(crate) use comm::retrospective;
 
 // Domain aliases for dispatch readability
 use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
-use compute::{cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, task, task_delegate, worker};
+use compute::{
+    cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, task, task_delegate,
+    worker,
+};
 use knowledge::{
     agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
     request, skill, workflow,
@@ -106,6 +109,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             skill::handle(state, n, args).await
         }
         n if n.starts_with("mission_question_") => question::handle(state, n, args).await,
+        n if n.starts_with("mission_incident_") => question::handle(state, n, args).await,
         n if n.starts_with("mission_router_chat") => router_chat::handle(state, n, args).await,
         n if n.starts_with("mission_memory_") => memory::handle(state, n, args).await,
         n if n.starts_with("mission_audit_") => audit::handle(state, n, args).await,
@@ -116,10 +120,7 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         {
             infra::handle(state, n, args).await
         }
-        n if n.starts_with("mission_incident_")
-            | (n == "mission_health")
-            | (n == "mission_power_control") =>
-        {
+        n if (n == "mission_health") | (n == "mission_power_control") => {
             health::handle(state, n, args).await
         }
         "mission_workers" | "mission_worker_control" => worker::handle(state, name, args).await,
