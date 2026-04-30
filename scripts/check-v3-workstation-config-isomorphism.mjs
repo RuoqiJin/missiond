@@ -155,6 +155,8 @@ function checkFiles(root, files) {
     'find_and_reserve_slot',
     'target_project_root',
     'auto_provision_slot',
+    'auto_provision_slot_ttl_secs',
+    'runtime_config.clamp_slot_ttl_secs(None)',
     'build_compute_slot_create_args',
     '"suppress_initial_prompt": true',
     'create_args["model_profile"]',
@@ -333,6 +335,8 @@ model_projection_matches();
 find_and_reserve_slot();
 let target_project_root = None;
 auto_provision_slot();
+auto_provision_slot_ttl_secs();
+runtime_config.clamp_slot_ttl_secs(None);
 build_compute_slot_create_args();
 json!({ "suppress_initial_prompt": true });
 create_args["model_profile"] = v;

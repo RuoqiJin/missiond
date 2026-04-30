@@ -181,7 +181,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
                 state,
                 template,
                 objective,
-                timeout_secs,
+                &runtime_config,
                 cwd,
                 model_arg.as_deref(),
                 effective_model_profile,
@@ -337,7 +337,7 @@ async fn auto_provision_slot(
     state: &AppState,
     template: &str,
     objective: &str,
-    timeout_secs: i64,
+    runtime_config: &WorkstationRuntimeConfig,
     cwd: Option<&str>,
     model: Option<&str>,
     model_profile: Option<&str>,
@@ -352,8 +352,11 @@ async fn auto_provision_slot(
         return Err(anyhow!("Dynamic slot quota full ({}/5)", active));
     }
 
-    // TTL = max(1h, timeout_secs + 300s buffer)
-    let ttl = (timeout_secs + 300).max(3600);
+    // V3 workstation-config :: ttl-policy dynamic-slot projection.
+    // Delegated auto-provision has no caller TTL override, so use the
+    // blueprint default and clamp it through the same path as direct
+    // mission_compute_slot create.
+    let ttl = auto_provision_slot_ttl_secs(runtime_config);
 
     // Build args for compute_slot create — projects V3 workstation-config
     // execution-ownership :: delegated-boardtask. The slot is provisioned
@@ -378,6 +381,10 @@ async fn auto_provision_slot(
     }
 
     Err(anyhow!("Failed to parse compute_slot response"))
+}
+
+fn auto_provision_slot_ttl_secs(runtime_config: &WorkstationRuntimeConfig) -> i64 {
+    runtime_config.clamp_slot_ttl_secs(None)
 }
 
 fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
@@ -499,6 +506,16 @@ mod tests {
     fn create_args_always_suppresses_initial_prompt() {
         let args = build_compute_slot_create_args("coder", "ship the fix", 3600, None, None, None);
         assert_eq!(args["suppress_initial_prompt"], json!(true));
+    }
+
+    #[test]
+    fn auto_provision_ttl_projects_v3_dynamic_slot_default() {
+        let ttl = auto_provision_slot_ttl_secs(&WorkstationRuntimeConfig::default());
+        assert_eq!(
+            ttl,
+            crate::context::v3_blueprint_runtime::DEFAULT_SLOT_TTL_SECS
+        );
+        assert_ne!(ttl, 3600);
     }
 
     #[test]
