@@ -23,6 +23,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_gemini_auth" => auth::handle(state, args).await,
         "mission_incident" => incident::handle_consolidated(state, args).await,
         n if n.starts_with("mission_incident_") => incident::handle_legacy(state, n, args).await,
+        "mission_jarvis_logs"
+        | "mission_jarvis_trace"
+        | "mission_gemini_trace"
+        | "mission_gemini_stats"
+        | "mission_gemini_content"
+        | "mission_gemini_watch" => llm_trace::handle_legacy(state, name, args).await,
         _ => Err(anyhow!("Unknown question tool: {name}")),
     }
 }

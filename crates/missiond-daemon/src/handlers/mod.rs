@@ -158,15 +158,18 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
             slot::handle(state, name, args).await
         }
 
-        // ===== Misc (legacy Jarvis/Gemini/support adapters) =====
-        "mission_submit_phase_result"
-        | "mission_jarvis_logs"
+        // ===== Legacy LLM trace aliases now owned by comm/question =====
+        "mission_jarvis_logs"
         | "mission_jarvis_trace"
         | "mission_gemini_trace"
         | "mission_gemini_stats"
         | "mission_gemini_content"
-        | "mission_gemini_watch"
-        | "mission_code_map_graph" => misc::handle(state, name, args).await,
+        | "mission_gemini_watch" => question::handle(state, name, args).await,
+
+        // ===== Misc (legacy support adapters) =====
+        "mission_submit_phase_result" | "mission_code_map_graph" => {
+            misc::handle(state, name, args).await
+        }
 
         // ===== xjp proxy =====
         _ if name.starts_with("xjp_") => match state.xjp_mcp.call_tool(name, args).await {

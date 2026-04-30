@@ -9,8 +9,8 @@ const usage = `Usage:
 
 Checks the V3 incident-governance Lisp/code isomorphism contract:
   - question.rs stays a thin facade for question/incident/trace/auth/stats tools.
-  - question CRUD, decision stats, LLM trace, Gemini auth, and incident adapters are split.
-  - legacy mission_question_* and mission_incident_* routes enter the same V3 facade.
+  - question CRUD, decision stats, LLM trace, Gemini auth, and incident execution are split.
+  - legacy mission_question_*, mission_incident_*, and LLM trace aliases enter the same V3 facade.
 `;
 
 const DEFAULT_FILES = {
@@ -22,7 +22,6 @@ const DEFAULT_FILES = {
   llmTrace: 'crates/missiond-daemon/src/handlers/comm/question/llm_trace.rs',
   auth: 'crates/missiond-daemon/src/handlers/comm/question/auth.rs',
   incident: 'crates/missiond-daemon/src/handlers/comm/question/incident.rs',
-  sysinfraMisc: 'crates/missiond-daemon/src/handlers/sysinfra/misc.rs',
   mcp: 'crates/missiond-mcp/src/tools/comm/question.rs',
 };
 
@@ -93,16 +92,14 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/comm/question/auth.rs',
     'crates/missiond-daemon/src/handlers/comm/question/incident.rs',
     'crates/missiond-daemon/src/handlers/mod.rs',
-    'crates/missiond-daemon/src/handlers/sysinfra/misc.rs',
     'crates/missiond-mcp/src/tools/comm/question.rs',
     'scripts/check-v3-incident-governance-isomorphism.mjs',
     'question.rs is the thin incident-governance facade',
     'question/question_flow.rs owns mission_question',
     'question/decision.rs owns mission_decision_stats',
-    'question/llm_trace.rs owns mission_llm_trace',
-    'question/auth.rs owns mission_gemini_auth',
-    'question/incident.rs owns mission_incident routing',
-    'sysinfra/misc.rs remains the legacy incident and Gemini execution adapter',
+    'question/llm_trace.rs owns mission_llm_trace plus legacy Gemini/Jarvis trace aliases',
+    'question/auth.rs owns mission_gemini_auth llm.yaml/settings.json projection',
+    'question/incident.rs owns mission_incident routing plus legacy mission_incident_* execution',
     'node scripts/check-v3-incident-governance-isomorphism.mjs',
   ]);
 
@@ -114,6 +111,8 @@ function checkFiles(root, files) {
     '"mission_gemini_auth" => question::handle(state, name, args).await',
     'n if n.starts_with("mission_question_") => question::handle(state, n, args).await',
     'n if n.starts_with("mission_incident_") => question::handle(state, n, args).await',
+    '"mission_jarvis_logs"',
+    '"mission_gemini_watch" => question::handle(state, name, args).await',
     'n if n == "mission_health"',
   ]);
 
@@ -129,6 +128,7 @@ function checkFiles(root, files) {
     '"mission_gemini_auth" => auth::handle(state, args).await',
     '"mission_incident" => incident::handle_consolidated(state, args).await',
     'n if n.starts_with("mission_incident_") => incident::handle_legacy(state, n, args).await',
+    '"mission_gemini_watch" => llm_trace::handle_legacy(state, name, args).await',
     'Unknown question tool',
   ]);
 
@@ -180,7 +180,9 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.auth, sources.auth, [
     'mission_gemini_auth',
-    'crate::handlers::misc::handle',
+    'gemini_auth_mode',
+    'selectedType',
+    'Gemini auth mode switched',
   ]);
 
   requireAll(diagnostics, files.incident, sources.incident, [
@@ -192,20 +194,10 @@ function checkFiles(root, files) {
     'mission_incident_remediate',
     'mission_incident_status',
     'mission_incident_close',
-    'Unknown incident tool',
-  ]);
-
-  requireAll(diagnostics, files.sysinfraMisc, sources.sysinfraMisc, [
-    'mission_incident_test',
-    'mission_incident_list',
-    'incident_get',
-    'incident_remediate',
-    'incident_status',
-    'incident_close',
-    'mission_gemini_auth',
     'publish_incident',
     'triage_incident',
     'is_safe_to_close_task',
+    'Unknown incident tool',
   ]);
 
   requireAll(diagnostics, files.mcp, sources.mcp, [
@@ -247,10 +239,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/comm/question/auth.rs"
              "crates/missiond-daemon/src/handlers/comm/question/incident.rs"
              "crates/missiond-daemon/src/handlers/mod.rs"
-             "crates/missiond-daemon/src/handlers/sysinfra/misc.rs"
              "crates/missiond-mcp/src/tools/comm/question.rs"
              "scripts/check-v3-incident-governance-isomorphism.mjs"]
-      :note "question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace; question/auth.rs owns mission_gemini_auth; question/incident.rs owns mission_incident routing; sysinfra/misc.rs remains the legacy incident and Gemini execution adapter."))
+      :note "question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace plus legacy Gemini/Jarvis trace aliases; question/auth.rs owns mission_gemini_auth llm.yaml/settings.json projection; question/incident.rs owns mission_incident routing plus legacy mission_incident_* execution."))
   (compression-contract
     :checks ["node scripts/check-v3-incident-governance-isomorphism.mjs"]))`);
 
@@ -259,6 +250,7 @@ function buildFixture() {
 "mission_gemini_auth" => question::handle(state, name, args).await
 n if n.starts_with("mission_question_") => question::handle(state, n, args).await
 n if n.starts_with("mission_incident_") => question::handle(state, n, args).await
+"mission_jarvis_logs" "mission_gemini_watch" => question::handle(state, name, args).await
 n if n == "mission_health"
 `);
 
@@ -274,6 +266,7 @@ mod question_flow;
 "mission_gemini_auth" => auth::handle(state, args).await
 "mission_incident" => incident::handle_consolidated(state, args).await
 n if n.starts_with("mission_incident_") => incident::handle_legacy(state, n, args).await
+"mission_gemini_watch" => llm_trace::handle_legacy(state, name, args).await
 Unknown question tool
 `);
 
@@ -293,16 +286,12 @@ mission_gemini_watch gemini_auth mission_gemini_auth jarvis_logs mission_jarvis_
 jarvis_trace mission_jarvis_trace
 `);
 
-  writeFixture(root, DEFAULT_FILES.auth, 'mission_gemini_auth crate::handlers::misc::handle');
+  writeFixture(root, DEFAULT_FILES.auth, 'mission_gemini_auth gemini_auth_mode selectedType Gemini auth mode switched');
 
   writeFixture(root, DEFAULT_FILES.incident, `
 handle_consolidated handle_legacy mission_incident_test mission_incident_list mission_incident_get
-mission_incident_remediate mission_incident_status mission_incident_close Unknown incident tool
-`);
-
-  writeFixture(root, DEFAULT_FILES.sysinfraMisc, `
-mission_incident_test mission_incident_list incident_get incident_remediate incident_status
-incident_close mission_gemini_auth publish_incident triage_incident is_safe_to_close_task
+mission_incident_remediate mission_incident_status mission_incident_close publish_incident
+triage_incident is_safe_to_close_task Unknown incident tool
 `);
 
   writeFixture(root, DEFAULT_FILES.mcp, `

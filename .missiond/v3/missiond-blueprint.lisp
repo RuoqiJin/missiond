@@ -1723,10 +1723,9 @@
              "crates/missiond-daemon/src/handlers/comm/question/auth.rs"
              "crates/missiond-daemon/src/handlers/comm/question/incident.rs"
              "crates/missiond-daemon/src/handlers/mod.rs"
-             "crates/missiond-daemon/src/handlers/sysinfra/misc.rs"
              "crates/missiond-mcp/src/tools/comm/question.rs"
              "scripts/check-v3-incident-governance-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for question, incident, LLM trace, Gemini auth, and decision stats behavior. question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question create/list/get/answer/dismiss, running-autopilot task inference, QuestionEvent::Created/Resolved, and TaskEvent::Completed scheduler wakeup; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace routing to Gemini/Jarvis trace adapters; question/auth.rs owns mission_gemini_auth routing; question/incident.rs owns mission_incident routing plus legacy mission_incident_* routing; handlers/mod.rs sends both consolidated and legacy question/incident public tools through this facade; sysinfra/misc.rs remains the legacy incident and Gemini execution adapter until sysinfra-control is physically split.")
+      :note "Code-aligned V3 destination for question, incident, LLM trace, Gemini auth, and decision stats behavior. question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question create/list/get/answer/dismiss, running-autopilot task inference, QuestionEvent::Created/Resolved, and TaskEvent::Completed scheduler wakeup; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace plus legacy Gemini/Jarvis trace aliases, Gemini request log/stat/content reads, and Gemini watch lifecycle; question/auth.rs owns mission_gemini_auth llm.yaml/settings.json projection; question/incident.rs owns mission_incident routing plus legacy mission_incident_* execution, incident injection/list/get/remediate/status/close, triage remediations, and safe close audit; handlers/mod.rs sends consolidated and legacy question/incident/LLM trace public tools through this facade.")
 
     (surface capability-governance
       :status "code-aligned"
