@@ -20,6 +20,9 @@ const DEFAULT_FILES = {
   kbQuality: 'crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs',
   kbCompact: 'crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs',
   kbConflicts: 'crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs',
+  kbQuery: 'crates/missiond-daemon/src/handlers/knowledge/kb/query.rs',
+  kbMutate: 'crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs',
+  kbImport: 'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
 };
 
@@ -87,12 +90,18 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/query.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
     'scripts/check-v3-memory-kb-isomorphism.mjs',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
     'kb/quality.rs owns content-quality rejection',
     'kb/compact.rs owns rule-based KB compaction',
     'kb/conflicts.rs owns semantic conflict detection',
+    'kb/query.rs owns get/list JSON egress',
+    'kb/mutate.rs owns forget/update/project mutation side effects',
+    'kb/import.rs owns servers_yaml import projection',
     'node scripts/check-v3-memory-kb-isomorphism.mjs',
   ]);
 
@@ -100,11 +109,20 @@ function checkFiles(root, files) {
     'mod args;',
     'mod compact;',
     'mod conflicts;',
+    'mod import;',
+    'mod mutate;',
     'mod quality;',
+    'mod query;',
     'use args::{',
     'use compact::handle_kb_compact;',
     'use conflicts::detect_kb_conflicts;',
+    'use import::handle_kb_import;',
+    'handle_kb_batch_forget',
+    'handle_kb_batch_set_project',
+    'handle_kb_forget',
+    'handle_kb_update',
     'use quality::check_content_quality;',
+    'use query::{handle_kb_get, handle_kb_list};',
     'pub(crate) async fn handle',
     '"mission_kb_query"',
     '"mission_kb_mutate"',
@@ -161,6 +179,40 @@ function checkFiles(root, files) {
     'conflicts.truncate(5)',
   ]);
 
+  requireAll(diagnostics, files.kbQuery, sources.kbQuery, [
+    'pub(super) async fn handle_kb_get',
+    'pub(super) async fn handle_kb_list',
+    'KBKeyArgs',
+    'KBListArgs',
+    'kb_get(&key)',
+    'kb_list_paginated',
+    '"compact": true',
+    'Key not found',
+  ]);
+
+  requireAll(diagnostics, files.kbMutate, sources.kbMutate, [
+    'pub(super) async fn handle_kb_forget',
+    'pub(super) async fn handle_kb_batch_forget',
+    'pub(super) async fn handle_kb_batch_set_project',
+    'pub(super) async fn handle_kb_update',
+    'check_content_quality',
+    'kb_get_id_by_key',
+    'kb_batch_forget',
+    'kb_update',
+    'EmbeddingTask::ProcessKBEntry',
+    'KBBatchMutated',
+  ]);
+
+  requireAll(diagnostics, files.kbImport, sources.kbImport, [
+    'pub(super) async fn handle_kb_import',
+    'KBImportArgs',
+    'servers_yaml',
+    'default_mission_home',
+    'InfraConfig::load',
+    'KBRememberInput',
+    'Unsupported import format',
+  ]);
+
   requireAll(diagnostics, files.mcpKb, sources.mcpKb, [
     '"mission_kb_query"',
     '"mission_kb_remember"',
@@ -191,8 +243,11 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/query.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/import.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection."))
+      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns get/list JSON egress; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
@@ -200,11 +255,17 @@ function buildFixture() {
 mod args;
 mod compact;
 mod conflicts;
+mod import;
+mod mutate;
 mod quality;
+mod query;
 use args::{KBRememberArgs};
 use compact::handle_kb_compact;
 use conflicts::detect_kb_conflicts;
+use import::handle_kb_import;
+handle_kb_batch_forget; handle_kb_batch_set_project; handle_kb_forget; handle_kb_update;
 use quality::check_content_quality;
+use query::{handle_kb_get, handle_kb_list};
 pub(crate) async fn handle() {
   "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_kb_remember";
 }`);
@@ -231,6 +292,24 @@ pub(super) async fn handle_kb_compact() {
   writeFixture(root, DEFAULT_FILES.kbConflicts, `
 pub(super) async fn detect_kb_conflicts() {
   CONFLICT_SIM_THRESHOLD; embedding_service; cosine_similarity; text_jaccard; category_prefix; conflicts.truncate(5);
+}`);
+  writeFixture(root, DEFAULT_FILES.kbQuery, `
+pub(super) async fn handle_kb_get() {
+  KBKeyArgs; kb_get(&key); Key not found;
+}
+pub(super) async fn handle_kb_list() {
+  KBListArgs; kb_list_paginated(); "compact": true;
+}`);
+  writeFixture(root, DEFAULT_FILES.kbMutate, `
+pub(super) async fn handle_kb_forget() { kb_get_id_by_key(); KBBatchMutated; }
+pub(super) async fn handle_kb_batch_forget() { kb_batch_forget(); KBBatchMutated; }
+pub(super) async fn handle_kb_batch_set_project() { kb_update(); }
+pub(super) async fn handle_kb_update() {
+  check_content_quality(); kb_update(); EmbeddingTask::ProcessKBEntry; KBBatchMutated;
+}`);
+  writeFixture(root, DEFAULT_FILES.kbImport, `
+pub(super) async fn handle_kb_import() {
+  KBImportArgs; servers_yaml; default_mission_home(); InfraConfig::load(); KBRememberInput; Unsupported import format;
 }`);
   writeFixture(root, DEFAULT_FILES.mcpKb, `
 "mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_ops";

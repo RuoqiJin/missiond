@@ -8,22 +8,26 @@ use crate::context_budget::apply_context_budget;
 use crate::context_budget::MAX_ROUTER_PAYLOAD_BYTES;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::gemini_client::REQUEST_CALLER;
-use crate::helpers::default_mission_home;
 use crate::state::AppState;
 use crate::state::EmbeddingTask;
 
 mod args;
 mod compact;
 mod conflicts;
+mod import;
+mod mutate;
 mod quality;
+mod query;
 
-use args::{
-    KBDiscoverArgs, KBGCArgs, KBImportArgs, KBKeyArgs, KBListArgs, KBRememberArgs, KBSearchArgs,
-    KBUpdateArgs,
-};
+use args::{KBDiscoverArgs, KBGCArgs, KBRememberArgs, KBSearchArgs};
 use compact::handle_kb_compact;
 use conflicts::detect_kb_conflicts;
+use import::handle_kb_import;
+use mutate::{
+    handle_kb_batch_forget, handle_kb_batch_set_project, handle_kb_forget, handle_kb_update,
+};
 use quality::check_content_quality;
+use query::{handle_kb_get, handle_kb_list};
 
 // @beacon: knowledge
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
@@ -210,163 +214,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
                 Ok(ToolResult::json_pretty(&output))
             }
         }
-        "mission_kb_forget" => {
-            let KBKeyArgs { key } = serde_json::from_value(args)?;
-            // Get entry ID before deletion for cache invalidation
-            let entry_id = state.store.kb_get_id_by_key(&key).await.ok().flatten();
-            let deleted = state
-                .store
-                .kb_forget(&key)
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            // Remove from embedding cache if deleted
-            if deleted {
-                if let Some(ref id) = entry_id {
-                    let mut guard = state.embedding_cache.write().await;
-                    guard.retain(|(eid, _)| eid != id);
-                    // Clean up knowledge graph edges + AST links
-                    let _ = state.store.kb_delete_edges_for(id).await;
-                    let _ = state.store.kb_delete_ast_links_for(id).await;
-                }
-            }
-            // Emit KBBatchMutated for event-driven FTS rebuild
-            if deleted {
-                let _ = state
-                    .bus
-                    .publish_memory(missiond_core::event::events::MemoryEvent::KBBatchMutated {
-                        count: 1,
-                        categories: vec![],
-                        action: "deleted".to_string(),
-                    })
-                    .await;
-            }
-            Ok(ToolResult::json(&serde_json::json!({
-                "deleted": deleted,
-                "key": key,
-            })))
-        }
-        "mission_kb_batch_forget" => {
-            let keys_val = args.get("keys").cloned().unwrap_or(Value::Array(vec![]));
-            let keys: Vec<String> = match serde_json::from_value::<Vec<String>>(keys_val.clone()) {
-                Ok(v) => v,
-                Err(_) => {
-                    // Claude may pass JSON string "[\"a\",\"b\"]" or comma-separated "a,b,c"
-                    if let Some(s) = keys_val.as_str() {
-                        serde_json::from_str::<Vec<String>>(s).unwrap_or_else(|_| {
-                            s.split(',')
-                                .map(|k| k.trim().to_string())
-                                .filter(|k| !k.is_empty())
-                                .collect()
-                        })
-                    } else {
-                        return Ok(ToolResult::error("keys: expected array or JSON string"));
-                    }
-                }
-            };
-            if keys.is_empty() {
-                return Ok(ToolResult::error("keys array is empty"));
-            }
-            let count = state
-                .store
-                .kb_batch_forget(&keys)
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            // Emit KBBatchMutated for event-driven consumers
-            if count > 0 {
-                let _ = state
-                    .bus
-                    .publish_memory(missiond_core::event::events::MemoryEvent::KBBatchMutated {
-                        count: count as u32,
-                        categories: vec![],
-                        action: "deleted".to_string(),
-                    })
-                    .await;
-            }
-            Ok(ToolResult::json(&serde_json::json!({
-                "deleted_count": count,
-                "requested_keys": keys.len(),
-            })))
-        }
-        "mission_kb_batch_set_project" => {
-            #[derive(Deserialize)]
-            struct Assignment {
-                key: String,
-                project_id: Option<String>,
-            }
-            #[derive(Deserialize)]
-            struct BatchArgs {
-                assignments: Vec<Assignment>,
-            }
-            let args: BatchArgs = serde_json::from_value(args)?;
-            let mut updated = 0usize;
-            let mut not_found = Vec::new();
-            for a in &args.assignments {
-                let pid = a.project_id.as_deref().filter(|s| !s.is_empty());
-                match state
-                    .store
-                    .kb_update(&a.key, None, None, None, None, None, pid)
-                    .await
-                {
-                    Ok(Some(_)) => updated += 1,
-                    Ok(None) => not_found.push(a.key.clone()),
-                    Err(_) => not_found.push(a.key.clone()),
-                }
-            }
-            Ok(ToolResult::json_pretty(&serde_json::json!({
-                "updated": updated,
-                "not_found": not_found,
-                "total": args.assignments.len(),
-            })))
-        }
-        "mission_kb_update" => {
-            let args: KBUpdateArgs = serde_json::from_value(args)?;
-            // Content quality check only if summary is being updated
-            if let Some(ref summary) = args.summary {
-                if let Some(rejection) =
-                    check_content_quality(summary, &args.detail, args.category.as_deref())
-                {
-                    return Ok(ToolResult::error(&rejection));
-                }
-            }
-            let result = state
-                .store
-                .kb_update(
-                    &args.key,
-                    args.category.as_deref(),
-                    args.summary.as_deref(),
-                    args.detail.as_ref(),
-                    args.confidence,
-                    args.linked_task_id.as_deref(),
-                    args.project_id.as_deref(),
-                )
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            match result {
-                Some((entry, content_changed)) => {
-                    // Only re-embed if summary/detail changed
-                    if content_changed {
-                        let _ = state
-                            .embedding_tx
-                            .try_send(EmbeddingTask::ProcessKBEntry(entry.id.clone()));
-                    }
-                    // Emit KBBatchMutated for event-driven consumers
-                    let _ = state
-                        .bus
-                        .publish_memory(missiond_core::event::events::MemoryEvent::KBBatchMutated {
-                            count: 1,
-                            categories: vec![entry.category.clone()],
-                            action: "updated".to_string(),
-                        })
-                        .await;
-                    Ok(ToolResult::json_pretty(&serde_json::json!({
-                        "updated": true,
-                        "content_changed": content_changed,
-                        "entry": entry,
-                    })))
-                }
-                None => Ok(ToolResult::error(&format!("key '{}' not found", args.key))),
-            }
-        }
+        "mission_kb_forget" => handle_kb_forget(state, args).await,
+        "mission_kb_batch_forget" => handle_kb_batch_forget(state, args).await,
+        "mission_kb_batch_set_project" => handle_kb_batch_set_project(state, args).await,
+        "mission_kb_update" => handle_kb_update(state, args).await,
         "mission_kb_search" => {
             let KBSearchArgs {
                 query,
@@ -626,105 +477,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
             Ok(ToolResult::json_pretty(&results))
         }
-        "mission_kb_get" => {
-            let KBKeyArgs { key } = serde_json::from_value(args)?;
-            let entry = state
-                .store
-                .kb_get(&key)
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-            match entry {
-                Some(e) => Ok(ToolResult::json_pretty(&e)),
-                None => Ok(ToolResult::error(format!("Key not found: {}", key))),
-            }
-        }
-        "mission_kb_list" => {
-            let args_parsed: KBListArgs = serde_json::from_value(args).unwrap_or(KBListArgs {
-                category: None,
-                limit: 50,
-                offset: 0,
-                compact: false,
-            });
-            let entries = state
-                .store
-                .kb_list_paginated(
-                    args_parsed.category.as_deref(),
-                    args_parsed.limit,
-                    args_parsed.offset,
-                )
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-
-            if args_parsed.compact {
-                let compact: Vec<serde_json::Value> = entries
-                    .iter()
-                    .map(|e| {
-                        serde_json::json!({
-                            "key": e.key,
-                            "category": e.category,
-                            "summary": if e.summary.chars().count() > 120 {
-                                format!("{}...", e.summary.chars().take(120).collect::<String>())
-                            } else {
-                                e.summary.clone()
-                            },
-                            "updatedAt": e.updated_at,
-                            "projectId": e.project_id,
-                        })
-                    })
-                    .collect();
-                Ok(ToolResult::json_pretty(&serde_json::json!({
-                    "total": compact.len(),
-                    "compact": true,
-                    "entries": compact,
-                })))
-            } else {
-                Ok(ToolResult::json_pretty(&entries))
-            }
-        }
-        "mission_kb_import" => {
-            let KBImportArgs { format, path } = serde_json::from_value(args)?;
-            match format.as_str() {
-                "servers_yaml" => {
-                    let yaml_path = path
-                        .map(std::path::PathBuf::from)
-                        .unwrap_or_else(|| default_mission_home().join("servers.yaml"));
-                    let infra = missiond_core::InfraConfig::load(&yaml_path);
-                    let mut imported = 0;
-                    for server in &infra.servers {
-                        let detail = serde_json::to_value(server).ok();
-                        let summary = format!(
-                            "{} ({}) — {}",
-                            server.name,
-                            server.provider,
-                            server.roles.join(", ")
-                        );
-                        let input = missiond_core::types::KBRememberInput {
-                            category: "infra".to_string(),
-                            key: server.id.clone(),
-                            summary,
-                            detail,
-                            source: Some("import".to_string()),
-                            confidence: Some(1.0),
-                            project_id: None,
-                        };
-                        state
-                            .store
-                            .kb_remember(&input)
-                            .await
-                            .map_err(|e| anyhow!("DB error: {}", e))?;
-                        imported += 1;
-                    }
-                    Ok(ToolResult::json(&serde_json::json!({
-                        "imported": imported,
-                        "source": yaml_path.display().to_string(),
-                    })))
-                }
-                _ => Ok(ToolResult::error(format!(
-                    "Unsupported import format: {}",
-                    format
-                ))),
-            }
-        }
+        "mission_kb_get" => handle_kb_get(state, args).await,
+        "mission_kb_list" => handle_kb_list(state, args).await,
+        "mission_kb_import" => handle_kb_import(state, args).await,
 
         "mission_kb_discover" => {
             let KBDiscoverArgs {

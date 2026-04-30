@@ -1556,6 +1556,9 @@
              "crates/missiond-daemon/src/handlers/knowledge/kb/quality.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/compact.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/conflicts.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/query.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/import.rs"
              "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
              "crates/missiond-daemon/src/handlers/knowledge/insight.rs"
              "crates/missiond-daemon/src/handlers/knowledge/intent.rs"
@@ -1564,7 +1567,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "Designed V3 destination for the legacy memory/KB public tools. First physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection. The surface intentionally remains designed rather than code-aligned until query/mutate/ops action handlers are split and runtime projection is Lisp-owned.")
+      :note "Designed V3 destination for the legacy memory/KB public tools. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns get/list JSON egress; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection. The surface intentionally remains designed rather than code-aligned until search/analyze/discovery/ops action handlers are split and runtime projection is Lisp-owned.")
 
     (surface project-registry
       :status "designed"
