@@ -35,6 +35,7 @@ const DEFAULT_FILES = {
   reviewGateResolution: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   reviewGateAutoAnswer: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   reviewGateLlmApproval: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
+  reviewGateTests: 'crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs',
   directive: 'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   plan: 'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   planCompileAuthoring: 'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -101,6 +102,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs',
   'crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs',
   'crates/missiond-daemon/src/handlers/knowledge/directive.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan.rs',
   'crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs',
@@ -141,6 +143,7 @@ const REVIEW_GATE_RS_NEEDLES = [
   'pub(crate) async fn maybe_emit_review_question_created',
   'pub(crate) async fn maybe_emit_review_question_resolved',
   'pub(crate) async fn auto_emit_review_question_after_artifact_write',
+  'mod tests;',
   'pub(crate) const PLAN_NODE_REVIEW_DEFAULT_ACTION',
   'review_question_warning',
   'BUS_PUBLISH_FAILED',
@@ -301,6 +304,12 @@ function checkFiles(root, files) {
     'pub(crate) fn stamp_llm_approve_apply_gate_payload',
     'never auto-approve',
   ]);
+  requireAll(diagnostics, files.reviewGateTests, sources.reviewGateTests, [
+    'use super::*;',
+    'smoke_wave22_07_review_apply_gate_rejects_missing_hash_accepts_fixture_hash',
+    'smoke_wave22_07_review_apply_gate_pins_wave21_06_five_invariants',
+    'proposal_invariants_round_trip_never_surface_rejected',
+  ]);
   requireAll(diagnostics, files.directive, sources.directive, DIRECTIVE_RS_NEEDLES);
   requireAll(diagnostics, files.plan, sources.plan, PLAN_RS_NEEDLES);
   requireAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, PLAN_COMPILE_AUTHORING_RS_NEEDLES);
@@ -378,6 +387,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.reviewGateResolution]: buildGoodReviewGateResolution(),
     [DEFAULT_FILES.reviewGateAutoAnswer]: buildGoodReviewGateAutoAnswer(),
     [DEFAULT_FILES.reviewGateLlmApproval]: buildGoodReviewGateLlmApproval(),
+    [DEFAULT_FILES.reviewGateTests]: buildGoodReviewGateTests(),
     [DEFAULT_FILES.directive]: buildGoodCallerRs(),
     [DEFAULT_FILES.plan]: buildGoodPlanFacadeRs(),
     [DEFAULT_FILES.planCompileAuthoring]: buildGoodCallerRs(),
@@ -524,6 +534,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/resolution.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/auto_answer.rs"
              "crates/missiond-daemon/src/handlers/knowledge/review_gate/llm_approval.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/review_gate/tests.rs"
              "crates/missiond-daemon/src/handlers/knowledge/directive.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/compile_authoring.rs"
@@ -544,6 +555,8 @@ mod created;
 mod resolution;
 mod auto_answer;
 mod llm_approval;
+#[cfg(test)]
+mod tests;
 pub(crate) use created::{ReviewGatePolicy, apply_compile_review_gates};
 pub(crate) use resolution::{ReviewDecision, maybe_emit_review_question_resolved};
 pub(crate) use auto_answer::{AutoAnswerPolicy, evaluate_auto_answer_policy};
@@ -613,6 +626,15 @@ pub(crate) fn evaluate_llm_approve_apply_gate() {}
 pub(crate) fn enforce_apply_gate_preflight() {}
 pub(crate) fn stamp_llm_approve_apply_gate_payload() {}
 // never auto-approve
+`;
+}
+
+function buildGoodReviewGateTests() {
+  return `// fixture
+use super::*;
+fn smoke_wave22_07_review_apply_gate_rejects_missing_hash_accepts_fixture_hash() {}
+fn smoke_wave22_07_review_apply_gate_pins_wave21_06_five_invariants() {}
+fn proposal_invariants_round_trip_never_surface_rejected() {}
 `;
 }
 
