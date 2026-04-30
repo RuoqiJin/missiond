@@ -664,12 +664,12 @@
       :surface memory-kb
       :note "KB, beacon, memory, insight, and intent snapshot tools are physically split under the V3 memory-kb surface; runtime projection remains a separate future graduation step.")
     (v2-item project-registry
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: project-root-spawn-cwd / ProjectRegistry"
       :v3-pillar memory
       :v3-function project-registry
       :surface project-registry
-      :note "Project root resolution and registry behavior are mapped for later runtime projection.")
+      :note "Project root resolution and registry behavior are physically split and pinned under the V3 project-registry surface; runtime projection remains a separate future graduation step.")
     (v2-item conversation-ingestion
       :status designed
       :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest / session organizer"
@@ -801,7 +801,7 @@
         :tools [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon
                 mission_code_search mission_memory mission_insight mission_intent])
       (tool-group project-registry-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: project registry"
         :v3-pillar memory
         :v3-function project-registry
@@ -1577,11 +1577,18 @@
       :note "Code-aligned V3 destination for the legacy memory/KB public tools. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress. Runtime projection remains a later runtime-projected graduation.")
 
     (surface project-registry
-      :status "designed"
+      :status "code-aligned"
       :implements [project-registry project-root-resolution]
       :code ["crates/missiond-daemon/src/handlers/knowledge/project.rs"
-             "crates/missiond-mcp/src/tools/knowledge/project.rs"]
-      :note "Designed V3 destination for project registry and root-resolution behavior inherited from V2. Later runtime projection should make project-root policy read the V3 contract instead of ad hoc handler defaults.")
+             "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/vault.rs"
+             "crates/missiond-core/src/types/project.rs"
+             "crates/missiond-daemon/src/slot_orchestrator/project_root.rs"
+             "crates/missiond-mcp/src/tools/knowledge/project.rs"
+             "scripts/check-v3-project-registry-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for project registry and root-resolution behavior inherited from V2. project.rs is the thin mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe, lisp file scan enrichment, git remote discovery, project upsert, conversation backfill, registry reload, and universe manifest import; project/context.rs owns context and memories egress including intent metadata, github normalization, conversation stats, KB stats, memory index, and configured slot status; project/survey.rs owns forge survey invocation, dry/check flags, output truncation, and intent-path refresh; project/vault.rs owns vault_sync copy and reference metadata; missiond-core ProjectRegistry::resolve owns longest-prefix project lookup and exclusive slot projection; resolve_target_project_root owns project-root spawn cwd policy in slot_orchestrator/project_root.rs with explicit project id, cwd longest-prefix, fallback project id, requested_cwd metadata, and no-signal errors. Runtime projection remains a later runtime-projected graduation so V3 can own project-root policy defaults directly.")
 
     (surface conversation-ingestion
       :status "designed"
@@ -1674,6 +1681,7 @@
              "node scripts/check-v3-review-gate-isomorphism.mjs"
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-memory-kb-isomorphism.mjs"
+             "node scripts/check-v3-project-registry-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
