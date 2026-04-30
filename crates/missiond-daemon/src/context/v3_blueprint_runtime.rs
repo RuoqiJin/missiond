@@ -12,6 +12,11 @@ pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
 pub(crate) const MIN_SLOT_TTL_SECS: i64 = 300;
 pub(crate) const MAX_SLOT_TTL_SECS: i64 = 28800;
+pub(crate) const DEFAULT_FLOW_LLM_MAX_TOKENS: u32 = 65536;
+pub(crate) const DEFAULT_FLOW_SLOT_MODEL: &str = "opus";
+pub(crate) const DEFAULT_FLOW_SLOT_TIMEOUT_SECS: u64 = 3600;
+pub(crate) const DEFAULT_FLOW_PARALLELISM: usize = 3;
+pub(crate) const DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS: u64 = 1800;
 pub(crate) const DEFAULT_CASCADE_MANIFEST_PATH: &str =
     "/Users/jinchen/Projects/universe.intent.lisp";
 pub(crate) const DEFAULT_CASCADE_ALLOWED_ROOT: &str = "/Users/jinchen/Projects";
@@ -67,6 +72,15 @@ pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
     pub timeout_policy: TimeoutPolicy,
     pub slot_ttl_policy: SlotTtlPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FlowRuntimeConfig {
+    pub llm_call_default_max_tokens: u32,
+    pub slot_task_default_model: String,
+    pub slot_task_default_timeout_secs: u64,
+    pub parallel_slot_default_parallelism: usize,
+    pub parallel_slot_default_timeout_secs: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -195,6 +209,18 @@ impl Default for WorkstationRuntimeConfig {
     }
 }
 
+impl Default for FlowRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            llm_call_default_max_tokens: DEFAULT_FLOW_LLM_MAX_TOKENS,
+            slot_task_default_model: DEFAULT_FLOW_SLOT_MODEL.to_string(),
+            slot_task_default_timeout_secs: DEFAULT_FLOW_SLOT_TIMEOUT_SECS,
+            parallel_slot_default_parallelism: DEFAULT_FLOW_PARALLELISM,
+            parallel_slot_default_timeout_secs: DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS,
+        }
+    }
+}
+
 impl Default for CascadeRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -305,6 +331,31 @@ impl WorkstationRuntimeConfig {
             _ => self.slot_ttl_policy.default_secs,
         };
         raw.clamp(self.slot_ttl_policy.min_secs, self.slot_ttl_policy.max_secs)
+    }
+}
+
+impl FlowRuntimeConfig {
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_flow_runtime_policy(&source)
     }
 }
 
@@ -586,6 +637,40 @@ pub(crate) fn parse_workstation_config(
     Ok(config)
 }
 
+pub(crate) fn parse_flow_runtime_policy(
+    source: &str,
+) -> Result<FlowRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "flow-runtime-policy")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing (flow-runtime-policy ...)".into()))?;
+    let tokens = tokenize_lisp(&block);
+    let slot_task_default_model = keyword_value(&tokens, ":slot-task-default-model")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing :slot-task-default-model".into()))?;
+    let cfg = FlowRuntimeConfig {
+        llm_call_default_max_tokens: u32_keyword(&tokens, ":llm-call-default-max-tokens")?,
+        slot_task_default_model,
+        slot_task_default_timeout_secs: u64_keyword(&tokens, ":slot-task-default-timeout-secs")?,
+        parallel_slot_default_parallelism: usize_keyword(
+            &tokens,
+            ":parallel-slot-default-parallelism",
+        )?,
+        parallel_slot_default_timeout_secs: u64_keyword(
+            &tokens,
+            ":parallel-slot-default-timeout-secs",
+        )?,
+    };
+    if cfg.slot_task_default_model.trim().is_empty() {
+        return Err(BlueprintConfigError::Parse(
+            ":slot-task-default-model must not be empty".into(),
+        ));
+    }
+    if cfg.parallel_slot_default_parallelism == 0 {
+        return Err(BlueprintConfigError::Parse(
+            ":parallel-slot-default-parallelism must be positive".into(),
+        ));
+    }
+    Ok(cfg)
+}
+
 pub(crate) fn parse_project_registry_policy(
     source: &str,
 ) -> Result<ProjectRegistryRuntimeConfig, BlueprintConfigError> {
@@ -790,6 +875,28 @@ fn int_keyword(tokens: &[String], key: &str) -> Result<i64, BlueprintConfigError
         .map_err(|_| BlueprintConfigError::Parse(format!("{} must be an integer", key)))
 }
 
+fn u32_keyword(tokens: &[String], key: &str) -> Result<u32, BlueprintConfigError> {
+    let value = int_keyword(tokens, key)?;
+    if value <= 0 || value > u32::MAX as i64 {
+        return Err(BlueprintConfigError::Parse(format!(
+            "{} must be a positive u32",
+            key
+        )));
+    }
+    Ok(value as u32)
+}
+
+fn u64_keyword(tokens: &[String], key: &str) -> Result<u64, BlueprintConfigError> {
+    let value = int_keyword(tokens, key)?;
+    if value <= 0 {
+        return Err(BlueprintConfigError::Parse(format!(
+            "{} must be a positive u64",
+            key
+        )));
+    }
+    Ok(value as u64)
+}
+
 fn usize_keyword(tokens: &[String], key: &str) -> Result<usize, BlueprintConfigError> {
     let value = keyword_value(tokens, key)
         .ok_or_else(|| BlueprintConfigError::Parse(format!("missing {}", key)))?;
@@ -978,6 +1085,12 @@ mod tests {
       :default_secs 14400
       :min_secs 300
       :max_secs 28800))
+  (flow-runtime-policy
+    :llm-call-default-max-tokens 65536
+    :slot-task-default-model "opus"
+    :slot-task-default-timeout-secs 3600
+    :parallel-slot-default-parallelism 3
+    :parallel-slot-default-timeout-secs 1800)
   (cascade-policy
     :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
     :allowed-root "/Users/jinchen/Projects"
@@ -1044,6 +1157,23 @@ mod tests {
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(5)), 300);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(99_999)), 28800);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(3600)), 3600);
+    }
+
+    #[test]
+    fn parses_flow_runtime_policy() {
+        let cfg = parse_flow_runtime_policy(BLUEPRINT).expect("parse");
+        assert_eq!(cfg.llm_call_default_max_tokens, 65536);
+        assert_eq!(cfg.slot_task_default_model, "opus");
+        assert_eq!(cfg.slot_task_default_timeout_secs, 3600);
+        assert_eq!(cfg.parallel_slot_default_parallelism, 3);
+        assert_eq!(cfg.parallel_slot_default_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn missing_flow_runtime_policy_is_rejected() {
+        let source = BLUEPRINT.replace("(flow-runtime-policy", "(flow-runtime-policy-disabled");
+        let err = parse_flow_runtime_policy(&source).expect_err("missing flow policy");
+        assert!(err.to_string().contains("flow-runtime-policy"));
     }
 
     #[test]

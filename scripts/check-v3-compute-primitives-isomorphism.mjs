@@ -20,6 +20,8 @@ const DEFAULT_FILES = {
   task: 'crates/missiond-daemon/src/handlers/compute/task.rs',
   job: 'crates/missiond-daemon/src/handlers/compute/job.rs',
   flowRun: 'crates/missiond-daemon/src/handlers/compute/flow_run.rs',
+  flowMod: 'crates/missiond-daemon/src/engine/flow/mod.rs',
+  flowLoader: 'crates/missiond-daemon/src/engine/flow/loader.rs',
   pty: 'crates/missiond-daemon/src/handlers/compute/pty.rs',
   process: 'crates/missiond-daemon/src/handlers/compute/process.rs',
   slot: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
@@ -27,6 +29,7 @@ const DEFAULT_FILES = {
   ccTasks: 'crates/missiond-daemon/src/handlers/compute/cc_tasks.rs',
   worker: 'crates/missiond-daemon/src/handlers/compute/worker.rs',
   forge: 'crates/missiond-daemon/src/handlers/compute/forge.rs',
+  v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   mcpTask: 'crates/missiond-mcp/src/tools/compute/task.rs',
   mcpJob: 'crates/missiond-mcp/src/tools/compute/job.rs',
   mcpFlowRun: 'crates/missiond-mcp/src/tools/compute/flow_run.rs',
@@ -105,6 +108,8 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/compute/task.rs',
     'crates/missiond-daemon/src/handlers/compute/job.rs',
     'crates/missiond-daemon/src/handlers/compute/flow_run.rs',
+    'crates/missiond-daemon/src/engine/flow/mod.rs',
+    'crates/missiond-daemon/src/engine/flow/loader.rs',
     'crates/missiond-daemon/src/handlers/compute/pty.rs',
     'crates/missiond-daemon/src/handlers/compute/process.rs',
     'crates/missiond-daemon/src/handlers/compute/slot.rs',
@@ -112,6 +117,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/compute/cc_tasks.rs',
     'crates/missiond-daemon/src/handlers/compute/worker.rs',
     'crates/missiond-daemon/src/handlers/compute/forge.rs',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-mcp/src/tools/compute/task.rs',
     'crates/missiond-mcp/src/tools/compute/job.rs',
     'crates/missiond-mcp/src/tools/compute/flow_run.rs',
@@ -124,6 +130,9 @@ function checkFiles(root, files) {
     'crates/missiond-mcp/src/tools/compute/forge.rs',
     'scripts/check-v3-compute-primitives-isomorphism.mjs',
     'task.rs owns mission_task_submit/query/cancel',
+    'flow-runtime-policy',
+    'mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy',
+    'Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults',
     'slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history',
     'compute_slot and task_delegate remain owned by workstation-config',
     'node scripts/check-v3-compute-primitives-isomorphism.mjs',
@@ -184,6 +193,40 @@ function checkFiles(root, files) {
     'status: Some("done".to_string())',
     'status: Some("failed".to_string())',
     'resolve_project_root',
+    'load_flow_from_path_with_project',
+  ]);
+
+  requireAll(diagnostics, files.flowMod, sources.flowMod, [
+    'DEFAULT_FLOW_LLM_MAX_TOKENS',
+    'DEFAULT_FLOW_SLOT_MODEL',
+    'DEFAULT_FLOW_SLOT_TIMEOUT_SECS',
+    'DEFAULT_FLOW_PARALLELISM',
+    'DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS',
+  ]);
+
+  requireAll(diagnostics, files.flowLoader, sources.flowLoader, [
+    'FlowRuntimeConfig::load_for_project_root',
+    'apply_flow_runtime_defaults',
+    'yaml_key_missing',
+    'load_flow_from_path_with_project',
+    'config.slot_task_default_model.clone()',
+    'config.slot_task_default_timeout_secs',
+    'config.parallel_slot_default_parallelism',
+    'config.parallel_slot_default_timeout_secs',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+  ]);
+
+  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'pub(crate) struct FlowRuntimeConfig',
+    'DEFAULT_FLOW_LLM_MAX_TOKENS',
+    'DEFAULT_FLOW_SLOT_MODEL',
+    'DEFAULT_FLOW_SLOT_TIMEOUT_SECS',
+    'DEFAULT_FLOW_PARALLELISM',
+    'DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS',
+    'pub(crate) fn parse_flow_runtime_policy',
+    'flow-runtime-policy',
+    ':slot-task-default-model',
+    ':parallel-slot-default-timeout-secs',
   ]);
 
   requireAll(diagnostics, files.pty, sources.pty, [
@@ -319,12 +362,22 @@ function buildFixture() {
     (v2-item compute-primitives :status code-aligned))
   (public-surface-map
     (tool-group compute-runtime-tools :status code-aligned))
+  (flow-runtime-policy
+    :llm-call-default-max-tokens 65536
+    :slot-task-default-model "opus"
+    :slot-task-default-timeout-secs 3600
+    :parallel-slot-default-parallelism 3
+    :parallel-slot-default-timeout-secs 1800
+    :invariants ["mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy"
+                 "Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults"])
   (implementation-map
     (surface compute-primitives
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/compute/task.rs"
              "crates/missiond-daemon/src/handlers/compute/job.rs"
              "crates/missiond-daemon/src/handlers/compute/flow_run.rs"
+             "crates/missiond-daemon/src/engine/flow/mod.rs"
+             "crates/missiond-daemon/src/engine/flow/loader.rs"
              "crates/missiond-daemon/src/handlers/compute/pty.rs"
              "crates/missiond-daemon/src/handlers/compute/process.rs"
              "crates/missiond-daemon/src/handlers/compute/slot.rs"
@@ -332,6 +385,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/compute/cc_tasks.rs"
              "crates/missiond-daemon/src/handlers/compute/worker.rs"
              "crates/missiond-daemon/src/handlers/compute/forge.rs"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-mcp/src/tools/compute/task.rs"
              "crates/missiond-mcp/src/tools/compute/job.rs"
              "crates/missiond-mcp/src/tools/compute/flow_run.rs"
@@ -343,7 +397,7 @@ function buildFixture() {
              "crates/missiond-mcp/src/tools/compute/worker.rs"
              "crates/missiond-mcp/src/tools/compute/forge.rs"
              "scripts/check-v3-compute-primitives-isomorphism.mjs"]
-      :note "task.rs owns mission_task_submit/query/cancel; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history; compute_slot and task_delegate remain owned by workstation-config."))
+      :note "task.rs owns mission_task_submit/query/cancel; flow-runtime-policy projects mission_flow_run defaults; engine/flow/loader.rs loads flow-runtime-policy and preserves explicit fields; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history; compute_slot and task_delegate remain owned by workstation-config."))
   (compression-contract
     :checks ["node scripts/check-v3-compute-primitives-isomorphism.mjs"]))`,
   );
@@ -367,7 +421,19 @@ function buildFixture() {
   fs.appendFileSync(path.join(root, DEFAULT_FILES.job), ' "poll" "list" "cancel" AsyncJobStatus::Running');
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.flowRun),
-    ' create_board_task status: Some("running".to_string()) status: Some("done".to_string()) status: Some("failed".to_string()) resolve_project_root',
+    ' create_board_task status: Some("running".to_string()) status: Some("done".to_string()) status: Some("failed".to_string()) resolve_project_root load_flow_from_path_with_project',
+  );
+  fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.flowMod),
+    ' DEFAULT_FLOW_LLM_MAX_TOKENS DEFAULT_FLOW_SLOT_MODEL DEFAULT_FLOW_SLOT_TIMEOUT_SECS DEFAULT_FLOW_PARALLELISM DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS',
+  );
+  fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.flowLoader),
+    ' FlowRuntimeConfig::load_for_project_root apply_flow_runtime_defaults yaml_key_missing load_flow_from_path_with_project config.slot_task_default_model.clone() config.slot_task_default_timeout_secs config.parallel_slot_default_parallelism config.parallel_slot_default_timeout_secs V3_BLUEPRINT_CONFIG_ERROR',
+  );
+  fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.v3Runtime),
+    ' pub(crate) struct FlowRuntimeConfig DEFAULT_FLOW_LLM_MAX_TOKENS DEFAULT_FLOW_SLOT_MODEL DEFAULT_FLOW_SLOT_TIMEOUT_SECS DEFAULT_FLOW_PARALLELISM DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS pub(crate) fn parse_flow_runtime_policy flow-runtime-policy :slot-task-default-model :parallel-slot-default-timeout-secs',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.pty),

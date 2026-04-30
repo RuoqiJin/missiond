@@ -10,11 +10,16 @@
 //! - FlowContext: runtime variable store (persisted to BoardTask.flow_context)
 //! - NodeType handlers: delegate to existing infrastructure (Gemini, SlotManager, MCP)
 
-pub mod runner;
 pub mod handlers;
 pub mod loader;
+pub mod runner;
 
 use std::collections::HashMap;
+
+use crate::context::v3_blueprint_runtime::{
+    DEFAULT_FLOW_LLM_MAX_TOKENS, DEFAULT_FLOW_PARALLELISM, DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS,
+    DEFAULT_FLOW_SLOT_MODEL, DEFAULT_FLOW_SLOT_TIMEOUT_SECS,
+};
 use serde::{Deserialize, Serialize};
 
 /// Error handling policy for a node.
@@ -98,11 +103,25 @@ pub enum NodeType {
     },
 }
 
-fn default_max_tokens() -> u32 { 65536 }
-fn default_model() -> String { "opus".to_string() }
-fn default_timeout() -> u64 { 3600 }
-fn default_parallelism() -> usize { 3 }
-fn default_parallel_timeout() -> u64 { 1800 }
+fn default_max_tokens() -> u32 {
+    DEFAULT_FLOW_LLM_MAX_TOKENS
+}
+
+fn default_model() -> String {
+    DEFAULT_FLOW_SLOT_MODEL.to_string()
+}
+
+fn default_timeout() -> u64 {
+    DEFAULT_FLOW_SLOT_TIMEOUT_SECS
+}
+
+fn default_parallelism() -> usize {
+    DEFAULT_FLOW_PARALLELISM
+}
+
+fn default_parallel_timeout() -> u64 {
+    DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS
+}
 
 /// A single node in a flow definition.
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -17,7 +17,9 @@ use anyhow::{anyhow, Result};
 use serde::Serialize;
 use tracing::info;
 
-use super::FlowDefinition;
+use crate::context::v3_blueprint_runtime::FlowRuntimeConfig;
+
+use super::{FlowDefinition, NodeType};
 
 /// Project-local generated flows dir, relative to `project_root`. Mirrors
 /// `GENERATED_FLOWS_DIR` in `handlers::knowledge::workflow` so the writer
@@ -74,23 +76,20 @@ pub struct FlowList {
 /// Search a flow yaml by id across (project-generated → core), returning the
 /// first hit. Errors include every path searched so the MCP response can be
 /// honest about what was looked at.
-pub fn load_flow_with_project(
-    flow_id: &str,
-    project_root: Option<&Path>,
-) -> Result<LoadedFlow> {
+pub fn load_flow_with_project(flow_id: &str, project_root: Option<&Path>) -> Result<LoadedFlow> {
     let mut searched: Vec<PathBuf> = Vec::new();
 
     if let Some(root) = project_root {
         let p = generated_flow_path(root, flow_id);
         if p.exists() {
-            return read_flow(&p, FlowSource::ProjectGenerated);
+            return read_flow(&p, FlowSource::ProjectGenerated, Some(root));
         }
         searched.push(p);
     }
 
     let core = core_flow_path(flow_id);
     if core.exists() {
-        return read_flow(&core, FlowSource::MissionHomeCore);
+        return read_flow(&core, FlowSource::MissionHomeCore, project_root);
     }
     searched.push(core);
 
@@ -106,10 +105,19 @@ pub fn load_flow_with_project(
 /// order. The returned `definition.id` is what was inside the YAML, not the
 /// caller-supplied path stem.
 pub fn load_flow_from_path(path: &Path) -> Result<LoadedFlow> {
+    load_flow_from_path_with_project(path, None)
+}
+
+/// Load a flow YAML directly from an explicit path while projecting
+/// project-local V3 flow-runtime defaults into any omitted node fields.
+pub fn load_flow_from_path_with_project(
+    path: &Path,
+    project_root: Option<&Path>,
+) -> Result<LoadedFlow> {
     if !path.exists() {
         return Err(anyhow!("Flow YAML not found at {}", path.display()));
     }
-    read_flow(path, FlowSource::ExplicitPath)
+    read_flow(path, FlowSource::ExplicitPath, project_root)
 }
 
 /// List all available flow definitions across (project-generated, core).
@@ -183,11 +191,17 @@ fn core_flow_path(flow_id: &str) -> PathBuf {
         .join(format!("{}.yaml", flow_id))
 }
 
-fn read_flow(path: &Path, source: FlowSource) -> Result<LoadedFlow> {
-    let content = std::fs::read_to_string(path)
-        .map_err(|e| anyhow!("read {}: {}", path.display(), e))?;
-    let definition: FlowDefinition = serde_yaml::from_str(&content)
-        .map_err(|e| anyhow!("parse {}: {}", path.display(), e))?;
+fn read_flow(path: &Path, source: FlowSource, project_root: Option<&Path>) -> Result<LoadedFlow> {
+    let content =
+        std::fs::read_to_string(path).map_err(|e| anyhow!("read {}: {}", path.display(), e))?;
+    let raw: serde_yaml::Value =
+        serde_yaml::from_str(&content).map_err(|e| anyhow!("parse {}: {}", path.display(), e))?;
+    let mut definition: FlowDefinition =
+        serde_yaml::from_str(&content).map_err(|e| anyhow!("parse {}: {}", path.display(), e))?;
+    let project_root_string = project_root.map(|p| p.to_string_lossy().to_string());
+    let runtime_config = FlowRuntimeConfig::load_for_project_root(project_root_string.as_deref())
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+    apply_flow_runtime_defaults(&mut definition, &raw, &runtime_config);
     info!(
         flow_id = definition.id,
         nodes = definition.nodes.len(),
@@ -200,6 +214,56 @@ fn read_flow(path: &Path, source: FlowSource) -> Result<LoadedFlow> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+fn apply_flow_runtime_defaults(
+    definition: &mut FlowDefinition,
+    raw: &serde_yaml::Value,
+    config: &FlowRuntimeConfig,
+) {
+    let raw_nodes = raw.get("nodes").and_then(serde_yaml::Value::as_sequence);
+    for (idx, node) in definition.nodes.iter_mut().enumerate() {
+        let raw_node = raw_nodes.and_then(|nodes| nodes.get(idx));
+        match &mut node.node_type {
+            NodeType::LlmCall { max_tokens, .. } => {
+                if yaml_key_missing(raw_node, "max_tokens") {
+                    *max_tokens = config.llm_call_default_max_tokens;
+                }
+            }
+            NodeType::SlotTask {
+                model,
+                timeout_secs,
+                ..
+            } => {
+                if yaml_key_missing(raw_node, "model") {
+                    *model = config.slot_task_default_model.clone();
+                }
+                if yaml_key_missing(raw_node, "timeout_secs") {
+                    *timeout_secs = config.slot_task_default_timeout_secs;
+                }
+            }
+            NodeType::ParallelSlotTasks {
+                parallelism,
+                timeout_secs,
+                ..
+            } => {
+                if yaml_key_missing(raw_node, "parallelism") {
+                    *parallelism = config.parallel_slot_default_parallelism;
+                }
+                if yaml_key_missing(raw_node, "timeout_secs") {
+                    *timeout_secs = config.parallel_slot_default_timeout_secs;
+                }
+            }
+            NodeType::McpTool { .. } | NodeType::DaemonAction { .. } => {}
+        }
+    }
+}
+
+fn yaml_key_missing(node: Option<&serde_yaml::Value>, key: &str) -> bool {
+    let Some(mapping) = node.and_then(serde_yaml::Value::as_mapping) else {
+        return true;
+    };
+    !mapping.contains_key(&serde_yaml::Value::String(key.to_string()))
 }
 
 fn read_dir_entries(dir: &Path, source: FlowSource) -> Result<Vec<FlowEntry>> {
@@ -215,11 +279,7 @@ fn read_dir_entries(dir: &Path, source: FlowSource) -> Result<Vec<FlowEntry>> {
         } else {
             continue;
         };
-        out.push(FlowEntry {
-            id,
-            path,
-            source,
-        });
+        out.push(FlowEntry { id, path, source });
     }
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
@@ -283,6 +343,24 @@ mod tests {
         path
     }
 
+    fn write_flow_runtime_blueprint(root: &Path) {
+        let dir = root.join(".missiond").join("v3");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("missiond-blueprint.lisp"),
+            r#"
+(missiond-blueprint
+  (flow-runtime-policy
+    :llm-call-default-max-tokens 42
+    :slot-task-default-model "project-opus"
+    :slot-task-default-timeout-secs 77
+    :parallel-slot-default-parallelism 5
+    :parallel-slot-default-timeout-secs 88))
+"#,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn load_flow_from_path_reads_explicit_yaml() {
         let tmp = tempfile::tempdir().unwrap();
@@ -291,6 +369,123 @@ mod tests {
         assert_eq!(lf.definition.id, "explicit-flow");
         assert_eq!(lf.path, path);
         assert_eq!(lf.source, FlowSource::ExplicitPath);
+    }
+
+    #[test]
+    fn load_flow_from_path_projects_v3_defaults_for_missing_node_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_flow_runtime_blueprint(tmp.path());
+        let path = tmp.path().join("flow.yaml");
+        std::fs::write(
+            &path,
+            r#"
+id: projected-flow
+name: "Projected"
+nodes:
+  - id: llm
+    type: llm_call
+    provider: gemini
+    prompt: "summarize"
+  - id: slot
+    type: slot_task
+    prompt: "ship"
+  - id: fanout
+    type: parallel_slot_tasks
+    tasks:
+      - id: a
+        prompt: "a"
+"#,
+        )
+        .unwrap();
+
+        let lf = load_flow_from_path_with_project(&path, Some(tmp.path())).unwrap();
+        match &lf.definition.nodes[0].node_type {
+            NodeType::LlmCall { max_tokens, .. } => assert_eq!(*max_tokens, 42),
+            other => panic!("expected llm_call, got {:?}", other),
+        }
+        match &lf.definition.nodes[1].node_type {
+            NodeType::SlotTask {
+                model,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(model, "project-opus");
+                assert_eq!(*timeout_secs, 77);
+            }
+            other => panic!("expected slot_task, got {:?}", other),
+        }
+        match &lf.definition.nodes[2].node_type {
+            NodeType::ParallelSlotTasks {
+                parallelism,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(*parallelism, 5);
+                assert_eq!(*timeout_secs, 88);
+            }
+            other => panic!("expected parallel_slot_tasks, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn load_flow_from_path_preserves_explicit_node_fields_over_v3_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        write_flow_runtime_blueprint(tmp.path());
+        let path = tmp.path().join("flow.yaml");
+        std::fs::write(
+            &path,
+            r#"
+id: explicit-flow
+name: "Explicit"
+nodes:
+  - id: llm
+    type: llm_call
+    provider: gemini
+    prompt: "summarize"
+    max_tokens: 123
+  - id: slot
+    type: slot_task
+    model: explicit-model
+    prompt: "ship"
+    timeout_secs: 456
+  - id: fanout
+    type: parallel_slot_tasks
+    parallelism: 2
+    timeout_secs: 789
+    tasks:
+      - id: a
+        prompt: "a"
+"#,
+        )
+        .unwrap();
+
+        let lf = load_flow_from_path_with_project(&path, Some(tmp.path())).unwrap();
+        match &lf.definition.nodes[0].node_type {
+            NodeType::LlmCall { max_tokens, .. } => assert_eq!(*max_tokens, 123),
+            other => panic!("expected llm_call, got {:?}", other),
+        }
+        match &lf.definition.nodes[1].node_type {
+            NodeType::SlotTask {
+                model,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(model, "explicit-model");
+                assert_eq!(*timeout_secs, 456);
+            }
+            other => panic!("expected slot_task, got {:?}", other),
+        }
+        match &lf.definition.nodes[2].node_type {
+            NodeType::ParallelSlotTasks {
+                parallelism,
+                timeout_secs,
+                ..
+            } => {
+                assert_eq!(*parallelism, 2);
+                assert_eq!(*timeout_secs, 789);
+            }
+            other => panic!("expected parallel_slot_tasks, got {:?}", other),
+        }
     }
 
     #[test]
@@ -304,6 +499,7 @@ mod tests {
     #[test]
     fn load_flow_with_project_finds_generated() {
         let tmp = tempfile::tempdir().unwrap();
+        write_flow_runtime_blueprint(tmp.path());
         let gen_dir = tmp.path().join(GENERATED_FLOWS_REL);
         let path = write_yaml(&gen_dir, "methodology-foo", "Foo");
 
@@ -321,10 +517,7 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(err.contains("ghost"), "err = {}", err);
-        let expected_gen = tmp
-            .path()
-            .join(GENERATED_FLOWS_REL)
-            .join("ghost.yaml");
+        let expected_gen = tmp.path().join(GENERATED_FLOWS_REL).join("ghost.yaml");
         assert!(
             err.contains(&expected_gen.display().to_string()),
             "missing generated path in err: {}",

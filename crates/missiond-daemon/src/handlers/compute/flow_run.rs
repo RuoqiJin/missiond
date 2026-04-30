@@ -73,22 +73,23 @@ async fn action_status(state: &AppState, args: &Value) -> Result<ToolResult> {
 
 async fn action_run(state: &AppState, args: &Value) -> Result<ToolResult> {
     let project = resolve_project_root_from_args(args, &state.project_registry).await;
-    let flow_id_arg = args.get("flow_id").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
+    let flow_id_arg = args
+        .get("flow_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
     let flow_path_arg = args
         .get("flow_path")
         .and_then(|v| v.as_str())
         .filter(|s| !s.is_empty());
 
     if flow_id_arg.is_none() && flow_path_arg.is_none() {
-        return Err(anyhow!(
-            "'flow_id' or 'flow_path' required for run"
-        ));
+        return Err(anyhow!("'flow_id' or 'flow_path' required for run"));
     }
 
     let loaded = match flow_path_arg {
         Some(raw) => {
             let resolved = resolve_flow_path_arg(raw, project.root.as_deref())?;
-            loader::load_flow_from_path(&resolved)?
+            loader::load_flow_from_path_with_project(&resolved, project.root.as_deref())?
         }
         None => {
             let id = flow_id_arg.expect("checked above");
@@ -494,11 +495,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let p = tmp.path().to_path_buf();
         let reg = registry_with(vec![project("missiond", "/totally/elsewhere")]);
-        let r = resolve_project_root_from_args(
-            &json!({ "cwd": p.display().to_string() }),
-            &reg,
-        )
-        .await;
+        let r =
+            resolve_project_root_from_args(&json!({ "cwd": p.display().to_string() }), &reg).await;
         assert_eq!(r.status, ProjectRootStatus::Resolved);
         assert_eq!(r.source, ProjectRootSource::ExplicitPath);
         assert_eq!(
@@ -562,11 +560,8 @@ mod tests {
     #[test]
     fn relative_flow_path_resolves_under_project_root() {
         let tmp = tempfile::tempdir().unwrap();
-        let resolved = resolve_flow_path_arg(
-            ".missiond/generated/flows/x.yaml",
-            Some(tmp.path()),
-        )
-        .unwrap();
+        let resolved =
+            resolve_flow_path_arg(".missiond/generated/flows/x.yaml", Some(tmp.path())).unwrap();
         assert_eq!(
             resolved,
             tmp.path().join(".missiond/generated/flows/x.yaml")
@@ -593,10 +588,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let project_root = tmp.path().to_path_buf();
         let canonical = project_root.canonicalize().unwrap();
-        let reg = registry_with(vec![project(
-            "alpha",
-            &canonical.display().to_string(),
-        )]);
+        let reg = registry_with(vec![project("alpha", &canonical.display().to_string())]);
         let r = resolve_project_root_from_args(
             &json!({ "cwd": canonical.display().to_string() }),
             &reg,
@@ -613,15 +605,10 @@ mod tests {
         let project_root = tmp.path().canonicalize().unwrap();
         let subdir = project_root.join("crates").join("inner");
         std::fs::create_dir_all(&subdir).unwrap();
-        let reg = registry_with(vec![project(
-            "alpha",
-            &project_root.display().to_string(),
-        )]);
-        let r = resolve_project_root_from_args(
-            &json!({ "cwd": subdir.display().to_string() }),
-            &reg,
-        )
-        .await;
+        let reg = registry_with(vec![project("alpha", &project_root.display().to_string())]);
+        let r =
+            resolve_project_root_from_args(&json!({ "cwd": subdir.display().to_string() }), &reg)
+                .await;
         assert_eq!(r.status, ProjectRootStatus::Resolved);
         assert_eq!(r.source, ProjectRootSource::RegistryLongestPrefix);
         assert_eq!(r.root.unwrap(), project_root);
@@ -659,7 +646,12 @@ mod tests {
         let canonical_cwd = tmp_cwd.path().canonicalize().unwrap();
         let reg = registry_with(vec![project(
             "alpha",
-            &tmp_proj.path().canonicalize().unwrap().display().to_string(),
+            &tmp_proj
+                .path()
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string(),
         )]);
         let r = resolve_project_root_from_args(
             &json!({ "cwd": canonical_cwd.display().to_string() }),
@@ -710,17 +702,13 @@ mod tests {
     async fn registry_id_via_project_arg_still_wins() {
         let tmp = tempfile::tempdir().unwrap();
         let canonical = tmp.path().canonicalize().unwrap();
-        let reg = registry_with(vec![project(
-            "alpha",
-            &canonical.display().to_string(),
-        )]);
-        let r = resolve_project_root_from_args(
-            &json!({ "project": "alpha" }),
-            &reg,
-        )
-        .await;
+        let reg = registry_with(vec![project("alpha", &canonical.display().to_string())]);
+        let r = resolve_project_root_from_args(&json!({ "project": "alpha" }), &reg).await;
         assert_eq!(r.status, ProjectRootStatus::Resolved);
         assert_eq!(r.source, ProjectRootSource::RegistryId);
-        assert_eq!(r.root.unwrap(), PathBuf::from(canonical.display().to_string()));
+        assert_eq!(
+            r.root.unwrap(),
+            PathBuf::from(canonical.display().to_string())
+        );
     }
 }
