@@ -671,12 +671,12 @@
       :surface project-registry
       :note "Project root resolution and registry behavior are physically split and pinned under the V3 project-registry surface; runtime projection remains a separate future graduation step.")
     (v2-item conversation-ingestion
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest / session organizer"
       :v3-pillar communication
       :v3-function conversation-ingestion
       :surface conversation-ingestion
-      :note "Conversation, timeline, retrospective, and embedding ingestion remain designed V3 surfaces.")
+      :note "Conversation query, analysis, timeline, retrospective, embedding, and reconcile tools are physically split and pinned under the V3 conversation-ingestion surface; runtime projection remains a separate future graduation step.")
     (v2-item router-policy-dry-run-chain
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: router-policy-v1 / router-backend-readiness-loop / router-dispatch-descriptor-loop"
@@ -822,7 +822,7 @@
         :surface cascade-governance
         :tools [mission_universe_graph mission_cascade_plan mission_cascade_trigger mission_cascade_lint])
       (tool-group conversation-ingestion-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest"
         :v3-pillar communication
         :v3-function conversation-ingestion
@@ -1591,11 +1591,20 @@
       :note "Code-aligned V3 destination for project registry and root-resolution behavior inherited from V2. project.rs is the thin mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe, lisp file scan enrichment, git remote discovery, project upsert, conversation backfill, registry reload, and universe manifest import; project/context.rs owns context and memories egress including intent metadata, github normalization, conversation stats, KB stats, memory index, and configured slot status; project/survey.rs owns forge survey invocation, dry/check flags, output truncation, and intent-path refresh; project/vault.rs owns vault_sync copy and reference metadata; missiond-core ProjectRegistry::resolve owns longest-prefix project lookup and exclusive slot projection; resolve_target_project_root owns project-root spawn cwd policy in slot_orchestrator/project_root.rs with explicit project id, cwd longest-prefix, fallback project id, requested_cwd metadata, and no-signal errors. Runtime projection remains a later runtime-projected graduation so V3 can own project-root policy defaults directly.")
 
     (surface conversation-ingestion
-      :status "designed"
+      :status "code-aligned"
       :implements [conversation-ingestion timeline retrospective embedding-ops]
       :code ["crates/missiond-mcp/src/tools/comm/conversation.rs"
-             "crates/missiond-mcp/src/tools/comm/timeline.rs"]
-      :note "Designed V3 destination for conversation/session/timeline/retrospective/embedding public tools. The current code remains legacy-shaped and must be brought under Lisp artifact/event projection before graduation.")
+             "crates/missiond-mcp/src/tools/comm/timeline.rs"
+             "crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/handlers/comm/conversation.rs"
+             "crates/missiond-daemon/src/handlers/comm/conversation/router.rs"
+             "crates/missiond-daemon/src/handlers/comm/conversation/query.rs"
+             "crates/missiond-daemon/src/handlers/comm/conversation/events.rs"
+             "crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"
+             "crates/missiond-daemon/src/handlers/comm/timeline.rs"
+             "crates/missiond-daemon/src/handlers/comm/retrospective.rs"
+             "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for conversation/session/timeline/retrospective/embedding public tools. conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conversation events, agent trajectory, message read, and activity report; conversation/maintenance.rs owns embedding/reconcile work items including backfill, habit scan, embedding stats/ops, and JSONL-to-DB reconcile; timeline.rs owns mission_timeline query/trace/stats/search; retrospective.rs owns retrospective analysis, list, and backfill.")
 
     (surface router-policy
       :status "code-aligned"
@@ -1695,6 +1704,7 @@
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-v2-coverage.mjs"
+             "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-router-policy-isomorphism.mjs"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"

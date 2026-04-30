@@ -18,8 +18,8 @@
 //   mission_execution-completion-audit, mission_workflow, review-gate,
 //   task-runner-cli, source-hygiene, context-pack, workstation-config,
 //   workstation-dispatch, mission_board, memory-kb, project-registry,
-//   skill-runtime, cascade-governance, router-policy, incident-governance,
-//   ops-infra.
+//   conversation-ingestion, skill-runtime, cascade-governance,
+//   router-policy, incident-governance, ops-infra.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -56,6 +56,7 @@ export const EXPECTED_SURFACES = [
   'mission_board',
   'memory-kb',
   'project-registry',
+  'conversation-ingestion',
   'skill-runtime',
   'cascade-governance',
   'router-policy',
@@ -82,6 +83,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
   'scripts/check-v3-memory-kb-isomorphism.mjs',
   'scripts/check-v3-project-registry-isomorphism.mjs',
+  'scripts/check-v3-conversation-ingestion-isomorphism.mjs',
   'scripts/check-v3-skill-runtime-isomorphism.mjs',
   'scripts/check-v3-cascade-governance-isomorphism.mjs',
   'scripts/check-v3-router-policy-isomorphism.mjs',
@@ -485,6 +487,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface conversation-ingestion
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface skill-runtime
       :status "code-aligned"
       :code ["a"]
@@ -508,7 +514,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all twenty-four surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all twenty-five surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -601,6 +607,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface project-registry
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface conversation-ingestion
       :status "code-aligned"
       :code ["a"]
       :note "n")
