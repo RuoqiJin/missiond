@@ -21,6 +21,7 @@ const DEFAULT_FILES = {
   workflowHandler: 'crates/missiond-daemon/src/handlers/knowledge/workflow.rs',
   workflowArtifacts: 'crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs',
   workflowMethodology: 'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
+  workflowReviewResolution: 'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
 };
 
@@ -99,11 +100,14 @@ function checkFiles(root, files) {
     'auto_sonnet_policy={off|safe_after_rules|dry_run}',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs',
     'crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs',
+    'workflow/review_resolution.rs owns resolve_review',
+    'WorkflowSubscriberOutcome',
     'node scripts/check-v3-workflow-isomorphism.mjs',
   ]);
 
-  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowMethodology}`;
-  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowMethodology}`;
+  const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowMethodology}\n${sources.workflowReviewResolution}`;
+  const workflowSurfaceLabel = `${files.workflowHandler} + ${files.workflowArtifacts} + ${files.workflowMethodology} + ${files.workflowReviewResolution}`;
   requireAll(diagnostics, workflowSurfaceLabel, workflowSurface, [
     'enum DistillMode',
     'fn parse_distill_mode',
@@ -164,6 +168,16 @@ function checkFiles(root, files) {
     'pub(super) struct GeneratedMeta',
   ]);
 
+  requireAll(diagnostics, files.workflowReviewResolution, sources.workflowReviewResolution, [
+    'pub(super) async fn action_resolve_review',
+    'pub(super) const WORKFLOW_REVIEW_ACTIONS',
+    'pub(super) const WORKFLOW_REVIEW_VERSION',
+    'pub(crate) enum WorkflowSubscriberOutcome',
+    'pub(crate) async fn handle_review_resolved_event',
+    'ResolutionOutcome::RequestChanges',
+    'WorkflowSubscriberOutcome::MethodologyReceipt',
+  ]);
+
   requireAll(diagnostics, files.workflowArtifacts, sources.workflowArtifacts, [
     'pub(super) fn extract_workflow_file_args',
     'pub(super) async fn maybe_write_workflow_artifact',
@@ -222,8 +236,9 @@ function buildFixture() {
     (surface mission_workflow
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/knowledge/workflow/artifacts.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs"]
-      :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}"))
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/methodology.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/workflow/review_resolution.rs"]
+      :note "distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.workflowHandler, `
@@ -293,6 +308,18 @@ pub(super) struct GeneratedMeta {}
 pub(super) fn extract_methodology_lifted() {}
 pub(super) fn build_generated_yaml() {}
 pub(super) fn resolve_compiled_flow() {}`);
+  writeFixture(root, DEFAULT_FILES.workflowReviewResolution, `
+pub(super) const WORKFLOW_REVIEW_ACTIONS: &[&str] = &["compile"];
+pub(super) const WORKFLOW_REVIEW_VERSION: i32 = 1;
+pub(super) async fn action_resolve_review() {
+  ResolutionOutcome::RequestChanges;
+}
+pub(crate) enum WorkflowSubscriberOutcome {
+  MethodologyReceipt,
+}
+pub(crate) async fn handle_review_resolved_event() {
+  WorkflowSubscriberOutcome::MethodologyReceipt;
+}`);
   writeFixture(root, DEFAULT_FILES.mcpWorkflow, `
 manager action — see Lisp implemented-surface mission_workflow
 "distill" "compile_methodology" "run_methodology" "resolve_review"
