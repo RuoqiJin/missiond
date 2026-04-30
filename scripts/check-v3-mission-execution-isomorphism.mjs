@@ -55,6 +55,8 @@ agent_execution.rs runtime is deliberately split into three V3 surfaces:
   - agent_execution/task_verifier_inputs.rs: report-contract, task-contract,
     and shared-memory Lisp input projectors for verifier gates
   - agent_execution/task_verifier_auto.rs: in-process task-run verifier
+  - agent_execution/task_verifier_auto_artifacts.rs: verifier artifact
+    path/read/schema-load error projection
     projection over task-contract/report/shared-memory artifacts
   - agent_execution/task_verifier.rs: read-only verifier gate orchestration
     used by the completion-audit surface
@@ -139,6 +141,8 @@ const DEFAULT_FILES = {
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
   taskVerifierAuto:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_auto.rs',
+  taskVerifierAutoArtifacts:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_auto_artifacts.rs',
   taskVerifierInputs:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_inputs.rs',
   mcp: 'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
@@ -157,7 +161,7 @@ const SURFACES = [
   },
   {
     name: 'mission_execution-completion-audit',
-    noteNeedles: ['agent_execution/completion_fields.rs', 'agent_execution/completion_inputs.rs', 'agent_execution/completion_records.rs', 'agent_execution/completion_durability.rs', 'agent_execution/completion_entry.rs', 'agent_execution/completion_id_audit.rs', 'agent_execution/completion_handoff_audit.rs', 'agent_execution/completion_contract_gate.rs', 'agent_execution/completion_indexes.rs', 'agent_execution/completion_response.rs', 'agent_execution/completion_maintenance.rs', 'agent_execution/completion_repair.rs', 'VALID_COMMIT_STATUSES', 'agent_execution/completion_gates.rs', 'agent_execution/completion_trace.rs', 'agent_execution/completion_verification.rs', 'agent_execution/task_verifier.rs', 'agent_execution/task_verifier_auto.rs', 'agent_execution/task_verifier_inputs.rs', 'agent_execution/preflight.rs', 'agent_execution/preflight_contract.rs', 'agent_execution/preflight_contract_scope.rs', 'agent_execution/preflight_trace.rs', 'agent_execution/preflight_patterns.rs', 'agent_execution/preflight_porcelain.rs'],
+    noteNeedles: ['agent_execution/completion_fields.rs', 'agent_execution/completion_inputs.rs', 'agent_execution/completion_records.rs', 'agent_execution/completion_durability.rs', 'agent_execution/completion_entry.rs', 'agent_execution/completion_id_audit.rs', 'agent_execution/completion_handoff_audit.rs', 'agent_execution/completion_contract_gate.rs', 'agent_execution/completion_indexes.rs', 'agent_execution/completion_response.rs', 'agent_execution/completion_maintenance.rs', 'agent_execution/completion_repair.rs', 'VALID_COMMIT_STATUSES', 'agent_execution/completion_gates.rs', 'agent_execution/completion_trace.rs', 'agent_execution/completion_verification.rs', 'agent_execution/task_verifier.rs', 'agent_execution/task_verifier_auto.rs', 'agent_execution/task_verifier_auto_artifacts.rs', 'agent_execution/task_verifier_inputs.rs', 'agent_execution/preflight.rs', 'agent_execution/preflight_contract.rs', 'agent_execution/preflight_contract_scope.rs', 'agent_execution/preflight_trace.rs', 'agent_execution/preflight_patterns.rs', 'agent_execution/preflight_porcelain.rs'],
   },
 ];
 
@@ -206,6 +210,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_trace.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_auto.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_auto_artifacts.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_inputs.rs',
   'crates/missiond-mcp/src/tools/knowledge/agent_execution.rs',
   AGGREGATE_COMMAND,
@@ -267,6 +272,7 @@ const DAEMON_NEEDLES = [
   'mod preflight_trace',
   'mod task_verifier',
   'mod task_verifier_auto',
+  'mod task_verifier_auto_artifacts',
   'mod task_verifier_inputs',
   '#[cfg(test)]',
   'mod tests;',
@@ -611,11 +617,26 @@ const TASK_VERIFIER_NEEDLES = [
 
 const TASK_VERIFIER_AUTO_NEEDLES = [
   'pub(super) fn auto_run_task_run_verifier',
+  'resolve_verifier_artifact_path',
+  'read_task_contract_artifact',
+  'read_report_artifact',
+  'read_shared_memory_artifact',
   'TASK_REPORT_COMMIT_HASH_MISMATCH',
   'SHARED_MEMORY_NO_COMPLETION_FOR_TASK',
   'read_report_summary',
   'read_shared_memory_ledger',
   'read_task_contract_id',
+];
+
+const TASK_VERIFIER_AUTO_ARTIFACTS_NEEDLES = [
+  'pub(super) fn resolve_verifier_artifact_path',
+  'pub(super) fn read_task_contract_artifact',
+  'pub(super) fn read_report_artifact',
+  'pub(super) fn read_shared_memory_artifact',
+  'load_task_contract',
+  'TASK_CONTRACT_MALFORMED',
+  'TASK_REPORT_REQUIRED',
+  'SHARED_MEMORY_REQUIRED',
 ];
 
 const TASK_VERIFIER_INPUTS_NEEDLES = [
@@ -907,6 +928,12 @@ function checkFiles(root, files) {
   );
   requireAll(
     diagnostics,
+    files.taskVerifierAutoArtifacts,
+    sources.taskVerifierAutoArtifacts,
+    TASK_VERIFIER_AUTO_ARTIFACTS_NEEDLES,
+  );
+  requireAll(
+    diagnostics,
     files.taskVerifierInputs,
     sources.taskVerifierInputs,
     TASK_VERIFIER_INPUTS_NEEDLES,
@@ -985,6 +1012,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.preflightTrace]: buildGoodPreflightTrace(),
     [DEFAULT_FILES.taskVerifier]: buildGoodTaskVerifier(),
     [DEFAULT_FILES.taskVerifierAuto]: buildGoodTaskVerifierAuto(),
+    [DEFAULT_FILES.taskVerifierAutoArtifacts]: buildGoodTaskVerifierAutoArtifacts(),
     [DEFAULT_FILES.taskVerifierInputs]: buildGoodTaskVerifierInputs(),
     [DEFAULT_FILES.mcp]: buildGoodMcp(),
   };
@@ -1145,13 +1173,14 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_scope.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_auto.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_auto_artifacts.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/task_verifier_inputs.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_patterns.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_contract.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_contract_scope.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/preflight_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-      :note "agent_execution/completion_fields.rs owns VALID_COMMIT_STATUSES, verifier status enums, normalize_commit_status, normalize_verifier_status, normalize_task_run_verifier_status, collect_string_list, render_string_list, parse_string_list, and scoped-commit finding constants; agent_execution/completion_inputs.rs owns CompletionRequest, parse_completion_request, parse_commit_status, parse_verifier_status, parse_task_run_verifier_status, and trimmed_string_arg for completion action ingress normalization; agent_execution/completion_records.rs owns CompletionRecord and parse_completions; agent_execution/completion_durability.rs owns summarize_durability and canonical_status_str for dashboard durability projection; agent_execution/completion_audit.rs owns action_complete; agent_execution/completion_entry.rs owns CompletionEntryFields and render_completion_entry for companion-log Lisp entry projection; agent_execution/completion_response.rs owns CompletionResponseFields and build_completion_response for JSON egress projection; agent_execution/completion_id_audit.rs owns check_id_monotonic duplicate-id audit; agent_execution/completion_handoff_audit.rs owns audit_scoped_commit_handoff; agent_execution/completion_contract_gate.rs owns enforce_task_contract_completion; agent_execution/completion_gates.rs owns enforce_scoped_commit_completion and compatibility re-exports for split gates; agent_execution/completion_indexes.rs owns rebuild_derived_indexes for durable-slot-derived cache reconstruction; agent_execution/completion_maintenance.rs owns action_audit, ExecutionEvent::Audited, and ExecutionEvent::StaleClaim; agent_execution/completion_repair.rs owns action_repair, ExecutionEvent::Repaired, id-counter synthesis, stale-claim marking, and derived-index rebuild apply/dry-run repair. agent_execution/completion_trace.rs owns append_completion_trace_if_requested and the complete/failure session-trace projection; agent_execution/completion_verification.rs owns CompletionVerificationOutcome and evaluate_completion_verification for daemon-auto-verifier versus legacy-caller-claim decisioning; agent_execution/task_verifier_inputs.rs owns ReportSummary, SharedMemorySummary, read_report_summary, read_task_contract_id, read_shared_memory_ledger, and read_completion_task_id; agent_execution/task_verifier_auto.rs owns auto_run_task_run_verifier for the in-process task-run verifier over task-contract/report/shared-memory artifacts; agent_execution/task_verifier.rs owns enforce_verified_completion for the legacy verified=true gate; agent_execution/preflight.rs owns preflight_commit action wiring before a writer commits; agent_execution/preflight_contract.rs owns apply_task_contract_projection, task_contract_status, staged_out_of_scope, staged_forbidden, unstaged_in_scope, and task_contract_scope promotion; agent_execution/preflight_contract_scope.rs owns build_contract_scope_summary, evaluate_task_contract_for_preflight, load_task_contract integration, and write-scope / must-not-touch projection; agent_execution/preflight_trace.rs owns append_preflight_trace_if_requested and the preflight observation session-trace projection; agent_execution/preflight_patterns.rs owns pattern_matches_path plus repo-relative glob normalization; agent_execution/preflight_porcelain.rs owns PorcelainEntry, parse_porcelain_status, and read-only git status; agent_execution/preflight_scope.rs owns build_preflight_summary and claim-scope projection."))
+      :note "agent_execution/completion_fields.rs owns VALID_COMMIT_STATUSES, verifier status enums, normalize_commit_status, normalize_verifier_status, normalize_task_run_verifier_status, collect_string_list, render_string_list, parse_string_list, and scoped-commit finding constants; agent_execution/completion_inputs.rs owns CompletionRequest, parse_completion_request, parse_commit_status, parse_verifier_status, parse_task_run_verifier_status, and trimmed_string_arg for completion action ingress normalization; agent_execution/completion_records.rs owns CompletionRecord and parse_completions; agent_execution/completion_durability.rs owns summarize_durability and canonical_status_str for dashboard durability projection; agent_execution/completion_audit.rs owns action_complete; agent_execution/completion_entry.rs owns CompletionEntryFields and render_completion_entry for companion-log Lisp entry projection; agent_execution/completion_response.rs owns CompletionResponseFields and build_completion_response for JSON egress projection; agent_execution/completion_id_audit.rs owns check_id_monotonic duplicate-id audit; agent_execution/completion_handoff_audit.rs owns audit_scoped_commit_handoff; agent_execution/completion_contract_gate.rs owns enforce_task_contract_completion; agent_execution/completion_gates.rs owns enforce_scoped_commit_completion and compatibility re-exports for split gates; agent_execution/completion_indexes.rs owns rebuild_derived_indexes for durable-slot-derived cache reconstruction; agent_execution/completion_maintenance.rs owns action_audit, ExecutionEvent::Audited, and ExecutionEvent::StaleClaim; agent_execution/completion_repair.rs owns action_repair, ExecutionEvent::Repaired, id-counter synthesis, stale-claim marking, and derived-index rebuild apply/dry-run repair. agent_execution/completion_trace.rs owns append_completion_trace_if_requested and the complete/failure session-trace projection; agent_execution/completion_verification.rs owns CompletionVerificationOutcome and evaluate_completion_verification for daemon-auto-verifier versus legacy-caller-claim decisioning; agent_execution/task_verifier_inputs.rs owns ReportSummary, SharedMemorySummary, read_report_summary, read_task_contract_id, read_shared_memory_ledger, and read_completion_task_id; agent_execution/task_verifier_auto_artifacts.rs owns resolve_verifier_artifact_path, read_task_contract_artifact, read_report_artifact, and read_shared_memory_artifact for verifier IO and error projection; agent_execution/task_verifier_auto.rs owns auto_run_task_run_verifier for the in-process task-run verifier over task-contract/report/shared-memory artifacts; agent_execution/task_verifier.rs owns enforce_verified_completion for the legacy verified=true gate; agent_execution/preflight.rs owns preflight_commit action wiring before a writer commits; agent_execution/preflight_contract.rs owns apply_task_contract_projection, task_contract_status, staged_out_of_scope, staged_forbidden, unstaged_in_scope, and task_contract_scope promotion; agent_execution/preflight_contract_scope.rs owns build_contract_scope_summary, evaluate_task_contract_for_preflight, load_task_contract integration, and write-scope / must-not-touch projection; agent_execution/preflight_trace.rs owns append_preflight_trace_if_requested and the preflight observation session-trace projection; agent_execution/preflight_patterns.rs owns pattern_matches_path plus repo-relative glob normalization; agent_execution/preflight_porcelain.rs owns PorcelainEntry, parse_porcelain_status, and read-only git status; agent_execution/preflight_scope.rs owns build_preflight_summary and claim-scope projection."))
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
 }
@@ -1215,6 +1244,7 @@ mod preflight_scope;
 mod preflight_trace;
 mod task_verifier;
 mod task_verifier_auto;
+mod task_verifier_auto_artifacts;
 mod task_verifier_inputs;
 #[cfg(test)]
 mod tests;
@@ -1705,11 +1735,30 @@ function buildGoodTaskVerifier() {
 
 function buildGoodTaskVerifierAuto() {
   return `pub(super) fn auto_run_task_run_verifier() {
+  resolve_verifier_artifact_path();
+  read_task_contract_artifact();
+  read_report_artifact();
+  read_shared_memory_artifact();
   "TASK_REPORT_COMMIT_HASH_MISMATCH";
   "SHARED_MEMORY_NO_COMPLETION_FOR_TASK";
   read_report_summary();
   read_shared_memory_ledger();
   read_task_contract_id();
+}
+`;
+}
+
+function buildGoodTaskVerifierAutoArtifacts() {
+  return `pub(super) fn resolve_verifier_artifact_path() {}
+pub(super) fn read_task_contract_artifact() {
+  load_task_contract();
+  "TASK_CONTRACT_MALFORMED";
+}
+pub(super) fn read_report_artifact() {
+  "TASK_REPORT_REQUIRED";
+}
+pub(super) fn read_shared_memory_artifact() {
+  "SHARED_MEMORY_REQUIRED";
 }
 `;
 }
