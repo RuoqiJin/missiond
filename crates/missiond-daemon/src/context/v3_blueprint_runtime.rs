@@ -50,6 +50,17 @@ pub(crate) const DEFAULT_PROTECTED_FLOW_PATTERNS: [&str; 4] = [
 pub(crate) const DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT: usize = 60;
 pub(crate) const DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS: usize = 1000;
 pub(crate) const DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS: usize = 500;
+pub(crate) const DEFAULT_CONVERSATION_GET_TAIL: i64 = 50;
+pub(crate) const DEFAULT_CONVERSATION_SEARCH_LIMIT: i64 = 10;
+pub(crate) const DEFAULT_MESSAGE_SEARCH_LIMIT: i64 = 20;
+pub(crate) const DEFAULT_CONTEXT_BEFORE: i64 = 3;
+pub(crate) const DEFAULT_CONTEXT_AFTER: i64 = 5;
+pub(crate) const DEFAULT_CONVERSATION_EVENTS_LIMIT: i64 = 100;
+pub(crate) const DEFAULT_AGENT_TRAJECTORY_LIMIT: i64 = 200;
+pub(crate) const DEFAULT_TIMELINE_QUERY_LIMIT: i64 = 50;
+pub(crate) const MAX_TIMELINE_QUERY_LIMIT: i64 = 200;
+pub(crate) const DEFAULT_TIMELINE_SEARCH_LIMIT: i64 = 20;
+pub(crate) const MAX_TIMELINE_SEARCH_LIMIT: i64 = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -101,6 +112,21 @@ pub(crate) struct MemoryKbRuntimeConfig {
     pub pending_message_limit: usize,
     pub tool_result_preview_chars: usize,
     pub assistant_preview_chars: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ConversationIngestionRuntimeConfig {
+    pub conversation_get_tail_default: i64,
+    pub conversation_search_default_limit: i64,
+    pub message_search_default_limit: i64,
+    pub context_before_default: i64,
+    pub context_after_default: i64,
+    pub conversation_events_default_limit: i64,
+    pub agent_trajectory_default_limit: i64,
+    pub timeline_query_default_limit: i64,
+    pub timeline_query_max_limit: i64,
+    pub timeline_search_default_limit: i64,
+    pub timeline_search_max_limit: i64,
 }
 
 #[derive(Debug)]
@@ -215,6 +241,24 @@ impl Default for MemoryKbRuntimeConfig {
             pending_message_limit: DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT,
             tool_result_preview_chars: DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS,
             assistant_preview_chars: DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS,
+        }
+    }
+}
+
+impl Default for ConversationIngestionRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            conversation_get_tail_default: DEFAULT_CONVERSATION_GET_TAIL,
+            conversation_search_default_limit: DEFAULT_CONVERSATION_SEARCH_LIMIT,
+            message_search_default_limit: DEFAULT_MESSAGE_SEARCH_LIMIT,
+            context_before_default: DEFAULT_CONTEXT_BEFORE,
+            context_after_default: DEFAULT_CONTEXT_AFTER,
+            conversation_events_default_limit: DEFAULT_CONVERSATION_EVENTS_LIMIT,
+            agent_trajectory_default_limit: DEFAULT_AGENT_TRAJECTORY_LIMIT,
+            timeline_query_default_limit: DEFAULT_TIMELINE_QUERY_LIMIT,
+            timeline_query_max_limit: MAX_TIMELINE_QUERY_LIMIT,
+            timeline_search_default_limit: DEFAULT_TIMELINE_SEARCH_LIMIT,
+            timeline_search_max_limit: MAX_TIMELINE_SEARCH_LIMIT,
         }
     }
 }
@@ -439,6 +483,52 @@ impl MemoryKbRuntimeConfig {
     }
 }
 
+impl ConversationIngestionRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_conversation_ingestion_policy(&source)
+    }
+
+    pub(crate) fn timeline_query_limit(&self, requested: Option<i64>) -> i64 {
+        requested
+            .unwrap_or(self.timeline_query_default_limit)
+            .min(self.timeline_query_max_limit)
+    }
+
+    pub(crate) fn timeline_search_limit(&self, requested: Option<i64>) -> i64 {
+        requested
+            .unwrap_or(self.timeline_search_default_limit)
+            .min(self.timeline_search_max_limit)
+    }
+}
+
 pub(crate) fn parse_workstation_config(
     source: &str,
 ) -> Result<WorkstationRuntimeConfig, BlueprintConfigError> {
@@ -605,6 +695,65 @@ pub(crate) fn parse_memory_kb_policy(
         tool_result_preview_chars,
         assistant_preview_chars,
     })
+}
+
+pub(crate) fn parse_conversation_ingestion_policy(
+    source: &str,
+) -> Result<ConversationIngestionRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "conversation-ingestion-policy").ok_or_else(|| {
+        BlueprintConfigError::Parse("missing (conversation-ingestion-policy ...)".into())
+    })?;
+    let tokens = tokenize_lisp(&block);
+    let cfg = ConversationIngestionRuntimeConfig {
+        conversation_get_tail_default: int_keyword(&tokens, ":conversation-get-tail-default")?,
+        conversation_search_default_limit: int_keyword(
+            &tokens,
+            ":conversation-search-default-limit",
+        )?,
+        message_search_default_limit: int_keyword(&tokens, ":message-search-default-limit")?,
+        context_before_default: int_keyword(&tokens, ":context-before-default")?,
+        context_after_default: int_keyword(&tokens, ":context-after-default")?,
+        conversation_events_default_limit: int_keyword(
+            &tokens,
+            ":conversation-events-default-limit",
+        )?,
+        agent_trajectory_default_limit: int_keyword(&tokens, ":agent-trajectory-default-limit")?,
+        timeline_query_default_limit: int_keyword(&tokens, ":timeline-query-default-limit")?,
+        timeline_query_max_limit: int_keyword(&tokens, ":timeline-query-max-limit")?,
+        timeline_search_default_limit: int_keyword(&tokens, ":timeline-search-default-limit")?,
+        timeline_search_max_limit: int_keyword(&tokens, ":timeline-search-max-limit")?,
+    };
+    if [
+        cfg.conversation_get_tail_default,
+        cfg.conversation_search_default_limit,
+        cfg.message_search_default_limit,
+        cfg.context_before_default,
+        cfg.context_after_default,
+        cfg.conversation_events_default_limit,
+        cfg.agent_trajectory_default_limit,
+        cfg.timeline_query_default_limit,
+        cfg.timeline_query_max_limit,
+        cfg.timeline_search_default_limit,
+        cfg.timeline_search_max_limit,
+    ]
+    .iter()
+    .any(|value| *value <= 0)
+    {
+        return Err(BlueprintConfigError::Parse(
+            "conversation-ingestion numeric limits must be positive".into(),
+        ));
+    }
+    if cfg.timeline_query_max_limit < cfg.timeline_query_default_limit {
+        return Err(BlueprintConfigError::Parse(
+            ":timeline-query-max-limit must be >= :timeline-query-default-limit".into(),
+        ));
+    }
+    if cfg.timeline_search_max_limit < cfg.timeline_search_default_limit {
+        return Err(BlueprintConfigError::Parse(
+            ":timeline-search-max-limit must be >= :timeline-search-default-limit".into(),
+        ));
+    }
+    Ok(cfg)
 }
 
 fn string_list_keyword(tokens: &[String], key: &str) -> Result<Vec<String>, BlueprintConfigError> {
@@ -845,7 +994,19 @@ mod tests {
   (memory-kb-policy
     :pending-message-limit 60
     :tool-result-preview-chars 1000
-    :assistant-preview-chars 500))
+    :assistant-preview-chars 500)
+  (conversation-ingestion-policy
+    :conversation-get-tail-default 50
+    :conversation-search-default-limit 10
+    :message-search-default-limit 20
+    :context-before-default 3
+    :context-after-default 5
+    :conversation-events-default-limit 100
+    :agent-trajectory-default-limit 200
+    :timeline-query-default-limit 50
+    :timeline-query-max-limit 200
+    :timeline-search-default-limit 20
+    :timeline-search-max-limit 100))
 "#;
 
     #[test]
@@ -1008,5 +1169,53 @@ mod tests {
         let err = parse_memory_kb_policy("(missiond-blueprint)")
             .expect_err("missing memory kb policy should fail");
         assert!(err.to_string().contains("memory-kb-policy"));
+    }
+
+    #[test]
+    fn parses_conversation_ingestion_policy_defaults() {
+        let cfg = parse_conversation_ingestion_policy(BLUEPRINT)
+            .expect("parse conversation ingestion policy");
+        assert_eq!(
+            cfg.conversation_get_tail_default,
+            DEFAULT_CONVERSATION_GET_TAIL
+        );
+        assert_eq!(
+            cfg.conversation_search_default_limit,
+            DEFAULT_CONVERSATION_SEARCH_LIMIT
+        );
+        assert_eq!(
+            cfg.message_search_default_limit,
+            DEFAULT_MESSAGE_SEARCH_LIMIT
+        );
+        assert_eq!(cfg.context_before_default, DEFAULT_CONTEXT_BEFORE);
+        assert_eq!(cfg.context_after_default, DEFAULT_CONTEXT_AFTER);
+        assert_eq!(
+            cfg.conversation_events_default_limit,
+            DEFAULT_CONVERSATION_EVENTS_LIMIT
+        );
+        assert_eq!(
+            cfg.agent_trajectory_default_limit,
+            DEFAULT_AGENT_TRAJECTORY_LIMIT
+        );
+        assert_eq!(cfg.timeline_query_limit(None), DEFAULT_TIMELINE_QUERY_LIMIT);
+        assert_eq!(
+            cfg.timeline_query_limit(Some(999)),
+            MAX_TIMELINE_QUERY_LIMIT
+        );
+        assert_eq!(
+            cfg.timeline_search_limit(None),
+            DEFAULT_TIMELINE_SEARCH_LIMIT
+        );
+        assert_eq!(
+            cfg.timeline_search_limit(Some(999)),
+            MAX_TIMELINE_SEARCH_LIMIT
+        );
+    }
+
+    #[test]
+    fn missing_conversation_ingestion_policy_is_rejected() {
+        let err = parse_conversation_ingestion_policy("(missiond-blueprint)")
+            .expect_err("missing conversation ingestion policy should fail");
+        assert!(err.to_string().contains("conversation-ingestion-policy"));
     }
 }

@@ -16,6 +16,7 @@ Checks the V3 conversation-ingestion Lisp/code isomorphism contract:
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   dispatcher: 'crates/missiond-daemon/src/handlers/mod.rs',
+  v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   facade: 'crates/missiond-daemon/src/handlers/comm/conversation.rs',
   router: 'crates/missiond-daemon/src/handlers/comm/conversation/router.rs',
   query: 'crates/missiond-daemon/src/handlers/comm/conversation/query.rs',
@@ -86,10 +87,19 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'conversation-ingestion',
     '(v2-item conversation-ingestion',
-    ':status code-aligned',
+    ':status runtime-projected',
+    '(conversation-ingestion-policy',
+    ':conversation-get-tail-default 50',
+    ':conversation-search-default-limit 10',
+    ':message-search-default-limit 20',
+    ':conversation-events-default-limit 100',
+    ':agent-trajectory-default-limit 200',
+    ':timeline-query-default-limit 50',
+    ':timeline-query-max-limit 200',
     '(tool-group conversation-ingestion-tools',
     '(surface conversation-ingestion',
     ':status "code-aligned"',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/handlers/comm/conversation.rs',
     'crates/missiond-daemon/src/handlers/comm/conversation/router.rs',
     'crates/missiond-daemon/src/handlers/comm/conversation/query.rs',
@@ -100,6 +110,7 @@ function checkFiles(root, files) {
     'crates/missiond-mcp/src/tools/comm/conversation.rs',
     'crates/missiond-mcp/src/tools/comm/timeline.rs',
     'scripts/check-v3-conversation-ingestion-isomorphism.mjs',
+    'conversation-ingestion-policy read-model default and max limits',
     'conversation.rs is the thin conversation-ingestion facade',
     'conversation/router.rs owns mission_conversation_query',
     'conversation/query.rs owns read-model query actions',
@@ -108,6 +119,21 @@ function checkFiles(root, files) {
     'timeline.rs owns mission_timeline',
     'retrospective.rs owns retrospective analysis, list, and backfill',
     'node scripts/check-v3-conversation-ingestion-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'ConversationIngestionRuntimeConfig',
+    'parse_conversation_ingestion_policy',
+    'DEFAULT_CONVERSATION_GET_TAIL',
+    'DEFAULT_CONVERSATION_SEARCH_LIMIT',
+    'DEFAULT_MESSAGE_SEARCH_LIMIT',
+    'DEFAULT_CONVERSATION_EVENTS_LIMIT',
+    'DEFAULT_AGENT_TRAJECTORY_LIMIT',
+    'DEFAULT_TIMELINE_QUERY_LIMIT',
+    'MAX_TIMELINE_QUERY_LIMIT',
+    'DEFAULT_TIMELINE_SEARCH_LIMIT',
+    'MAX_TIMELINE_SEARCH_LIMIT',
+    'conversation-ingestion-policy',
   ]);
 
   requireAll(diagnostics, files.dispatcher, sources.dispatcher, [
@@ -148,6 +174,14 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.query, sources.query, [
     'handle_query',
+    'ConversationIngestionRuntimeConfig',
+    'load_conversation_config',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'conversation_get_tail_default',
+    'conversation_search_default_limit',
+    'message_search_default_limit',
+    'context_before_default',
+    'context_after_default',
     '"mission_token_stats"',
     '"mission_conversation_list"',
     '"mission_conversation_get"',
@@ -164,6 +198,11 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.events, sources.events, [
     'handle_events',
+    'ConversationIngestionRuntimeConfig',
+    'load_conversation_config',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'conversation_events_default_limit',
+    'agent_trajectory_default_limit',
     '"mission_conversation_events"',
     '"mission_agent_trajectory"',
     '"mission_conversation_message"',
@@ -188,6 +227,11 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.timeline, sources.timeline, [
     'mission_timeline',
+    'ConversationIngestionRuntimeConfig',
+    'load_conversation_config',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'timeline_query_limit',
+    'timeline_search_limit',
     'mission_timeline_query',
     'mission_timeline_trace',
     'mission_timeline_stats',
@@ -244,14 +288,27 @@ function buildFixture() {
     path.join(root, DEFAULT_FILES.blueprint),
     `
 (missiond-blueprint
+  (conversation-ingestion-policy
+    :conversation-get-tail-default 50
+    :conversation-search-default-limit 10
+    :message-search-default-limit 20
+    :context-before-default 3
+    :context-after-default 5
+    :conversation-events-default-limit 100
+    :agent-trajectory-default-limit 200
+    :timeline-query-default-limit 50
+    :timeline-query-max-limit 200
+    :timeline-search-default-limit 20
+    :timeline-search-max-limit 100)
   (v2-convergence-map
-    (v2-item conversation-ingestion :status code-aligned))
+    (v2-item conversation-ingestion :status runtime-projected))
   (public-surface-map
     (tool-group conversation-ingestion-tools :status code-aligned))
   (implementation-map
     (surface conversation-ingestion
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/handlers/comm/conversation.rs"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation/router.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation/query.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation/events.rs"
@@ -261,13 +318,17 @@ function buildFixture() {
              "crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill."))
+      :note "conversation-ingestion-policy read-model default and max limits; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill."))
   (compression-contract
     :checks ["node scripts/check-v3-conversation-ingestion-isomorphism.mjs"]))`,
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.dispatcher),
     'mission_conversation_ mission_retrospective_manage mission_embedding_ops mission_activity_report conversation::handle',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.v3Runtime),
+    'ConversationIngestionRuntimeConfig parse_conversation_ingestion_policy DEFAULT_CONVERSATION_GET_TAIL DEFAULT_CONVERSATION_SEARCH_LIMIT DEFAULT_MESSAGE_SEARCH_LIMIT DEFAULT_CONVERSATION_EVENTS_LIMIT DEFAULT_AGENT_TRAJECTORY_LIMIT DEFAULT_TIMELINE_QUERY_LIMIT MAX_TIMELINE_QUERY_LIMIT DEFAULT_TIMELINE_SEARCH_LIMIT MAX_TIMELINE_SEARCH_LIMIT conversation-ingestion-policy',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.facade),
@@ -279,11 +340,11 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.query),
-    'handle_query "mission_token_stats" "mission_conversation_list" "mission_conversation_get" "mission_conversation_search" "mission_message_search" "mission_user_message_index" "mission_conversation_set_label" "mission_conversation_delete_label" "mission_context_around" hybrid_message_search search_conversation_sessions_fts_filtered get_messages_around',
+    'handle_query ConversationIngestionRuntimeConfig load_conversation_config V3_BLUEPRINT_CONFIG_ERROR conversation_get_tail_default conversation_search_default_limit message_search_default_limit context_before_default context_after_default "mission_token_stats" "mission_conversation_list" "mission_conversation_get" "mission_conversation_search" "mission_message_search" "mission_user_message_index" "mission_conversation_set_label" "mission_conversation_delete_label" "mission_context_around" hybrid_message_search search_conversation_sessions_fts_filtered get_messages_around',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.events),
-    'handle_events "mission_conversation_events" "mission_agent_trajectory" "mission_conversation_message" "mission_activity_report" get_conversation_events get_agent_trajectory query_timeline_stats',
+    'handle_events ConversationIngestionRuntimeConfig load_conversation_config V3_BLUEPRINT_CONFIG_ERROR conversation_events_default_limit agent_trajectory_default_limit "mission_conversation_events" "mission_agent_trajectory" "mission_conversation_message" "mission_activity_report" get_conversation_events get_agent_trajectory query_timeline_stats',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.maintenance),
@@ -291,7 +352,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.timeline),
-    'mission_timeline mission_timeline_query mission_timeline_trace mission_timeline_stats mission_timeline_search',
+    'mission_timeline ConversationIngestionRuntimeConfig load_conversation_config V3_BLUEPRINT_CONFIG_ERROR timeline_query_limit timeline_search_limit mission_timeline_query mission_timeline_trace mission_timeline_stats mission_timeline_search',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.retrospective),

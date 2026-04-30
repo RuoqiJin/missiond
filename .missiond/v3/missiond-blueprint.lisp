@@ -570,6 +570,25 @@
       ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
        "A real MissionD project with .missiond but no memory-kb-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (conversation-ingestion-policy
+    :desc "Lisp-owned read-model window and limit defaults for conversation, event, and timeline query surfaces."
+    :conversation-get-tail-default 50
+    :conversation-search-default-limit 10
+    :message-search-default-limit 20
+    :context-before-default 3
+    :context-after-default 5
+    :conversation-events-default-limit 100
+    :agent-trajectory-default-limit 200
+    :timeline-query-default-limit 50
+    :timeline-query-max-limit 200
+    :timeline-search-default-limit 20
+    :timeline-search-max-limit 100
+    :invariants
+      ["mission_conversation_get/search/message_search/context_around MUST project default limits from conversation-ingestion-policy."
+       "mission_conversation_events and mission_agent_trajectory MUST project default limits from conversation-ingestion-policy."
+       "mission_timeline query/search MUST project default and max limits from conversation-ingestion-policy."
+       "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
+
   (ops-infra
     :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
     :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
@@ -732,12 +751,12 @@
       :surface project-registry
       :note "Project root resolution and registry behavior are physically split and pinned under the V3 project-registry surface; project-registry-policy now projects intent-path candidates and default universe manifest into mission_project init/import_universe/survey runtime.")
     (v2-item conversation-ingestion
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest / session organizer"
       :v3-pillar communication
       :v3-function conversation-ingestion
       :surface conversation-ingestion
-      :note "Conversation query, analysis, timeline, retrospective, embedding, and reconcile tools are physically split and pinned under the V3 conversation-ingestion surface; runtime projection remains a separate future graduation step.")
+      :note "Conversation query, analysis, timeline, retrospective, embedding, and reconcile tools are physically split and pinned under the V3 conversation-ingestion surface; conversation-ingestion-policy now projects read-model default and max limits into conversation, event, and timeline runtime.")
     (v2-item router-policy-dry-run-chain
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: router-policy-v1 / router-backend-readiness-loop / router-dispatch-descriptor-loop"
@@ -1096,9 +1115,10 @@
       (function conversation-ingestion
         :surface conversation-ingestion
         :entry [mission_conversation_query mission_conversation_analyze mission_conversation_reconcile mission_timeline mission_retrospective_manage mission_embedding_ops]
-        :core ((step s1 :logic "ingest or query conversation/session/timeline records by project scope")
-               (step s2 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
-               (step s3 :logic "surface durable facts for context assembly and later memory projection"))
+        :core ((step s1 :logic "load conversation-ingestion-policy for read-model default and max limits")
+               (step s2 :logic "ingest or query conversation/session/timeline records by project scope")
+               (step s3 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
+               (step s4 :logic "surface durable facts for context assembly and later memory projection"))
         :egress [conversation_rows timeline_events retrospective_result embedding_jobs])
       (function router-policy
         :surface router-policy
@@ -1663,6 +1683,7 @@
       :code ["crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation/router.rs"
              "crates/missiond-daemon/src/handlers/comm/conversation/query.rs"
@@ -1671,7 +1692,7 @@
              "crates/missiond-daemon/src/handlers/comm/timeline.rs"
              "crates/missiond-daemon/src/handlers/comm/retrospective.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for conversation/session/timeline/retrospective/embedding public tools. conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conversation events, agent trajectory, message read, and activity report; conversation/maintenance.rs owns embedding/reconcile work items including backfill, habit scan, embedding stats/ops, and JSONL-to-DB reconcile; timeline.rs owns mission_timeline query/trace/stats/search; retrospective.rs owns retrospective analysis, list, and backfill.")
+      :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conversation events, agent trajectory, message read, and activity report; conversation/maintenance.rs owns embedding/reconcile work items including backfill, habit scan, embedding stats/ops, and JSONL-to-DB reconcile; timeline.rs owns mission_timeline query/trace/stats/search; retrospective.rs owns retrospective analysis, list, and backfill.")
 
     (surface router-policy
       :status "code-aligned"

@@ -3,10 +3,17 @@ use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
 
+fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
+    ConversationIngestionRuntimeConfig::load_for_current_dir()
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
+
 pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    let config = load_conversation_config()?;
     match name {
         "mission_token_stats" => {
             #[derive(Deserialize)]
@@ -199,7 +206,11 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
 
             let msgs = state
                 .store
-                .get_conversation_messages(&session_id, since_id, tail.unwrap_or(50))
+                .get_conversation_messages(
+                    &session_id,
+                    since_id,
+                    tail.unwrap_or(config.conversation_get_tail_default),
+                )
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let messages: Vec<serde_json::Value> = if include_raw.unwrap_or(false) {
@@ -384,7 +395,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 project,
                 conversation_type,
             } = serde_json::from_value(args)?;
-            let top_k = limit.unwrap_or(10) as usize;
+            let top_k = limit.unwrap_or(config.conversation_search_default_limit) as usize;
             let skip = offset.unwrap_or(0) as usize;
             let mode = query_mode.as_deref().unwrap_or("hybrid");
 
@@ -695,7 +706,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                 limit,
                 time_range,
             } = serde_json::from_value(args)?;
-            let lim = limit.unwrap_or(20);
+            let lim = limit.unwrap_or(config.message_search_default_limit);
 
             let time_after: Option<String> = time_range.as_deref().and_then(|tr| {
                 let hours = match tr {
@@ -890,8 +901,8 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
             let message_id = message_id.ok_or_else(|| anyhow!("messageId is required"))?;
 
             // Defensive limits
-            let before = before.unwrap_or(3).min(50);
-            let after = after.unwrap_or(5).min(50);
+            let before = before.unwrap_or(config.context_before_default).min(50);
+            let after = after.unwrap_or(config.context_after_default).min(50);
 
             let result = state
                 .store

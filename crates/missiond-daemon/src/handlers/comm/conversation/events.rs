@@ -3,10 +3,17 @@ use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
 
+fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
+    ConversationIngestionRuntimeConfig::load_for_current_dir()
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
+
 pub(super) async fn handle_events(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    let config = load_conversation_config()?;
     match name {
         "mission_conversation_events" => {
             #[derive(Deserialize)]
@@ -31,7 +38,11 @@ pub(super) async fn handle_events(state: &AppState, name: &str, args: Value) -> 
             if let Some(sid) = &session_id {
                 let events = state
                     .store
-                    .get_conversation_events(sid, event_type.as_deref(), limit.unwrap_or(100))
+                    .get_conversation_events(
+                        sid,
+                        event_type.as_deref(),
+                        limit.unwrap_or(config.conversation_events_default_limit),
+                    )
                     .await
                     .map_err(|e| anyhow!("DB error: {}", e))?;
                 Ok(ToolResult::json(&serde_json::json!({
@@ -69,7 +80,10 @@ pub(super) async fn handle_events(state: &AppState, name: &str, args: Value) -> 
             let Args { tool_use_id, limit } = serde_json::from_value(args)?;
             let msgs = state
                 .store
-                .get_agent_trajectory(&tool_use_id, limit.unwrap_or(200))
+                .get_agent_trajectory(
+                    &tool_use_id,
+                    limit.unwrap_or(config.agent_trajectory_default_limit),
+                )
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             // Extract agentId from first message metadata

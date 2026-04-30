@@ -3,8 +3,14 @@ use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
+use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
+
+fn load_conversation_config() -> Result<ConversationIngestionRuntimeConfig> {
+    ConversationIngestionRuntimeConfig::load_for_current_dir()
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     // Consolidated tool: mission_timeline
@@ -25,6 +31,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 }
 
 async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    let config = load_conversation_config()?;
     match name {
         "mission_timeline_query" => {
             #[derive(Deserialize)]
@@ -47,7 +54,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 limit: None,
                 offset: None,
             });
-            let limit = args.limit.unwrap_or(50).min(200);
+            let limit = config.timeline_query_limit(args.limit);
             let offset = args.offset.unwrap_or(0);
 
             let rows = state
@@ -188,7 +195,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 limit: Option<i64>,
             }
             let args: Args = serde_json::from_value(args)?;
-            let limit = args.limit.unwrap_or(20).min(100);
+            let limit = config.timeline_search_limit(args.limit);
 
             let rows = state
                 .store
