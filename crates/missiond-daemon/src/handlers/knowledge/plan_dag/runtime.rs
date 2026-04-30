@@ -6,23 +6,23 @@
 
 use anyhow::Result;
 use missiond_core::types::Plan;
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::collections::HashMap;
 
 use crate::state::AppState;
 
 use super::claim_lease::{
-    derive_node_claim_scopes, derive_plan_dag_claim_id, parse_claim_lease_secs, parse_claimer_name,
-    parse_enforce_claims, ClaimAcquire, ClaimRegistry, PlanDagClaim,
+    parse_claim_lease_secs, parse_claimer_name, parse_enforce_claims, ClaimRegistry,
 };
 use super::dispatch::{DispatchOutcome, TaskContractDispatchCtx};
-use super::lifecycle::{emit_evidence_claim_conflict, emit_evidence_finished, EvidenceCtx};
-use super::outcome::{ExecutionOutcome, NodeLifecycle, NodeResult, NodeState};
+use super::lifecycle::{emit_evidence_finished, EvidenceCtx};
+use super::outcome::{ExecutionOutcome, NodeResult};
 use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
 use super::scheduler::propagate_taint;
 
 mod acceptance;
 mod bookkeeping;
+mod claiming;
 mod claims;
 mod failures;
 mod gates;
@@ -35,7 +35,8 @@ use bookkeeping::{
     build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
     initialize_lifecycle, stitch_results_topologically,
 };
-use claims::{record_acquired_claim, record_compat_claim, release_claim_if_recorded};
+use claiming::{prepare_dispatch_claim, DispatchClaimDecision};
+use claims::release_claim_if_recorded;
 use failures::record_final_failure;
 use gates::filter_ready_nodes_for_gates;
 use retry::retry_failed_node_if_allowed;
@@ -202,164 +203,33 @@ pub(super) async fn execute_with_concurrency(
                 *entry
             };
 
-            // wave-17 / task 02 — try to acquire a claim covering the
-            // node's derived scopes. The acquire runs against the
-            // shared per-DAG registry; conflicts are decided by the
-            // shared `scopes_overlap_pure` predicate.
-            let (scopes, scope_source) = derive_node_claim_scopes(&node, plan.id);
-            let claim_id = derive_plan_dag_claim_id(plan.id, &node.id, attempt);
-            let acquire_now = chrono::Utc::now();
-            let acquire_outcome = claim_registry.try_acquire(
-                claim_id.clone(),
-                claimer_name.clone(),
-                scopes.clone(),
-                scope_source,
+            match prepare_dispatch_claim(
+                state,
+                &ctx,
+                plan.id,
+                &node,
+                &dispatch_strategy,
+                attempt,
                 claim_lease_secs,
-                acquire_now,
-            );
-
-            match acquire_outcome {
-                ClaimAcquire::Acquired(claim) => {
-                    record_acquired_claim(
-                        state,
-                        &ctx,
-                        &node,
-                        &dispatch_strategy,
-                        attempt,
-                        &claim,
-                        &mut lifecycle,
-                        &mut active_claims_by_node,
-                        &mut outcome,
-                    )
-                    .await;
-                }
-                ClaimAcquire::Conflict {
-                    attempted_claim_id,
-                    attempted_scopes,
-                    attempted_scope_source,
-                    conflicting_claim_id,
-                    conflicting_claimer,
-                    conflicting_scope,
-                    offending_scope,
-                } => {
-                    if enforce_claims {
-                        // Strict mode — refuse to dispatch. Mark the
-                        // node failed, emit `pending -> failed` with
-                        // the structured CLAIM_CONFLICT reason, do NOT
-                        // spawn the inner handler.
-                        lifecycle.insert(node.id.clone(), NodeLifecycle::Failed);
-                        emit_evidence_claim_conflict(
-                            state,
-                            &ctx,
-                            &node,
-                            &dispatch_strategy,
-                            attempt,
-                            &attempted_claim_id,
-                            &attempted_scopes,
-                            attempted_scope_source,
-                            &conflicting_claim_id,
-                            &conflicting_claimer,
-                            &conflicting_scope,
-                            &offending_scope,
-                            &mut outcome,
-                        )
-                        .await;
-                        let reason = format!(
-                            "CLAIM_CONFLICT: scope `{}` overlaps active claim {} \
-                             held by `{}` over `{}`",
-                            offending_scope,
-                            conflicting_claim_id,
-                            conflicting_claimer,
-                            conflicting_scope
-                        );
-                        let inner_payload = json!({
-                            "error": reason.clone(),
-                            "claim_status": "conflict",
-                            "attempted_claim_id": attempted_claim_id,
-                            "attempted_claim_scopes": attempted_scopes,
-                            "attempted_claim_scope_source": attempted_scope_source,
-                            "conflicting_claim_id": conflicting_claim_id,
-                            "conflicting_claimer": conflicting_claimer,
-                            "conflicting_scope": conflicting_scope,
-                            "offending_scope": offending_scope,
-                        });
-                        results_by_id.insert(
-                            node.id.clone(),
-                            NodeResult {
-                                id: node.id.clone(),
-                                target: node.target.clone(),
-                                state: NodeState::Failed { reason },
-                                dispatch_strategy: dispatch_strategy.clone(),
-                                inner_payload,
-                                attempts_made: attempt,
-                                max_attempts: node.effective_max_attempts(),
-                                retry_skipped_non_retryable: true,
-                                // wave-17 / task 04 — claim-conflict
-                                // refusal happens BEFORE any handler
-                                // runs; the rollback evaluator never
-                                // gets a chance to reason about it
-                                // because the failure is purely a
-                                // coordination event, not a node-level
-                                // failure that warrants compensation.
-                                rollback: None,
-                                // wave-17 / task 03 — claim-conflict
-                                // refusal happens BEFORE the inner
-                                // handler runs; acceptance phase is
-                                // never reached for this node.
-                                acceptance: None,
-                            },
-                        );
-                        // Taint propagation — the failed node still
-                        // taints downstream so the rest of the DAG
-                        // sees the failure as a real one, AND
-                        // fail-fast trips when policy says so.
-                        propagate_taint(&node, &succs, &mut tainted_by);
-                        if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
-                            abort_new_dispatch = true;
-                            abort_aborter = Some(node.id.clone());
-                        }
-                        continue;
+                &claimer_name,
+                enforce_claims,
+                &mut claim_registry,
+                &mut active_claims_by_node,
+                &mut lifecycle,
+                &mut results_by_id,
+                &mut tainted_by,
+                &succs,
+                &mut outcome,
+            )
+            .await
+            {
+                DispatchClaimDecision::Dispatch => {}
+                DispatchClaimDecision::ConflictFailed { fail_fast_abort } => {
+                    if fail_fast_abort {
+                        abort_new_dispatch = true;
+                        abort_aborter = Some(node.id.clone());
                     }
-                    // Compat mode — best-effort record the claim into
-                    // the registry under a synthetic id so the audit
-                    // row carries the metadata. We synthesise a
-                    // record (NOT inserted into the registry to avoid
-                    // poisoning future overlap checks) and attach the
-                    // conflict snapshot so dashboards can spot
-                    // "compat mode papered over a real conflict".
-                    let synthetic_claim = PlanDagClaim {
-                        claim_id: attempted_claim_id.clone(),
-                        claimer: claimer_name.clone(),
-                        scopes: attempted_scopes,
-                        scope_source: attempted_scope_source,
-                        acquired_at: acquire_now,
-                        lease_expires_at: acquire_now + chrono::Duration::seconds(claim_lease_secs),
-                        released_at: None,
-                    };
-                    record_compat_claim(
-                        state,
-                        &ctx,
-                        &node,
-                        &dispatch_strategy,
-                        attempt,
-                        &synthetic_claim,
-                        (
-                            conflicting_claim_id,
-                            conflicting_claimer,
-                            conflicting_scope,
-                            offending_scope,
-                        ),
-                        &mut lifecycle,
-                        &mut outcome,
-                    )
-                    .await;
-                    // No registry entry, no per-node active claim
-                    // map entry — release skip is intentional: we
-                    // never registered the claim, so there's nothing
-                    // to release. Audit row already captured the
-                    // metadata; downstream nodes still see the held
-                    // scope on the original conflicting claim, which
-                    // is the right thing for compat mode.
+                    continue;
                 }
             }
 

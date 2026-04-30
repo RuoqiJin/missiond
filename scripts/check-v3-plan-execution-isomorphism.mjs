@@ -77,6 +77,8 @@ const DEFAULT_FILES = {
     'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/acceptance.rs',
   planDagRuntimeBookkeeping:
     'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/bookkeeping.rs',
+  planDagRuntimeClaiming:
+    'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claiming.rs',
   planDagRuntimeClaims:
     'crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claims.rs',
   planDagRuntimeFailures:
@@ -318,6 +320,7 @@ function checkFiles(root, files) {
     'plan_dag/runtime.rs owns the DAG live runtime wave loop',
     'plan_dag/runtime/acceptance.rs owns DAG runtime success acceptance projection',
     'plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping',
+    'plan_dag/runtime/claiming.rs owns DAG runtime dispatch claim preparation',
     'plan_dag/runtime/claims.rs owns DAG runtime claim acquisition and release projection',
     'plan_dag/runtime/failures.rs owns DAG runtime final failure projection',
     'plan_dag/runtime/gates.rs owns DAG runtime ready-node gate filtering',
@@ -859,6 +862,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.planDagRuntime, sources.planDagRuntime, [
     'mod acceptance;',
     'mod bookkeeping;',
+    'mod claiming;',
     'mod claims;',
     'mod failures;',
     'mod gates;',
@@ -874,9 +878,7 @@ function checkFiles(root, files) {
     'pub(super) async fn execute_with_concurrency',
     'tokio::task::JoinSet<Result<DispatchOutcome>>',
     'ClaimRegistry::new()',
-    'derive_node_claim_scopes(&node, plan.id)',
-    'record_acquired_claim(',
-    'record_compat_claim(',
+    'prepare_dispatch_claim(',
     'release_claim_if_recorded(',
     'record_final_failure(',
     'spawn_dispatch_attempt(',
@@ -906,6 +908,21 @@ function checkFiles(root, files) {
     'pub(super) fn stitch_results_topologically',
     'NodeState::SkippedUpstreamFailed',
     'NodeLifecycle::Succeeded',
+  ]);
+
+  requireAll(diagnostics, files.planDagRuntimeClaiming, sources.planDagRuntimeClaiming, [
+    'pub(super) enum DispatchClaimDecision',
+    'pub(super) async fn prepare_dispatch_claim',
+    'derive_node_claim_scopes',
+    'derive_plan_dag_claim_id',
+    'ClaimAcquire::Acquired',
+    'record_acquired_claim',
+    'ClaimAcquire::Conflict',
+    'emit_evidence_claim_conflict',
+    'NodeState::Failed',
+    'record_compat_claim',
+    'propagate_taint',
+    'FAILURE_POLICY_FAIL_FAST',
   ]);
 
   requireAll(diagnostics, files.planDagRuntimeClaims, sources.planDagRuntimeClaims, [
@@ -1773,6 +1790,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/acceptance.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/bookkeeping.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claiming.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claims.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/failures.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/gates.rs"
@@ -1842,7 +1860,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/compile_authoring/artifact.rs owns plan file-first artifact egress; plan/compile_authoring/validation.rs owns planner prompt and Lisp output validation; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute facade orchestration; plan/execution_runtime/bridge.rs owns bridge descriptor projection; plan/execution_runtime/internal.rs owns mission_plan internal dispatch runtime; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/predicate.rs owns router-policy predicate projection; plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection; plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/task_runner_dry_run/manifest.rs owns task-runner manifest loading/parsing; plan/task_runner_dry_run/projection.rs owns task-runner manifest response projection; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/runtime/acceptance.rs owns DAG runtime success acceptance projection; plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping; plan_dag/runtime/claims.rs owns DAG runtime claim acquisition and release projection; plan_dag/runtime/failures.rs owns DAG runtime final failure projection; plan_dag/runtime/gates.rs owns DAG runtime ready-node gate filtering; plan_dag/runtime/rollbacks.rs owns DAG runtime rollback evaluation; plan_dag/runtime/retry.rs owns DAG runtime retry projection; plan_dag/runtime/skips.rs owns DAG runtime skip materialization; plan_dag/runtime/spawn.rs owns DAG runtime dispatch spawn projection; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs is the DAG parser types facade; plan_dag/parser/types/node.rs owns DAG node shapes and typed hint projections; plan_dag/parser/types/errors.rs owns DAG build error egress; plan_dag/parser/scanner.rs is the DAG scanner facade; plan_dag/parser/scanner/top_level.rs owns top-level PLAN.lisp S-expression scanning; plan_dag/parser/scanner/node_form.rs owns node form keyword lowering; plan_dag/parser/scanner/lists.rs owns DAG id-list parsing; plan_dag/parser/scanner/keyword_pairs.rs owns Lisp keyword/value token scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs is the DAG acceptance facade; plan_dag/acceptance/types.rs owns typed acceptance contracts; plan_dag/acceptance/evaluator.rs owns per-node acceptance evaluation; plan_dag/acceptance/fan_in.rs owns cross-node acceptance fan-in; plan_dag/acceptance/payload.rs owns inner-payload signal/key scanning; plan_dag/acceptance/pause.rs owns deterministic acceptance pause ids; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs is the DAG node dispatch facade; plan_dag/dispatch/types.rs owns DAG dispatch outcome shape; plan_dag/dispatch/workstation.rs owns workstation hint/outcome projection; plan_dag/dispatch/task_contract_ctx.rs owns per-run task-contract dispatch context; plan_dag/dispatch/runner.rs owns DAG node dispatch execution; plan_dag/rollback.rs is the DAG rollback facade; plan_dag/rollback/types.rs is the rollback types facade; plan_dag/rollback/types/node_ext.rs owns DagNode rollback hint projections; plan_dag/rollback/types/policy.rs owns rollback policy parsing; plan_dag/rollback/types/evaluation.rs owns node-local rollback evaluation JSON; plan_dag/rollback/types/cascade.rs owns cascade rollback outcome JSON; plan_dag/rollback/descriptor.rs owns rollback descriptor and pre-dispatch safety; plan_dag/rollback/run.rs owns node-local rollback execution; plan_dag/rollback/cascade.rs is the DAG cascade rollback facade; plan_dag/rollback/cascade/ordering.rs owns compensation ordering; plan_dag/rollback/cascade/plan_entry.rs owns plan-mode compensation projection; plan_dag/rollback/cascade/runner.rs owns dispatch-safe cascade execution; plan_dag/rollback/cascade/dispatch_outcome.rs owns workstation-dispatch outcome mapping; plan_dag/resume.rs is the DAG review-resume facade; plan_dag/resume/validation.rs owns resume id validation and error vocabulary; plan_dag/resume/action.rs owns explicit resume action entry/egress; plan_dag/resume/evidence.rs owns resume decision evidence; plan_dag/resume/listener.rs owns bus-resolved plan-node resume bridge; plan_dag/outcome.rs is the DAG node outcome facade; plan_dag/outcome/state.rs owns node state/lifecycle enums; plan_dag/outcome/node_result.rs owns node result shape/defaults; plan_dag/outcome/execution.rs owns DAG execution outcome response projection; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs is the DAG lifecycle facade; plan_dag/lifecycle/context.rs owns per-run evidence context; plan_dag/lifecycle/event_ref.rs owns deterministic event refs and bus publish fallback; plan_dag/lifecycle/finalize.rs owns dag_finalized evidence rows; plan_dag/lifecycle/nodes.rs is the DAG node evidence row facade; plan_dag/lifecycle/nodes/running.rs owns ready->running evidence rows; plan_dag/lifecycle/nodes/finished.rs owns running->finished evidence rows; plan_dag/lifecycle/nodes/rollback.rs owns failed->rollback evidence rows; plan_dag/lifecycle/nodes/acceptance.rs owns succeeded->acceptance evidence rows; plan_dag/lifecycle/nodes/skipped.rs owns pending->skipped evidence rows; plan_dag/lifecycle/retry.rs owns retry attempt constants and retry predicate; plan_dag/lifecycle/review.rs owns paused review-gate evidence rows; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/compile_authoring/artifact.rs owns plan file-first artifact egress; plan/compile_authoring/validation.rs owns planner prompt and Lisp output validation; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute facade orchestration; plan/execution_runtime/bridge.rs owns bridge descriptor projection; plan/execution_runtime/internal.rs owns mission_plan internal dispatch runtime; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/predicate.rs owns router-policy predicate projection; plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection; plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/task_runner_dry_run/manifest.rs owns task-runner manifest loading/parsing; plan/task_runner_dry_run/projection.rs owns task-runner manifest response projection; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/runtime/acceptance.rs owns DAG runtime success acceptance projection; plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping; plan_dag/runtime/claiming.rs owns DAG runtime dispatch claim preparation; plan_dag/runtime/claims.rs owns DAG runtime claim acquisition and release projection; plan_dag/runtime/failures.rs owns DAG runtime final failure projection; plan_dag/runtime/gates.rs owns DAG runtime ready-node gate filtering; plan_dag/runtime/rollbacks.rs owns DAG runtime rollback evaluation; plan_dag/runtime/retry.rs owns DAG runtime retry projection; plan_dag/runtime/skips.rs owns DAG runtime skip materialization; plan_dag/runtime/spawn.rs owns DAG runtime dispatch spawn projection; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs is the DAG parser types facade; plan_dag/parser/types/node.rs owns DAG node shapes and typed hint projections; plan_dag/parser/types/errors.rs owns DAG build error egress; plan_dag/parser/scanner.rs is the DAG scanner facade; plan_dag/parser/scanner/top_level.rs owns top-level PLAN.lisp S-expression scanning; plan_dag/parser/scanner/node_form.rs owns node form keyword lowering; plan_dag/parser/scanner/lists.rs owns DAG id-list parsing; plan_dag/parser/scanner/keyword_pairs.rs owns Lisp keyword/value token scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs is the DAG acceptance facade; plan_dag/acceptance/types.rs owns typed acceptance contracts; plan_dag/acceptance/evaluator.rs owns per-node acceptance evaluation; plan_dag/acceptance/fan_in.rs owns cross-node acceptance fan-in; plan_dag/acceptance/payload.rs owns inner-payload signal/key scanning; plan_dag/acceptance/pause.rs owns deterministic acceptance pause ids; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs is the DAG node dispatch facade; plan_dag/dispatch/types.rs owns DAG dispatch outcome shape; plan_dag/dispatch/workstation.rs owns workstation hint/outcome projection; plan_dag/dispatch/task_contract_ctx.rs owns per-run task-contract dispatch context; plan_dag/dispatch/runner.rs owns DAG node dispatch execution; plan_dag/rollback.rs is the DAG rollback facade; plan_dag/rollback/types.rs is the rollback types facade; plan_dag/rollback/types/node_ext.rs owns DagNode rollback hint projections; plan_dag/rollback/types/policy.rs owns rollback policy parsing; plan_dag/rollback/types/evaluation.rs owns node-local rollback evaluation JSON; plan_dag/rollback/types/cascade.rs owns cascade rollback outcome JSON; plan_dag/rollback/descriptor.rs owns rollback descriptor and pre-dispatch safety; plan_dag/rollback/run.rs owns node-local rollback execution; plan_dag/rollback/cascade.rs is the DAG cascade rollback facade; plan_dag/rollback/cascade/ordering.rs owns compensation ordering; plan_dag/rollback/cascade/plan_entry.rs owns plan-mode compensation projection; plan_dag/rollback/cascade/runner.rs owns dispatch-safe cascade execution; plan_dag/rollback/cascade/dispatch_outcome.rs owns workstation-dispatch outcome mapping; plan_dag/resume.rs is the DAG review-resume facade; plan_dag/resume/validation.rs owns resume id validation and error vocabulary; plan_dag/resume/action.rs owns explicit resume action entry/egress; plan_dag/resume/evidence.rs owns resume decision evidence; plan_dag/resume/listener.rs owns bus-resolved plan-node resume bridge; plan_dag/outcome.rs is the DAG node outcome facade; plan_dag/outcome/state.rs owns node state/lifecycle enums; plan_dag/outcome/node_result.rs owns node result shape/defaults; plan_dag/outcome/execution.rs owns DAG execution outcome response projection; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs is the DAG lifecycle facade; plan_dag/lifecycle/context.rs owns per-run evidence context; plan_dag/lifecycle/event_ref.rs owns deterministic event refs and bus publish fallback; plan_dag/lifecycle/finalize.rs owns dag_finalized evidence rows; plan_dag/lifecycle/nodes.rs is the DAG node evidence row facade; plan_dag/lifecycle/nodes/running.rs owns ready->running evidence rows; plan_dag/lifecycle/nodes/finished.rs owns running->finished evidence rows; plan_dag/lifecycle/nodes/rollback.rs owns failed->rollback evidence rows; plan_dag/lifecycle/nodes/acceptance.rs owns succeeded->acceptance evidence rows; plan_dag/lifecycle/nodes/skipped.rs owns pending->skipped evidence rows; plan_dag/lifecycle/retry.rs owns retry attempt constants and retry predicate; plan_dag/lifecycle/review.rs owns paused review-gate evidence rows; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -2366,6 +2384,7 @@ mod tests;`);
   writeFixture(root, DEFAULT_FILES.planDagRuntime, `
 mod acceptance;
 mod bookkeeping;
+mod claiming;
 mod claims;
 mod failures;
 mod gates;
@@ -2375,12 +2394,10 @@ mod skips;
 mod spawn;
 build_node_map(&parsed.nodes);
 compute_ready_ids(order, &lifecycle, &by_id);
-pub(super) async fn execute_with_concurrency() {
+  pub(super) async fn execute_with_concurrency() {
   tokio::task::JoinSet<Result<DispatchOutcome>>;
   ClaimRegistry::new();
-  derive_node_claim_scopes(&node, plan.id);
-  record_acquired_claim();
-  record_compat_claim();
+  prepare_dispatch_claim();
   release_claim_if_recorded();
   record_final_failure();
   spawn_dispatch_attempt();
@@ -2421,6 +2438,23 @@ pub(super) fn compute_ready_ids() {
 pub(super) fn stitch_results_topologically() {
   NodeState::SkippedUpstreamFailed;
 }
+}`);
+  writeFixture(root, DEFAULT_FILES.planDagRuntimeClaiming, `
+pub(super) enum DispatchClaimDecision {
+  Dispatch,
+  ConflictFailed { fail_fast_abort: bool },
+}
+pub(super) async fn prepare_dispatch_claim() {
+  derive_node_claim_scopes();
+  derive_plan_dag_claim_id();
+  ClaimAcquire::Acquired;
+  record_acquired_claim();
+  ClaimAcquire::Conflict;
+  emit_evidence_claim_conflict();
+  NodeState::Failed;
+  record_compat_claim();
+  propagate_taint();
+  FAILURE_POLICY_FAIL_FAST;
 }`);
   writeFixture(root, DEFAULT_FILES.planDagRuntimeClaims, `
 pub(super) async fn record_acquired_claim() {

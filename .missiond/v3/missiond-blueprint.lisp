@@ -1195,6 +1195,7 @@
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/acceptance.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/bookkeeping.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claiming.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/claims.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/failures.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/runtime/gates.rs"
@@ -1267,6 +1268,7 @@
              "crates/missiond-mcp/src/tools/knowledge/plan.rs"]
       :runtime-bookkeeping "plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping: node map, successor map, topo index, ready-id selection, running/pending scans, and topological outcome stitching."
       :runtime-acceptance "plan_dag/runtime/acceptance.rs owns DAG runtime success acceptance projection: per-node acceptance evaluation, fan-in overlay, acceptance evidence emission, terminal lifecycle/state selection, manual pause id projection, and success-branch acceptance result packaging."
+      :runtime-claiming "plan_dag/runtime/claiming.rs owns DAG runtime dispatch claim preparation: initial claim acquisition, strict claim-conflict refusal, compat conflict audit projection, conflict payload construction, taint propagation, and fail-fast claim-conflict signaling."
       :runtime-claims "plan_dag/runtime/claims.rs owns DAG runtime claim acquisition and release projection: acquired/compat claim evidence, claimed lifecycle projection, active claim map updates, recorded claim lookup, lease release, terminal-state label threading, and compatibility no-op release for unrecorded claims."
       :runtime-failures "plan_dag/runtime/failures.rs owns DAG runtime final failure projection: terminal failed lifecycle, claim release, rollback evaluation, failed NodeResult projection, downstream taint propagation, and fail-fast abort signaling."
       :runtime-gates "plan_dag/runtime/gates.rs owns DAG runtime ready-node gate filtering: condition-gated skips, review-gate pause projection, ready dispatch cap, and gate-local taint propagation."
