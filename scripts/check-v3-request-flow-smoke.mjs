@@ -16,8 +16,9 @@
 //   2. The V3 blueprint's review-response :decisions list matches the six
 //      decisions surfaced by mission_request respond.
 //   3. The request handler surface (request.rs + request/respond.rs +
-//      request/respond/events.rs + request/review_packet.rs) declares every
-//      wire state and decision string the blueprint promises.
+//      request/respond/events.rs + request/respond/routing.rs +
+//      request/review_packet.rs) declares every wire state and decision
+//      string the blueprint promises.
 //   4. A JS reimplementation of the state-derivation logic, run against
 //      synthetic .missiond/requests/<request_id> directories, projects the
 //      same six states the Rust handler would on identical inputs:
@@ -143,6 +144,7 @@ const REQUEST_HANDLER_PATHS = [
   'crates/missiond-daemon/src/handlers/knowledge/request/request_artifacts.rs',
   'crates/missiond-daemon/src/handlers/knowledge/request/respond.rs',
   'crates/missiond-daemon/src/handlers/knowledge/request/respond/events.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/request/respond/routing.rs',
   'crates/missiond-daemon/src/handlers/knowledge/request/review_packet.rs',
 ];
 const MCP_REQUEST_PATH = 'crates/missiond-mcp/src/tools/knowledge/request.rs';
