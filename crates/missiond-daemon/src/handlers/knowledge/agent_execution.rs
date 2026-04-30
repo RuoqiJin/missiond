@@ -36,6 +36,7 @@ mod completion_entry;
 mod completion_gates;
 mod completion_maintenance;
 mod completion_records;
+mod completion_response;
 mod completion_trace;
 mod completion_verification;
 mod lisp_syntax;

@@ -1,7 +1,7 @@
 use anyhow::Result;
 use missiond_core::event::events::ExecutionEvent;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
-use serde_json::{json, Value};
+use serde_json::Value;
 
 use crate::state::AppState;
 
@@ -12,6 +12,7 @@ use super::completion_records::{
     normalize_verifier_status, VALID_COMMIT_STATUSES, VALID_TASK_RUN_VERIFIER_STATUSES,
     VALID_VERIFIER_STATUSES,
 };
+use super::completion_response::{build_completion_response, CompletionResponseFields};
 use super::completion_trace::append_completion_trace_if_requested;
 use super::completion_verification::evaluate_completion_verification;
 use super::log_counters::{allocate_id, Counter};
@@ -261,12 +262,6 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
         Ok(outcome) => outcome,
         Err(err) => return Ok(err),
     };
-    // Tri-state placeholder kept in sync with the wave21-03 response
-    // shape: when the auto-verifier ran the response surfaces the
-    // structured summary; when only the legacy claim was made it stays
-    // None and the diagnostic prose above carries the explanation.
-    let verified_validation: Option<Value> = verification_outcome.auto_verifier_summary.clone();
-
     let id = allocate_id(&mut file, Counter::Completion)?;
     let date = now_iso();
 
@@ -318,116 +313,29 @@ pub(super) async fn action_complete(state: &AppState, args: &Value) -> Result<To
     )
     .await;
 
-    let mut response = json!({
-        "status": "recorded",
-        "completion_id": id,
-        "phase": phase,
-        "agent": agent,
-        "at": date,
-        // Always surfaced so callers can detect at a glance which mode
-        // the completion went through. `false` here means audit-only
-        // (legacy / opt-out) — `true` means the durability invariants
-        // were validated at write-time and the validation summary is
-        // included below.
-        "scoped_commit_enforced": enforce_scoped_commit,
+    let mut response = build_completion_response(CompletionResponseFields {
+        completion_id: &id,
+        phase,
+        agent,
+        date: &date,
+        scoped_commit_enforced: enforce_scoped_commit,
+        changed_files: changed_files.as_deref(),
+        staged_files: staged_files.as_deref(),
+        commit_hash: commit_hash.as_deref(),
+        commit_status: commit_status.as_deref(),
+        commit_blocker: commit_blocker.as_deref(),
+        scoped_commit_validation: scoped_commit_validation.as_ref(),
+        task_contract_path: task_contract_path.as_deref(),
+        task_report_path: task_report_path.as_deref(),
+        verifier_status: verifier_status.as_deref(),
+        verifier_notes: verifier_notes.as_deref(),
+        task_contract_validation: task_contract_validation.as_ref(),
+        task_run_verifier_status: task_run_verifier_status.as_deref(),
+        shared_memory_path: shared_memory_path.as_deref(),
+        verifier_diagnostics: verifier_diagnostics.as_deref(),
+        verified: verified_flag,
+        verification_outcome: &verification_outcome,
     });
-    if let Some(list) = changed_files {
-        response["changed_files"] = json!(list);
-    }
-    if let Some(list) = staged_files {
-        response["staged_files"] = json!(list);
-    }
-    if let Some(hash) = commit_hash {
-        response["commit_hash"] = json!(hash);
-    }
-    if let Some(status_val) = commit_status {
-        response["commit_status"] = json!(status_val);
-    }
-    if let Some(blocker) = commit_blocker {
-        response["commit_blocker"] = json!(blocker);
-    }
-    if let Some(v) = scoped_commit_validation {
-        response["scoped_commit_validation"] = v;
-    }
-    // wave-19 / task 08 — surface contract metadata + the contract-level
-    // validation summary (when the gate ran). Skip-serialize semantics
-    // mirror the scoped-commit fields above so the response stays
-    // byte-identical for legacy callers that omit every wave19 field.
-    if let Some(tcp) = task_contract_path {
-        response["task_contract_path"] = json!(tcp);
-    }
-    if let Some(trp) = task_report_path {
-        response["task_report_path"] = json!(trp);
-    }
-    // The wave19-08 caller-supplied `verifier_status` slot is preserved
-    // verbatim when the wave22-02 auto-verifier did NOT run; otherwise
-    // the daemon-computed status (set further below) wins so the
-    // response surface advertises a single authoritative verdict.
-    if let Some(ref vs) = verifier_status {
-        response["verifier_status"] = json!(vs);
-    }
-    if let Some(vn) = verifier_notes {
-        response["verifier_notes"] = json!(vn);
-    }
-    if let Some(v) = task_contract_validation {
-        response["task_contract_validation"] = v;
-    }
-    // wave-21 / task 03 — surface task-run verifier metadata + the
-    // verified-gate validation summary. Same skip-serialize semantics
-    // as the wave19-08 fields above so legacy callers stay byte-
-    // identical when they omit every wave21 field.
-    if let Some(trvs) = task_run_verifier_status {
-        response["task_run_verifier_status"] = json!(trvs);
-    }
-    if let Some(smp) = shared_memory_path {
-        response["shared_memory_path"] = json!(smp);
-    }
-    // The wave21-03 caller-supplied `verifier_diagnostics` slot is
-    // preserved verbatim when the wave22-02 auto-verifier did NOT run;
-    // otherwise the daemon-computed diagnostic (set further below)
-    // wins so reviewers see one diagnostic per response.
-    if let Some(ref vd) = verifier_diagnostics {
-        response["verifier_diagnostics"] = json!(vd);
-    }
-    if let Some(v) = verified_flag {
-        response["verified"] = json!(v);
-    }
-
-    // ── wave-22 / task 02 — auto task-run verifier surface ────────────
-    //
-    // `verification_source` flags how the verdict was reached:
-    //   * `daemon-auto-verifier` — daemon ran the in-tree verifier; the
-    //     daemon-computed `verifier_status="passed"` overrides any
-    //     caller-supplied wave19-08 / wave21-03 status. The structured
-    //     `verified_scope_summary` records every cross-checked rule.
-    //   * `legacy-caller-claim` — caller passed `verified=true` but at
-    //     least one path was missing; daemon-computed status is
-    //     `"unknown"` and `verifier_diagnostics` carries the migration
-    //     prose pointing at the missing path(s).
-    //
-    // Absent `verification_source` (legacy callers) keeps the response
-    // shape byte-identical to the wave21-03 surface.
-    if let Some(src) = verification_outcome.verification_source {
-        response["verification_source"] = json!(src);
-    }
-    if let Some(status) = verification_outcome.auto_verifier_status {
-        // Daemon-computed verdict wins over the caller-supplied
-        // wave19-08 / wave21-03 statuses. Reviewers can still see the
-        // caller-supplied values inside `task_run_verifier_status` /
-        // the companion log.
-        response["verifier_status"] = json!(status);
-    }
-    if let Some(diag) = verification_outcome.auto_verifier_diagnostics {
-        response["verifier_diagnostics"] = json!(diag);
-    }
-    if let Some(scope_summary) = verified_validation {
-        // wave-22 contract: the summary is exposed as
-        // `verified_scope_summary`. We keep the wave21-03 shape under
-        // the legacy `verified_validation` key too so existing
-        // dashboards keep parsing while consumers migrate.
-        response["verified_scope_summary"] = scope_summary.clone();
-        response["verified_validation"] = scope_summary;
-    }
 
     append_completion_trace_if_requested(
         args,
