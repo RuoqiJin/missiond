@@ -45,6 +45,7 @@ mod completion_indexes;
 mod completion_inputs;
 mod completion_maintenance;
 mod completion_records;
+mod completion_repair;
 mod completion_response;
 mod completion_trace;
 mod completion_verification;
