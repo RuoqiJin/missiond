@@ -19,21 +19,24 @@ import { pathToFileURL } from 'node:url';
 
 import { compileContextPackSource } from './context-pack-compile-shards.mjs';
 import { parseLisp } from './lib/missiond_lisp.mjs';
+import {
+  DEFAULT_MODEL_PROFILE,
+  loadWorkstationRuntimeConfigForRepo,
+} from './lib/v3_workstation_runtime.mjs';
 import { projectManifest, validateManifestObject } from './check-task-runner-manifest.mjs';
 
 const SCRIPT = 'scripts/context-pack-materialize-wave.mjs';
 const MANIFEST_SCHEMA = 'missiond.task-runner-manifest.v2';
 const TASK_SCHEMA = 'missiond.task-contract.v1';
-const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
 const DEFAULT_ESTIMATED_MINUTES = 30;
 const DEFAULT_HEARTBEAT_MINUTES = 10;
-const DEFAULT_TIMEOUT_SECS = 2400;
 
 const usage = `Usage:
   node scripts/context-pack-materialize-wave.mjs --context-pack <context-pack.lisp>
     [--out-dir <repo>] [--wave <wave>] [--task-prefix <prefix>]
     [--estimated-minutes <n>] [--heartbeat-minutes <n>] [--timeout-secs <n>]
-    [--model-profile <profile>] [--dry-run] [--force] [--json]
+    [--model-profile <profile>] [--blueprint <path>] [--allow-default-config]
+    [--dry-run] [--force] [--json]
   node scripts/context-pack-materialize-wave.mjs --dry-fixture [--json]
 
 Projects a mapped context-pack integration-plan into task-runner manifest +
@@ -62,6 +65,8 @@ function main() {
     heartbeatMinutes: opts.heartbeatMinutes,
     timeoutSecs: opts.timeoutSecs,
     modelProfile: opts.modelProfile,
+    blueprintPath: opts.blueprintPath,
+    allowDefaultConfig: opts.allowDefaultConfig,
     dryRun: opts.dryRun,
     force: opts.force,
     nowIso: isoNow(),
@@ -84,8 +89,10 @@ function parseArgs(args) {
     taskPrefix: null,
     estimatedMinutes: DEFAULT_ESTIMATED_MINUTES,
     heartbeatMinutes: DEFAULT_HEARTBEAT_MINUTES,
-    timeoutSecs: DEFAULT_TIMEOUT_SECS,
-    modelProfile: DEFAULT_MODEL_PROFILE,
+    timeoutSecs: null,
+    modelProfile: null,
+    blueprintPath: null,
+    allowDefaultConfig: false,
     dryRun: false,
     force: false,
     json: false,
@@ -116,6 +123,9 @@ function parseArgs(args) {
     else if (arg.startsWith('--timeout-secs=')) opts.timeoutSecs = parsePositiveInt(arg.slice('--timeout-secs='.length), '--timeout-secs');
     else if (arg === '--model-profile') opts.modelProfile = need(args, ++i, arg);
     else if (arg.startsWith('--model-profile=')) opts.modelProfile = arg.slice('--model-profile='.length);
+    else if (arg === '--blueprint') opts.blueprintPath = need(args, ++i, arg);
+    else if (arg.startsWith('--blueprint=')) opts.blueprintPath = arg.slice('--blueprint='.length);
+    else if (arg === '--allow-default-config') opts.allowDefaultConfig = true;
     else fail(`unknown argument: ${arg}`);
   }
   return opts;
@@ -128,17 +138,25 @@ export function materializeContextPackWave({
   taskPrefix = null,
   estimatedMinutes = DEFAULT_ESTIMATED_MINUTES,
   heartbeatMinutes = DEFAULT_HEARTBEAT_MINUTES,
-  timeoutSecs = DEFAULT_TIMEOUT_SECS,
-  modelProfile = DEFAULT_MODEL_PROFILE,
+  timeoutSecs = null,
+  modelProfile = null,
+  blueprintPath = null,
+  allowDefaultConfig = false,
   dryRun = false,
   force = false,
   nowIso = isoNow(),
 }) {
   const repo = path.resolve(repoRoot);
-  validateToken(modelProfile, 'model profile');
-  if (timeoutSecs < 60 || timeoutSecs > 7200) {
-    throw new Error(`timeout_secs must be between 60 and 7200, got ${timeoutSecs}`);
-  }
+  const runtimeConfig = loadWorkstationRuntimeConfigForRepo(repo, {
+    blueprintPath,
+    allowDefaultFallback: allowDefaultConfig,
+  });
+  const effectiveModelProfile =
+    modelProfile ??
+    runtimeConfig.defaultModelProfileForTemplate('coder') ??
+    DEFAULT_MODEL_PROFILE;
+  const effectiveTimeoutSecs = runtimeConfig.clampTimeoutSecs(timeoutSecs);
+  validateToken(effectiveModelProfile, 'model profile');
 
   const contextPackAbs = path.resolve(process.cwd(), contextPackPath);
   const contextPackRel = repoRelative(repo, contextPackAbs, 'context-pack');
@@ -163,17 +181,17 @@ export function materializeContextPackWave({
     contextPackRel,
     estimatedMinutes,
     heartbeatMinutes,
-    timeoutSecs,
-    modelProfile,
+    timeoutSecs: effectiveTimeoutSecs,
+    modelProfile: effectiveModelProfile,
   });
   const manifestSource = renderManifest({
     wave: outputWave,
     contextPackRel,
     nowIso,
-    modelProfile,
+    modelProfile: effectiveModelProfile,
     estimatedMinutes,
     heartbeatMinutes,
-    timeoutSecs,
+    timeoutSecs: effectiveTimeoutSecs,
     tasks,
   });
   validateManifestSource(manifestSource);
@@ -214,7 +232,14 @@ export function materializeContextPackWave({
       write_scope: task.write_scope,
       must_not_touch: task.must_not_touch,
       acceptance: task.acceptance,
+      model_profile: task.model_profile,
+      timeout_secs: task.timeout_secs,
     })),
+    runtime_projection: {
+      config_source: runtimeConfig.source,
+      model_profile: effectiveModelProfile,
+      timeout_secs: effectiveTimeoutSecs,
+    },
     outputs,
     next_commands: [
       `node scripts/prepare-task-runner-wave.mjs --manifest .missiond/tasks/${outputWave}/manifest.lisp`,
@@ -465,6 +490,9 @@ function runFixtures() {
     const packPath = path.join(tmp, '.missiond/tasks/wave99/context-pack.lisp');
     fs.mkdirSync(path.dirname(packPath), { recursive: true });
     fs.writeFileSync(packPath, fixtureContextPack());
+    const blueprintPath = path.join(tmp, '.missiond/v3/missiond-blueprint.lisp');
+    fs.mkdirSync(path.dirname(blueprintPath), { recursive: true });
+    fs.writeFileSync(blueprintPath, fixtureBlueprint());
     const result = materializeContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
@@ -473,9 +501,16 @@ function runFixtures() {
     assert(result.task_count === 2, 'expected two generated tasks');
     assert(result.outputs.manifest.action === 'written', 'manifest should be written');
     assert(result.outputs.contracts.every((c) => c.action === 'written'), 'contracts should be written');
+    assert(result.runtime_projection.model_profile === 'fixture-opus-4-7', 'expected model profile from V3 workstation-config');
+    assert(result.runtime_projection.timeout_secs === 3660, 'expected timeout from V3 workstation-config');
+    assert(result.tasks.every((task) => task.model_profile === 'fixture-opus-4-7'), 'tasks should carry projected model profile');
+    assert(result.tasks.every((task) => task.timeout_secs === 3660), 'tasks should carry projected timeout');
 
     const manifest = path.join(tmp, '.missiond/tasks/wave99/manifest.lisp');
     assert(fs.existsSync(manifest), 'manifest should exist');
+    const manifestSource = fs.readFileSync(manifest, 'utf8');
+    assert(manifestSource.includes(':model_profile fixture-opus-4-7'), 'manifest should project V3 model profile');
+    assert(manifestSource.includes(':timeout_secs 3660'), 'manifest should project V3 timeout');
     const manifestCheck = spawnSync(process.execPath, [path.resolve('scripts/check-task-runner-manifest.mjs'), manifest], {
       cwd: process.cwd(),
       encoding: 'utf8',
@@ -538,6 +573,20 @@ function fixtureContextPack({ dispatchGroups = '[(group :id A :shards [alpha]) (
   (shard-proposal :id s1 :agent context-a :seq 1 :at "2026-04-29T00:00:00Z" :shard alpha :owner worker-a :summary "Alpha summary." :write-scope ["scripts/alpha.mjs"] :must-not-touch ["packages/**"] :acceptance ["node scripts/check-v3-code-isomorphism-complete.mjs"])
   (shard-proposal :id s2 :agent context-b :seq 2 :at "2026-04-29T00:00:01Z" :shard beta :owner worker-b :summary "Beta summary." :write-scope ["scripts/beta.mjs"] :must-not-touch ["scripts/alpha.mjs"] :acceptance ["git diff --check"])
   (integration-plan :id ${integrationId} :agent integrator :seq 3 :at "2026-04-29T00:00:02Z" :summary "accept both" :accepted-shards [alpha beta] :dispatch-groups ${dispatchGroups}))`;
+}
+
+function fixtureBlueprint() {
+  return `(missiond-blueprint
+  (workstation-config
+    (slot-template coder
+      :role coder
+      :default-model-profile fixture-opus-4-7)
+    (timeout-policy boardtask-dispatch
+      :default_secs 3660
+      :min_secs 60
+      :max_secs 7200
+      :watchdog_grace_secs 120
+      :missing_session_probe_secs 120)))`;
 }
 
 function assert(condition, message) {

@@ -20,6 +20,7 @@ const DEFAULT_FILES = {
   appender: 'scripts/context-pack-append.mjs',
   compiler: 'scripts/context-pack-compile-shards.mjs',
   materializer: 'scripts/context-pack-materialize-wave.mjs',
+  v3Runtime: 'scripts/lib/v3_workstation_runtime.mjs',
 };
 
 function main() {
@@ -108,6 +109,8 @@ function checkFiles(root, files) {
     'context-pack-materialize-wave',
     'two-stage',
     'code workers consume',
+    '(v2-item context-pack-two-stage-parallel-work',
+    ':status runtime-projected',
     'materialize-wave',
     'task-runner-manifest',
     'task-contracts',
@@ -117,6 +120,7 @@ function checkFiles(root, files) {
     'scripts/context-pack-append.mjs',
     'scripts/context-pack-compile-shards.mjs',
     'scripts/context-pack-materialize-wave.mjs',
+    'scripts/lib/v3_workstation_runtime.mjs',
     'node scripts/check-v3-context-pack-isomorphism.mjs',
   ]);
 
@@ -163,11 +167,31 @@ function checkFiles(root, files) {
     'task-runner-manifest.v2',
     'task-contract.v1',
     'mapped dispatch groups',
+    'loadWorkstationRuntimeConfigForRepo',
+    'defaultModelProfileForTemplate(\'coder\')',
+    'clampTimeoutSecs',
     'model_profile',
     'timeout_secs',
+    'runtime_projection',
     'context_pack_path',
+    '--allow-default-config',
     'prepare-task-runner-wave.mjs',
     'task-runner-dispatch.mjs',
+  ]);
+
+  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'export class WorkstationRuntimeConfig',
+    'export function loadWorkstationRuntimeConfigForRepo',
+    'export function parseWorkstationRuntimeConfig',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'workstation-config',
+    'slot-template',
+    'timeout-policy',
+    'boardtask-dispatch',
+    'defaultModelProfileForTemplate',
+    'clampTimeoutSecs',
+    'DEFAULT_MODEL_PROFILE',
+    'DEFAULT_TIMEOUT_SECS',
   ]);
 
   return diagnostics;
@@ -185,6 +209,9 @@ function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-context-pack-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
+  (v2-convergence-map
+    (v2-item context-pack-two-stage-parallel-work
+      :status runtime-projected))
   (artifact-contracts
     (artifact context-pack
       :schema "missiond.context-pack.v1"
@@ -202,7 +229,8 @@ function buildFixture() {
 	      :code ["scripts/check-context-pack.mjs"
 	             "scripts/context-pack-append.mjs"
 	             "scripts/context-pack-compile-shards.mjs"
-	             "scripts/context-pack-materialize-wave.mjs"]
+	             "scripts/context-pack-materialize-wave.mjs"
+	             "scripts/lib/v3_workstation_runtime.mjs"]
 	      :note "context-pack-materialize-wave materialize-wave task-runner-manifest task-contracts fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-context-pack-isomorphism.mjs"]))`);
@@ -210,6 +238,7 @@ function buildFixture() {
   writeFixture(root, DEFAULT_FILES.appender, fs.readFileSync(DEFAULT_FILES.appender, 'utf8'));
   writeFixture(root, DEFAULT_FILES.compiler, fs.readFileSync(DEFAULT_FILES.compiler, 'utf8'));
   writeFixture(root, DEFAULT_FILES.materializer, fs.readFileSync(DEFAULT_FILES.materializer, 'utf8'));
+  writeFixture(root, DEFAULT_FILES.v3Runtime, fs.readFileSync(DEFAULT_FILES.v3Runtime, 'utf8'));
   writeFixture(root, 'scripts/lib/missiond_lisp.mjs', fs.readFileSync('scripts/lib/missiond_lisp.mjs', 'utf8'));
   writeFixture(root, 'scripts/check-task-contract.mjs', fs.readFileSync('scripts/check-task-contract.mjs', 'utf8'));
   writeFixture(root, 'scripts/check-task-runner-manifest.mjs', fs.readFileSync('scripts/check-task-runner-manifest.mjs', 'utf8'));
