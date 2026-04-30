@@ -35,6 +35,7 @@ mod claim_lease;
 mod claim_records;
 mod claim_release;
 mod completion_audit;
+mod completion_audit_findings;
 mod completion_contract_gate;
 mod completion_durability;
 mod completion_entry;
