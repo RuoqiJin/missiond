@@ -706,12 +706,12 @@
       :surface compute-primitives
       :note "PTY, job, flow, forge, cc, process, and low-level worker tools remain a designed runtime-primitives surface.")
     (v2-item skill-runtime
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: skill workflow executor"
       :v3-pillar worker-runtime
       :v3-function skill-runtime
       :surface skill-runtime
-      :note "Skill query/context/mutate/exec has a V3 destination before code split.")
+      :note "Skill query/context/mutate/exec is physically split and pinned under the V3 skill-runtime surface.")
     (v2-item cascade-universe-governance
       :status designed
       :v2-source ".missiond/v2/intent-event-bus.lisp :: cascade/control tree"
@@ -808,7 +808,7 @@
         :surface project-registry
         :tools [mission_project])
       (tool-group skill-runtime-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: skill workflow executor"
         :v3-pillar worker-runtime
         :v3-function skill-runtime
@@ -1633,11 +1633,16 @@
       :note "Designed V3 destination for low-level worker runtime primitives: PTY, task, job, flow_run, process, CC tasks, forge, pause/control, and model process tools. Higher-level MissionD work should enter through mission_request/mission_plan/mission_board; this surface exists so legacy compute tools have a visible convergence target.")
 
     (surface skill-runtime
-      :status "designed"
+      :status "code-aligned"
       :implements [skill-query skill-context skill-mutate skill-exec]
       :code ["crates/missiond-daemon/src/handlers/knowledge/skill.rs"
-             "crates/missiond-mcp/src/tools/knowledge/skill.rs"]
-      :note "Designed V3 destination for skill registry and skill execution behavior. It is mapped but not yet physically aligned to V3 pillar/function boundaries.")
+             "crates/missiond-daemon/src/handlers/knowledge/skill/query.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/skill/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/skill/mutate.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/skill/exec.rs"
+             "crates/missiond-mcp/src/tools/knowledge/skill.rs"
+             "scripts/check-v3-skill-runtime-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for skill registry and skill execution behavior. skill.rs is the thin mission_skill facade for consolidated mission_skill_query, mission_skill_context, mission_skill_mutate, and direct legacy skill tool names; skill/query.rs owns list/search/topics/actions/stats, FTS/vector ranking, topic hit recording, workflow action projection, and execution stats egress; skill/context.rs owns context build/resolve, skill dependency expansion, infra and KB dependency aggregation, and optional BoardTask context projection; skill/mutate.rs owns upsert/record/render/rollback, topic auto-create, block writes, materialization, skill version rollback, and embedding refresh through ProcessSkillTopic; skill/exec.rs owns mission_skill_exec and execute_workflow result/error egress. Runtime projection remains a later runtime-projected graduation so V3 can own skill execution policy directly.")
 
     (surface cascade-governance
       :status "designed"
@@ -1682,6 +1687,7 @@
              "node scripts/check-v3-task-lifecycle-isomorphism.mjs"
              "node scripts/check-v3-memory-kb-isomorphism.mjs"
              "node scripts/check-v3-project-registry-isomorphism.mjs"
+             "node scripts/check-v3-skill-runtime-isomorphism.mjs"
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
