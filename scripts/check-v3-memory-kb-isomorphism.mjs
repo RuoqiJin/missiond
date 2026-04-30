@@ -23,6 +23,8 @@ const DEFAULT_FILES = {
   kbQuery: 'crates/missiond-daemon/src/handlers/knowledge/kb/query.rs',
   kbMutate: 'crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs',
   kbImport: 'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
+  kbGc: 'crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs',
+  kbOps: 'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
 };
 
@@ -93,6 +95,8 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/kb/query.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/import.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs',
+    'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
     'scripts/check-v3-memory-kb-isomorphism.mjs',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
@@ -102,6 +106,8 @@ function checkFiles(root, files) {
     'kb/query.rs owns get/list JSON egress',
     'kb/mutate.rs owns forget/update/project mutation side effects',
     'kb/import.rs owns servers_yaml import projection',
+    'kb/gc.rs owns stats/stale/duplicates cleanup actions',
+    'kb/ops.rs owns queue-status and execute-plan operation egress',
     'node scripts/check-v3-memory-kb-isomorphism.mjs',
   ]);
 
@@ -109,18 +115,23 @@ function checkFiles(root, files) {
     'mod args;',
     'mod compact;',
     'mod conflicts;',
+    'mod gc;',
     'mod import;',
     'mod mutate;',
+    'mod ops;',
     'mod quality;',
     'mod query;',
     'use args::{',
     'use compact::handle_kb_compact;',
     'use conflicts::detect_kb_conflicts;',
+    'use gc::handle_kb_gc;',
     'use import::handle_kb_import;',
     'handle_kb_batch_forget',
     'handle_kb_batch_set_project',
     'handle_kb_forget',
     'handle_kb_update',
+    'handle_kb_execute_plan',
+    'handle_kb_queue_status',
     'use quality::check_content_quality;',
     'use query::{handle_kb_get, handle_kb_list};',
     'pub(crate) async fn handle',
@@ -213,6 +224,34 @@ function checkFiles(root, files) {
     'Unsupported import format',
   ]);
 
+  requireAll(diagnostics, files.kbGc, sources.kbGc, [
+    'pub(super) async fn handle_kb_gc',
+    'KBGCArgs',
+    'kb_stats',
+    'kb_find_stale',
+    'kb_find_duplicates',
+    'kb_batch_forget',
+    'clean_stale',
+    'clean_duplicates',
+    'Unknown gc action',
+  ]);
+
+  requireAll(diagnostics, files.kbOps, sources.kbOps, [
+    'pub(super) async fn handle_kb_queue_status',
+    'pub(super) async fn handle_kb_execute_plan',
+    'kb_ops_list',
+    'kb_ops_plan_summary',
+    'kb_ops_expire_stale',
+    'kb_ops_update_status',
+    'execute_delete',
+    'execute_update',
+    'execute_dispatch',
+    'KBRememberInput',
+    'publish_task',
+    'TaskEvent::Created',
+    'submit_task',
+  ]);
+
   requireAll(diagnostics, files.mcpKb, sources.mcpKb, [
     '"mission_kb_query"',
     '"mission_kb_remember"',
@@ -246,8 +285,10 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/kb/query.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/mutate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/import.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns get/list JSON egress; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection."))
+      :note "kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns get/list JSON egress; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
@@ -255,15 +296,19 @@ function buildFixture() {
 mod args;
 mod compact;
 mod conflicts;
+mod gc;
 mod import;
 mod mutate;
+mod ops;
 mod quality;
 mod query;
 use args::{KBRememberArgs};
 use compact::handle_kb_compact;
 use conflicts::detect_kb_conflicts;
+use gc::handle_kb_gc;
 use import::handle_kb_import;
 handle_kb_batch_forget; handle_kb_batch_set_project; handle_kb_forget; handle_kb_update;
+handle_kb_execute_plan; handle_kb_queue_status;
 use quality::check_content_quality;
 use query::{handle_kb_get, handle_kb_list};
 pub(crate) async fn handle() {
@@ -310,6 +355,17 @@ pub(super) async fn handle_kb_update() {
   writeFixture(root, DEFAULT_FILES.kbImport, `
 pub(super) async fn handle_kb_import() {
   KBImportArgs; servers_yaml; default_mission_home(); InfraConfig::load(); KBRememberInput; Unsupported import format;
+}`);
+  writeFixture(root, DEFAULT_FILES.kbGc, `
+pub(super) async fn handle_kb_gc() {
+  KBGCArgs; kb_stats(); kb_find_stale(); kb_find_duplicates(); kb_batch_forget(); clean_stale; clean_duplicates; Unknown gc action;
+}`);
+  writeFixture(root, DEFAULT_FILES.kbOps, `
+pub(super) async fn handle_kb_queue_status() {
+  kb_ops_list(); kb_ops_plan_summary();
+}
+pub(super) async fn handle_kb_execute_plan() {
+  kb_ops_list(); kb_ops_expire_stale(); kb_ops_update_status(); execute_delete(); execute_update(); execute_dispatch(); KBRememberInput; publish_task(); TaskEvent::Created; submit_task();
 }`);
   writeFixture(root, DEFAULT_FILES.mcpKb, `
 "mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_ops";

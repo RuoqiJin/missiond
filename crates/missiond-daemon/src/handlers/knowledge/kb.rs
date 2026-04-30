@@ -14,18 +14,22 @@ use crate::state::EmbeddingTask;
 mod args;
 mod compact;
 mod conflicts;
+mod gc;
 mod import;
 mod mutate;
+mod ops;
 mod quality;
 mod query;
 
-use args::{KBDiscoverArgs, KBGCArgs, KBRememberArgs, KBSearchArgs};
+use args::{KBDiscoverArgs, KBRememberArgs, KBSearchArgs};
 use compact::handle_kb_compact;
 use conflicts::detect_kb_conflicts;
+use gc::handle_kb_gc;
 use import::handle_kb_import;
 use mutate::{
     handle_kb_batch_forget, handle_kb_batch_set_project, handle_kb_forget, handle_kb_update,
 };
+use ops::{handle_kb_execute_plan, handle_kb_queue_status};
 use quality::check_content_quality;
 use query::{handle_kb_get, handle_kb_list};
 
@@ -663,94 +667,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             })))
         }
 
-        "mission_kb_gc" => {
-            let KBGCArgs { action, days } = serde_json::from_value(args)?;
-            match action.as_str() {
-                "stats" => {
-                    let stats = state.store.kb_stats().await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    Ok(ToolResult::json_pretty(&stats))
-                }
-                "stale" => {
-                    let threshold = days.unwrap_or(30);
-                    let stale = state.store.kb_find_stale(threshold).await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    Ok(ToolResult::json(&serde_json::json!({
-                        "threshold_days": threshold,
-                        "count": stale.len(),
-                        "entries": stale.iter().map(|e| serde_json::json!({
-                            "category": e.category,
-                            "key": e.key,
-                            "summary": e.summary,
-                            "updatedAt": e.updated_at,
-                        })).collect::<Vec<_>>(),
-                    })))
-                }
-                "duplicates" => {
-                    let dups = state.store.kb_find_duplicates().await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    Ok(ToolResult::json(&serde_json::json!({
-                        "count": dups.len(),
-                        "pairs": dups.iter().map(|(a, b, sim)| serde_json::json!({
-                            "similarity": format!("{:.2}", sim),
-                            "a": {"category": a.category, "key": a.key, "summary": a.summary, "accessCount": a.access_count},
-                            "b": {"category": b.category, "key": b.key, "summary": b.summary, "accessCount": b.access_count},
-                        })).collect::<Vec<_>>(),
-                    })))
-                }
-                "clean_stale" => {
-                    let threshold = days.unwrap_or(30);
-                    let stale = state.store.kb_find_stale(threshold).await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    let keys: Vec<String> = stale.iter().map(|e| e.key.clone()).collect();
-                    let count = state.store.kb_batch_forget(&keys).await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    Ok(ToolResult::json(&serde_json::json!({
-                        "action": "clean_stale",
-                        "threshold_days": threshold,
-                        "deleted": count,
-                        "keys": keys,
-                    })))
-                }
-                "clean_duplicates" => {
-                    let dups = state.store.kb_find_duplicates().await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    // Keep entry with higher access_count (or newer updated_at), delete the other
-                    let mut to_delete = Vec::new();
-                    let mut seen = std::collections::HashSet::new();
-                    for (a, b, sim) in &dups {
-                        // Skip if either already marked for deletion
-                        if seen.contains(&a.key) || seen.contains(&b.key) { continue; }
-                        let loser = if a.access_count > b.access_count {
-                            &b.key
-                        } else if b.access_count > a.access_count {
-                            &a.key
-                        } else if a.updated_at >= b.updated_at {
-                            &b.key
-                        } else {
-                            &a.key
-                        };
-                        to_delete.push(serde_json::json!({
-                            "deleted_key": loser,
-                            "kept_key": if loser == &a.key { &b.key } else { &a.key },
-                            "similarity": format!("{:.2}", sim),
-                        }));
-                        seen.insert(loser.clone());
-                    }
-                    let keys: Vec<String> = to_delete.iter()
-                        .filter_map(|d| d["deleted_key"].as_str().map(String::from))
-                        .collect();
-                    let count = state.store.kb_batch_forget(&keys).await
-                        .map_err(|e| anyhow!("DB error: {}", e))?;
-                    Ok(ToolResult::json(&serde_json::json!({
-                        "action": "clean_duplicates",
-                        "deleted": count,
-                        "details": to_delete,
-                    })))
-                }
-                _ => Ok(ToolResult::error(format!("Unknown gc action: {}. Use: stats, stale, duplicates, clean_stale, clean_duplicates", action))),
-            }
-        }
+        "mission_kb_gc" => handle_kb_gc(state, args).await,
 
         // ===== KB Analysis (via external AI) =====
         "mission_kb_analyze" => {
@@ -1164,234 +1081,8 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         }
 
         // ===== KB Operation Queue =====
-        "mission_kb_queue_status" => {
-            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
-            let plan_id = args_val.get("plan_id").and_then(|v| v.as_str());
-            let status_filter = args_val.get("status").and_then(|v| v.as_str());
-
-            let ops = state
-                .store
-                .kb_ops_list(plan_id, status_filter)
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-
-            // If plan_id given, also get summary
-            let summary = if let Some(pid) = plan_id {
-                state.store.kb_ops_plan_summary(pid).await.ok()
-            } else {
-                None
-            };
-
-            let mut resp = serde_json::json!({
-                "operations": ops,
-                "count": ops.len(),
-            });
-            if let Some(s) = summary {
-                resp["summary"] = s;
-            }
-            Ok(ToolResult::json_pretty(&resp))
-        }
-
-        "mission_kb_execute_plan" => {
-            let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
-            let plan_id = args_val.get("plan_id").and_then(|v| v.as_str());
-            let limit = args_val.get("limit").and_then(|v| v.as_u64()).unwrap_or(5) as usize;
-
-            // Expire stale pending ops (>24h)
-            let expired = state.store.kb_ops_expire_stale(86400).await.unwrap_or(0);
-            if expired > 0 {
-                info!(expired, "kb_execute_plan: expired stale pending ops");
-            }
-
-            let plan_id = plan_id.ok_or_else(|| anyhow!("plan_id is required"))?;
-
-            // Get pending operations
-            let ops = state
-                .store
-                .kb_ops_list(Some(plan_id), Some("pending"))
-                .await
-                .map_err(|e| anyhow!("DB error: {}", e))?;
-
-            if ops.is_empty() {
-                return Ok(ToolResult::text("No pending operations in queue."));
-            }
-
-            let batch: Vec<_> = ops.into_iter().take(limit).collect();
-            let mut results = Vec::new();
-
-            for op in &batch {
-                // Mark as running
-                let _ = state
-                    .store
-                    .kb_ops_update_status(&op.id, "running", None, None)
-                    .await;
-
-                let target_keys: Vec<String> =
-                    serde_json::from_str(&op.target_keys).unwrap_or_default();
-                let outcome = match op.operation.as_str() {
-                    "delete" => {
-                        let mut deleted = 0usize;
-                        for key in &target_keys {
-                            if state.store.kb_forget(key).await.unwrap_or(false) {
-                                deleted += 1;
-                            }
-                        }
-                        Ok(format!("Deleted {}/{} keys", deleted, target_keys.len()))
-                    }
-                    "update" | "category_fix" | "recategorize" => {
-                        // Update category/summary directly from rationale (contains new_entry JSON)
-                        let meta: serde_json::Value = op
-                            .rationale
-                            .as_deref()
-                            .and_then(|r| serde_json::from_str(r).ok())
-                            .unwrap_or_default();
-                        let new_entry = meta.get("new_entry");
-                        let key = target_keys.first().map(|k| k.as_str()).or_else(|| {
-                            new_entry.and_then(|ne| ne.get("key").and_then(|v| v.as_str()))
-                        });
-                        let category =
-                            new_entry.and_then(|ne| ne.get("category").and_then(|v| v.as_str()));
-                        let summary =
-                            new_entry.and_then(|ne| ne.get("summary").and_then(|v| v.as_str()));
-
-                        match (key, category) {
-                            (Some(key), Some(cat)) => {
-                                let input = missiond_core::types::KBRememberInput {
-                                    category: cat.to_string(),
-                                    key: key.to_string(),
-                                    summary: summary.unwrap_or("").to_string(),
-                                    detail: new_entry.and_then(|ne| ne.get("detail").cloned()),
-                                    source: Some("consolidation".to_string()),
-                                    confidence: new_entry.and_then(|ne| ne.get("confidence").and_then(|v| v.as_f64())),
-                                    project_id: None,
-                                };
-                                match state.store.kb_remember(&input).await {
-                                    Ok(r) => Ok(format!("Updated key={} category={} action={}", key, cat, r.action)),
-                                    Err(e) => Err(format!("Failed to update: {}", e)),
-                                }
-                            }
-                            _ => Err("update operation requires new_entry with key and category in rationale".to_string()),
-                        }
-                    }
-                    "merge" | "distill" => {
-                        // Auto-dispatch: fetch entries, build prompt, submit to slot-memory-slow
-                        let mut entries_text = String::new();
-                        for key in &target_keys {
-                            if let Ok(Some(entry)) = state.store.kb_get(key).await {
-                                entries_text.push_str(&format!(
-                                    "---\nKey: {}\nCategory: {}\nSummary: {}\nDetail: {}\n",
-                                    entry.key,
-                                    entry.category,
-                                    entry.summary,
-                                    entry
-                                        .detail
-                                        .as_ref()
-                                        .map(|d| d.to_string())
-                                        .unwrap_or_default(),
-                                ));
-                            }
-                        }
-                        if entries_text.is_empty() {
-                            Err(format!("No KB entries found for keys: {:?}", target_keys))
-                        } else {
-                            let rationale = op.rationale.as_deref().unwrap_or("");
-                            let prompt = if op.operation == "merge" {
-                                format!(
-                                    "KB整理任务(merge):\n\n原因: {}\n\n以下KB条目内容重叠,请合并为一条。\
-                                    保留最完整的key,用 mission_kb_remember 写入合并后的内容(category/summary/detail),\
-                                    然后用 mission_kb_forget 删除多余的key。\n\n{}", rationale, entries_text
-                                )
-                            } else {
-                                format!(
-                                    "KB整理任务(distill):\n\n原因: {}\n\n以下KB条目需要精炼。\
-                                    用 mission_kb_remember 更新每条的 summary(更简洁)和 detail(保留关键信息,删除冗余)。\n\n{}",
-                                    rationale, entries_text
-                                )
-                            };
-                            match crate::state::submit_task(state.store.as_ref(), "memory", &prompt)
-                                .await
-                            {
-                                Ok(task_id) => Ok(format!("dispatched:task_id={}", task_id)),
-                                Err(e) => Err(format!("submit failed: {}", e)),
-                            }
-                        }
-                    }
-                    other => Err(format!("Unknown operation: {}", other)),
-                };
-
-                match outcome {
-                    Ok(msg) => {
-                        let (status_str, result_json) = if msg.starts_with("dispatched:") {
-                            // Extract task_id from "dispatched:task_id=xxx"
-                            let task_id = msg.strip_prefix("dispatched:task_id=").unwrap_or(&msg);
-                            (
-                                "dispatched",
-                                serde_json::json!({
-                                    "id": op.id,
-                                    "operation": op.operation,
-                                    "status": "dispatched",
-                                    "taskId": task_id,
-                                }),
-                            )
-                        } else {
-                            (
-                                "done",
-                                serde_json::json!({
-                                    "id": op.id,
-                                    "operation": op.operation,
-                                    "status": "done",
-                                    "result": msg,
-                                }),
-                            )
-                        };
-                        let _ = state
-                            .store
-                            .kb_ops_update_status(&op.id, status_str, Some(&msg), None)
-                            .await;
-                        results.push(result_json);
-                    }
-                    Err(msg) => {
-                        let _ = state
-                            .store
-                            .kb_ops_update_status(&op.id, "failed", None, Some(&msg))
-                            .await;
-                        results.push(serde_json::json!({
-                            "id": op.id,
-                            "operation": op.operation,
-                            "status": "failed",
-                            "error": msg,
-                        }));
-                    }
-                }
-            }
-
-            // Signal unified scheduler to dispatch any newly created submit tasks
-            if results
-                .iter()
-                .any(|r| r.get("status").and_then(|s| s.as_str()) == Some("dispatched"))
-            {
-                let _ = state
-                    .bus
-                    .publish_task(missiond_core::event::events::TaskEvent::Created {
-                        task_id: String::new(),
-                    })
-                    .await;
-            }
-
-            // Get remaining count
-            let remaining = state
-                .store
-                .kb_ops_list(Some(plan_id), Some("pending"))
-                .await
-                .map(|v| v.len())
-                .unwrap_or(0);
-
-            Ok(ToolResult::json_pretty(&serde_json::json!({
-                "executed": results.len(),
-                "results": results,
-                "remaining": remaining,
-            })))
-        }
+        "mission_kb_queue_status" => handle_kb_queue_status(state, args).await,
+        "mission_kb_execute_plan" => handle_kb_execute_plan(state, args).await,
 
         // ===== Holographic Beacon (P4) =====
         "mission_beacon_list" => {
