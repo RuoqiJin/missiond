@@ -699,12 +699,12 @@
       :surface capability-governance
       :note "Capability usage, audit, and Codex ops are physically pinned under the V3 capability-governance surface; runtime projection remains a separate future graduation step.")
     (v2-item compute-primitives
-      :status designed
+      :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: pty / llm / worker / engine runtime"
       :v3-pillar worker-runtime
       :v3-function compute-primitives
       :surface compute-primitives
-      :note "PTY, job, flow, forge, cc, process, and low-level worker tools remain a designed runtime-primitives surface.")
+      :note "Task, PTY, job, flow_run, process, CC, forge, slot, pause, and worker primitives are physically pinned under the V3 compute-primitives surface; mission_compute_slot and mission_task_delegate remain owned by workstation-config.")
     (v2-item skill-runtime
       :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: skill workflow executor"
@@ -782,7 +782,7 @@
         :surface workstation-config
         :tools [mission_compute_slot mission_task_delegate])
       (tool-group compute-runtime-tools
-        :status designed
+        :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: worker path runtime primitives"
         :v3-pillar worker-runtime
         :v3-function compute-primitives
@@ -1655,11 +1655,32 @@
       :note "Code-aligned V3 destination for capability usage, audit, and Codex ops surfaces. capability_usage.rs is the thin capability-governance facade; capability_usage/runtime.rs owns snapshot/report/candidates/mark/ack, six source lanes, semantic hint merge review, protected source/target policy, review sidecar persistence, and non-blocking observability emissions; audit.rs owns mission_audit trace/detail/stats/export plus legacy mission_audit_* compatibility; codex_ops.rs owns mission_codex_ops recent/thread/tool_stats over codex_cli conversations.")
 
     (surface compute-primitives
-      :status "designed"
+      :status "code-aligned"
       :implements [pty task job flow-run process cc forge worker-control]
-      :code ["crates/missiond-daemon/src/handlers/compute"
-             "crates/missiond-mcp/src/tools/compute"]
-      :note "Designed V3 destination for low-level worker runtime primitives: PTY, task, job, flow_run, process, CC tasks, forge, pause/control, and model process tools. Higher-level MissionD work should enter through mission_request/mission_plan/mission_board; this surface exists so legacy compute tools have a visible convergence target.")
+      :code ["crates/missiond-daemon/src/handlers/mod.rs"
+             "crates/missiond-daemon/src/handlers/compute/mod.rs"
+             "crates/missiond-daemon/src/handlers/compute/task.rs"
+             "crates/missiond-daemon/src/handlers/compute/job.rs"
+             "crates/missiond-daemon/src/handlers/compute/flow_run.rs"
+             "crates/missiond-daemon/src/handlers/compute/pty.rs"
+             "crates/missiond-daemon/src/handlers/compute/process.rs"
+             "crates/missiond-daemon/src/handlers/compute/slot.rs"
+             "crates/missiond-daemon/src/handlers/compute/minimax.rs"
+             "crates/missiond-daemon/src/handlers/compute/cc_tasks.rs"
+             "crates/missiond-daemon/src/handlers/compute/worker.rs"
+             "crates/missiond-daemon/src/handlers/compute/forge.rs"
+             "crates/missiond-mcp/src/tools/compute/task.rs"
+             "crates/missiond-mcp/src/tools/compute/job.rs"
+             "crates/missiond-mcp/src/tools/compute/flow_run.rs"
+             "crates/missiond-mcp/src/tools/compute/pty.rs"
+             "crates/missiond-mcp/src/tools/compute/process.rs"
+             "crates/missiond-mcp/src/tools/compute/slot.rs"
+             "crates/missiond-mcp/src/tools/compute/minimax.rs"
+             "crates/missiond-mcp/src/tools/compute/cc_tasks.rs"
+             "crates/missiond-mcp/src/tools/compute/worker.rs"
+             "crates/missiond-mcp/src/tools/compute/forge.rs"
+             "scripts/check-v3-compute-primitives-isomorphism.mjs"]
+      :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history and moves global pause plus slot history into the compute surface; minimax.rs owns mission_sonnet_process/mission_minimax_process; cc_tasks.rs owns mission_cc_query/swarm; worker.rs owns mission_worker/mission_control; forge.rs owns mission_forge_build/lint. compute_slot and task_delegate remain owned by workstation-config so delegated ClaudeCode dispatch stays in the workstation surface.")
 
     (surface skill-runtime
       :status "code-aligned"
@@ -1712,6 +1733,7 @@
              "node scripts/check-v3-v2-coverage.mjs"
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-capability-governance-isomorphism.mjs"
+             "node scripts/check-v3-compute-primitives-isomorphism.mjs"
              "node scripts/check-v3-router-policy-isomorphism.mjs"
              "node scripts/check-v3-request-lisp-isomorphism.mjs"
              "node scripts/check-v3-unified-entry-isomorphism.mjs"

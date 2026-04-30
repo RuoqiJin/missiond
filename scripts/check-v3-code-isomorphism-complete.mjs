@@ -19,7 +19,8 @@
 //   task-runner-cli, source-hygiene, context-pack, workstation-config,
 //   workstation-dispatch, mission_board, memory-kb, project-registry,
 //   conversation-ingestion, skill-runtime, cascade-governance,
-//   router-policy, incident-governance, capability-governance, ops-infra.
+//   router-policy, incident-governance, capability-governance,
+//   compute-primitives, ops-infra.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -62,6 +63,7 @@ export const EXPECTED_SURFACES = [
   'router-policy',
   'incident-governance',
   'capability-governance',
+  'compute-primitives',
   'ops-infra',
 ];
 
@@ -90,6 +92,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-router-policy-isomorphism.mjs',
   'scripts/check-v3-incident-governance-isomorphism.mjs',
   'scripts/check-v3-capability-governance-isomorphism.mjs',
+  'scripts/check-v3-compute-primitives-isomorphism.mjs',
   'scripts/check-v3-source-hygiene-isomorphism.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
@@ -513,6 +516,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface compute-primitives
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface ops-infra
       :status "code-aligned"
       :code ["a"]
@@ -520,7 +527,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all twenty-six surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all twenty-seven surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -637,6 +644,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface capability-governance
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface compute-primitives
       :status "code-aligned"
       :code ["a"]
       :note "n")

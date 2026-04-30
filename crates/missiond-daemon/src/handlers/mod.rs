@@ -3,7 +3,7 @@
 //!
 //! Domain layout (Phase 3):
 //!   knowledge/ — board, kb, skill, memory
-//!   compute/   — pty, task, process, worker, cc_tasks, minimax, compute_slot
+//!   compute/   — pty, task, process, worker, cc_tasks, minimax, slot, compute_slot
 //!   comm/      — router_chat, question, conversation, timeline, audit, retrospective
 //!   sysinfra/  — infra, permission, system, health, misc
 
@@ -24,7 +24,7 @@ pub(crate) use comm::retrospective;
 // Domain aliases for dispatch readability
 use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
 use compute::{
-    cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, task, task_delegate,
+    cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, slot, task, task_delegate,
     worker,
 };
 use knowledge::{
@@ -154,11 +154,13 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         | "mission_retrospective_list"
         | "mission_retrospective_backfill" => retrospective::handle(state, name, args).await,
 
-        // ===== Misc (slots, inbox, etc.) =====
-        "mission_slots"
-        | "mission_inbox"
-        | "mission_submit_phase_result"
-        | "mission_slot_history"
+        // ===== Compute runtime slot/process control =====
+        "mission_slots" | "mission_inbox" | "mission_slot_history" | "mission_pause" => {
+            slot::handle(state, name, args).await
+        }
+
+        // ===== Misc (legacy Jarvis/Gemini/support adapters) =====
+        "mission_submit_phase_result"
         | "mission_jarvis_logs"
         | "mission_jarvis_trace"
         | "mission_gemini_trace"
