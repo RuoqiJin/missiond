@@ -17,8 +17,7 @@ use super::claim_lease::{
 use super::dispatch::{DispatchOutcome, TaskContractDispatchCtx};
 use super::lifecycle::{emit_evidence_finished, EvidenceCtx};
 use super::outcome::{ExecutionOutcome, NodeResult};
-use super::parser::{ParsedDag, FAILURE_POLICY_FAIL_FAST};
-use super::scheduler::propagate_taint;
+use super::parser::ParsedDag;
 
 mod acceptance;
 mod bookkeeping;
@@ -30,19 +29,18 @@ mod retry;
 mod rollbacks;
 mod skips;
 mod spawn;
-use acceptance::evaluate_success_acceptance;
+mod success;
 use bookkeeping::{
     build_node_map, build_successor_map, build_topo_index, compute_ready_ids, has_running_nodes,
     initialize_lifecycle, stitch_results_topologically,
 };
 use claiming::{prepare_dispatch_claim, DispatchClaimDecision};
-use claims::release_claim_if_recorded;
 use failures::record_final_failure;
 use gates::filter_ready_nodes_for_gates;
 use retry::retry_failed_node_if_allowed;
-use rollbacks::evaluate_and_emit_rollback;
 use skips::{force_skip_fail_fast_pending, materialize_tainted_pending_skips};
 use spawn::spawn_dispatch_attempt;
+use success::record_successful_dispatch;
 
 pub(super) async fn execute_with_concurrency(
     state: &AppState,
@@ -307,105 +305,32 @@ pub(super) async fn execute_with_concurrency(
             )
             .await;
             if succeeded {
-                // wave-17 / task 03 — deterministic acceptance phase.
-                // Runs ONLY on the success branch (failure already
-                // dominates the lifecycle). NEVER executes shell — the
-                // evaluator is a pure projection over `(node, payload)`
-                // and decides one of: NotEvaluated (no hints — preserve
-                // wave-13 behaviour), Accepted, Rejected, ManualRequired.
-                // The first three terminate the node (succeeded /
-                // failed / paused) without further dispatch.
-                //
-                // wave-18 / task 03 — `apply_acceptance_fan_in` then
-                // overlays cross-node fan-in on top of the per-node
-                // result. The validator already proved every fan-in dep
-                // is a transitive `:depends-on` ancestor, so the prior
-                // node's result is guaranteed to live in `results_by_id`
-                // by the time this branch runs.
-                let acceptance_outcome = evaluate_success_acceptance(
+                if record_successful_dispatch(
                     state,
                     &ctx,
                     plan,
+                    parsed,
+                    order,
                     &node,
-                    &dispatch_strategy,
+                    &node_id,
+                    target,
+                    dispatch_strategy,
+                    inner_payload,
                     current_attempt,
-                    &inner_payload,
-                    &results_by_id,
-                    &mut outcome,
-                )
-                .await;
-                let acceptance_rejected = acceptance_outcome.is_rejected();
-                lifecycle.insert(node_id.clone(), acceptance_outcome.next_lifecycle);
-                // wave-17 / task 02 — release the claim now that the
-                // terminal state is set. Best-effort: we only release
-                // when the registry actually recorded the claim
-                // (compat-mode conflicts skip the registry insert).
-                release_claim_if_recorded(
-                    state,
-                    &ctx,
-                    &node,
-                    &dispatch_strategy,
-                    current_attempt,
-                    acceptance_outcome.terminal_state_label,
+                    max_attempts,
                     &mut claim_registry,
                     &mut active_claims_by_node,
+                    &mut lifecycle,
+                    &mut results_by_id,
+                    &mut tainted_by,
+                    &succs,
                     &mut outcome,
                 )
-                .await;
-                // wave-17 / task 04 — acceptance-rejected nodes are
-                // node-level failures and warrant the same rollback
-                // pass as a dispatch-time failure. Runs BEFORE
-                // `propagate_taint` so the downstream behaviour is
-                // governed by the existing failure-policy contract.
-                // Skipped for accepted / paused / not-evaluated
-                // branches (the node is not in a "final failed"
-                // state for those).
-                let acc_rollback_eval = if acceptance_rejected {
-                    evaluate_and_emit_rollback(
-                        state,
-                        &ctx,
-                        plan,
-                        &node,
-                        parsed,
-                        order,
-                        &dispatch_strategy,
-                        current_attempt,
-                        &mut outcome,
-                    )
-                    .await
-                } else {
-                    None
-                };
-                // wave-17 / task 03 — Rejected acceptance also taints
-                // downstream and may trip fail-fast (matches the
-                // dispatch-failure path so consumers get one shape for
-                // any non-success terminal state).
-                if acceptance_rejected {
-                    propagate_taint(&node, &succs, &mut tainted_by);
-                    if node.failure_policy == FAILURE_POLICY_FAIL_FAST {
-                        abort_new_dispatch = true;
-                        abort_aborter = Some(node_id.clone());
-                    }
+                .await
+                {
+                    abort_new_dispatch = true;
+                    abort_aborter = Some(node_id.clone());
                 }
-                results_by_id.insert(
-                    node_id.clone(),
-                    NodeResult {
-                        id: node_id,
-                        target,
-                        state: acceptance_outcome.next_node_state,
-                        dispatch_strategy,
-                        inner_payload,
-                        attempts_made: current_attempt,
-                        max_attempts,
-                        retry_skipped_non_retryable: false,
-                        rollback: acc_rollback_eval,
-                        acceptance: if acceptance_outcome.acceptance_active {
-                            Some(acceptance_outcome.acceptance)
-                        } else {
-                            None
-                        },
-                    },
-                );
                 continue;
             }
 
