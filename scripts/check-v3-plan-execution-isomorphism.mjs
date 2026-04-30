@@ -84,6 +84,11 @@ const DEFAULT_FILES = {
   planDagClaimLease: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs',
   planDagDispatch: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/dispatch.rs',
   planDagRollback: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs',
+  planDagRollbackDescriptor:
+    'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/descriptor.rs',
+  planDagRollbackRun: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/run.rs',
+  planDagRollbackTypes:
+    'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/types.rs',
   planDagRollbackCascade:
     'crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/cascade.rs',
   planDagResume: 'crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs',
@@ -204,7 +209,10 @@ function checkFiles(root, files) {
     'plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping',
     'plan_dag/dispatch.rs owns the DAG node dispatch bridge',
     'plan_dag/tests.rs does the same for the DAG scheduler regression suite',
-    'plan_dag/rollback.rs owns the DAG node-local rollback core',
+    'plan_dag/rollback.rs is the DAG rollback facade',
+    'plan_dag/rollback/types.rs owns rollback policy/status/evaluation shapes',
+    'plan_dag/rollback/descriptor.rs owns rollback descriptor and pre-dispatch safety',
+    'plan_dag/rollback/run.rs owns node-local rollback execution',
     'plan_dag/rollback/cascade.rs owns the DAG cascade rollback planner/dispatcher',
     'plan_dag/resume.rs owns the DAG review-resume entry/egress core',
     'plan_dag/outcome.rs owns the DAG node outcome/state response projection core',
@@ -814,18 +822,49 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.planDagRollback, sources.planDagRollback, [
     'mod cascade;',
+    'mod descriptor;',
+    'mod run;',
+    'mod types;',
     'pub(super) use cascade::{',
+    'pub(super) use descriptor::{',
+    'pub(super) use run::{',
+    'pub(super) use types::{',
+    'use super::DagNode',
+  ]);
+
+  requireAll(diagnostics, files.planDagRollbackTypes, sources.planDagRollbackTypes, [
     'impl DagNode',
-    'pub(super) enum RollbackPolicy',
-    'pub(super) enum RollbackStatus',
-    'pub(super) struct RollbackEvaluation',
-    'pub(super) enum RollbackCascadeMode',
-    'pub(super) struct CascadeCompensationOutcome',
-    'pub(super) struct CascadeRollbackOutcome',
-    'pub(super) fn build_rollback_descriptor',
-    'pub(super) fn pre_dispatch_rollback_decision',
-    'pub(super) async fn run_rollback',
-    'fn truncate_rollback_brief_preview',
+    'pub(in crate::handlers::knowledge::plan_dag) enum RollbackPolicy',
+    'pub(in crate::handlers::knowledge::plan_dag) enum RollbackStatus',
+    'pub(in crate::handlers::knowledge::plan_dag) struct RollbackEvaluation',
+    'pub(in crate::handlers::knowledge::plan_dag) enum RollbackCascadeMode',
+    'pub(in crate::handlers::knowledge::plan_dag) struct CascadeCompensationOutcome',
+    'pub(in crate::handlers::knowledge::plan_dag) struct CascadeRollbackOutcome',
+    'pub(in crate::handlers::knowledge::plan_dag) fn rollback_policy_kind',
+    'pub(in crate::handlers::knowledge::plan_dag) fn rollback_cascade_kind',
+    'pub(in crate::handlers::knowledge::plan_dag) fn has_active_rollback_cascade',
+    'pub(in crate::handlers::knowledge::plan_dag) fn has_rollback_hints',
+    'pub(in crate::handlers::knowledge::plan_dag) fn to_json',
+  ]);
+
+  requireAll(diagnostics, files.planDagRollbackDescriptor, sources.planDagRollbackDescriptor, [
+    'pub(in crate::handlers::knowledge::plan_dag) fn build_rollback_descriptor',
+    'pub(in crate::handlers::knowledge::plan_dag) struct RollbackDescriptor',
+    'pub(in crate::handlers::knowledge::plan_dag) fn to_workstation_hints',
+    'pub(in crate::handlers::knowledge::plan_dag) fn safety_check_for_workstation',
+    'pub(in crate::handlers::knowledge::plan_dag) fn pre_dispatch_rollback_decision',
+    'rollback workstation dispatch requires :rollback-objective',
+    'workstation_dispatch::INFERABLE_DISPATCH_STRATEGIES',
+  ]);
+
+  requireAll(diagnostics, files.planDagRollbackRun, sources.planDagRollbackRun, [
+    'pub(in crate::handlers::knowledge::plan_dag) async fn run_rollback',
+    'pub(in crate::handlers::knowledge::plan_dag) fn truncate_rollback_brief_preview',
+    'workstation_dispatch::run_workstation_dispatch',
+    'WorkstationDispatchOutcome::Dispatched',
+    'WorkstationDispatchOutcome::DryRun',
+    'WorkstationDispatchOutcome::InnerError',
+    'WorkstationDispatchOutcome::SafeDescriptor',
   ]);
 
   requireAll(diagnostics, files.planDagRollbackCascade, sources.planDagRollbackCascade, [
@@ -1066,6 +1105,9 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/claim_lease.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/dispatch.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/descriptor.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/run.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/types.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/rollback/cascade.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/resume.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/outcome.rs"
@@ -1076,7 +1118,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/scheduler.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/mode.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan_dag/tests.rs"]
-      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/compile_authoring/artifact.rs owns plan file-first artifact egress; plan/compile_authoring/validation.rs owns planner prompt and Lisp output validation; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute facade orchestration; plan/execution_runtime/bridge.rs owns bridge descriptor projection; plan/execution_runtime/internal.rs owns mission_plan internal dispatch runtime; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/predicate.rs owns router-policy predicate projection; plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection; plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/task_runner_dry_run/manifest.rs owns task-runner manifest loading/parsing; plan/task_runner_dry_run/projection.rs owns task-runner manifest response projection; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs owns DAG node/error shapes; plan_dag/parser/scanner.rs owns PLAN.lisp S-expression scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs owns the DAG node-local rollback core; plan_dag/rollback/cascade.rs owns the DAG cascade rollback planner/dispatcher; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/outcome.rs owns the DAG node outcome/state response projection core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
+      :note "compiler_mode=dry_run now renders plan-draft as an executable Lisp scaffold; plan/compile_authoring.rs owns mission_plan plan-authoring entry/core; plan/compile_authoring/artifact.rs owns plan file-first artifact egress; plan/compile_authoring/validation.rs owns planner prompt and Lisp output validation; plan/approval_review.rs owns mission_plan plan-review-gate caller action facade plus shared PLAN_REVIEW_ACTIONS wiring. plan/approval_review/approve.rs owns mission_plan approve action: action_approve, action_approve_with_resolution, plan_action_approve_with_policy_only, PlanStatus::Approved transition, review-resolution validation, and resolved-event egress. plan/approval_review/mark.rs owns mission_plan mark action: action_mark, action_mark_with_resolution, plan_action_mark_with_policy_only, target_raw parsing, mark-to-approved policy auto-promotion, and resolved-event egress. plan/approval_review/supersede.rs owns mission_plan supersede action: action_supersede, action_supersede_with_resolution, plan_action_supersede_with_policy_only, destructive-action refusal, PlanStatus::Superseded transition, and resolved-event egress. plan/approval_review/proposer.rs owns mission_plan plan-review LLM proposal helpers: build_plan_automation_ctx, request_plan_auto_approve_proposal, attach_plan_proposal_block, attach_plan_apply_gate_block, parse_plan_proposer_mode_or_error, and plan_proposer_summary keep propose-only audit blocks outside the caller action facade. plan/approval_review/subscriber.rs owns mission_plan plan-review subscriber bridge: PlanSubscriberOutcome and handle_review_resolved_event keep approval/rejection/needs_changes transitions tied to the same review envelope validation without bloating the caller action facade. plan/field_inference.rs owns mission_plan execute preflight field inference/core; plan/field_inference/mode.rs owns infer_plan_fields/workstation_inference_mode parsing and DAG preflight gates; plan/field_inference/evidence.rs owns evidence-sidecar scanners; plan/field_inference/rules.rs owns deterministic field inference rules; plan/field_inference/llm.rs owns Sonnet proposal parsing, validation, conflict reconciliation, prompt construction, gateway request, and recent evidence reads for inference; plan/field_inference/apply.rs owns apply_gate, including explicit apply approval, LLM caller approval, and response block splicing; plan/field_inference/apply/persisted.rs owns persisted_apply, including proposal-hash preflight, PLAN.lisp persisted annotation synthesis, evidence entry construction, and response block splicing; plan/execution_runtime.rs owns mission_plan execute facade orchestration; plan/execution_runtime/bridge.rs owns bridge descriptor projection; plan/execution_runtime/internal.rs owns mission_plan internal dispatch runtime; plan/execution_runtime/workstation.rs owns workstation proposal/auto-spawn execution adjuncts; plan/internal_dispatch.rs owns mission_plan inner target argument projection; plan/execute_hints.rs owns mission_plan PLAN.lisp hint parsing; plan/task_contract.rs owns mission_plan task-contract Lisp projection; plan/distill_chain.rs owns mission_plan cross-plan distill-chain egress; plan/dispatch_response.rs owns mission_plan execution response egress; plan/evidence_sidecar.rs owns mission_plan evidence sidecar egress; plan/router_policy_dry_run.rs owns the mission_plan router-policy adapter; plan/router_policy_dry_run/predicate.rs owns router-policy predicate projection; plan/router_policy_dry_run/readiness.rs owns router-policy trace-index/backend-readiness projection; plan/router_policy_dry_run/descriptor.rs owns router dispatch descriptor projection; plan/router_policy_dry_run/schema_parser.rs owns the router-policy Lisp schema parser shared by the policy and backend-registry advisory projections; plan/task_runner_dry_run.rs owns the mission_plan task-runner adapter; plan/task_runner_dry_run/manifest.rs owns task-runner manifest loading/parsing; plan/task_runner_dry_run/projection.rs owns task-runner manifest response projection; plan/tests.rs holds the historical mission_plan regression suite outside the runtime facade; plan_dag/runtime.rs owns the DAG live runtime wave loop; plan_dag/runtime/bookkeeping.rs owns DAG runtime bookkeeping; plan_dag/parser.rs is the DAG parser/validator facade; plan_dag/parser/types.rs owns DAG node/error shapes; plan_dag/parser/scanner.rs owns PLAN.lisp S-expression scanning; plan_dag/parser/validation.rs owns DAG contract validation/topological ordering; plan_dag/acceptance.rs owns the DAG acceptance core; plan_dag/claim_lease.rs owns the DAG claim/lease core; plan_dag/dispatch.rs owns the DAG node dispatch bridge into workstation-dispatch, task-contract emission, and internal handler execution; plan_dag/rollback.rs is the DAG rollback facade; plan_dag/rollback/types.rs owns rollback policy/status/evaluation shapes; plan_dag/rollback/descriptor.rs owns rollback descriptor and pre-dispatch safety; plan_dag/rollback/run.rs owns node-local rollback execution; plan_dag/rollback/cascade.rs owns the DAG cascade rollback planner/dispatcher; plan_dag/resume.rs owns the DAG review-resume entry/egress core; plan_dag/outcome.rs owns the DAG node outcome/state response projection core; plan_dag/projection.rs owns the DAG response projection core; plan_dag/finalization.rs owns the DAG finalization projection core; plan_dag/lifecycle.rs owns the DAG lifecycle event/evidence projection core; plan_dag/lifecycle/claims.rs owns the DAG claim lifecycle evidence rows; plan_dag/scheduler.rs owns the DAG scheduler projection core; plan_dag/mode.rs owns the DAG scheduler-mode gate; plan_dag/tests.rs does the same for the DAG scheduler regression suite; execute can derive target_source=plan_hint from plan.sexp_text. DAG execution parses node-local Lisp hints."))
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
@@ -1733,20 +1775,53 @@ scopes_overlap_pure();
 `);
   writeFixture(root, DEFAULT_FILES.planDagRollback, `
 mod cascade;
+mod descriptor;
+mod run;
+mod types;
 pub(super) use cascade::{compute_compensation_order, run_cascade_rollback};
+pub(super) use descriptor::{build_rollback_descriptor, pre_dispatch_rollback_decision, RollbackDescriptor};
+pub(super) use run::{run_rollback, truncate_rollback_brief_preview};
+pub(super) use types::{CascadeCompensationOutcome, CascadeRollbackOutcome, RollbackCascadeMode, RollbackEvaluation, RollbackPolicy, RollbackStatus};
+use super::DagNode;
+`);
+  writeFixture(root, DEFAULT_FILES.planDagRollbackTypes, `
 impl DagNode {
-  pub(super) fn rollback_policy_kind(&self) {}
+  pub(in crate::handlers::knowledge::plan_dag) fn rollback_policy_kind(&self) {}
+  pub(in crate::handlers::knowledge::plan_dag) fn rollback_cascade_kind(&self) {}
+  pub(in crate::handlers::knowledge::plan_dag) fn has_active_rollback_cascade(&self) {}
+  pub(in crate::handlers::knowledge::plan_dag) fn has_rollback_hints(&self) {}
 }
-pub(super) enum RollbackPolicy { None }
-pub(super) enum RollbackStatus { NotRequested }
-pub(super) struct RollbackEvaluation;
-pub(super) enum RollbackCascadeMode { None }
-pub(super) struct CascadeCompensationOutcome;
-pub(super) struct CascadeRollbackOutcome;
-pub(super) fn build_rollback_descriptor() {}
-pub(super) fn pre_dispatch_rollback_decision() {}
-pub(super) async fn run_rollback() {}
-fn truncate_rollback_brief_preview() {}
+pub(in crate::handlers::knowledge::plan_dag) enum RollbackPolicy { None }
+pub(in crate::handlers::knowledge::plan_dag) enum RollbackStatus { NotRequested }
+pub(in crate::handlers::knowledge::plan_dag) struct RollbackEvaluation;
+impl RollbackEvaluation { pub(in crate::handlers::knowledge::plan_dag) fn to_json() {} }
+pub(in crate::handlers::knowledge::plan_dag) enum RollbackCascadeMode { None }
+pub(in crate::handlers::knowledge::plan_dag) struct CascadeCompensationOutcome;
+impl CascadeCompensationOutcome { pub(in crate::handlers::knowledge::plan_dag) fn to_json() {} }
+pub(in crate::handlers::knowledge::plan_dag) struct CascadeRollbackOutcome;
+impl CascadeRollbackOutcome { pub(in crate::handlers::knowledge::plan_dag) fn to_json() {} }
+`);
+  writeFixture(root, DEFAULT_FILES.planDagRollbackDescriptor, `
+pub(in crate::handlers::knowledge::plan_dag) fn build_rollback_descriptor() {}
+pub(in crate::handlers::knowledge::plan_dag) struct RollbackDescriptor;
+impl RollbackDescriptor {
+  pub(in crate::handlers::knowledge::plan_dag) fn to_workstation_hints() {}
+  pub(in crate::handlers::knowledge::plan_dag) fn safety_check_for_workstation() {
+    "rollback workstation dispatch requires :rollback-objective";
+    workstation_dispatch::INFERABLE_DISPATCH_STRATEGIES;
+  }
+}
+pub(in crate::handlers::knowledge::plan_dag) fn pre_dispatch_rollback_decision() {}
+`);
+  writeFixture(root, DEFAULT_FILES.planDagRollbackRun, `
+pub(in crate::handlers::knowledge::plan_dag) async fn run_rollback() {
+  workstation_dispatch::run_workstation_dispatch;
+  WorkstationDispatchOutcome::Dispatched;
+  WorkstationDispatchOutcome::DryRun;
+  WorkstationDispatchOutcome::InnerError;
+  WorkstationDispatchOutcome::SafeDescriptor;
+}
+pub(in crate::handlers::knowledge::plan_dag) fn truncate_rollback_brief_preview() {}
 `);
   writeFixture(root, DEFAULT_FILES.planDagRollbackCascade, `
 use std::collections::{HashMap, HashSet};
