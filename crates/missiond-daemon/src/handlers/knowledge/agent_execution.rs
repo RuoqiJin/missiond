@@ -52,6 +52,7 @@ mod log_governance;
 mod log_status;
 mod log_store;
 mod log_surface;
+mod log_template;
 mod preflight;
 mod preflight_patterns;
 mod preflight_porcelain;

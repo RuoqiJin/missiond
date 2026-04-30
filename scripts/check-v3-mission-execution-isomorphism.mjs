@@ -59,6 +59,8 @@ const DEFAULT_FILES = {
   logCounters:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs',
   logStore: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
+  logTemplate:
+    'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_template.rs',
   lispSyntax: 'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   sessionTrace:
     'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
@@ -114,7 +116,7 @@ const AGGREGATE_COMMAND = 'node scripts/check-v3-mission-execution-isomorphism.m
 const SURFACES = [
   {
     name: 'mission_execution-log',
-    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
+    noteNeedles: ['agent_execution/log_store.rs', 'agent_execution/log_template.rs', 'agent_execution/log_counters.rs', 'agent_execution/log_governance.rs', 'agent_execution/log_status.rs', 'agent_execution/lisp_syntax.rs', 'emit_execution_event', 'agent_execution/session_trace.rs'],
   },
   {
     name: 'mission_execution-claim-lease',
@@ -135,6 +137,7 @@ const BLUEPRINT_NEEDLES = [
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs',
+  'crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_template.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs',
   'crates/missiond-daemon/src/handlers/knowledge/agent_execution/claim_lease.rs',
@@ -185,6 +188,7 @@ const DAEMON_NEEDLES = [
   'mod log_governance',
   'mod log_status',
   'mod log_surface',
+  'mod log_template',
   'mod session_trace',
   'mod claim_lease',
   'mod claim_heartbeat',
@@ -241,6 +245,7 @@ const TESTS_NEEDLES = [
 
 const LOG_STORE_NEEDLES = [
   'pub(super) const COMPANION_DIR: &str = ".missiond/v2"',
+  'pub(super) use super::log_template::render_canonical_template',
   'pub(super) async fn resolve_project_root',
   'pub(super) fn companion_path',
   'pub(super) fn project_or_target_project',
@@ -249,7 +254,6 @@ const LOG_STORE_NEEDLES = [
   'pub(super) fn now_iso',
   'pub(super) fn parse_kv_pairs',
   'pub(super) fn lisp_quote_string',
-  'pub(super) fn render_canonical_template',
   'pub(super) fn locate_kv_value',
   'pub(super) fn update_kv_in_node',
   'pub(super) fn list_block_summaries',
@@ -258,6 +262,15 @@ const LOG_STORE_NEEDLES = [
   'pub(super) fn touch_last_updated',
   'pub(super) fn write_log_file',
   'pub(super) fn read_log_file',
+];
+
+const LOG_TEMPLATE_NEEDLES = [
+  'pub(super) fn render_canonical_template',
+  'execution-log',
+  'id-counters',
+  'phase-tracker',
+  'derived-indexes',
+  ':dispatch-strategy',
 ];
 
 const LOG_COUNTERS_NEEDLES = [
@@ -617,6 +630,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.logSurface, sources.logSurface, LOG_SURFACE_NEEDLES);
   requireAll(diagnostics, files.logGovernance, sources.logGovernance, LOG_GOVERNANCE_NEEDLES);
   requireAll(diagnostics, files.logStatus, sources.logStatus, LOG_STATUS_NEEDLES);
+  requireAll(diagnostics, files.logTemplate, sources.logTemplate, LOG_TEMPLATE_NEEDLES);
   requireAll(diagnostics, files.sessionTrace, sources.sessionTrace, SESSION_TRACE_NEEDLES);
   requireAll(diagnostics, files.claimLease, sources.claimLease, CLAIM_LEASE_NEEDLES);
   requireAll(diagnostics, files.claimRecords, sources.claimRecords, CLAIM_RECORDS_NEEDLES);
@@ -750,6 +764,7 @@ function runFixtures(json) {
     [DEFAULT_FILES.logSurface]: buildGoodLogSurface(),
     [DEFAULT_FILES.logGovernance]: buildGoodLogGovernance(),
     [DEFAULT_FILES.logStatus]: buildGoodLogStatus(),
+    [DEFAULT_FILES.logTemplate]: buildGoodLogTemplate(),
     [DEFAULT_FILES.sessionTrace]: buildGoodSessionTrace(),
     [DEFAULT_FILES.claimLease]: buildGoodClaimLease(),
     [DEFAULT_FILES.claimHeartbeat]: buildGoodClaimHeartbeat(),
@@ -889,10 +904,11 @@ function buildGoodBlueprint() {
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_status.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_counters.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_store.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/log_template.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/lisp_syntax.rs"
 	             "crates/missiond-daemon/src/handlers/knowledge/agent_execution/session_trace.rs"
 	             "crates/missiond-mcp/src/tools/knowledge/agent_execution.rs"]
-	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, companion paths, canonical template, key/value mutation, block append, and Lisp read/write helpers authoritative; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; action routing, emit_execution_event, and DispatchMeta stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
+	      :note "agent_execution/lisp_syntax.rs owns the shared S-expression parser and check_balance delimiter audit; agent_execution/log_store.rs keeps COMPANION_DIR .missiond/v2, LogFile, companion paths, key/value mutation, block append, and Lisp read/write helpers authoritative; agent_execution/log_template.rs owns render_canonical_template for canonical companion-log Lisp projection; agent_execution/log_counters.rs owns ID counters, allocate_id, scan_max_id, and insert_id_counters_block; action routing, emit_execution_event, and DispatchMeta stay in agent_execution/log_surface.rs; agent_execution/log_governance.rs owns action_deviate, action_decide, action_issue, and their DeviationRecorded/DecisionRecorded/IssueRecorded live event projection; agent_execution/log_status.rs owns action_status, active claims, open issues, unresolved deviations, decisions, completed_phases, and durability read-model projection; agent_execution/session_trace.rs keeps optional task traces aligned.")
 	    (surface mission_execution-claim-lease
 	      :status "code-aligned"
 	      :code ["crates/missiond-daemon/src/handlers/knowledge/agent_execution.rs"
@@ -956,6 +972,7 @@ mod lisp_syntax;
 mod log_governance;
 mod log_status;
 mod log_surface;
+mod log_template;
 mod session_trace;
 mod claim_lease;
 mod claim_heartbeat;
@@ -1021,6 +1038,7 @@ fn resolve_trace_task_id_falls_back_to_execution_id() {}
 
 function buildGoodLogStore() {
   return `pub(super) const COMPANION_DIR: &str = ".missiond/v2";
+pub(super) use super::log_template::render_canonical_template;
 pub(super) async fn resolve_project_root() {}
 pub(super) fn companion_path() {}
 pub(super) fn project_or_target_project() {}
@@ -1029,7 +1047,6 @@ pub(super) struct LogFile {}
 pub(super) fn now_iso() {}
 pub(super) fn parse_kv_pairs() {}
 pub(super) fn lisp_quote_string() {}
-pub(super) fn render_canonical_template() {}
 pub(super) fn locate_kv_value() {}
 pub(super) fn update_kv_in_node() {}
 pub(super) fn list_block_summaries() {}
@@ -1038,6 +1055,17 @@ pub(super) fn append_to_block() {}
 pub(super) fn touch_last_updated() {}
 pub(super) fn write_log_file() {}
 pub(super) fn read_log_file() {}
+`;
+}
+
+function buildGoodLogTemplate() {
+  return `pub(super) fn render_canonical_template() {
+  "execution-log";
+  "id-counters";
+  "phase-tracker";
+  "derived-indexes";
+  ":dispatch-strategy";
+}
 `;
 }
 
