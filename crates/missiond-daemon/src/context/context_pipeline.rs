@@ -252,7 +252,7 @@ fn is_high_confidence_devops(query: &str) -> bool {
     PATTERNS.iter().any(|p| q.contains(p))
 }
 
-/// Route intent via XJP router API (claude-sonnet via clewdr).
+/// Route intent via the configured XJP router API.
 ///
 /// Stateless HTTP call — no slot contention, no conversation pollution.
 /// Returns None on any error (caller falls back to rules).

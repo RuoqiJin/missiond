@@ -14,7 +14,7 @@
 //!
 //! Usage:
 //! ```ignore
-//! let cli = GeminiCli::new("gemini", "gemini-3.1-pro-preview", Duration::from_secs(120));
+//! let cli = GeminiCli::new("gemini", "gemini-3.1-pro", Duration::from_secs(120));
 //! let resp = cli.call(&messages, None, None, None).await?;
 //! ```
 
