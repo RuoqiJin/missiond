@@ -637,11 +637,12 @@
 
   (minimax-runtime-policy
     :desc "Lisp-owned defaults for direct MiniMax HTTP gateway calls used by background briefing, translation, and legacy minimax lanes."
+    :model "MiniMax-M2.5-highspeed"
     :direct-http-timeout-secs 30
     :quota-throttle-secs 60
     :default-max-tokens 500
     :invariants
-      ["MiniMaxClient HTTP timeout and default max_tokens MUST project from minimax-runtime-policy instead of local constants."
+      ["MiniMaxClient model, HTTP timeout, and default max_tokens MUST project from minimax-runtime-policy instead of local constants."
        "MinimaxGateway quota throttle sleep MUST project from minimax-runtime-policy instead of a local 60s literal."
        "A real MissionD project with .missiond but no minimax-runtime-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
@@ -1986,7 +1987,7 @@
              "crates/missiond-mcp/src/tools/compute/worker.rs"
              "crates/missiond-mcp/src/tools/compute/forge.rs"
              "scripts/check-v3-compute-primitives-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress, and projects auto-spawn tracked PTY wait_for_idle timeout from compute-runtime-policy; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; engine/flow/mod.rs owns FlowDefinition shape constants, engine/flow/loader.rs loads flow-runtime-policy through context/v3_blueprint_runtime.rs and projects missing YAML node defaults while preserving explicit fields; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list and projects tracked PTY spawn wait_for_idle timeout from compute-runtime-policy; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history and moves global pause plus slot history into the compute surface; minimax.rs owns mission_sonnet_process/mission_minimax_process, while llm/minimax_client.rs and llm/minimax_gateway.rs project direct MiniMax timeout/max_tokens/quota throttle from minimax-runtime-policy for background lanes; cc_tasks.rs owns mission_cc_query/swarm; worker.rs owns mission_worker/mission_control; forge.rs owns mission_forge_build/lint. compute_slot and task_delegate remain owned by workstation-config so delegated ClaudeCode dispatch stays in the workstation surface.")
+      :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress, and projects auto-spawn tracked PTY wait_for_idle timeout from compute-runtime-policy; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; engine/flow/mod.rs owns FlowDefinition shape constants, engine/flow/loader.rs loads flow-runtime-policy through context/v3_blueprint_runtime.rs and projects missing YAML node defaults while preserving explicit fields; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list and projects tracked PTY spawn wait_for_idle timeout from compute-runtime-policy; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history and moves global pause plus slot history into the compute surface; minimax.rs owns mission_sonnet_process/mission_minimax_process, while llm/minimax_client.rs and llm/minimax_gateway.rs project direct MiniMax model/timeout/max_tokens/quota throttle from minimax-runtime-policy for background lanes; cc_tasks.rs owns mission_cc_query/swarm; worker.rs owns mission_worker/mission_control; forge.rs owns mission_forge_build/lint. compute_slot and task_delegate remain owned by workstation-config so delegated ClaudeCode dispatch stays in the workstation surface.")
 
     (surface skill-runtime
       :status "code-aligned"

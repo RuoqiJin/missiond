@@ -4,7 +4,7 @@
 //! Direct HTTP call (not PTY slot) — lightweight, fast, no Claude Code overhead.
 //!
 //! Endpoint: https://api.minimaxi.com/v1/chat/completions
-//! Model: MiniMax-M2.5-highspeed (~100 TPS)
+//! Model: projected from V3 minimax-runtime-policy.
 //! Auth: Bearer token from `xjp secret get minimax/api-key-domestic`
 
 use anyhow::{anyhow, Result};
@@ -14,7 +14,6 @@ use tracing::warn;
 use crate::context::v3_blueprint_runtime::MinimaxRuntimeConfig;
 
 const API_URL: &str = "https://api.minimaxi.com/v1/chat/completions";
-const MODEL: &str = "MiniMax-M2.5-highspeed";
 
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
@@ -49,6 +48,7 @@ struct ChoiceMessage {
 pub(crate) struct MiniMaxClient {
     http: reqwest::Client,
     api_key: String,
+    model: String,
     default_max_tokens: u32,
 }
 
@@ -61,6 +61,7 @@ impl MiniMaxClient {
         Self {
             http,
             api_key,
+            model: config.model.clone(),
             default_max_tokens: config.default_max_tokens,
         }
     }
@@ -68,7 +69,7 @@ impl MiniMaxClient {
     /// Send a chat completion request. Returns the assistant's content with `<think>` tags stripped.
     pub async fn chat(&self, messages: &[ChatMessage], max_tokens: Option<u32>) -> Result<String> {
         let body = ChatRequest {
-            model: MODEL,
+            model: self.model.as_str(),
             max_tokens: max_tokens.unwrap_or(self.default_max_tokens),
             messages,
         };
@@ -186,10 +187,12 @@ mod tests {
     #[test]
     fn projects_default_max_tokens_from_runtime_config() {
         let config = MinimaxRuntimeConfig {
+            model: "minimax-test-model".to_string(),
             default_max_tokens: 123,
             ..MinimaxRuntimeConfig::default()
         };
         let client = MiniMaxClient::new_with_runtime_config("token".to_string(), &config);
+        assert_eq!(client.model, "minimax-test-model");
         assert_eq!(client.default_max_tokens, 123);
     }
 }

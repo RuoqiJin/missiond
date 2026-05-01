@@ -143,7 +143,7 @@ function checkFiles(root, files) {
     'mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy',
     'Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults',
     'mission_agent spawn/restart and mission_task_submit auto-spawn MUST project tracked PTY spawn wait_for_idle timeout from compute-runtime-policy timeout-policy tracked-pty-spawn',
-    'MiniMaxClient HTTP timeout and default max_tokens MUST project from minimax-runtime-policy',
+    'MiniMaxClient model, HTTP timeout, and default max_tokens MUST project from minimax-runtime-policy',
     'MinimaxGateway quota throttle sleep MUST project from minimax-runtime-policy',
     'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
     'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
@@ -257,6 +257,7 @@ function checkFiles(root, files) {
     'DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS',
     'DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS',
     'DEFAULT_MINIMAX_MAX_TOKENS',
+    'DEFAULT_MINIMAX_MODEL',
     'pub(crate) fn parse_flow_runtime_policy',
     'pub(crate) fn parse_compute_runtime_policy',
     'pub(crate) fn parse_minimax_runtime_policy',
@@ -267,6 +268,7 @@ function checkFiles(root, files) {
     'pty_spawn_timeout_secs',
     'direct_http_timeout',
     'quota_throttle_sleep',
+    ':model',
     ':default-max-tokens',
     ':slot-task-default-model',
     ':parallel-slot-default-timeout-secs',
@@ -328,10 +330,14 @@ function checkFiles(root, files) {
     'MinimaxRuntimeConfig',
     'new_with_runtime_config',
     'config.direct_http_timeout()',
+    'config.model.clone()',
     'config.default_max_tokens',
+    'self.model.as_str()',
     'self.default_max_tokens',
   ]);
   forbidAll(diagnostics, files.minimaxClient, sources.minimaxClient, [
+    'const MODEL',
+    '"MiniMax-M2.5-highspeed"',
     'DEFAULT_TIMEOUT_SECS',
     'DEFAULT_MAX_TOKENS',
     'Duration::from_secs(30)',
@@ -477,10 +483,11 @@ function buildFixture() {
       :max_secs 600)
     :invariants ["mission_agent spawn/restart and mission_task_submit auto-spawn MUST project tracked PTY spawn wait_for_idle timeout from compute-runtime-policy timeout-policy tracked-pty-spawn"])
   (minimax-runtime-policy
+    :model "MiniMax-M2.5-highspeed"
     :direct-http-timeout-secs 30
     :quota-throttle-secs 60
     :default-max-tokens 500
-    :invariants ["MiniMaxClient HTTP timeout and default max_tokens MUST project from minimax-runtime-policy"
+    :invariants ["MiniMaxClient model, HTTP timeout, and default max_tokens MUST project from minimax-runtime-policy"
                  "MinimaxGateway quota throttle sleep MUST project from minimax-runtime-policy"])
   (implementation-map
     (surface compute-primitives
@@ -511,7 +518,7 @@ function buildFixture() {
              "crates/missiond-mcp/src/tools/compute/worker.rs"
              "crates/missiond-mcp/src/tools/compute/forge.rs"
              "scripts/check-v3-compute-primitives-isomorphism.mjs"]
-      :note "task.rs owns mission_task_submit/query/cancel; flow-runtime-policy projects mission_flow_run defaults; engine/flow/loader.rs loads flow-runtime-policy and preserves explicit fields; llm/minimax_client.rs and llm/minimax_gateway.rs project direct MiniMax timeout/max_tokens/quota throttle from minimax-runtime-policy for background lanes; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history; compute_slot and task_delegate remain owned by workstation-config."))
+      :note "task.rs owns mission_task_submit/query/cancel; flow-runtime-policy projects mission_flow_run defaults; engine/flow/loader.rs loads flow-runtime-policy and preserves explicit fields; llm/minimax_client.rs and llm/minimax_gateway.rs project direct MiniMax model/timeout/max_tokens/quota throttle from minimax-runtime-policy for background lanes; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history; compute_slot and task_delegate remain owned by workstation-config."))
   (compression-contract
     :checks ["node scripts/check-v3-compute-primitives-isomorphism.mjs"]))`,
   );
@@ -551,7 +558,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.v3Runtime),
-    ' pub(crate) struct FlowRuntimeConfig pub(crate) struct ComputePrimitivesRuntimeConfig MinimaxRuntimeConfig DEFAULT_FLOW_LLM_MAX_TOKENS DEFAULT_FLOW_SLOT_MODEL DEFAULT_FLOW_SLOT_TIMEOUT_SECS DEFAULT_FLOW_PARALLELISM DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS DEFAULT_MINIMAX_MAX_TOKENS pub(crate) fn parse_flow_runtime_policy pub(crate) fn parse_compute_runtime_policy pub(crate) fn parse_minimax_runtime_policy flow-runtime-policy compute-runtime-policy minimax-runtime-policy tracked-pty-spawn pty_spawn_timeout_secs direct_http_timeout quota_throttle_sleep :default-max-tokens :slot-task-default-model :parallel-slot-default-timeout-secs',
+    ' pub(crate) struct FlowRuntimeConfig pub(crate) struct ComputePrimitivesRuntimeConfig MinimaxRuntimeConfig DEFAULT_FLOW_LLM_MAX_TOKENS DEFAULT_FLOW_SLOT_MODEL DEFAULT_FLOW_SLOT_TIMEOUT_SECS DEFAULT_FLOW_PARALLELISM DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS DEFAULT_MINIMAX_MODEL DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS DEFAULT_MINIMAX_MAX_TOKENS pub(crate) fn parse_flow_runtime_policy pub(crate) fn parse_compute_runtime_policy pub(crate) fn parse_minimax_runtime_policy flow-runtime-policy compute-runtime-policy minimax-runtime-policy tracked-pty-spawn pty_spawn_timeout_secs direct_http_timeout quota_throttle_sleep :model :default-max-tokens :slot-task-default-model :parallel-slot-default-timeout-secs',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.pty),
@@ -568,7 +575,7 @@ function buildFixture() {
   fs.appendFileSync(path.join(root, DEFAULT_FILES.minimax), ' call_interactive');
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.minimaxClient),
-    ' MinimaxRuntimeConfig new_with_runtime_config config.direct_http_timeout() config.default_max_tokens self.default_max_tokens',
+    ' MinimaxRuntimeConfig new_with_runtime_config config.direct_http_timeout() config.model.clone() config.default_max_tokens self.model.as_str() self.default_max_tokens',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.minimaxGateway),

@@ -19,6 +19,7 @@ pub(crate) const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 600;
 pub(crate) const DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 30;
 pub(crate) const MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 1;
 pub(crate) const MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 600;
+pub(crate) const DEFAULT_MINIMAX_MODEL: &str = "MiniMax-M2.5-highspeed";
 pub(crate) const DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS: u64 = 30;
 pub(crate) const DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS: u64 = 60;
 pub(crate) const DEFAULT_MINIMAX_MAX_TOKENS: u32 = 500;
@@ -202,8 +203,9 @@ pub(crate) struct ComputePrimitivesRuntimeConfig {
     pub pty_spawn_timeout_policy: SimpleTimeoutPolicy,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct MinimaxRuntimeConfig {
+    pub model: String,
     pub direct_http_timeout_secs: u64,
     pub quota_throttle_secs: u64,
     pub default_max_tokens: u32,
@@ -581,6 +583,7 @@ impl Default for ComputePrimitivesRuntimeConfig {
 impl Default for MinimaxRuntimeConfig {
     fn default() -> Self {
         Self {
+            model: DEFAULT_MINIMAX_MODEL.to_string(),
             direct_http_timeout_secs: DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS,
             quota_throttle_secs: DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS,
             default_max_tokens: DEFAULT_MINIMAX_MAX_TOKENS,
@@ -1695,6 +1698,7 @@ pub(crate) fn parse_minimax_runtime_policy(
     })?;
     let tokens = tokenize_lisp(&block);
     let cfg = MinimaxRuntimeConfig {
+        model: non_empty_keyword(&tokens, ":model")?,
         direct_http_timeout_secs: u64_keyword(&tokens, ":direct-http-timeout-secs")?,
         quota_throttle_secs: u64_keyword(&tokens, ":quota-throttle-secs")?,
         default_max_tokens: u32_keyword(&tokens, ":default-max-tokens")?,
@@ -2403,6 +2407,7 @@ mod tests {
       :min_secs 1
       :max_secs 600))
   (minimax-runtime-policy
+    :model "MiniMax-M2.5-highspeed"
     :direct-http-timeout-secs 30
     :quota-throttle-secs 60
     :default-max-tokens 500)
@@ -2629,6 +2634,7 @@ mod tests {
     #[test]
     fn parses_minimax_runtime_policy() {
         let cfg = parse_minimax_runtime_policy(BLUEPRINT).expect("parse minimax runtime policy");
+        assert_eq!(cfg.model, DEFAULT_MINIMAX_MODEL);
         assert_eq!(cfg.direct_http_timeout_secs, 30);
         assert_eq!(
             cfg.direct_http_timeout(),
