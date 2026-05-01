@@ -69,6 +69,7 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
         .sonnet
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("Sonnet gateway not available"))?;
+    let model = sonnet.model().to_string();
 
     // Single span_id for the entire translation lifecycle (Started + Completed/Failed)
     let translation_span_id = uuid::Uuid::new_v4().to_string();
@@ -119,12 +120,7 @@ async fn translate_message(state: &AppState, ctx: &ThinkingTraceCtx, content: &s
             // Store in DB
             state
                 .store
-                .insert_translation(
-                    ctx.message_id,
-                    &translation,
-                    "MiniMax-M2.5-highspeed",
-                    duration_ms,
-                )
+                .insert_translation(ctx.message_id, &translation, &model, duration_ms)
                 .await?;
 
             // Preview: first ~80 chars

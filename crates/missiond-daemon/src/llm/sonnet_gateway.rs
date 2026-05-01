@@ -51,9 +51,14 @@ pub(crate) struct SonnetHandle {
     tx_translation: mpsc::Sender<GatewayRequest>,
     tx_briefing: mpsc::Sender<GatewayRequest>,
     tx_intent: mpsc::Sender<GatewayRequest>,
+    model: Arc<str>,
 }
 
 impl SonnetHandle {
+    pub(crate) fn model(&self) -> &str {
+        self.model.as_ref()
+    }
+
     /// Send a request at the given priority. Returns the LLM response content.
     /// Fail-fast: checks gate BEFORE enqueuing to avoid wasting channel capacity.
     async fn send(
@@ -447,6 +452,7 @@ pub(crate) fn create_sonnet_gateway() -> Result<(SonnetHandle, SonnetGateway)> {
         tx_translation,
         tx_briefing,
         tx_intent,
+        model: Arc::from(router_config.queued_sonnet_model.as_str()),
     };
 
     let gateway = SonnetGateway {
