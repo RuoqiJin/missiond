@@ -67,6 +67,25 @@ use ipc_handler::{bind_ipc_listener, handle_ipc_connection};
 use mcp_client::McpProcessClient;
 use state::*;
 
+fn parse_startup_slot_engine(value: &str) -> Result<missiond_core::types::CliEngine> {
+    match value {
+        "claude-code" | "claude_code" => Ok(missiond_core::types::CliEngine::ClaudeCode),
+        "gemini" | "gemini-cli" | "gemini_cli" => Ok(missiond_core::types::CliEngine::Gemini),
+        other => Err(anyhow!("unknown workstation startup-slot engine {}", other)),
+    }
+}
+
+fn parse_startup_slot_lifecycle(value: &str) -> Result<missiond_core::types::Lifecycle> {
+    match value {
+        "persistent" => Ok(missiond_core::types::Lifecycle::Persistent),
+        "on-demand" | "on_demand" => Ok(missiond_core::types::Lifecycle::OnDemand),
+        other => Err(anyhow!(
+            "unknown workstation startup-slot lifecycle {}",
+            other
+        )),
+    }
+}
+
 impl AppState {
     pub(crate) async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
         match self.call_tool_inner(name, args).await {
@@ -752,77 +771,41 @@ async fn main() -> Result<()> {
 
     // Register SlotManager task configs
     {
-        use missiond_core::types::{CliEngine, Lifecycle};
         let missiond_project_root = std::path::PathBuf::from("/Users/jinchen/Projects/missiond");
         let workstation_config =
             context::v3_blueprint_runtime::WorkstationRuntimeConfig::load_for_project_root(Some(
                 missiond_project_root.to_string_lossy().as_ref(),
             ))
             .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
-        let researcher_model = workstation_config
-            .default_spawn_model_for_template("researcher")
-            .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
-        let coder_model = workstation_config
-            .default_spawn_model_for_template("coder")
-            .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
-        state
-            .slot_manager
-            .register(slot_orchestrator::SlotTaskConfig {
-                task_type: "arch_maintenance".to_string(),
-                engine: CliEngine::ClaudeCode,
-                lifecycle: Lifecycle::Persistent,
-                slot_id: Some("slot-arch-maint".to_string()),
-                role: Some("arch-maint".to_string()),
-                model: researcher_model.clone(),
-                timeout: std::time::Duration::from_secs(600),
-                cwd: missiond_project_root.clone(),
-                skip_permissions: true,
-            })
-            .await?;
-        state
-            .slot_manager
-            .register(slot_orchestrator::SlotTaskConfig {
-                task_type: "strategy_analyst".to_string(),
-                engine: CliEngine::Gemini,
-                lifecycle: Lifecycle::Persistent,
-                slot_id: Some("slot-gemini-strategy".to_string()),
-                role: Some("strategy".to_string()),
-                model: None, // Uses GEMINI_MODEL constant in controller
-                timeout: std::time::Duration::from_secs(600),
-                cwd: missiond_project_root.clone(),
-                skip_permissions: true,
-            })
-            .await?;
-        state
-            .slot_manager
-            .register(slot_orchestrator::SlotTaskConfig {
-                task_type: "gemini_router".to_string(),
-                engine: CliEngine::Gemini,
-                lifecycle: Lifecycle::Persistent,
-                slot_id: Some("slot-gemini-router".to_string()),
-                role: Some("gemini-router".to_string()),
-                model: None,
-                timeout: std::time::Duration::from_secs(120),
-                cwd: missiond_project_root.clone(),
-                skip_permissions: true,
-            })
-            .await?;
-        state
-            .slot_manager
-            .register(slot_orchestrator::SlotTaskConfig {
-                task_type: "lisp_survey".to_string(),
-                engine: CliEngine::ClaudeCode,
-                lifecycle: Lifecycle::Persistent,
-                slot_id: Some("lisp-surveyor".to_string()),
-                role: Some("coder".to_string()),
-                model: coder_model,
-                timeout: std::time::Duration::from_secs(900),
-                cwd: missiond_project_root,
-                skip_permissions: true,
-            })
-            .await?;
+        for startup_slot in workstation_config.startup_slots() {
+            let engine = parse_startup_slot_engine(&startup_slot.engine)
+                .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+            let lifecycle = parse_startup_slot_lifecycle(&startup_slot.lifecycle)
+                .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+            let model = match startup_slot.model_profile.as_deref() {
+                Some(profile) => workstation_config
+                    .spawn_model_for_profile(profile)
+                    .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?,
+                None => None,
+            };
+            state
+                .slot_manager
+                .register(slot_orchestrator::SlotTaskConfig {
+                    task_type: startup_slot.task_type.clone(),
+                    engine,
+                    lifecycle,
+                    slot_id: startup_slot.slot_id.clone(),
+                    role: startup_slot.role.clone(),
+                    model,
+                    timeout: std::time::Duration::from_secs(startup_slot.timeout_secs),
+                    cwd: missiond_project_root.clone(),
+                    skip_permissions: startup_slot.skip_permissions,
+                })
+                .await?;
+        }
         info!(
-            "SlotManager: 4 tasks registered (arch_maintenance, strategy_analyst, gemini_router, lisp_survey)"
+            count = workstation_config.startup_slots().len(),
+            "SlotManager: startup tasks registered from V3 workstation-config"
         );
     }
 

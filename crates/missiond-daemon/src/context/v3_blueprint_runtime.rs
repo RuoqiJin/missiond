@@ -128,10 +128,23 @@ pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS: u32 = 1024;
 pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
     model_profile_spawn_args: HashMap<String, Option<String>>,
+    startup_slots: Vec<StartupSlotRuntimeConfig>,
     pub timeout_policy: TimeoutPolicy,
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
     pub pty_send_timeout_policy: SimpleTimeoutPolicy,
     pub slot_ttl_policy: SlotTtlPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct StartupSlotRuntimeConfig {
+    pub task_type: String,
+    pub engine: String,
+    pub lifecycle: String,
+    pub slot_id: Option<String>,
+    pub role: Option<String>,
+    pub model_profile: Option<String>,
+    pub timeout_secs: u64,
+    pub skip_permissions: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -361,9 +374,52 @@ impl Default for WorkstationRuntimeConfig {
             DEFAULT_DAILY_SONNET_PROFILE.to_string(),
             Some("sonnet".to_string()),
         );
+        let startup_slots = vec![
+            StartupSlotRuntimeConfig {
+                task_type: "arch_maintenance".to_string(),
+                engine: "claude-code".to_string(),
+                lifecycle: "persistent".to_string(),
+                slot_id: Some("slot-arch-maint".to_string()),
+                role: Some("arch-maint".to_string()),
+                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
+                timeout_secs: 600,
+                skip_permissions: true,
+            },
+            StartupSlotRuntimeConfig {
+                task_type: "strategy_analyst".to_string(),
+                engine: "gemini".to_string(),
+                lifecycle: "persistent".to_string(),
+                slot_id: Some("slot-gemini-strategy".to_string()),
+                role: Some("strategy".to_string()),
+                model_profile: None,
+                timeout_secs: 600,
+                skip_permissions: true,
+            },
+            StartupSlotRuntimeConfig {
+                task_type: "gemini_router".to_string(),
+                engine: "gemini".to_string(),
+                lifecycle: "persistent".to_string(),
+                slot_id: Some("slot-gemini-router".to_string()),
+                role: Some("gemini-router".to_string()),
+                model_profile: None,
+                timeout_secs: 120,
+                skip_permissions: true,
+            },
+            StartupSlotRuntimeConfig {
+                task_type: "lisp_survey".to_string(),
+                engine: "claude-code".to_string(),
+                lifecycle: "persistent".to_string(),
+                slot_id: Some("lisp-surveyor".to_string()),
+                role: Some("coder".to_string()),
+                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
+                timeout_secs: 900,
+                skip_permissions: true,
+            },
+        ];
         Self {
             slot_default_profiles,
             model_profile_spawn_args,
+            startup_slots,
             timeout_policy: TimeoutPolicy::default(),
             cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
             pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
@@ -551,6 +607,11 @@ impl WorkstationRuntimeConfig {
         self.slot_default_profiles.get(template).map(String::as_str)
     }
 
+    pub(crate) fn startup_slots(&self) -> &[StartupSlotRuntimeConfig] {
+        &self.startup_slots
+    }
+
+    #[allow(dead_code)]
     pub(crate) fn default_spawn_model_for_template(
         &self,
         template: &str,
@@ -1021,6 +1082,29 @@ pub(crate) fn parse_workstation_config(
         let template = tokens[2].clone();
         if let Some(profile) = keyword_value(&tokens, ":default-model-profile") {
             config.slot_default_profiles.insert(template, profile);
+        }
+    }
+    let startup_slot_forms = find_forms(&block, "startup-slot");
+    if !startup_slot_forms.is_empty() {
+        config.startup_slots.clear();
+        for form in startup_slot_forms {
+            let tokens = tokenize_lisp(&form);
+            if tokens.len() < 3 {
+                continue;
+            }
+            let skip_permissions = keyword_value(&tokens, ":skip_permissions")
+                .and_then(|value| parse_bool_token(&value))
+                .unwrap_or(true);
+            config.startup_slots.push(StartupSlotRuntimeConfig {
+                task_type: tokens[2].clone(),
+                engine: non_empty_keyword(&tokens, ":engine")?,
+                lifecycle: non_empty_keyword(&tokens, ":lifecycle")?,
+                slot_id: optional_non_nil_keyword(&tokens, ":slot_id"),
+                role: optional_non_nil_keyword(&tokens, ":role"),
+                model_profile: optional_non_nil_keyword(&tokens, ":model_profile"),
+                timeout_secs: u64_keyword(&tokens, ":timeout_secs")?,
+                skip_permissions,
+            });
         }
     }
     let timeout_form = find_forms(&block, "timeout-policy")
@@ -1604,6 +1688,13 @@ fn non_empty_keyword(tokens: &[String], key: &str) -> Result<String, BlueprintCo
     Ok(value)
 }
 
+fn optional_non_nil_keyword(tokens: &[String], key: &str) -> Option<String> {
+    keyword_value(tokens, key).filter(|value| {
+        let value = value.trim();
+        !value.is_empty() && !matches!(value.to_ascii_lowercase().as_str(), "nil" | "none" | "null")
+    })
+}
+
 fn parse_spawn_model_arg(value: &str) -> Result<Option<String>, BlueprintConfigError> {
     let value = value.trim();
     if value.is_empty()
@@ -1789,6 +1880,10 @@ mod tests {
     (slot-template coder :role coder :default-model-profile coding-default-opus-4-7)
     (slot-template researcher :role coder :default-model-profile coding-default-opus-4-7)
     (slot-template ops :role operator :default-model-profile daily-sonnet)
+    (startup-slot arch_maintenance :engine claude-code :lifecycle persistent :slot_id "slot-arch-maint" :role arch-maint :model_profile coding-default-opus-4-7 :timeout_secs 600 :skip_permissions true)
+    (startup-slot strategy_analyst :engine gemini :lifecycle persistent :slot_id "slot-gemini-strategy" :role strategy :model_profile nil :timeout_secs 600 :skip_permissions true)
+    (startup-slot gemini_router :engine gemini :lifecycle persistent :slot_id "slot-gemini-router" :role gemini-router :model_profile nil :timeout_secs 120 :skip_permissions true)
+    (startup-slot lisp_survey :engine claude-code :lifecycle persistent :slot_id "lisp-surveyor" :role coder :model_profile coding-default-opus-4-7 :timeout_secs 900 :skip_permissions true)
     (timeout-policy boardtask-dispatch
       :default_secs 1800
       :min_secs 60
@@ -1921,6 +2016,18 @@ mod tests {
             cfg.default_spawn_model_for_template("ops").unwrap(),
             Some("sonnet".to_string())
         );
+        assert_eq!(cfg.startup_slots().len(), 4);
+        let lisp_survey = cfg
+            .startup_slots()
+            .iter()
+            .find(|slot| slot.task_type == "lisp_survey")
+            .expect("lisp survey startup slot");
+        assert_eq!(lisp_survey.engine, "claude-code");
+        assert_eq!(
+            lisp_survey.model_profile.as_deref(),
+            Some(DEFAULT_MODEL_PROFILE)
+        );
+        assert_eq!(lisp_survey.timeout_secs, 900);
         assert_eq!(cfg.timeout_policy.default_secs, 1800);
         assert_eq!(cfg.timeout_policy.min_secs, 60);
         assert_eq!(cfg.timeout_policy.max_secs, 7200);
