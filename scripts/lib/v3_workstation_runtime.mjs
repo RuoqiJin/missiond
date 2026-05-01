@@ -19,6 +19,8 @@ export const MISSING_SESSION_PROBE_SECS = 120;
 export const DEFAULT_SLOT_TTL_SECS = 14400;
 export const MIN_SLOT_TTL_SECS = 300;
 export const MAX_SLOT_TTL_SECS = 28800;
+export const DEFAULT_SLOT_EXTEND_SECS = 3600;
+export const MAX_SLOT_EXTEND_SECS = 3600;
 
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -59,6 +61,20 @@ export class WorkstationRuntimeConfig {
       ? ttlSecs
       : this.slotTtlPolicy.default_secs;
     return Math.max(this.slotTtlPolicy.min_secs, Math.min(this.slotTtlPolicy.max_secs, raw));
+  }
+
+  defaultSlotExtendSecs() {
+    return Math.max(
+      this.slotTtlPolicy.min_secs,
+      Math.min(this.maxSlotExtendSecs(), this.slotTtlPolicy.default_extend_secs),
+    );
+  }
+
+  maxSlotExtendSecs() {
+    return Math.max(
+      this.slotTtlPolicy.min_secs,
+      Math.min(this.slotTtlPolicy.max_secs, this.slotTtlPolicy.max_extend_secs),
+    );
   }
 }
 
@@ -152,6 +168,8 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
     default_secs: readPositiveInt(ttlProps, ':default_secs', file),
     min_secs: readPositiveInt(ttlProps, ':min_secs', file),
     max_secs: readPositiveInt(ttlProps, ':max_secs', file),
+    default_extend_secs: readPositiveInt(ttlProps, ':default_extend_secs', file),
+    max_extend_secs: readPositiveInt(ttlProps, ':max_extend_secs', file),
   };
   if (config.timeoutPolicy.min_secs > config.timeoutPolicy.max_secs) {
     throw new V3BlueprintRuntimeConfigError(
@@ -161,6 +179,21 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
   if (config.slotTtlPolicy.min_secs > config.slotTtlPolicy.max_secs) {
     throw new V3BlueprintRuntimeConfigError(
       'failed to parse V3 workstation-config: ttl :min_secs exceeds :max_secs',
+    );
+  }
+  if (config.slotTtlPolicy.default_extend_secs > config.slotTtlPolicy.max_extend_secs) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: ttl :default_extend_secs exceeds :max_extend_secs',
+    );
+  }
+  if (config.slotTtlPolicy.max_extend_secs < config.slotTtlPolicy.min_secs) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: ttl :max_extend_secs is below :min_secs',
+    );
+  }
+  if (config.slotTtlPolicy.max_extend_secs > config.slotTtlPolicy.max_secs) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: ttl :max_extend_secs exceeds :max_secs',
     );
   }
 
@@ -199,6 +232,8 @@ function defaultSlotTtlPolicy() {
     default_secs: DEFAULT_SLOT_TTL_SECS,
     min_secs: MIN_SLOT_TTL_SECS,
     max_secs: MAX_SLOT_TTL_SECS,
+    default_extend_secs: DEFAULT_SLOT_EXTEND_SECS,
+    max_extend_secs: MAX_SLOT_EXTEND_SECS,
   };
 }
 

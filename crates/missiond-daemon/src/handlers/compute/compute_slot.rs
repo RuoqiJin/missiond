@@ -11,8 +11,6 @@ use crate::state::AppState;
 
 /// Max dynamic slots allowed concurrently.
 const MAX_DYNAMIC_SLOTS: i64 = 5;
-/// Max extension per request: 1 hour.
-const MAX_EXTEND_SECS: i64 = 3600;
 
 /// Allowed cwd prefixes (path traversal prevention).
 const ALLOWED_CWD_PREFIXES: &[&str] = &[
@@ -542,15 +540,44 @@ async fn extend_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
 
+    let Some(dynamic_slot) = state
+        .store
+        .get_dynamic_slot(slot_id)
+        .await
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    else {
+        return Ok(slot_extend_not_found(slot_id));
+    };
+    if dynamic_slot.status != "active" {
+        return Ok(slot_extend_not_found(slot_id));
+    }
+
+    let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(
+        dynamic_slot_project_root(&dynamic_slot).as_deref(),
+    ) {
+        Ok(config) => config,
+        Err(err) => {
+            let tool_error = ToolError::new("V3_BLUEPRINT_CONFIG_ERROR", err.to_string())
+                .with_suggestion(
+                    "ensure <project>/.missiond/v3/missiond-blueprint.lisp contains workstation-config ttl-policy",
+                );
+            return Ok(ToolResult::structured_error(tool_error));
+        }
+    };
+
     let additional = args
         .get("additional_seconds")
         .and_then(|v| v.as_i64())
-        .unwrap_or(3600);
+        .unwrap_or_else(|| runtime_config.default_slot_extend_secs());
+    let max_extend_secs = runtime_config.max_slot_extend_secs();
 
-    if additional > MAX_EXTEND_SECS {
+    if additional <= 0 || additional > max_extend_secs {
         return Ok(ToolResult::structured_error(ToolError::new(
             error_codes::INVALID_PARAM,
-            format!("Max extension is {} seconds per request", MAX_EXTEND_SECS),
+            format!(
+                "Extension must be between 1 and {} seconds per request",
+                max_extend_secs
+            ),
         )));
     }
 
@@ -565,17 +592,29 @@ async fn extend_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             "new_expires_at": new_expires,
             "extended_by_seconds": additional,
         }))),
-        None => Ok(ToolResult::structured_error(
-            ToolError::new(
-                error_codes::NOT_FOUND,
-                format!(
-                    "Cannot extend '{}': slot not found, not active, or max extensions (2) reached",
-                    slot_id
-                ),
-            )
-            .with_suggestion("Use action=list to check slot status"),
-        )),
+        None => Ok(slot_extend_not_found(slot_id)),
     }
+}
+
+fn slot_extend_not_found(slot_id: &str) -> ToolResult {
+    ToolResult::structured_error(
+        ToolError::new(
+            error_codes::NOT_FOUND,
+            format!(
+                "Cannot extend '{}': slot not found, not active, or max extensions (2) reached",
+                slot_id
+            ),
+        )
+        .with_suggestion("Use action=list to check slot status"),
+    )
+}
+
+fn dynamic_slot_project_root(slot: &DynamicSlot) -> Option<String> {
+    serde_json::from_str::<SlotConfig>(&slot.config)
+        .ok()
+        .and_then(|config| config.project_root.or(config.cwd))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
@@ -707,5 +746,87 @@ mod tests {
     fn effective_initial_prompt_returns_none_when_prompt_absent() {
         assert_eq!(effective_initial_prompt(None, false), None);
         assert_eq!(effective_initial_prompt(None, true), None);
+    }
+
+    #[test]
+    fn dynamic_slot_project_root_prefers_project_root() {
+        let config = SlotConfig {
+            id: "slot-dyn-test".to_string(),
+            role: "coder".to_string(),
+            description: "test".to_string(),
+            engine: Default::default(),
+            cwd: Some("/tmp/requested".to_string()),
+            project_root: Some("/tmp/project".to_string()),
+            requested_cwd: None,
+            mcp_config: None,
+            lifecycle: Some(Lifecycle::OnDemand),
+            auto_start: None,
+            dangerously_skip_permissions: None,
+            model: None,
+            traits: vec![],
+            category: None,
+            env: None,
+            initial_prompt: None,
+        };
+        let slot = DynamicSlot {
+            id: "slot-dyn-test".to_string(),
+            parent_slot_id: "slot-jarvis".to_string(),
+            template: "coder".to_string(),
+            objective: None,
+            config: serde_json::to_string(&config).unwrap(),
+            status: "active".to_string(),
+            termination_reason: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            terminated_at: None,
+            ttl_seconds: 14400,
+            expires_at: "2026-01-01T04:00:00Z".to_string(),
+            extend_count: 0,
+        };
+
+        assert_eq!(
+            dynamic_slot_project_root(&slot),
+            Some("/tmp/project".to_string())
+        );
+    }
+
+    #[test]
+    fn dynamic_slot_project_root_falls_back_to_cwd() {
+        let config = SlotConfig {
+            id: "slot-dyn-test".to_string(),
+            role: "coder".to_string(),
+            description: "test".to_string(),
+            engine: Default::default(),
+            cwd: Some("/tmp/project".to_string()),
+            project_root: None,
+            requested_cwd: None,
+            mcp_config: None,
+            lifecycle: Some(Lifecycle::OnDemand),
+            auto_start: None,
+            dangerously_skip_permissions: None,
+            model: None,
+            traits: vec![],
+            category: None,
+            env: None,
+            initial_prompt: None,
+        };
+        let slot = DynamicSlot {
+            id: "slot-dyn-test".to_string(),
+            parent_slot_id: "slot-jarvis".to_string(),
+            template: "coder".to_string(),
+            objective: None,
+            config: serde_json::to_string(&config).unwrap(),
+            status: "active".to_string(),
+            termination_reason: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            terminated_at: None,
+            ttl_seconds: 14400,
+            expires_at: "2026-01-01T04:00:00Z".to_string(),
+            extend_count: 0,
+        };
+
+        assert_eq!(
+            dynamic_slot_project_root(&slot),
+            Some("/tmp/project".to_string())
+        );
     }
 }

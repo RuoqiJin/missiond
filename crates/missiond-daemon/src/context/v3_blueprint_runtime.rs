@@ -12,6 +12,8 @@ pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
 pub(crate) const MIN_SLOT_TTL_SECS: i64 = 300;
 pub(crate) const MAX_SLOT_TTL_SECS: i64 = 28800;
+pub(crate) const DEFAULT_SLOT_EXTEND_SECS: i64 = 3600;
+pub(crate) const MAX_SLOT_EXTEND_SECS: i64 = 3600;
 pub(crate) const DEFAULT_FLOW_LLM_MAX_TOKENS: u32 = 65536;
 pub(crate) const DEFAULT_FLOW_SLOT_MODEL: &str = "opus";
 pub(crate) const DEFAULT_FLOW_SLOT_TIMEOUT_SECS: u64 = 3600;
@@ -97,6 +99,8 @@ pub(crate) struct SlotTtlPolicy {
     pub default_secs: i64,
     pub min_secs: i64,
     pub max_secs: i64,
+    pub default_extend_secs: i64,
+    pub max_extend_secs: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -191,6 +195,8 @@ impl Default for SlotTtlPolicy {
             default_secs: DEFAULT_SLOT_TTL_SECS,
             min_secs: MIN_SLOT_TTL_SECS,
             max_secs: MAX_SLOT_TTL_SECS,
+            default_extend_secs: DEFAULT_SLOT_EXTEND_SECS,
+            max_extend_secs: MAX_SLOT_EXTEND_SECS,
         }
     }
 }
@@ -331,6 +337,18 @@ impl WorkstationRuntimeConfig {
             _ => self.slot_ttl_policy.default_secs,
         };
         raw.clamp(self.slot_ttl_policy.min_secs, self.slot_ttl_policy.max_secs)
+    }
+
+    pub(crate) fn default_slot_extend_secs(&self) -> i64 {
+        self.slot_ttl_policy
+            .default_extend_secs
+            .clamp(self.slot_ttl_policy.min_secs, self.max_slot_extend_secs())
+    }
+
+    pub(crate) fn max_slot_extend_secs(&self) -> i64 {
+        self.slot_ttl_policy
+            .max_extend_secs
+            .clamp(self.slot_ttl_policy.min_secs, self.slot_ttl_policy.max_secs)
     }
 }
 
@@ -633,7 +651,34 @@ pub(crate) fn parse_workstation_config(
         default_secs: int_keyword(&ttl_tokens, ":default_secs")?,
         min_secs: int_keyword(&ttl_tokens, ":min_secs")?,
         max_secs: int_keyword(&ttl_tokens, ":max_secs")?,
+        default_extend_secs: int_keyword(&ttl_tokens, ":default_extend_secs")?,
+        max_extend_secs: int_keyword(&ttl_tokens, ":max_extend_secs")?,
     };
+    if config.timeout_policy.min_secs > config.timeout_policy.max_secs {
+        return Err(BlueprintConfigError::Parse(
+            "workstation timeout :min_secs must be <= :max_secs".into(),
+        ));
+    }
+    if config.slot_ttl_policy.min_secs > config.slot_ttl_policy.max_secs {
+        return Err(BlueprintConfigError::Parse(
+            "dynamic-slot ttl :min_secs must be <= :max_secs".into(),
+        ));
+    }
+    if config.slot_ttl_policy.default_extend_secs > config.slot_ttl_policy.max_extend_secs {
+        return Err(BlueprintConfigError::Parse(
+            "dynamic-slot :default_extend_secs must be <= :max_extend_secs".into(),
+        ));
+    }
+    if config.slot_ttl_policy.max_extend_secs < config.slot_ttl_policy.min_secs {
+        return Err(BlueprintConfigError::Parse(
+            "dynamic-slot :max_extend_secs must be >= :min_secs".into(),
+        ));
+    }
+    if config.slot_ttl_policy.max_extend_secs > config.slot_ttl_policy.max_secs {
+        return Err(BlueprintConfigError::Parse(
+            "dynamic-slot :max_extend_secs must be <= :max_secs".into(),
+        ));
+    }
     Ok(config)
 }
 
@@ -1084,7 +1129,9 @@ mod tests {
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
-      :max_secs 28800))
+      :max_secs 28800
+      :default_extend_secs 3600
+      :max_extend_secs 3600))
   (flow-runtime-policy
     :llm-call-default-max-tokens 65536
     :slot-task-default-model "opus"
@@ -1144,6 +1191,8 @@ mod tests {
         assert_eq!(cfg.slot_ttl_policy.default_secs, 14400);
         assert_eq!(cfg.slot_ttl_policy.min_secs, 300);
         assert_eq!(cfg.slot_ttl_policy.max_secs, 28800);
+        assert_eq!(cfg.slot_ttl_policy.default_extend_secs, 3600);
+        assert_eq!(cfg.slot_ttl_policy.max_extend_secs, 3600);
     }
 
     #[test]
@@ -1157,6 +1206,8 @@ mod tests {
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(5)), 300);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(99_999)), 28800);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(3600)), 3600);
+        assert_eq!(cfg.default_slot_extend_secs(), 3600);
+        assert_eq!(cfg.max_slot_extend_secs(), 3600);
     }
 
     #[test]

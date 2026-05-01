@@ -25,7 +25,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "model_profile": {"type": "string", "description": "[create] 可选模型 profile；coding-default-opus-4-7 表示 Claude Code Default(Opus 4.7/1M)"},
                     "modelProfile": {"type": "string", "description": "[create] model_profile camelCase alias"},
                     "slot_id": {"type": "string", "description": "[terminate/extend] 动态 slot ID"},
-                    "additional_seconds": {"type": "integer", "description": "[extend] 延长秒数(每次上限 3600)"},
+                    "additional_seconds": {"type": "integer", "description": "[extend] 延长秒数；默认/上限由 V3 workstation-config ttl-policy dynamic-slot 投影"},
                     "status": {"type": "string", "description": "[list] active/terminated"}
                 }
             }),

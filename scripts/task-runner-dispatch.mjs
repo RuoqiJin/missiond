@@ -630,7 +630,9 @@ function fixtureBlueprint() {
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
-      :max_secs 28800)))`;
+      :max_secs 28800
+      :default_extend_secs 3600
+      :max_extend_secs 3600)))`;
 }
 
 function assert(condition, message) {

@@ -104,7 +104,7 @@ function checkFiles(root, files) {
     'Project-bound workstation spawn MUST sync MissionD Claude hooks',
     'MISSION_IPC_ENDPOINT',
     'Autopilot pty.send budget MUST project from BoardTask.timeout_secs',
-    'Dynamic slot TTL MUST project from workstation-config ttl-policy dynamic-slot',
+    'Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot',
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
     'timeout-policy boardtask-dispatch',
@@ -140,6 +140,9 @@ function checkFiles(root, files) {
     'initial_prompt_for_spawn',
     'WorkstationRuntimeConfig::load_for_project_root',
     'clamp_slot_ttl_secs',
+    'default_slot_extend_secs',
+    'max_slot_extend_secs',
+    'dynamic_slot_project_root',
     'V3_BLUEPRINT_CONFIG_ERROR',
     'PTYSpawnOptions',
   ]);
@@ -182,6 +185,10 @@ function checkFiles(root, files) {
     'DEFAULT_SLOT_TTL_SECS',
     'MIN_SLOT_TTL_SECS',
     'MAX_SLOT_TTL_SECS',
+    'DEFAULT_SLOT_EXTEND_SECS',
+    'MAX_SLOT_EXTEND_SECS',
+    'default_slot_extend_secs',
+    'max_slot_extend_secs',
     'MissingBlueprint',
   ]);
 
@@ -284,7 +291,9 @@ function buildFixture() {
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
-      :max_secs 28800)
+      :max_secs 28800
+      :default_extend_secs 3600
+      :max_extend_secs 3600)
     :invariants
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
@@ -292,7 +301,7 @@ function buildFixture() {
        "Project-bound workstation spawn MUST sync MissionD Claude hooks"
        "MISSION_IPC_ENDPOINT"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs"
-       "Dynamic slot TTL MUST project from workstation-config ttl-policy dynamic-slot"
+       "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold"
        "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
@@ -322,6 +331,9 @@ let suppress_initial_prompt = true;
 let initial_prompt_for_spawn = None;
 WorkstationRuntimeConfig::load_for_project_root();
 clamp_slot_ttl_secs();
+default_slot_extend_secs();
+max_slot_extend_secs();
+dynamic_slot_project_root();
 V3_BLUEPRINT_CONFIG_ERROR;
 PTYSpawnOptions;`);
   writeFixture(root, DEFAULT_FILES.taskDelegate, `
@@ -349,7 +361,7 @@ pub(crate) fn load_for_project_root() {}
 fn parse_workstation_config() {}
 fn x() {
   find_form(source, "workstation-config");
-  let a = "timeout-policy boardtask-dispatch ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS MissingBlueprint";
+  let a = "timeout-policy boardtask-dispatch ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS default_slot_extend_secs max_slot_extend_secs MissingBlueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
