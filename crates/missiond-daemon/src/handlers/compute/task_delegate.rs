@@ -143,6 +143,7 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         template,
         model_arg.as_deref(),
         effective_model_profile,
+        &runtime_config,
     ) {
         Ok(model) => model,
         Err(message) => {

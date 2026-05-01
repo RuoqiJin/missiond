@@ -103,6 +103,7 @@ function checkFiles(root, files) {
     'WorkstationRuntimeConfig::load_for_project_root',
     'V3_BLUEPRINT_CONFIG_ERROR',
     'coding-default-opus-4-7',
+    'quick-haiku',
     ':effective-model "Opus 4.7 with 1M context"',
     ':spawn-model-arg nil',
     'code and research dynamic slots MUST NOT hardcode --model sonnet',
@@ -111,6 +112,7 @@ function checkFiles(root, files) {
     '(startup-slot arch_maintenance',
     '(startup-slot lisp_survey',
     'model_profile=coding-default-opus-4-7 both mean no CLI --model override',
+    'mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg',
     'task_delegate must pass model/model_profile through to compute_slot',
     'Project-bound workstation spawn MUST sync MissionD Claude hooks',
     'MISSION_IPC_ENDPOINT',
@@ -146,15 +148,12 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
     'const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7"',
     '"coder" => Some(TemplateConfig',
-    'model: None',
     '"researcher" => Some(TemplateConfig',
     '"ops" => Some(TemplateConfig',
-    'model: Some("sonnet")',
     'pub(crate) fn resolve_model_projection',
     'pub(crate) fn effective_initial_prompt',
     'pub(crate) fn model_projection_matches',
-    'fn model_for_profile',
-    'Ok(None)',
+    'spawn_model_for_profile(profile)',
     'model must be a single safe CLI token',
     'string_arg(args, &["model_profile", "modelProfile"])',
     'string_arg(args, &["initial_prompt", "initialPrompt"])',
@@ -376,6 +375,8 @@ function buildFixture() {
     (model-profile coding-default-opus-4-7
       :effective-model "Opus 4.7 with 1M context"
       :spawn-model-arg nil)
+    (model-profile quick-haiku
+      :spawn-model-arg "haiku")
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -417,6 +418,7 @@ function buildFixture() {
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries"
        "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
+       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg"
        "task_delegate must pass model/model_profile through to compute_slot"
        "Project-bound workstation spawn MUST sync MissionD Claude hooks"
        "MISSION_IPC_ENDPOINT"
@@ -465,11 +467,11 @@ std::time::Duration::from_secs(startup_slot.timeout_secs);
 skip_permissions: startup_slot.skip_permissions;`);
   writeFixture(root, DEFAULT_FILES.computeSlot, `
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
-match name { "coder" => Some(TemplateConfig { model: None }), "researcher" => Some(TemplateConfig { model: None }), "ops" => Some(TemplateConfig { model: Some("sonnet") }) }
+match name { "coder" => Some(TemplateConfig {}), "researcher" => Some(TemplateConfig {}), "ops" => Some(TemplateConfig {}) }
 pub(crate) fn resolve_model_projection() {}
 pub(crate) fn effective_initial_prompt() {}
 pub(crate) fn model_projection_matches() {}
-fn model_for_profile() { Ok(None); }
+runtime_config.spawn_model_for_profile(profile);
 const e = 'model must be a single safe CLI token';
 string_arg(args, &["model_profile", "modelProfile"]);
 string_arg(args, &["initial_prompt", "initialPrompt"]);

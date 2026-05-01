@@ -108,6 +108,7 @@ pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MAX_TOKENS: u32 = 2000;
 pub(crate) const DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS: i64 = 86400;
 pub(crate) const DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS: i64 = 6 * 3600;
 pub(crate) const DEFAULT_DAILY_SONNET_PROFILE: &str = "daily-sonnet";
+pub(crate) const DEFAULT_QUICK_HAIKU_PROFILE: &str = "quick-haiku";
 pub(crate) const DEFAULT_ROUTER_CHAT_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_CHAT_MAX_TOKENS: u32 = 16384;
 pub(crate) const DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS: u32 = 65536;
@@ -374,6 +375,10 @@ impl Default for WorkstationRuntimeConfig {
             DEFAULT_DAILY_SONNET_PROFILE.to_string(),
             Some("sonnet".to_string()),
         );
+        model_profile_spawn_args.insert(
+            DEFAULT_QUICK_HAIKU_PROFILE.to_string(),
+            Some("haiku".to_string()),
+        );
         let startup_slots = vec![
             StartupSlotRuntimeConfig {
                 task_type: "arch_maintenance".to_string(),
@@ -626,6 +631,15 @@ impl WorkstationRuntimeConfig {
         &self,
         profile: &str,
     ) -> Result<Option<String>, BlueprintConfigError> {
+        let normalized = normalize_model_profile_name(profile);
+        let profile = match normalized.as_str() {
+            "default" | "claude-code-default" | "coding-default" | "opus-4-7-default" => {
+                DEFAULT_MODEL_PROFILE
+            }
+            "sonnet" => DEFAULT_DAILY_SONNET_PROFILE,
+            "haiku" => DEFAULT_QUICK_HAIKU_PROFILE,
+            other => other,
+        };
         self.model_profile_spawn_args
             .get(profile)
             .cloned()
@@ -1695,6 +1709,10 @@ fn optional_non_nil_keyword(tokens: &[String], key: &str) -> Option<String> {
     })
 }
 
+fn normalize_model_profile_name(value: &str) -> String {
+    value.trim().to_ascii_lowercase().replace('_', "-")
+}
+
 fn parse_spawn_model_arg(value: &str) -> Result<Option<String>, BlueprintConfigError> {
     let value = value.trim();
     if value.is_empty()
@@ -1877,6 +1895,7 @@ mod tests {
   (workstation-config
     (model-profile coding-default-opus-4-7 :spawn-model-arg nil)
     (model-profile daily-sonnet :spawn-model-arg "sonnet")
+    (model-profile quick-haiku :spawn-model-arg "haiku")
     (slot-template coder :role coder :default-model-profile coding-default-opus-4-7)
     (slot-template researcher :role coder :default-model-profile coding-default-opus-4-7)
     (slot-template ops :role operator :default-model-profile daily-sonnet)
@@ -2015,6 +2034,15 @@ mod tests {
         assert_eq!(
             cfg.default_spawn_model_for_template("ops").unwrap(),
             Some("sonnet".to_string())
+        );
+        assert_eq!(
+            cfg.spawn_model_for_profile("quick-haiku").unwrap(),
+            Some("haiku".to_string())
+        );
+        assert_eq!(
+            cfg.spawn_model_for_profile("coding_default_opus_4_7")
+                .unwrap(),
+            None
         );
         assert_eq!(cfg.startup_slots().len(), 4);
         let lisp_survey = cfg

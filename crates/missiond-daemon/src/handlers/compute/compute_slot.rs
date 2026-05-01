@@ -29,21 +29,18 @@ fn get_template(name: &str) -> Option<TemplateConfig> {
             description: "Dynamic coder slot (ephemeral)",
             mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
             default_cwd: "/Users/jinchen/Projects",
-            model: None,
         }),
         "ops" => Some(TemplateConfig {
             role: "operator",
             description: "Dynamic ops slot (ephemeral)",
             mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
             default_cwd: "/Users/jinchen/Projects",
-            model: Some("sonnet"),
         }),
         "researcher" => Some(TemplateConfig {
             role: "coder",
             description: "Dynamic researcher slot (read-only analysis)",
             mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
             default_cwd: "/Users/jinchen/Projects",
-            model: None,
         }),
         _ => None,
     }
@@ -54,21 +51,25 @@ struct TemplateConfig {
     description: &'static str,
     mcp_config: Option<&'static str>,
     default_cwd: &'static str,
-    model: Option<&'static str>,
 }
 
 pub(crate) fn resolve_model_projection(
     template_name: &str,
     model: Option<&str>,
     model_profile: Option<&str>,
+    runtime_config: &WorkstationRuntimeConfig,
 ) -> std::result::Result<Option<String>, String> {
     if let Some(value) = non_empty(model) {
         return normalize_model_override(value);
     }
-    if let Some(profile) = non_empty(model_profile) {
-        return model_for_profile(profile);
+    let profile = non_empty(model_profile)
+        .or_else(|| runtime_config.default_model_profile_for_template(template_name));
+    match profile {
+        Some(profile) => runtime_config
+            .spawn_model_for_profile(profile)
+            .map_err(|err| err.to_string()),
+        None => Ok(None),
     }
-    Ok(get_template(template_name).and_then(|template| template.model.map(str::to_string)))
 }
 
 /// V3 workstation-config :: execution-ownership delegated-boardtask projection.
@@ -101,22 +102,6 @@ pub(crate) fn model_projection_matches(
         None => None,
     };
     slot.as_deref() == requested_model
-}
-
-fn model_for_profile(profile: &str) -> std::result::Result<Option<String>, String> {
-    match normalize_profile(profile).as_str() {
-        "default"
-        | "claude-code-default"
-        | "coding-default"
-        | CODING_DEFAULT_PROFILE
-        | "opus-4-7-default" => Ok(None),
-        "daily-sonnet" | "sonnet" => Ok(Some("sonnet".to_string())),
-        "quick-haiku" | "haiku" => Ok(Some("haiku".to_string())),
-        other => Err(format!(
-            "Unknown model_profile '{}'. Use {}, daily-sonnet, or quick-haiku.",
-            other, CODING_DEFAULT_PROFILE
-        )),
-    }
 }
 
 fn normalize_model_override(value: &str) -> std::result::Result<Option<String>, String> {
@@ -199,20 +184,6 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             ))
         }
     };
-    let model = match resolve_model_projection(
-        template_name,
-        string_arg(args, &["model"]),
-        string_arg(args, &["model_profile", "modelProfile"]),
-    ) {
-        Ok(model) => model,
-        Err(message) => {
-            return Ok(ToolResult::structured_error(ToolError::new(
-                error_codes::INVALID_PARAM,
-                message,
-            )))
-        }
-    };
-
     // Check slot limit
     let active_count = state
         .store
@@ -329,6 +300,20 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
     let ttl = runtime_config.clamp_slot_ttl_secs(args.get("max_ttl").and_then(|v| v.as_i64()));
+    let model = match resolve_model_projection(
+        template_name,
+        string_arg(args, &["model"]),
+        string_arg(args, &["model_profile", "modelProfile"]),
+        &runtime_config,
+    ) {
+        Ok(model) => model,
+        Err(message) => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::INVALID_PARAM,
+                message,
+            )))
+        }
+    };
 
     // Build SlotConfig — `cwd` becomes the canonical project root so that
     // spawn_tracked_slot picks it up as process cwd. The original requested
@@ -674,45 +659,53 @@ mod tests {
 
     #[test]
     fn coder_template_uses_claude_code_default_profile() {
-        assert_eq!(resolve_model_projection("coder", None, None).unwrap(), None);
+        let cfg = WorkstationRuntimeConfig::default();
         assert_eq!(
-            resolve_model_projection("researcher", None, None).unwrap(),
+            resolve_model_projection("coder", None, None, &cfg).unwrap(),
+            None
+        );
+        assert_eq!(
+            resolve_model_projection("researcher", None, None, &cfg).unwrap(),
             None
         );
     }
 
     #[test]
     fn ops_template_keeps_sonnet_default() {
+        let cfg = WorkstationRuntimeConfig::default();
         assert_eq!(
-            resolve_model_projection("ops", None, None).unwrap(),
+            resolve_model_projection("ops", None, None, &cfg).unwrap(),
             Some("sonnet".to_string())
         );
     }
 
     #[test]
     fn caller_model_wins_over_profile() {
+        let cfg = WorkstationRuntimeConfig::default();
         assert_eq!(
-            resolve_model_projection("coder", Some("haiku"), Some("daily-sonnet")).unwrap(),
+            resolve_model_projection("coder", Some("haiku"), Some("daily-sonnet"), &cfg).unwrap(),
             Some("haiku".to_string())
         );
     }
 
     #[test]
     fn default_alias_means_no_model_arg() {
+        let cfg = WorkstationRuntimeConfig::default();
         assert_eq!(
-            resolve_model_projection("coder", Some("claude-code-default"), None).unwrap(),
+            resolve_model_projection("coder", Some("claude-code-default"), None, &cfg).unwrap(),
             None
         );
         assert_eq!(
-            resolve_model_projection("coder", None, Some("coding_default_opus_4_7")).unwrap(),
+            resolve_model_projection("coder", None, Some("coding_default_opus_4_7"), &cfg).unwrap(),
             None
         );
     }
 
     #[test]
     fn unsafe_model_token_is_rejected() {
-        assert!(resolve_model_projection("coder", Some("sonnet;rm"), None).is_err());
-        assert!(resolve_model_projection("coder", Some("sonnet 4.6"), None).is_err());
+        let cfg = WorkstationRuntimeConfig::default();
+        assert!(resolve_model_projection("coder", Some("sonnet;rm"), None, &cfg).is_err());
+        assert!(resolve_model_projection("coder", Some("sonnet 4.6"), None, &cfg).is_err());
     }
 
     #[test]

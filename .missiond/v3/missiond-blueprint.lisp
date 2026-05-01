@@ -452,6 +452,10 @@
       :applies-to [ops low-risk-maintenance]
       :spawn-model-arg "sonnet"
       :rule "Use only when the task or caller explicitly asks for Sonnet-class daily work.")
+    (model-profile quick-haiku
+      :applies-to [docs test chore low-risk-fast-path]
+      :spawn-model-arg "haiku"
+      :rule "Use only when the task or caller explicitly asks for a low-cost fast Claude Code model.")
     (slot-template coder
       :role coder
       :default-model-profile coding-default-opus-4-7
@@ -521,6 +525,7 @@
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config and omit --model for coding-default-opus-4-7"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries, including engine/lifecycle/slot_id/role/timeout_secs/skip_permissions"
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
+       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
        "caller-supplied model wins over model_profile, but must be a single shell token"
        "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
        "Project-bound workstation spawn MUST sync MissionD Claude hooks into <project>/.claude/settings.local.json before PTY start and MUST inject MISSION_IPC_ENDPOINT into the slot env; this preserves global ~/.claude/settings.json while making SessionStart UUID capture and UserPromptSubmit context prefetch local, idempotent, and project-scoped"
