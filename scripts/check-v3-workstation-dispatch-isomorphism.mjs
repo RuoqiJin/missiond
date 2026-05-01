@@ -269,6 +269,7 @@ const WORKSTATION_OUTCOME_RS_NEEDLES = [
   'pub(crate) fn truncate_brief_preview',
   'SCOPED_COMMIT_REQUIRED',
   'SCOPED_COMMIT_POLICY',
+  'CompletionLogUnavailable',
   '"workstation_dispatch_status"',
   '"task_brief_preview"',
   '"delegated_board_task_id"',
@@ -276,6 +277,7 @@ const WORKSTATION_OUTCOME_RS_NEEDLES = [
   '"dispatched"',
   '"dry_run_no_dispatch"',
   '"inner_returned_error"',
+  '"skipped_completion_log_unavailable"',
 ];
 
 const WORKSTATION_RUNNER_RS_NEEDLES = [
@@ -285,6 +287,9 @@ const WORKSTATION_RUNNER_RS_NEEDLES = [
   'resolve_target_project_root',
   'resolve_contract_path',
   'build_task_brief_with_source_and_trace',
+  'workstation_execution_id',
+  'agent_execution::handle',
+  '"action": "open"',
   'mission_task_delegate',
   'tool_result_payload',
   'EvidenceEntry::new',
@@ -294,6 +299,7 @@ const WORKSTATION_RUNNER_RS_NEEDLES = [
   'WorkstationDispatchOutcome::InnerError',
   'WorkstationDispatchOutcome::SafeDescriptor',
   'SafeDescriptorReason::MalformedTaskContract',
+  'SafeDescriptorReason::CompletionLogUnavailable',
   'task_contract_source_path',
   'session_trace_path',
 ];
@@ -301,10 +307,14 @@ const WORKSTATION_RUNNER_RS_NEEDLES = [
 const WORKSTATION_BRIEF_RS_NEEDLES = [
   'pub(crate) enum BriefTaskKind',
   'pub(crate) fn classify_task_kind',
+  'pub(crate) fn workstation_execution_id',
   'pub(crate) fn build_task_brief',
   'pub(crate) fn build_task_brief_with_source',
   'pub(crate) fn build_task_brief_with_source_and_trace',
   'AGENT_TEAM_OBJECTIVE_HINT',
+  'Execution log:',
+  'execution_id=',
+  'dispatcher pre-opened this MissionD audit log',
   'Completion handoff (scoped commit)',
   'Session trace',
   'COMMIT_POLICY_SCOPED',
@@ -814,7 +824,7 @@ pub(crate) use auto_spawn::{
 //   "workstation_dispatch_status" "task_brief_preview"
 //   "delegated_board_task_id"     "inner_result"
 // Stable status values returned by WorkstationDispatchOutcome::status:
-//   "dispatched" "dry_run_no_dispatch" "inner_returned_error"
+//   "dispatched" "dry_run_no_dispatch" "inner_returned_error" "skipped_completion_log_unavailable"
 // substrate only ever wraps mission_task_delegate
 `;
 }
@@ -824,7 +834,8 @@ function buildGoodWorkstationRunner() {
 use crate::slot_orchestrator::project_root::resolve_target_project_root;
 use super::descriptor::resolve_contract_path;
 use super::{
-    build_task_brief_with_source_and_trace, SafeDescriptorReason, WorkstationDispatchOutcome,
+    build_task_brief_with_source_and_trace, workstation_execution_id, SafeDescriptorReason,
+    WorkstationDispatchOutcome,
 };
 pub(crate) async fn run_workstation_dispatch() {}
 pub(crate) async fn run_workstation_dispatch_with_contract() {}
@@ -832,6 +843,9 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace() {
     let _ = resolve_target_project_root;
     let _ = resolve_contract_path;
     let _ = build_task_brief_with_source_and_trace;
+    let _ = workstation_execution_id;
+    let _ = "agent_execution::handle";
+    let _ = "\"action\": \"open\"";
     let _ = "mission_task_delegate";
     let _ = "tool_result_payload";
     let _ = "EvidenceEntry::new";
@@ -843,6 +857,7 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace() {
     let _ = "WorkstationDispatchOutcome::InnerError";
     let _ = "WorkstationDispatchOutcome::SafeDescriptor";
     let _ = "SafeDescriptorReason::MalformedTaskContract";
+    let _ = "SafeDescriptorReason::CompletionLogUnavailable";
 }
 `;
 }
@@ -862,7 +877,7 @@ const REFS: &[&str] = &[
     "WorkstationDispatchOutcome::InnerError",
     "WorkstationDispatchOutcome::SafeDescriptor",
 ];
-pub(crate) enum SafeDescriptorReason { UnsupportedTarget(String) }
+pub(crate) enum SafeDescriptorReason { UnsupportedTarget(String), CompletionLogUnavailable(String) }
 pub(crate) fn outcome_to_response_fields() {}
 pub(crate) fn extract_inner_board_task_id() {}
 pub(crate) fn truncate_brief_preview() {}
@@ -872,7 +887,7 @@ pub(crate) const SCOPED_COMMIT_POLICY: &str = "enforced-on-complete";
 //   "workstation_dispatch_status" "task_brief_preview"
 //   "delegated_board_task_id"     "inner_result"
 // Stable status values returned by WorkstationDispatchOutcome::status:
-//   "dispatched" "dry_run_no_dispatch" "inner_returned_error"
+//   "dispatched" "dry_run_no_dispatch" "inner_returned_error" "skipped_completion_log_unavailable"
 `;
 }
 
@@ -887,9 +902,13 @@ pub(crate) enum BriefTaskKind {
 pub(crate) fn classify_task_kind(_: &WorkstationDispatchHints) -> BriefTaskKind {
     BriefTaskKind::ReadOnly
 }
+pub(crate) fn workstation_execution_id() {}
 pub(crate) fn build_task_brief() {
     let _ = COMMIT_POLICY_SCOPED;
     let _ = AGENT_TEAM_OBJECTIVE_HINT;
+    let _ = "Execution log:";
+    let _ = "execution_id=";
+    let _ = "dispatcher pre-opened this MissionD audit log";
     let _ = "Completion handoff (scoped commit)";
 }
 pub(crate) fn build_task_brief_with_source() {}

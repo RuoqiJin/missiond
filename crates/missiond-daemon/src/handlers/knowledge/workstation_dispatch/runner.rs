@@ -1,9 +1,11 @@
 use std::path::{Path, PathBuf};
 
 use missiond_core::types::Plan;
+use missiond_mcp::tools::{ToolContent, ToolResult};
 use serde_json::json;
 
 use crate::handlers::compute::task_delegate;
+use crate::handlers::knowledge::agent_execution;
 use crate::slot_orchestrator::project_root::resolve_target_project_root;
 use crate::state::AppState;
 
@@ -12,8 +14,8 @@ use super::super::plan::tool_result_payload;
 use super::descriptor::resolve_contract_path;
 use super::{
     build_task_brief_with_source_and_trace, load_task_contract, truncate_brief_preview,
-    SafeDescriptorReason, WorkstationDispatchHints, WorkstationDispatchOutcome,
-    COMMIT_POLICY_SCOPED,
+    workstation_execution_id, SafeDescriptorReason, WorkstationDispatchHints,
+    WorkstationDispatchOutcome, COMMIT_POLICY_SCOPED,
 };
 
 /// Top-level entry point invoked from `plan::action_execute_internal` and
@@ -280,6 +282,27 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
         return WorkstationDispatchOutcome::DryRun { task_brief: brief };
     }
 
+    let execution_id = workstation_execution_id(plan);
+    if let Err(reason) = preopen_completion_log(
+        state,
+        plan,
+        &execution_id,
+        brief_dispatch_strategy,
+        &resolution.project_id,
+        resolution
+            .requested_cwd
+            .as_deref()
+            .unwrap_or(&resolution.project_root),
+        hints.scope.as_deref(),
+    )
+    .await
+    {
+        return WorkstationDispatchOutcome::SafeDescriptor {
+            reason: SafeDescriptorReason::CompletionLogUnavailable(reason),
+            task_brief: Some(brief),
+        };
+    }
+
     // 6. Dispatch through the existing mission_task_delegate substrate.
     //    cwd is the resolved canonical project root (downstream resolves
     //    the same way; we forward it explicitly so the inner handler does
@@ -291,6 +314,7 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
         "context_hints": [
             format!("plan:{}", plan.id),
             format!("board_task:{}", plan.board_task_id),
+            format!("execution_id:{}", execution_id),
             format!("workstation_dispatch:v0"),
         ],
         "cwd": resolution.project_root.to_string_lossy().to_string(),
@@ -420,4 +444,64 @@ pub(crate) async fn run_workstation_dispatch_with_contract_and_trace(
         evidence_error,
         inner_payload,
     }
+}
+
+async fn preopen_completion_log(
+    state: &AppState,
+    plan: &Plan,
+    execution_id: &str,
+    dispatch_strategy: &str,
+    project_id: &str,
+    requested_cwd: &Path,
+    scope_hint: Option<&str>,
+) -> std::result::Result<(), String> {
+    let parent_design = plan
+        .source_directive_id
+        .map(|id| format!("directive/{}", id))
+        .unwrap_or_else(|| format!("plan/{}", plan.id));
+    let scope = scope_hint
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                "plan {} board_task {} status {}",
+                plan.id,
+                plan.board_task_id,
+                plan.status.as_str()
+            )
+        });
+    let args = json!({
+        "action": "open",
+        "execution_id": execution_id,
+        "parent_design": parent_design,
+        "scope": scope,
+        "owner": "workstation-dispatch",
+        "project": project_id,
+        "target_project": project_id,
+        "requested_cwd": requested_cwd.to_string_lossy().to_string(),
+        "dispatch_strategy": dispatch_strategy,
+    });
+    let result = agent_execution::handle(state, "mission_execution", args)
+        .await
+        .map_err(|err| format!("mission_execution(action=open) raised: {}", err))?;
+    if !result.is_error.unwrap_or(false) {
+        return Ok(());
+    }
+    let text = tool_result_text(&result);
+    if text.contains("\"EXECUTION_EXISTS\"") || text.contains("EXECUTION_EXISTS") {
+        return Ok(());
+    }
+    Err(format!("mission_execution(action=open) failed: {}", text))
+}
+
+fn tool_result_text(result: &ToolResult) -> String {
+    result
+        .content
+        .iter()
+        .map(|content| match content {
+            ToolContent::Text { text } => text.as_str(),
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }

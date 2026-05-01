@@ -259,7 +259,9 @@ pub(crate) use runner::{
 
 mod brief;
 
-pub(crate) use brief::{build_task_brief, build_task_brief_with_source_and_trace};
+pub(crate) use brief::{
+    build_task_brief, build_task_brief_with_source_and_trace, workstation_execution_id,
+};
 #[cfg(test)]
 pub(crate) use brief::{build_task_brief_with_source, classify_task_kind, BriefTaskKind};
 

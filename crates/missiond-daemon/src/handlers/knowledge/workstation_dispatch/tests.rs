@@ -706,6 +706,18 @@ fn build_task_brief_code_requires_enforce_scoped_commit_on_completion() {
         brief.contains("`enforce_scoped_commit=true`"),
         "code brief must instruct the worker to opt into enforcement"
     );
+    assert!(
+        brief.contains("Execution log: `plan-00000000-0000-0000-0000-000000000def`"),
+        "brief must pin the companion execution log id"
+    );
+    assert!(
+        brief.contains("execution_id=\"plan-00000000-0000-0000-0000-000000000def\""),
+        "completion handoff must tell the worker which pre-opened log to close"
+    );
+    assert!(
+        brief.contains("dispatcher pre-opened this MissionD audit log"),
+        "brief must make the read-only audit append permission explicit"
+    );
     // The brief asks for committed status + commit_hash + staged_files.
     assert!(
         brief.contains("`commit_status=\"committed\"`"),

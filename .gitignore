@@ -26,6 +26,10 @@ dist/
 # Logs
 *.log
 
+# MissionD live-dispatch runtime audit artifacts
+.missiond/v2/plan-*.lisp
+.missiond/v2/plans/*.evidence.json
+
 # Claude Code (contains credentials and private config)
 .claude/
 

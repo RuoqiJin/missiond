@@ -50,6 +50,10 @@ pub(crate) fn classify_task_kind(hints: &WorkstationDispatchHints) -> BriefTaskK
     }
 }
 
+pub(crate) fn workstation_execution_id(plan: &Plan) -> String {
+    format!("plan-{}", plan.id)
+}
+
 /// Build the canonical task-brief text. The shape is fixed so downstream
 /// consumers (Claude / agent-team) always see the same headings.
 ///
@@ -117,6 +121,8 @@ pub(crate) fn build_task_brief_with_source_and_trace(
     // which row it is acting on.
     out.push_str(&format!("# Plan {} — workstation task brief\n", plan.id));
     out.push_str(&format!("Board task: {}\n\n", plan.board_task_id));
+    let execution_id = workstation_execution_id(plan);
+    out.push_str(&format!("Execution log: `{}`\n\n", execution_id));
 
     // 0. Source contract (wave-19 / task 07). Preamble — only present
     //    when the dispatch flowed through a task-contract v1 file.
@@ -215,8 +221,12 @@ pub(crate) fn build_task_brief_with_source_and_trace(
     let task_kind = classify_task_kind(hints);
     out.push_str("## Completion handoff (scoped commit)\n");
     out.push_str(&format!("- task kind: {}\n", task_kind.as_str()));
+    out.push_str(&format!(
+        "- on completion call `mission_execution(action=complete, execution_id=\"{}\")` with `enforce_scoped_commit=true`\n",
+        execution_id
+    ));
     out.push_str(
-        "- on completion call `mission_execution(action=complete)` with `enforce_scoped_commit=true`\n",
+        "- the dispatcher pre-opened this MissionD audit log; completion may append to it even for read-only briefs\n",
     );
     match task_kind {
         BriefTaskKind::Code => {

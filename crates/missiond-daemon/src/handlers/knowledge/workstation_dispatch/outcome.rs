@@ -73,6 +73,11 @@ pub(crate) enum SafeDescriptorReason {
     /// because the contract is the SSOT — silently downgrading would
     /// hide an authoring bug. Carries the absolute path + a typed reason.
     MalformedTaskContract { path: String, reason: String },
+    /// The delegated worker is expected to close out through
+    /// `mission_execution(action=complete)`, so live dispatch first
+    /// pre-opens that companion audit log. If this fails, dispatch is
+    /// refused before a worker receives an impossible handoff contract.
+    CompletionLogUnavailable(String),
 }
 
 impl SafeDescriptorReason {
@@ -82,6 +87,9 @@ impl SafeDescriptorReason {
             SafeDescriptorReason::ProjectRootUnresolved(_) => "skipped_project_root_unresolved",
             SafeDescriptorReason::MissingObjective => "skipped_missing_objective",
             SafeDescriptorReason::MalformedTaskContract { .. } => "skipped_malformed_task_contract",
+            SafeDescriptorReason::CompletionLogUnavailable(_) => {
+                "skipped_completion_log_unavailable"
+            }
         }
     }
 
@@ -106,6 +114,7 @@ impl SafeDescriptorReason {
                     path, reason
                 )
             }
+            SafeDescriptorReason::CompletionLogUnavailable(reason) => reason.clone(),
         }
     }
 }
