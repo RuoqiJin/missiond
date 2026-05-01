@@ -13,6 +13,9 @@ pub(crate) const MAX_CC_SWARM_TIMEOUT_SECS: i64 = 7200;
 pub(crate) const DEFAULT_PTY_SEND_TIMEOUT_SECS: i64 = 300;
 pub(crate) const MIN_PTY_SEND_TIMEOUT_SECS: i64 = 1;
 pub(crate) const MAX_PTY_SEND_TIMEOUT_SECS: i64 = 7200;
+pub(crate) const DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 60;
+pub(crate) const MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 10;
+pub(crate) const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 600;
 pub(crate) const WATCHDOG_GRACE_SECS: i64 = 120;
 pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
@@ -142,6 +145,7 @@ pub(crate) struct WorkstationRuntimeConfig {
     pub timeout_policy: TimeoutPolicy,
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
     pub pty_send_timeout_policy: SimpleTimeoutPolicy,
+    pub dynamic_slot_spawn_timeout_policy: SimpleTimeoutPolicy,
     pub slot_ttl_policy: SlotTtlPolicy,
 }
 
@@ -368,6 +372,14 @@ impl SimpleTimeoutPolicy {
             max_secs: MAX_PTY_SEND_TIMEOUT_SECS,
         }
     }
+
+    fn dynamic_slot_spawn_default() -> Self {
+        Self {
+            default_secs: DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
+            min_secs: MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
+            max_secs: MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
+        }
+    }
 }
 
 impl Default for SlotTtlPolicy {
@@ -496,6 +508,7 @@ impl Default for WorkstationRuntimeConfig {
             timeout_policy: TimeoutPolicy::default(),
             cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
             pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
+            dynamic_slot_spawn_timeout_policy: SimpleTimeoutPolicy::dynamic_slot_spawn_default(),
             slot_ttl_policy: SlotTtlPolicy::default(),
         }
     }
@@ -766,6 +779,16 @@ impl WorkstationRuntimeConfig {
             (self.pty_send_timeout_policy.default_secs.max(1) as u64).saturating_mul(1000);
         let raw = timeout_ms.filter(|value| *value > 0).unwrap_or(default_ms);
         raw.clamp(min_ms, max_ms)
+    }
+
+    pub(crate) fn dynamic_slot_spawn_timeout_secs(&self) -> u64 {
+        self.dynamic_slot_spawn_timeout_policy
+            .default_secs
+            .clamp(
+                self.dynamic_slot_spawn_timeout_policy.min_secs,
+                self.dynamic_slot_spawn_timeout_policy.max_secs,
+            )
+            .max(1) as u64
     }
 
     pub(crate) fn clamp_slot_ttl_secs(&self, ttl_secs: Option<i64>) -> i64 {
@@ -1311,6 +1334,25 @@ pub(crate) fn parse_workstation_config(
         default_secs: int_keyword(&pty_send_timeout_tokens, ":default_secs")?,
         min_secs: int_keyword(&pty_send_timeout_tokens, ":min_secs")?,
         max_secs: int_keyword(&pty_send_timeout_tokens, ":max_secs")?,
+    };
+    let dynamic_slot_spawn_timeout_form = find_forms(&block, "timeout-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens
+                .get(2)
+                .is_some_and(|name| name == "dynamic-slot-spawn")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (timeout-policy dynamic-slot-spawn ...) in workstation-config".into(),
+            )
+        })?;
+    let dynamic_slot_spawn_timeout_tokens = tokenize_lisp(&dynamic_slot_spawn_timeout_form);
+    config.dynamic_slot_spawn_timeout_policy = SimpleTimeoutPolicy {
+        default_secs: int_keyword(&dynamic_slot_spawn_timeout_tokens, ":default_secs")?,
+        min_secs: int_keyword(&dynamic_slot_spawn_timeout_tokens, ":min_secs")?,
+        max_secs: int_keyword(&dynamic_slot_spawn_timeout_tokens, ":max_secs")?,
     };
     let ttl_form = find_forms(&block, "ttl-policy")
         .into_iter()
@@ -2053,6 +2095,10 @@ mod tests {
       :default_secs 300
       :min_secs 1
       :max_secs 7200)
+    (timeout-policy dynamic-slot-spawn
+      :default_secs 60
+      :min_secs 10
+      :max_secs 600)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
@@ -2221,6 +2267,9 @@ mod tests {
         assert_eq!(cfg.pty_send_timeout_policy.default_secs, 300);
         assert_eq!(cfg.pty_send_timeout_policy.min_secs, 1);
         assert_eq!(cfg.pty_send_timeout_policy.max_secs, 7200);
+        assert_eq!(cfg.dynamic_slot_spawn_timeout_policy.default_secs, 60);
+        assert_eq!(cfg.dynamic_slot_spawn_timeout_policy.min_secs, 10);
+        assert_eq!(cfg.dynamic_slot_spawn_timeout_policy.max_secs, 600);
         assert_eq!(cfg.slot_ttl_policy.default_secs, 14400);
         assert_eq!(cfg.slot_ttl_policy.min_secs, 300);
         assert_eq!(cfg.slot_ttl_policy.max_secs, 28800);
@@ -2243,6 +2292,7 @@ mod tests {
         assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(500)), 1_000);
         assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(99_999_999)), 7_200_000);
         assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(42_000)), 42_000);
+        assert_eq!(cfg.dynamic_slot_spawn_timeout_secs(), 60);
         assert_eq!(cfg.clamp_slot_ttl_secs(None), 14400);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(5)), 300);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(99_999)), 28800);
@@ -2379,7 +2429,11 @@ mod tests {
     (timeout-policy pty-send-blocking
       :default_secs 300
       :min_secs 1
-      :max_secs 7200)))
+      :max_secs 7200)
+    (timeout-policy dynamic-slot-spawn
+      :default_secs 60
+      :min_secs 10
+      :max_secs 600)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");
         assert!(err.to_string().contains("ttl-policy dynamic-slot"));

@@ -21,6 +21,9 @@ export const MAX_CC_SWARM_TIMEOUT_SECS = 7200;
 export const DEFAULT_PTY_SEND_TIMEOUT_SECS = 300;
 export const MIN_PTY_SEND_TIMEOUT_SECS = 1;
 export const MAX_PTY_SEND_TIMEOUT_SECS = 7200;
+export const DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 60;
+export const MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 10;
+export const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 600;
 export const WATCHDOG_GRACE_SECS = 120;
 export const MISSING_SESSION_PROBE_SECS = 120;
 export const DEFAULT_SLOT_TTL_SECS = 14400;
@@ -54,6 +57,7 @@ export class WorkstationRuntimeConfig {
     timeoutPolicy = defaultTimeoutPolicy(),
     ccSwarmTimeoutPolicy = defaultCcSwarmTimeoutPolicy(),
     ptySendTimeoutPolicy = defaultPtySendTimeoutPolicy(),
+    dynamicSlotSpawnTimeoutPolicy = defaultDynamicSlotSpawnTimeoutPolicy(),
     slotTtlPolicy = defaultSlotTtlPolicy(),
     source = 'defaults',
   } = {}) {
@@ -63,6 +67,7 @@ export class WorkstationRuntimeConfig {
     this.timeoutPolicy = { ...timeoutPolicy };
     this.ccSwarmTimeoutPolicy = { ...ccSwarmTimeoutPolicy };
     this.ptySendTimeoutPolicy = { ...ptySendTimeoutPolicy };
+    this.dynamicSlotSpawnTimeoutPolicy = { ...dynamicSlotSpawnTimeoutPolicy };
     this.slotTtlPolicy = { ...slotTtlPolicy };
     this.source = source;
   }
@@ -103,6 +108,19 @@ export class WorkstationRuntimeConfig {
     return Math.max(
       this.ptySendTimeoutPolicy.min_secs * 1000,
       Math.min(this.ptySendTimeoutPolicy.max_secs * 1000, raw),
+    );
+  }
+
+  dynamicSlotSpawnTimeoutSecs() {
+    return Math.max(
+      1,
+      Math.max(
+        this.dynamicSlotSpawnTimeoutPolicy.min_secs,
+        Math.min(
+          this.dynamicSlotSpawnTimeoutPolicy.max_secs,
+          this.dynamicSlotSpawnTimeoutPolicy.default_secs,
+        ),
+      ),
     );
   }
 
@@ -258,6 +276,18 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
     min_secs: readPositiveInt(ptySendProps, ':min_secs', file),
     max_secs: readPositiveInt(ptySendProps, ':max_secs', file),
   };
+  const dynamicSlotSpawnTimeoutForm = block.children.find((child) => {
+    if (!isList(child) || head(child) !== 'timeout-policy') return false;
+    return nodeText(child.children[1]) === 'dynamic-slot-spawn';
+  });
+  if (dynamicSlotSpawnTimeoutForm) {
+    const dynamicSlotSpawnProps = readKeywordProps(dynamicSlotSpawnTimeoutForm, { start: 2 });
+    config.dynamicSlotSpawnTimeoutPolicy = {
+      default_secs: readPositiveInt(dynamicSlotSpawnProps, ':default_secs', file),
+      min_secs: readPositiveInt(dynamicSlotSpawnProps, ':min_secs', file),
+      max_secs: readPositiveInt(dynamicSlotSpawnProps, ':max_secs', file),
+    };
+  }
   const ttlForm = block.children.find((child) => {
     if (!isList(child) || head(child) !== 'ttl-policy') return false;
     return nodeText(child.children[1]) === 'dynamic-slot';
@@ -306,6 +336,14 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
       'failed to parse V3 workstation-config: pty-send-blocking :default_secs outside :min_secs..:max_secs',
     );
   }
+  if (
+    config.dynamicSlotSpawnTimeoutPolicy.default_secs < config.dynamicSlotSpawnTimeoutPolicy.min_secs
+    || config.dynamicSlotSpawnTimeoutPolicy.default_secs > config.dynamicSlotSpawnTimeoutPolicy.max_secs
+  ) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: dynamic-slot-spawn :default_secs outside :min_secs..:max_secs',
+    );
+  }
   if (config.slotTtlPolicy.min_secs > config.slotTtlPolicy.max_secs) {
     throw new V3BlueprintRuntimeConfigError(
       'failed to parse V3 workstation-config: ttl :min_secs exceeds :max_secs',
@@ -338,6 +376,7 @@ function defaultWorkstationRuntimeConfig(source) {
     timeoutPolicy: defaultTimeoutPolicy(),
     ccSwarmTimeoutPolicy: defaultCcSwarmTimeoutPolicy(),
     ptySendTimeoutPolicy: defaultPtySendTimeoutPolicy(),
+    dynamicSlotSpawnTimeoutPolicy: defaultDynamicSlotSpawnTimeoutPolicy(),
     slotTtlPolicy: defaultSlotTtlPolicy(),
     source,
   });
@@ -403,6 +442,14 @@ function defaultPtySendTimeoutPolicy() {
     default_secs: DEFAULT_PTY_SEND_TIMEOUT_SECS,
     min_secs: MIN_PTY_SEND_TIMEOUT_SECS,
     max_secs: MAX_PTY_SEND_TIMEOUT_SECS,
+  };
+}
+
+function defaultDynamicSlotSpawnTimeoutPolicy() {
+  return {
+    default_secs: DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
+    min_secs: MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
+    max_secs: MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
   };
 }
 

@@ -300,6 +300,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         }
     };
     let ttl = runtime_config.clamp_slot_ttl_secs(args.get("max_ttl").and_then(|v| v.as_i64()));
+    let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
     let model = match resolve_model_projection(
         template_name,
         string_arg(args, &["model"]),
@@ -418,7 +419,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             PTYSpawnOptions {
                 auto_restart: false,
                 wait_for_idle: true,
-                timeout_secs: Some(60),
+                timeout_secs: Some(spawn_timeout_secs),
                 mcp_config,
                 dangerously_skip_permissions: false,
                 model: slot_config.model.clone(),
