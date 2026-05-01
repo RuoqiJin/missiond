@@ -362,15 +362,13 @@ impl GeminiClient {
                     .and_then(|v| v.as_str())
                     .map(std::path::PathBuf::from);
 
-                // Whitelist: only these models are allowed via CLI. Others fall back to default.
-                // Note: flash-lite is NOT supported by Gemini CLI (ModelNotFoundError).
+                // Explicit caller model wins; missing/blank values fall back to the
+                // GeminiCli default projected from router-runtime-policy.
                 let cli_model = body
                     .get("model")
                     .and_then(|v| v.as_str())
-                    .and_then(|m| match m {
-                        "gemini-3.1-pro-preview" => Some(m),
-                        _ => None,
-                    });
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty());
 
                 // Create progress channel to emit real-time tool activity events
                 let (progress_tx, mut progress_rx) =

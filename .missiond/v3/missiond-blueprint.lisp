@@ -677,6 +677,7 @@
        "Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model and direct HTTP timeout from router-runtime-policy."
        "GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; explicit caller model still wins."
        "Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model; explicit llm.yaml gemini_cli.model still wins."
+       "GeminiClient CLI mode MUST forward non-empty caller model to GeminiCli and use the V3-projected GeminiCli default only when the caller omits model."
        "GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy, preserving PTY starvation protection without local 30s/300s literals."
        "Gemini File API upload and poll timeouts MUST project from router-runtime-policy instead of local 600s/300s literals."
        "Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy instead of local 900s/300s literals."
