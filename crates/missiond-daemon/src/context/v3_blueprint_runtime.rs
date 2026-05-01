@@ -20,6 +20,13 @@ pub(crate) const MIN_SLOT_TTL_SECS: i64 = 300;
 pub(crate) const MAX_SLOT_TTL_SECS: i64 = 28800;
 pub(crate) const DEFAULT_SLOT_EXTEND_SECS: i64 = 3600;
 pub(crate) const MAX_SLOT_EXTEND_SECS: i64 = 3600;
+pub(crate) const DEFAULT_SLOT_DEFAULT_CWD: &str = "/Users/jinchen/Projects";
+pub(crate) const DEFAULT_SLOT_MCP_CONFIG: &str = "/Users/jinchen/.xjp-mission/xjp-mcp-config.json";
+pub(crate) const DEFAULT_ALLOWED_CWD_PREFIXES: [&str; 3] = [
+    "/Users/jinchen/Projects",
+    "/Users/jinchen/Documents",
+    "/tmp",
+];
 pub(crate) const DEFAULT_FLOW_LLM_MAX_TOKENS: u32 = 65536;
 pub(crate) const DEFAULT_FLOW_SLOT_MODEL: &str = "opus";
 pub(crate) const DEFAULT_FLOW_SLOT_TIMEOUT_SECS: u64 = 3600;
@@ -128,12 +135,24 @@ pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS: u32 = 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
+    slot_templates: HashMap<String, SlotTemplateRuntimeConfig>,
     model_profile_spawn_args: HashMap<String, Option<String>>,
     startup_slots: Vec<StartupSlotRuntimeConfig>,
+    allowed_cwd_prefixes: Vec<PathBuf>,
     pub timeout_policy: TimeoutPolicy,
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
     pub pty_send_timeout_policy: SimpleTimeoutPolicy,
     pub slot_ttl_policy: SlotTtlPolicy,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SlotTemplateRuntimeConfig {
+    pub name: String,
+    pub role: String,
+    pub description: String,
+    pub default_model_profile: Option<String>,
+    pub mcp_config: Option<String>,
+    pub default_cwd: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -363,12 +382,56 @@ impl Default for SlotTtlPolicy {
     }
 }
 
+fn default_slot_templates() -> HashMap<String, SlotTemplateRuntimeConfig> {
+    let mut templates = HashMap::new();
+    templates.insert(
+        "coder".to_string(),
+        SlotTemplateRuntimeConfig {
+            name: "coder".to_string(),
+            role: "coder".to_string(),
+            description: "Dynamic coder slot (ephemeral)".to_string(),
+            default_model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
+            mcp_config: Some(DEFAULT_SLOT_MCP_CONFIG.to_string()),
+            default_cwd: DEFAULT_SLOT_DEFAULT_CWD.to_string(),
+        },
+    );
+    templates.insert(
+        "researcher".to_string(),
+        SlotTemplateRuntimeConfig {
+            name: "researcher".to_string(),
+            role: "coder".to_string(),
+            description: "Dynamic researcher slot (read-only analysis)".to_string(),
+            default_model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
+            mcp_config: Some(DEFAULT_SLOT_MCP_CONFIG.to_string()),
+            default_cwd: DEFAULT_SLOT_DEFAULT_CWD.to_string(),
+        },
+    );
+    templates.insert(
+        "ops".to_string(),
+        SlotTemplateRuntimeConfig {
+            name: "ops".to_string(),
+            role: "operator".to_string(),
+            description: "Dynamic ops slot (ephemeral)".to_string(),
+            default_model_profile: Some(DEFAULT_DAILY_SONNET_PROFILE.to_string()),
+            mcp_config: Some(DEFAULT_SLOT_MCP_CONFIG.to_string()),
+            default_cwd: DEFAULT_SLOT_DEFAULT_CWD.to_string(),
+        },
+    );
+    templates
+}
+
 impl Default for WorkstationRuntimeConfig {
     fn default() -> Self {
-        let mut slot_default_profiles = HashMap::new();
-        slot_default_profiles.insert("coder".to_string(), DEFAULT_MODEL_PROFILE.to_string());
-        slot_default_profiles.insert("researcher".to_string(), DEFAULT_MODEL_PROFILE.to_string());
-        slot_default_profiles.insert("ops".to_string(), DEFAULT_DAILY_SONNET_PROFILE.to_string());
+        let slot_templates = default_slot_templates();
+        let slot_default_profiles = slot_templates
+            .iter()
+            .filter_map(|(name, template)| {
+                template
+                    .default_model_profile
+                    .as_ref()
+                    .map(|profile| (name.clone(), profile.clone()))
+            })
+            .collect();
         let mut model_profile_spawn_args = HashMap::new();
         model_profile_spawn_args.insert(DEFAULT_MODEL_PROFILE.to_string(), None);
         model_profile_spawn_args.insert(
@@ -423,8 +486,13 @@ impl Default for WorkstationRuntimeConfig {
         ];
         Self {
             slot_default_profiles,
+            slot_templates,
             model_profile_spawn_args,
             startup_slots,
+            allowed_cwd_prefixes: DEFAULT_ALLOWED_CWD_PREFIXES
+                .iter()
+                .map(PathBuf::from)
+                .collect(),
             timeout_policy: TimeoutPolicy::default(),
             cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
             pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
@@ -585,6 +653,15 @@ impl Default for LearningEngineRuntimeConfig {
 }
 
 impl WorkstationRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
@@ -610,6 +687,20 @@ impl WorkstationRuntimeConfig {
 
     pub(crate) fn default_model_profile_for_template(&self, template: &str) -> Option<&str> {
         self.slot_default_profiles.get(template).map(String::as_str)
+    }
+
+    pub(crate) fn slot_template(&self, template: &str) -> Option<&SlotTemplateRuntimeConfig> {
+        self.slot_templates.get(template)
+    }
+
+    pub(crate) fn allowed_cwd_prefixes(&self) -> &[PathBuf] {
+        &self.allowed_cwd_prefixes
+    }
+
+    pub(crate) fn available_slot_template_names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.slot_templates.keys().map(String::as_str).collect();
+        names.sort_unstable();
+        names
     }
 
     pub(crate) fn startup_slots(&self) -> &[StartupSlotRuntimeConfig] {
@@ -1088,16 +1179,59 @@ pub(crate) fn parse_workstation_config(
                 .insert(profile, parse_spawn_model_arg(&spawn_model_arg)?);
         }
     }
-    for form in find_forms(&block, "slot-template") {
-        let tokens = tokenize_lisp(&form);
-        if tokens.len() < 3 {
-            continue;
-        }
-        let template = tokens[2].clone();
-        if let Some(profile) = keyword_value(&tokens, ":default-model-profile") {
-            config.slot_default_profiles.insert(template, profile);
+    let slot_template_forms = find_forms(&block, "slot-template");
+    if !slot_template_forms.is_empty() {
+        config.slot_templates.clear();
+        config.slot_default_profiles.clear();
+        for form in slot_template_forms {
+            let tokens = tokenize_lisp(&form);
+            if tokens.len() < 3 {
+                continue;
+            }
+            let template = tokens[2].clone();
+            let default_model_profile = optional_non_nil_keyword(&tokens, ":default-model-profile");
+            if let Some(profile) = default_model_profile.as_ref() {
+                config
+                    .slot_default_profiles
+                    .insert(template.clone(), profile.clone());
+            }
+            config.slot_templates.insert(
+                template.clone(),
+                SlotTemplateRuntimeConfig {
+                    name: template,
+                    role: non_empty_keyword(&tokens, ":role")?,
+                    description: non_empty_keyword(&tokens, ":description")?,
+                    default_model_profile,
+                    mcp_config: optional_non_nil_keyword(&tokens, ":mcp-config"),
+                    default_cwd: non_empty_keyword(&tokens, ":default-cwd")?,
+                },
+            );
         }
     }
+    if config.slot_templates.is_empty() {
+        return Err(BlueprintConfigError::Parse(
+            "workstation-config must declare at least one slot-template".into(),
+        ));
+    }
+    let cwd_policy_form = find_forms(&block, "cwd-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens.get(2).is_some_and(|name| name == "dynamic-slot")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (cwd-policy dynamic-slot ...) in workstation-config".into(),
+            )
+        })?;
+    let cwd_policy_tokens = tokenize_lisp(&cwd_policy_form);
+    let allowed_prefixes = string_list_keyword(&cwd_policy_tokens, ":allowed-prefixes")?;
+    if allowed_prefixes.is_empty() {
+        return Err(BlueprintConfigError::Parse(
+            "cwd-policy dynamic-slot :allowed-prefixes must not be empty".into(),
+        ));
+    }
+    config.allowed_cwd_prefixes = allowed_prefixes.into_iter().map(PathBuf::from).collect();
     let startup_slot_forms = find_forms(&block, "startup-slot");
     if !startup_slot_forms.is_empty() {
         config.startup_slots.clear();
@@ -1896,9 +2030,11 @@ mod tests {
     (model-profile coding-default-opus-4-7 :spawn-model-arg nil)
     (model-profile daily-sonnet :spawn-model-arg "sonnet")
     (model-profile quick-haiku :spawn-model-arg "haiku")
-    (slot-template coder :role coder :default-model-profile coding-default-opus-4-7)
-    (slot-template researcher :role coder :default-model-profile coding-default-opus-4-7)
-    (slot-template ops :role operator :default-model-profile daily-sonnet)
+    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
+    (slot-template researcher :role coder :description "Dynamic researcher slot (read-only analysis)" :default-model-profile coding-default-opus-4-7 :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
+    (slot-template ops :role operator :description "Dynamic ops slot (ephemeral)" :default-model-profile daily-sonnet :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json" :default-cwd "/Users/jinchen/Projects")
+    (cwd-policy dynamic-slot
+      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Documents" "/tmp"])
     (startup-slot arch_maintenance :engine claude-code :lifecycle persistent :slot_id "slot-arch-maint" :role arch-maint :model_profile coding-default-opus-4-7 :timeout_secs 600 :skip_permissions true)
     (startup-slot strategy_analyst :engine gemini :lifecycle persistent :slot_id "slot-gemini-strategy" :role strategy :model_profile nil :timeout_secs 600 :skip_permissions true)
     (startup-slot gemini_router :engine gemini :lifecycle persistent :slot_id "slot-gemini-router" :role gemini-router :model_profile nil :timeout_secs 120 :skip_permissions true)
@@ -2034,6 +2170,25 @@ mod tests {
         assert_eq!(
             cfg.default_spawn_model_for_template("ops").unwrap(),
             Some("sonnet".to_string())
+        );
+        let coder_template = cfg.slot_template("coder").expect("coder template");
+        assert_eq!(coder_template.role, "coder");
+        assert_eq!(coder_template.default_cwd, "/Users/jinchen/Projects");
+        assert_eq!(
+            coder_template.mcp_config.as_deref(),
+            Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+        );
+        assert_eq!(
+            cfg.available_slot_template_names(),
+            vec!["coder", "ops", "researcher"]
+        );
+        assert_eq!(
+            cfg.allowed_cwd_prefixes(),
+            &[
+                PathBuf::from("/Users/jinchen/Projects"),
+                PathBuf::from("/Users/jinchen/Documents"),
+                PathBuf::from("/tmp")
+            ]
         );
         assert_eq!(
             cfg.spawn_model_for_profile("quick-haiku").unwrap(),
@@ -2182,11 +2337,26 @@ mod tests {
 
     #[test]
     fn missing_timeout_policy_is_rejected() {
-        let err = parse_workstation_config("(missiond-blueprint (workstation-config))")
-            .expect_err("missing policy");
+        let err = parse_workstation_config(
+            r#"(missiond-blueprint
+  (workstation-config
+    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "/Users/jinchen/Projects")
+    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"])))"#,
+        )
+        .expect_err("missing policy");
         assert!(err
             .to_string()
             .contains("timeout-policy boardtask-dispatch"));
+    }
+
+    #[test]
+    fn missing_cwd_policy_is_rejected() {
+        let source = BLUEPRINT.replace(
+            "(cwd-policy dynamic-slot",
+            "(cwd-policy-disabled dynamic-slot",
+        );
+        let err = parse_workstation_config(&source).expect_err("missing cwd policy");
+        assert!(err.to_string().contains("cwd-policy dynamic-slot"));
     }
 
     #[test]
@@ -2194,7 +2364,8 @@ mod tests {
         let source = r#"
 (missiond-blueprint
   (workstation-config
-    (slot-template coder :role coder :default-model-profile coding-default-opus-4-7)
+    (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "/Users/jinchen/Projects")
+    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"])
     (timeout-policy boardtask-dispatch
       :default_secs 1800
       :min_secs 60

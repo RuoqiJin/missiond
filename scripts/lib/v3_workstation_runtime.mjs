@@ -6,6 +6,7 @@ import {
   isList,
   keywordPropText,
   nodeText,
+  nodeToStringArray,
   parseLisp,
   readKeywordProps,
 } from './missiond_lisp.mjs';
@@ -27,6 +28,13 @@ export const MIN_SLOT_TTL_SECS = 300;
 export const MAX_SLOT_TTL_SECS = 28800;
 export const DEFAULT_SLOT_EXTEND_SECS = 3600;
 export const MAX_SLOT_EXTEND_SECS = 3600;
+export const DEFAULT_SLOT_DEFAULT_CWD = '/Users/jinchen/Projects';
+export const DEFAULT_SLOT_MCP_CONFIG = '/Users/jinchen/.xjp-mission/xjp-mcp-config.json';
+export const DEFAULT_ALLOWED_CWD_PREFIXES = [
+  '/Users/jinchen/Projects',
+  '/Users/jinchen/Documents',
+  '/tmp',
+];
 
 const PROFILE_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
@@ -41,6 +49,8 @@ export class V3BlueprintRuntimeConfigError extends Error {
 export class WorkstationRuntimeConfig {
   constructor({
     slotDefaultProfiles = defaultSlotProfiles(),
+    slotTemplates = defaultSlotTemplates(),
+    allowedCwdPrefixes = DEFAULT_ALLOWED_CWD_PREFIXES,
     timeoutPolicy = defaultTimeoutPolicy(),
     ccSwarmTimeoutPolicy = defaultCcSwarmTimeoutPolicy(),
     ptySendTimeoutPolicy = defaultPtySendTimeoutPolicy(),
@@ -48,6 +58,8 @@ export class WorkstationRuntimeConfig {
     source = 'defaults',
   } = {}) {
     this.slotDefaultProfiles = new Map(slotDefaultProfiles);
+    this.slotTemplates = new Map(slotTemplates);
+    this.allowedCwdPrefixes = [...allowedCwdPrefixes];
     this.timeoutPolicy = { ...timeoutPolicy };
     this.ccSwarmTimeoutPolicy = { ...ccSwarmTimeoutPolicy };
     this.ptySendTimeoutPolicy = { ...ptySendTimeoutPolicy };
@@ -57,6 +69,14 @@ export class WorkstationRuntimeConfig {
 
   defaultModelProfileForTemplate(template) {
     return this.slotDefaultProfiles.get(template) ?? null;
+  }
+
+  slotTemplate(template) {
+    return this.slotTemplates.get(template) ?? null;
+  }
+
+  availableSlotTemplateNames() {
+    return [...this.slotTemplates.keys()].sort();
   }
 
   clampTimeoutSecs(timeoutSecs = null) {
@@ -155,8 +175,14 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
   }
 
   const config = defaultWorkstationRuntimeConfig(file);
-  for (const child of block.children) {
-    if (!isList(child) || head(child) !== 'slot-template') continue;
+  const slotTemplateForms = block.children.filter(
+    (child) => isList(child) && head(child) === 'slot-template',
+  );
+  if (slotTemplateForms.length > 0) {
+    config.slotDefaultProfiles.clear();
+    config.slotTemplates.clear();
+  }
+  for (const child of slotTemplateForms) {
     const template = nodeText(child.children[1]);
     if (!template) continue;
     const props = readKeywordProps(child, { start: 2 });
@@ -165,6 +191,24 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
       validateProfile(profile, `${file}: slot-template ${template}`);
       config.slotDefaultProfiles.set(template, profile);
     }
+    config.slotTemplates.set(template, {
+      name: template,
+      role: requiredText(props, ':role', `${file}: slot-template ${template}`),
+      description: keywordPropText(props, ':description') ?? `Dynamic ${template} slot`,
+      default_model_profile: profile ?? null,
+      mcp_config: keywordPropText(props, ':mcp-config') ?? null,
+      default_cwd: keywordPropText(props, ':default-cwd') ?? DEFAULT_SLOT_DEFAULT_CWD,
+    });
+  }
+
+  const cwdPolicyForm = block.children.find((child) => {
+    if (!isList(child) || head(child) !== 'cwd-policy') return false;
+    return nodeText(child.children[1]) === 'dynamic-slot';
+  });
+  if (cwdPolicyForm) {
+    const cwdProps = readKeywordProps(cwdPolicyForm, { start: 2 });
+    const allowed = keywordPropList(cwdProps, ':allowed-prefixes');
+    if (allowed.length > 0) config.allowedCwdPrefixes = allowed;
   }
 
   const timeoutForm = block.children.find((child) => {
@@ -289,12 +333,43 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
 function defaultWorkstationRuntimeConfig(source) {
   return new WorkstationRuntimeConfig({
     slotDefaultProfiles: defaultSlotProfiles(),
+    slotTemplates: defaultSlotTemplates(),
+    allowedCwdPrefixes: DEFAULT_ALLOWED_CWD_PREFIXES,
     timeoutPolicy: defaultTimeoutPolicy(),
     ccSwarmTimeoutPolicy: defaultCcSwarmTimeoutPolicy(),
     ptySendTimeoutPolicy: defaultPtySendTimeoutPolicy(),
     slotTtlPolicy: defaultSlotTtlPolicy(),
     source,
   });
+}
+
+function defaultSlotTemplates() {
+  return new Map([
+    ['coder', {
+      name: 'coder',
+      role: 'coder',
+      description: 'Dynamic coder slot (ephemeral)',
+      default_model_profile: DEFAULT_MODEL_PROFILE,
+      mcp_config: DEFAULT_SLOT_MCP_CONFIG,
+      default_cwd: DEFAULT_SLOT_DEFAULT_CWD,
+    }],
+    ['researcher', {
+      name: 'researcher',
+      role: 'coder',
+      description: 'Dynamic researcher slot (read-only analysis)',
+      default_model_profile: DEFAULT_MODEL_PROFILE,
+      mcp_config: DEFAULT_SLOT_MCP_CONFIG,
+      default_cwd: DEFAULT_SLOT_DEFAULT_CWD,
+    }],
+    ['ops', {
+      name: 'ops',
+      role: 'operator',
+      description: 'Dynamic ops slot (ephemeral)',
+      default_model_profile: 'daily-sonnet',
+      mcp_config: DEFAULT_SLOT_MCP_CONFIG,
+      default_cwd: DEFAULT_SLOT_DEFAULT_CWD,
+    }],
+  ]);
 }
 
 function defaultSlotProfiles() {
@@ -339,6 +414,18 @@ function defaultSlotTtlPolicy() {
     default_extend_secs: DEFAULT_SLOT_EXTEND_SECS,
     max_extend_secs: MAX_SLOT_EXTEND_SECS,
   };
+}
+
+function requiredText(props, key, context) {
+  const value = keywordPropText(props, key);
+  if (!value) {
+    throw new V3BlueprintRuntimeConfigError(`${context}: missing ${key}`);
+  }
+  return value;
+}
+
+function keywordPropList(props, key) {
+  return nodeToStringArray(props[key]?.value);
 }
 
 function findFirstListByHead(nodes, targetHead) {

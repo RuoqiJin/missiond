@@ -18,6 +18,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
 	  - mission_cc_swarm pty.send timeout is projected from timeout-policy claudecode-swarm.
 	  - mission_pty_send waitForResponse timeout is projected from timeout-policy pty-send-blocking.
 	  - Autopilot tick/dispatch/consciousness windows are projected from autopilot-policy.
+	  - mission_compute_slot dynamic template role/description/mcp/default cwd and cwd allow-list are projected from V3.
 	`;
 
 const DEFAULT_FILES = {
@@ -109,8 +110,13 @@ function checkFiles(root, files) {
     'code and research dynamic slots MUST NOT hardcode --model sonnet',
     'daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config',
     'daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries',
+    'mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot',
     '(startup-slot arch_maintenance',
     '(startup-slot lisp_survey',
+    '(cwd-policy dynamic-slot',
+    ':allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Documents" "/tmp"]',
+    ':description "Dynamic coder slot (ephemeral)"',
+    ':default-cwd "/Users/jinchen/Projects"',
     'model_profile=coding-default-opus-4-7 both mean no CLI --model override',
     'mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg',
     'task_delegate must pass model/model_profile through to compute_slot',
@@ -147,9 +153,13 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.computeSlot, sources.computeSlot, [
     'const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7"',
-    '"coder" => Some(TemplateConfig',
-    '"researcher" => Some(TemplateConfig',
-    '"ops" => Some(TemplateConfig',
+    'WorkstationRuntimeConfig::load_for_current_dir',
+    'slot_template(template_name)',
+    'available_slot_template_names',
+    'allowed_cwd_prefixes',
+    'template.default_cwd.as_str()',
+    'template.role.clone()',
+    'template.mcp_config.clone()',
     'pub(crate) fn resolve_model_projection',
     'pub(crate) fn effective_initial_prompt',
     'pub(crate) fn model_projection_matches',
@@ -166,6 +176,11 @@ function checkFiles(root, files) {
     'dynamic_slot_project_root',
     'V3_BLUEPRINT_CONFIG_ERROR',
     'PTYSpawnOptions',
+  ]);
+  forbidAll(diagnostics, files.computeSlot, sources.computeSlot, [
+    'const ALLOWED_CWD_PREFIXES',
+    'TemplateConfig {',
+    '"/Users/jinchen/.xjp-mission/xjp-mcp-config.json"',
   ]);
 
   requireAll(diagnostics, files.main, sources.main, [
@@ -207,13 +222,20 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'pub(crate) struct WorkstationRuntimeConfig',
+    'pub(crate) struct SlotTemplateRuntimeConfig',
     'pub(crate) struct StartupSlotRuntimeConfig',
     'pub(crate) struct AutopilotRuntimeConfig',
     'startup_slots',
+    'slot_templates',
+    'allowed_cwd_prefixes',
     'model_profile_spawn_args',
     'optional_non_nil_keyword',
     'default_spawn_model_for_template',
     'parse_spawn_model_arg',
+    'slot_template',
+    'allowed_cwd_prefixes',
+    'available_slot_template_names',
+    'load_for_current_dir',
     'pub(crate) struct TimeoutPolicy',
     'pub(crate) struct SlotTtlPolicy',
     'pub(crate) struct SimpleTimeoutPolicy',
@@ -224,7 +246,10 @@ function checkFiles(root, files) {
 	    'find_form(source, "autopilot-policy")',
     'timeout-policy boardtask-dispatch',
     'timeout-policy claudecode-swarm',
+    'timeout-policy pty-send-blocking',
     'ttl-policy dynamic-slot',
+    'cwd-policy dynamic-slot',
+    'string_list_keyword',
     'slot-template',
     'DEFAULT_MODEL_PROFILE',
     'DEFAULT_TIMEOUT_SECS',
@@ -377,6 +402,14 @@ function buildFixture() {
       :spawn-model-arg nil)
     (model-profile quick-haiku
       :spawn-model-arg "haiku")
+    (slot-template coder
+      :role coder
+      :description "Dynamic coder slot (ephemeral)"
+      :default-model-profile coding-default-opus-4-7
+      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
+      :default-cwd "/Users/jinchen/Projects")
+    (cwd-policy dynamic-slot
+      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Documents" "/tmp"])
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -417,6 +450,7 @@ function buildFixture() {
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries"
+       "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot"
        "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
        "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg"
        "task_delegate must pass model/model_profile through to compute_slot"
@@ -467,7 +501,13 @@ std::time::Duration::from_secs(startup_slot.timeout_secs);
 skip_permissions: startup_slot.skip_permissions;`);
   writeFixture(root, DEFAULT_FILES.computeSlot, `
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
-match name { "coder" => Some(TemplateConfig {}), "researcher" => Some(TemplateConfig {}), "ops" => Some(TemplateConfig {}) }
+WorkstationRuntimeConfig::load_for_current_dir();
+slot_template(template_name);
+available_slot_template_names();
+allowed_cwd_prefixes();
+template.default_cwd.as_str();
+template.role.clone();
+template.mcp_config.clone();
 pub(crate) fn resolve_model_projection() {}
 pub(crate) fn effective_initial_prompt() {}
 pub(crate) fn model_projection_matches() {}
@@ -503,18 +543,20 @@ create_args["model_profile"] = v;
 // starts idle and Autopilot remains the sole task-prompt owner`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
 	pub(crate) struct WorkstationRuntimeConfig {}
+	pub(crate) struct SlotTemplateRuntimeConfig {}
 	pub(crate) struct StartupSlotRuntimeConfig {}
 	pub(crate) struct AutopilotRuntimeConfig {}
 	pub(crate) struct TimeoutPolicy {}
 	pub(crate) struct SlotTtlPolicy {}
 	pub(crate) struct SimpleTimeoutPolicy {}
 	pub(crate) fn load_for_project_root() {}
+	pub(crate) fn load_for_current_dir() {}
 	fn parse_workstation_config() {}
 	fn parse_autopilot_policy() {}
 	fn x() {
   find_form(source, "workstation-config");
   find_form(source, "autopilot-policy");
-  let a = "startup_slots optional_non_nil_keyword model_profile_spawn_args default_spawn_model_for_template parse_spawn_model_arg timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms deploy_review_timeout_ms MissingBlueprint";
+  let a = "startup_slots slot_templates allowed_cwd_prefixes optional_non_nil_keyword model_profile_spawn_args default_spawn_model_for_template parse_spawn_model_arg slot_template available_slot_template_names timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking ttl-policy dynamic-slot cwd-policy dynamic-slot string_list_keyword slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms deploy_review_timeout_ms MissingBlueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';

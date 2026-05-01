@@ -458,16 +458,24 @@
       :rule "Use only when the task or caller explicitly asks for a low-cost fast Claude Code model.")
     (slot-template coder
       :role coder
+      :description "Dynamic coder slot (ephemeral)"
       :default-model-profile coding-default-opus-4-7
-      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
+      :default-cwd "/Users/jinchen/Projects")
     (slot-template researcher
       :role coder
+      :description "Dynamic researcher slot (read-only analysis)"
       :default-model-profile coding-default-opus-4-7
-      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
+      :default-cwd "/Users/jinchen/Projects")
     (slot-template ops
       :role operator
+      :description "Dynamic ops slot (ephemeral)"
       :default-model-profile daily-sonnet
-      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json")
+      :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
+      :default-cwd "/Users/jinchen/Projects")
+    (cwd-policy dynamic-slot
+      :allowed-prefixes ["/Users/jinchen/Projects" "/Users/jinchen/Documents" "/tmp"])
     (startup-slot arch_maintenance
       :engine claude-code
       :lifecycle persistent
@@ -524,6 +532,7 @@
       ["code and research dynamic slots MUST NOT hardcode --model sonnet"
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config and omit --model for coding-default-opus-4-7"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries, including engine/lifecycle/slot_id/role/timeout_secs/skip_permissions"
+       "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot, not a Rust-local template table"
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
        "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
        "caller-supplied model wins over model_profile, but must be a single shell token"

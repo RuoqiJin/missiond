@@ -12,46 +12,7 @@ use crate::state::AppState;
 /// Max dynamic slots allowed concurrently.
 const MAX_DYNAMIC_SLOTS: i64 = 5;
 
-/// Allowed cwd prefixes (path traversal prevention).
-const ALLOWED_CWD_PREFIXES: &[&str] = &[
-    "/Users/jinchen/Projects",
-    "/Users/jinchen/Documents",
-    "/tmp",
-];
-
 const CODING_DEFAULT_PROFILE: &str = "coding-default-opus-4-7";
-
-/// Built-in templates — derived from slots.yaml patterns.
-fn get_template(name: &str) -> Option<TemplateConfig> {
-    match name {
-        "coder" => Some(TemplateConfig {
-            role: "coder",
-            description: "Dynamic coder slot (ephemeral)",
-            mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
-            default_cwd: "/Users/jinchen/Projects",
-        }),
-        "ops" => Some(TemplateConfig {
-            role: "operator",
-            description: "Dynamic ops slot (ephemeral)",
-            mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
-            default_cwd: "/Users/jinchen/Projects",
-        }),
-        "researcher" => Some(TemplateConfig {
-            role: "coder",
-            description: "Dynamic researcher slot (read-only analysis)",
-            mcp_config: Some("/Users/jinchen/.xjp-mission/xjp-mcp-config.json"),
-            default_cwd: "/Users/jinchen/Projects",
-        }),
-        _ => None,
-    }
-}
-
-struct TemplateConfig {
-    role: &'static str,
-    description: &'static str,
-    mcp_config: Option<&'static str>,
-    default_cwd: &'static str,
-}
 
 pub(crate) fn resolve_model_projection(
     template_name: &str,
@@ -140,6 +101,22 @@ fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .filter(|s| !s.is_empty())
 }
 
+fn available_templates_suggestion(config: &WorkstationRuntimeConfig) -> String {
+    format!(
+        "Available templates: {}",
+        config.available_slot_template_names().join(", ")
+    )
+}
+
+fn allowed_cwd_prefixes_suggestion(config: &WorkstationRuntimeConfig) -> String {
+    let prefixes: Vec<String> = config
+        .allowed_cwd_prefixes()
+        .iter()
+        .map(|prefix| prefix.display().to_string())
+        .collect();
+    format!("Allowed prefixes: {:?}", prefixes)
+}
+
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let action = args
         .get("action")
@@ -162,17 +139,27 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 }
 
 async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
+    let workstation_config = match WorkstationRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            let tool_error = ToolError::new("V3_BLUEPRINT_CONFIG_ERROR", err.to_string())
+                .with_suggestion(
+                    "ensure the MissionD root .missiond/v3/missiond-blueprint.lisp contains workstation-config slot-template and cwd-policy",
+                );
+            return Ok(ToolResult::structured_error(tool_error));
+        }
+    };
     let template_name = match args.get("template").and_then(|v| v.as_str()) {
         Some(t) => t,
         None => {
             return Ok(ToolResult::structured_error(
                 ToolError::new(error_codes::MISSING_PARAM, "'template' is required")
-                    .with_suggestion("Available templates: coder, ops, researcher"),
+                    .with_suggestion(available_templates_suggestion(&workstation_config)),
             ))
         }
     };
 
-    let template = match get_template(template_name) {
+    let template = match workstation_config.slot_template(template_name) {
         Some(t) => t,
         None => {
             return Ok(ToolResult::structured_error(
@@ -180,7 +167,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                     error_codes::INVALID_PARAM,
                     format!("Unknown template '{}'", template_name),
                 )
-                .with_suggestion("Available templates: coder, ops, researcher"),
+                .with_suggestion(available_templates_suggestion(&workstation_config)),
             ))
         }
     };
@@ -207,7 +194,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     let cwd = args
         .get("cwd")
         .and_then(|v| v.as_str())
-        .unwrap_or(template.default_cwd);
+        .unwrap_or(template.default_cwd.as_str());
     let canonical_cwd = match std::fs::canonicalize(cwd) {
         Ok(p) => p.to_string_lossy().to_string(),
         Err(_) => {
@@ -219,7 +206,8 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     };
 
     let canonical_path = std::path::Path::new(&canonical_cwd);
-    let cwd_allowed = ALLOWED_CWD_PREFIXES
+    let cwd_allowed = workstation_config
+        .allowed_cwd_prefixes()
         .iter()
         .any(|prefix| canonical_path.starts_with(prefix));
     if !cwd_allowed {
@@ -228,7 +216,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 error_codes::PERMISSION_DENIED,
                 format!("cwd '{}' is not under allowed prefixes", cwd),
             )
-            .with_suggestion(format!("Allowed prefixes: {:?}", ALLOWED_CWD_PREFIXES)),
+            .with_suggestion(allowed_cwd_prefixes_suggestion(&workstation_config)),
         ));
     }
 
@@ -299,6 +287,18 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             return Ok(ToolResult::structured_error(tool_error));
         }
     };
+    let template = match runtime_config.slot_template(template_name) {
+        Some(template) => template.clone(),
+        None => {
+            return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    error_codes::INVALID_PARAM,
+                    format!("Unknown template '{}'", template_name),
+                )
+                .with_suggestion(available_templates_suggestion(&runtime_config)),
+            ))
+        }
+    };
     let ttl = runtime_config.clamp_slot_ttl_secs(args.get("max_ttl").and_then(|v| v.as_i64()));
     let model = match resolve_model_projection(
         template_name,
@@ -320,7 +320,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
     // path (subdir) is retained in `requested_cwd` for prompt/context only.
     let slot_config = SlotConfig {
         id: slot_id.clone(),
-        role: template.role.to_string(),
+        role: template.role.clone(),
         description: format!(
             "[Dynamic] {} | Template: {} | Objective: {}",
             template.description,
@@ -331,7 +331,7 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         cwd: Some(project_root_str.clone()),
         project_root: Some(project_root_str),
         requested_cwd,
-        mcp_config: template.mcp_config.map(|s| s.to_string()),
+        mcp_config: template.mcp_config.clone(),
         lifecycle: Some(Lifecycle::OnDemand),
         auto_start: None,
         dangerously_skip_permissions: Some(false), // ALWAYS false for dynamic slots
