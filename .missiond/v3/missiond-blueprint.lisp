@@ -625,6 +625,16 @@
        "Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults."
        "A real MissionD project with .missiond but no flow-runtime-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (compute-runtime-policy
+    :desc "Lisp-owned defaults for low-level compute primitives that spawn or resume PTY-backed slots outside workstation-config."
+    (timeout-policy tracked-pty-spawn
+      :default_secs 30
+      :min_secs 1
+      :max_secs 600)
+    :invariants
+      ["mission_agent spawn/restart and mission_task_submit auto-spawn MUST project tracked PTY spawn wait_for_idle timeout from compute-runtime-policy timeout-policy tracked-pty-spawn."
+       "A real MissionD project with .missiond but no compute-runtime-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
+
   (router-runtime-policy
     :desc "Lisp-owned defaults for router chat and internal Router/Sonnet gateway calls; direct caller args still win."
     :default-chat-model "gemini-3.1-pro"
@@ -931,12 +941,12 @@
       :surface capability-governance
       :note "Capability usage, audit, and Codex ops are physically pinned under the V3 capability-governance surface; capability-governance-policy now projects review sidecar location plus protected source/target lists into mission_capability_usage runtime.")
     (v2-item compute-primitives
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: pty / llm / worker / engine runtime"
       :v3-pillar worker-runtime
       :v3-function compute-primitives
       :surface compute-primitives
-      :note "Task, PTY, job, flow_run, process, CC, forge, slot, pause, and worker primitives are physically pinned under the V3 compute-primitives surface; flow-runtime-policy projects missing FlowDefinition node defaults; mission_compute_slot and mission_task_delegate remain owned by workstation-config.")
+      :note "Task, PTY, job, flow_run, process, CC, forge, slot, pause, and worker primitives are physically pinned under the V3 compute-primitives surface; flow-runtime-policy projects missing FlowDefinition node defaults; compute-runtime-policy projects low-level tracked PTY spawn timeouts; mission_compute_slot and mission_task_delegate remain owned by workstation-config.")
     (v2-item skill-runtime
       :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: skill workflow executor"
@@ -1935,7 +1945,7 @@
              "crates/missiond-mcp/src/tools/compute/worker.rs"
              "crates/missiond-mcp/src/tools/compute/forge.rs"
              "scripts/check-v3-compute-primitives-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; engine/flow/mod.rs owns FlowDefinition shape constants, engine/flow/loader.rs loads flow-runtime-policy through context/v3_blueprint_runtime.rs and projects missing YAML node defaults while preserving explicit fields; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history and moves global pause plus slot history into the compute surface; minimax.rs owns mission_sonnet_process/mission_minimax_process; cc_tasks.rs owns mission_cc_query/swarm; worker.rs owns mission_worker/mission_control; forge.rs owns mission_forge_build/lint. compute_slot and task_delegate remain owned by workstation-config so delegated ClaudeCode dispatch stays in the workstation surface.")
+      :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress, and projects auto-spawn tracked PTY wait_for_idle timeout from compute-runtime-policy; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; engine/flow/mod.rs owns FlowDefinition shape constants, engine/flow/loader.rs loads flow-runtime-policy through context/v3_blueprint_runtime.rs and projects missing YAML node defaults while preserving explicit fields; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list and projects tracked PTY spawn wait_for_idle timeout from compute-runtime-policy; slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history and moves global pause plus slot history into the compute surface; minimax.rs owns mission_sonnet_process/mission_minimax_process; cc_tasks.rs owns mission_cc_query/swarm; worker.rs owns mission_worker/mission_control; forge.rs owns mission_forge_build/lint. compute_slot and task_delegate remain owned by workstation-config so delegated ClaudeCode dispatch stays in the workstation surface.")
 
     (surface skill-runtime
       :status "code-aligned"

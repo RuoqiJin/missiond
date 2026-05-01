@@ -4,8 +4,8 @@ use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::context::v3_blueprint_runtime::ComputePrimitivesRuntimeConfig;
 use crate::lenient;
-use crate::slot_env;
 use crate::state::AppState;
 
 #[derive(Deserialize)]
@@ -68,23 +68,21 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .mission
                 .get_slot(&slot_id)
                 .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
-            let cwd_path = slot
-                .config
-                .cwd
-                .as_deref()
-                .map(std::path::PathBuf::from);
+            let cwd_path = slot.config.cwd.as_deref().map(std::path::PathBuf::from);
             let resolved_cwd = match cwd_path.as_ref() {
-                Some(cwd) => match crate::slot_orchestrator::project_root::resolve_target_project_root(
-                    None,
-                    Some(cwd),
-                    None,
-                    &state.project_registry,
-                )
-                .await
-                {
-                    Ok(r) => Some(r.project_root),
-                    Err(_) => Some(cwd.clone()),
-                },
+                Some(cwd) => {
+                    match crate::slot_orchestrator::project_root::resolve_target_project_root(
+                        None,
+                        Some(cwd),
+                        None,
+                        &state.project_registry,
+                    )
+                    .await
+                    {
+                        Ok(r) => Some(r.project_root),
+                        Err(_) => Some(cwd.clone()),
+                    }
+                }
                 None => None,
             };
             let pty_slot = missiond_core::PTYSlot {
@@ -94,6 +92,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
+            let spawn_timeout_secs = load_spawn_timeout_secs(pty_slot.cwd.as_deref())?;
 
             let info = crate::slot_orchestrator::spawner::spawn_tracked_slot(
                 &state.pty,
@@ -105,7 +104,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 PTYSpawnOptions {
                     auto_restart: auto_restart.unwrap_or(false),
                     wait_for_idle: true,
-                    timeout_secs: Some(30),
+                    timeout_secs: Some(spawn_timeout_secs),
                     mcp_config,
                     dangerously_skip_permissions: slot
                         .config
@@ -136,23 +135,21 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 .mission
                 .get_slot(&slot_id)
                 .ok_or_else(|| anyhow!("Slot not found: {}", slot_id))?;
-            let cwd_path = slot
-                .config
-                .cwd
-                .as_deref()
-                .map(std::path::PathBuf::from);
+            let cwd_path = slot.config.cwd.as_deref().map(std::path::PathBuf::from);
             let resolved_cwd = match cwd_path.as_ref() {
-                Some(cwd) => match crate::slot_orchestrator::project_root::resolve_target_project_root(
-                    None,
-                    Some(cwd),
-                    None,
-                    &state.project_registry,
-                )
-                .await
-                {
-                    Ok(r) => Some(r.project_root),
-                    Err(_) => Some(cwd.clone()),
-                },
+                Some(cwd) => {
+                    match crate::slot_orchestrator::project_root::resolve_target_project_root(
+                        None,
+                        Some(cwd),
+                        None,
+                        &state.project_registry,
+                    )
+                    .await
+                    {
+                        Ok(r) => Some(r.project_root),
+                        Err(_) => Some(cwd.clone()),
+                    }
+                }
                 None => None,
             };
             let pty_slot = missiond_core::PTYSlot {
@@ -162,6 +159,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
+            let spawn_timeout_secs = load_spawn_timeout_secs(pty_slot.cwd.as_deref())?;
 
             // Replicate pty.restart behavior but with tracking
             let _ = state.pty.kill(&slot_id).await;
@@ -176,7 +174,7 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 PTYSpawnOptions {
                     auto_restart: auto_restart.unwrap_or(false),
                     wait_for_idle: true,
-                    timeout_secs: Some(30),
+                    timeout_secs: Some(spawn_timeout_secs),
                     mcp_config,
                     dangerously_skip_permissions: slot
                         .config
@@ -210,4 +208,12 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
         _ => Err(anyhow!("Unknown process tool: {name}")),
     }
+}
+
+fn load_spawn_timeout_secs(cwd: Option<&std::path::Path>) -> Result<u64> {
+    let project_root = cwd.map(|cwd| cwd.to_string_lossy());
+    let runtime_config =
+        ComputePrimitivesRuntimeConfig::load_for_project_root(project_root.as_deref())
+            .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))?;
+    Ok(runtime_config.pty_spawn_timeout_secs())
 }

@@ -16,6 +16,9 @@ pub(crate) const MAX_PTY_SEND_TIMEOUT_SECS: i64 = 7200;
 pub(crate) const DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 60;
 pub(crate) const MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 10;
 pub(crate) const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 600;
+pub(crate) const DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 30;
+pub(crate) const MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 1;
+pub(crate) const MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 600;
 pub(crate) const WATCHDOG_GRACE_SECS: i64 = 120;
 pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
@@ -178,6 +181,11 @@ pub(crate) struct FlowRuntimeConfig {
     pub slot_task_default_timeout_secs: u64,
     pub parallel_slot_default_parallelism: usize,
     pub parallel_slot_default_timeout_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct ComputePrimitivesRuntimeConfig {
+    pub pty_spawn_timeout_policy: SimpleTimeoutPolicy,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -526,6 +534,18 @@ impl Default for FlowRuntimeConfig {
     }
 }
 
+impl Default for ComputePrimitivesRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            pty_spawn_timeout_policy: SimpleTimeoutPolicy {
+                default_secs: DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS,
+                min_secs: MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS,
+                max_secs: MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS,
+            },
+        }
+    }
+}
+
 impl Default for RouterRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -834,6 +854,41 @@ impl FlowRuntimeConfig {
                 message: err.to_string(),
             })?;
         parse_flow_runtime_policy(&source)
+    }
+}
+
+impl ComputePrimitivesRuntimeConfig {
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_compute_runtime_policy(&source)
+    }
+
+    pub(crate) fn pty_spawn_timeout_secs(&self) -> u64 {
+        self.pty_spawn_timeout_policy
+            .default_secs
+            .clamp(
+                self.pty_spawn_timeout_policy.min_secs,
+                self.pty_spawn_timeout_policy.max_secs,
+            )
+            .max(1) as u64
     }
 }
 
@@ -1454,6 +1509,48 @@ pub(crate) fn parse_flow_runtime_policy(
     if cfg.parallel_slot_default_parallelism == 0 {
         return Err(BlueprintConfigError::Parse(
             ":parallel-slot-default-parallelism must be positive".into(),
+        ));
+    }
+    Ok(cfg)
+}
+
+pub(crate) fn parse_compute_runtime_policy(
+    source: &str,
+) -> Result<ComputePrimitivesRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "compute-runtime-policy").ok_or_else(|| {
+        BlueprintConfigError::Parse("missing (compute-runtime-policy ...)".into())
+    })?;
+    let timeout_form = find_forms(&block, "timeout-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens
+                .get(2)
+                .is_some_and(|name| name == "tracked-pty-spawn")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (timeout-policy tracked-pty-spawn ...) in compute-runtime-policy".into(),
+            )
+        })?;
+    let timeout_tokens = tokenize_lisp(&timeout_form);
+    let cfg = ComputePrimitivesRuntimeConfig {
+        pty_spawn_timeout_policy: SimpleTimeoutPolicy {
+            default_secs: int_keyword(&timeout_tokens, ":default_secs")?,
+            min_secs: int_keyword(&timeout_tokens, ":min_secs")?,
+            max_secs: int_keyword(&timeout_tokens, ":max_secs")?,
+        },
+    };
+    if cfg.pty_spawn_timeout_policy.min_secs > cfg.pty_spawn_timeout_policy.max_secs {
+        return Err(BlueprintConfigError::Parse(
+            "tracked-pty-spawn timeout :min_secs must be <= :max_secs".into(),
+        ));
+    }
+    if cfg.pty_spawn_timeout_policy.default_secs < cfg.pty_spawn_timeout_policy.min_secs
+        || cfg.pty_spawn_timeout_policy.default_secs > cfg.pty_spawn_timeout_policy.max_secs
+    {
+        return Err(BlueprintConfigError::Parse(
+            "tracked-pty-spawn timeout :default_secs must be within :min_secs..:max_secs".into(),
         ));
     }
     Ok(cfg)
@@ -2111,6 +2208,11 @@ mod tests {
 	    :slot-task-default-timeout-secs 3600
 	    :parallel-slot-default-parallelism 3
 	    :parallel-slot-default-timeout-secs 1800)
+	  (compute-runtime-policy
+	    (timeout-policy tracked-pty-spawn
+	      :default_secs 30
+	      :min_secs 1
+	      :max_secs 600))
 	  (router-runtime-policy
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
@@ -2312,6 +2414,15 @@ mod tests {
     }
 
     #[test]
+    fn parses_compute_runtime_policy() {
+        let cfg = parse_compute_runtime_policy(BLUEPRINT).expect("parse compute runtime policy");
+        assert_eq!(cfg.pty_spawn_timeout_policy.default_secs, 30);
+        assert_eq!(cfg.pty_spawn_timeout_policy.min_secs, 1);
+        assert_eq!(cfg.pty_spawn_timeout_policy.max_secs, 600);
+        assert_eq!(cfg.pty_spawn_timeout_secs(), 30);
+    }
+
+    #[test]
     fn parses_router_runtime_policy() {
         let cfg = parse_router_runtime_policy(BLUEPRINT).expect("parse router runtime policy");
         assert_eq!(cfg.default_chat_model, DEFAULT_ROUTER_CHAT_MODEL);
@@ -2383,6 +2494,16 @@ mod tests {
         let source = BLUEPRINT.replace("(flow-runtime-policy", "(flow-runtime-policy-disabled");
         let err = parse_flow_runtime_policy(&source).expect_err("missing flow policy");
         assert!(err.to_string().contains("flow-runtime-policy"));
+    }
+
+    #[test]
+    fn missing_compute_runtime_policy_is_rejected() {
+        let source = BLUEPRINT.replace(
+            "(compute-runtime-policy",
+            "(compute-runtime-policy-disabled",
+        );
+        let err = parse_compute_runtime_policy(&source).expect_err("missing compute policy");
+        assert!(err.to_string().contains("compute-runtime-policy"));
     }
 
     #[test]

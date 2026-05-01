@@ -102,7 +102,7 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'compute-primitives',
     '(v2-item compute-primitives',
-    ':status code-aligned',
+    ':status runtime-projected',
     '(tool-group compute-runtime-tools',
     '(surface compute-primitives',
     ':status "code-aligned"',
@@ -132,8 +132,11 @@ function checkFiles(root, files) {
     'scripts/check-v3-compute-primitives-isomorphism.mjs',
     'task.rs owns mission_task_submit/query/cancel',
     'flow-runtime-policy',
+    'compute-runtime-policy',
+    'timeout-policy tracked-pty-spawn',
     'mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy',
     'Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults',
+    'mission_agent spawn/restart and mission_task_submit auto-spawn MUST project tracked PTY spawn wait_for_idle timeout from compute-runtime-policy timeout-policy tracked-pty-spawn',
     'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
     'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
     'slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history',
@@ -187,7 +190,12 @@ function checkFiles(root, files) {
     '"ack"',
     '"track"',
     'TaskEvent::Created',
+    'ComputePrimitivesRuntimeConfig::load_for_project_root',
+    'pty_spawn_timeout_secs',
+    'timeout_secs: Some(spawn_timeout_secs)',
+    'V3_BLUEPRINT_CONFIG_ERROR',
   ]);
+  forbidAll(diagnostics, files.task, sources.task, ['timeout_secs: Some(30)']);
 
   requireAll(diagnostics, files.job, sources.job, [
     '"poll"',
@@ -228,13 +236,21 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'pub(crate) struct FlowRuntimeConfig',
+    'pub(crate) struct ComputePrimitivesRuntimeConfig',
     'DEFAULT_FLOW_LLM_MAX_TOKENS',
     'DEFAULT_FLOW_SLOT_MODEL',
     'DEFAULT_FLOW_SLOT_TIMEOUT_SECS',
     'DEFAULT_FLOW_PARALLELISM',
     'DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS',
+    'DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS',
+    'MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS',
+    'MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS',
     'pub(crate) fn parse_flow_runtime_policy',
+    'pub(crate) fn parse_compute_runtime_policy',
     'flow-runtime-policy',
+    'compute-runtime-policy',
+    'tracked-pty-spawn',
+    'pty_spawn_timeout_secs',
     ':slot-task-default-model',
     ':parallel-slot-default-timeout-secs',
   ]);
@@ -268,7 +284,12 @@ function checkFiles(root, files) {
     'mission_restart',
     'mission_agents',
     'spawn_tracked_slot',
+    'ComputePrimitivesRuntimeConfig::load_for_project_root',
+    'pty_spawn_timeout_secs',
+    'timeout_secs: Some(spawn_timeout_secs)',
+    'V3_BLUEPRINT_CONFIG_ERROR',
   ]);
+  forbidAll(diagnostics, files.process, sources.process, ['timeout_secs: Some(30)']);
 
   requireAll(diagnostics, files.slot, sources.slot, [
     'mission_slots',
@@ -372,6 +393,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden text is still present: ${needle}` });
+    }
+  }
+}
+
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-compute-primitives-'));
   for (const rel of Object.values(DEFAULT_FILES)) {
@@ -382,7 +411,7 @@ function buildFixture() {
     `
 (missiond-blueprint
   (v2-convergence-map
-    (v2-item compute-primitives :status code-aligned))
+    (v2-item compute-primitives :status runtime-projected))
   (public-surface-map
     (tool-group compute-runtime-tools :status code-aligned))
   (flow-runtime-policy
@@ -395,6 +424,12 @@ function buildFixture() {
                  "Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults"
                  "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"
                  "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking"])
+  (compute-runtime-policy
+    (timeout-policy tracked-pty-spawn
+      :default_secs 30
+      :min_secs 1
+      :max_secs 600)
+    :invariants ["mission_agent spawn/restart and mission_task_submit auto-spawn MUST project tracked PTY spawn wait_for_idle timeout from compute-runtime-policy timeout-policy tracked-pty-spawn"])
   (implementation-map
     (surface compute-primitives
       :status "code-aligned"
@@ -445,7 +480,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.task),
-    ' "async" "sync" "status" "list" "ack" "track" TaskEvent::Created',
+    ' "async" "sync" "status" "list" "ack" "track" TaskEvent::Created ComputePrimitivesRuntimeConfig::load_for_project_root pty_spawn_timeout_secs timeout_secs: Some(spawn_timeout_secs) V3_BLUEPRINT_CONFIG_ERROR',
   );
   fs.appendFileSync(path.join(root, DEFAULT_FILES.job), ' "poll" "list" "cancel" AsyncJobStatus::Running');
   fs.appendFileSync(
@@ -462,7 +497,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.v3Runtime),
-    ' pub(crate) struct FlowRuntimeConfig DEFAULT_FLOW_LLM_MAX_TOKENS DEFAULT_FLOW_SLOT_MODEL DEFAULT_FLOW_SLOT_TIMEOUT_SECS DEFAULT_FLOW_PARALLELISM DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS pub(crate) fn parse_flow_runtime_policy flow-runtime-policy :slot-task-default-model :parallel-slot-default-timeout-secs',
+    ' pub(crate) struct FlowRuntimeConfig pub(crate) struct ComputePrimitivesRuntimeConfig DEFAULT_FLOW_LLM_MAX_TOKENS DEFAULT_FLOW_SLOT_MODEL DEFAULT_FLOW_SLOT_TIMEOUT_SECS DEFAULT_FLOW_PARALLELISM DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS pub(crate) fn parse_flow_runtime_policy pub(crate) fn parse_compute_runtime_policy flow-runtime-policy compute-runtime-policy tracked-pty-spawn pty_spawn_timeout_secs :slot-task-default-model :parallel-slot-default-timeout-secs',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.pty),
@@ -470,7 +505,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.process),
-    ' mission_spawn mission_kill mission_restart mission_agents spawn_tracked_slot',
+    ' mission_spawn mission_kill mission_restart mission_agents spawn_tracked_slot ComputePrimitivesRuntimeConfig::load_for_project_root pty_spawn_timeout_secs timeout_secs: Some(spawn_timeout_secs) V3_BLUEPRINT_CONFIG_ERROR',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.slot),

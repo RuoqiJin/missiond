@@ -4,9 +4,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::ComputePrimitivesRuntimeConfig;
 use crate::lenient;
-use crate::slot_env::build_slot_tracking_env;
-use crate::slot_env::capture_slot_session_uuid;
 use crate::state::AppState;
 use missiond_core::PTYSpawnOptions;
 
@@ -219,6 +218,8 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                 engine: slot.config.engine,
             };
             let mcp_config = slot.config.mcp_config.clone().map(std::path::PathBuf::from);
+            let spawn_timeout_secs =
+                load_spawn_timeout_secs_for_slot(state, pty_slot.cwd.as_deref()).await?;
             info!(task_id = %task_id, slot_id = %candidate_id, "mission_submit: auto-spawning exited slot");
             let spawn_ok = crate::slot_orchestrator::spawner::spawn_tracked_slot(
                 &state.pty,
@@ -230,7 +231,7 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                 PTYSpawnOptions {
                     auto_restart: false,
                     wait_for_idle: true,
-                    timeout_secs: Some(30),
+                    timeout_secs: Some(spawn_timeout_secs),
                     mcp_config,
                     dangerously_skip_permissions: slot
                         .config
@@ -322,6 +323,33 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
             .await;
     }
     Ok(ToolResult::json(&result))
+}
+
+async fn load_spawn_timeout_secs_for_slot(
+    state: &AppState,
+    cwd: Option<&std::path::Path>,
+) -> Result<u64> {
+    let resolved_project_root = match cwd {
+        Some(cwd) => match crate::slot_orchestrator::project_root::resolve_target_project_root(
+            None,
+            Some(cwd),
+            None,
+            &state.project_registry,
+        )
+        .await
+        {
+            Ok(r) => Some(r.project_root),
+            Err(_) => Some(cwd.to_path_buf()),
+        },
+        None => None,
+    };
+    let project_root = resolved_project_root
+        .as_ref()
+        .map(|cwd| cwd.to_string_lossy());
+    let runtime_config =
+        ComputePrimitivesRuntimeConfig::load_for_project_root(project_root.as_deref())
+            .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))?;
+    Ok(runtime_config.pty_spawn_timeout_secs())
 }
 
 async fn handle_ask(state: &AppState, args: Value) -> Result<ToolResult> {
