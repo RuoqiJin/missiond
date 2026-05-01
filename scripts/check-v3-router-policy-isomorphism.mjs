@@ -285,12 +285,14 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.embeddingWorker, sources.embeddingWorker, [
     'RouterRuntimeConfig',
+    'default_model: Option<String>',
     'pub model: Option<String>',
     'resolved_model(&self, router_config: &RouterRuntimeConfig)',
     'router_config.flow_gemini_model.clone()',
   ]);
   forbidAll(diagnostics, files.embeddingWorker, sources.embeddingWorker, [
     '"gemini-3.1-pro-preview"',
+    '"gpt-4o"',
   ]);
 
   requireAll(diagnostics, files.geminiClient, sources.geminiClient, [
@@ -611,7 +613,7 @@ cli_cfg.resolved_model(&router_runtime_config) cli_model V3_BLUEPRINT_CONFIG_ERR
 
   writeFixture(root, DEFAULT_FILES.embeddingWorker, `
 RouterRuntimeConfig pub model: Option<String> resolved_model(&self, router_config: &RouterRuntimeConfig)
-router_config.flow_gemini_model.clone()
+default_model: Option<String> router_config.flow_gemini_model.clone()
 `);
 
   writeFixture(root, DEFAULT_FILES.geminiClient, `

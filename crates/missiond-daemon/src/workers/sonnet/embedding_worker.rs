@@ -52,9 +52,9 @@ pub(crate) struct LlmConfig {
     base_url: String,
     #[serde(default)]
     auth: LlmAuth,
-    #[serde(default = "LlmConfig::default_model")]
+    #[serde(default)]
     #[allow(dead_code)]
-    default_model: String,
+    default_model: Option<String>,
     #[serde(default)]
     pub(crate) gemini_cli: Option<GeminiCliConfig>,
     /// Gemini API key for multimodal (video/image) File API uploads.
@@ -131,9 +131,6 @@ impl Default for LlmAuth {
 impl LlmConfig {
     fn default_provider() -> String {
         "xjp-router".to_string()
-    }
-    fn default_model() -> String {
-        "gpt-4o".to_string()
     }
 }
 
