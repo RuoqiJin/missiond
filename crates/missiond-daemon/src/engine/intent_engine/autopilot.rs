@@ -4,7 +4,7 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::claude_md_sync::sync_claude_md;
-use crate::context::v3_blueprint_runtime::AutopilotRuntimeConfig;
+use crate::context::v3_blueprint_runtime::{AutopilotRuntimeConfig, RouterRuntimeConfig};
 use crate::engine::learning_engine;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
 use crate::llm_gateway::determine_llm_env;
@@ -511,6 +511,7 @@ async fn dispatch_board_tasks_with_config(
     if state.control_manager.current().global_paused {
         return Ok(());
     }
+    let router_config = RouterRuntimeConfig::load_for_current_dir()?;
 
     let tasks = state
         .store
@@ -820,7 +821,7 @@ async fn dispatch_board_tasks_with_config(
             .get_slot(&slot_id)
             .map(|s| s.config.role.clone())
             .unwrap_or_default();
-        let task_env = determine_llm_env(&task, &slot_role);
+        let task_env = determine_llm_env(&task, &slot_role, &router_config);
 
         // Check if PTY session exists, spawn if needed
         if !ensure_autopilot_pty(state, &task, &slot_id, task_env).await {

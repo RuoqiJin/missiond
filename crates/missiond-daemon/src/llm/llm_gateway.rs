@@ -232,25 +232,29 @@ pub(crate) async fn call_sonnet_stateless(
 pub(crate) fn determine_llm_env(
     task: &missiond_core::types::BoardTask,
     _slot_role: &str,
+    router_config: &RouterRuntimeConfig,
 ) -> HashMap<String, String> {
     let mut envs = HashMap::new();
 
-    // Rule 1: urgent priority → Opus (critical tasks need best quality)
+    // Rule 1: urgent priority -> best quality model.
     if task.priority == "urgent" {
-        envs.insert("ANTHROPIC_MODEL".to_string(), "claude-opus-4-6".to_string());
+        envs.insert(
+            "ANTHROPIC_MODEL".to_string(),
+            router_config.anthropic_urgent_model.clone(),
+        );
     }
-    // Rule 2: ops category → Sonnet (balanced for remediation tasks)
+    // Rule 2: ops category -> balanced remediation model.
     else if task.category == "ops" {
         envs.insert(
             "ANTHROPIC_MODEL".to_string(),
-            "claude-sonnet-4-6".to_string(),
+            router_config.anthropic_ops_model.clone(),
         );
     }
-    // Rule 3: docs / test / chore → fast & cheap Haiku
+    // Rule 3: docs / test / chore -> low-cost model.
     else if task.category == "docs" || task.category == "test" || task.category == "chore" {
         envs.insert(
             "ANTHROPIC_MODEL".to_string(),
-            "claude-haiku-4-5-20251001".to_string(),
+            router_config.anthropic_docs_test_chore_model.clone(),
         );
     }
     // Default: no override — let slot's own model config apply

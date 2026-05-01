@@ -10,6 +10,7 @@ use std::sync::Arc;
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::decision_harvest::harvest_decisions_for_task;
 use crate::llm_gateway::{call_gemini_for_flow, determine_llm_env};
 use crate::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
@@ -240,7 +241,8 @@ pub(crate) async fn execute_flow_task(
                 .get_slot(slot_id)
                 .map(|s| s.config.role.clone())
                 .unwrap_or_default();
-            let task_env = determine_llm_env(task, &slot_role);
+            let router_config = RouterRuntimeConfig::load_for_current_dir()?;
+            let task_env = determine_llm_env(task, &slot_role, &router_config);
             if !ensure_autopilot_pty(state, task, slot_id, task_env).await {
                 return Ok(());
             }

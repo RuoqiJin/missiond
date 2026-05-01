@@ -581,6 +581,9 @@
     :flow-gemini-model "gemini-3.1-pro"
     :stateless-sonnet-model "claude-sonnet"
     :queued-sonnet-model "claude-sonnet"
+    :anthropic-urgent-model "claude-opus-4-6"
+    :anthropic-ops-model "claude-sonnet-4-6"
+    :anthropic-docs-test-chore-model "claude-haiku-4-5-20251001"
     :compress-model "gemini-3.1-pro"
     :compress-channel "google"
     :compress-max-tokens 2048
@@ -591,7 +594,8 @@
       ["RouterRuntimeConfig MUST load router-runtime-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
        "mission_router_chat default model and max_tokens MUST project from router-runtime-policy; explicit caller model/max_tokens still wins."
        "mission_router_chat_manage history lookup and compression model/channel/token/char budgets MUST project from router-runtime-policy."
-       "Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model and direct HTTP timeout from router-runtime-policy."])
+       "Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model and direct HTTP timeout from router-runtime-policy."
+       "BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy, not Rust literals."])
 
   (project-registry-policy
     :desc "Lisp-owned project registry defaults for intent discovery and universe import."
@@ -1817,7 +1821,7 @@
              "scripts/check-router-backend-registry.mjs"
              "scripts/check-router-dispatch-descriptor.mjs"
              "scripts/check-v3-router-policy-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for the V2 router-policy dry-run chain and public router chat tools. router-runtime-policy owns default chat/flow/Sonnet models plus token/timeout/compression budgets through RouterRuntimeConfig. router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat request normalization, context injection, LLM dispatch, persistence, and response projection; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage history/list/delete/clear/delete_message/restore/stats/compress. llm_gateway.rs owns flow Gemini and stateless Sonnet calls, while sonnet_gateway.rs owns queued SonnetGateway calls. plan/router_policy_dry_run.rs owns the advisory dry-run adapter, predicate.rs owns rule matching, readiness.rs owns trace-index/backend-readiness projection, descriptor.rs owns router dispatch descriptor projection, and schema_parser.rs owns router-policy/backend-registry Lisp parsing. The surface preserves dry_run_only/runtime_replacement/no_execution invariants and deliberately does not claim router-policy dry-run as automatic runtime backend replacement.")
+      :note "Runtime-projected V3 destination for the V2 router-policy dry-run chain and public router chat tools. router-runtime-policy owns default chat/flow/Sonnet models, BoardTask ANTHROPIC_MODEL override routing, and token/timeout/compression budgets through RouterRuntimeConfig. router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat request normalization, context injection, LLM dispatch, persistence, and response projection; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage history/list/delete/clear/delete_message/restore/stats/compress. llm_gateway.rs owns flow Gemini, stateless Sonnet calls, and BoardTask urgent/ops/docs-test-chore model env projection, while sonnet_gateway.rs owns queued SonnetGateway calls. plan/router_policy_dry_run.rs owns the advisory dry-run adapter, predicate.rs owns rule matching, readiness.rs owns trace-index/backend-readiness projection, descriptor.rs owns router dispatch descriptor projection, and schema_parser.rs owns router-policy/backend-registry Lisp parsing. The surface preserves dry_run_only/runtime_replacement/no_execution invariants and deliberately does not claim router-policy dry-run as automatic runtime backend replacement.")
 
     (surface incident-governance
       :status "code-aligned"

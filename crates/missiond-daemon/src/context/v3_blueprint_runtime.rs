@@ -114,6 +114,9 @@ pub(crate) const DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS: u32 = 65536;
 pub(crate) const DEFAULT_ROUTER_FLOW_GEMINI_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_STATELESS_SONNET_MODEL: &str = "claude-sonnet";
 pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MODEL: &str = "claude-sonnet";
+pub(crate) const DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL: &str = "claude-opus-4-6";
+pub(crate) const DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL: &str = "claude-sonnet-4-6";
+pub(crate) const DEFAULT_ROUTER_ANTHROPIC_DOCS_TEST_CHORE_MODEL: &str = "claude-haiku-4-5-20251001";
 pub(crate) const DEFAULT_ROUTER_COMPRESS_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_COMPRESS_CHANNEL: &str = "google";
 pub(crate) const DEFAULT_ROUTER_COMPRESS_MAX_TOKENS: u32 = 2048;
@@ -234,6 +237,9 @@ pub(crate) struct RouterRuntimeConfig {
     pub flow_gemini_model: String,
     pub stateless_sonnet_model: String,
     pub queued_sonnet_model: String,
+    pub anthropic_urgent_model: String,
+    pub anthropic_ops_model: String,
+    pub anthropic_docs_test_chore_model: String,
     pub compress_model: String,
     pub compress_channel: String,
     pub compress_max_tokens: u32,
@@ -387,6 +393,10 @@ impl Default for RouterRuntimeConfig {
             flow_gemini_model: DEFAULT_ROUTER_FLOW_GEMINI_MODEL.to_string(),
             stateless_sonnet_model: DEFAULT_ROUTER_STATELESS_SONNET_MODEL.to_string(),
             queued_sonnet_model: DEFAULT_ROUTER_QUEUED_SONNET_MODEL.to_string(),
+            anthropic_urgent_model: DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL.to_string(),
+            anthropic_ops_model: DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL.to_string(),
+            anthropic_docs_test_chore_model: DEFAULT_ROUTER_ANTHROPIC_DOCS_TEST_CHORE_MODEL
+                .to_string(),
             compress_model: DEFAULT_ROUTER_COMPRESS_MODEL.to_string(),
             compress_channel: DEFAULT_ROUTER_COMPRESS_CHANNEL.to_string(),
             compress_max_tokens: DEFAULT_ROUTER_COMPRESS_MAX_TOKENS,
@@ -1188,6 +1198,12 @@ pub(crate) fn parse_router_runtime_policy(
         flow_gemini_model: non_empty_keyword(&tokens, ":flow-gemini-model")?,
         stateless_sonnet_model: non_empty_keyword(&tokens, ":stateless-sonnet-model")?,
         queued_sonnet_model: non_empty_keyword(&tokens, ":queued-sonnet-model")?,
+        anthropic_urgent_model: non_empty_keyword(&tokens, ":anthropic-urgent-model")?,
+        anthropic_ops_model: non_empty_keyword(&tokens, ":anthropic-ops-model")?,
+        anthropic_docs_test_chore_model: non_empty_keyword(
+            &tokens,
+            ":anthropic-docs-test-chore-model",
+        )?,
         compress_model: non_empty_keyword(&tokens, ":compress-model")?,
         compress_channel: non_empty_keyword(&tokens, ":compress-channel")?,
         compress_max_tokens: u32_keyword(&tokens, ":compress-max-tokens")?,
@@ -1803,10 +1819,13 @@ mod tests {
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
 	    :file-chat-default-max-tokens 65536
-	    :flow-gemini-model "gemini-3.1-pro"
-	    :stateless-sonnet-model "claude-sonnet"
-	    :queued-sonnet-model "claude-sonnet"
-	    :compress-model "gemini-3.1-pro"
+    :flow-gemini-model "gemini-3.1-pro"
+    :stateless-sonnet-model "claude-sonnet"
+    :queued-sonnet-model "claude-sonnet"
+    :anthropic-urgent-model "claude-opus-4-6"
+    :anthropic-ops-model "claude-sonnet-4-6"
+    :anthropic-docs-test-chore-model "claude-haiku-4-5-20251001"
+    :compress-model "gemini-3.1-pro"
 	    :compress-channel "google"
 	    :compress-max-tokens 2048
 	    :compress-char-budget-chars 100000
@@ -1964,6 +1983,15 @@ mod tests {
             DEFAULT_ROUTER_STATELESS_SONNET_MODEL
         );
         assert_eq!(cfg.queued_sonnet_model, DEFAULT_ROUTER_QUEUED_SONNET_MODEL);
+        assert_eq!(
+            cfg.anthropic_urgent_model,
+            DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL
+        );
+        assert_eq!(cfg.anthropic_ops_model, DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL);
+        assert_eq!(
+            cfg.anthropic_docs_test_chore_model,
+            DEFAULT_ROUTER_ANTHROPIC_DOCS_TEST_CHORE_MODEL
+        );
         assert_eq!(cfg.compress_model, DEFAULT_ROUTER_COMPRESS_MODEL);
         assert_eq!(cfg.compress_channel, DEFAULT_ROUTER_COMPRESS_CHANNEL);
         assert_eq!(cfg.compress_max_tokens, 2048);

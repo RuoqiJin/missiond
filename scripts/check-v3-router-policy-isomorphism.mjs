@@ -118,6 +118,10 @@ function checkFiles(root, files) {
     'RouterRuntimeConfig',
     'mission_router_chat default model and max_tokens MUST project from router-runtime-policy',
     'Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model',
+    'BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy',
+    ':anthropic-urgent-model',
+    ':anthropic-ops-model',
+    ':anthropic-docs-test-chore-model',
     'plan/router_policy_dry_run.rs owns the advisory dry-run adapter',
     'dry_run_only/runtime_replacement/no_execution invariants',
     'node scripts/check-v3-router-policy-isomorphism.mjs',
@@ -209,6 +213,12 @@ function checkFiles(root, files) {
     'DEFAULT_ROUTER_FLOW_GEMINI_MODEL',
     'DEFAULT_ROUTER_STATELESS_SONNET_MODEL',
     'DEFAULT_ROUTER_QUEUED_SONNET_MODEL',
+    'DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL',
+    'DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL',
+    'DEFAULT_ROUTER_ANTHROPIC_DOCS_TEST_CHORE_MODEL',
+    'anthropic_urgent_model',
+    'anthropic_ops_model',
+    'anthropic_docs_test_chore_model',
     'DEFAULT_ROUTER_COMPRESS_MODEL',
     'parse_router_runtime_policy',
     'find_form(source, "router-runtime-policy")',
@@ -220,8 +230,16 @@ function checkFiles(root, files) {
     'router_config.flow_gemini_model',
     'router_config.chat_default_max_tokens',
     'router_config.stateless_sonnet_model',
+    'router_config.anthropic_urgent_model',
+    'router_config.anthropic_ops_model',
+    'router_config.anthropic_docs_test_chore_model',
     'router_config.direct_http_timeout()',
     'V3_BLUEPRINT_CONFIG_ERROR',
+  ]);
+  forbidAll(diagnostics, files.llmGateway, sources.llmGateway, [
+    'claude-opus-4-6',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5-20251001',
   ]);
 
   requireAll(diagnostics, files.sonnetGateway, sources.sonnetGateway, [
@@ -319,6 +337,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden contract text is still present: ${needle}` });
+    }
+  }
+}
+
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-router-policy-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
@@ -343,7 +369,7 @@ function buildFixture() {
 	             "scripts/check-router-backend-registry.mjs"
 	             "scripts/check-router-dispatch-descriptor.mjs"
 	             "scripts/check-v3-router-policy-isomorphism.mjs"]
-	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
+	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
 	  (router-runtime-policy
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
@@ -351,6 +377,9 @@ function buildFixture() {
 	    :flow-gemini-model "gemini-3.1-pro"
 	    :stateless-sonnet-model "claude-sonnet"
 	    :queued-sonnet-model "claude-sonnet"
+	    :anthropic-urgent-model "claude-opus-4-6"
+	    :anthropic-ops-model "claude-sonnet-4-6"
+	    :anthropic-docs-test-chore-model "claude-haiku-4-5-20251001"
 	    :compress-model "gemini-3.1-pro"
 	    :compress-channel "google"
 	    :compress-max-tokens 2048
@@ -396,12 +425,15 @@ is_file_denied /.ssh/ .env credentials.json
   writeFixture(root, DEFAULT_FILES.v3Runtime, `
 pub(crate) struct RouterRuntimeConfig DEFAULT_ROUTER_CHAT_MODEL DEFAULT_ROUTER_FLOW_GEMINI_MODEL
 DEFAULT_ROUTER_STATELESS_SONNET_MODEL DEFAULT_ROUTER_QUEUED_SONNET_MODEL DEFAULT_ROUTER_COMPRESS_MODEL
+DEFAULT_ROUTER_ANTHROPIC_URGENT_MODEL DEFAULT_ROUTER_ANTHROPIC_OPS_MODEL DEFAULT_ROUTER_ANTHROPIC_DOCS_TEST_CHORE_MODEL
+anthropic_urgent_model anthropic_ops_model anthropic_docs_test_chore_model
 parse_router_runtime_policy find_form(source, "router-runtime-policy") direct_http_timeout
 `);
 
   writeFixture(root, DEFAULT_FILES.llmGateway, `
 RouterRuntimeConfig::load_for_current_dir router_config.flow_gemini_model router_config.chat_default_max_tokens
-router_config.stateless_sonnet_model router_config.direct_http_timeout() V3_BLUEPRINT_CONFIG_ERROR
+router_config.stateless_sonnet_model router_config.anthropic_urgent_model router_config.anthropic_ops_model
+router_config.anthropic_docs_test_chore_model router_config.direct_http_timeout() V3_BLUEPRINT_CONFIG_ERROR
 `);
 
   writeFixture(root, DEFAULT_FILES.sonnetGateway, `
