@@ -19,9 +19,9 @@ import { materializeContextPackWave } from './context-pack-materialize-wave.mjs'
 import { prepareWave } from './prepare-task-runner-wave.mjs';
 import { runDispatch } from './task-runner-dispatch.mjs';
 import { submitDispatch } from './task-runner-submit-dispatch.mjs';
+import { loadWorkstationRuntimeConfigForRepo } from './lib/v3_workstation_runtime.mjs';
 
 const RUNNER_SCHEMA = 'missiond.context-pack-run-wave.v0';
-const DEFAULT_MAX_PARALLEL = '4';
 
 const usage = `Usage:
   node scripts/context-pack-run-wave.mjs --context-pack <context-pack.lisp>
@@ -115,7 +115,7 @@ function parseArgs(args) {
     modelProfile: null,
     blueprintPath: null,
     allowDefaultConfig: false,
-    maxParallel: DEFAULT_MAX_PARALLEL,
+    maxParallel: null,
     force: false,
     dryRun: false,
     skipPrepare: false,
@@ -204,7 +204,7 @@ export async function runContextPackWave({
   modelProfile = null,
   blueprintPath = null,
   allowDefaultConfig = false,
-  maxParallel = DEFAULT_MAX_PARALLEL,
+  maxParallel = null,
   force = false,
   dryRun = false,
   skipPrepare = false,
@@ -224,6 +224,11 @@ export async function runContextPackWave({
 } = {}) {
   if (!contextPackPath) throw new Error('contextPackPath is required');
   const repo = path.resolve(repoRoot);
+  const runtimeConfig = loadWorkstationRuntimeConfigForRepo(repo, {
+    blueprintPath,
+    allowDefaultFallback: allowDefaultConfig,
+  });
+  const effectiveMaxParallel = runtimeConfig.contextPackMaxParallel(maxParallel);
   const materialize = materializeContextPackWave({
     contextPackPath,
     repoRoot: repo,
@@ -252,10 +257,14 @@ export async function runContextPackWave({
       materialize,
       prepare: null,
       dispatch: null,
+      runtime_projection: {
+        config_source: runtimeConfig.source,
+        max_parallel: effectiveMaxParallel,
+      },
       next_commands: nextCommands({
         contextPackPath: materialize.context_pack_path,
         manifestPath: manifestRel,
-        maxParallel,
+        maxParallel: effectiveMaxParallel,
       }),
     };
   }
@@ -280,7 +289,7 @@ export async function runContextPackWave({
         lifecyclePath,
         eventsDirPath,
         receiptsPath,
-        maxParallel,
+        maxParallel: effectiveMaxParallel,
         endpoint: endpoint ?? undefined,
         sessionId: sessionId ?? undefined,
         actorRole: 'context-pack-run-wave',
@@ -299,7 +308,7 @@ export async function runContextPackWave({
         lifecyclePath,
         eventsDirPath,
         receiptsPath,
-        maxParallel,
+        maxParallel: effectiveMaxParallel,
         actorRole: 'context-pack-run-wave',
         requestId,
         requestEventsDir,
@@ -323,10 +332,14 @@ export async function runContextPackWave({
     materialize,
     prepare,
     dispatch,
+    runtime_projection: {
+      config_source: runtimeConfig.source,
+      max_parallel: effectiveMaxParallel,
+    },
     next_commands: nextCommands({
       contextPackPath: materialize.context_pack_path,
       manifestPath: manifestRel,
-      maxParallel,
+      maxParallel: effectiveMaxParallel,
     }),
   };
 }
@@ -353,11 +366,11 @@ async function runFixtures() {
     const descriptor = await runContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
-      maxParallel: '1',
       nowIso: '2026-04-29T00:00:00Z',
     });
     assert(descriptor.mode === 'descriptor', 'default mode should return dispatch descriptor');
     assert(descriptor.materialize.task_count === 2, 'expected two materialized tasks');
+    assert(descriptor.runtime_projection.max_parallel === '1', 'expected V3 projected max parallel');
     assert(descriptor.prepare.briefsWritten === 2, 'expected two rendered briefs');
     assert(descriptor.prepare.skeletonsWritten === 2, 'expected two report skeletons');
     assert(descriptor.dispatch.status === 'ready_to_delegate', 'expected ready dispatch status');
@@ -372,10 +385,19 @@ async function runFixtures() {
       assert(objective.includes(literal), `objective should include ${literal}`);
     }
 
+    const override = await runContextPackWave({
+      contextPackPath: packPath,
+      repoRoot: tmp,
+      maxParallel: '2',
+      force: false,
+      nowIso: '2026-04-29T00:00:00Z',
+    });
+    assert(override.runtime_projection.max_parallel === '2', 'explicit maxParallel should override V3 default');
+    assert(override.dispatch.delegate_call_count === 2, 'explicit maxParallel=2 should select two tasks');
+
     const submitDry = await runContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
-      maxParallel: '1',
       submit: true,
       force: false,
       nowIso: '2026-04-29T00:00:00Z',
@@ -395,7 +417,7 @@ async function runFixtures() {
     assert(dry.mode === 'dry-run', 'dry-run should report dry-run mode');
     assert(!fs.existsSync(path.join(tmp, '.missiond/tasks/wave100/manifest.lisp')), 'dry-run should not write manifest');
 
-    return { ok: true, cases: 3 };
+    return { ok: true, cases: 4 };
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
@@ -474,6 +496,10 @@ function fixtureBlueprint() {
       :default_secs 300
       :min_secs 1
       :max_secs 7200)
+    (dispatch-policy context-pack-run-wave
+      :default_max_parallel 1
+      :min_parallel 1
+      :max_parallel 4)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300

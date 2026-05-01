@@ -123,6 +123,9 @@ function checkFiles(root, files) {
     'run-wave',
     'task-runner-manifest',
     'task-contracts',
+    'dispatch-policy context-pack-run-wave',
+    ':default_max_parallel 4',
+    'default max_parallel from workstation-config dispatch-policy context-pack-run-wave',
     '(surface context-pack',
     ':status "code-aligned"',
     'scripts/check-context-pack.mjs',
@@ -196,15 +199,17 @@ function checkFiles(root, files) {
     'prepareWave',
     'runDispatch',
     'submitDispatch',
+    'loadWorkstationRuntimeConfigForRepo',
+    'contextPackMaxParallel',
     '--context-pack <context-pack.lisp>',
     '--max-parallel <n|all>',
     '--apply',
-    'DEFAULT_MAX_PARALLEL = \'4\'',
     'context-pack remains the SSOT',
     'dispatch descriptor',
     'never calls the daemon or spawns workers unless --apply',
     'modelProfile',
     'timeoutSecs',
+    'max_parallel',
     'allowDefaultConfig',
     'BoardTask ID: assigned by mission_task_delegate',
   ]);
@@ -222,6 +227,13 @@ function checkFiles(root, files) {
     'clampTimeoutSecs',
     'DEFAULT_MODEL_PROFILE',
     'DEFAULT_TIMEOUT_SECS',
+    'DEFAULT_CONTEXT_PACK_MAX_PARALLEL',
+    'MIN_CONTEXT_PACK_MAX_PARALLEL',
+    'MAX_CONTEXT_PACK_MAX_PARALLEL',
+    'contextPackMaxParallel',
+    'dispatch-policy',
+    'context-pack-run-wave',
+    ':default_max_parallel',
   ]);
 
   return diagnostics;
@@ -253,6 +265,11 @@ function buildFixture() {
     :merge "two-stage: investigators append proposals; code workers consume integration-plan accepted-shards and dispatch-groups via context-pack-compile-shards then context-pack-materialize-wave"
     :flow [compile-shards materialize-wave run-wave]
     :egress [task-runner-manifest task-contracts])
+  (workstation-config
+    (dispatch-policy context-pack-run-wave
+      :default_max_parallel 4
+      :min_parallel 1
+      :max_parallel 8))
   (implementation-map
     (surface context-pack
       :status "code-aligned"
@@ -262,7 +279,7 @@ function buildFixture() {
 	             "scripts/context-pack-materialize-wave.mjs"
 	             "scripts/context-pack-run-wave.mjs"
 	             "scripts/lib/v3_workstation_runtime.mjs"]
-	      :note "context-pack-materialize-wave context-pack-run-wave materialize-wave run-wave task-runner-manifest task-contracts fixture"))
+		      :note "context-pack-materialize-wave context-pack-run-wave materialize-wave run-wave task-runner-manifest task-contracts default max_parallel from workstation-config dispatch-policy context-pack-run-wave fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-context-pack-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.checker, fs.readFileSync(DEFAULT_FILES.checker, 'utf8'));

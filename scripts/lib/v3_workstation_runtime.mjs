@@ -24,6 +24,9 @@ export const MAX_PTY_SEND_TIMEOUT_SECS = 7200;
 export const DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 60;
 export const MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 10;
 export const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS = 600;
+export const DEFAULT_CONTEXT_PACK_MAX_PARALLEL = 4;
+export const MIN_CONTEXT_PACK_MAX_PARALLEL = 1;
+export const MAX_CONTEXT_PACK_MAX_PARALLEL = 8;
 export const WATCHDOG_GRACE_SECS = 120;
 export const MISSING_SESSION_PROBE_SECS = 120;
 export const DEFAULT_SLOT_TTL_SECS = 14400;
@@ -58,6 +61,7 @@ export class WorkstationRuntimeConfig {
     ccSwarmTimeoutPolicy = defaultCcSwarmTimeoutPolicy(),
     ptySendTimeoutPolicy = defaultPtySendTimeoutPolicy(),
     dynamicSlotSpawnTimeoutPolicy = defaultDynamicSlotSpawnTimeoutPolicy(),
+    contextPackDispatchPolicy = defaultContextPackDispatchPolicy(),
     slotTtlPolicy = defaultSlotTtlPolicy(),
     source = 'defaults',
   } = {}) {
@@ -68,6 +72,7 @@ export class WorkstationRuntimeConfig {
     this.ccSwarmTimeoutPolicy = { ...ccSwarmTimeoutPolicy };
     this.ptySendTimeoutPolicy = { ...ptySendTimeoutPolicy };
     this.dynamicSlotSpawnTimeoutPolicy = { ...dynamicSlotSpawnTimeoutPolicy };
+    this.contextPackDispatchPolicy = { ...contextPackDispatchPolicy };
     this.slotTtlPolicy = { ...slotTtlPolicy };
     this.source = source;
   }
@@ -122,6 +127,21 @@ export class WorkstationRuntimeConfig {
         ),
       ),
     );
+  }
+
+  contextPackMaxParallel(maxParallel = null) {
+    if (maxParallel === 'all') return 'all';
+    const parsed = Number.isInteger(maxParallel) && maxParallel > 0
+      ? maxParallel
+      : typeof maxParallel === 'string' && /^[1-9][0-9]*$/.test(maxParallel)
+        ? Number.parseInt(maxParallel, 10)
+        : null;
+    const raw = parsed ?? this.contextPackDispatchPolicy.default_max_parallel;
+    const clamped = Math.max(
+      this.contextPackDispatchPolicy.min_parallel,
+      Math.min(this.contextPackDispatchPolicy.max_parallel, raw),
+    );
+    return String(clamped);
   }
 
   clampSlotTtlSecs(ttlSecs = null) {
@@ -288,6 +308,18 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
       max_secs: readPositiveInt(dynamicSlotSpawnProps, ':max_secs', file),
     };
   }
+  const contextPackDispatchForm = block.children.find((child) => {
+    if (!isList(child) || head(child) !== 'dispatch-policy') return false;
+    return nodeText(child.children[1]) === 'context-pack-run-wave';
+  });
+  if (contextPackDispatchForm) {
+    const dispatchProps = readKeywordProps(contextPackDispatchForm, { start: 2 });
+    config.contextPackDispatchPolicy = {
+      default_max_parallel: readPositiveInt(dispatchProps, ':default_max_parallel', file),
+      min_parallel: readPositiveInt(dispatchProps, ':min_parallel', file),
+      max_parallel: readPositiveInt(dispatchProps, ':max_parallel', file),
+    };
+  }
   const ttlForm = block.children.find((child) => {
     if (!isList(child) || head(child) !== 'ttl-policy') return false;
     return nodeText(child.children[1]) === 'dynamic-slot';
@@ -344,6 +376,19 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
       'failed to parse V3 workstation-config: dynamic-slot-spawn :default_secs outside :min_secs..:max_secs',
     );
   }
+  if (config.contextPackDispatchPolicy.min_parallel > config.contextPackDispatchPolicy.max_parallel) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: context-pack-run-wave :min_parallel exceeds :max_parallel',
+    );
+  }
+  if (
+    config.contextPackDispatchPolicy.default_max_parallel < config.contextPackDispatchPolicy.min_parallel
+    || config.contextPackDispatchPolicy.default_max_parallel > config.contextPackDispatchPolicy.max_parallel
+  ) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: context-pack-run-wave :default_max_parallel outside :min_parallel..:max_parallel',
+    );
+  }
   if (config.slotTtlPolicy.min_secs > config.slotTtlPolicy.max_secs) {
     throw new V3BlueprintRuntimeConfigError(
       'failed to parse V3 workstation-config: ttl :min_secs exceeds :max_secs',
@@ -377,6 +422,7 @@ function defaultWorkstationRuntimeConfig(source) {
     ccSwarmTimeoutPolicy: defaultCcSwarmTimeoutPolicy(),
     ptySendTimeoutPolicy: defaultPtySendTimeoutPolicy(),
     dynamicSlotSpawnTimeoutPolicy: defaultDynamicSlotSpawnTimeoutPolicy(),
+    contextPackDispatchPolicy: defaultContextPackDispatchPolicy(),
     slotTtlPolicy: defaultSlotTtlPolicy(),
     source,
   });
@@ -450,6 +496,14 @@ function defaultDynamicSlotSpawnTimeoutPolicy() {
     default_secs: DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
     min_secs: MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
     max_secs: MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS,
+  };
+}
+
+function defaultContextPackDispatchPolicy() {
+  return {
+    default_max_parallel: DEFAULT_CONTEXT_PACK_MAX_PARALLEL,
+    min_parallel: MIN_CONTEXT_PACK_MAX_PARALLEL,
+    max_parallel: MAX_CONTEXT_PACK_MAX_PARALLEL,
   };
 }
 
