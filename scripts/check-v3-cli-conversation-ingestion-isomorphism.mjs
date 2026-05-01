@@ -1,0 +1,241 @@
+#!/usr/bin/env node
+
+import fs from 'node:fs';
+import path from 'node:path';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
+
+const usage = `Usage:
+  node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs [--json]
+
+Checks that V3 and code agree on CLI conversation ingestion sources:
+  - canonical sources are claude_code, gemini_cli, and codex_cli.
+  - each source has a watcher/reconcile/worker path into conversation storage.
+  - source aliases are explicit, not accidental string drift.
+`;
+
+const DEFAULT_FILES = {
+  blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  ingestionRouter: 'crates/missiond-daemon/src/infra/ingestion_router.rs',
+  messageHandler: 'crates/missiond-daemon/src/infra/message_handler.rs',
+  slotHandler: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
+  slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
+  slotOrchestrator: 'crates/missiond-daemon/src/slot_orchestrator/mod.rs',
+  slotSpawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
+  ccController: 'crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs',
+  geminiController: 'crates/missiond-daemon/src/slot_orchestrator/gemini_controller.rs',
+  claudeWatcher: 'crates/missiond-core/src/cc_tasks/watcher.rs',
+  geminiWatcher: 'crates/missiond-core/src/gemini_cli/watcher.rs',
+  geminiParser: 'crates/missiond-core/src/gemini_cli/parser.rs',
+  geminiReconcile: 'crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs',
+  codexIngestion: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
+  pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
+  sourceMigration: 'crates/missiond-core/migrations/20260501000000_canonical_cli_sources.sql',
+  sourceCleanupMigration: 'crates/missiond-core/migrations/20260501001000_clean_stale_cli_slot_sessions.sql',
+  conversationTypes: 'crates/missiond-core/src/types/conversation.rs',
+};
+
+function main() {
+  const args = process.argv.slice(2);
+  let json = false;
+  for (const arg of args) {
+    if (arg === '--help' || arg === '-h') {
+      console.log(usage);
+      process.exit(0);
+    } else if (arg === '--json') {
+      json = true;
+    } else {
+      console.error(`unknown arg: ${arg}`);
+      console.error(usage);
+      process.exit(2);
+    }
+  }
+  const diagnostics = checkFiles(process.cwd(), DEFAULT_FILES);
+  const result = { ok: diagnostics.length === 0, diagnostics };
+  if (json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (result.ok) {
+    console.log('v3 CLI conversation ingestion isomorphism check OK');
+  } else {
+    for (const d of diagnostics) console.error(`${d.file}: ${d.message}`);
+    console.error(`v3 CLI conversation ingestion check FAILED -- ${diagnostics.length} diagnostic(s)`);
+  }
+  process.exit(result.ok ? 0 : 1);
+}
+
+function checkFiles(root, files) {
+  const diagnostics = [];
+  const sources = {};
+  for (const [key, rel] of Object.entries(files)) {
+    try {
+      sources[key] =
+        key === 'blueprint'
+          ? readBlueprintWithEvidenceSidecars(root, rel)
+          : fs.readFileSync(path.join(root, rel), 'utf8');
+    } catch (err) {
+      diagnostics.push({ file: rel, message: `cannot read: ${err.message}` });
+    }
+  }
+  if (diagnostics.length > 0) return diagnostics;
+
+  requireAll(diagnostics, files.blueprint, sources.blueprint, [
+    '(cli-conversation-ingestion',
+    '(source claude-code',
+    ':canonical "claude_code"',
+    '(source gemini-cli',
+    ':canonical "gemini_cli"',
+    '"~/.gemini/tmp/*/chats/*.jsonl"',
+    '(source codex-cli',
+    ':canonical "codex_cli"',
+    ':legacy-aliases ["claude_cli" "pty_jsonl"]',
+    'Conversation sources MUST be canonicalized before DB write',
+    'mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine',
+    'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.ingestionRouter, sources.ingestionRouter, [
+    'Origin CLI: "claude_code", "gemini_cli", "codex_cli"',
+    '"claude_cli" | "pty_jsonl" => "claude_code"',
+    'canonical_event_source == "claude_code" || canonical_event_source == "gemini_cli"',
+    'let source = canonical_event_source.to_string();',
+  ]);
+
+  rejectAll(diagnostics, files.ingestionRouter, sources.ingestionRouter, [
+    '"pty_jsonl".to_string()',
+  ]);
+
+  requireAll(diagnostics, files.slotEnv, sources.slotEnv, [
+    'updated.source = "claude_code".to_string();',
+    '&updated.source',
+  ]);
+  rejectAll(diagnostics, files.slotEnv, sources.slotEnv, [
+    'updated.source = "pty_jsonl".to_string();',
+  ]);
+
+  requireAll(diagnostics, files.slotOrchestrator, sources.slotOrchestrator, [
+    'canonical_source_for_engine',
+    'CliEngine::ClaudeCode => "claude_code"',
+    'CliEngine::Gemini => "gemini_cli"',
+    'CliEngine::Codex => "codex_cli"',
+    'chat_type_for_source',
+    'source: &str',
+    'session_id,\n        source',
+    'source: source.to_string()',
+  ]);
+  rejectAll(diagnostics, files.slotOrchestrator, sources.slotOrchestrator, [
+    'session_id, "pty_jsonl"',
+    'source: "pty_jsonl".to_string()',
+  ]);
+
+  requireAll(diagnostics, files.slotSpawner, sources.slotSpawner, [
+    'missiond_core::CliEngine::Gemini | missiond_core::CliEngine::Codex',
+    'format!("pty-{}", pty_slot.id)',
+    'canonical_source_for_engine(pty_slot.engine)',
+    'register_slot_session(',
+  ]);
+
+  requireAll(diagnostics, files.ccController, sources.ccController, [
+    'register_slot_session(',
+    '"claude_code"',
+  ]);
+
+  requireAll(diagnostics, files.geminiController, sources.geminiController, [
+    'register_slot_session(',
+    '"gemini_cli"',
+  ]);
+
+  requireAll(diagnostics, files.messageHandler, sources.messageHandler, [
+    'canonical_source_for_engine(engine).to_string()',
+    'chat_type_for_source(&source)',
+    'updated.source = source.clone();',
+  ]);
+  rejectAll(diagnostics, files.messageHandler, sources.messageHandler, [
+    'source: "pty".to_string()',
+  ]);
+
+  requireAll(diagnostics, files.slotHandler, sources.slotHandler, [
+    'conversation_source_matches_engine',
+    'canonical_source_for_engine',
+    'latestConversationMismatch',
+    'CliEngine::ClaudeCode => "claude_code"',
+    'CliEngine::Gemini => "gemini_cli"',
+    'CliEngine::Codex => "codex_cli"',
+  ]);
+
+  requireAll(diagnostics, files.claudeWatcher, sources.claudeWatcher, [
+    'source: String',
+    '"claude_code"',
+  ]);
+
+  requireAll(diagnostics, files.geminiWatcher, sources.geminiWatcher, [
+    '*.{json,jsonl}',
+    'Some("json" | "jsonl")',
+    'source: "gemini_cli"',
+    'WatcherEvent::NewMessages',
+  ]);
+
+  requireAll(diagnostics, files.geminiParser, sources.geminiParser, [
+    'parse_jsonl_session',
+    'sessionId',
+    '$set',
+    'Some("json" | "jsonl")',
+    'test_parse_jsonl_session',
+  ]);
+
+  requireAll(diagnostics, files.geminiReconcile, sources.geminiReconcile, [
+    '*.{json,jsonl}',
+    'source: "gemini_cli".to_string()',
+    'chat_type: Some("gemini_cli".to_string())',
+  ]);
+
+  requireAll(diagnostics, files.codexIngestion, sources.codexIngestion, [
+    'source: "codex_cli".to_string()',
+    'chat_type: Some("codex_cli".to_string())',
+  ]);
+
+  requireAll(diagnostics, files.pgConversation, sources.pgConversation, [
+    'source = $4',
+    'chat_type = COALESCE($17, conversations.chat_type)',
+    "VALUES ($1, $2, 'claude_code'",
+    "source = 'claude_code'",
+  ]);
+  rejectAll(diagnostics, files.pgConversation, sources.pgConversation, [
+    "VALUES ($1, $2, 'claude_cli'",
+  ]);
+
+  requireAll(diagnostics, files.sourceMigration, sources.sourceMigration, [
+    "ALTER COLUMN source SET DEFAULT 'claude_code'",
+    "source IN ('claude_cli', 'pty_jsonl')",
+    "SET source = 'gemini_cli'",
+    "conversation_type = 'gemini_chat'",
+  ]);
+
+  requireAll(diagnostics, files.sourceCleanupMigration, sources.sourceCleanupMigration, [
+    'DELETE FROM slot_sessions',
+    "ss.slot_id ILIKE '%gemini%' AND c.source <> 'gemini_cli'",
+    "ss.slot_id ILIKE '%codex%' AND c.source <> 'codex_cli'",
+    "c.source <> 'claude_code'",
+  ]);
+
+  requireAll(diagnostics, files.conversationTypes, sources.conversationTypes, [
+    'source',
+    'canonical: "claude_code" | "gemini_cli" | "codex_cli"',
+    'chat_type',
+    'conversation_type',
+  ]);
+
+  return diagnostics;
+}
+
+function requireAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (!source.includes(needle)) diagnostics.push({ file, message: `missing ${needle}` });
+  }
+}
+
+function rejectAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) diagnostics.push({ file, message: `forbidden ${needle}` });
+  }
+}
+
+main();

@@ -382,13 +382,13 @@ pub(crate) async fn capture_slot_session_uuid(
                 if conv.slot_id.is_none() {
                     let mut updated = conv.clone();
                     updated.slot_id = Some(slot_id.to_string());
-                    updated.source = "pty_jsonl".to_string();
+                    updated.source = "claude_code".to_string();
                     let category: Option<String> = None;
                     updated.conversation_type = missiond_core::db::derive_conversation_type(
                         category.as_deref(),
                         Some(slot_id),
                         &session_uuid,
-                        &conv.source,
+                        &updated.source,
                     );
                     let _ = store.upsert_conversation(&updated).await;
                     info!(session = %session_uuid, slot_id = %slot_id, "Retroactively tagged conversation with slot_id and conversation_type");

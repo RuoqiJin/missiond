@@ -915,6 +915,68 @@
        "Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy instead of local gpt-5.4/120s/300s literals."
        "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (cli-conversation-ingestion
+    :desc "Canonical CLI conversation-log ingestion contract for ClaudeCode, Gemini CLI, and Codex CLI."
+    :legacy-aliases ["claude_cli" "pty_jsonl"]
+    (source claude-code
+      :canonical "claude_code"
+      :paths ["~/.claude/projects/**/sessions/*.jsonl"]
+      :watcher "crates/missiond-core/src/cc_tasks/watcher.rs"
+      :route "crates/missiond-daemon/src/infra/ingestion_router.rs")
+    (source gemini-cli
+      :canonical "gemini_cli"
+      :paths ["~/.gemini/tmp/*/chats/*.json" "~/.gemini/tmp/*/chats/*.jsonl"]
+      :watcher "crates/missiond-core/src/gemini_cli/watcher.rs"
+      :route "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs")
+    (source codex-cli
+      :canonical "codex_cli"
+      :paths ["~/.codex/state_5.sqlite" "~/.codex/session_index.jsonl" "~/.codex/history.jsonl"]
+      :worker "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs")
+    :invariants
+      ["Conversation sources MUST be canonicalized before DB write: claude_code, gemini_cli, or codex_cli."
+       "Legacy claude_cli and PTY transport pty_jsonl remain read aliases only; new non-transport source fields MUST name the canonical CLI."
+       "mission_pty_status and mission_slots observability MUST be joinable with the latest conversation row by slot/session id and source."
+       "mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine; stale provider drift must never masquerade as current state."
+       "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."]
+    :checker "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs")
+
+  (upstream-pty-signatures
+    :desc "Provider-aware PTY recognition signatures derived from upstream TUI source instead of screenshot-only heuristics."
+    (provider codex-cli
+      :canonical "codex_cli"
+      :upstream "https://github.com/openai/codex"
+      :ref "ff27d01676a93be7467b3893e82f41a7af7e1418"
+      :source-paths ["codex-rs/tui/src/status_indicator_widget.rs"
+                     "codex-rs/tui/src/chatwidget.rs"
+                     "codex-rs/tui/src/bottom_pane/approval_overlay.rs"
+                     "codex-rs/tui/src/bottom_pane/chat_composer.rs"]
+      :signals [working-status esc-to-interrupt status-details approval-overlay composer-idle])
+    (provider gemini-cli
+      :canonical "gemini_cli"
+      :upstream "https://github.com/google-gemini/gemini-cli"
+      :ref "d9f273e44095b742e9ab74241e240c587ae27e64"
+      :source-paths ["packages/cli/src/ui/types.ts"
+                     "packages/cli/src/ui/components/LoadingIndicator.tsx"
+                     "packages/cli/src/ui/components/InputPrompt.tsx"
+                     "packages/cli/src/ui/components/messages/DenseToolMessage.tsx"]
+      :signals [StreamingState.Idle StreamingState.Responding StreamingState.WaitingForConfirmation Thinking esc-to-cancel CoreToolCallStatus])
+    (provider claude-code
+      :canonical "claude_code"
+      :upstream "/Users/jinchen/Downloads/claudecode/claudecode"
+      :source-paths ["src/constants/spinnerVerbs.ts"
+                     "src/constants/turnCompletionVerbs.ts"
+                     "src/remote/sdkMessageAdapter.ts"
+                     "src/cli/print.ts"]
+      :signals [spinner-verbs turn-completion-verbs tool-progress auto-mode prompt-footer])
+    :output PtyRecognitionSnapshot
+    :states [running idle blocked complete unknown]
+    :invariants
+      ["Codex CLI and Gemini CLI MUST use provider-specific StateParser implementations and MUST NOT fall back to the ClaudeCode parser."
+       "mission_pty_status MUST include PtyRecognitionSnapshot with provider, state, confidence, reason, phase/tool/blocked details when available."
+       "Autopilot watchdogs MUST treat low-confidence unknown as diagnostic state rather than automatic BoardTask closure evidence."
+       "If an upstream TUI signal changes, checker failure is preferred over silent downgrade to generic prompt heuristics."]
+    :checker "node scripts/check-v3-pty-recognition-isomorphism.mjs")
+
   (ops-infra
     :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
     :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
@@ -1504,11 +1566,12 @@
     (pillar worker-runtime
       (function compute-primitives
         :surface compute-primitives
-        :entry [mission_task_submit mission_task_query mission_task_cancel mission_job_poll mission_flow_run mission_pty_spawn mission_pty_send mission_pty_read mission_pty_signal mission_pty_confirm mission_pty_status mission_pty_screenshot mission_slots mission_slot_history mission_agent mission_inbox mission_sonnet_process mission_minimax_process mission_cc_query mission_cc_swarm mission_worker mission_control mission_pause mission_forge_build mission_forge_lint]
+        :entry [mission_task_submit mission_task_query mission_task_cancel mission_job_poll mission_flow_run mission_pty_spawn mission_pty_send mission_pty_read mission_pty_signal mission_pty_confirm mission_pty_status mission_pty_screenshot mission_slots mission_slot_history mission_agent mission_inbox mission_sonnet_process mission_minimax_process mission_cc_query mission_cc_swarm mission_worker mission_control mission_pause mission_forge_build mission_forge_lint CodexCliStateParser GeminiCliUpstreamStateParser recognize_screen]
         :core ((step s1 :logic "normalize low-level runtime requests into slot, job, task, PTY, flow, forge, or process operations")
                (step s2 :logic "apply project-root, permission, timeout, and pause/control policies before side effects")
-               (step s3 :logic "return durable runtime handles and status without bypassing BoardTask or plan execution when a higher-level surface exists"))
-        :egress [runtime_handle job_status pty_snapshot flow_result forge_result])
+               (step s3 :logic "classify provider PTY text into running/idle/blocked/complete/unknown with confidence and reason")
+               (step s4 :logic "return durable runtime handles and status without bypassing BoardTask or plan execution when a higher-level surface exists"))
+        :egress [runtime_handle job_status pty_snapshot PtyRecognitionSnapshot flow_result forge_result])
       (function skill-runtime
         :surface skill-runtime
         :entry [mission_skill_query mission_skill_context mission_skill_mutate mission_skill_exec]
@@ -2092,7 +2155,13 @@
              "crates/missiond-daemon/src/context/context_pipeline.rs"
              "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
              "crates/missiond-daemon/src/llm/codex_cli.rs"
-             "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
+             "crates/missiond-daemon/src/infra/ingestion_router.rs"
+             "crates/missiond-core/src/cc_tasks/watcher.rs"
+             "crates/missiond-core/src/gemini_cli/watcher.rs"
+             "crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs"
+             "crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs"
+             "scripts/check-v3-conversation-ingestion-isomorphism.mjs"
+             "scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"]
       :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs, projects context prefetch intent-router model/timeout into context/context_pipeline.rs, and projects Codex vision worker binary/model/idle/absolute timeout into workers/codex/vision_worker.rs plus llm/codex_cli.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conver... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-017]")
 
     (surface router-policy
@@ -2165,6 +2234,9 @@
              "crates/missiond-daemon/src/engine/flow/mod.rs"
              "crates/missiond-daemon/src/engine/flow/loader.rs"
              "crates/missiond-daemon/src/handlers/compute/pty.rs"
+             "crates/missiond-pty/src/pty_recognition.rs"
+             "crates/missiond-pty/src/session.rs"
+             "crates/missiond-pty/src/manager.rs"
              "crates/missiond-daemon/src/handlers/compute/process.rs"
              "crates/missiond-daemon/src/handlers/compute/slot.rs"
              "crates/missiond-daemon/src/handlers/compute/minimax.rs"
@@ -2184,7 +2256,8 @@
              "crates/missiond-mcp/src/tools/compute/cc_tasks.rs"
              "crates/missiond-mcp/src/tools/compute/worker.rs"
              "crates/missiond-mcp/src/tools/compute/forge.rs"
-             "scripts/check-v3-compute-primitives-isomorphism.mjs"]
+             "scripts/check-v3-compute-primitives-isomorphism.mjs"
+             "scripts/check-v3-pty-recognition-isomorphism.mjs"]
       :note "Code-aligned V3 destination for low-level worker runtime primitives. task.rs owns mission_task_submit/query/cancel plus async/sync/status/list/ack/track and TaskEvent::Created egress, and projects auto-spawn tracked PTY wait_for_idle timeout from compute-runtime-policy; job.rs owns mission_job_poll poll/list/cancel over AsyncJobStatus; flow_run.rs owns mission_flow_run BoardTask-backed flow execution and project-root resolution; engine/flow/mod.rs owns FlowDefinition shape constants, engine/flow/loader.rs loads flow-runtime-policy through context/v3_blueprint_runtime.rs and projects missing YAML node defaults while preserving explicit fields; pty.rs owns mission_pty_spawn/send/read/signal/confirm/status/screenshot plus kill/interrupt/read screen-history-logs, task requeue, and permission learning; process.rs owns mission_agent spawn/kill/restart/list and projects trac... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-019]")
 
     (surface skill-runtime
@@ -2249,6 +2322,8 @@
              "node scripts/check-v3-v2-coverage.mjs"
              "node scripts/check-v3-runtime-path-hygiene.mjs"
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
+             "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs"
+             "node scripts/check-v3-pty-recognition-isomorphism.mjs"
              "node scripts/check-v3-capability-governance-isomorphism.mjs"
              "node scripts/check-v3-compute-primitives-isomorphism.mjs"
              "node scripts/check-v3-sysinfra-control-isomorphism.mjs"

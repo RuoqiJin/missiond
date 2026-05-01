@@ -56,7 +56,14 @@ pub(crate) async fn handle_new_messages(
     };
 
     // ── Layer 2: Classifier (audit + labels) ──
-    classify(state, &session_id, &messages, &inserted_ids, &semantic_roles).await;
+    classify(
+        state,
+        &session_id,
+        &messages,
+        &inserted_ids,
+        &semantic_roles,
+    )
+    .await;
 
     // ── Layer 3: Emitter (timeline events + token ledger) ──
     emit(
@@ -127,9 +134,7 @@ async fn ingest(
                     .unwrap_or_else(|| project_path.to_string()),
             ),
             project_id: {
-                let cwd = first
-                    .map(|m| m.cwd.as_str())
-                    .unwrap_or(project_path);
+                let cwd = first.map(|m| m.cwd.as_str()).unwrap_or(project_path);
                 let registry = state.project_registry.read().await;
                 registry.resolve(cwd).map(|s| s.to_string())
             },
@@ -204,7 +209,10 @@ async fn ingest(
             Some("tool_result".to_string())
         } else if is_thinking {
             Some("thinking".to_string())
-        } else if msg.message.role == "user" && is_slot_session && !is_interactive_conversation(conversation_type) {
+        } else if msg.message.role == "user"
+            && is_slot_session
+            && !is_interactive_conversation(conversation_type)
+        {
             Some("system".to_string())
         } else if msg.message.role == "user"
             && parent_session_id.is_some()
@@ -216,7 +224,7 @@ async fn ingest(
         } else {
             None
         };
-        
+
         if let Some(sr) = semantic_role {
             semantic_roles.insert(msg.uuid.clone(), sr);
         }
@@ -355,7 +363,11 @@ async fn classify(
 /// Apply rule-based labels to newly inserted messages (single batch write).
 /// Labels: role_mapped, has_code_change, has_mcp_call, has_tool_use, has_tool_result, has_image,
 ///         gemini_chat (send/receive), gemini_channel (apikey/google)
-async fn apply_rule_labels(state: &AppState, inserted_ids: &[i64], semantic_roles: &std::collections::HashMap<String, String>) {
+async fn apply_rule_labels(
+    state: &AppState,
+    inserted_ids: &[i64],
+    semantic_roles: &std::collections::HashMap<String, String>,
+) {
     // Collect all labels first, then flush as a single batch (avoids N+1 auto-commit fsync).
     let mut role_labels: Vec<(i64, String)> = Vec::new();
     let mut flag_labels: Vec<(i64, &'static str, &'static str)> = Vec::new();
@@ -714,15 +726,46 @@ pub(crate) async fn handle_pty_text_complete(
     }
 
     let session_id = format!("pty-{}", slot_id);
+    let (source, chat_type) = match state
+        .mission
+        .get_slot(&slot_id)
+        .map(|slot| slot.config.engine)
+    {
+        Some(engine) => {
+            let source = crate::slot_orchestrator::canonical_source_for_engine(engine).to_string();
+            let chat_type = crate::slot_orchestrator::chat_type_for_source(&source);
+            (source, chat_type)
+        }
+        None => ("claude_code".to_string(), None),
+    };
+    let conversation_type = {
+        let category = state.mission.get_slot_category(&slot_id);
+        missiond_core::db::derive_conversation_type(
+            category.as_deref(),
+            Some(&slot_id),
+            &session_id,
+            &source,
+        )
+    };
 
     // Ensure conversation exists for this PTY session
-    if state
+    if let Some(existing) = state
         .store
         .get_conversation(&session_id)
         .await
         .unwrap_or(None)
-        .is_none()
     {
+        if existing.source != source || existing.conversation_type != conversation_type {
+            let mut updated = existing;
+            updated.source = source.clone();
+            updated.chat_type = chat_type.clone();
+            updated.conversation_type = conversation_type.clone();
+            if let Err(e) = state.store.upsert_conversation(&updated).await {
+                error!(slot = %slot_id, error = %e, "Failed to update PTY conversation source");
+                return;
+            }
+        }
+    } else {
         let ts = chrono::DateTime::from_timestamp(timestamp, 0)
             .map(|dt| dt.to_rfc3339())
             .unwrap_or_else(|| timestamp.to_string());
@@ -731,7 +774,7 @@ pub(crate) async fn handle_pty_text_complete(
             project: None,
             project_id: None,
             slot_id: Some(slot_id.clone()),
-            source: "pty".to_string(),
+            source: source.clone(),
             model: None,
             git_branch: None,
             jsonl_path: None,
@@ -745,16 +788,8 @@ pub(crate) async fn handle_pty_text_complete(
             analysis_version: 0,
             analysis_retries: 0,
             deep_analyzed_message_id: 0,
-            chat_type: None,
-            conversation_type: {
-                let category = state.mission.get_slot_category(&slot_id);
-                missiond_core::db::derive_conversation_type(
-                    category.as_deref(),
-                    Some(&slot_id),
-                    &session_id,
-                    "claude_code",
-                )
-            },
+            chat_type: chat_type.clone(),
+            conversation_type: conversation_type.clone(),
             updated_at: None,
             llm_summary: None,
             embedding_provider: None,

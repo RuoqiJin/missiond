@@ -18,6 +18,7 @@ use super::session::{
     ConfirmInfo, ConfirmResponse, PTYSession, PTYSessionOptions, PermissionDecision, SessionEvent,
     SessionState, TextOutputEvent,
 };
+use crate::pty_recognition::{session_state_snapshot, PtyRecognitionSnapshot};
 
 // ========== Types ==========
 
@@ -35,6 +36,9 @@ pub struct PTYAgentInfo {
     /// Spinner status text from Claude Code (e.g., "Compacting conversation… (1m 40s · ↑ 704 tokens · thought for 6s)")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status_text: Option<String>,
+    /// Provider-aware status recognition snapshot for orchestration/watchdog decisions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recognition: Option<PtyRecognitionSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -187,6 +191,7 @@ impl PTYManager {
             pid: None,
             state: SessionState::Exited,
             status_text: None,
+            recognition: Some(session_state_snapshot(slot.engine, SessionState::Exited)),
             started_at: None,
             current_task_id: None,
             log_file,
@@ -199,8 +204,8 @@ impl PTYManager {
     /// Check network reachability before spawning Claude Code.
     /// Tries to TCP-connect to Google DNS (8.8.8.8:443) with a 3s timeout.
     async fn check_network_reachability() -> Result<()> {
-        use tokio::net::TcpStream;
         use std::net::SocketAddr;
+        use tokio::net::TcpStream;
 
         let target: SocketAddr = "8.8.8.8:443".parse().unwrap();
         match tokio::time::timeout(
@@ -286,20 +291,28 @@ impl PTYManager {
 
         // Track auto-restart
         if options.auto_restart {
-            self.auto_restart_slots.write().await.insert(slot.id.clone());
+            self.auto_restart_slots
+                .write()
+                .await
+                .insert(slot.id.clone());
         } else {
             self.auto_restart_slots.write().await.remove(&slot.id);
         }
 
         // Create session
-        let cwd = slot.cwd.clone().unwrap_or_else(|| {
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/"))
-        });
+        let cwd = slot
+            .cwd
+            .clone()
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/")));
 
         let mut session = PTYSession::new(PTYSessionOptions {
             slot_id: slot.id.clone(),
             cwd,
-            env: if options.extra_env.is_empty() { None } else { Some(options.extra_env.clone()) },
+            env: if options.extra_env.is_empty() {
+                None
+            } else {
+                Some(options.extra_env.clone())
+            },
             log_file: Some(info.log_file.clone()),
             cols: 120,
             rows: 30,
@@ -344,6 +357,8 @@ impl PTYManager {
                             let mut info = agent_info_for_forward.write().await;
                             if let Some(entry) = info.get_mut(&slot_id_for_events) {
                                 entry.state = new_state;
+                                entry.recognition =
+                                    Some(session_state_snapshot(entry.engine, new_state));
                                 // Clear status_text when leaving processing state
                                 if !new_state.is_processing() {
                                     entry.status_text = None;
@@ -358,13 +373,16 @@ impl PTYManager {
                     }
                     SessionEvent::StatusUpdate(status) => {
                         // Update spinner status text in agent_info
-                        let text = format!(
-                            "{} {}",
-                            status.spinner, status.status_text
-                        );
+                        let text = format!("{} {}", status.spinner, status.status_text);
                         let mut info = agent_info_for_forward.write().await;
                         if let Some(entry) = info.get_mut(&slot_id_for_events) {
                             entry.status_text = Some(text);
+                        }
+                    }
+                    SessionEvent::RecognitionUpdate(snapshot) => {
+                        let mut info = agent_info_for_forward.write().await;
+                        if let Some(entry) = info.get_mut(&slot_id_for_events) {
+                            entry.recognition = Some(snapshot);
                         }
                     }
                     SessionEvent::ConfirmRequired { prompt, info } => {
@@ -559,8 +577,7 @@ impl PTYManager {
 
                         let log_file = {
                             let info = manager_info.read().await;
-                            info.get(&slot_for_restart.id)
-                                .map(|i| i.log_file.clone())
+                            info.get(&slot_for_restart.id).map(|i| i.log_file.clone())
                         };
 
                         if let Ok(mut new_session) = PTYSession::new(PTYSessionOptions {
@@ -607,8 +624,7 @@ impl PTYManager {
                                     if let Some(agent_info) = info.get_mut(&slot_for_restart.id) {
                                         agent_info.pid = pid;
                                         agent_info.state = state;
-                                        agent_info.started_at =
-                                            Some(Utc::now().timestamp_millis());
+                                        agent_info.started_at = Some(Utc::now().timestamp_millis());
                                     }
                                 }
 
@@ -673,7 +689,11 @@ impl PTYManager {
             s.send_fire_and_forget(message).await?;
         }
 
-        info!(slot_id = slot_id, message_len = message.len(), "Message sent (fire-and-forget)");
+        info!(
+            slot_id = slot_id,
+            message_len = message.len(),
+            "Message sent (fire-and-forget)"
+        );
         Ok(())
     }
 
@@ -796,7 +816,11 @@ impl PTYManager {
     }
 
     /// Take a screenshot of a PTY session
-    pub async fn screenshot(&self, slot_id: &str, output_dir: &std::path::Path) -> Result<std::path::PathBuf> {
+    pub async fn screenshot(
+        &self,
+        slot_id: &str,
+        output_dir: &std::path::Path,
+    ) -> Result<std::path::PathBuf> {
         let session = {
             let sessions = self.sessions.read().await;
             sessions

@@ -190,7 +190,14 @@ impl EngineController for ClaudeCodeController {
 
         // Also try immediate registration if session is already known (fast-spawn case)
         if let Ok(Some(session_id)) = self.store.get_slot_session(slot_id).await {
-            register_slot_session(&self.store, slot_id, &session_id, is_ephemeral).await;
+            register_slot_session(
+                &self.store,
+                slot_id,
+                &session_id,
+                "claude_code",
+                is_ephemeral,
+            )
+            .await;
             info!(slot_id, session_id = %session_id, "ClaudeCodeCtrl: spawned + immediately registered");
             return Ok(session_id);
         }

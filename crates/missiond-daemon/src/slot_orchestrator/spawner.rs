@@ -13,6 +13,8 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+use super::{canonical_source_for_engine, register_slot_session};
+
 /// A unified spawner for tracked slot PTY processes.
 /// This ensures that the session tracking environment and UUID capture
 /// are always correctly applied, preventing orphaned sessions.
@@ -140,6 +142,26 @@ pub async fn spawn_tracked_slot(
 
     // 3. Execute underlying PTY spawn
     let spawn_result = pty.spawn(pty_slot, options).await?;
+
+    // 3.5. Engines without a Claude JSONL session hook still need an
+    // observable conversation row as soon as they are spawned through the
+    // generic `mission_pty_spawn` path. Controller-based dispatch also calls
+    // `register_slot_session`, but direct PTY spawn used by smoke tests and
+    // manual operators bypasses those controllers.
+    if matches!(
+        pty_slot.engine,
+        missiond_core::CliEngine::Gemini | missiond_core::CliEngine::Codex
+    ) {
+        let session_id = format!("pty-{}", pty_slot.id);
+        register_slot_session(
+            store,
+            &pty_slot.id,
+            &session_id,
+            canonical_source_for_engine(pty_slot.engine),
+            false,
+        )
+        .await;
+    }
 
     // 4. Handle UUID capture based on whether we waited for idle
     if wait_for_idle {

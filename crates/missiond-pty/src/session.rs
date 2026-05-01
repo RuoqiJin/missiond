@@ -47,15 +47,15 @@ use uuid::Uuid;
 
 use super::extractor::{IncrementalExtractor, StableTextOp, TextAssembler};
 use semantic_terminal::{
-    ClaudeCodeConfirmParser, ClaudeCodeStateParser, ClaudeCodeStatusParser,
-    ClaudeCodeToolOutputParser, GeminiCliStateParser,
-    ConfirmParser, ParserContext, StateParser, StatusParser, ToolOutputParser,
-    default_compiled, registry_from,
-    ClaudeCodeStatus, ClaudeCodeToolOutput, ClaudeCodeTitle,
-    ConfirmInfo as SemanticConfirmInfo,
-    State as SemanticState,
-    ToolStatus,
-    maybe_reload_global_patterns,
+    default_compiled, maybe_reload_global_patterns, registry_from, ClaudeCodeConfirmParser,
+    ClaudeCodeStateParser, ClaudeCodeStatus, ClaudeCodeStatusParser, ClaudeCodeTitle,
+    ClaudeCodeToolOutput, ClaudeCodeToolOutputParser, ConfirmInfo as SemanticConfirmInfo,
+    ConfirmParser, ParserContext, State as SemanticState, StateParser, StatusParser,
+    ToolOutputParser, ToolStatus,
+};
+
+use crate::pty_recognition::{
+    recognize_screen, CodexCliStateParser, GeminiCliUpstreamStateParser, PtyRecognitionSnapshot,
 };
 
 // ========== Types ==========
@@ -252,7 +252,8 @@ pub struct PTYSession {
     history: Arc<RwLock<Vec<Message>>>,
     terminal_title: Arc<RwLock<String>>,
     pending_tool_confirm: Arc<RwLock<Option<ConfirmInfo>>>,
-    permission_check: Arc<RwLock<Option<Box<dyn Fn(&ConfirmInfo) -> PermissionDecision + Send + Sync>>>>,
+    permission_check:
+        Arc<RwLock<Option<Box<dyn Fn(&ConfirmInfo) -> PermissionDecision + Send + Sync>>>>,
 
     // PTY process
     pty_writer: Arc<Mutex<Option<Box<dyn IoWrite + Send>>>>,
@@ -318,6 +319,8 @@ pub enum SessionEvent {
     },
     /// Status bar update (spinner + status text)
     StatusUpdate(ClaudeCodeStatus),
+    /// Provider-aware PTY recognition update.
+    RecognitionUpdate(PtyRecognitionSnapshot),
     /// Tool output parsed
     ToolOutput(ClaudeCodeToolOutput),
     /// Terminal title changed
@@ -448,9 +451,7 @@ impl PTYSession {
             env: options.env,
             log_file: options.log_file,
 
-            raw_output_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(
-                512 * 1024,
-            ))),
+            raw_output_buffer: Arc::new(std::sync::Mutex::new(VecDeque::with_capacity(512 * 1024))),
             raw_output_max: 512 * 1024,
         })
     }
@@ -490,7 +491,10 @@ impl PTYSession {
     // ========== Screen Reading ==========
 
     /// Capture terminal screenshot as PNG, return file path
-    pub async fn screenshot(&self, output_dir: &std::path::Path) -> anyhow::Result<std::path::PathBuf> {
+    pub async fn screenshot(
+        &self,
+        output_dir: &std::path::Path,
+    ) -> anyhow::Result<std::path::PathBuf> {
         let captured = {
             let term = self.term.lock().await;
             super::screenshot::capture_grid(&*term)
@@ -508,7 +512,9 @@ impl PTYSession {
 
         // Line(0) = top of visible screen, Line(rows-1) = bottom
         for y in 0..rows {
-            let Ok(line_idx) = i32::try_from(y) else { break };
+            let Ok(line_idx) = i32::try_from(y) else {
+                break;
+            };
             let line = alacritty_terminal::index::Line(line_idx);
             let row = &grid[line];
             let text: String = row.into_iter().map(|cell| cell.c).collect();
@@ -520,7 +526,10 @@ impl PTYSession {
 
     /// Get raw output replay buffer for late-joining WebSocket clients
     pub fn get_replay_buffer(&self) -> Vec<u8> {
-        let buf = self.raw_output_buffer.lock().unwrap_or_else(|e| e.into_inner());
+        let buf = self
+            .raw_output_buffer
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         buf.iter().copied().collect()
     }
 
@@ -537,7 +546,11 @@ impl PTYSession {
 
         // How many scrollback lines we need above visible area
         let scroll_needed = n.saturating_sub(screen_lines).min(history);
-        let visible_start = if n > screen_lines { 0 } else { screen_lines - n };
+        let visible_start = if n > screen_lines {
+            0
+        } else {
+            screen_lines - n
+        };
 
         // Read scrollback lines (oldest first: Line(-scroll_needed) .. Line(-1))
         for i in (1..=scroll_needed).rev() {
@@ -549,7 +562,9 @@ impl PTYSession {
 
         // Read visible lines
         for y in visible_start..screen_lines {
-            let Ok(line_idx) = i32::try_from(y) else { break };
+            let Ok(line_idx) = i32::try_from(y) else {
+                break;
+            };
             let line = alacritty_terminal::index::Line(line_idx);
             let row = &grid[line];
             let text: String = row.into_iter().map(|cell| cell.c).collect();
@@ -579,7 +594,13 @@ impl PTYSession {
         })?;
 
         // Build CLI command based on engine type
-        let cli_cmd = build_cli_command(self.engine, &self.cwd, self.mcp_config.as_deref(), self.dangerously_skip_permissions, self.model.as_deref());
+        let cli_cmd = build_cli_command(
+            self.engine,
+            &self.cwd,
+            self.mcp_config.as_deref(),
+            self.dangerously_skip_permissions,
+            self.model.as_deref(),
+        );
 
         #[cfg(unix)]
         let mut cmd = {
@@ -588,10 +609,9 @@ impl PTYSession {
 
             let mut c = CommandBuilder::new(&shell);
             c.args([
-                "-l",  // login shell (loads .zprofile, .zshrc)
-                "-i",  // interactive (needed for proper PTY behavior)
-                "-c",
-                &cli_cmd,
+                "-l", // login shell (loads .zprofile, .zshrc)
+                "-i", // interactive (needed for proper PTY behavior)
+                "-c", &cli_cmd,
             ]);
             c
         };
@@ -599,10 +619,7 @@ impl PTYSession {
         #[cfg(windows)]
         let mut cmd = {
             let mut c = CommandBuilder::new("cmd.exe");
-            c.args([
-                "/C",
-                &cli_cmd,
-            ]);
+            c.args(["/C", &cli_cmd]);
             c
         };
 
@@ -630,7 +647,9 @@ impl PTYSession {
         {
             let home = std::env::var("HOME").unwrap_or_default();
             if !home.is_empty() {
-                let cred_path = std::path::Path::new(&home).join(".claude").join(".credentials.json");
+                let cred_path = std::path::Path::new(&home)
+                    .join(".claude")
+                    .join(".credentials.json");
                 if cred_path.exists() {
                     // Check if credentials file is readable by current process
                     match std::fs::File::open(&cred_path) {
@@ -655,7 +674,7 @@ impl PTYSession {
         }
 
         // Spawn child process
-        let mut child = pty_pair.slave.spawn_command(cmd)?;
+        let child = pty_pair.slave.spawn_command(cmd)?;
         let pid = child.process_id().unwrap_or(0);
         *self.pty_pid.write().await = Some(pid);
         info!(pid = pid, "PTY spawned");
@@ -688,7 +707,17 @@ impl PTYSession {
         let replay_max = self.raw_output_max;
 
         tokio::spawn(async move {
-            Self::read_loop(reader, term, event_tx, running, shutdown_rx, term_feed_tx, replay_buf, replay_max).await;
+            Self::read_loop(
+                reader,
+                term,
+                event_tx,
+                running,
+                shutdown_rx,
+                term_feed_tx,
+                replay_buf,
+                replay_max,
+            )
+            .await;
         });
 
         // Spawn state check task
@@ -842,7 +871,9 @@ impl PTYSession {
         event_tx: broadcast::Sender<SessionEvent>,
         running: Arc<AtomicBool>,
         pending_tool_confirm: Arc<RwLock<Option<ConfirmInfo>>>,
-        permission_check: Arc<RwLock<Option<Box<dyn Fn(&ConfirmInfo) -> PermissionDecision + Send + Sync>>>>,
+        permission_check: Arc<
+            RwLock<Option<Box<dyn Fn(&ConfirmInfo) -> PermissionDecision + Send + Sync>>>,
+        >,
         pty_writer: Arc<Mutex<Option<Box<dyn IoWrite + Send>>>>,
     ) {
         let mut check_interval = interval(Duration::from_millis(100));
@@ -860,15 +891,16 @@ impl PTYSession {
         );
 
         let state_parser: Box<dyn StateParser + Send + Sync> = match engine {
-            CliEngine::ClaudeCode => Box::new(ClaudeCodeStateParser::with_patterns(compiled_patterns.clone())),
-            CliEngine::Gemini => Box::new(GeminiCliStateParser::with_patterns(compiled_patterns.clone())),
-            CliEngine::Codex => {
-                // TODO: implement CodexCliStateParser
-                Box::new(ClaudeCodeStateParser::with_patterns(compiled_patterns.clone()))
-            }
+            CliEngine::ClaudeCode => Box::new(ClaudeCodeStateParser::with_patterns(
+                compiled_patterns.clone(),
+            )),
+            CliEngine::Gemini => Box::new(GeminiCliUpstreamStateParser::new()),
+            CliEngine::Codex => Box::new(CodexCliStateParser::new()),
         };
         let confirm_parser: Option<Box<dyn ConfirmParser + Send + Sync>> = match engine {
-            CliEngine::ClaudeCode => Some(Box::new(ClaudeCodeConfirmParser::with_patterns(compiled_patterns.clone()))),
+            CliEngine::ClaudeCode => Some(Box::new(ClaudeCodeConfirmParser::with_patterns(
+                compiled_patterns.clone(),
+            ))),
             CliEngine::Gemini | CliEngine::Codex => None,
         };
         let status_parser = ClaudeCodeStatusParser::with_patterns(compiled_patterns.clone());
@@ -903,6 +935,7 @@ impl PTYSession {
         // a new ToolOutput(Running), flooding the Jarvis SSE stream.
         let mut last_tool_name: Option<String> = None;
         let mut last_tool_status: Option<ToolStatus> = None;
+        let mut last_recognition: Option<PtyRecognitionSnapshot> = None;
         // Block-scoped context classifier: tracks whether we're inside a tool
         // output block or assistant text block, so Unknown lines inherit context.
         let mut block_classifier = BlockClassifier::new();
@@ -931,22 +964,26 @@ impl PTYSession {
             // Get screen text for state detection (read ALL visible lines)
             let (last_lines, is_alt_screen) = {
                 let term_guard = term.lock().await;
-                let is_alt = term_guard.mode().contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
+                let is_alt = term_guard
+                    .mode()
+                    .contains(alacritty_terminal::term::TermMode::ALT_SCREEN);
                 let grid = term_guard.grid();
                 let mut lines = Vec::new();
                 let rows = grid.screen_lines();
                 // Read visible area only: Line(0) to Line(screen_lines - 1)
                 for y in 0..rows {
-                    let Ok(line_idx) = i32::try_from(y) else { break };
+                    let Ok(line_idx) = i32::try_from(y) else {
+                        break;
+                    };
                     let line = alacritty_terminal::index::Line(line_idx);
                     let row = &grid[line];
                     // Skip wide-char spacer cells (CJK/emoji second cells)
                     let text: String = row
                         .into_iter()
                         .filter(|cell| {
-                            !cell.flags.contains(
-                                alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER,
-                            )
+                            !cell
+                                .flags
+                                .contains(alacritty_terminal::term::cell::Flags::WIDE_CHAR_SPACER)
                         })
                         .map(|cell| cell.c)
                         .collect();
@@ -960,16 +997,25 @@ impl PTYSession {
             let context = ParserContext::new(last_lines.clone())
                 .with_state(current_state_to_semantic(current_state));
 
+            let recognition = recognize_screen(engine, &last_lines, current_state);
+            if last_recognition.as_ref() != Some(&recognition) {
+                let _ = event_tx.send(SessionEvent::RecognitionUpdate(recognition.clone()));
+                last_recognition = Some(recognition);
+            }
+
             // Use FingerprintRegistry for quick hints
             let hints = fingerprint_registry.extract(&context).hints;
 
             // Detect state using semantic StateParser
             let detected_result = state_parser.detect_state(&context);
-            let detected_state = detected_result.as_ref().map(|r| semantic_state_to_session_state(r.state));
+            let detected_state = detected_result
+                .as_ref()
+                .map(|r| semantic_state_to_session_state(r.state));
 
             // Periodic heartbeat (every 5s) — log detected state and screen sample
             if heartbeat_tick % 50 == 0 {
-                let non_empty: Vec<_> = last_lines.iter()
+                let non_empty: Vec<_> = last_lines
+                    .iter()
                     .filter(|l| !l.trim().is_empty())
                     .take(5)
                     .map(|s| {
@@ -1004,7 +1050,8 @@ impl PTYSession {
                 if let Some(since) = starting_since {
                     let elapsed = since.elapsed();
                     if !starting_warned && elapsed.as_secs() >= 30 {
-                        let screen_snapshot: Vec<_> = last_lines.iter()
+                        let screen_snapshot: Vec<_> = last_lines
+                            .iter()
                             .filter(|l| !l.trim().is_empty())
                             .take(5)
                             .map(|s| s.chars().take(80).collect::<String>())
@@ -1022,16 +1069,27 @@ impl PTYSession {
 
             // Diagnostic logging (once per second = every 10 ticks at 100ms)
             diag_tick += 1;
-            if diag_tick % 10 == 0 && !matches!(current_state, SessionState::Idle | SessionState::Exited) {
+            if diag_tick % 10 == 0
+                && !matches!(current_state, SessionState::Idle | SessionState::Exited)
+            {
                 let non_empty_count = last_lines.iter().filter(|l| !l.trim().is_empty()).count();
                 // Show last_non_empty_lines (what state detection actually uses)
                 let active = context.last_non_empty_lines(5);
-                let active_sample = active.iter().map(|s| {
-                    let truncated: String = s.chars().take(60).collect();
-                    if truncated.len() < s.len() { format!("{}...", truncated) } else { s.to_string() }
-                }).collect::<Vec<_>>().join(" | ");
+                let active_sample = active
+                    .iter()
+                    .map(|s| {
+                        let truncated: String = s.chars().take(60).collect();
+                        if truncated.len() < s.len() {
+                            format!("{}...", truncated)
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" | ");
                 // Extract spinner status line for diagnostics
-                let spinner_line = active.iter()
+                let spinner_line = active
+                    .iter()
                     .find(|l| l.trim().starts_with(|c: char| "·✻✽✶✳✢*".contains(c)))
                     .map(|s| {
                         let t: String = s.chars().take(80).collect();
@@ -1076,13 +1134,14 @@ impl PTYSession {
                                     *seq_guard += 1;
                                     s
                                 };
-                                let _ =
-                                    event_tx.send(SessionEvent::TextOutput(TextOutputEvent::Stream {
+                                let _ = event_tx.send(SessionEvent::TextOutput(
+                                    TextOutputEvent::Stream {
                                         turn_id,
                                         seq,
                                         content: chunk,
                                         timestamp: Utc::now().timestamp_millis(),
-                                    }));
+                                    },
+                                ));
                             }
                         }
                     }
@@ -1117,7 +1176,8 @@ impl PTYSession {
                         (current_state, new_state),
                         (SessionState::Thinking, SessionState::ToolRunning)
                             | (SessionState::ToolRunning, SessionState::Thinking)
-                    ) || (current_state.is_processing() && !new_state.is_processing());
+                    ) || (current_state.is_processing()
+                        && !new_state.is_processing());
 
                     if needs_debounce {
                         if debounce_target == Some(new_state) {
@@ -1152,10 +1212,18 @@ impl PTYSession {
 
                     // Diagnostic: dump active screen on state transition
                     let active = context.last_non_empty_lines(8);
-                    let active_dump = active.iter().map(|s| {
-                        let truncated: String = s.chars().take(80).collect();
-                        if truncated.len() < s.len() { format!("{}...", truncated) } else { s.to_string() }
-                    }).collect::<Vec<_>>().join(" | ");
+                    let active_dump = active
+                        .iter()
+                        .map(|s| {
+                            let truncated: String = s.chars().take(80).collect();
+                            if truncated.len() < s.len() {
+                                format!("{}...", truncated)
+                            } else {
+                                s.to_string()
+                            }
+                        })
+                        .collect::<Vec<_>>()
+                        .join(" | ");
                     info!(
                         slot = %slot_id,
                         from = ?current_state,
@@ -1238,8 +1306,11 @@ impl PTYSession {
 
                     // Handle confirming state using semantic ConfirmParser
                     if new_state == SessionState::Confirming {
-                        let semantic_confirm = confirm_parser.as_ref().and_then(|p| p.detect_confirm(&context));
-                        let confirm_info = semantic_confirm.as_ref().map(convert_semantic_confirm_info);
+                        let semantic_confirm = confirm_parser
+                            .as_ref()
+                            .and_then(|p| p.detect_confirm(&context));
+                        let confirm_info =
+                            semantic_confirm.as_ref().map(convert_semantic_confirm_info);
                         *pending_tool_confirm.write().await = confirm_info.clone();
 
                         // Check permission if callback is set
@@ -1250,20 +1321,15 @@ impl PTYSession {
                                 match decision {
                                     PermissionDecision::Allow => {
                                         // Auto-approve
-                                        if let Some(writer) =
-                                            pty_writer.lock().await.as_mut()
-                                        {
+                                        if let Some(writer) = pty_writer.lock().await.as_mut() {
                                             let _ = writer.write_all(b"\r");
                                         }
                                         continue;
                                     }
                                     PermissionDecision::Deny => {
                                         // Auto-deny (down, down, enter)
-                                        if let Some(writer) =
-                                            pty_writer.lock().await.as_mut()
-                                        {
-                                            let _ =
-                                                writer.write_all(b"\x1b[B\x1b[B\r");
+                                        if let Some(writer) = pty_writer.lock().await.as_mut() {
+                                            let _ = writer.write_all(b"\x1b[B\x1b[B\r");
                                         }
                                         continue;
                                     }
@@ -1295,12 +1361,11 @@ impl PTYSession {
                 // "Nearly empty" = only bottom bar (⏵⏵ bypass) and separators (────) remain,
                 // or truly all lines empty. Either way, no meaningful content to detect.
                 let non_empty = last_lines.iter().filter(|l| !l.trim().is_empty()).count();
-                let screen_is_nearly_empty = non_empty <= 3 && last_lines.iter().all(|l| {
-                    let t = l.trim();
-                    t.is_empty()
-                        || t.starts_with('─')
-                        || t.starts_with("⏵")
-                });
+                let screen_is_nearly_empty = non_empty <= 3
+                    && last_lines.iter().all(|l| {
+                        let t = l.trim();
+                        t.is_empty() || t.starts_with('─') || t.starts_with("⏵")
+                    });
                 if screen_is_nearly_empty {
                     empty_screen_count += 1;
                     if empty_screen_count >= EMPTY_SCREEN_IDLE_THRESHOLD {
@@ -1356,8 +1421,8 @@ impl PTYSession {
                 if let Some(result) = tool_parser.parse(&context) {
                     let name = &result.data.tool_name;
                     let status = result.data.status;
-                    let is_duplicate = last_tool_name.as_deref() == Some(name)
-                        && last_tool_status == Some(status);
+                    let is_duplicate =
+                        last_tool_name.as_deref() == Some(name) && last_tool_status == Some(status);
                     if !is_duplicate {
                         last_tool_name = Some(name.clone());
                         last_tool_status = Some(status);
@@ -1369,7 +1434,6 @@ impl PTYSession {
                 last_tool_name = None;
                 last_tool_status = None;
             }
-
         }
     }
 
@@ -1498,7 +1562,9 @@ impl PTYSession {
             self.line_source_by_y.write().await.clear();
             self.assistant_block_active.store(false, Ordering::SeqCst);
 
-            let _ = self.state_change_tx.send((SessionState::Thinking, prev_state));
+            let _ = self
+                .state_change_tx
+                .send((SessionState::Thinking, prev_state));
             let _ = self.event_tx.send(SessionEvent::StateChange {
                 new_state: SessionState::Thinking,
                 prev_state,
@@ -1567,8 +1633,9 @@ impl PTYSession {
                 match rx.recv().await {
                     Ok(event) => {
                         event_count += 1;
-                        if let SessionEvent::TextOutput(TextOutputEvent::Complete { content, .. }) =
-                            event
+                        if let SessionEvent::TextOutput(TextOutputEvent::Complete {
+                            content, ..
+                        }) = event
                         {
                             info!(
                                 slot = %slot_id,
@@ -1679,7 +1746,11 @@ impl PTYSession {
     }
 
     /// Wait for specific state
-    pub async fn wait_for_state(&self, target: SessionState, timeout_duration: Duration) -> Result<()> {
+    pub async fn wait_for_state(
+        &self,
+        target: SessionState,
+        timeout_duration: Duration,
+    ) -> Result<()> {
         let current = self.state().await;
         if current == target {
             return Ok(());
@@ -1753,7 +1824,9 @@ impl PTYSession {
             #[cfg(unix)]
             {
                 // kill(-pid) sends SIGKILL to the entire process group
-                unsafe { libc::kill(-(pid as libc::pid_t), libc::SIGKILL); }
+                unsafe {
+                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
+                }
                 info!(pid, "PTY process group SIGKILL sent");
             }
             #[cfg(not(unix))]
@@ -1906,10 +1979,12 @@ impl BlockClassifier {
         }
 
         // Box drawing = UI
-        if trimmed
-            .chars()
-            .any(|c| matches!(c, '╭' | '╮' | '╯' | '╰' | '┌' | '┐' | '└' | '┘' | '─' | '━' | '═'))
-        {
+        if trimmed.chars().any(|c| {
+            matches!(
+                c,
+                '╭' | '╮' | '╯' | '╰' | '┌' | '┐' | '└' | '┘' | '─' | '━' | '═'
+            )
+        }) {
             return ScreenTextSource::Ui;
         }
 
@@ -1920,4 +1995,3 @@ impl BlockClassifier {
         self.current_block
     }
 }
-

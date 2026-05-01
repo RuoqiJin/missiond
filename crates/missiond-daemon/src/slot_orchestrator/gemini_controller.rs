@@ -58,7 +58,14 @@ impl EngineController for GeminiCliController {
 
         // Gemini has no JSONL — use synthetic session_id
         let session_id = format!("pty-{}", slot_id);
-        register_slot_session(&self.store, slot_id, &session_id, is_ephemeral).await;
+        register_slot_session(
+            &self.store,
+            slot_id,
+            &session_id,
+            "gemini_cli",
+            is_ephemeral,
+        )
+        .await;
 
         info!(slot_id, session_id = %session_id, "GeminiCtrl: spawned and registered");
         Ok(session_id)

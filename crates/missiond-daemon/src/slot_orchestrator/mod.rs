@@ -27,9 +27,26 @@ pub use gemini_cli::GeminiCliSlotManager;
 pub use types::{EngineSlotManager, EngineStatus, SlotTaskConfig, SlotTaskRequest};
 
 use missiond_core::db::traits::MissionStore;
+use missiond_core::types::CliEngine;
 use missiond_core::types::Conversation;
 use std::sync::Arc;
 use tracing::info;
+
+pub(crate) fn canonical_source_for_engine(engine: CliEngine) -> &'static str {
+    match engine {
+        CliEngine::ClaudeCode => "claude_code",
+        CliEngine::Gemini => "gemini_cli",
+        CliEngine::Codex => "codex_cli",
+    }
+}
+
+pub(crate) fn chat_type_for_source(source: &str) -> Option<String> {
+    match source {
+        "gemini_cli" => Some("gemini_cli".to_string()),
+        "codex_cli" => Some("codex_cli".to_string()),
+        _ => None,
+    }
+}
 
 /// Register a slot's session in DB for log categorization.
 /// Separates agent sessions from user sessions via conversation_type field.
@@ -37,6 +54,7 @@ pub(crate) async fn register_slot_session(
     store: &Arc<dyn MissionStore>,
     slot_id: &str,
     session_id: &str,
+    source: &str,
     _is_ephemeral: bool,
 ) {
     // 1. Map slot_id → session_id in slot_sessions table
@@ -50,14 +68,19 @@ pub(crate) async fn register_slot_session(
 
     // 2. Ensure conversation record exists — use derive_conversation_type (single source of truth)
     let category: Option<String> = None;
-    let conversation_type = missiond_core::db::derive_conversation_type(category.as_deref(), Some(slot_id), session_id, "pty_jsonl");
+    let conversation_type = missiond_core::db::derive_conversation_type(
+        category.as_deref(),
+        Some(slot_id),
+        session_id,
+        source,
+    );
 
     let conv = Conversation {
         id: session_id.to_string(),
         project: None,
         project_id: None,
         slot_id: Some(slot_id.to_string()),
-        source: "pty_jsonl".to_string(),
+        source: source.to_string(),
         model: None,
         git_branch: None,
         jsonl_path: None,
@@ -71,7 +94,7 @@ pub(crate) async fn register_slot_session(
         analysis_version: 0,
         analysis_retries: 0,
         deep_analyzed_message_id: 0,
-        chat_type: Some("pty".to_string()),
+        chat_type: chat_type_for_source(source),
         conversation_type: conversation_type.clone(),
         updated_at: None,
         llm_summary: None,

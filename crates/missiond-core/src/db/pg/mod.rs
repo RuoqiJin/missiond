@@ -32,6 +32,8 @@ impl PgMissionStore {
             .await?;
 
         // Run embedded migrations (SQL baked into binary at compile time).
+        // Keep this call in missiond-core so release builds package the latest
+        // canonical-source and slot-session cleanup migrations with the store.
         // Does NOT need a compile-time DB connection — only reads files.
         sqlx::migrate!("./migrations")
             .run(&pool)

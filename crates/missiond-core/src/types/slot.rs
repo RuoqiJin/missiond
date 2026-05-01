@@ -1,5 +1,5 @@
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 pub use missiond_shared::CliEngine;
 
@@ -60,11 +60,19 @@ pub struct SlotConfig {
     /// `mission_agent` after running the project-root resolver. When set,
     /// `spawn_tracked_slot` uses it as the process cwd. See
     /// `intent-worker.lisp :: invariant project-root-spawn-cwd`.
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "project_root")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "project_root"
+    )]
     pub project_root: Option<String>,
     /// Caller-supplied cwd preserved for prompt/context/audit only. Never used
     /// as process cwd after root resolution. See worker pillar slot-config-fields.
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "requested_cwd")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "requested_cwd"
+    )]
     pub requested_cwd: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", alias = "mcp_config")]
     pub mcp_config: Option<String>,
@@ -75,7 +83,11 @@ pub struct SlotConfig {
     #[serde(skip_serializing_if = "Option::is_none", alias = "auto_start")]
     pub auto_start: Option<bool>,
     /// Skip all permission prompts and trust dialogs (--dangerously-skip-permissions)
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "dangerously_skip_permissions")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "dangerously_skip_permissions"
+    )]
     pub dangerously_skip_permissions: Option<bool>,
     /// Model override for the CLI session (e.g., "sonnet", "opus", "haiku").
     /// Passed as `--model <model>` to Claude Code. Ignored for other engines.
@@ -96,7 +108,11 @@ pub struct SlotConfig {
     pub env: Option<HashMap<String, String>>,
     /// Prompt injected as the first message after the slot reaches Idle.
     /// Used for persistent slots that need a standing instruction on boot.
-    #[serde(default, skip_serializing_if = "Option::is_none", alias = "initial_prompt")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "initial_prompt"
+    )]
     pub initial_prompt: Option<String>,
 }
 

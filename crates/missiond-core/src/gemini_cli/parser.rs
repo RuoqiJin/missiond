@@ -1,4 +1,4 @@
-//! Gemini CLI session parser — reads JSON session files and converts to CCMessageLine.
+//! Gemini CLI session parser — reads JSON/JSONL session files and converts to CCMessageLine.
 //!
 //! The key transformation: Gemini's per-message `thoughts`, `toolCalls`, and nested
 //! content structures are flattened into the same CCMessageLine format used by the
@@ -78,28 +78,92 @@ fn sha256_hex(input: &str) -> String {
 
 // ============ Session parsing ============
 
-/// Parse a Gemini CLI session JSON file.
+/// Parse a Gemini CLI session file.
+///
+/// Gemini CLI has used both a whole-session JSON shape and a JSONL shape where
+/// the first line carries session metadata, message lines carry `id` + `type`,
+/// and `$set` lines update session metadata. Support both so watcher/reconcile
+/// stay source-compatible across CLI releases.
 pub async fn parse_session(path: &Path) -> Option<GeminiSession> {
     let data = fs::read_to_string(path).await.ok()?;
     match serde_json::from_str::<GeminiSession>(&data) {
         Ok(session) => Some(session),
         Err(e) => {
-            warn!(path = %path.display(), error = %e, "Failed to parse Gemini session");
-            None
+            if let Some(session) = parse_jsonl_session(&data) {
+                Some(session)
+            } else {
+                warn!(path = %path.display(), error = %e, "Failed to parse Gemini session");
+                None
+            }
         }
     }
 }
 
 /// Extract only the message count from a session file (lightweight check).
 pub async fn session_message_count(path: &Path) -> Option<usize> {
-    let data = fs::read_to_string(path).await.ok()?;
-    // Partial parse: only need messages array length
-    #[derive(serde::Deserialize)]
-    struct Partial {
-        messages: Vec<serde_json::Value>,
+    parse_session(path).await.map(|s| s.messages.len())
+}
+
+fn parse_jsonl_session(data: &str) -> Option<GeminiSession> {
+    let mut session_id = None;
+    let mut project_hash = None;
+    let mut start_time = None;
+    let mut last_updated = None;
+    let mut kind = None;
+    let mut messages = Vec::new();
+
+    for line in data.lines().filter(|l| !l.trim().is_empty()) {
+        let value: serde_json::Value = serde_json::from_str(line).ok()?;
+
+        if let Some(set) = value.get("$set").and_then(|v| v.as_object()) {
+            if let Some(ts) = set.get("lastUpdated").and_then(|v| v.as_str()) {
+                last_updated = Some(ts.to_string());
+            }
+            continue;
+        }
+
+        if value.get("sessionId").is_some() && value.get("projectHash").is_some() {
+            session_id = value
+                .get("sessionId")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            project_hash = value
+                .get("projectHash")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            start_time = value
+                .get("startTime")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            last_updated = value
+                .get("lastUpdated")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            kind = value
+                .get("kind")
+                .and_then(|v| v.as_str())
+                .map(ToString::to_string);
+            continue;
+        }
+
+        if value.get("id").is_some() && value.get("type").is_some() {
+            let msg: GeminiMessage = serde_json::from_value(value).ok()?;
+            if start_time.is_none() {
+                start_time = Some(msg.timestamp.clone());
+            }
+            last_updated = Some(msg.timestamp.clone());
+            messages.push(msg);
+        }
     }
-    let partial: Partial = serde_json::from_str(&data).ok()?;
-    Some(partial.messages.len())
+
+    Some(GeminiSession {
+        session_id: session_id?,
+        project_hash: project_hash.unwrap_or_default(),
+        start_time: start_time.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        last_updated: last_updated.unwrap_or_else(|| chrono::Utc::now().to_rfc3339()),
+        messages,
+        kind,
+    })
 }
 
 // ============ Message transformation ============
@@ -347,7 +411,8 @@ pub async fn list_session_files(chats_dir: &Path) -> Vec<PathBuf> {
     };
     while let Ok(Some(entry)) = entries.next_entry().await {
         let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) == Some("json") {
+        let ext = path.extension().and_then(|e| e.to_str());
+        if matches!(ext, Some("json" | "jsonl")) {
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                 if name.starts_with("session-") {
                     files.push(path);
@@ -386,6 +451,30 @@ mod tests {
     fn test_sha256_hex() {
         let hash = sha256_hex("/Users/jinchen/Projects/missiond");
         assert_eq!(hash.len(), 64);
+    }
+
+    #[tokio::test]
+    async fn test_parse_jsonl_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session-2026-05-01T16-07-656fdc77.jsonl");
+        tokio::fs::write(
+            &path,
+            r#"{"sessionId":"656fdc77-de83-4f2b-bf03-56ae4f067554","projectHash":"hash","startTime":"2026-05-01T16:07:16.785Z","lastUpdated":"2026-05-01T16:07:16.785Z","kind":"main"}
+{"id":"u1","timestamp":"2026-05-01T16:07:58.470Z","type":"user","content":[{"text":"hello"}]}
+{"$set":{"lastUpdated":"2026-05-01T16:07:58.471Z"}}
+{"id":"a1","timestamp":"2026-05-01T16:08:08.471Z","type":"gemini","content":"world","model":"gemini-3-flash-preview"}
+"#,
+        )
+        .await
+        .unwrap();
+
+        let session = parse_session(&path).await.unwrap();
+        assert_eq!(session.session_id, "656fdc77-de83-4f2b-bf03-56ae4f067554");
+        assert_eq!(session.messages.len(), 2);
+        assert_eq!(session.messages[0].msg_type, "user");
+        assert_eq!(session.messages[1].msg_type, "gemini");
+        assert_eq!(session.last_updated, "2026-05-01T16:08:08.471Z");
+        assert_eq!(session_message_count(&path).await, Some(2));
     }
 
     #[test]
@@ -431,13 +520,11 @@ mod tests {
             timestamp: "2026-01-01T00:01:00Z".into(),
             msg_type: "gemini".into(),
             content: json!("The answer is 42"),
-            thoughts: Some(vec![
-                GeminiThought {
-                    subject: "Thinking".into(),
-                    description: "I need to compute".into(),
-                    timestamp: "2026-01-01T00:00:50Z".into(),
-                },
-            ]),
+            thoughts: Some(vec![GeminiThought {
+                subject: "Thinking".into(),
+                description: "I need to compute".into(),
+                timestamp: "2026-01-01T00:00:50Z".into(),
+            }]),
             tokens: Some(GeminiTokens {
                 input: 100,
                 output: 50,
@@ -454,7 +541,12 @@ mod tests {
         // 1 thought + 1 main = 2 lines
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].message.role, "thinking");
-        assert!(lines[0].message.content.as_str().unwrap().contains("Thinking"));
+        assert!(lines[0]
+            .message
+            .content
+            .as_str()
+            .unwrap()
+            .contains("Thinking"));
         assert_eq!(lines[1].message.role, "assistant");
         assert_eq!(lines[1].message.content, json!("The answer is 42"));
         let usage = lines[1].message.usage.as_ref().unwrap();
@@ -529,12 +621,18 @@ mod tests {
             return;
         }
         // Parse the first file
-        let session = parse_session(&files[0]).await.expect("Failed to parse session file");
+        let session = parse_session(&files[0])
+            .await
+            .expect("Failed to parse session file");
         assert!(!session.session_id.is_empty());
         assert!(!session.messages.is_empty());
 
         // Convert all messages
-        let lines = gemini_messages_to_cc(&session.messages, &session, "/Users/jinchen/Projects/missiond");
+        let lines = gemini_messages_to_cc(
+            &session.messages,
+            &session,
+            "/Users/jinchen/Projects/missiond",
+        );
         assert!(!lines.is_empty());
         // Every line must have a non-empty session_id and uuid
         for line in &lines {
@@ -553,18 +651,30 @@ mod tests {
         if !path.exists() {
             return;
         }
-        let session = parse_session(&path).await.expect("Failed to parse large session");
-        assert!(session.messages.len() > 5, "Expected many messages in large session");
+        let session = parse_session(&path)
+            .await
+            .expect("Failed to parse large session");
+        assert!(
+            session.messages.len() > 5,
+            "Expected many messages in large session"
+        );
 
-        let lines = gemini_messages_to_cc(&session.messages, &session, "/Users/jinchen/Projects/missiond");
+        let lines = gemini_messages_to_cc(
+            &session.messages,
+            &session,
+            "/Users/jinchen/Projects/missiond",
+        );
         // Should expand to more lines than original messages (thoughts + tool calls)
         assert!(lines.len() >= session.messages.len());
 
         // Check roles are valid
         let valid_roles = ["user", "assistant", "thinking", "tool_result", "system"];
         for line in &lines {
-            assert!(valid_roles.contains(&line.message.role.as_str()),
-                "Unexpected role: {}", line.message.role);
+            assert!(
+                valid_roles.contains(&line.message.role.as_str()),
+                "Unexpected role: {}",
+                line.message.role
+            );
         }
     }
 

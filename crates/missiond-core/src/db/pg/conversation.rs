@@ -9,13 +9,13 @@
 //! Note: Rust coherence requires a single `impl ConversationStore for PgMissionStore`
 //! block per crate. All methods live here.
 
-use std::collections::HashSet;
-use async_trait::async_trait;
-use sqlx::Row;
+use super::PgMissionStore;
 use crate::db::error::DbResult;
 use crate::db::traits::ConversationStore;
 use crate::types::*;
-use super::PgMissionStore;
+use async_trait::async_trait;
+use sqlx::Row;
+use std::collections::HashSet;
 
 /// Zero-allocation pgvector literal serializer.
 /// Pre-allocates a single String for 512-dim halfvec (~7KB) instead of 513 heap allocs.
@@ -24,7 +24,9 @@ fn vec_to_pg_literal(v: &[f32]) -> String {
     let mut buf = String::with_capacity(v.len() * 14 + 2);
     buf.push('[');
     for (i, f) in v.iter().enumerate() {
-        if i > 0 { buf.push(','); }
+        if i > 0 {
+            buf.push(',');
+        }
         let _ = write!(buf, "{}", f);
     }
     buf.push(']');
@@ -56,7 +58,9 @@ impl PgMissionStore {
             analysis_retries: row.try_get("analysis_retries").unwrap_or(0),
             deep_analyzed_message_id: row.try_get("deep_analyzed_message_id").unwrap_or(0),
             chat_type: row.get("chat_type"),
-            conversation_type: row.try_get("conversation_type").unwrap_or_else(|_| "user".to_string()),
+            conversation_type: row
+                .try_get("conversation_type")
+                .unwrap_or_else(|_| "user".to_string()),
             updated_at: row.get("updated_at"),
             llm_summary: row.get("llm_summary"),
             embedding_provider: row.get("embedding_provider"),
@@ -77,7 +81,8 @@ impl PgMissionStore {
             message_uuid: row.get("message_uuid"),
             parent_uuid: row.get("parent_uuid"),
             model: row.get("model"),
-            timestamp: row.get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
+            timestamp: row
+                .get::<chrono::DateTime<chrono::Utc>, _>("timestamp")
                 .to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
             metadata: row.get("metadata"),
             tool_name: row.get("tool_name"),
@@ -106,13 +111,22 @@ impl PgMissionStore {
     fn parse_relative_time(s: &str) -> String {
         let s = s.trim();
         if let Some(mins) = s.strip_suffix("min").and_then(|v| v.parse::<i64>().ok()) {
-            return format!("{}", (chrono::Utc::now() - chrono::Duration::minutes(mins)).format("%Y-%m-%dT%H:%M:%S"));
+            return format!(
+                "{}",
+                (chrono::Utc::now() - chrono::Duration::minutes(mins)).format("%Y-%m-%dT%H:%M:%S")
+            );
         }
         if let Some(hours) = s.strip_suffix('h').and_then(|v| v.parse::<i64>().ok()) {
-            return format!("{}", (chrono::Utc::now() - chrono::Duration::hours(hours)).format("%Y-%m-%dT%H:%M:%S"));
+            return format!(
+                "{}",
+                (chrono::Utc::now() - chrono::Duration::hours(hours)).format("%Y-%m-%dT%H:%M:%S")
+            );
         }
         if let Some(days) = s.strip_suffix('d').and_then(|v| v.parse::<i64>().ok()) {
-            return format!("{}", (chrono::Utc::now() - chrono::Duration::days(days)).format("%Y-%m-%dT%H:%M:%S"));
+            return format!(
+                "{}",
+                (chrono::Utc::now() - chrono::Duration::days(days)).format("%Y-%m-%dT%H:%M:%S")
+            );
         }
         if s.contains('T') {
             return s.replace('T', " ").chars().take(19).collect();
@@ -122,12 +136,20 @@ impl PgMissionStore {
 
     fn parse_since(s: &str) -> String {
         let ts = Self::parse_relative_time(s);
-        if ts.len() == 10 { format!("{}T00:00:00", ts) } else { ts.replace(' ', "T") }
+        if ts.len() == 10 {
+            format!("{}T00:00:00", ts)
+        } else {
+            ts.replace(' ', "T")
+        }
     }
 
     fn parse_until(s: &str) -> String {
         let ts = Self::parse_relative_time(s);
-        if ts.len() == 10 { format!("{}T23:59:59", ts) } else { ts.replace(' ', "T") }
+        if ts.len() == 10 {
+            format!("{}T23:59:59", ts)
+        } else {
+            ts.replace(' ', "T")
+        }
     }
 }
 
@@ -138,10 +160,11 @@ impl ConversationStore for PgMissionStore {
 
     async fn upsert_conversation(&self, conv: &Conversation) -> DbResult<()> {
         sqlx::query(
-            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type, project_id)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+            "INSERT INTO conversations (id, project, slot_id, source, model, git_branch, jsonl_path, parent_session_id, task_id, message_count, started_at, ended_at, status, analyzed_at, conversation_type, project_id, chat_type)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
              ON CONFLICT (id) DO UPDATE SET
                 slot_id = COALESCE($3, conversations.slot_id),
+                source = $4,
                 model = COALESCE($5, conversations.model),
                 git_branch = COALESCE($6, conversations.git_branch),
                 message_count = $10,
@@ -150,7 +173,8 @@ impl ConversationStore for PgMissionStore {
                 status = $13,
                 parent_session_id = COALESCE(conversations.parent_session_id, $8),
                 conversation_type = COALESCE($15, conversations.conversation_type),
-                project_id = COALESCE($16, conversations.project_id)"
+                project_id = COALESCE($16, conversations.project_id),
+                chat_type = COALESCE($17, conversations.chat_type)"
         )
         .bind(&conv.id)
         .bind(&conv.project)
@@ -168,16 +192,28 @@ impl ConversationStore for PgMissionStore {
         .bind(&conv.analyzed_at)
         .bind(&conv.conversation_type)
         .bind(&conv.project_id)
+        .bind(&conv.chat_type)
         .execute(&self.pool)
         .await?;
         Ok(())
     }
 
-    async fn ensure_conversation_exists(&self, session_id: &str, project_path: &str, jsonl_path: &str, status: &str, conversation_type: &str, parent_session_id: Option<&str>, started_at: Option<&str>) -> DbResult<()> {
+    async fn ensure_conversation_exists(
+        &self,
+        session_id: &str,
+        project_path: &str,
+        jsonl_path: &str,
+        status: &str,
+        conversation_type: &str,
+        parent_session_id: Option<&str>,
+        started_at: Option<&str>,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO conversations (id, project, source, jsonl_path, message_count, started_at, status, conversation_type, parent_session_id)
-             VALUES ($1, $2, 'claude_cli', $3, 0, COALESCE($7::timestamptz, NOW()), $4, $5, $6)
-             ON CONFLICT (id) DO UPDATE SET parent_session_id = COALESCE(conversations.parent_session_id, EXCLUDED.parent_session_id)"
+             VALUES ($1, $2, 'claude_code', $3, 0, COALESCE($7::timestamptz, NOW()), $4, $5, $6)
+             ON CONFLICT (id) DO UPDATE SET
+                source = 'claude_code',
+                parent_session_id = COALESCE(conversations.parent_session_id, EXCLUDED.parent_session_id)"
         )
             .bind(session_id)
             .bind(project_path)
@@ -209,21 +245,35 @@ impl ConversationStore for PgMissionStore {
         Ok(row.as_ref().map(Self::row_to_conversation))
     }
 
-    async fn list_conversations(&self, status: Option<&str>, limit: i64, conv_type: Option<&str>, task_id: Option<&str>, since: Option<&str>, until: Option<&str>, source: Option<&str>) -> DbResult<Vec<Conversation>> {
+    async fn list_conversations(
+        &self,
+        status: Option<&str>,
+        limit: i64,
+        conv_type: Option<&str>,
+        task_id: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+        source: Option<&str>,
+    ) -> DbResult<Vec<Conversation>> {
         let source_clause = match source {
             Some(s) if s.starts_with('!') => {
                 // Exclusion: "!gemini_cli,!router_chat" → NOT IN ('gemini_cli','router_chat')
-                let excluded: Vec<String> = s.split(',')
+                let excluded: Vec<String> = s
+                    .split(',')
                     .map(|v| v.trim_start_matches('!').replace('\'', "''"))
                     .filter(|v| !v.is_empty())
                     .map(|v| format!("'{}'", v))
                     .collect();
-                if excluded.is_empty() { String::new() }
-                else { format!(" AND source NOT IN ({})", excluded.join(",")) }
+                if excluded.is_empty() {
+                    String::new()
+                } else {
+                    format!(" AND source NOT IN ({})", excluded.join(","))
+                }
             }
             Some(s) if s.contains(',') => {
                 // Multi-inclusion: "claude_cli,pty_jsonl" → IN ('claude_cli','pty_jsonl')
-                let included: Vec<String> = s.split(',')
+                let included: Vec<String> = s
+                    .split(',')
                     .map(|v| format!("'{}'", v.replace('\'', "''")))
                     .collect();
                 format!(" AND source IN ({})", included.join(","))
@@ -254,7 +304,11 @@ impl ConversationStore for PgMissionStore {
                 let ts = Self::parse_until(u);
                 parts.push(format!("started_at <= '{}'", ts.replace('\'', "''")));
             }
-            if parts.is_empty() { String::new() } else { format!(" AND {}", parts.join(" AND ")) }
+            if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" AND {}", parts.join(" AND "))
+            }
         };
 
         // Fast path: filter by task_id
@@ -283,10 +337,7 @@ impl ConversationStore for PgMissionStore {
                 "SELECT * FROM conversations WHERE {}{}{}{} ORDER BY started_at DESC LIMIT $1",
                 status_clause, type_clause, source_clause, time_clause
             );
-            let rows = sqlx::query(&sql)
-                .bind(limit)
-                .fetch_all(&self.pool)
-                .await?;
+            let rows = sqlx::query(&sql).bind(limit).fetch_all(&self.pool).await?;
             return Ok(rows.iter().map(Self::row_to_conversation).collect());
         }
 
@@ -307,10 +358,9 @@ impl ConversationStore for PgMissionStore {
                 "SELECT * FROM conversations WHERE status = 'active'{}{} ORDER BY started_at DESC",
                 type_clause, source_clause
             );
-            let active_rows = sqlx::query(&sql_active)
-                .fetch_all(&self.pool)
-                .await?;
-            let mut convs: Vec<Conversation> = active_rows.iter().map(Self::row_to_conversation).collect();
+            let active_rows = sqlx::query(&sql_active).fetch_all(&self.pool).await?;
+            let mut convs: Vec<Conversation> =
+                active_rows.iter().map(Self::row_to_conversation).collect();
 
             let remaining = limit - convs.len() as i64;
             if remaining > 0 {
@@ -338,16 +388,23 @@ impl ConversationStore for PgMissionStore {
         }
     }
 
-    async fn get_child_conversations(&self, parent_session_id: &str) -> DbResult<Vec<Conversation>> {
-        let rows = sqlx::query("SELECT * FROM conversations WHERE parent_session_id = $1 ORDER BY started_at ASC")
-            .bind(parent_session_id)
-            .fetch_all(&self.pool)
-            .await?;
+    async fn get_child_conversations(
+        &self,
+        parent_session_id: &str,
+    ) -> DbResult<Vec<Conversation>> {
+        let rows = sqlx::query(
+            "SELECT * FROM conversations WHERE parent_session_id = $1 ORDER BY started_at ASC",
+        )
+        .bind(parent_session_id)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows.iter().map(Self::row_to_conversation).collect())
     }
 
     async fn fix_orphan_parent_links(&self, session_ids: &[String]) -> DbResult<usize> {
-        if session_ids.is_empty() { return Ok(0); }
+        if session_ids.is_empty() {
+            return Ok(0);
+        }
         // Batch SQL: extract parent_session_id from jsonl_path using regexp, single query
         let result = sqlx::query(
             "UPDATE conversations
@@ -363,21 +420,29 @@ impl ConversationStore for PgMissionStore {
         Ok(result.rows_affected() as usize)
     }
 
-    async fn link_compaction_fragment(&self, fragment_id: &str, original_id: &str) -> DbResult<bool> {
+    async fn link_compaction_fragment(
+        &self,
+        fragment_id: &str,
+        original_id: &str,
+    ) -> DbResult<bool> {
         let result = sqlx::query(
             "UPDATE conversations SET parent_session_id = $1
-             WHERE id = $2 AND parent_session_id IS NULL AND conversation_type = 'compaction'"
+             WHERE id = $2 AND parent_session_id IS NULL AND conversation_type = 'compaction'",
         )
-            .bind(original_id)
-            .bind(fragment_id)
-            .execute(&self.pool)
-            .await?;
+        .bind(original_id)
+        .bind(fragment_id)
+        .execute(&self.pool)
+        .await?;
         Ok(result.rows_affected() > 0)
     }
 
     // -- deep analysis tracking --
 
-    async fn get_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> DbResult<Vec<Conversation>> {
+    async fn get_pending_deep_analysis(
+        &self,
+        current_version: i32,
+        max_retries: i32,
+    ) -> DbResult<Vec<Conversation>> {
         let rows = sqlx::query(
             "SELECT * FROM conversations
              WHERE status = 'completed'
@@ -405,7 +470,7 @@ impl ConversationStore for PgMissionStore {
                       AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
                       AND m.role IN ('user', 'assistant')) >= 100
 
-             ORDER BY started_at ASC"
+             ORDER BY started_at ASC",
         )
         .bind(max_retries)
         .bind(current_version)
@@ -414,7 +479,11 @@ impl ConversationStore for PgMissionStore {
         Ok(rows.iter().map(Self::row_to_conversation).collect())
     }
 
-    async fn has_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> DbResult<bool> {
+    async fn has_pending_deep_analysis(
+        &self,
+        current_version: i32,
+        max_retries: i32,
+    ) -> DbResult<bool> {
         let (exists,): (bool,) = sqlx::query_as(
             "SELECT EXISTS(
                 SELECT 1 FROM conversations
@@ -442,7 +511,7 @@ impl ConversationStore for PgMissionStore {
                        WHERE m.session_id = conversations.id
                          AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
                          AND m.role IN ('user', 'assistant')) >= 100
-            )"
+            )",
         )
         .bind(max_retries)
         .bind(current_version)
@@ -451,7 +520,11 @@ impl ConversationStore for PgMissionStore {
         Ok(exists)
     }
 
-    async fn count_pending_deep_analysis(&self, current_version: i32, max_retries: i32) -> DbResult<i64> {
+    async fn count_pending_deep_analysis(
+        &self,
+        current_version: i32,
+        max_retries: i32,
+    ) -> DbResult<i64> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM (
                 SELECT id FROM conversations
@@ -479,7 +552,7 @@ impl ConversationStore for PgMissionStore {
                        WHERE m.session_id = conversations.id
                          AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
                          AND m.role IN ('user', 'assistant')) >= 100
-            ) sub"
+            ) sub",
         )
         .bind(max_retries)
         .bind(current_version)
@@ -494,7 +567,7 @@ impl ConversationStore for PgMissionStore {
              JOIN conversation_messages m ON c.id = m.session_id
              WHERE c.conversation_type = 'user'
                AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
-               AND m.role IN ('user', 'assistant')"
+               AND m.role IN ('user', 'assistant')",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -511,14 +584,18 @@ impl ConversationStore for PgMissionStore {
                AND m.role IN ('user', 'assistant')
              GROUP BY c.id
              ORDER BY cnt DESC
-             LIMIT 20"
+             LIMIT 20",
         )
         .fetch_all(&self.pool)
         .await?;
         Ok(rows)
     }
 
-    async fn pending_deep_detail(&self, current_version: i32, max_retries: i32) -> DbResult<Vec<(String, String, i32)>> {
+    async fn pending_deep_detail(
+        &self,
+        current_version: i32,
+        max_retries: i32,
+    ) -> DbResult<Vec<(String, String, i32)>> {
         let rows: Vec<(String, String, i32)> = sqlx::query_as(
             "SELECT id, COALESCE(ended_at, '[active]'), analysis_retries FROM conversations
              WHERE status = 'completed'
@@ -539,7 +616,7 @@ impl ConversationStore for PgMissionStore {
                       AND m.role IN ('user', 'assistant')) >= 100
 
              ORDER BY 2 ASC
-             LIMIT 20"
+             LIMIT 20",
         )
         .bind(max_retries)
         .bind(current_version)
@@ -574,7 +651,7 @@ impl ConversationStore for PgMissionStore {
 
     async fn mark_analysis_failed(&self, id: &str) -> DbResult<()> {
         sqlx::query(
-            "UPDATE conversations SET analysis_retries = analysis_retries + 1 WHERE id = $1"
+            "UPDATE conversations SET analysis_retries = analysis_retries + 1 WHERE id = $1",
         )
         .bind(id)
         .execute(&self.pool)
@@ -592,7 +669,7 @@ impl ConversationStore for PgMissionStore {
                AND message_count >= 4
                AND status IN ('completed', 'compacted', 'active')
              ORDER BY started_at ASC
-             LIMIT $1"
+             LIMIT $1",
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)
@@ -601,7 +678,9 @@ impl ConversationStore for PgMissionStore {
     }
 
     async fn mark_habit_scanned(&self, id: &str) -> DbResult<()> {
-        let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.3fZ").to_string();
+        let now = chrono::Utc::now()
+            .format("%Y-%m-%dT%H:%M:%S%.3fZ")
+            .to_string();
         sqlx::query("UPDATE conversations SET habit_scanned_at = $1 WHERE id = $2")
             .bind(&now)
             .bind(id)
@@ -615,7 +694,7 @@ impl ConversationStore for PgMissionStore {
             "SELECT COUNT(*) FROM conversations
              WHERE habit_scanned_at IS NULL
                AND conversation_type = 'user'
-               AND message_count >= 4"
+               AND message_count >= 4",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -626,7 +705,7 @@ impl ConversationStore for PgMissionStore {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM conversations
              WHERE conversation_type = 'user'
-               AND message_count >= 4"
+               AND message_count >= 4",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -652,31 +731,42 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn set_conversation_embedding(&self, id: &str, embedding: &[f32], provider: &str) -> DbResult<()> {
+    async fn set_conversation_embedding(
+        &self,
+        id: &str,
+        embedding: &[f32],
+        provider: &str,
+    ) -> DbResult<()> {
         let bytes = crate::embedding::f32_vec_to_bytes(embedding);
         // Note: conversations table doesn't have embedding_vec column (no ANN search needed),
         // only BYTEA blob for in-memory cosine similarity. This is consistent with SQLite.
-        sqlx::query("UPDATE conversations SET embedding = $1, embedding_provider = $2 WHERE id = $3")
-            .bind(&bytes)
-            .bind(provider)
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE conversations SET embedding = $1, embedding_provider = $2 WHERE id = $3",
+        )
+        .bind(&bytes)
+        .bind(provider)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
-    async fn load_conversation_embeddings(&self, provider: &str) -> DbResult<Vec<(String, Vec<f32>)>> {
+    async fn load_conversation_embeddings(
+        &self,
+        provider: &str,
+    ) -> DbResult<Vec<(String, Vec<f32>)>> {
         let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
             "SELECT id, embedding FROM conversations
              WHERE embedding IS NOT NULL AND embedding_provider = $1
-               AND conversation_type NOT IN ('meta', 'compaction')"
+               AND conversation_type NOT IN ('meta', 'compaction')",
         )
         .bind(provider)
         .fetch_all(&self.pool)
         .await?;
-        Ok(rows.into_iter().map(|(id, blob)| {
-            (id, crate::embedding::bytes_to_f32_vec(&blob))
-        }).collect())
+        Ok(rows
+            .into_iter()
+            .map(|(id, blob)| (id, crate::embedding::bytes_to_f32_vec(&blob)))
+            .collect())
     }
 
     async fn conversations_missing_summary(&self, limit: i64) -> DbResult<Vec<String>> {
@@ -684,7 +774,7 @@ impl ConversationStore for PgMissionStore {
             "SELECT id FROM conversations
              WHERE llm_summary IS NULL AND status = 'completed' AND message_count >= 6
                AND conversation_type IN ('user', 'worker')
-             ORDER BY started_at DESC LIMIT $1"
+             ORDER BY started_at DESC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -692,13 +782,17 @@ impl ConversationStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn conversations_stale_embedding(&self, current_provider: &str, limit: i64) -> DbResult<Vec<String>> {
+    async fn conversations_stale_embedding(
+        &self,
+        current_provider: &str,
+        limit: i64,
+    ) -> DbResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT id FROM conversations
              WHERE llm_summary IS NOT NULL AND embedding_provider IS NOT NULL
                AND embedding_provider != $1
                AND conversation_type IN ('user', 'worker')
-             ORDER BY started_at DESC LIMIT $2"
+             ORDER BY started_at DESC LIMIT $2",
         )
         .bind(current_provider)
         .bind(limit)
@@ -709,7 +803,12 @@ impl ConversationStore for PgMissionStore {
 
     // -- topic vectors --
 
-    async fn set_conversation_topic_vectors(&self, session_id: &str, topics: &[(String, Vec<f32>)], provider: &str) -> DbResult<()> {
+    async fn set_conversation_topic_vectors(
+        &self,
+        session_id: &str,
+        topics: &[(String, Vec<f32>)],
+        provider: &str,
+    ) -> DbResult<()> {
         sqlx::query("DELETE FROM conversation_topic_vectors WHERE session_id = $1")
             .bind(session_id)
             .execute(&self.pool)
@@ -731,14 +830,17 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn load_conversation_topic_vectors(&self, provider: &str) -> DbResult<Vec<(String, Vec<Vec<f32>>)>> {
+    async fn load_conversation_topic_vectors(
+        &self,
+        provider: &str,
+    ) -> DbResult<Vec<(String, Vec<Vec<f32>>)>> {
         let rows: Vec<(String, Vec<u8>)> = sqlx::query_as(
             "SELECT tv.session_id, tv.embedding
              FROM conversation_topic_vectors tv
              JOIN conversations c ON c.id = tv.session_id
              WHERE tv.embedding_provider = $1
                AND c.conversation_type NOT IN ('meta', 'compaction')
-             ORDER BY tv.session_id, tv.chunk_idx"
+             ORDER BY tv.session_id, tv.chunk_idx",
         )
         .bind(provider)
         .fetch_all(&self.pool)
@@ -761,7 +863,7 @@ impl ConversationStore for PgMissionStore {
     async fn get_conversation_topics(&self, session_id: &str) -> DbResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT topic FROM conversation_topic_vectors
-             WHERE session_id = $1 ORDER BY chunk_idx"
+             WHERE session_id = $1 ORDER BY chunk_idx",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -769,7 +871,11 @@ impl ConversationStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn conversations_needing_topic_vectors(&self, provider: &str, limit: i64) -> DbResult<Vec<String>> {
+    async fn conversations_needing_topic_vectors(
+        &self,
+        provider: &str,
+        limit: i64,
+    ) -> DbResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
             "SELECT c.id FROM conversations c
              WHERE c.llm_summary IS NOT NULL
@@ -778,7 +884,7 @@ impl ConversationStore for PgMissionStore {
                    SELECT 1 FROM conversation_topic_vectors tv
                    WHERE tv.session_id = c.id AND tv.embedding_provider = $1
                )
-             ORDER BY c.started_at DESC LIMIT $2"
+             ORDER BY c.started_at DESC LIMIT $2",
         )
         .bind(provider)
         .bind(limit)
@@ -797,7 +903,7 @@ impl ConversationStore for PgMissionStore {
              WHERE c.conversation_type = 'compaction'
                AND p.status = 'completed'
                AND p.timeline_built_at IS NULL
-             LIMIT $1"
+             LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
@@ -805,11 +911,14 @@ impl ConversationStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn get_compaction_fragments(&self, parent_id: &str) -> DbResult<Vec<(String, String, i64)>> {
+    async fn get_compaction_fragments(
+        &self,
+        parent_id: &str,
+    ) -> DbResult<Vec<(String, String, i64)>> {
         let rows: Vec<(String, String, i64)> = sqlx::query_as(
             "SELECT id, started_at, message_count FROM conversations
              WHERE parent_session_id = $1 AND conversation_type = 'compaction'
-             ORDER BY started_at ASC, id ASC"
+             ORDER BY started_at ASC, id ASC",
         )
         .bind(parent_id)
         .fetch_all(&self.pool)
@@ -821,7 +930,7 @@ impl ConversationStore for PgMissionStore {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT content FROM conversation_messages
              WHERE session_id = $1 AND role = 'assistant'
-             ORDER BY id DESC LIMIT 1"
+             ORDER BY id DESC LIMIT 1",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
@@ -892,11 +1001,13 @@ impl ConversationStore for PgMissionStore {
         .await?;
         let now = chrono::Utc::now().to_rfc3339();
         for (id,) in &rows {
-            sqlx::query("UPDATE conversations SET status = 'completed', ended_at = $1 WHERE id = $2")
-                .bind(&now)
-                .bind(id)
-                .execute(&self.pool)
-                .await?;
+            sqlx::query(
+                "UPDATE conversations SET status = 'completed', ended_at = $1 WHERE id = $2",
+            )
+            .bind(&now)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
         }
         Ok(rows.len())
     }
@@ -921,10 +1032,11 @@ impl ConversationStore for PgMissionStore {
     }
 
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>> {
-        let rows = sqlx::query("SELECT * FROM conversations WHERE task_id = $1 ORDER BY started_at ASC")
-            .bind(task_id)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT * FROM conversations WHERE task_id = $1 ORDER BY started_at ASC")
+                .bind(task_id)
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows.iter().map(Self::row_to_conversation).collect())
     }
 
@@ -940,12 +1052,18 @@ impl ConversationStore for PgMissionStore {
 
     // -- message embeddings (independent table) --
 
-    async fn insert_message_embedding(&self, message_id: i64, session_id: &str, embedding_vec: &[f32], model_version: &str) -> DbResult<()> {
+    async fn insert_message_embedding(
+        &self,
+        message_id: i64,
+        session_id: &str,
+        embedding_vec: &[f32],
+        model_version: &str,
+    ) -> DbResult<()> {
         let vec_str = vec_to_pg_literal(embedding_vec);
         sqlx::query(
             "INSERT INTO message_embeddings (message_id, session_id, embedding_vec, model_version)
              VALUES ($1, $2, $3::halfvec(512), $4)
-             ON CONFLICT (message_id) DO NOTHING"
+             ON CONFLICT (message_id) DO NOTHING",
         )
         .bind(message_id)
         .bind(session_id)
@@ -956,11 +1074,15 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn insert_message_embedding_skip(&self, message_id: i64, skip_reason: &str) -> DbResult<()> {
+    async fn insert_message_embedding_skip(
+        &self,
+        message_id: i64,
+        skip_reason: &str,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO message_embedding_skips (message_id, skip_reason)
              VALUES ($1, $2)
-             ON CONFLICT (message_id) DO NOTHING"
+             ON CONFLICT (message_id) DO NOTHING",
         )
         .bind(message_id)
         .bind(skip_reason)
@@ -969,8 +1091,13 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn insert_message_embeddings_batch(&self, entries: &[(i64, &str, Vec<f32>, &str)]) -> DbResult<usize> {
-        if entries.is_empty() { return Ok(0); }
+    async fn insert_message_embeddings_batch(
+        &self,
+        entries: &[(i64, &str, Vec<f32>, &str)],
+    ) -> DbResult<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
         // Use sqlx::QueryBuilder for safe dynamic VALUES batch insert
         let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
             "INSERT INTO message_embeddings (message_id, session_id, embedding_vec, model_version) "
@@ -988,10 +1115,15 @@ impl ConversationStore for PgMissionStore {
         Ok(result.rows_affected() as usize)
     }
 
-    async fn insert_message_embedding_skips_batch(&self, entries: &[(i64, &str)]) -> DbResult<usize> {
-        if entries.is_empty() { return Ok(0); }
+    async fn insert_message_embedding_skips_batch(
+        &self,
+        entries: &[(i64, &str)],
+    ) -> DbResult<usize> {
+        if entries.is_empty() {
+            return Ok(0);
+        }
         let mut qb: sqlx::QueryBuilder<sqlx::Postgres> = sqlx::QueryBuilder::new(
-            "INSERT INTO message_embedding_skips (message_id, skip_reason) "
+            "INSERT INTO message_embedding_skips (message_id, skip_reason) ",
         );
         qb.push_values(entries, |mut b, (msg_id, reason)| {
             b.push_bind(*msg_id);
@@ -1002,13 +1134,17 @@ impl ConversationStore for PgMissionStore {
         Ok(result.rows_affected() as usize)
     }
 
-    async fn messages_pending_embedding(&self, cursor: i64, limit: i64) -> DbResult<Vec<(i64, String, String, String)>> {
+    async fn messages_pending_embedding(
+        &self,
+        cursor: i64,
+        limit: i64,
+    ) -> DbResult<Vec<(i64, String, String, String)>> {
         // v2: pure cursor scan — no LEFT JOIN, O(batch_size) not O(N)
         let rows: Vec<(i64, String, String, String)> = sqlx::query_as(
             "SELECT cm.id, cm.session_id, cm.role, cm.content
              FROM conversation_messages cm
              WHERE cm.id > $1
-             ORDER BY cm.id ASC LIMIT $2"
+             ORDER BY cm.id ASC LIMIT $2",
         )
         .bind(cursor)
         .bind(limit)
@@ -1019,11 +1155,14 @@ impl ConversationStore for PgMissionStore {
 
     async fn message_embedding_stats(&self) -> DbResult<serde_json::Value> {
         let (total_msgs,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM conversation_messages")
-            .fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
         let (embedded,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM message_embeddings")
-            .fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
         let (skipped,): (i64,) = sqlx::query_as("SELECT COUNT(*) FROM message_embedding_skips")
-            .fetch_one(&self.pool).await?;
+            .fetch_one(&self.pool)
+            .await?;
         let pending = total_msgs - embedded - skipped;
 
         let skip_dist: Vec<(String, i64)> = sqlx::query_as(
@@ -1035,7 +1174,10 @@ impl ConversationStore for PgMissionStore {
         ).fetch_all(&self.pool).await?;
 
         let coverage = if total_msgs > 0 {
-            format!("{:.1}%", (embedded + skipped) as f64 / total_msgs as f64 * 100.0)
+            format!(
+                "{:.1}%",
+                (embedded + skipped) as f64 / total_msgs as f64 * 100.0
+            )
         } else {
             "N/A".to_string()
         };
@@ -1053,7 +1195,10 @@ impl ConversationStore for PgMissionStore {
 
     // -- extraction watermarks --
 
-    async fn get_pending_memory_messages(&self, today: &str) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    async fn get_pending_memory_messages(
+        &self,
+        today: &str,
+    ) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let rows = sqlx::query(
             "SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid,
                     m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name,
@@ -1095,7 +1240,9 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn get_pending_user_voice_messages(&self) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    async fn get_pending_user_voice_messages(
+        &self,
+    ) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let rows = sqlx::query(
             "SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid,
                     m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name,
@@ -1126,7 +1273,11 @@ impl ConversationStore for PgMissionStore {
         Ok(results)
     }
 
-    async fn update_user_voice_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()> {
+    async fn update_user_voice_forwarded_at(
+        &self,
+        session_id: &str,
+        timestamp: &str,
+    ) -> DbResult<()> {
         sqlx::query("UPDATE conversations SET user_voice_forwarded_at = $1 WHERE id = $2")
             .bind(timestamp)
             .bind(session_id)
@@ -1135,11 +1286,16 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
-    async fn get_pending_realtime_messages(&self) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    async fn get_pending_realtime_messages(
+        &self,
+    ) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         self.get_pending_realtime_messages_with_limit(50).await
     }
 
-    async fn get_pending_realtime_messages_with_limit(&self, limit: usize) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
+    async fn get_pending_realtime_messages_with_limit(
+        &self,
+        limit: usize,
+    ) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let rows = sqlx::query(
             "WITH ranked AS (
                 SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid,
@@ -1181,7 +1337,11 @@ impl ConversationStore for PgMissionStore {
         Ok(results)
     }
 
-    async fn update_realtime_forwarded_at(&self, session_id: &str, timestamp: &str) -> DbResult<()> {
+    async fn update_realtime_forwarded_at(
+        &self,
+        session_id: &str,
+        timestamp: &str,
+    ) -> DbResult<()> {
         sqlx::query("UPDATE conversations SET realtime_forwarded_at = $1 WHERE id = $2")
             .bind(timestamp)
             .bind(session_id)
@@ -1196,11 +1356,11 @@ impl ConversationStore for PgMissionStore {
         let row = sqlx::query_scalar::<_, i64>(
             "SELECT end_message_id FROM conversation_turns
              WHERE session_id = $1
-             ORDER BY turn_idx DESC LIMIT 1"
+             ORDER BY turn_idx DESC LIMIT 1",
         )
-            .bind(session_id)
-            .fetch_optional(&self.pool)
-            .await?;
+        .bind(session_id)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(row)
     }
 
@@ -1208,61 +1368,73 @@ impl ConversationStore for PgMissionStore {
         // MAX() always returns exactly one row; empty table → [NULL].
         // Must decode as Option<i32> to avoid UnexpectedNullError.
         let row = sqlx::query_scalar::<_, Option<i32>>(
-            "SELECT MAX(turn_idx) FROM conversation_turns WHERE session_id = $1"
+            "SELECT MAX(turn_idx) FROM conversation_turns WHERE session_id = $1",
         )
-            .bind(session_id)
-            .fetch_one(&self.pool)
-            .await?;
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row)
     }
 
-    async fn insert_conversation_turns_batch(&self, session_id: &str, base_idx: i32, turns: &[RawTurn]) -> DbResult<usize> {
-        if turns.is_empty() { return Ok(0); }
+    async fn insert_conversation_turns_batch(
+        &self,
+        session_id: &str,
+        base_idx: i32,
+        turns: &[RawTurn],
+    ) -> DbResult<usize> {
+        if turns.is_empty() {
+            return Ok(0);
+        }
         let mut qb = sqlx::QueryBuilder::new(
             "INSERT INTO conversation_turns \
              (session_id, turn_idx, start_message_id, end_message_id, \
               user_content, tool_names, tool_call_count, message_count, \
               has_code_change, has_mcp_call, started_at, ended_at, \
-              files_read, files_changed, outcome, skeleton) "
+              files_read, files_changed, outcome, skeleton) ",
         );
         qb.push_values(turns.iter().enumerate(), |mut b, (i, turn)| {
             b.push_bind(session_id)
-             .push_bind(base_idx + i as i32)
-             .push_bind(turn.start_message_id)
-             .push_bind(turn.end_message_id)
-             .push_bind(&turn.user_content)
-             .push_bind(&turn.tool_names)
-             .push_bind(turn.tool_call_count)
-             .push_bind(turn.message_count)
-             .push_bind(turn.has_code_change)
-             .push_bind(turn.has_mcp_call)
-             .push_bind(&turn.started_at)
-             .push_bind(&turn.ended_at)
-             .push_bind(&turn.files_read)
-             .push_bind(&turn.files_changed)
-             .push_bind(&turn.outcome)
-             .push_bind(&turn.skeleton);
+                .push_bind(base_idx + i as i32)
+                .push_bind(turn.start_message_id)
+                .push_bind(turn.end_message_id)
+                .push_bind(&turn.user_content)
+                .push_bind(&turn.tool_names)
+                .push_bind(turn.tool_call_count)
+                .push_bind(turn.message_count)
+                .push_bind(turn.has_code_change)
+                .push_bind(turn.has_mcp_call)
+                .push_bind(&turn.started_at)
+                .push_bind(&turn.ended_at)
+                .push_bind(&turn.files_read)
+                .push_bind(&turn.files_changed)
+                .push_bind(&turn.outcome)
+                .push_bind(&turn.skeleton);
         });
         qb.push(" ON CONFLICT (session_id, turn_idx) DO NOTHING");
         let result = qb.build().execute(&self.pool).await?;
         Ok(result.rows_affected() as usize)
     }
 
-    async fn insert_message_labels_batch(&self, labels: &[(i64, &str, &str, &str)]) -> DbResult<usize> {
-        if labels.is_empty() { return Ok(0); }
+    async fn insert_message_labels_batch(
+        &self,
+        labels: &[(i64, &str, &str, &str)],
+    ) -> DbResult<usize> {
+        if labels.is_empty() {
+            return Ok(0);
+        }
         let mut inserted = 0usize;
         for &(message_id, label, value, source) in labels {
             let result = sqlx::query(
                 "INSERT INTO message_labels (message_id, label, value, source)
                  VALUES ($1, $2, $3, $4)
-                 ON CONFLICT (message_id, label) DO NOTHING"
+                 ON CONFLICT (message_id, label) DO NOTHING",
             )
-                .bind(message_id)
-                .bind(label)
-                .bind(value)
-                .bind(source)
-                .execute(&self.pool)
-                .await?;
+            .bind(message_id)
+            .bind(label)
+            .bind(value)
+            .bind(source)
+            .execute(&self.pool)
+            .await?;
             if result.rows_affected() > 0 {
                 inserted += 1;
             }
@@ -1277,15 +1449,19 @@ impl ConversationStore for PgMissionStore {
                AND c.status IN ('completed', 'compacted')
                AND NOT EXISTS (SELECT 1 FROM conversation_turns ct WHERE ct.session_id = c.id)
              ORDER BY c.started_at DESC
-             LIMIT $1"
+             LIMIT $1",
         )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
-    async fn sessions_recently_active_without_turns(&self, since_minutes: i64, limit: i64) -> DbResult<Vec<String>> {
+    async fn sessions_recently_active_without_turns(
+        &self,
+        since_minutes: i64,
+        limit: i64,
+    ) -> DbResult<Vec<String>> {
         let rows = sqlx::query_scalar::<_, String>(
             "SELECT c.id FROM conversations c
              WHERE c.message_count > 0
@@ -1304,7 +1480,11 @@ impl ConversationStore for PgMissionStore {
 
     // -- S4 per-turn embedding --
 
-    async fn turns_pending_embedding(&self, session_id: &str, provider: &str) -> DbResult<Vec<ConversationTurn>> {
+    async fn turns_pending_embedding(
+        &self,
+        session_id: &str,
+        provider: &str,
+    ) -> DbResult<Vec<ConversationTurn>> {
         let rows = sqlx::query_as::<_, ConversationTurn>(
             "SELECT t.id, t.session_id, t.turn_idx, t.start_message_id, t.end_message_id,
                     t.user_content, t.tool_names, t.tool_call_count, t.message_count,
@@ -1319,21 +1499,19 @@ impl ConversationStore for PgMissionStore {
                      AND tv.chunk_idx = t.turn_idx
                      AND tv.embedding_provider = $2
                )
-             ORDER BY t.turn_idx"
+             ORDER BY t.turn_idx",
         )
-            .bind(session_id)
-            .bind(provider)
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(session_id)
+        .bind(provider)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
     async fn update_turn_topics_batch(&self, updates: &[(i64, &str)]) -> DbResult<usize> {
         let mut count = 0usize;
         for &(id, topic) in updates {
-            let result = sqlx::query(
-                "UPDATE conversation_turns SET topic = $2 WHERE id = $1"
-            )
+            let result = sqlx::query("UPDATE conversation_turns SET topic = $2 WHERE id = $1")
                 .bind(id)
                 .bind(topic)
                 .execute(&self.pool)
@@ -1343,8 +1521,15 @@ impl ConversationStore for PgMissionStore {
         Ok(count)
     }
 
-    async fn set_conversation_turn_vectors(&self, session_id: &str, vectors: &[(String, i32, Vec<f32>)], provider: &str) -> DbResult<usize> {
-        if vectors.is_empty() { return Ok(0); }
+    async fn set_conversation_turn_vectors(
+        &self,
+        session_id: &str,
+        vectors: &[(String, i32, Vec<f32>)],
+        provider: &str,
+    ) -> DbResult<usize> {
+        if vectors.is_empty() {
+            return Ok(0);
+        }
         let mut count = 0usize;
         for (topic, turn_idx, vec) in vectors {
             let bytes = crate::embedding::f32_vec_to_bytes(vec);
@@ -1368,7 +1553,12 @@ impl ConversationStore for PgMissionStore {
         Ok(count)
     }
 
-    async fn sessions_with_turns_but_no_vectors(&self, provider: &str, cursor: i64, limit: i64) -> DbResult<Vec<String>> {
+    async fn sessions_with_turns_but_no_vectors(
+        &self,
+        provider: &str,
+        cursor: i64,
+        limit: i64,
+    ) -> DbResult<Vec<String>> {
         let rows = sqlx::query_scalar::<_, String>(
             "SELECT DISTINCT ct.session_id
              FROM conversation_turns ct
@@ -1382,13 +1572,13 @@ impl ConversationStore for PgMissionStore {
                      AND tv.embedding_provider = $1
                )
              ORDER BY ct.session_id
-             LIMIT $2"
+             LIMIT $2",
         )
-            .bind(provider)
-            .bind(limit)
-            .bind(cursor.to_string())
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(provider)
+        .bind(limit)
+        .bind(cursor.to_string())
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
@@ -1431,15 +1621,19 @@ impl ConversationStore for PgMissionStore {
 
     async fn get_intent_coverage(&self, session_id: &str) -> DbResult<Option<i32>> {
         let row = sqlx::query_scalar::<_, Option<i32>>(
-            "SELECT MAX(turn_range_end) FROM user_intents WHERE session_id = $1"
+            "SELECT MAX(turn_range_end) FROM user_intents WHERE session_id = $1",
         )
-            .bind(session_id)
-            .fetch_one(&self.pool)
-            .await?;
+        .bind(session_id)
+        .fetch_one(&self.pool)
+        .await?;
         Ok(row)
     }
 
-    async fn get_turns_after(&self, session_id: &str, after_idx: i32) -> DbResult<Vec<ConversationTurn>> {
+    async fn get_turns_after(
+        &self,
+        session_id: &str,
+        after_idx: i32,
+    ) -> DbResult<Vec<ConversationTurn>> {
         let rows = sqlx::query_as::<_, ConversationTurn>(
             "SELECT id, session_id, turn_idx, start_message_id, end_message_id,
                     user_content, tool_names, tool_call_count, message_count,
@@ -1447,26 +1641,32 @@ impl ConversationStore for PgMissionStore {
                     files_read, files_changed, outcome, skeleton
              FROM conversation_turns
              WHERE session_id = $1 AND turn_idx > $2
-             ORDER BY turn_idx"
+             ORDER BY turn_idx",
         )
-            .bind(session_id)
-            .bind(after_idx)
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(session_id)
+        .bind(after_idx)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
-    async fn update_turns_intent_group(&self, session_id: &str, turn_range_start: i32, turn_range_end: i32, intent_id: i64) -> DbResult<()> {
+    async fn update_turns_intent_group(
+        &self,
+        session_id: &str,
+        turn_range_start: i32,
+        turn_range_end: i32,
+        intent_id: i64,
+    ) -> DbResult<()> {
         sqlx::query(
             "UPDATE conversation_turns SET intent_group_id = $4
-             WHERE session_id = $1 AND turn_idx >= $2 AND turn_idx <= $3"
+             WHERE session_id = $1 AND turn_idx >= $2 AND turn_idx <= $3",
         )
-            .bind(session_id)
-            .bind(turn_range_start)
-            .bind(turn_range_end)
-            .bind(intent_id)
-            .execute(&self.pool)
-            .await?;
+        .bind(session_id)
+        .bind(turn_range_start)
+        .bind(turn_range_end)
+        .bind(intent_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1477,11 +1677,11 @@ impl ConversationStore for PgMissionStore {
                     created_at::text as created_at
              FROM user_intents
              WHERE created_at > NOW() - make_interval(secs => $1::double precision)
-             ORDER BY created_at DESC"
+             ORDER BY created_at DESC",
         )
-            .bind(since_secs as f64)
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(since_secs as f64)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
@@ -1494,11 +1694,11 @@ impl ConversationStore for PgMissionStore {
                AND c.conversation_type IN ('user', 'worker')
                AND NOT EXISTS (SELECT 1 FROM user_intents ui WHERE ui.session_id = ct.session_id)
              ORDER BY ct.session_id
-             LIMIT $1"
+             LIMIT $1",
         )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
         Ok(rows)
     }
 
@@ -1571,7 +1771,13 @@ impl ConversationStore for PgMissionStore {
         Ok(count)
     }
 
-    async fn update_tool_call_output(&self, tool_use_id: &str, output_summary: &str, raw_output: &str, status: &str) -> DbResult<bool> {
+    async fn update_tool_call_output(
+        &self,
+        tool_use_id: &str,
+        output_summary: &str,
+        raw_output: &str,
+        status: &str,
+    ) -> DbResult<bool> {
         let result = sqlx::query(
             "UPDATE conversation_tool_calls SET output_summary = $1, raw_output = $2, status = $3 WHERE id = $4"
         )
@@ -1584,13 +1790,19 @@ impl ConversationStore for PgMissionStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn get_tool_calls_by_session(&self, session_id: &str, tool_filter: Option<&[String]>, limit: i64) -> DbResult<Vec<ToolCallRecord>> {
+    async fn get_tool_calls_by_session(
+        &self,
+        session_id: &str,
+        tool_filter: Option<&[String]>,
+        limit: i64,
+    ) -> DbResult<Vec<ToolCallRecord>> {
         if let Some(filter) = tool_filter {
             if filter.is_empty() {
                 return Ok(Vec::new());
             }
             // Build dynamic IN clause
-            let placeholders: Vec<String> = (0..filter.len()).map(|i| format!("${}", i + 2)).collect();
+            let placeholders: Vec<String> =
+                (0..filter.len()).map(|i| format!("${}", i + 2)).collect();
             let sql = format!(
                 "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
                  FROM conversation_tool_calls WHERE session_id = $1 AND tool_name IN ({}) ORDER BY id ASC LIMIT ${}",
@@ -1598,18 +1810,44 @@ impl ConversationStore for PgMissionStore {
                 filter.len() + 2
             );
             // sqlx doesn't support dynamic bind count easily, so use query_as with raw
-            let mut query = sqlx::query_as::<_, (String, String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<i64>, String)>(&sql);
+            let mut query = sqlx::query_as::<
+                _,
+                (
+                    String,
+                    String,
+                    Option<i64>,
+                    String,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    Option<String>,
+                    String,
+                    Option<i64>,
+                    String,
+                ),
+            >(&sql);
             query = query.bind(session_id);
             for f in filter {
                 query = query.bind(f);
             }
             query = query.bind(limit);
             let rows = query.fetch_all(&self.pool).await?;
-            Ok(rows.into_iter().map(|r| ToolCallRecord {
-                id: r.0, session_id: r.1, message_id: r.2, tool_name: r.3,
-                input_summary: r.4, raw_input: r.5, output_summary: r.6, raw_output: r.7,
-                status: r.8, duration_ms: r.9, timestamp: r.10,
-            }).collect())
+            Ok(rows
+                .into_iter()
+                .map(|r| ToolCallRecord {
+                    id: r.0,
+                    session_id: r.1,
+                    message_id: r.2,
+                    tool_name: r.3,
+                    input_summary: r.4,
+                    raw_input: r.5,
+                    output_summary: r.6,
+                    raw_output: r.7,
+                    status: r.8,
+                    duration_ms: r.9,
+                    timestamp: r.10,
+                })
+                .collect())
         } else {
             let rows: Vec<(String, String, Option<i64>, String, Option<String>, Option<String>, Option<String>, Option<String>, String, Option<i64>, String)> = sqlx::query_as(
                 "SELECT id, session_id, message_id, tool_name, input_summary, raw_input, output_summary, raw_output, status, duration_ms, timestamp
@@ -1619,11 +1857,22 @@ impl ConversationStore for PgMissionStore {
             .bind(limit)
             .fetch_all(&self.pool)
             .await?;
-            Ok(rows.into_iter().map(|r| ToolCallRecord {
-                id: r.0, session_id: r.1, message_id: r.2, tool_name: r.3,
-                input_summary: r.4, raw_input: r.5, output_summary: r.6, raw_output: r.7,
-                status: r.8, duration_ms: r.9, timestamp: r.10,
-            }).collect())
+            Ok(rows
+                .into_iter()
+                .map(|r| ToolCallRecord {
+                    id: r.0,
+                    session_id: r.1,
+                    message_id: r.2,
+                    tool_name: r.3,
+                    input_summary: r.4,
+                    raw_input: r.5,
+                    output_summary: r.6,
+                    raw_output: r.7,
+                    status: r.8,
+                    duration_ms: r.9,
+                    timestamp: r.10,
+                })
+                .collect())
         }
     }
 
@@ -1636,20 +1885,31 @@ impl ConversationStore for PgMissionStore {
         .fetch_optional(&self.pool)
         .await?;
         Ok(row.map(|r| ToolCallRecord {
-            id: r.0, session_id: r.1, message_id: r.2, tool_name: r.3,
-            input_summary: r.4, raw_input: r.5, output_summary: r.6, raw_output: r.7,
-            status: r.8, duration_ms: r.9, timestamp: r.10,
+            id: r.0,
+            session_id: r.1,
+            message_id: r.2,
+            tool_name: r.3,
+            input_summary: r.4,
+            raw_input: r.5,
+            output_summary: r.6,
+            raw_output: r.7,
+            status: r.8,
+            duration_ms: r.9,
+            timestamp: r.10,
         }))
     }
 
-    async fn get_tool_call_stats(&self, session_id: &str) -> DbResult<Vec<(String, i64, i64, i64)>> {
+    async fn get_tool_call_stats(
+        &self,
+        session_id: &str,
+    ) -> DbResult<Vec<(String, i64, i64, i64)>> {
         let rows: Vec<(String, i64, i64, i64)> = sqlx::query_as(
             "SELECT tool_name,
                     COUNT(*) as total,
                     SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) as success_count,
                     SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count
              FROM conversation_tool_calls WHERE session_id = $1
-             GROUP BY tool_name ORDER BY total DESC"
+             GROUP BY tool_name ORDER BY total DESC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -1658,17 +1918,16 @@ impl ConversationStore for PgMissionStore {
     }
 
     async fn count_pending_tool_calls(&self) -> DbResult<i64> {
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM conversation_tool_calls WHERE status = 'pending'"
-        )
-        .fetch_one(&self.pool)
-        .await?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM conversation_tool_calls WHERE status = 'pending'")
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count)
     }
 
     async fn get_sessions_with_pending_tool_calls(&self) -> DbResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT session_id FROM conversation_tool_calls WHERE status = 'pending'"
+            "SELECT DISTINCT session_id FROM conversation_tool_calls WHERE status = 'pending'",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1676,11 +1935,10 @@ impl ConversationStore for PgMissionStore {
     }
 
     async fn get_sessions_with_tool_calls(&self) -> DbResult<HashSet<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT session_id FROM conversation_tool_calls"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT DISTINCT session_id FROM conversation_tool_calls")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
@@ -1692,8 +1950,9 @@ impl ConversationStore for PgMissionStore {
         // `timestamp` is ISO text; lexicographic compare is correct here because
         // ISO-8601 with the same offset/zone sorts the same as chronological.
         let rows: Vec<(String, i64, Option<String>, i64, i64)> = match since_iso {
-            Some(since) => sqlx::query_as(
-                "SELECT tool_name,
+            Some(since) => {
+                sqlx::query_as(
+                    "SELECT tool_name,
                         COUNT(*)::bigint AS total,
                         MAX(timestamp) AS last_at,
                         SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::bigint AS ok,
@@ -1702,12 +1961,14 @@ impl ConversationStore for PgMissionStore {
                  WHERE timestamp >= $1
                  GROUP BY tool_name
                  ORDER BY total DESC",
-            )
-            .bind(since)
-            .fetch_all(&self.pool)
-            .await?,
-            None => sqlx::query_as(
-                "SELECT tool_name,
+                )
+                .bind(since)
+                .fetch_all(&self.pool)
+                .await?
+            }
+            None => {
+                sqlx::query_as(
+                    "SELECT tool_name,
                         COUNT(*)::bigint AS total,
                         MAX(timestamp) AS last_at,
                         SUM(CASE WHEN status='success' THEN 1 ELSE 0 END)::bigint AS ok,
@@ -1715,19 +1976,23 @@ impl ConversationStore for PgMissionStore {
                  FROM conversation_tool_calls
                  GROUP BY tool_name
                  ORDER BY total DESC",
-            )
-            .fetch_all(&self.pool)
-            .await?,
+                )
+                .fetch_all(&self.pool)
+                .await?
+            }
         };
         Ok(rows)
     }
 
-    async fn get_messages_for_tool_call_backfill(&self, session_id: &str) -> DbResult<Vec<(String, String, String)>> {
+    async fn get_messages_for_tool_call_backfill(
+        &self,
+        session_id: &str,
+    ) -> DbResult<Vec<(String, String, String)>> {
         let rows: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT role, raw_content, timestamp FROM conversation_messages
              WHERE session_id = $1 AND raw_content IS NOT NULL AND raw_content != ''
              AND role IN ('assistant', 'user', 'thinking', 'system', 'tool_result')
-             ORDER BY id ASC"
+             ORDER BY id ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -1746,7 +2011,11 @@ impl ConversationStore for PgMissionStore {
 
     // -- Retrospective tool analysis --
 
-    async fn get_retrospective_tool_stats(&self, session_id: &str, limit: i64) -> DbResult<Vec<(String, i64, i64, i64, f64)>> {
+    async fn get_retrospective_tool_stats(
+        &self,
+        session_id: &str,
+        limit: i64,
+    ) -> DbResult<Vec<(String, i64, i64, i64, f64)>> {
         let rows: Vec<(String, i64, i64, i64, f64)> = sqlx::query_as(
             "SELECT tool_name,
                     COUNT(*) as total,
@@ -1754,7 +2023,7 @@ impl ConversationStore for PgMissionStore {
                     SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) as error_count,
                     COALESCE(AVG(duration_ms), 0) as avg_duration
              FROM conversation_tool_calls WHERE session_id = $1
-             GROUP BY tool_name ORDER BY total DESC LIMIT $2"
+             GROUP BY tool_name ORDER BY total DESC LIMIT $2",
         )
         .bind(session_id)
         .bind(limit)
@@ -1766,14 +2035,14 @@ impl ConversationStore for PgMissionStore {
     async fn get_retrospective_meta(&self, session_id: &str) -> DbResult<(i64, i64, i64, i64)> {
         let (total_calls, total_duration, unique_tools): (i64, i64, i64) = sqlx::query_as(
             "SELECT COUNT(*), COALESCE(SUM(duration_ms), 0), COUNT(DISTINCT tool_name)
-             FROM conversation_tool_calls WHERE session_id = $1"
+             FROM conversation_tool_calls WHERE session_id = $1",
         )
         .bind(session_id)
         .fetch_one(&self.pool)
         .await?;
         let (compact_count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM conversation_events
-             WHERE session_id = $1 AND event_type = 'compact_boundary'"
+             WHERE session_id = $1 AND event_type = 'compact_boundary'",
         )
         .bind(session_id)
         .fetch_one(&self.pool)
@@ -1781,7 +2050,11 @@ impl ConversationStore for PgMissionStore {
         Ok((total_calls, total_duration, unique_tools, compact_count))
     }
 
-    async fn get_retrospective_repeat_patterns(&self, session_id: &str, min_streak: i64) -> DbResult<Vec<(String, i64, String, String)>> {
+    async fn get_retrospective_repeat_patterns(
+        &self,
+        session_id: &str,
+        min_streak: i64,
+    ) -> DbResult<Vec<(String, i64, String, String)>> {
         let rows: Vec<(String, i64, String, String)> = sqlx::query_as(
             "WITH numbered AS (
                 SELECT tool_name, timestamp,
@@ -1791,7 +2064,7 @@ impl ConversationStore for PgMissionStore {
             )
             SELECT tool_name, COUNT(*) as streak, MIN(timestamp) as start_t, MAX(timestamp) as end_t
             FROM numbered GROUP BY tool_name, (rn - grn)
-            HAVING COUNT(*) >= $2 ORDER BY streak DESC"
+            HAVING COUNT(*) >= $2 ORDER BY streak DESC",
         )
         .bind(session_id)
         .bind(min_streak)
@@ -1802,7 +2075,7 @@ impl ConversationStore for PgMissionStore {
 
     async fn get_tool_name_sequence(&self, session_id: &str) -> DbResult<Vec<String>> {
         let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT tool_name FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC"
+            "SELECT tool_name FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -1810,7 +2083,11 @@ impl ConversationStore for PgMissionStore {
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
-    async fn get_retrospective_high_error_tools(&self, session_id: &str, min_error_rate: f64) -> DbResult<Vec<(String, f64, i64)>> {
+    async fn get_retrospective_high_error_tools(
+        &self,
+        session_id: &str,
+        min_error_rate: f64,
+    ) -> DbResult<Vec<(String, f64, i64)>> {
         let rows: Vec<(String, f64, i64)> = sqlx::query_as(
             "SELECT tool_name,
                     ROUND(100.0 * SUM(CASE WHEN status='error' THEN 1 ELSE 0 END)::numeric / COUNT(*), 1)::float8 as error_rate,
@@ -1826,14 +2103,18 @@ impl ConversationStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn get_tool_error_samples(&self, session_id: &str, tool_name: &str) -> DbResult<Vec<(String, String, String)>> {
+    async fn get_tool_error_samples(
+        &self,
+        session_id: &str,
+        tool_name: &str,
+    ) -> DbResult<Vec<(String, String, String)>> {
         let mut samples = Vec::new();
         // First error
         let first: Vec<(String, String, String)> = sqlx::query_as(
             "SELECT COALESCE(input_summary, ''), COALESCE(output_summary, ''), timestamp
              FROM conversation_tool_calls
              WHERE session_id = $1 AND tool_name = $2 AND status = 'error'
-             ORDER BY id ASC LIMIT 1"
+             ORDER BY id ASC LIMIT 1",
         )
         .bind(session_id)
         .bind(tool_name)
@@ -1845,7 +2126,7 @@ impl ConversationStore for PgMissionStore {
             "SELECT COALESCE(input_summary, ''), COALESCE(output_summary, ''), timestamp
              FROM conversation_tool_calls
              WHERE session_id = $1 AND tool_name = $2 AND status = 'error'
-             ORDER BY id DESC LIMIT 1"
+             ORDER BY id DESC LIMIT 1",
         )
         .bind(session_id)
         .bind(tool_name)
@@ -1859,10 +2140,13 @@ impl ConversationStore for PgMissionStore {
         Ok(samples)
     }
 
-    async fn get_tool_calls_for_detailed_analysis(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+    async fn get_tool_calls_for_detailed_analysis(
+        &self,
+        session_id: &str,
+    ) -> DbResult<Vec<(String, String, String, String)>> {
         let rows: Vec<(String, String, String, String)> = sqlx::query_as(
             "SELECT tool_name, COALESCE(input_summary, ''), COALESCE(output_summary, ''), status
-             FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC"
+             FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -1870,10 +2154,13 @@ impl ConversationStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn get_tool_calls_with_status_timeline(&self, session_id: &str) -> DbResult<Vec<(String, String, String, String)>> {
+    async fn get_tool_calls_with_status_timeline(
+        &self,
+        session_id: &str,
+    ) -> DbResult<Vec<(String, String, String, String)>> {
         let rows: Vec<(String, String, String, String)> = sqlx::query_as(
             "SELECT tool_name, status, COALESCE(input_summary, ''), timestamp
-             FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC"
+             FROM conversation_tool_calls WHERE session_id = $1 ORDER BY id ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -1885,7 +2172,10 @@ impl ConversationStore for PgMissionStore {
     // -- from EventStore v0.4.x: conversation events (JSONL audit) --
     // ══════════════════════════════════════════════════════════════════════
 
-    async fn insert_conversation_events_batch(&self, events: &[ConversationEvent]) -> DbResult<usize> {
+    async fn insert_conversation_events_batch(
+        &self,
+        events: &[ConversationEvent],
+    ) -> DbResult<usize> {
         if events.is_empty() {
             return Ok(0);
         }
@@ -1911,12 +2201,17 @@ impl ConversationStore for PgMissionStore {
         Ok(count)
     }
 
-    async fn get_conversation_events(&self, session_id: &str, event_type: Option<&str>, limit: i64) -> DbResult<Vec<ConversationEvent>> {
+    async fn get_conversation_events(
+        &self,
+        session_id: &str,
+        event_type: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationEvent>> {
         let rows = if let Some(et) = event_type {
             sqlx::query(
                 "SELECT id, session_id, event_uuid, event_type, content, raw_data, timestamp
                  FROM conversation_events WHERE session_id = $1 AND event_type = $2
-                 ORDER BY id ASC LIMIT $3"
+                 ORDER BY id ASC LIMIT $3",
             )
             .bind(session_id)
             .bind(et)
@@ -1927,7 +2222,7 @@ impl ConversationStore for PgMissionStore {
             sqlx::query(
                 "SELECT id, session_id, event_uuid, event_type, content, raw_data, timestamp
                  FROM conversation_events WHERE session_id = $1
-                 ORDER BY id ASC LIMIT $2"
+                 ORDER BY id ASC LIMIT $2",
             )
             .bind(session_id)
             .bind(limit)
@@ -1935,8 +2230,9 @@ impl ConversationStore for PgMissionStore {
             .await?
         };
 
-        let results: Vec<ConversationEvent> = rows.iter().map(|row| {
-            ConversationEvent {
+        let results: Vec<ConversationEvent> = rows
+            .iter()
+            .map(|row| ConversationEvent {
                 id: row.get("id"),
                 session_id: row.get("session_id"),
                 event_uuid: row.get("event_uuid"),
@@ -1944,15 +2240,19 @@ impl ConversationStore for PgMissionStore {
                 content: row.get("content"),
                 raw_data: row.get("raw_data"),
                 timestamp: row.get("timestamp"),
-            }
-        }).collect();
+            })
+            .collect();
         Ok(results)
     }
 
-    async fn is_compact_boundary_event(&self, session_id: &str, event_uuid: &str) -> DbResult<bool> {
+    async fn is_compact_boundary_event(
+        &self,
+        session_id: &str,
+        event_uuid: &str,
+    ) -> DbResult<bool> {
         let (count,): (i64,) = sqlx::query_as(
             "SELECT COUNT(*) FROM conversation_events
-             WHERE session_id = $1 AND event_uuid = $2 AND event_type = 'compact_boundary'"
+             WHERE session_id = $1 AND event_uuid = $2 AND event_type = 'compact_boundary'",
         )
         .bind(session_id)
         .bind(event_uuid)
@@ -1961,7 +2261,11 @@ impl ConversationStore for PgMissionStore {
         Ok(count > 0)
     }
 
-    async fn get_agent_trajectory(&self, tool_use_id: &str, limit: i64) -> DbResult<Vec<ConversationMessage>> {
+    async fn get_agent_trajectory(
+        &self,
+        tool_use_id: &str,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationMessage>> {
         let rows = sqlx::query(
             "SELECT id, session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                     tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
@@ -1973,8 +2277,9 @@ impl ConversationStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let results: Vec<ConversationMessage> = rows.iter().map(|row| {
-            ConversationMessage {
+        let results: Vec<ConversationMessage> = rows
+            .iter()
+            .map(|row| ConversationMessage {
                 id: row.get("id"),
                 session_id: row.get("session_id"),
                 role: row.get("role"),
@@ -1994,16 +2299,19 @@ impl ConversationStore for PgMissionStore {
                 token_count: row.get("token_count"),
                 seq: None,
                 role_display: None,
-            }
-        }).collect();
+            })
+            .collect();
         Ok(results)
     }
 
-    async fn get_event_type_summary(&self, session_id: Option<&str>) -> DbResult<Vec<(String, i64)>> {
+    async fn get_event_type_summary(
+        &self,
+        session_id: Option<&str>,
+    ) -> DbResult<Vec<(String, i64)>> {
         let rows = if let Some(sid) = session_id {
             sqlx::query(
                 "SELECT event_type, COUNT(*) as cnt FROM conversation_events
-                 WHERE session_id = $1 GROUP BY event_type ORDER BY cnt DESC"
+                 WHERE session_id = $1 GROUP BY event_type ORDER BY cnt DESC",
             )
             .bind(sid)
             .fetch_all(&self.pool)
@@ -2011,15 +2319,16 @@ impl ConversationStore for PgMissionStore {
         } else {
             sqlx::query(
                 "SELECT event_type, COUNT(*) as cnt FROM conversation_events
-                 GROUP BY event_type ORDER BY cnt DESC"
+                 GROUP BY event_type ORDER BY cnt DESC",
             )
             .fetch_all(&self.pool)
             .await?
         };
 
-        let results: Vec<(String, i64)> = rows.iter().map(|row| {
-            (row.get::<String, _>("event_type"), row.get::<i64, _>("cnt"))
-        }).collect();
+        let results: Vec<(String, i64)> = rows
+            .iter()
+            .map(|row| (row.get::<String, _>("event_type"), row.get::<i64, _>("cnt")))
+            .collect();
         Ok(results)
     }
 
@@ -2036,11 +2345,10 @@ impl ConversationStore for PgMissionStore {
     }
 
     async fn get_sessions_with_events(&self) -> DbResult<HashSet<String>> {
-        let rows: Vec<(String,)> = sqlx::query_as(
-            "SELECT DISTINCT session_id FROM conversation_events"
-        )
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String,)> =
+            sqlx::query_as("SELECT DISTINCT session_id FROM conversation_events")
+                .fetch_all(&self.pool)
+                .await?;
         Ok(rows.into_iter().map(|r| r.0).collect())
     }
 
@@ -2050,7 +2358,13 @@ impl ConversationStore for PgMissionStore {
 
     // -- audit.rs: retrospective --
 
-    async fn save_retrospective_result(&self, session_id: &str, trigger_reason: &str, quick_stats: &str, full_analysis: Option<&str>) -> DbResult<()> {
+    async fn save_retrospective_result(
+        &self,
+        session_id: &str,
+        trigger_reason: &str,
+        quick_stats: &str,
+        full_analysis: Option<&str>,
+    ) -> DbResult<()> {
         sqlx::query(
             "INSERT INTO retrospective_results (session_id, trigger_reason, quick_stats, full_analysis, created_at)
              VALUES ($1, $2, $3, $4, NOW())
@@ -2070,12 +2384,11 @@ impl ConversationStore for PgMissionStore {
     }
 
     async fn has_retrospective_result(&self, session_id: &str) -> DbResult<bool> {
-        let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(*) FROM retrospective_results WHERE session_id = $1"
-        )
-        .bind(session_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let (count,): (i64,) =
+            sqlx::query_as("SELECT COUNT(*) FROM retrospective_results WHERE session_id = $1")
+                .bind(session_id)
+                .fetch_one(&self.pool)
+                .await?;
         Ok(count > 0)
     }
 
@@ -2107,18 +2420,25 @@ impl ConversationStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let results = rows.iter().map(|row| {
-            (
-                row.get::<String, _>("id"),
-                row.get::<i64, _>("message_count"),
-                row.get::<i64, _>("tool_count"),
-                row.get::<f64, _>("error_rate"),
-            )
-        }).collect();
+        let results = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("id"),
+                    row.get::<i64, _>("message_count"),
+                    row.get::<i64, _>("tool_count"),
+                    row.get::<f64, _>("error_rate"),
+                )
+            })
+            .collect();
         Ok(results)
     }
 
-    async fn get_sessions_for_retro_backfill(&self, since: &str, force: bool) -> DbResult<Vec<(String, i64, i64, f64)>> {
+    async fn get_sessions_for_retro_backfill(
+        &self,
+        since: &str,
+        force: bool,
+    ) -> DbResult<Vec<(String, i64, i64, f64)>> {
         let sql = if force {
             "SELECT c.id, c.message_count,
                     COALESCE((SELECT COUNT(*) FROM conversation_tool_calls tc WHERE tc.session_id = c.id), 0) as tool_count,
@@ -2156,47 +2476,56 @@ impl ConversationStore for PgMissionStore {
              ORDER BY c.started_at ASC"
         };
 
-        let rows = sqlx::query(sql)
-            .bind(since)
-            .fetch_all(&self.pool)
-            .await?;
+        let rows = sqlx::query(sql).bind(since).fetch_all(&self.pool).await?;
 
-        let results = rows.iter().map(|row| {
-            (
-                row.get::<String, _>("id"),
-                row.get::<i64, _>("message_count"),
-                row.get::<i64, _>("tool_count"),
-                row.get::<f64, _>("error_rate"),
-            )
-        }).collect();
+        let results = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("id"),
+                    row.get::<i64, _>("message_count"),
+                    row.get::<i64, _>("tool_count"),
+                    row.get::<f64, _>("error_rate"),
+                )
+            })
+            .collect();
         Ok(results)
     }
 
-    async fn list_retrospective_results(&self, limit: i64) -> DbResult<Vec<(String, String, String, Option<String>, String)>> {
+    async fn list_retrospective_results(
+        &self,
+        limit: i64,
+    ) -> DbResult<Vec<(String, String, String, Option<String>, String)>> {
         let rows = sqlx::query(
             "SELECT session_id, trigger_reason, quick_stats, full_analysis, created_at
-             FROM retrospective_results ORDER BY created_at DESC LIMIT $1"
+             FROM retrospective_results ORDER BY created_at DESC LIMIT $1",
         )
         .bind(limit)
         .fetch_all(&self.pool)
         .await?;
 
-        let results = rows.iter().map(|row| {
-            (
-                row.get::<String, _>("session_id"),
-                row.get::<String, _>("trigger_reason"),
-                row.get::<String, _>("quick_stats"),
-                row.get::<Option<String>, _>("full_analysis"),
-                row.get::<String, _>("created_at"),
-            )
-        }).collect();
+        let results = rows
+            .iter()
+            .map(|row| {
+                (
+                    row.get::<String, _>("session_id"),
+                    row.get::<String, _>("trigger_reason"),
+                    row.get::<String, _>("quick_stats"),
+                    row.get::<Option<String>, _>("full_analysis"),
+                    row.get::<String, _>("created_at"),
+                )
+            })
+            .collect();
         Ok(results)
     }
 
-    async fn get_retrospective_result(&self, session_id: &str) -> DbResult<Option<(String, String, Option<String>, String)>> {
+    async fn get_retrospective_result(
+        &self,
+        session_id: &str,
+    ) -> DbResult<Option<(String, String, Option<String>, String)>> {
         let row = sqlx::query(
             "SELECT trigger_reason, quick_stats, full_analysis, created_at
-             FROM retrospective_results WHERE session_id = $1"
+             FROM retrospective_results WHERE session_id = $1",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)

@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use missiond_core::types::{CliEngine, Slot};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashSet;
 use tracing::{info, warn};
 
@@ -24,7 +24,7 @@ struct InboxArgs {
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
-        "mission_slots" => Ok(ToolResult::json(&projected_mission_slots(state))),
+        "mission_slots" => Ok(ToolResult::json(&projected_mission_slots(state).await)),
         "mission_inbox" => {
             let InboxArgs { unread_only, limit } =
                 serde_json::from_value(args).unwrap_or(InboxArgs {
@@ -43,10 +43,13 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     }
 }
 
-fn projected_mission_slots(state: &AppState) -> Vec<Slot> {
+async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
     let slots = state.mission.list_slots();
     let Ok(config) = WorkstationRuntimeConfig::load_for_current_dir() else {
-        return slots;
+        return slots
+            .into_iter()
+            .filter_map(|slot| serde_json::to_value(slot).ok())
+            .collect();
     };
     let v3_slot_ids: HashSet<String> = config
         .startup_slots()
@@ -60,10 +63,64 @@ fn projected_mission_slots(state: &AppState) -> Vec<Slot> {
         )
         .collect();
 
-    slots
+    let projected: Vec<Slot> = slots
         .into_iter()
         .filter(|slot| !is_stopped_legacy_sonnet_residual(slot, &v3_slot_ids))
-        .collect()
+        .collect();
+
+    let mut out = Vec::with_capacity(projected.len());
+    for slot in projected {
+        let mut value = serde_json::to_value(&slot).unwrap_or_else(|_| json!({}));
+        if let Some(info) = state.pty.get_status(&slot.config.id).await {
+            value["ptyState"] = json!(serde_json::to_value(&info.state)
+                .ok()
+                .and_then(|v| v.as_str().map(ToString::to_string))
+                .unwrap_or_else(|| format!("{:?}", info.state)));
+            if let Some(recognition) = info.recognition {
+                if let Ok(recognition) = serde_json::to_value(recognition) {
+                    value["ptyRecognition"] = recognition;
+                }
+            }
+        }
+
+        if let Ok(Some(session_id)) = state.store.get_slot_session(&slot.config.id).await {
+            value["sessionId"] = json!(session_id);
+            if let Ok(Some(conv)) = state.store.get_conversation(&session_id).await {
+                if conversation_source_matches_engine(slot.config.engine, &conv.source) {
+                    value["latestConversation"] = json!({
+                        "id": conv.id,
+                        "source": conv.source,
+                        "chatType": conv.chat_type,
+                        "conversationType": conv.conversation_type,
+                        "messageCount": conv.message_count,
+                        "status": conv.status,
+                        "updatedAt": conv.updated_at,
+                    });
+                } else {
+                    value["latestConversationMismatch"] = json!({
+                        "id": conv.id,
+                        "source": conv.source,
+                        "expectedSource": canonical_source_for_engine(slot.config.engine),
+                    });
+                }
+            }
+        }
+        out.push(value);
+    }
+
+    out
+}
+
+fn canonical_source_for_engine(engine: CliEngine) -> &'static str {
+    match engine {
+        CliEngine::ClaudeCode => "claude_code",
+        CliEngine::Gemini => "gemini_cli",
+        CliEngine::Codex => "codex_cli",
+    }
+}
+
+fn conversation_source_matches_engine(engine: CliEngine, source: &str) -> bool {
+    source == canonical_source_for_engine(engine)
 }
 
 fn is_stopped_legacy_sonnet_residual(slot: &Slot, v3_slot_ids: &HashSet<String>) -> bool {

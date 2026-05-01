@@ -16,7 +16,7 @@ use crate::state::AppState;
 /// making any classification decisions of their own.
 #[derive(Debug, Clone)]
 pub(crate) struct IngestionRoute {
-    /// Origin CLI: "claude_code", "gemini_cli", "codex_cli", "pty_jsonl"
+    /// Origin CLI: "claude_code", "gemini_cli", "codex_cli"
     pub source: String,
     /// Domain type: "user", "worker", "meta", "subagent", "compaction"
     pub conversation_type: String,
@@ -63,13 +63,20 @@ pub(crate) async fn classify(
         .filter(|cwd| !cwd.is_empty())
         .unwrap_or(project_path);
 
+    let canonical_event_source = match event_source {
+        "claude_cli" | "pty_jsonl" => "claude_code",
+        other => other,
+    };
+
     let mut is_pty = state.pty_session_uuids.read().await.contains(session_id);
     let mut compaction = CompactionInfo::default();
 
     // Expectation ticket claim: if this is a new claude_code session, check if a slot
     // recently spawned in the same project. Late-binding resolves the cross-process race
     // where Claude Code generates a UUID that MissionD cannot predict.
-    if !is_pty && (event_source == "claude_code" || event_source == "gemini_cli") {
+    if !is_pty
+        && (canonical_event_source == "claude_code" || canonical_event_source == "gemini_cli")
+    {
         if let Some(slot_id) = claim_pending_spawn(state, resolved_project, messages).await {
             info!(
                 session_id,
@@ -90,7 +97,9 @@ pub(crate) async fn classify(
     // Compaction detection: a non-PTY session that actually belongs to a slot
     // (context compaction creates a new session_id for the same slot).
     // Only applies to Claude Code sessions — Gemini CLI has no compaction mechanism.
-    if !is_pty && (event_source == "claude_code" || event_source == "gemini_cli") {
+    if !is_pty
+        && (canonical_event_source == "claude_code" || canonical_event_source == "gemini_cli")
+    {
         if let Some((slot_id, old_uuid, old_task_id)) =
             detect_compaction(state, session_id, jsonl_path).await
         {
@@ -127,16 +136,20 @@ pub(crate) async fn classify(
         None
     };
 
-    // Determine source: PTY Claude Code → "pty_jsonl", others pass through
-    let source = if is_pty && event_source == "claude_code" {
-        "pty_jsonl".to_string()
-    } else {
-        event_source.to_string()
-    };
+    // Determine source: provider canonical name. `pty_jsonl` is a legacy
+    // transport alias and must not be written as a new conversation source.
+    let source = canonical_event_source.to_string();
 
     // Determine conversation_type via the central brain
-    let conversation_type =
-        missiond_core::db::derive_conversation_type(slot_id.as_deref().and_then(|id| state.mission.get_slot_category(id)).as_deref(), slot_id.as_deref(), session_id, event_source);
+    let conversation_type = missiond_core::db::derive_conversation_type(
+        slot_id
+            .as_deref()
+            .and_then(|id| state.mission.get_slot_category(id))
+            .as_deref(),
+        slot_id.as_deref(),
+        session_id,
+        canonical_event_source,
+    );
 
     // Extract parent session ID: compaction inherits from predecessor,
     // subagent extracts from JSONL path structure.

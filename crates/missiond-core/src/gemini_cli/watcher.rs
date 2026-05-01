@@ -1,6 +1,6 @@
 //! GeminiCliWatcher — monitors Gemini CLI session files for new messages.
 //!
-//! Parallel to CCTasksWatcher: watches ~/.gemini/tmp/*/chats/*.json,
+//! Parallel to CCTasksWatcher: watches ~/.gemini/tmp/*/chats/*.{json,jsonl},
 //! detects incremental messages via message-count cursor (not byte offset),
 //! converts to CCMessageLine, and emits WatcherEvent::NewMessages into the
 //! shared broadcast channel consumed by ConversationLoggerWorker.
@@ -84,7 +84,9 @@ impl GeminiCliWatcher {
     /// ConversationLoggerWorker confirms PG insert. This is the ONLY path
     /// that advances the Gemini cursor in the database.
     pub fn persist_cursor_ack(&self, file_path: &str, msg_count: u64) {
-        let _ = self.cursor_persist_tx.send((file_path.to_string(), msg_count));
+        let _ = self
+            .cursor_persist_tx
+            .send((file_path.to_string(), msg_count));
     }
 
     /// Start the watcher. Loads project map, restores cursors, scans existing files,
@@ -143,7 +145,7 @@ impl GeminiCliWatcher {
         tokio::spawn(async move {
             while let Some(event) = rx.recv().await {
                 for path in &event.paths {
-                    // Only process session JSON files
+                    // Only process session JSON/JSONL files
                     if !is_session_file(path) {
                         // Check if projects.json changed → hot-reload project map
                         if path.ends_with("projects.json") {
@@ -154,14 +156,8 @@ impl GeminiCliWatcher {
                         continue;
                     }
 
-                    process_file_change(
-                        path,
-                        &project_map,
-                        &msg_cursors,
-                        &session_ids,
-                        &event_tx,
-                    )
-                    .await;
+                    process_file_change(path, &project_map, &msg_cursors, &session_ids, &event_tx)
+                        .await;
                 }
             }
         });
@@ -196,7 +192,10 @@ impl GeminiCliWatcher {
         }
 
         if anchored > 0 {
-            info!(anchored, "Gemini CLI initial scan: anchored new file cursors");
+            info!(
+                anchored,
+                "Gemini CLI initial scan: anchored new file cursors"
+            );
         }
     }
 
@@ -248,7 +247,10 @@ impl GeminiCliWatcher {
         }
 
         if caught_up > 0 {
-            info!(caught_up, "Gemini CLI startup catchup: emitted pending messages");
+            info!(
+                caught_up,
+                "Gemini CLI startup catchup: emitted pending messages"
+            );
         }
     }
 }
@@ -376,7 +378,7 @@ fn is_session_file(path: &Path) -> bool {
     let Some(ext) = path.extension() else {
         return false;
     };
-    if ext != "json" {
+    if !matches!(ext.to_str(), Some("json" | "jsonl")) {
         return false;
     }
     let Some(name) = path.file_name().and_then(|n| n.to_str()) else {

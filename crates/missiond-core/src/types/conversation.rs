@@ -13,7 +13,7 @@ pub struct Conversation {
     pub project_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub slot_id: Option<String>,
-    pub source: String, // "claude_cli" | "pty"
+    pub source: String, // canonical: "claude_code" | "gemini_cli" | "codex_cli"
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,7 +66,9 @@ pub struct Conversation {
     pub timeline_built_at: Option<String>,
 }
 
-fn default_conversation_type() -> String { "user".to_string() }
+fn default_conversation_type() -> String {
+    "user".to_string()
+}
 
 /// A message within a conversation
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,7 +120,9 @@ pub struct ConversationMessage {
     pub role_display: Option<String>,
 }
 
-fn is_false(v: &bool) -> bool { !v }
+fn is_false(v: &bool) -> bool {
+    !v
+}
 
 /// Map DB role + flags to human-readable display name.
 pub fn role_display(role: &str, has_tool_use: bool) -> &'static str {
@@ -158,7 +162,7 @@ pub struct ConversationEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallRecord {
-    pub id: String,              // tool_use_id from Claude API
+    pub id: String, // tool_use_id from Claude API
     pub session_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_id: Option<i64>, // FK to conversation_messages
@@ -171,7 +175,7 @@ pub struct ToolCallRecord {
     pub output_summary: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub raw_output: Option<String>,
-    pub status: String,          // pending, success, error
+    pub status: String, // pending, success, error
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration_ms: Option<i64>,
     pub timestamp: String,

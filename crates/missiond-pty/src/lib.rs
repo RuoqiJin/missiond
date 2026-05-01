@@ -10,6 +10,7 @@
 pub mod anomaly;
 mod extractor;
 mod manager;
+mod pty_recognition;
 pub mod screenshot;
 mod session;
 
@@ -19,6 +20,9 @@ pub use extractor::{
 pub use manager::{
     ManagerEvent, ManagerStats, PTYAgentInfo, PTYExecuteResult, PTYManager, PTYSpawnOptions,
     PermissionPolicy, Slot,
+};
+pub use pty_recognition::{
+    recognize_screen, session_state_snapshot, PtyCanonicalState, PtyRecognitionSnapshot,
 };
 pub use session::{
     ConfirmInfo, ConfirmResponse, Message, MessageRole, PTYSession, PTYSessionOptions,
