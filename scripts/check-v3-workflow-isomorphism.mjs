@@ -113,6 +113,8 @@ function checkFiles(root, files) {
     ':status "code-aligned"',
     'distill dry_run emits workflow-draft Lisp',
     'sonnet distiller requires JSON workflow_sexp + object match_rules',
+    'mission_workflow sonnet distiller compiler_model labels',
+    'router-runtime-policy queued_sonnet_model',
     'distill persist+write_file writes an enriched V3 workflow artifact',
     ':body workflow_sexp',
     'compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp',
@@ -261,17 +263,27 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.workflowDistill, sources.workflowDistill, [
+    'RouterRuntimeConfig',
+    'fn load_sonnet_compiler_model',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'queued_sonnet_model',
     'pub(super) enum DistillMode',
     'pub(super) fn parse_distill_mode',
     'pub(super) async fn action_distill',
     'async fn action_distill_dry_run',
     'pub(super) async fn action_distill_sonnet',
     'build_distiller_prompt(plan, name, &match_hint, &evidence_value)',
+    'load_sonnet_compiler_model()',
+    '"compiler_model": compiler_model',
     'pub(super) enum EvidenceOutcome',
     'pub(super) fn evidence_sidecar_path',
     'pub(super) fn read_evidence_sidecar',
     'pub(super) fn validate_workflow_sexp',
     'pub(super) fn paren_balanced_ignoring_strings',
+  ]);
+  forbidAll(diagnostics, files.workflowDistill, sources.workflowDistill, [
+    'const SONNET_COMPILER_MODEL',
+    'SONNET_COMPILER_MODEL: &str = "claude-sonnet"',
   ]);
 
   requireAll(diagnostics, files.workflowMethodology, sources.workflowMethodology, [
@@ -437,6 +449,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden contract text present: ${needle}` });
+    }
+  }
+}
+
 function requireText(diagnostics, file, source, needle) {
   if (!source.includes(needle)) {
     diagnostics.push({ file, message: `missing required contract text: ${needle}` });
@@ -474,6 +494,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/workflow/run_methodology.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/store_actions.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs"]
+      :model-projection "mission_workflow sonnet distiller compiler_model labels project from router-runtime-policy queued_sonnet_model"
       :note "workflow/distill.rs owns DistillMode and action_distill. distill dry_run emits workflow-draft Lisp; sonnet distiller requires JSON workflow_sexp + object match_rules; distill persist+write_file writes an enriched V3 workflow artifact with :body workflow_sexp; workflow/run_methodology.rs owns parse_run_methodology_record_intent and methodology_execution_record_payload; workflow/methodology.rs is the compile_methodology facade; methodology/types.rs owns methodology compiler data shapes; methodology/source.rs owns methodology path/source/hash/flow resolution; methodology/extract.rs owns step and higher-order form lifting; methodology/yaml.rs owns generated executable YAML projection; methodology/io.rs owns unique temp path and atomic write. compile_methodology reads methodology Lisp from .missiond/workflows/<name>.lisp; persist+write_file path now also projects the methodology compile through render_workflow_artifact_sexp with :match_rules carrying source_kind=methodology / compiler / compiler_version / source_hash / flow_id, :status compiled, :body methodology lisp body, instead of canonicalizing the raw methodology source — no Workflow DB row is introduced; ArtifactKind::Workflow; run_methodology returns artifact_only_no_workflow_row unless caller supplies workflow_id, then records workflow_record_execution(success=true,cost_usd?); workflow/auto_chain/recorder.rs owns the wave-19 explicit recorder; workflow/auto_chain/rules.rs owns deterministic auto-trigger rule evaluation; workflow/auto_sonnet.rs owns the wave-21 dual opt-in gate; workflow/auto_sonnet/policy.rs owns auto_sonnet_policy={off|safe_after_rules|dry_run}; workflow/review_resolution.rs owns resolve_review and WorkflowSubscriberOutcome"))
   (compression-contract
     :checks ["node scripts/check-v3-workflow-isomorphism.mjs"]))`);
@@ -569,6 +590,12 @@ fn parse_auto_sonnet_policy() { "safe_after_rules"; }
 mod tests;
 `);
   writeFixture(root, DEFAULT_FILES.workflowDistill, `
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
+fn load_sonnet_compiler_model() {
+  let router_config = RouterRuntimeConfig::load_for_current_dir().unwrap();
+  let _ = "V3_BLUEPRINT_CONFIG_ERROR";
+  let _ = router_config.queued_sonnet_model;
+}
 pub(super) enum DistillMode {}
 pub(super) fn parse_distill_mode() {
   Some("dry_run") => Ok(DistillMode::DryRun);
@@ -583,6 +610,8 @@ async fn action_distill_dry_run() {
 }
 pub(super) async fn action_distill_sonnet() {
   build_distiller_prompt(plan, name, &match_hint, &evidence_value);
+  let compiler_model = load_sonnet_compiler_model().unwrap();
+  "compiler_model": compiler_model;
   "workflow_sexp";
   validate_workflow_sexp(&workflow_sexp);
   "match_rules";

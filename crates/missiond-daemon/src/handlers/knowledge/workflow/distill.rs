@@ -4,12 +4,13 @@
 //! sidecar gate, workflow_sexp validation, and auto-chain handoff. The parent
 //! `workflow.rs` remains the action facade.
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use missiond_core::types::{Plan, PlanStatus};
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, parse_compile_review_gate, parse_review_gate_policy,
     review_gate_policy_was_explicit,
@@ -25,8 +26,13 @@ use super::auto_sonnet::{parse_auto_sonnet_policy, validate_auto_sonnet_args};
 use super::{parse_id_arg, resolve_project_root_from_args};
 
 const EVIDENCE_DIR: &str = ".missiond/v2/plans";
-const SONNET_COMPILER_MODEL: &str = "claude-sonnet";
 const DISTILLER_MAX_TOKENS: u32 = 2048;
+
+fn load_sonnet_compiler_model() -> Result<String> {
+    RouterRuntimeConfig::load_for_current_dir()
+        .map(|config| config.queued_sonnet_model)
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum DistillMode {
@@ -402,11 +408,12 @@ pub(super) async fn action_distill_sonnet(
 
     let summary = parsed.get("summary").and_then(|v| v.as_str()).unwrap_or("");
     let reusability_score = parsed.get("reusability_score").and_then(|v| v.as_f64());
+    let compiler_model = load_sonnet_compiler_model()?;
 
     let mut payload = json!({
         "status": "distilled",
         "distill_mode": "sonnet",
-        "compiler_model": SONNET_COMPILER_MODEL,
+        "compiler_model": compiler_model,
         "flow_ref": "F-intent-alignment-plan-execution-loop :: s8 workflow-distillation (sonnet actor v0) / F-directive-plan-workflow-compile :: workflow distill branch",
         "plan_id": plan.id,
         "name_hint": name,
