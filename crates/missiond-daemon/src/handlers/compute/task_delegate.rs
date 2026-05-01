@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use missiond_core::event::events::BoardEvent;
 use missiond_core::pty::SessionState;
 use missiond_core::types::CreateBoardTaskInput;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
@@ -248,13 +249,28 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         ..Default::default()
     };
 
-    let task_id = state
+    let task = state
         .store
         .create_board_task(&input)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
+    let task_id = task.id.to_string();
 
-    // 5. Trigger immediate dispatch (don't wait 60s autopilot tick)
+    // 5. Emit the canonical event-bus cause. The Autopilot subscriber
+    // converts BoardEvent::TaskCreated into board_dispatch_notify, so
+    // delegated work is driven by the same nervous-system path as explicit
+    // mission_board_create calls.
+    let _ = state
+        .bus
+        .publish_board(BoardEvent::TaskCreated {
+            task_id: task_id.clone(),
+            title: input.title.clone(),
+            category: input.category.clone().unwrap_or_else(|| "dev".to_string()),
+        })
+        .await;
+
+    // Legacy local fast-path while older producers finish moving to bus
+    // causality. Duplicate Notify wakeups are coalesced and harmless.
     state.board_dispatch_notify.notify_one();
 
     Ok(ToolResult::json_pretty(&json!({

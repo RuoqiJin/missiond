@@ -17,7 +17,7 @@
 //   mission_execution-log, mission_execution-claim-lease,
 //   mission_execution-completion-audit, mission_workflow, review-gate,
 //   task-runner-cli, source-hygiene, context-pack, workstation-config,
-//   workstation-dispatch, mission_board, memory-kb, project-registry,
+//   autopilot-runtime, workstation-dispatch, mission_board, memory-kb, project-registry,
 //   conversation-ingestion, skill-runtime, cascade-governance,
 //   router-policy, incident-governance, capability-governance,
 //   compute-primitives, sysinfra-control, ops-infra.
@@ -53,6 +53,7 @@ export const EXPECTED_SURFACES = [
   'source-hygiene',
   'context-pack',
   'workstation-config',
+  'autopilot-runtime',
   'workstation-dispatch',
   'mission_board',
   'memory-kb',
@@ -101,6 +102,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-source-hygiene-isomorphism.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
   'scripts/check-v3-workstation-config-isomorphism.mjs',
+  'scripts/check-v3-autopilot-runtime-isomorphism.mjs',
   'scripts/check-v3-workstation-dispatch-isomorphism.mjs',
   'scripts/check-v3-board-isomorphism.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
@@ -481,6 +483,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface autopilot-runtime
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface workstation-dispatch
       :status "code-aligned"
       :code ["a"]
@@ -536,7 +542,7 @@ function runDryFixture(opts) {
   (compression-contract
     :checks ["${AGGREGATE_COMMAND}"]))`;
   cases.push({
-    name: 'good fixture: all twenty-eight surfaces code-aligned, aggregate command pinned',
+    name: 'good fixture: all twenty-nine surfaces code-aligned, aggregate command pinned',
     expectOk: true,
     source: goodSource,
   });
@@ -613,6 +619,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface workstation-config
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface autopilot-runtime
       :status "code-aligned"
       :code ["a"]
       :note "n")

@@ -377,7 +377,43 @@
                :worker_committed :draft_reported :parent_patched
                :verification_pending :verified :report_finalized :complete
                :blocked :stale :failed :abandoned :superseded]
-      :completion-rule "complete iff final-report is finalized, final commit matches lineage, and required receipts are valid"))
+      :completion-rule "complete iff final-report is finalized, final commit matches lineage, and required receipts are valid")
+
+    (state-machine delegated-boardtask-runtime
+      :initial :queued
+      :terminal [:done :blocked :failed :skipped]
+      :derived-from [BoardEvent SlotEvent ExecutionEvent]
+      :states [:queued :event_woken :eligible :claimed :slot_selected
+               :prompt_sent :running :completed :completion_audited
+               :done :blocked :failed :skipped]
+      (transition :queued -> :event_woken
+        :event [BoardEvent::TaskCreated SlotEvent::BecameIdle]
+        :actor event-bus-subscriber
+        :effect "notify dedicated Autopilot dispatch task without running pty.send inline")
+      (transition :event_woken -> :eligible
+        :actor autopilot-runtime
+        :reads [board_task dependency_state slot_state global_pause])
+      (transition :eligible -> :claimed
+        :actor autopilot-runtime
+        :writes [board_claim lease])
+      (transition :claimed -> :slot_selected
+        :actor autopilot-runtime
+        :writes [assignee dispatch_guard])
+      (transition :slot_selected -> :prompt_sent
+        :actor autopilot-runtime
+        :emits [SlotEvent::TaskDispatched])
+      (transition :prompt_sent -> :running
+        :actor worker-slot)
+      (transition :running -> :completed
+        :actor worker-slot
+        :emits [ExecutionEvent::Completed])
+      (transition :completed -> :completion_audited
+        :actor autopilot-runtime
+        :writes [mission_execution completion-note])
+      (transition :completion_audited -> :done
+        :actor autopilot-runtime
+        :writes [BoardEvent::StatusChanged])
+      :completion-rule "A delegated BoardTask is complete only after Autopilot observes worker completion or self-close, reconciles mission_execution completion, and emits the final BoardEvent status transition."))
 
   (policies
     (policy risk-gate
@@ -587,6 +623,50 @@
         "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins when the runtime slot is absent and the dynamic_slots row is not active, using BoardStore::clear_board_task_assignee before normal no-assignee routing resumes."
       :rationale
         "Wave33 evidence: a delegated BoardTask was sent twice — once via spawner.initial_prompt fire-and-forget, then again via Autopilot pty.send — and the slot's TextOutputEvent::Complete arrived without Autopilot transitioning the BoardTask to done. Single ownership of prompt+close eliminates the orphaned-task class entirely."))
+
+  (event-causality-runtime
+    :desc "MissionD nervous-system contract: every meaningful runtime transition emits an event with causal ancestry, and downstream muscles subscribe to events instead of polling hidden state."
+    :event-chain
+      ((user-message
+         :event MessageEvent::Logged
+         :causes [mission-request-created intent-alignment-drafted])
+       (mission-request-created
+         :event RequestEvent::Created
+         :caused-by MessageEvent::Logged
+         :causes [intent-alignment-drafted])
+       (intent-alignment-drafted
+         :event ArtifactEvent::Written
+         :caused-by mission-request-created
+         :causes [plan-drafted])
+       (plan-drafted
+         :event ArtifactEvent::Written
+         :caused-by intent-alignment-approved
+         :causes [task-runner-manifest-materialized])
+       (task-runner-manifest-materialized
+         :event TaskRunnerEvent::ManifestMaterialized
+         :caused-by plan-approved
+         :causes [BoardEvent::TaskCreated])
+       (board-task-created
+         :event BoardEvent::TaskCreated
+         :caused-by task-runner-manifest-materialized
+         :triggers [autopilot-runtime.dispatch-boardtask])
+       (slot-became-idle
+         :event SlotEvent::BecameIdle
+         :triggers [autopilot-runtime.dispatch-boardtask])
+       (boardtask-prompt-sent
+         :event SlotEvent::TaskDispatched
+         :caused-by BoardEvent::TaskCreated
+         :causes [ExecutionEvent::Completed BoardEvent::StatusChanged]))
+    :autopilot-trigger-contract
+      "BoardEvent::TaskCreated, BoardEvent::Updated(status=open), BoardEvent::StatusChanged(new_status=open), and SlotEvent::BecameIdle MUST wake Autopilot through event-bus subscribers. Subscribers only notify the dedicated Autopilot task and ack immediately; they MUST NOT run pty.send inline."
+    :causation-rule
+      "Every generated artifact/event should preserve a predecessor handle when the producer has one. Missing causation is allowed only at external ingress boundaries such as the first user message."
+    :implementation ["crates/missiond-daemon/src/bus/v2_subscribers.rs"
+                     "crates/missiond-daemon/src/handlers/knowledge/board/events.rs"
+                     "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+                     "crates/missiond-core/src/event/events/board.rs"
+                     "crates/missiond-core/src/event/events/slot.rs"]
+    :checker "node scripts/check-v3-autopilot-runtime-isomorphism.mjs")
 
   (autopilot-policy
     :desc "Lisp-owned Autopilot operational windows; tick/reaper/watchdog/consciousness timings are runtime projections, not independent Rust literals."
@@ -928,6 +1008,13 @@
       :v3-function workstation-config
       :surface workstation-config
       :note "V2 workstation policy now has explicit V3 model/profile, timeout, prompt, ownership, and close-owner contracts; mission_task_delegate reads V3 workstation-config through WorkstationRuntimeConfig::load_for_project_root for model-profile and timeout projection.")
+    (v2-item event-driven-autopilot-runtime
+      :status code-aligned
+      :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router / BoardTaskCreated / SlotBecameIdle"
+      :v3-pillar workstation
+      :v3-function delegated-boardtask-runtime
+      :surface autopilot-runtime
+      :note "V2 event-router intent is promoted into V3 Autopilot runtime: BoardEvent and SlotEvent subscribers wake delegated BoardTask dispatch through the event bus, preserving the existing dedicated Autopilot task as the pty.send owner.")
     (v2-item workstation-dispatch-substrate
       :status code-aligned
       :v2-source ".missiond/v2/intent.lisp :: workstation-dispatch-v0"
@@ -1293,6 +1380,15 @@
                (step s2 :logic "project BoardTask timeout into pty send budget, watchdog, and claim lease")
                (step s3 :logic "send BoardTask prompt through Autopilot-owned pty path with per-slot exclusion"))
         :egress [dynamic_slot board_task_dispatch close_action kb_feedback])
+      (function delegated-boardtask-runtime
+        :surface autopilot-runtime
+        :entry [BoardEvent.TaskCreated BoardEvent.StatusChanged SlotEvent.BecameIdle board_dispatch_notify autopilot.dispatch_board_tasks]
+        :core ((step s1 :logic "subscribe to event-bus BoardEvent and SlotEvent nerves")
+               (step s2 :logic "wake the dedicated Autopilot task without running pty.send inside the subscriber")
+               (step s3 :logic "claim eligible BoardTask rows, select or provision slots, and hold per-slot dispatch guards")
+               (step s4 :logic "send prompts once through Autopilot, emit SlotEvent::TaskDispatched, and reconcile mission_execution completion")
+               (step s5 :logic "close BoardTask through Autopilot-owned status transition or preserve worker self-close/blocked states"))
+        :egress [BoardEvent SlotEvent ExecutionEvent board_task_status mission_execution_completion])
       (function workstation-dispatch
         :surface workstation-dispatch
         :entry [mission_plan.execute_internal run_workstation_dispatch_with_contract_and_trace]
@@ -1805,6 +1901,18 @@
              "crates/missiond-mcp/src/tools/compute/task_delegate.rs"]
       :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. main.rs startup SlotManager registration loads WorkstationRuntimeConfig and generates persistent SlotTaskConfig rows by iterating workstation-config startup-slot entries; ClaudeCode startup slots project their model_profile through spawn_model_for_profile, so arch maintenance and Lisp survey no longer hardcode claude-sonnet-4-6 or local timeout literals. task_delegate loads .missiond/v3/missiond-blueprint.lisp via context/v3_blueprint_runtime.rs and projects workstation-config slot-template default-model-profile plus timeout-policy boardtask-dispatch into delegated BoardTask rows; if a real MissionD project has .missiond but lacks V3 blueprint/workstation-config, dispatch returns V3_BLUEPRINT_CONFIG_ERROR instead of silently falling back. compute_slot objective is metadata only; direct warmup requires explicit initial_prompt, and delegated task_delegate auto-provision still carries suppress_initial_prompt=true. Dynamic slot template role/description/mcp/default-cwd, cwd allow-list, spawn wait_for_idle timeout, TTL, and extension budget are projected through workstation-config slot-template/cwd-policy/timeout-policy dynamic-slot-spawn/ttl-policy dynamic-slot for direct compute_slot create/extend, Claude/Gemini slot-orchestrator spawn, and delegated task_delegate auto-provision; task_delegate uses the V3 default/clamp path instead of a local timeout-derived TTL formula, and compute_slot extend uses the stored dynamic slot project_root to load the same V3 policy instead of a local 3600s constant. mission_cc_swarm uses timeout-policy claudecode-swarm through WorkstationRuntimeConfig::clamp_cc_swarm_timeout_ms, loading the target slot project_root/cwd so the old 600_000ms default is now Lisp-owned. spawn_tracked_slot now syncs MissionD Claude hooks project-locally via slot_env::sync_slot_hooks_to_local_settings, preserving permissions and existing hooks while adding SessionStart session-register + UserPromptSubmit context-prefetch before PTY start; build_slot_tracking_env injects MISSION_IPC_ENDPOINT so hooks reconnect to the active daemon instead of relying on stale global defaults. Autopilot pty.send budget, smart-watchdog idle-recovery threshold, and Autopilot BoardTask claim lease are now projections of BoardTask.timeout_secs (default 1800s, clamp 60..7200, watchdog grace 120s); the no-PTY-session branch retains a 120s probe window for missing slot processes — see derive_pty_timeout_secs / idle_watchdog_threshold_secs / derive_board_task_lease_secs in autopilot.rs. AutopilotRuntimeConfig also loads autopilot-policy for tick/reaper/dispatch/consciousness windows: stale conversation completion, stale slot-task reaping, stale running fallback, slot failure throttle, deploy-review pty.send timeout, dynamic-slot expiring-soon warning, stale board progress reminders, completed-job GC, idle persistent-slot scale-to-zero, recent-intents window, and proactive cooldowns are now Lisp-owned. The fixed 20-minute claim lease is gone; the lease now equals idle_watchdog_threshold_secs so the watchdog cannot reclaim a slot whose claim is still legitimately ticking inside its declared timeout. Autopilot prompt assembly projects the V3 prompt-tool-contract via build_base_prompt (objective dedupe) and append_board_task_id_suffix (conditional board self-close); the prompt no longer hardcodes mission_board_update / mission_board_note_add as unconditional must-calls. The V3 execution-ownership rule for delegated BoardTasks projects to: compute_slot::effective_initial_prompt + explicit initial_prompt + suppress_initial_prompt arg (delegated path starts the slot idle), task_delegate::auto_provision_slot create_args carrying suppress_initial_prompt=true, and autopilot dispatch_board_tasks holding an OwnedSlotDispatchGuard across state.pty.send + post-send tail inside a tokio::task::JoinSet send-task so different-slot sends run concurrently within a single dispatch tick while same-slot exclusion still covers the full close-owner / KB-feedback / deploy-review sequence, with decide_close_action preserving Done self-close and Blocked question states. Restart recovery clears stale slot-dyn-* BoardTask assignee pins via BoardStore::clear_board_task_assignee before normal no-assignee routing resumes.")
 
+    (surface autopilot-runtime
+      :status "code-aligned"
+      :implements [delegated-boardtask-runtime event-driven-autopilot-handoff]
+      :code ["crates/missiond-daemon/src/bus/v2_subscribers.rs"
+             "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
+             "crates/missiond-daemon/src/handlers/compute/task_delegate.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/events.rs"
+             "crates/missiond-core/src/event/events/board.rs"
+             "crates/missiond-core/src/event/events/slot.rs"
+             "scripts/check-v3-autopilot-runtime-isomorphism.mjs"]
+      :note "autopilot-runtime is the event-driven muscle layer for delegated BoardTasks. task_delegate and mission_board_create publish BoardEvent::TaskCreated; v2_subscribers owns the event-bus nerves v2_autopilot_board_event and v2_autopilot_slot_event, which wake board_dispatch_notify on BoardEvent::TaskCreated, reopened BoardEvent status updates, and SlotEvent::BecameIdle, then ack immediately without running pty.send inline. The dedicated Autopilot task remains the only prompt/close owner: it claims eligible open BoardTasks, derives leases/timeouts from V3 policy, holds a per-slot dispatch guard across state.pty.send, emits SlotEvent::TaskDispatched, synthesizes mission_execution completion when needed, and closes/preserves the BoardTask according to execution-ownership delegated-boardtask. This preserves the event-bus causal chain while keeping long-running worker interaction outside subscriber ack paths.")
+
     (surface workstation-dispatch
       :status "code-aligned"
       :implements [workstation-dispatch substrate-dispatch audit-dispatch]
@@ -2093,6 +2201,7 @@
              "node scripts/check-v3-source-hygiene-isomorphism.mjs"
              "node scripts/check-v3-context-pack-isomorphism.mjs"
              "node scripts/check-v3-workstation-config-isomorphism.mjs"
+             "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
              "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
              "node scripts/check-v3-board-isomorphism.mjs"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"

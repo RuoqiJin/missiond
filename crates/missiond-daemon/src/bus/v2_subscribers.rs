@@ -49,8 +49,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use missiond_core::event::events::{
-    ExecutionEvent, IncidentEvent, MemoryEvent, MessageEvent, QuestionEvent, SessionEndStatus,
-    SessionEvent, SlotEvent, TaskEvent, WorkerEvent,
+    BoardEvent, ExecutionEvent, IncidentEvent, MemoryEvent, MessageEvent, QuestionEvent,
+    SessionEndStatus, SessionEvent, SlotEvent, TaskEvent, WorkerEvent,
 };
 use missiond_core::event::subscription::{Subscription, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
@@ -60,12 +60,9 @@ use tracing::{debug, info, warn};
 use crate::bus::BusServices;
 use crate::decision_engine::process_pending_master_questions;
 use crate::experience_harvester;
-use crate::extraction::{
-    check_deep_analysis, check_kb_consolidation, check_realtime_extraction,
-};
+use crate::extraction::{check_deep_analysis, check_kb_consolidation, check_realtime_extraction};
 use crate::handlers::knowledge::directive::{
-    handle_review_resolved_event as directive_handle_review_resolved,
-    DirectiveSubscriberOutcome,
+    handle_review_resolved_event as directive_handle_review_resolved, DirectiveSubscriberOutcome,
 };
 use crate::handlers::knowledge::plan::{
     handle_review_resolved_event as plan_handle_review_resolved, PlanSubscriberOutcome,
@@ -78,8 +75,7 @@ use crate::handlers::knowledge::review_gate::{
     is_plan_node_review_action, plan_review_resolved_dispatch, ReviewResolvedDispatch,
 };
 use crate::handlers::knowledge::workflow::{
-    handle_review_resolved_event as workflow_handle_review_resolved,
-    WorkflowSubscriberOutcome,
+    handle_review_resolved_event as workflow_handle_review_resolved, WorkflowSubscriberOutcome,
 };
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, schedule_memory_tasks};
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
@@ -94,6 +90,8 @@ pub(crate) fn start_v2_subscribers(
     // Group A — event_router consumers (8 subs).
     spawn_extraction_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_submit_sub(bus.clone(), state.clone(), shutdown_rx.clone());
+    spawn_autopilot_board_event_sub(bus.clone(), state.clone(), shutdown_rx.clone());
+    spawn_autopilot_slot_event_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_decision_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_harvest_sub(bus.clone(), state.clone(), shutdown_rx.clone());
     spawn_realtime_extraction_sub(bus.clone(), state.clone(), shutdown_rx.clone());
@@ -120,14 +118,21 @@ pub(crate) fn start_v2_subscribers(
     // Strictly observation-only — never publishes / mutates DB.
     spawn_event_ref_cache_sub(bus.clone(), shutdown_rx.clone());
 
-    info!("v2 event-bus subscribers started (8 router consumers + 1 incident reactor + 1 review-resolution listener + 1 event-ref cache populator)");
+    info!("v2 event-bus subscribers started (8 router consumers + 2 autopilot handoff nerves + 1 incident reactor + 1 review-resolution listener + 1 event-ref cache populator)");
 }
 
 /// Incident reactor — subscribes to IncidentEvent and triages via
 /// `aiops::process_incident`. Replaces the old `incident_rx` MPSC consumer.
-fn spawn_incident_reactor(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
+fn spawn_incident_reactor(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<IncidentEvent>(&bus, "v2_incident_reactor", "incident_reactor").await else {
+        let Some(mut sub) =
+            subscribe_or_warn::<IncidentEvent>(&bus, "v2_incident_reactor", "incident_reactor")
+                .await
+        else {
             return;
         };
         info!("v2[incident_reactor]: subscription live");
@@ -170,9 +175,15 @@ async fn subscribe_or_warn<T: DomainEvent>(
 }
 
 /// Router A1 — extraction: SlotEvent::BecameIdle for memory slots → schedule.
-fn spawn_extraction_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
+fn spawn_extraction_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<SlotEvent>(&bus, "v2_router_extraction", "router_extraction").await else {
+        let Some(mut sub) =
+            subscribe_or_warn::<SlotEvent>(&bus, "v2_router_extraction", "router_extraction").await
+        else {
             return;
         };
         info!("v2[extraction]: subscription live");
@@ -201,7 +212,9 @@ fn spawn_extraction_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: wa
 /// Router A2 — submit: TaskEvent::Created / Completed → dispatch queued tasks.
 fn spawn_submit_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<TaskEvent>(&bus, "v2_router_submit", "router_submit").await else {
+        let Some(mut sub) =
+            subscribe_or_warn::<TaskEvent>(&bus, "v2_router_submit", "router_submit").await
+        else {
             return;
         };
         info!("v2[submit]: subscription live");
@@ -226,10 +239,99 @@ fn spawn_submit_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch:
     });
 }
 
+/// Autopilot nerve A — BoardTask writes should wake board dispatch through the
+/// event bus. The subscriber only nudges the dedicated Autopilot task and then
+/// acks; it never runs `dispatch_board_tasks` inline, because a real pty.send
+/// can legitimately last for the BoardTask timeout window.
+fn spawn_autopilot_board_event_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let Some(mut sub) = subscribe_or_warn::<BoardEvent>(
+            &bus,
+            "v2_autopilot_board_event",
+            "autopilot_board_event",
+        )
+        .await
+        else {
+            return;
+        };
+        info!("v2[autopilot_board_event]: subscription live");
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    if board_event_should_wake_autopilot(ack.event()) {
+                        state.board_dispatch_notify.notify_one();
+                    }
+                    ack.ack().await;
+                }
+            }
+        }
+        info!("v2[autopilot_board_event]: shutdown");
+    });
+}
+
+/// Autopilot nerve B — a slot becoming idle is the other natural trigger for
+/// queued BoardTasks. This duplicates the legacy direct notify path
+/// intentionally: event-bus causality is now the canonical path, while the
+/// direct notify remains a harmless fast-path until every producer has moved
+/// to pure bus emission.
+fn spawn_autopilot_slot_event_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let Some(mut sub) =
+            subscribe_or_warn::<SlotEvent>(&bus, "v2_autopilot_slot_event", "autopilot_slot_event")
+                .await
+        else {
+            return;
+        };
+        info!("v2[autopilot_slot_event]: subscription live");
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    if slot_event_should_wake_autopilot(ack.event()) {
+                        state.board_dispatch_notify.notify_one();
+                    }
+                    ack.ack().await;
+                }
+            }
+        }
+        info!("v2[autopilot_slot_event]: shutdown");
+    });
+}
+
+fn board_event_should_wake_autopilot(event: &BoardEvent) -> bool {
+    match event {
+        BoardEvent::TaskCreated { .. } => true,
+        BoardEvent::Updated { status, .. } => status.eq_ignore_ascii_case("open"),
+        BoardEvent::StatusChanged { new_status, .. } => new_status.eq_ignore_ascii_case("open"),
+        BoardEvent::NoteAdded { .. } | BoardEvent::Claimed { .. } | BoardEvent::Deleted { .. } => {
+            false
+        }
+    }
+}
+
+fn slot_event_should_wake_autopilot(event: &SlotEvent) -> bool {
+    matches!(event, SlotEvent::BecameIdle { .. })
+}
+
 /// Router A3 — decision: QuestionEvent::Created → process pending.
 fn spawn_decision_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<QuestionEvent>(&bus, "v2_router_decision", "router_decision").await else {
+        let Some(mut sub) =
+            subscribe_or_warn::<QuestionEvent>(&bus, "v2_router_decision", "router_decision").await
+        else {
             return;
         };
         info!("v2[decision]: subscription live");
@@ -254,7 +356,9 @@ fn spawn_decision_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watc
 /// Router A4 — harvest: WorkerEvent::NarrationSessionCompleted → harvester.
 fn spawn_harvest_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<WorkerEvent>(&bus, "v2_router_harvest", "router_harvest").await else {
+        let Some(mut sub) =
+            subscribe_or_warn::<WorkerEvent>(&bus, "v2_router_harvest", "router_harvest").await
+        else {
             return;
         };
         info!("v2[harvest]: subscription live");
@@ -278,9 +382,19 @@ fn spawn_harvest_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch
 
 /// Router A5 — realtime extraction: MessageEvent::Logged → trigger extraction.
 /// Uses the 3-second debounce combinator.
-fn spawn_realtime_extraction_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
+fn spawn_realtime_extraction_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
-        let Some(sub) = subscribe_or_warn::<MessageEvent>(&bus, "v2_router_realtime_extraction", "router_realtime_extraction").await else {
+        let Some(sub) = subscribe_or_warn::<MessageEvent>(
+            &bus,
+            "v2_router_realtime_extraction",
+            "router_realtime_extraction",
+        )
+        .await
+        else {
             return;
         };
         let mut sub = sub.debounce(Duration::from_secs(3));
@@ -311,9 +425,19 @@ fn spawn_realtime_extraction_sub(bus: Arc<BusServices>, state: AppState, mut shu
 
 /// Router A6 — session reflection: SessionEvent::Completed{Success} → notify
 /// strategy/retro + run deep analysis. 5-second debounce.
-fn spawn_session_reflection_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
+fn spawn_session_reflection_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
-        let Some(sub) = subscribe_or_warn::<SessionEvent>(&bus, "v2_router_session_reflection", "router_session_reflection").await else {
+        let Some(sub) = subscribe_or_warn::<SessionEvent>(
+            &bus,
+            "v2_router_session_reflection",
+            "router_session_reflection",
+        )
+        .await
+        else {
             return;
         };
         let mut sub = sub.debounce(Duration::from_secs(5));
@@ -347,9 +471,19 @@ fn spawn_session_reflection_sub(bus: Arc<BusServices>, state: AppState, mut shut
 
 /// Router A7 — KB consolidation: MemoryEvent::DeepAnalysisCompleted →
 /// accumulate N=5 then trigger consolidation.
-fn spawn_kb_consolidation_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
+fn spawn_kb_consolidation_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<MemoryEvent>(&bus, "v2_router_kb_consolidation", "router_kb_consolidation").await else {
+        let Some(mut sub) = subscribe_or_warn::<MemoryEvent>(
+            &bus,
+            "v2_router_kb_consolidation",
+            "router_kb_consolidation",
+        )
+        .await
+        else {
             return;
         };
         info!("v2[kb_consolidation]: subscription live (threshold=5)");
@@ -387,9 +521,19 @@ fn spawn_kb_consolidation_sub(bus: Arc<BusServices>, state: AppState, mut shutdo
 /// debounce (5 min) or accumulation (5 turns) → analysis. Uses a manual
 /// loop because the v1 version carries per-session state that combinators
 /// don't express directly.
-fn spawn_intent_analyst_sub(bus: Arc<BusServices>, state: AppState, mut shutdown: watch::Receiver<bool>) {
+fn spawn_intent_analyst_sub(
+    bus: Arc<BusServices>,
+    state: AppState,
+    mut shutdown: watch::Receiver<bool>,
+) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<MemoryEvent>(&bus, "v2_router_intent_analyst", "router_intent_analyst").await else {
+        let Some(mut sub) = subscribe_or_warn::<MemoryEvent>(
+            &bus,
+            "v2_router_intent_analyst",
+            "router_intent_analyst",
+        )
+        .await
+        else {
             return;
         };
         info!("v2[intent_analyst]: subscription live");
@@ -424,15 +568,26 @@ fn spawn_intent_analyst_sub(bus: Arc<BusServices>, state: AppState, mut shutdown
             let now = Instant::now();
             let expired: Vec<String> = pending
                 .iter()
-                .filter(|(_, (ts, count))| now.duration_since(*ts) >= DEBOUNCE || *count >= MAX_ACCUM)
+                .filter(|(_, (ts, count))| {
+                    now.duration_since(*ts) >= DEBOUNCE || *count >= MAX_ACCUM
+                })
                 .map(|(id, _)| id.clone())
                 .collect();
             for session_id in expired {
                 pending.remove(&session_id);
-                if state.control_manager.current().is_provider_paused(crate::control_tree::CtlProvider::Sonnet) {
+                if state
+                    .control_manager
+                    .current()
+                    .is_provider_paused(crate::control_tree::CtlProvider::Sonnet)
+                {
                     continue;
                 }
-                match crate::engine::learning_engine::intent_analyst::process_session_intents(&state, &session_id).await {
+                match crate::engine::learning_engine::intent_analyst::process_session_intents(
+                    &state,
+                    &session_id,
+                )
+                .await
+                {
                     Ok(count) if count > 0 => {
                         debug!(session = %session_id, intents = count, "v2[intent_analyst]: analysis complete");
                     }
@@ -479,12 +634,9 @@ fn spawn_review_resolution_sub(
     mut shutdown: watch::Receiver<bool>,
 ) {
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<QuestionEvent>(
-            &bus,
-            "v2_review_resolution",
-            "review_resolution",
-        )
-        .await
+        let Some(mut sub) =
+            subscribe_or_warn::<QuestionEvent>(&bus, "v2_review_resolution", "review_resolution")
+                .await
         else {
             return;
         };
@@ -543,8 +695,7 @@ async fn handle_review_resolved(state: &AppState, question_id: &str, resolution:
         }
         ReviewResolvedDispatch::Route { parsed, decision } => match parsed.scope.as_str() {
             "directive" => {
-                let outcome =
-                    directive_handle_review_resolved(state, &parsed, decision).await;
+                let outcome = directive_handle_review_resolved(state, &parsed, decision).await;
                 log_directive_outcome(question_id, &outcome);
             }
             "plan" => {
@@ -557,18 +708,15 @@ async fn handle_review_resolved(state: &AppState, question_id: &str, resolution:
                 // unsupported scope already failed earlier in the
                 // planner; we only need to split here.
                 if is_plan_node_review_action(&parsed.action) {
-                    let outcome =
-                        plan_node_handle_review_resolved(state, &parsed, decision).await;
+                    let outcome = plan_node_handle_review_resolved(state, &parsed, decision).await;
                     log_plan_node_resume_outcome(question_id, &outcome);
                 } else {
-                    let outcome =
-                        plan_handle_review_resolved(state, &parsed, decision).await;
+                    let outcome = plan_handle_review_resolved(state, &parsed, decision).await;
                     log_plan_outcome(question_id, &outcome);
                 }
             }
             "workflow" => {
-                let outcome =
-                    workflow_handle_review_resolved(state, &parsed, decision).await;
+                let outcome = workflow_handle_review_resolved(state, &parsed, decision).await;
                 log_workflow_outcome(question_id, &outcome);
             }
             other => {
@@ -730,7 +878,10 @@ fn log_plan_node_resume_outcome(qid: &str, outcome: &PlanNodeResumeListenerOutco
 
 fn log_workflow_outcome(qid: &str, outcome: &WorkflowSubscriberOutcome) {
     match outcome {
-        WorkflowSubscriberOutcome::PersistedReceipt { workflow_id, decision } => {
+        WorkflowSubscriberOutcome::PersistedReceipt {
+            workflow_id,
+            decision,
+        } => {
             info!(question_id = %qid, workflow_id = %workflow_id, decision = decision.as_str(), "v2[review_resolution]: workflow persisted receipt (no DB transition; row has no status column)");
         }
         WorkflowSubscriberOutcome::MethodologyReceipt { flow_id, decision } => {
@@ -774,12 +925,9 @@ fn log_workflow_outcome(qid: &str, outcome: &WorkflowSubscriberOutcome) {
 fn spawn_event_ref_cache_sub(bus: Arc<BusServices>, mut shutdown: watch::Receiver<bool>) {
     let resolver = bus.event_ref_resolver.clone();
     tokio::spawn(async move {
-        let Some(mut sub) = subscribe_or_warn::<ExecutionEvent>(
-            &bus,
-            "v2_event_ref_cache",
-            "event_ref_cache",
-        )
-        .await
+        let Some(mut sub) =
+            subscribe_or_warn::<ExecutionEvent>(&bus, "v2_event_ref_cache", "event_ref_cache")
+                .await
         else {
             return;
         };
@@ -839,6 +987,51 @@ mod tests {
     use crate::handlers::knowledge::review_gate::ReviewDecision;
 
     #[test]
+    fn board_events_wake_autopilot_only_for_new_or_reopened_work() {
+        assert!(board_event_should_wake_autopilot(
+            &BoardEvent::TaskCreated {
+                task_id: "t".to_string(),
+                title: "do it".to_string(),
+                category: "dev".to_string(),
+            }
+        ));
+        assert!(board_event_should_wake_autopilot(
+            &BoardEvent::StatusChanged {
+                task_id: "t".to_string(),
+                old_status: "blocked".to_string(),
+                new_status: "Open".to_string(),
+            }
+        ));
+        assert!(board_event_should_wake_autopilot(&BoardEvent::Updated {
+            task_id: "t".to_string(),
+            status: "open".to_string(),
+            category: "dev".to_string(),
+        }));
+        assert!(!board_event_should_wake_autopilot(&BoardEvent::NoteAdded {
+            task_id: "t".to_string(),
+            note_id: "n".to_string(),
+            content_preview: "done".to_string(),
+        }));
+    }
+
+    #[test]
+    fn slot_became_idle_wakes_autopilot() {
+        assert!(slot_event_should_wake_autopilot(&SlotEvent::BecameIdle {
+            slot_id: "slot-a".to_string(),
+        }));
+        assert!(!slot_event_should_wake_autopilot(
+            &SlotEvent::TaskDispatched {
+                slot_id: "slot-a".to_string(),
+                task_id: Some("t".to_string()),
+                purpose: "board_auto_execute".to_string(),
+                prompt_chars: 10,
+                preview: "x".to_string(),
+                cited_kb_ids: Vec::new(),
+            }
+        ));
+    }
+
+    #[test]
     fn dispatch_routes_resident_three_scopes_per_envelope() {
         // Pin the assumption that the planner only routes on the three
         // wave-14 scopes; the subscriber's match arm relies on this.
@@ -863,10 +1056,8 @@ mod tests {
         // A wave-14-shaped review id with garbage resolution string MUST
         // hit IgnoreUnknownResolution rather than Route — this is the
         // "no auto-approve for arbitrary text" guarantee.
-        let d = plan_review_resolved_dispatch(
-            "review:directive:abc:v1:approve",
-            "looks-good-to-me",
-        );
+        let d =
+            plan_review_resolved_dispatch("review:directive:abc:v1:approve", "looks-good-to-me");
         assert!(matches!(
             d,
             ReviewResolvedDispatch::IgnoreUnknownResolution { .. }
@@ -893,10 +1084,7 @@ mod tests {
         use crate::handlers::knowledge::review_gate::is_plan_node_review_action;
 
         // Manager-action id — NOT routed through the resume helper.
-        let d = plan_review_resolved_dispatch(
-            "review:plan:abc:v1:approve",
-            "approved",
-        );
+        let d = plan_review_resolved_dispatch("review:plan:abc:v1:approve", "approved");
         match d {
             ReviewResolvedDispatch::Route { parsed, .. } => {
                 assert_eq!(parsed.scope, "plan");
@@ -921,4 +1109,3 @@ mod tests {
         }
     }
 }
-
