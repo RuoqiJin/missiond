@@ -1,6 +1,7 @@
 use tracing::{debug, info, warn};
 
 use crate::bus::BusServices;
+use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
 use crate::engine::intent_engine::{request_default_slot, request_execution_slot};
 use crate::state::{AppState, ExtractionPhase, ExtractionState};
 use crate::state::{CURRENT_ANALYSIS_VERSION, MAX_ANALYSIS_RETRIES};
@@ -10,6 +11,16 @@ use crate::supervisor::{is_auth_error, is_quota_exhausted};
 use missiond_core::event::events::{MemoryEvent, SlotEvent};
 use missiond_core::SessionState;
 use std::sync::Arc;
+
+fn load_learning_engine_config() -> Option<LearningEngineRuntimeConfig> {
+    match LearningEngineRuntimeConfig::load_for_current_dir() {
+        Ok(config) => Some(config),
+        Err(err) => {
+            warn!(error = %err, "Learning Engine: V3 learning-engine-policy unavailable");
+            None
+        }
+    }
+}
 
 /// Helper: update extraction phase and publish MemoryPhaseChanged event with trace context.
 fn set_extraction_phase(
@@ -33,12 +44,7 @@ fn set_extraction_phase(
 }
 
 /// Helper: emit SlotTaskDispatched event for timeline visibility.
-fn emit_dispatch_event(
-    bus: &Arc<BusServices>,
-    slot_id: &str,
-    purpose: &str,
-    prompt: &str,
-) {
+fn emit_dispatch_event(bus: &Arc<BusServices>, slot_id: &str, purpose: &str, prompt: &str) {
     let preview = if prompt.len() > 200 {
         let mut end = 200;
         while end > 0 && !prompt.is_char_boundary(end) {
@@ -67,6 +73,9 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     if !check_extraction_gate(&state.extraction_state, state, "realtime").await {
         return;
     }
+    let Some(config) = load_learning_engine_config() else {
+        return;
+    };
 
     // Priority enforcement: unified scheduler guarantees submit tasks run before this.
     // Skip if slot-memory is occupied by a running submit task (spawn_blocking: batch scan).
@@ -220,8 +229,9 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     let extraction_state = Arc::clone(&state.extraction_state);
     let store = Arc::clone(&state.store);
     let slot_task_id_clone = slot_task_id;
+    let timeout_ms = config.realtime_extraction_timeout_ms();
     tokio::spawn(async move {
-        match pty.send(MEMORY_SLOT_ID, &prompt, 300_000).await {
+        match pty.send(MEMORY_SLOT_ID, &prompt, timeout_ms).await {
             Ok(res) => {
                 if is_auth_error(&res.response) || is_quota_exhausted(&res.response) {
                     let reason = if is_quota_exhausted(&res.response) {
@@ -511,12 +521,7 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         }
 
         // Emit dispatch event for timeline visibility
-        emit_dispatch_event(
-            &state.bus,
-            MEMORY_SLOW_SLOT_ID,
-            "deep_analysis",
-            &prompt,
-        );
+        emit_dispatch_event(&state.bus, MEMORY_SLOW_SLOT_ID, "deep_analysis", &prompt);
 
         let conv_id = conv.id.clone();
         let pty = Arc::clone(&state.pty);
@@ -601,6 +606,9 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
 /// KB consolidation on slow lane (slot-memory-slow).
 /// Periodic (every 24h) KB dedup, merge, and cleanup.
 pub(crate) async fn check_kb_consolidation(state: &AppState) {
+    let Some(config) = load_learning_engine_config() else {
+        return;
+    };
     // Only run once per 24 hours (persisted in DB to survive daemon restarts)
     let now = chrono::Utc::now().timestamp();
     if let Ok(Some(last)) = state
@@ -608,7 +616,7 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
         .last_completed_slot_task_at("kb_consolidation")
         .await
     {
-        if now - last < 86400 {
+        if now - last < config.kb_consolidation_interval_secs {
             return;
         }
     }
@@ -776,6 +784,9 @@ pub(crate) async fn check_kb_consolidation(state: &AppState) {
 
 /// KB auto-GC: delete infra, expired bugfix, stale zero-access entries. Runs hourly.
 pub(crate) async fn check_kb_auto_gc(state: &AppState) {
+    let Some(config) = load_learning_engine_config() else {
+        return;
+    };
     let now = chrono::Utc::now().timestamp();
     let last = state
         .store
@@ -783,7 +794,7 @@ pub(crate) async fn check_kb_auto_gc(state: &AppState) {
         .await
         .unwrap_or(None)
         .unwrap_or(0);
-    if now - last < 3600 {
+    if now - last < config.kb_auto_gc_interval_secs {
         return;
     }
 
@@ -797,12 +808,10 @@ pub(crate) async fn check_kb_auto_gc(state: &AppState) {
 
 /// Phase 4c: Weekly LLM reflection on low-utility KB entries.
 /// Sonnet diagnoses why certain KBs underperform and recommends actions.
-const KB_REFLECTION_INTERVAL_SECS: i64 = 7 * 86400; // 7 days
-const KB_REFLECTION_UTILITY_THRESHOLD: f64 = 0.3;
-const KB_REFLECTION_MIN_ACCESS: i64 = 3;
-const KB_REFLECTION_MAX_ENTRIES: usize = 20;
-
 pub(crate) async fn check_kb_reflection(state: &AppState) {
+    let Some(config) = load_learning_engine_config() else {
+        return;
+    };
     let now = chrono::Utc::now().timestamp();
     let last = state
         .store
@@ -810,7 +819,7 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
         .await
         .unwrap_or(None)
         .unwrap_or(0);
-    if now - last < KB_REFLECTION_INTERVAL_SECS {
+    if now - last < config.kb_reflection_interval_secs {
         return;
     }
 
@@ -825,9 +834,9 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
     let entries = match state
         .store
         .kb_list_low_utility(
-            KB_REFLECTION_UTILITY_THRESHOLD,
-            KB_REFLECTION_MIN_ACCESS,
-            KB_REFLECTION_MAX_ENTRIES,
+            config.kb_reflection_utility_threshold,
+            config.kb_reflection_min_access,
+            config.kb_reflection_max_entries,
         )
         .await
     {
@@ -890,7 +899,11 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
     }];
 
     let analysis = match sonnet
-        .call_briefing(messages, Some(2000), Some("kb-reflection".to_string()))
+        .call_briefing(
+            messages,
+            Some(config.kb_reflection_max_tokens),
+            Some("kb-reflection".to_string()),
+        )
         .await
     {
         Ok(resp) => resp,
@@ -926,7 +939,7 @@ pub(crate) async fn check_kb_reflection(state: &AppState) {
             Some("delete") => {
                 // Gemini ARB safety net: verify utility is actually low before trusting LLM delete verdict
                 if let Ok(Some(entry)) = state.store.kb_get_by_id(id).await {
-                    if entry.utility_score >= KB_REFLECTION_UTILITY_THRESHOLD {
+                    if entry.utility_score >= config.kb_reflection_utility_threshold {
                         warn!(
                             kb_id = id,
                             utility = entry.utility_score,

@@ -615,6 +615,36 @@
       ["mission_memory_pending MUST project batch size and preview truncation lengths from memory-kb-policy."
        "A real MissionD project with .missiond but no memory-kb-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (learning-engine-policy
+    :desc "Lisp-owned autonomous learning engine cadence, pty budget, and low-utility reflection policy."
+    :realtime-extraction-timeout-secs 300
+    :decision-tier3-timeout-secs 300
+    :habit-scan-timeout-secs 600
+    :timeline-analysis-interval-secs 43200
+    :timeline-analysis-window-hours 12
+    :timeline-error-limit 20
+    :timeline-llm-sample-limit 50
+    :timeline-slow-event-limit 20
+    :timeline-slow-threshold-ms 60000
+    :idle-explore-interval-secs 7200
+    :habit-scan-interval-secs 14400
+    :habit-scan-batch-size 5
+    :kb-auto-gc-interval-secs 3600
+    :kb-consolidation-interval-secs 86400
+    :kb-reflection-interval-secs 604800
+    :kb-reflection-utility-threshold 0.3
+    :kb-reflection-min-access 3
+    :kb-reflection-max-entries 20
+    :kb-reflection-max-tokens 2000
+    :decision-harvest-interval-secs 86400
+    :cooccurrence-refresh-interval-secs 21600
+    :invariants
+      ["LearningEngineRuntimeConfig MUST load learning-engine-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
+       "Realtime extraction, Tier3 decision escalation, and historical habit scan pty.send budgets MUST project from learning-engine-policy."
+       "Learning maintenance cadences (timeline analysis, idle exploration, habit scan, KB auto-GC, KB consolidation, KB reflection, decision harvest, co-occurrence refresh) MUST project from learning-engine-policy."
+       "Timeline analysis read windows, event limits, and slow-request threshold MUST project from learning-engine-policy."
+       "KB reflection low-utility threshold, minimum access count, max entries, and max_tokens MUST project from learning-engine-policy."])
+
   (conversation-ingestion-policy
     :desc "Lisp-owned read-model window and limit defaults for conversation, event, and timeline query surfaces."
     :conversation-get-tail-default 50
@@ -1143,7 +1173,7 @@
       (function knowledge-memory
         :surface memory-kb
         :entry [mission_kb_query mission_kb_remember mission_kb_mutate mission_kb_ops mission_beacon mission_code_search mission_memory mission_insight mission_intent]
-        :core ((step s1 :logic "load memory-kb-policy for realtime extraction batch and preview budgets")
+        :core ((step s1 :logic "load memory-kb-policy and learning-engine-policy for realtime extraction batch, preview budgets, learning cadences, and pty send budgets")
                (step s2 :logic "resolve project/global memory scope and normalize KB or intent query")
                (step s3 :logic "read or mutate durable knowledge rows through one Lisp-described memory contract")
                (step s4 :logic "project search, beacon, insight, and memory responses into reviewable evidence"))
@@ -1698,6 +1728,12 @@
              "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
              "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
+             "crates/missiond-daemon/src/engine/learning_engine/mod.rs"
+             "crates/missiond-daemon/src/engine/learning_engine/extraction.rs"
+             "crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs"
+             "crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs"
+             "crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs"
+             "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs"
              "crates/missiond-daemon/src/handlers/knowledge/insight.rs"
              "crates/missiond-daemon/src/handlers/knowledge/intent.rs"
              "crates/missiond-mcp/src/tools/knowledge/kb.rs"
@@ -1705,7 +1741,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for the legacy memory/KB public tools. context/v3_blueprint_runtime.rs projects memory-kb-policy realtime extraction batch size and preview truncation budgets into mission_memory runtime. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress; memory.rs owns mission_memory pending/pause/status with V3 memory-kb-policy projection.")
+	      :note "Runtime-projected V3 destination for the legacy memory/KB public tools. context/v3_blueprint_runtime.rs projects memory-kb-policy realtime extraction batch size and preview truncation budgets into mission_memory runtime, and projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress; memory.rs owns mission_memory pending/pause/status with V3 memory-kb-policy projection; learning_engine/mod.rs owns decision harvest and co-occurrence cadence; extraction.rs owns realtime extraction, KB consolidation, auto-GC, and KB reflection projection; decision_engine.rs owns Tier3 pty budget projection; timeline_analyst.rs owns analysis window/limit projection; idle_explorer.rs and historical_scanner.rs own autonomous exploration and habit-scan cadence projection.")
 
     (surface project-registry
       :status "code-aligned"

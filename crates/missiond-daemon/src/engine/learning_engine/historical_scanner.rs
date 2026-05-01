@@ -6,6 +6,7 @@
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
 use crate::engine::intent_engine::request_execution_slot;
 use crate::state::{AppState, MEMORY_SLOW_SLOT_ID};
 use missiond_core::event::events::{MemoryEvent, SlotEvent};
@@ -13,14 +14,18 @@ use missiond_core::SessionState;
 
 /// Cadence guard key for daemon_state.
 const LAST_HABIT_SCAN_KEY: &str = "last_habit_scan_at";
-/// Minimum interval between scans (4 hours).
-const HABIT_SCAN_INTERVAL_SECS: i64 = 4 * 3600;
-/// Max conversations per scan batch.
-const BATCH_SIZE: usize = 5;
 
 /// Check if we should run a historical habit scan.
 /// Gates: 4h cadence, no high-priority work, slow slot idle, unscanned conversations exist.
 pub(crate) async fn check_historical_scan(state: &AppState) {
+    let config = match LearningEngineRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            warn!(error = %err, "habit_scan: V3 learning-engine-policy unavailable");
+            return;
+        }
+    };
+
     // Gate 1: 4h cadence
     let now = chrono::Utc::now().timestamp();
     let last = state
@@ -29,7 +34,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
         .await
         .unwrap_or(None)
         .unwrap_or(0);
-    if now - last < HABIT_SCAN_INTERVAL_SECS {
+    if now - last < config.habit_scan_interval_secs {
         return;
     }
 
@@ -80,7 +85,11 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     }
 
     // Fetch batch of unscanned conversations
-    let convs = match state.store.get_unscanned_conversations(BATCH_SIZE).await {
+    let convs = match state
+        .store
+        .get_unscanned_conversations(config.habit_scan_batch_size)
+        .await
+    {
         Ok(c) if !c.is_empty() => c,
         Ok(_) => return,
         Err(e) => {
@@ -138,7 +147,7 @@ pub(crate) async fn check_historical_scan(state: &AppState) {
     let ids = session_ids.clone();
 
     tokio::spawn(async move {
-        let timeout_ms = 600_000u64; // 10 min for batch
+        let timeout_ms = config.habit_scan_timeout_ms();
         match pty.send(MEMORY_SLOW_SLOT_ID, &prompt, timeout_ms).await {
             Ok(result) => {
                 info!(

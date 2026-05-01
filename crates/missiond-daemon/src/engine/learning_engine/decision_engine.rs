@@ -3,6 +3,7 @@ use std::sync::atomic::Ordering;
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
 use crate::engine::intent_engine::request_execution_slot;
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::state::AppState;
@@ -495,7 +496,9 @@ pub(crate) async fn decision_tier1_kb(
             // Scheduling signal (wake submit consumer)
             let _ = state
                 .bus
-                .publish_task(TaskEvent::Created { task_id: String::new() })
+                .publish_task(TaskEvent::Created {
+                    task_id: String::new(),
+                })
                 .await;
             // Semantic trace: decision resolved
             let _ = state
@@ -580,7 +583,9 @@ pub(crate) async fn decision_tier1_kb(
         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
     let _ = state
         .bus
-        .publish_task(TaskEvent::Created { task_id: String::new() })
+        .publish_task(TaskEvent::Created {
+            task_id: String::new(),
+        })
         .await;
     let _ = state
         .bus
@@ -684,7 +689,9 @@ pub(crate) async fn decision_tier2_gemini(
                         .map_err(|e| anyhow!("Failed to answer: {}", e))?;
                     let _ = state
                         .bus
-                        .publish_task(TaskEvent::Created { task_id: String::new() })
+                        .publish_task(TaskEvent::Created {
+                            task_id: String::new(),
+                        })
                         .await;
                     let _ = state
                         .bus
@@ -804,8 +811,9 @@ pub(crate) async fn decision_tier3_dispatch(
     };
     let _ = state.store.insert_slot_task(&slot_task).await;
 
-    // Send prompt to slot-decision PTY
-    let timeout_ms = 300_000; // 5 min
+    // Send prompt to slot-decision PTY using the V3 learning-engine policy.
+    let timeout_ms =
+        LearningEngineRuntimeConfig::load_for_current_dir()?.decision_tier3_timeout_ms();
     match state.pty.send(slot_id, &prompt, timeout_ms).await {
         Ok(_) => {
             info!(question_id = %question.id, slot_task_id = %slot_task.id,

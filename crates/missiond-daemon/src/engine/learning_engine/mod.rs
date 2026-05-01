@@ -11,8 +11,9 @@ pub mod idle_explorer;
 pub mod intent_analyst;
 pub mod timeline_analyst;
 
+use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
 use crate::state::AppState;
-use tracing::info;
+use tracing::{info, warn};
 
 /// Learning Engine periodic tick — called from autopilot_tick.
 ///
@@ -22,6 +23,14 @@ use tracing::info;
 /// - Decision harvester checkpoint (24h)
 /// - Timeline analyst (12h cadence)
 pub(crate) async fn learning_tick(state: &AppState) {
+    let config = match LearningEngineRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            warn!(error = %err, "Learning Engine: V3 learning-engine-policy unavailable");
+            return;
+        }
+    };
+
     // KB auto-GC: every hour (internal cadence guard)
     extraction::check_kb_auto_gc(state).await;
 
@@ -37,7 +46,7 @@ pub(crate) async fn learning_tick(state: &AppState) {
             .await
             .unwrap_or(None)
             .unwrap_or(0);
-        if now - last > 86400 {
+        if now - last > config.decision_harvest_interval_secs {
             let _ = state
                 .store
                 .daemon_state_set("last_decision_harvest_at", now)
@@ -71,7 +80,7 @@ pub(crate) async fn learning_tick(state: &AppState) {
             .await
             .unwrap_or(None)
             .unwrap_or(0);
-        if now - last > 6 * 3600 {
+        if now - last > config.cooccurrence_refresh_interval_secs {
             let _ = state
                 .store
                 .daemon_state_set("last_cooccurrence_refresh", now)

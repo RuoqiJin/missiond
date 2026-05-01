@@ -11,16 +11,22 @@ use serde::{Deserialize, Serialize};
 use std::sync::atomic::Ordering;
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
 use crate::llm_gateway::call_gemini_for_flow;
 use crate::state::AppState;
-use missiond_core::event::events::SystemEvent;
 use missiond_core::db::TimelineRow;
-
-const ANALYSIS_INTERVAL_SECS: i64 = 12 * 3600; // 12 hours
+use missiond_core::event::events::SystemEvent;
 
 /// Check if timeline analysis is due and run it.
 /// Called from autopilot_tick every 60s.
 pub(crate) async fn check_timeline_analysis(state: &AppState) {
+    let config = match LearningEngineRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            warn!(error = %err, "Timeline Analyst: V3 learning-engine-policy unavailable");
+            return;
+        }
+    };
     let now = chrono::Utc::now().timestamp();
     let last = state
         .store
@@ -28,13 +34,13 @@ pub(crate) async fn check_timeline_analysis(state: &AppState) {
         .await
         .unwrap_or(None)
         .unwrap_or(0);
-    if now - last < ANALYSIS_INTERVAL_SECS {
+    if now - last < config.timeline_analysis_interval_secs {
         return;
     }
     // Do NOT update timestamp here — only after success (Gemini review requirement)
 
     info!("Timeline Analyst: starting periodic analysis");
-    match run_analysis(state).await {
+    match run_analysis(state, &config).await {
         Ok(count) => {
             info!(insights = count, "Timeline Analyst: analysis complete");
             let _ = state
@@ -68,11 +74,15 @@ struct AnalysisData {
     slow_gemini: Vec<TimelineRow>,
 }
 
-async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
+async fn collect_analysis_data(
+    state: &AppState,
+    config: &LearningEngineRuntimeConfig,
+) -> Result<AnalysisData> {
+    let window = config.timeline_window_arg();
     // 1. Timeline stats (12h window)
     let stats = state
         .store
-        .query_timeline_stats(Some("12h"), None)
+        .query_timeline_stats(Some(window.as_str()), None)
         .await
         .map_err(|e| anyhow::anyhow!("timeline stats: {}", e))?;
 
@@ -84,7 +94,12 @@ async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
     // 2. Error events (LIMIT 20 — Gemini review: strict limits)
     let error_events = state
         .store
-        .query_timeline_search("error", Some("12h"), None, 20)
+        .query_timeline_search(
+            "error",
+            Some(window.as_str()),
+            None,
+            config.timeline_error_limit,
+        )
         .await
         .unwrap_or_default();
 
@@ -98,9 +113,9 @@ async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
         .query_timeline_filtered(
             Some("llm::legacy_gemini_request_completed"),
             None,
-            Some("12h"),
+            Some(window.as_str()),
             None,
-            50,
+            config.timeline_llm_sample_limit,
             0,
         )
         .await
@@ -108,8 +123,8 @@ async fn collect_analysis_data(state: &AppState) -> Result<AnalysisData> {
 
     let slow_gemini: Vec<TimelineRow> = all_gemini
         .into_iter()
-        .filter(|r| extract_duration_ms(r) > 60_000)
-        .take(20)
+        .filter(|r| extract_duration_ms(r) > config.timeline_slow_threshold_ms)
+        .take(config.timeline_slow_event_limit)
         .collect();
 
     // 4. Decision stats from atomic counters
@@ -152,8 +167,8 @@ fn extract_duration_ms(row: &TimelineRow) -> i64 {
 
 // ── Analysis Core ──
 
-async fn run_analysis(state: &AppState) -> Result<usize> {
-    let data = collect_analysis_data(state).await?;
+async fn run_analysis(state: &AppState, config: &LearningEngineRuntimeConfig) -> Result<usize> {
+    let data = collect_analysis_data(state, config).await?;
 
     // Local pre-filter: skip Gemini if insufficient data
     if data.total_events < 10 && data.error_events.is_empty() {
@@ -161,7 +176,7 @@ async fn run_analysis(state: &AppState) -> Result<usize> {
         return Ok(0);
     }
 
-    let prompt = build_analysis_prompt(&data);
+    let prompt = build_analysis_prompt(&data, config);
     let response = call_gemini_for_flow(state, "timeline-analysis", &prompt).await?;
     let insights = parse_insights(&response);
 
@@ -176,7 +191,7 @@ async fn run_analysis(state: &AppState) -> Result<usize> {
 
 // ── Prompt Construction ──
 
-fn build_analysis_prompt(data: &AnalysisData) -> String {
+fn build_analysis_prompt(data: &AnalysisData, config: &LearningEngineRuntimeConfig) -> String {
     // Truncate event description to max chars (Gemini review: ≤500 chars/event)
     fn truncate_event(row: &TimelineRow, max_chars: usize) -> String {
         let payload_preview: String = row.payload.chars().take(300).collect();
@@ -227,10 +242,13 @@ fn build_analysis_prompt(data: &AnalysisData) -> String {
             .join("\n")
     };
 
+    let slow_threshold_secs = config.timeline_slow_threshold_ms / 1000;
+    let p90_warning_secs = slow_threshold_secs.saturating_mul(2);
+
     format!(
         r#"你是 MissionD 系统运维分析师。当前时间: {}。
 
-分析以下 12 小时时间轴数据，识别模式并提出改进建议。
+分析以下 {} 小时时间轴数据，识别模式并提出改进建议。
 
 ## 事件统计
 - 总事件数: {}
@@ -246,7 +264,7 @@ fn build_analysis_prompt(data: &AnalysisData) -> String {
 ## 异常事件 ({} 条)
 {}
 
-## 慢 Gemini >60s ({} 条)
+## 慢 Gemini >{}s ({} 条)
 {}
 
 输出 JSON 数组（0-5 条 Insight，只输出可操作的）：
@@ -255,10 +273,11 @@ fn build_analysis_prompt(data: &AnalysisData) -> String {
 规则：
 - 无问题 → 返回空数组 []
 - T1 miss 率 > 40% → 高优先级 KB 补充建议
-- Gemini p90 > 120s → 性能告警
+- Gemini p90 > {}s → 性能告警
 - 错误事件 > 5 → 趋势告警
 - 只报告可操作的 insight，不报告"一切正常""#,
         chrono::Utc::now().to_rfc3339(),
+        config.timeline_analysis_window_hours,
         data.total_events,
         type_distribution,
         data.traced_events,
@@ -270,8 +289,10 @@ fn build_analysis_prompt(data: &AnalysisData) -> String {
         data.t3_dispatched,
         data.error_events.len(),
         error_summary,
+        slow_threshold_secs,
         data.slow_gemini.len(),
         slow_summary,
+        p90_warning_secs,
     )
 }
 

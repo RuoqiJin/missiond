@@ -86,6 +86,27 @@ pub(crate) const DEFAULT_AUTOPILOT_IDLE_PERSISTENT_SLOT_SECS: u64 = 30 * 60;
 pub(crate) const DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS: i64 = 1800;
 pub(crate) const DEFAULT_AUTOPILOT_USER_STUCK_COOLDOWN_SECS: i64 = 1800;
 pub(crate) const DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS: i64 = 3600;
+pub(crate) const DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS: u64 = 300;
+pub(crate) const DEFAULT_LEARNING_DECISION_TIER3_TIMEOUT_SECS: u64 = 300;
+pub(crate) const DEFAULT_LEARNING_HABIT_SCAN_TIMEOUT_SECS: u64 = 600;
+pub(crate) const DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS: i64 = 12 * 3600;
+pub(crate) const DEFAULT_LEARNING_TIMELINE_ANALYSIS_WINDOW_HOURS: i64 = 12;
+pub(crate) const DEFAULT_LEARNING_TIMELINE_ERROR_LIMIT: i64 = 20;
+pub(crate) const DEFAULT_LEARNING_TIMELINE_LLM_SAMPLE_LIMIT: i64 = 50;
+pub(crate) const DEFAULT_LEARNING_TIMELINE_SLOW_EVENT_LIMIT: usize = 20;
+pub(crate) const DEFAULT_LEARNING_TIMELINE_SLOW_THRESHOLD_MS: i64 = 60_000;
+pub(crate) const DEFAULT_LEARNING_IDLE_EXPLORE_INTERVAL_SECS: i64 = 2 * 3600;
+pub(crate) const DEFAULT_LEARNING_HABIT_SCAN_INTERVAL_SECS: i64 = 4 * 3600;
+pub(crate) const DEFAULT_LEARNING_HABIT_SCAN_BATCH_SIZE: usize = 5;
+pub(crate) const DEFAULT_LEARNING_KB_AUTO_GC_INTERVAL_SECS: i64 = 3600;
+pub(crate) const DEFAULT_LEARNING_KB_CONSOLIDATION_INTERVAL_SECS: i64 = 86400;
+pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_INTERVAL_SECS: i64 = 7 * 86400;
+pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD: f64 = 0.3;
+pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MIN_ACCESS: i64 = 3;
+pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MAX_ENTRIES: usize = 20;
+pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MAX_TOKENS: u32 = 2000;
+pub(crate) const DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS: i64 = 86400;
+pub(crate) const DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS: i64 = 6 * 3600;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -189,6 +210,31 @@ pub(crate) struct AutopilotRuntimeConfig {
     pub recent_intents_window_secs: i64,
     pub user_stuck_cooldown_secs: i64,
     pub direction_shift_cooldown_secs: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LearningEngineRuntimeConfig {
+    pub realtime_extraction_timeout_secs: u64,
+    pub decision_tier3_timeout_secs: u64,
+    pub habit_scan_timeout_secs: u64,
+    pub timeline_analysis_interval_secs: i64,
+    pub timeline_analysis_window_hours: i64,
+    pub timeline_error_limit: i64,
+    pub timeline_llm_sample_limit: i64,
+    pub timeline_slow_event_limit: usize,
+    pub timeline_slow_threshold_ms: i64,
+    pub idle_explore_interval_secs: i64,
+    pub habit_scan_interval_secs: i64,
+    pub habit_scan_batch_size: usize,
+    pub kb_auto_gc_interval_secs: i64,
+    pub kb_consolidation_interval_secs: i64,
+    pub kb_reflection_interval_secs: i64,
+    pub kb_reflection_utility_threshold: f64,
+    pub kb_reflection_min_access: i64,
+    pub kb_reflection_max_entries: usize,
+    pub kb_reflection_max_tokens: u32,
+    pub decision_harvest_interval_secs: i64,
+    pub cooccurrence_refresh_interval_secs: i64,
 }
 
 #[derive(Debug)]
@@ -379,6 +425,34 @@ impl Default for AutopilotRuntimeConfig {
             recent_intents_window_secs: DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS,
             user_stuck_cooldown_secs: DEFAULT_AUTOPILOT_USER_STUCK_COOLDOWN_SECS,
             direction_shift_cooldown_secs: DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS,
+        }
+    }
+}
+
+impl Default for LearningEngineRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            realtime_extraction_timeout_secs: DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS,
+            decision_tier3_timeout_secs: DEFAULT_LEARNING_DECISION_TIER3_TIMEOUT_SECS,
+            habit_scan_timeout_secs: DEFAULT_LEARNING_HABIT_SCAN_TIMEOUT_SECS,
+            timeline_analysis_interval_secs: DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS,
+            timeline_analysis_window_hours: DEFAULT_LEARNING_TIMELINE_ANALYSIS_WINDOW_HOURS,
+            timeline_error_limit: DEFAULT_LEARNING_TIMELINE_ERROR_LIMIT,
+            timeline_llm_sample_limit: DEFAULT_LEARNING_TIMELINE_LLM_SAMPLE_LIMIT,
+            timeline_slow_event_limit: DEFAULT_LEARNING_TIMELINE_SLOW_EVENT_LIMIT,
+            timeline_slow_threshold_ms: DEFAULT_LEARNING_TIMELINE_SLOW_THRESHOLD_MS,
+            idle_explore_interval_secs: DEFAULT_LEARNING_IDLE_EXPLORE_INTERVAL_SECS,
+            habit_scan_interval_secs: DEFAULT_LEARNING_HABIT_SCAN_INTERVAL_SECS,
+            habit_scan_batch_size: DEFAULT_LEARNING_HABIT_SCAN_BATCH_SIZE,
+            kb_auto_gc_interval_secs: DEFAULT_LEARNING_KB_AUTO_GC_INTERVAL_SECS,
+            kb_consolidation_interval_secs: DEFAULT_LEARNING_KB_CONSOLIDATION_INTERVAL_SECS,
+            kb_reflection_interval_secs: DEFAULT_LEARNING_KB_REFLECTION_INTERVAL_SECS,
+            kb_reflection_utility_threshold: DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD,
+            kb_reflection_min_access: DEFAULT_LEARNING_KB_REFLECTION_MIN_ACCESS,
+            kb_reflection_max_entries: DEFAULT_LEARNING_KB_REFLECTION_MAX_ENTRIES,
+            kb_reflection_max_tokens: DEFAULT_LEARNING_KB_REFLECTION_MAX_TOKENS,
+            decision_harvest_interval_secs: DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS,
+            cooccurrence_refresh_interval_secs: DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS,
         }
     }
 }
@@ -739,6 +813,56 @@ impl AutopilotRuntimeConfig {
 
     pub(crate) fn deploy_review_timeout_ms(&self) -> u64 {
         self.deploy_review_timeout_secs.saturating_mul(1000)
+    }
+}
+
+impl LearningEngineRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_learning_engine_policy(&source)
+    }
+
+    pub(crate) fn realtime_extraction_timeout_ms(&self) -> u64 {
+        self.realtime_extraction_timeout_secs.saturating_mul(1000)
+    }
+
+    pub(crate) fn decision_tier3_timeout_ms(&self) -> u64 {
+        self.decision_tier3_timeout_secs.saturating_mul(1000)
+    }
+
+    pub(crate) fn habit_scan_timeout_ms(&self) -> u64 {
+        self.habit_scan_timeout_secs.saturating_mul(1000)
+    }
+
+    pub(crate) fn timeline_window_arg(&self) -> String {
+        format!("{}h", self.timeline_analysis_window_hours)
     }
 }
 
@@ -1134,6 +1258,77 @@ pub(crate) fn parse_autopilot_policy(
     Ok(cfg)
 }
 
+pub(crate) fn parse_learning_engine_policy(
+    source: &str,
+) -> Result<LearningEngineRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "learning-engine-policy").ok_or_else(|| {
+        BlueprintConfigError::Parse("missing (learning-engine-policy ...)".into())
+    })?;
+    let tokens = tokenize_lisp(&block);
+    let cfg = LearningEngineRuntimeConfig {
+        realtime_extraction_timeout_secs: u64_keyword(
+            &tokens,
+            ":realtime-extraction-timeout-secs",
+        )?,
+        decision_tier3_timeout_secs: u64_keyword(&tokens, ":decision-tier3-timeout-secs")?,
+        habit_scan_timeout_secs: u64_keyword(&tokens, ":habit-scan-timeout-secs")?,
+        timeline_analysis_interval_secs: int_keyword(&tokens, ":timeline-analysis-interval-secs")?,
+        timeline_analysis_window_hours: int_keyword(&tokens, ":timeline-analysis-window-hours")?,
+        timeline_error_limit: int_keyword(&tokens, ":timeline-error-limit")?,
+        timeline_llm_sample_limit: int_keyword(&tokens, ":timeline-llm-sample-limit")?,
+        timeline_slow_event_limit: usize_keyword(&tokens, ":timeline-slow-event-limit")?,
+        timeline_slow_threshold_ms: int_keyword(&tokens, ":timeline-slow-threshold-ms")?,
+        idle_explore_interval_secs: int_keyword(&tokens, ":idle-explore-interval-secs")?,
+        habit_scan_interval_secs: int_keyword(&tokens, ":habit-scan-interval-secs")?,
+        habit_scan_batch_size: usize_keyword(&tokens, ":habit-scan-batch-size")?,
+        kb_auto_gc_interval_secs: int_keyword(&tokens, ":kb-auto-gc-interval-secs")?,
+        kb_consolidation_interval_secs: int_keyword(&tokens, ":kb-consolidation-interval-secs")?,
+        kb_reflection_interval_secs: int_keyword(&tokens, ":kb-reflection-interval-secs")?,
+        kb_reflection_utility_threshold: f64_keyword(&tokens, ":kb-reflection-utility-threshold")?,
+        kb_reflection_min_access: int_keyword(&tokens, ":kb-reflection-min-access")?,
+        kb_reflection_max_entries: usize_keyword(&tokens, ":kb-reflection-max-entries")?,
+        kb_reflection_max_tokens: u32_keyword(&tokens, ":kb-reflection-max-tokens")?,
+        decision_harvest_interval_secs: int_keyword(&tokens, ":decision-harvest-interval-secs")?,
+        cooccurrence_refresh_interval_secs: int_keyword(
+            &tokens,
+            ":cooccurrence-refresh-interval-secs",
+        )?,
+    };
+    if [
+        cfg.timeline_analysis_interval_secs,
+        cfg.timeline_analysis_window_hours,
+        cfg.timeline_error_limit,
+        cfg.timeline_llm_sample_limit,
+        cfg.timeline_slow_threshold_ms,
+        cfg.idle_explore_interval_secs,
+        cfg.habit_scan_interval_secs,
+        cfg.kb_auto_gc_interval_secs,
+        cfg.kb_consolidation_interval_secs,
+        cfg.kb_reflection_interval_secs,
+        cfg.kb_reflection_min_access,
+        cfg.decision_harvest_interval_secs,
+        cfg.cooccurrence_refresh_interval_secs,
+    ]
+    .iter()
+    .any(|value| *value <= 0)
+    {
+        return Err(BlueprintConfigError::Parse(
+            "learning-engine-policy numeric windows must be positive".into(),
+        ));
+    }
+    if cfg.timeline_slow_event_limit == 0 || cfg.habit_scan_batch_size == 0 {
+        return Err(BlueprintConfigError::Parse(
+            "learning-engine-policy batch/limit fields must be positive".into(),
+        ));
+    }
+    if !(0.0..=1.0).contains(&cfg.kb_reflection_utility_threshold) {
+        return Err(BlueprintConfigError::Parse(
+            ":kb-reflection-utility-threshold must be within 0.0..1.0".into(),
+        ));
+    }
+    Ok(cfg)
+}
+
 fn string_list_keyword(tokens: &[String], key: &str) -> Result<Vec<String>, BlueprintConfigError> {
     let Some(pos) = tokens.iter().position(|token| token == key) else {
         return Err(BlueprintConfigError::Parse(format!("missing {}", key)));
@@ -1188,6 +1383,14 @@ fn u64_keyword(tokens: &[String], key: &str) -> Result<u64, BlueprintConfigError
         )));
     }
     Ok(value as u64)
+}
+
+fn f64_keyword(tokens: &[String], key: &str) -> Result<f64, BlueprintConfigError> {
+    let value = keyword_value(tokens, key)
+        .ok_or_else(|| BlueprintConfigError::Parse(format!("missing {}", key)))?;
+    value
+        .parse::<f64>()
+        .map_err(|_| BlueprintConfigError::Parse(format!("{} must be a number", key)))
 }
 
 fn usize_keyword(tokens: &[String], key: &str) -> Result<usize, BlueprintConfigError> {
@@ -1407,12 +1610,34 @@ mod tests {
     :review-sidecar ".missiond/v2/capability-usage-review.json"
     :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_" "mission_sys_" "mission_daemon_update" "mission_health" "mission_power_control" "mission_kb_ops" "mission_audit" "mission_pty_signal" "mission_pty_confirm" "mission_incident"]
     :protected-flow-patterns ["engineering" "F-execution-log-governance" "F-incident-reaction" "F-capability-usage-monitoring"])
-  (memory-kb-policy
-    :pending-message-limit 60
-    :tool-result-preview-chars 1000
-    :assistant-preview-chars 500)
-  (conversation-ingestion-policy
-    :conversation-get-tail-default 50
+	  (memory-kb-policy
+	    :pending-message-limit 60
+	    :tool-result-preview-chars 1000
+	    :assistant-preview-chars 500)
+	  (learning-engine-policy
+	    :realtime-extraction-timeout-secs 300
+	    :decision-tier3-timeout-secs 300
+	    :habit-scan-timeout-secs 600
+	    :timeline-analysis-interval-secs 43200
+	    :timeline-analysis-window-hours 12
+	    :timeline-error-limit 20
+	    :timeline-llm-sample-limit 50
+	    :timeline-slow-event-limit 20
+	    :timeline-slow-threshold-ms 60000
+	    :idle-explore-interval-secs 7200
+	    :habit-scan-interval-secs 14400
+	    :habit-scan-batch-size 5
+	    :kb-auto-gc-interval-secs 3600
+	    :kb-consolidation-interval-secs 86400
+	    :kb-reflection-interval-secs 604800
+	    :kb-reflection-utility-threshold 0.3
+	    :kb-reflection-min-access 3
+	    :kb-reflection-max-entries 20
+	    :kb-reflection-max-tokens 2000
+	    :decision-harvest-interval-secs 86400
+	    :cooccurrence-refresh-interval-secs 21600)
+	  (conversation-ingestion-policy
+	    :conversation-get-tail-default 50
     :conversation-search-default-limit 10
     :message-search-default-limit 20
     :context-before-default 3
@@ -1668,6 +1893,94 @@ mod tests {
         let err = parse_memory_kb_policy("(missiond-blueprint)")
             .expect_err("missing memory kb policy should fail");
         assert!(err.to_string().contains("memory-kb-policy"));
+    }
+
+    #[test]
+    fn parses_learning_engine_policy_defaults() {
+        let cfg = parse_learning_engine_policy(BLUEPRINT).expect("parse learning engine policy");
+        assert_eq!(
+            cfg.realtime_extraction_timeout_secs,
+            DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS
+        );
+        assert_eq!(cfg.realtime_extraction_timeout_ms(), 300_000);
+        assert_eq!(cfg.decision_tier3_timeout_ms(), 300_000);
+        assert_eq!(cfg.habit_scan_timeout_ms(), 600_000);
+        assert_eq!(
+            cfg.timeline_analysis_interval_secs,
+            DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS
+        );
+        assert_eq!(cfg.timeline_window_arg(), "12h");
+        assert_eq!(
+            cfg.timeline_error_limit,
+            DEFAULT_LEARNING_TIMELINE_ERROR_LIMIT
+        );
+        assert_eq!(
+            cfg.timeline_llm_sample_limit,
+            DEFAULT_LEARNING_TIMELINE_LLM_SAMPLE_LIMIT
+        );
+        assert_eq!(
+            cfg.timeline_slow_event_limit,
+            DEFAULT_LEARNING_TIMELINE_SLOW_EVENT_LIMIT
+        );
+        assert_eq!(
+            cfg.timeline_slow_threshold_ms,
+            DEFAULT_LEARNING_TIMELINE_SLOW_THRESHOLD_MS
+        );
+        assert_eq!(
+            cfg.idle_explore_interval_secs,
+            DEFAULT_LEARNING_IDLE_EXPLORE_INTERVAL_SECS
+        );
+        assert_eq!(
+            cfg.habit_scan_interval_secs,
+            DEFAULT_LEARNING_HABIT_SCAN_INTERVAL_SECS
+        );
+        assert_eq!(
+            cfg.habit_scan_batch_size,
+            DEFAULT_LEARNING_HABIT_SCAN_BATCH_SIZE
+        );
+        assert_eq!(
+            cfg.kb_auto_gc_interval_secs,
+            DEFAULT_LEARNING_KB_AUTO_GC_INTERVAL_SECS
+        );
+        assert_eq!(
+            cfg.kb_consolidation_interval_secs,
+            DEFAULT_LEARNING_KB_CONSOLIDATION_INTERVAL_SECS
+        );
+        assert_eq!(
+            cfg.kb_reflection_interval_secs,
+            DEFAULT_LEARNING_KB_REFLECTION_INTERVAL_SECS
+        );
+        assert_eq!(
+            cfg.kb_reflection_utility_threshold,
+            DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD
+        );
+        assert_eq!(
+            cfg.kb_reflection_min_access,
+            DEFAULT_LEARNING_KB_REFLECTION_MIN_ACCESS
+        );
+        assert_eq!(
+            cfg.kb_reflection_max_entries,
+            DEFAULT_LEARNING_KB_REFLECTION_MAX_ENTRIES
+        );
+        assert_eq!(
+            cfg.kb_reflection_max_tokens,
+            DEFAULT_LEARNING_KB_REFLECTION_MAX_TOKENS
+        );
+        assert_eq!(
+            cfg.decision_harvest_interval_secs,
+            DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS
+        );
+        assert_eq!(
+            cfg.cooccurrence_refresh_interval_secs,
+            DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS
+        );
+    }
+
+    #[test]
+    fn missing_learning_engine_policy_is_rejected() {
+        let err = parse_learning_engine_policy("(missiond-blueprint)")
+            .expect_err("missing learning engine policy should fail");
+        assert!(err.to_string().contains("learning-engine-policy"));
     }
 
     #[test]

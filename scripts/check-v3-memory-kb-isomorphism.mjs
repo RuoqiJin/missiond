@@ -31,6 +31,12 @@ const DEFAULT_FILES = {
   kbBeacon: 'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
   kbCodeSearch: 'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
   memory: 'crates/missiond-daemon/src/handlers/knowledge/memory.rs',
+  learningMod: 'crates/missiond-daemon/src/engine/learning_engine/mod.rs',
+  learningExtraction: 'crates/missiond-daemon/src/engine/learning_engine/extraction.rs',
+  learningDecision: 'crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs',
+  learningTimeline: 'crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs',
+  learningIdle: 'crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs',
+  learningHistorical: 'crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
 };
 
@@ -92,11 +98,17 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     '(surface memory-kb',
-    '(memory-kb-policy',
-    ':pending-message-limit 60',
-    ':tool-result-preview-chars 1000',
-    ':assistant-preview-chars 500',
-    ':status "code-aligned"',
+	    '(memory-kb-policy',
+	    '(learning-engine-policy',
+	    ':pending-message-limit 60',
+	    ':tool-result-preview-chars 1000',
+	    ':assistant-preview-chars 500',
+	    ':realtime-extraction-timeout-secs 300',
+	    ':decision-tier3-timeout-secs 300',
+	    ':timeline-analysis-interval-secs 43200',
+	    ':habit-scan-timeout-secs 600',
+	    'LearningEngineRuntimeConfig MUST load learning-engine-policy',
+	    ':status "code-aligned"',
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/args.rs',
@@ -112,9 +124,16 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs',
     'crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs',
-    'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
-    'scripts/check-v3-memory-kb-isomorphism.mjs',
-    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
+	    'crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs',
+	    'crates/missiond-daemon/src/engine/learning_engine/mod.rs',
+	    'crates/missiond-daemon/src/engine/learning_engine/extraction.rs',
+	    'crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs',
+	    'crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs',
+	    'crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs',
+	    'crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs',
+	    'scripts/check-v3-memory-kb-isomorphism.mjs',
+	    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
+	    'projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
     'kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting',
@@ -135,7 +154,9 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'MemoryKbRuntimeConfig',
+    'LearningEngineRuntimeConfig',
     'parse_memory_kb_policy',
+    'parse_learning_engine_policy',
     'DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT',
     'DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS',
     'DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS',
@@ -143,6 +164,12 @@ function checkFiles(root, files) {
     ':pending-message-limit',
     ':tool-result-preview-chars',
     ':assistant-preview-chars',
+    'DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS',
+    'DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS',
+    'DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD',
+    'learning-engine-policy',
+    ':realtime-extraction-timeout-secs',
+    ':cooccurrence-refresh-interval-secs',
   ]);
 
   requireAll(diagnostics, files.kbFacade, sources.kbFacade, [
@@ -192,6 +219,50 @@ function checkFiles(root, files) {
     'tool_result_preview_chars',
     'assistant_preview_chars',
     'get_pending_realtime_messages_with_limit(pending_msg_limit)',
+  ]);
+
+  requireAll(diagnostics, files.learningMod, sources.learningMod, [
+    'LearningEngineRuntimeConfig',
+    'decision_harvest_interval_secs',
+    'cooccurrence_refresh_interval_secs',
+    'V3 learning-engine-policy unavailable',
+  ]);
+
+  requireAll(diagnostics, files.learningExtraction, sources.learningExtraction, [
+    'LearningEngineRuntimeConfig',
+    'load_learning_engine_config',
+    'realtime_extraction_timeout_ms',
+    'kb_consolidation_interval_secs',
+    'kb_auto_gc_interval_secs',
+    'kb_reflection_interval_secs',
+    'kb_reflection_utility_threshold',
+    'kb_reflection_max_tokens',
+  ]);
+
+  requireAll(diagnostics, files.learningDecision, sources.learningDecision, [
+    'LearningEngineRuntimeConfig',
+    'decision_tier3_timeout_ms',
+  ]);
+
+  requireAll(diagnostics, files.learningTimeline, sources.learningTimeline, [
+    'LearningEngineRuntimeConfig',
+    'timeline_analysis_interval_secs',
+    'timeline_window_arg',
+    'timeline_error_limit',
+    'timeline_llm_sample_limit',
+    'timeline_slow_threshold_ms',
+  ]);
+
+  requireAll(diagnostics, files.learningIdle, sources.learningIdle, [
+    'LearningEngineRuntimeConfig',
+    'idle_explore_interval_secs',
+  ]);
+
+  requireAll(diagnostics, files.learningHistorical, sources.learningHistorical, [
+    'LearningEngineRuntimeConfig',
+    'habit_scan_interval_secs',
+    'habit_scan_batch_size',
+    'habit_scan_timeout_ms',
   ]);
 
   requireAll(diagnostics, files.kbArgs, sources.kbArgs, [
@@ -413,11 +484,18 @@ function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-memory-kb-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
-  (memory-kb-policy
-    :pending-message-limit 60
-    :tool-result-preview-chars 1000
-    :assistant-preview-chars 500)
-  (implementation-map
+	  (memory-kb-policy
+	    :pending-message-limit 60
+	    :tool-result-preview-chars 1000
+	    :assistant-preview-chars 500)
+	  (learning-engine-policy
+	    :realtime-extraction-timeout-secs 300
+	    :decision-tier3-timeout-secs 300
+	    :habit-scan-timeout-secs 600
+	    :timeline-analysis-interval-secs 43200
+	    :cooccurrence-refresh-interval-secs 21600
+	    :invariants ["LearningEngineRuntimeConfig MUST load learning-engine-policy"])
+	  (implementation-map
     (surface memory-kb
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
@@ -435,10 +513,16 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/kb/gc.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/ops.rs"
              "crates/missiond-daemon/src/handlers/knowledge/kb/beacon.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
-             "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
-             "scripts/check-v3-memory-kb-isomorphism.mjs"]
-      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
+	             "crates/missiond-daemon/src/handlers/knowledge/kb/code_search.rs"
+	             "crates/missiond-daemon/src/handlers/knowledge/memory.rs"
+	             "crates/missiond-daemon/src/engine/learning_engine/mod.rs"
+	             "crates/missiond-daemon/src/engine/learning_engine/extraction.rs"
+	             "crates/missiond-daemon/src/engine/learning_engine/decision_engine.rs"
+	             "crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs"
+	             "crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs"
+	             "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs"
+	             "scripts/check-v3-memory-kb-isomorphism.mjs"]
+	      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
@@ -471,9 +555,9 @@ use query::{handle_kb_get, handle_kb_list, handle_kb_search};
 pub(crate) async fn handle() {
   "mission_kb_query"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_kb_remember";
 }`);
-  writeFixture(root, DEFAULT_FILES.v3Runtime, `
-MemoryKbRuntimeConfig; parse_memory_kb_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars;
-`);
+	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
+	MemoryKbRuntimeConfig; LearningEngineRuntimeConfig; parse_memory_kb_policy; parse_learning_engine_policy; DEFAULT_MEMORY_PENDING_MESSAGE_LIMIT; DEFAULT_MEMORY_TOOL_RESULT_PREVIEW_CHARS; DEFAULT_MEMORY_ASSISTANT_PREVIEW_CHARS; memory-kb-policy; :pending-message-limit; :tool-result-preview-chars; :assistant-preview-chars; DEFAULT_LEARNING_REALTIME_EXTRACTION_TIMEOUT_SECS; DEFAULT_LEARNING_TIMELINE_ANALYSIS_INTERVAL_SECS; DEFAULT_LEARNING_KB_REFLECTION_UTILITY_THRESHOLD; learning-engine-policy; :realtime-extraction-timeout-secs; :cooccurrence-refresh-interval-secs;
+	`);
   writeFixture(root, DEFAULT_FILES.kbArgs, `
 pub(super) struct KBRememberArgs;
 pub(super) struct KBKeyArgs;
@@ -553,10 +637,28 @@ pub(super) async fn handle_beacon_annotate() { beacon_node_annotate(); }
 pub(super) async fn handle_code_search() {
   CodeSearchArgs; ast_search(); node_type; ast_find_related(); No code nodes found matching query; No code nodes matched filters;
 }`);
-  writeFixture(root, DEFAULT_FILES.memory, `
-MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit);
-`);
-  writeFixture(root, DEFAULT_FILES.mcpKb, `
+	  writeFixture(root, DEFAULT_FILES.memory, `
+	MemoryKbRuntimeConfig; load_memory_kb_config; V3_BLUEPRINT_CONFIG_ERROR; pending_message_limit; tool_result_preview_chars; assistant_preview_chars; get_pending_realtime_messages_with_limit(pending_msg_limit);
+	`);
+	  writeFixture(root, DEFAULT_FILES.learningMod, `
+	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
+	`);
+	  writeFixture(root, DEFAULT_FILES.learningExtraction, `
+	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
+	`);
+	  writeFixture(root, DEFAULT_FILES.learningDecision, `
+	LearningEngineRuntimeConfig; decision_tier3_timeout_ms;
+	`);
+	  writeFixture(root, DEFAULT_FILES.learningTimeline, `
+	LearningEngineRuntimeConfig; timeline_analysis_interval_secs; timeline_window_arg; timeline_error_limit; timeline_llm_sample_limit; timeline_slow_threshold_ms;
+	`);
+	  writeFixture(root, DEFAULT_FILES.learningIdle, `
+	LearningEngineRuntimeConfig; idle_explore_interval_secs;
+	`);
+	  writeFixture(root, DEFAULT_FILES.learningHistorical, `
+	LearningEngineRuntimeConfig; habit_scan_interval_secs; habit_scan_batch_size; habit_scan_timeout_ms;
+	`);
+	  writeFixture(root, DEFAULT_FILES.mcpKb, `
 "mission_kb_query"; "mission_kb_remember"; "mission_kb_mutate"; "mission_kb_ops"; "mission_beacon"; "mission_code_search";
 `);
   return root;

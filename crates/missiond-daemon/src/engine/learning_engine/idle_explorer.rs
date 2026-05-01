@@ -6,11 +6,9 @@
 //! Safety: exploration tasks are auto_execute=true but READ-ONLY analysis.
 //! Any modification suggestions become auto_execute=false follow-up tasks.
 
+use crate::context::v3_blueprint_runtime::LearningEngineRuntimeConfig;
 use crate::state::AppState;
 use tracing::{debug, info, warn};
-
-/// Cadence: minimum interval between exploration runs (2 hours).
-const EXPLORE_INTERVAL_SECS: i64 = 2 * 3600;
 
 /// Check if conditions are right for idle exploration, and if so,
 /// create a single exploration Board task.
@@ -18,6 +16,14 @@ const EXPLORE_INTERVAL_SECS: i64 = 2 * 3600;
 /// Called from `learning_tick()` on every autopilot tick (60s).
 /// Internal cadence guard prevents over-triggering.
 pub(crate) async fn check_idle_exploration(state: &AppState) {
+    let config = match LearningEngineRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            warn!(error = %err, "Idle explorer: V3 learning-engine-policy unavailable");
+            return;
+        }
+    };
+
     // Gate 1: cadence — at least 2h since last exploration
     let now = chrono::Utc::now().timestamp();
     let last = state
@@ -26,7 +32,7 @@ pub(crate) async fn check_idle_exploration(state: &AppState) {
         .await
         .unwrap_or(None)
         .unwrap_or(0);
-    if now - last < EXPLORE_INTERVAL_SECS {
+    if now - last < config.idle_explore_interval_secs {
         return;
     }
 
