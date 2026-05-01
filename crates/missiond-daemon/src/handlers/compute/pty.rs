@@ -1,9 +1,10 @@
 use anyhow::{anyhow, Result};
-use missiond_mcp::tools::ToolResult;
+use missiond_mcp::tools::{ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tracing::info;
 
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::helpers::default_mission_home;
 use crate::lenient;
 use crate::slot_env::build_slot_tracking_env;
@@ -221,7 +222,18 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
 
             if wait_for_response.unwrap_or(false) {
                 // Blocking mode: send and wait for response
-                let timeout_ms = timeout_ms.unwrap_or(300_000);
+                let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(
+                    slot_project_root(state, &slot_id).as_deref(),
+                ) {
+                    Ok(config) => config,
+                    Err(err) => {
+                        return Ok(ToolResult::structured_error(ToolError::new(
+                            "V3_BLUEPRINT_CONFIG_ERROR",
+                            err.to_string(),
+                        )))
+                    }
+                };
+                let timeout_ms = runtime_config.clamp_pty_send_timeout_ms(timeout_ms);
                 let res = state.pty.send(&slot_id, &message, timeout_ms).await?;
                 let state = state
                     .pty
@@ -581,6 +593,15 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
     }
 }
 
+fn slot_project_root(state: &AppState, slot_id: &str) -> Option<String> {
+    state
+        .mission
+        .get_slot(slot_id)
+        .and_then(|slot| slot.config.project_root.or(slot.config.cwd))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -627,7 +648,13 @@ mod tests {
         let yaml_path = dir.path().join("perms.yaml");
         let learned = Arc::new(missiond_core::LearnedPermissions::new(&yaml_path).unwrap());
         learned
-            .learn("role", "coder", "Bash", "allow", Some(extracted.pattern.as_str()))
+            .learn(
+                "role",
+                "coder",
+                "Bash",
+                "allow",
+                Some(extracted.pattern.as_str()),
+            )
             .expect("learn should succeed");
 
         // Step 4: sync to settings.local.json (simulates next slot spawn)
@@ -639,10 +666,15 @@ mod tests {
 
         // Step 5: verify the entry appears in settings.local.json
         let settings_path = cwd.join(".claude/settings.local.json");
-        assert!(settings_path.exists(), "settings.local.json must be created");
+        assert!(
+            settings_path.exists(),
+            "settings.local.json must be created"
+        );
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
-        let allow = v["permissions"]["allow"].as_array().expect("allow must be array");
+        let allow = v["permissions"]["allow"]
+            .as_array()
+            .expect("allow must be array");
         assert!(
             allow.iter().any(|e| e == "Bash(python3:*)"),
             "Bash(python3:*) not found in allowlist: {:?}",

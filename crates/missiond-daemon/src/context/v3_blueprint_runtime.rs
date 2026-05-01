@@ -10,6 +10,9 @@ pub(crate) const MAX_TIMEOUT_SECS: i64 = 7200;
 pub(crate) const DEFAULT_CC_SWARM_TIMEOUT_SECS: i64 = 600;
 pub(crate) const MIN_CC_SWARM_TIMEOUT_SECS: i64 = 60;
 pub(crate) const MAX_CC_SWARM_TIMEOUT_SECS: i64 = 7200;
+pub(crate) const DEFAULT_PTY_SEND_TIMEOUT_SECS: i64 = 300;
+pub(crate) const MIN_PTY_SEND_TIMEOUT_SECS: i64 = 1;
+pub(crate) const MAX_PTY_SEND_TIMEOUT_SECS: i64 = 7200;
 pub(crate) const WATCHDOG_GRACE_SECS: i64 = 120;
 pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
@@ -77,6 +80,7 @@ pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
     pub timeout_policy: TimeoutPolicy,
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
+    pub pty_send_timeout_policy: SimpleTimeoutPolicy,
     pub slot_ttl_policy: SlotTtlPolicy,
 }
 
@@ -210,6 +214,16 @@ impl Default for SimpleTimeoutPolicy {
     }
 }
 
+impl SimpleTimeoutPolicy {
+    fn pty_send_default() -> Self {
+        Self {
+            default_secs: DEFAULT_PTY_SEND_TIMEOUT_SECS,
+            min_secs: MIN_PTY_SEND_TIMEOUT_SECS,
+            max_secs: MAX_PTY_SEND_TIMEOUT_SECS,
+        }
+    }
+}
+
 impl Default for SlotTtlPolicy {
     fn default() -> Self {
         Self {
@@ -232,6 +246,7 @@ impl Default for WorkstationRuntimeConfig {
             slot_default_profiles,
             timeout_policy: TimeoutPolicy::default(),
             cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
+            pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
             slot_ttl_policy: SlotTtlPolicy::default(),
         }
     }
@@ -358,6 +373,15 @@ impl WorkstationRuntimeConfig {
         let max_ms = (self.cc_swarm_timeout_policy.max_secs.max(1) as u64).saturating_mul(1000);
         let default_ms =
             (self.cc_swarm_timeout_policy.default_secs.max(1) as u64).saturating_mul(1000);
+        let raw = timeout_ms.filter(|value| *value > 0).unwrap_or(default_ms);
+        raw.clamp(min_ms, max_ms)
+    }
+
+    pub(crate) fn clamp_pty_send_timeout_ms(&self, timeout_ms: Option<u64>) -> u64 {
+        let min_ms = (self.pty_send_timeout_policy.min_secs.max(1) as u64).saturating_mul(1000);
+        let max_ms = (self.pty_send_timeout_policy.max_secs.max(1) as u64).saturating_mul(1000);
+        let default_ms =
+            (self.pty_send_timeout_policy.default_secs.max(1) as u64).saturating_mul(1000);
         let raw = timeout_ms.filter(|value| *value > 0).unwrap_or(default_ms);
         raw.clamp(min_ms, max_ms)
     }
@@ -683,6 +707,25 @@ pub(crate) fn parse_workstation_config(
         min_secs: int_keyword(&cc_swarm_timeout_tokens, ":min_secs")?,
         max_secs: int_keyword(&cc_swarm_timeout_tokens, ":max_secs")?,
     };
+    let pty_send_timeout_form = find_forms(&block, "timeout-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens
+                .get(2)
+                .is_some_and(|name| name == "pty-send-blocking")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (timeout-policy pty-send-blocking ...) in workstation-config".into(),
+            )
+        })?;
+    let pty_send_timeout_tokens = tokenize_lisp(&pty_send_timeout_form);
+    config.pty_send_timeout_policy = SimpleTimeoutPolicy {
+        default_secs: int_keyword(&pty_send_timeout_tokens, ":default_secs")?,
+        min_secs: int_keyword(&pty_send_timeout_tokens, ":min_secs")?,
+        max_secs: int_keyword(&pty_send_timeout_tokens, ":max_secs")?,
+    };
     let ttl_form = find_forms(&block, "ttl-policy")
         .into_iter()
         .find(|form| {
@@ -717,6 +760,18 @@ pub(crate) fn parse_workstation_config(
     {
         return Err(BlueprintConfigError::Parse(
             "claudecode-swarm timeout :default_secs must be within :min_secs..:max_secs".into(),
+        ));
+    }
+    if config.pty_send_timeout_policy.min_secs > config.pty_send_timeout_policy.max_secs {
+        return Err(BlueprintConfigError::Parse(
+            "pty-send-blocking timeout :min_secs must be <= :max_secs".into(),
+        ));
+    }
+    if config.pty_send_timeout_policy.default_secs < config.pty_send_timeout_policy.min_secs
+        || config.pty_send_timeout_policy.default_secs > config.pty_send_timeout_policy.max_secs
+    {
+        return Err(BlueprintConfigError::Parse(
+            "pty-send-blocking timeout :default_secs must be within :min_secs..:max_secs".into(),
         ));
     }
     if config.slot_ttl_policy.min_secs > config.slot_ttl_policy.max_secs {
@@ -1190,6 +1245,10 @@ mod tests {
       :default_secs 600
       :min_secs 60
       :max_secs 7200)
+    (timeout-policy pty-send-blocking
+      :default_secs 300
+      :min_secs 1
+      :max_secs 7200)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
@@ -1255,6 +1314,9 @@ mod tests {
         assert_eq!(cfg.cc_swarm_timeout_policy.default_secs, 600);
         assert_eq!(cfg.cc_swarm_timeout_policy.min_secs, 60);
         assert_eq!(cfg.cc_swarm_timeout_policy.max_secs, 7200);
+        assert_eq!(cfg.pty_send_timeout_policy.default_secs, 300);
+        assert_eq!(cfg.pty_send_timeout_policy.min_secs, 1);
+        assert_eq!(cfg.pty_send_timeout_policy.max_secs, 7200);
         assert_eq!(cfg.slot_ttl_policy.default_secs, 14400);
         assert_eq!(cfg.slot_ttl_policy.min_secs, 300);
         assert_eq!(cfg.slot_ttl_policy.max_secs, 28800);
@@ -1273,6 +1335,10 @@ mod tests {
         assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(1000)), 60_000);
         assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(99_999_999)), 7_200_000);
         assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(900_000)), 900_000);
+        assert_eq!(cfg.clamp_pty_send_timeout_ms(None), 300_000);
+        assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(500)), 1_000);
+        assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(99_999_999)), 7_200_000);
+        assert_eq!(cfg.clamp_pty_send_timeout_ms(Some(42_000)), 42_000);
         assert_eq!(cfg.clamp_slot_ttl_secs(None), 14400);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(5)), 300);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(99_999)), 28800);
@@ -1322,6 +1388,10 @@ mod tests {
     (timeout-policy claudecode-swarm
       :default_secs 600
       :min_secs 60
+      :max_secs 7200)
+    (timeout-policy pty-send-blocking
+      :default_secs 300
+      :min_secs 1
       :max_secs 7200)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");

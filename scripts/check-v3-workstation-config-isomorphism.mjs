@@ -16,6 +16,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
   - Autopilot starts pty.send concurrently across different slots within a tick.
   - Autopilot clears stale slot-dyn-* assignee pins after daemon restart.
   - mission_cc_swarm pty.send timeout is projected from timeout-policy claudecode-swarm.
+  - mission_pty_send waitForResponse timeout is projected from timeout-policy pty-send-blocking.
 `;
 
 const DEFAULT_FILES = {
@@ -111,11 +112,14 @@ function checkFiles(root, files) {
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
     'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
+    'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
     'timeout-policy boardtask-dispatch',
     'timeout-policy claudecode-swarm',
+    'timeout-policy pty-send-blocking',
     'ttl-policy dynamic-slot',
     ':default_secs 1800',
     ':default_secs 600',
+    ':default_secs 300',
     ':min_secs 60',
     ':max_secs 7200',
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
@@ -198,9 +202,13 @@ function checkFiles(root, files) {
     'DEFAULT_CC_SWARM_TIMEOUT_SECS',
     'MIN_CC_SWARM_TIMEOUT_SECS',
     'MAX_CC_SWARM_TIMEOUT_SECS',
+    'DEFAULT_PTY_SEND_TIMEOUT_SECS',
+    'MIN_PTY_SEND_TIMEOUT_SECS',
+    'MAX_PTY_SEND_TIMEOUT_SECS',
     'default_slot_extend_secs',
     'max_slot_extend_secs',
     'clamp_cc_swarm_timeout_ms',
+    'clamp_pty_send_timeout_ms',
     'MissingBlueprint',
   ]);
 
@@ -320,6 +328,10 @@ function buildFixture() {
       :default_secs 600
       :min_secs 60
       :max_secs 7200)
+    (timeout-policy pty-send-blocking
+      :default_secs 300
+      :min_secs 1
+      :max_secs 7200)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
@@ -337,6 +349,7 @@ function buildFixture() {
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold"
        "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"
+       "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking"
        "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
        "BoardStore::clear_board_task_assignee"])
     (execution-ownership delegated-boardtask
@@ -395,7 +408,7 @@ pub(crate) fn load_for_project_root() {}
 fn parse_workstation_config() {}
 fn x() {
   find_form(source, "workstation-config");
-  let a = "timeout-policy boardtask-dispatch timeout-policy claudecode-swarm ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms MissingBlueprint";
+  let a = "timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms MissingBlueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';

@@ -631,6 +631,10 @@ function fixtureBlueprint() {
       :default_secs 600
       :min_secs 60
       :max_secs 7200)
+    (timeout-policy pty-send-blocking
+      :default_secs 300
+      :min_secs 1
+      :max_secs 7200)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300

@@ -380,7 +380,7 @@
       (slotId  string :required)
       (message string :required)
       (waitForResponse boolean :default false :description "阻塞等待回复")
-      (timeoutMs number :default 300000 :description "[waitForResponse=true] 超时毫秒数"))
+      (timeoutMs number :default 300000 :description "[waitForResponse=true] 默认/上下限由 V3 workstation-config timeout-policy pty-send-blocking 投影"))
     :returns "Value")
 
   (tool mission_pty_read

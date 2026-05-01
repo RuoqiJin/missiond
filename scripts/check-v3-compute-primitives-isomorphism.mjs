@@ -135,6 +135,7 @@ function checkFiles(root, files) {
     'mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy',
     'Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults',
     'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
+    'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
     'slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history',
     'compute_slot and task_delegate remain owned by workstation-config',
     'node scripts/check-v3-compute-primitives-isomorphism.mjs',
@@ -158,6 +159,8 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.intentMcpDefs, sources.intentMcpDefs, [
     '(tool mission_cc_swarm',
     '(timeoutMs number :default 600000 :description "PTY 等待超时；默认/上下限由 V3 workstation-config timeout-policy claudecode-swarm 投影")',
+    '(tool mission_pty_send',
+    '(timeoutMs number :default 300000 :description "[waitForResponse=true] 默认/上下限由 V3 workstation-config timeout-policy pty-send-blocking 投影")',
   ]);
 
   requireAll(diagnostics, files.computeMod, sources.computeMod, [
@@ -251,6 +254,11 @@ function checkFiles(root, files) {
     '"interrupt"',
     'requeue_running_tasks_for_slot',
     'learned.learn',
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'slot_project_root',
+    'clamp_pty_send_timeout_ms',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'ToolResult::structured_error',
   ]);
 
   requireAll(diagnostics, files.process, sources.process, [
@@ -322,6 +330,8 @@ function checkFiles(root, files) {
     '"mission_pty_confirm"',
     '"mission_pty_status"',
     '"mission_pty_screenshot"',
+    'timeout-policy pty-send-blocking',
+    '"default": 300000',
   ]);
   requireAll(diagnostics, files.mcpProcess, sources.mcpProcess, [
     '"mission_agent"',
@@ -383,7 +393,8 @@ function buildFixture() {
     :parallel-slot-default-timeout-secs 1800
     :invariants ["mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy"
                  "Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults"
-                 "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"])
+                 "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"
+                 "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking"])
   (implementation-map
     (surface compute-primitives
       :status "code-aligned"
@@ -426,7 +437,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.intentMcpDefs),
-    ' (tool mission_cc_swarm (timeoutMs number :default 600000 :description "PTY 等待超时；默认/上下限由 V3 workstation-config timeout-policy claudecode-swarm 投影"))',
+    ' (tool mission_cc_swarm (timeoutMs number :default 600000 :description "PTY 等待超时；默认/上下限由 V3 workstation-config timeout-policy claudecode-swarm 投影")) (tool mission_pty_send (timeoutMs number :default 300000 :description "[waitForResponse=true] 默认/上下限由 V3 workstation-config timeout-policy pty-send-blocking 投影"))',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.computeMod),
@@ -455,7 +466,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.pty),
-    ' "screen" "history" "logs" "kill" "interrupt" requeue_running_tasks_for_slot learned.learn',
+    ' "screen" "history" "logs" "kill" "interrupt" requeue_running_tasks_for_slot learned.learn WorkstationRuntimeConfig::load_for_project_root slot_project_root clamp_pty_send_timeout_ms V3_BLUEPRINT_CONFIG_ERROR ToolResult::structured_error',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.process),
@@ -473,6 +484,10 @@ function buildFixture() {
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.mcpCcTasks),
     ' timeout-policy claudecode-swarm "default": 600000',
+  );
+  fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.mcpPty),
+    ' timeout-policy pty-send-blocking "default": 300000',
   );
   fs.appendFileSync(path.join(root, DEFAULT_FILES.worker), ' mission_workers mission_worker_control ControlTree');
   fs.appendFileSync(path.join(root, DEFAULT_FILES.forge), ' exit_code project_root command');

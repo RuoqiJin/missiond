@@ -17,6 +17,9 @@ export const MAX_TIMEOUT_SECS = 7200;
 export const DEFAULT_CC_SWARM_TIMEOUT_SECS = 600;
 export const MIN_CC_SWARM_TIMEOUT_SECS = 60;
 export const MAX_CC_SWARM_TIMEOUT_SECS = 7200;
+export const DEFAULT_PTY_SEND_TIMEOUT_SECS = 300;
+export const MIN_PTY_SEND_TIMEOUT_SECS = 1;
+export const MAX_PTY_SEND_TIMEOUT_SECS = 7200;
 export const WATCHDOG_GRACE_SECS = 120;
 export const MISSING_SESSION_PROBE_SECS = 120;
 export const DEFAULT_SLOT_TTL_SECS = 14400;
@@ -40,12 +43,14 @@ export class WorkstationRuntimeConfig {
     slotDefaultProfiles = defaultSlotProfiles(),
     timeoutPolicy = defaultTimeoutPolicy(),
     ccSwarmTimeoutPolicy = defaultCcSwarmTimeoutPolicy(),
+    ptySendTimeoutPolicy = defaultPtySendTimeoutPolicy(),
     slotTtlPolicy = defaultSlotTtlPolicy(),
     source = 'defaults',
   } = {}) {
     this.slotDefaultProfiles = new Map(slotDefaultProfiles);
     this.timeoutPolicy = { ...timeoutPolicy };
     this.ccSwarmTimeoutPolicy = { ...ccSwarmTimeoutPolicy };
+    this.ptySendTimeoutPolicy = { ...ptySendTimeoutPolicy };
     this.slotTtlPolicy = { ...slotTtlPolicy };
     this.source = source;
   }
@@ -68,6 +73,16 @@ export class WorkstationRuntimeConfig {
     return Math.max(
       this.ccSwarmTimeoutPolicy.min_secs * 1000,
       Math.min(this.ccSwarmTimeoutPolicy.max_secs * 1000, raw),
+    );
+  }
+
+  clampPtySendTimeoutMs(timeoutMs = null) {
+    const raw = Number.isInteger(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : this.ptySendTimeoutPolicy.default_secs * 1000;
+    return Math.max(
+      this.ptySendTimeoutPolicy.min_secs * 1000,
+      Math.min(this.ptySendTimeoutPolicy.max_secs * 1000, raw),
     );
   }
 
@@ -184,6 +199,21 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
     min_secs: readPositiveInt(ccSwarmProps, ':min_secs', file),
     max_secs: readPositiveInt(ccSwarmProps, ':max_secs', file),
   };
+  const ptySendTimeoutForm = block.children.find((child) => {
+    if (!isList(child) || head(child) !== 'timeout-policy') return false;
+    return nodeText(child.children[1]) === 'pty-send-blocking';
+  });
+  if (!ptySendTimeoutForm) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: missing (timeout-policy pty-send-blocking ...)',
+    );
+  }
+  const ptySendProps = readKeywordProps(ptySendTimeoutForm, { start: 2 });
+  config.ptySendTimeoutPolicy = {
+    default_secs: readPositiveInt(ptySendProps, ':default_secs', file),
+    min_secs: readPositiveInt(ptySendProps, ':min_secs', file),
+    max_secs: readPositiveInt(ptySendProps, ':max_secs', file),
+  };
   const ttlForm = block.children.find((child) => {
     if (!isList(child) || head(child) !== 'ttl-policy') return false;
     return nodeText(child.children[1]) === 'dynamic-slot';
@@ -219,6 +249,19 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
       'failed to parse V3 workstation-config: claudecode-swarm :default_secs outside :min_secs..:max_secs',
     );
   }
+  if (config.ptySendTimeoutPolicy.min_secs > config.ptySendTimeoutPolicy.max_secs) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: pty-send-blocking :min_secs exceeds :max_secs',
+    );
+  }
+  if (
+    config.ptySendTimeoutPolicy.default_secs < config.ptySendTimeoutPolicy.min_secs
+    || config.ptySendTimeoutPolicy.default_secs > config.ptySendTimeoutPolicy.max_secs
+  ) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: pty-send-blocking :default_secs outside :min_secs..:max_secs',
+    );
+  }
   if (config.slotTtlPolicy.min_secs > config.slotTtlPolicy.max_secs) {
     throw new V3BlueprintRuntimeConfigError(
       'failed to parse V3 workstation-config: ttl :min_secs exceeds :max_secs',
@@ -248,6 +291,7 @@ function defaultWorkstationRuntimeConfig(source) {
     slotDefaultProfiles: defaultSlotProfiles(),
     timeoutPolicy: defaultTimeoutPolicy(),
     ccSwarmTimeoutPolicy: defaultCcSwarmTimeoutPolicy(),
+    ptySendTimeoutPolicy: defaultPtySendTimeoutPolicy(),
     slotTtlPolicy: defaultSlotTtlPolicy(),
     source,
   });
@@ -276,6 +320,14 @@ function defaultCcSwarmTimeoutPolicy() {
     default_secs: DEFAULT_CC_SWARM_TIMEOUT_SECS,
     min_secs: MIN_CC_SWARM_TIMEOUT_SECS,
     max_secs: MAX_CC_SWARM_TIMEOUT_SECS,
+  };
+}
+
+function defaultPtySendTimeoutPolicy() {
+  return {
+    default_secs: DEFAULT_PTY_SEND_TIMEOUT_SECS,
+    min_secs: MIN_PTY_SEND_TIMEOUT_SECS,
+    max_secs: MAX_PTY_SEND_TIMEOUT_SECS,
   };
 }
 
