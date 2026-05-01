@@ -260,6 +260,7 @@ pub(crate) struct SonnetGateway {
     backend: SonnetBackend,
     quota: Arc<tokio::sync::RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
+    quota_throttle_sleep: Duration,
     /// v2 bus: every `WorkerEvent::LlmCall` is published here.
     bus: Option<Arc<crate::bus::BusServices>>,
 }
@@ -347,9 +348,10 @@ impl SonnetGateway {
                 drop(q);
                 warn!(
                     caller = req.caller,
-                    "SonnetGateway: quota exhausted, throttling 30s"
+                    throttle_secs = self.quota_throttle_sleep.as_secs(),
+                    "SonnetGateway: quota exhausted, throttling"
                 );
-                tokio::time::sleep(Duration::from_secs(30)).await;
+                tokio::time::sleep(self.quota_throttle_sleep).await;
             }
 
             if quota_rejected {
@@ -455,6 +457,7 @@ pub(crate) fn create_sonnet_gateway() -> Result<(SonnetHandle, SonnetGateway)> {
         backend,
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
+        quota_throttle_sleep: router_config.queued_sonnet_quota_throttle(),
         bus: None,
     };
 
