@@ -90,6 +90,10 @@ pub(crate) const DEFAULT_TIMELINE_QUERY_LIMIT: i64 = 50;
 pub(crate) const MAX_TIMELINE_QUERY_LIMIT: i64 = 200;
 pub(crate) const DEFAULT_TIMELINE_SEARCH_LIMIT: i64 = 20;
 pub(crate) const MAX_TIMELINE_SEARCH_LIMIT: i64 = 100;
+pub(crate) const DEFAULT_VISION_CODEX_BINARY: &str = "codex";
+pub(crate) const DEFAULT_VISION_CODEX_MODEL: &str = "gpt-5.4";
+pub(crate) const DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS: u64 = 120;
+pub(crate) const DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS: u64 = 300;
 pub(crate) const DEFAULT_AUTOPILOT_STALE_CONVERSATION_MINUTES: i64 = 10;
 pub(crate) const DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS: i64 = 1800;
 pub(crate) const DEFAULT_AUTOPILOT_RECOVER_STALE_RUNNING_MINUTES: i64 = 15;
@@ -259,7 +263,7 @@ pub(crate) struct MemoryKbRuntimeConfig {
     pub assistant_preview_chars: usize,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ConversationIngestionRuntimeConfig {
     pub conversation_get_tail_default: i64,
     pub conversation_search_default_limit: i64,
@@ -272,6 +276,10 @@ pub(crate) struct ConversationIngestionRuntimeConfig {
     pub timeline_query_max_limit: i64,
     pub timeline_search_default_limit: i64,
     pub timeline_search_max_limit: i64,
+    pub vision_codex_binary: String,
+    pub vision_codex_model: String,
+    pub vision_codex_idle_timeout_secs: u64,
+    pub vision_codex_absolute_timeout_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -674,6 +682,10 @@ impl Default for ConversationIngestionRuntimeConfig {
             timeline_query_max_limit: MAX_TIMELINE_QUERY_LIMIT,
             timeline_search_default_limit: DEFAULT_TIMELINE_SEARCH_LIMIT,
             timeline_search_max_limit: MAX_TIMELINE_SEARCH_LIMIT,
+            vision_codex_binary: DEFAULT_VISION_CODEX_BINARY.to_string(),
+            vision_codex_model: DEFAULT_VISION_CODEX_MODEL.to_string(),
+            vision_codex_idle_timeout_secs: DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS,
+            vision_codex_absolute_timeout_secs: DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS,
         }
     }
 }
@@ -1259,6 +1271,14 @@ impl ConversationIngestionRuntimeConfig {
         requested
             .unwrap_or(self.timeline_search_default_limit)
             .min(self.timeline_search_max_limit)
+    }
+
+    pub(crate) fn vision_codex_idle_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.vision_codex_idle_timeout_secs.max(1))
+    }
+
+    pub(crate) fn vision_codex_absolute_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.vision_codex_absolute_timeout_secs.max(1))
     }
 }
 
@@ -1892,6 +1912,13 @@ pub(crate) fn parse_conversation_ingestion_policy(
         timeline_query_max_limit: int_keyword(&tokens, ":timeline-query-max-limit")?,
         timeline_search_default_limit: int_keyword(&tokens, ":timeline-search-default-limit")?,
         timeline_search_max_limit: int_keyword(&tokens, ":timeline-search-max-limit")?,
+        vision_codex_binary: non_empty_keyword(&tokens, ":vision-codex-binary")?,
+        vision_codex_model: non_empty_keyword(&tokens, ":vision-codex-model")?,
+        vision_codex_idle_timeout_secs: u64_keyword(&tokens, ":vision-codex-idle-timeout-secs")?,
+        vision_codex_absolute_timeout_secs: u64_keyword(
+            &tokens,
+            ":vision-codex-absolute-timeout-secs",
+        )?,
     };
     if [
         cfg.conversation_get_tail_default,
@@ -1911,6 +1938,11 @@ pub(crate) fn parse_conversation_ingestion_policy(
     {
         return Err(BlueprintConfigError::Parse(
             "conversation-ingestion numeric limits must be positive".into(),
+        ));
+    }
+    if cfg.vision_codex_idle_timeout_secs == 0 || cfg.vision_codex_absolute_timeout_secs == 0 {
+        return Err(BlueprintConfigError::Parse(
+            "conversation-ingestion Codex vision timeouts must be positive".into(),
         ));
     }
     if cfg.timeline_query_max_limit < cfg.timeline_query_default_limit {
@@ -2447,7 +2479,11 @@ mod tests {
     :timeline-query-default-limit 50
     :timeline-query-max-limit 200
     :timeline-search-default-limit 20
-    :timeline-search-max-limit 100)
+    :timeline-search-max-limit 100
+    :vision-codex-binary "codex"
+    :vision-codex-model "gpt-5.4"
+    :vision-codex-idle-timeout-secs 120
+    :vision-codex-absolute-timeout-secs 300)
   (autopilot-policy
     :stale-conversation-minutes 10
     :slot-task-reap-stale-secs 1800
@@ -3014,6 +3050,16 @@ mod tests {
         assert_eq!(
             cfg.timeline_search_limit(Some(999)),
             MAX_TIMELINE_SEARCH_LIMIT
+        );
+        assert_eq!(cfg.vision_codex_binary, DEFAULT_VISION_CODEX_BINARY);
+        assert_eq!(cfg.vision_codex_model, DEFAULT_VISION_CODEX_MODEL);
+        assert_eq!(
+            cfg.vision_codex_idle_timeout(),
+            std::time::Duration::from_secs(DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS)
+        );
+        assert_eq!(
+            cfg.vision_codex_absolute_timeout(),
+            std::time::Duration::from_secs(DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS)
         );
     }
 

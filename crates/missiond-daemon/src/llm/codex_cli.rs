@@ -32,13 +32,11 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::gemini_client::current_parent_span_id;
 use missiond_core::event::events::{LlmEvent, Provider};
 
 type GovernorLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
-
-/// Absolute safety cap: kill process no matter what after this duration.
-const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
 
 /// RPM limit for Codex CLI calls.
 const CODEX_RPM: u32 = 20;
@@ -64,6 +62,7 @@ pub(crate) struct CodexCli {
     binary: String,
     default_model: String,
     idle_timeout: Duration,
+    absolute_timeout: Duration,
     rate_limiter: Arc<GovernorLimiter>,
     semaphore: Arc<Semaphore>,
     /// v2 bus: every LlmEvent flows here.
@@ -125,10 +124,21 @@ impl CodexCli {
             binary,
             default_model,
             idle_timeout,
+            absolute_timeout: ConversationIngestionRuntimeConfig::default()
+                .vision_codex_absolute_timeout(),
             rate_limiter: Arc::new(RateLimiter::direct(quota)),
             semaphore: Arc::new(Semaphore::new(CODEX_MAX_CONCURRENT)),
             bus: None,
         }
+    }
+
+    /// Project Codex CLI process safety settings from V3 conversation-ingestion-policy.
+    pub fn with_conversation_ingestion_config(
+        mut self,
+        config: &ConversationIngestionRuntimeConfig,
+    ) -> Self {
+        self.absolute_timeout = config.vision_codex_absolute_timeout();
+        self
     }
 
     /// Attach the v2 bus so every emitted event flows through it.
@@ -282,14 +292,18 @@ impl CodexCli {
         let mut lines = BufReader::new(stdout).lines();
 
         let mut events: Vec<Value> = Vec::new();
-        let absolute_deadline = tokio::time::Instant::now() + ABSOLUTE_TIMEOUT;
+        let absolute_timeout = self.absolute_timeout;
+        let absolute_deadline = tokio::time::Instant::now() + absolute_timeout;
 
         let stream_result: Result<(), String> = async {
             loop {
                 let remaining =
                     absolute_deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    return Err("absolute timeout (5min)".to_string());
+                    return Err(format!(
+                        "absolute timeout ({}s)",
+                        absolute_timeout.as_secs()
+                    ));
                 }
                 let effective_timeout = idle_timeout.min(remaining);
 
@@ -492,4 +506,25 @@ fn parse_codex_events(events: &[Value], requested_model: &str) -> Result<CodexCl
         input_tokens,
         output_tokens,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_absolute_timeout_from_conversation_ingestion_config() {
+        let config = ConversationIngestionRuntimeConfig {
+            vision_codex_absolute_timeout_secs: 42,
+            ..ConversationIngestionRuntimeConfig::default()
+        };
+        let cli = CodexCli::new(
+            "codex".to_string(),
+            "gpt-test".to_string(),
+            Duration::from_secs(5),
+        )
+        .with_conversation_ingestion_config(&config);
+
+        assert_eq!(cli.absolute_timeout, Duration::from_secs(42));
+    }
 }

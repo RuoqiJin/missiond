@@ -17,6 +17,7 @@ use std::time::Duration;
 use tracing::{debug, info, warn};
 
 use crate::codex_cli::CodexCli;
+use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::state::AppState;
 
 /// Max retry attempts per message before marking as permanently failed
@@ -244,15 +245,25 @@ impl super::BackgroundWorker for VisionWorker {
     const KIND: super::WorkerKind = super::WorkerKind::Codex;
 
     async fn run(self, state: Arc<AppState>, mut ctx: super::WorkerContext) {
+        let conversation_config = match ConversationIngestionRuntimeConfig::load_for_current_dir() {
+            Ok(config) => config,
+            Err(err) => {
+                warn!(error = %err, "Vision worker: V3_BLUEPRINT_CONFIG_ERROR");
+                return;
+            }
+        };
         let codex = CodexCli::new(
-            "codex".to_string(),
-            "gpt-5.4".to_string(),
-            Duration::from_secs(120),
+            conversation_config.vision_codex_binary.clone(),
+            conversation_config.vision_codex_model.clone(),
+            conversation_config.vision_codex_idle_timeout(),
         )
+        .with_conversation_ingestion_config(&conversation_config)
         .with_bus(Arc::clone(&state.bus));
 
         info!(
-            "Vision worker started (codex/gpt-5.4, poll interval: {}s)",
+            binary = %conversation_config.vision_codex_binary,
+            model = %conversation_config.vision_codex_model,
+            "Vision worker started (codex, poll interval: {}s)",
             IDLE_INTERVAL_SECS
         );
         let mut attempt_counts: HashMap<i64, u32> = HashMap::new();

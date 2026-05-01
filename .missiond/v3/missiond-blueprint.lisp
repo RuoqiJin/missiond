@@ -767,10 +767,15 @@
     :timeline-query-max-limit 200
     :timeline-search-default-limit 20
     :timeline-search-max-limit 100
+    :vision-codex-binary "codex"
+    :vision-codex-model "gpt-5.4"
+    :vision-codex-idle-timeout-secs 120
+    :vision-codex-absolute-timeout-secs 300
     :invariants
       ["mission_conversation_get/search/message_search/context_around MUST project default limits from conversation-ingestion-policy."
        "mission_conversation_events and mission_agent_trajectory MUST project default limits from conversation-ingestion-policy."
        "mission_timeline query/search MUST project default and max limits from conversation-ingestion-policy."
+       "Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy instead of local gpt-5.4/120s/300s literals."
        "A real MissionD project with .missiond but no conversation-ingestion-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
   (ops-infra
@@ -1884,8 +1889,10 @@
              "crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"
              "crates/missiond-daemon/src/handlers/comm/timeline.rs"
              "crates/missiond-daemon/src/handlers/comm/retrospective.rs"
+             "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
+             "crates/missiond-daemon/src/llm/codex_cli.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conversation events, agent trajectory, message read, and activity report; conversation/maintenance.rs owns embedding/reconcile work items including backfill, habit scan, embedding stats/ops, and JSONL-to-DB reconcile; timeline.rs owns mission_timeline query/trace/stats/search; retrospective.rs owns retrospective analysis, list, and backfill.")
+      :note "Runtime-projected V3 destination for conversation/session/timeline/retrospective/embedding public tools. context/v3_blueprint_runtime.rs projects conversation-ingestion-policy read-model default and max limits into conversation/query.rs, conversation/events.rs, and timeline.rs, and projects Codex vision worker binary/model/idle/absolute timeout into workers/codex/vision_worker.rs plus llm/codex_cli.rs; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query, mission_conversation_analyze, and mission_retrospective_manage consolidated routing; conversation/query.rs owns read-model query actions including list/get/search/message_search/user_index/labels/context; conversation/events.rs owns analysis/event egress including conversation events, agent trajectory, message read, and activity report; conversation/maintenance.rs owns embedding/reconcile work items including backfill, habit scan, embedding stats/ops, and JSONL-to-DB reconcile; timeline.rs owns mission_timeline query/trace/stats/search; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli with V3-projected runtime settings.")
 
     (surface router-policy
       :status "code-aligned"

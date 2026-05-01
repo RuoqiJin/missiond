@@ -24,6 +24,8 @@ const DEFAULT_FILES = {
   maintenance: 'crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs',
   timeline: 'crates/missiond-daemon/src/handlers/comm/timeline.rs',
   retrospective: 'crates/missiond-daemon/src/handlers/comm/retrospective.rs',
+  visionWorker: 'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
+  codexCli: 'crates/missiond-daemon/src/llm/codex_cli.rs',
   mcpConversation: 'crates/missiond-mcp/src/tools/comm/conversation.rs',
   mcpTimeline: 'crates/missiond-mcp/src/tools/comm/timeline.rs',
 };
@@ -96,6 +98,10 @@ function checkFiles(root, files) {
     ':agent-trajectory-default-limit 200',
     ':timeline-query-default-limit 50',
     ':timeline-query-max-limit 200',
+    ':vision-codex-binary "codex"',
+    ':vision-codex-model "gpt-5.4"',
+    ':vision-codex-idle-timeout-secs 120',
+    ':vision-codex-absolute-timeout-secs 300',
     '(tool-group conversation-ingestion-tools',
     '(surface conversation-ingestion',
     ':status "code-aligned"',
@@ -107,10 +113,13 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs',
     'crates/missiond-daemon/src/handlers/comm/timeline.rs',
     'crates/missiond-daemon/src/handlers/comm/retrospective.rs',
+    'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
+    'crates/missiond-daemon/src/llm/codex_cli.rs',
     'crates/missiond-mcp/src/tools/comm/conversation.rs',
     'crates/missiond-mcp/src/tools/comm/timeline.rs',
     'scripts/check-v3-conversation-ingestion-isomorphism.mjs',
     'conversation-ingestion-policy read-model default and max limits',
+    'Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy',
     'conversation.rs is the thin conversation-ingestion facade',
     'conversation/router.rs owns mission_conversation_query',
     'conversation/query.rs owns read-model query actions',
@@ -118,6 +127,7 @@ function checkFiles(root, files) {
     'conversation/maintenance.rs owns embedding/reconcile work items',
     'timeline.rs owns mission_timeline',
     'retrospective.rs owns retrospective analysis, list, and backfill',
+    'vision_worker.rs owns unprocessed image-message extraction through CodexCli',
     'node scripts/check-v3-conversation-ingestion-isomorphism.mjs',
   ]);
 
@@ -133,6 +143,16 @@ function checkFiles(root, files) {
     'MAX_TIMELINE_QUERY_LIMIT',
     'DEFAULT_TIMELINE_SEARCH_LIMIT',
     'MAX_TIMELINE_SEARCH_LIMIT',
+    'DEFAULT_VISION_CODEX_BINARY',
+    'DEFAULT_VISION_CODEX_MODEL',
+    'DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS',
+    'DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS',
+    'vision_codex_binary',
+    'vision_codex_model',
+    'vision_codex_idle_timeout',
+    'vision_codex_absolute_timeout',
+    ':vision-codex-binary',
+    ':vision-codex-absolute-timeout-secs',
     'conversation-ingestion-policy',
   ]);
 
@@ -247,6 +267,33 @@ function checkFiles(root, files) {
     'retro_worker::backfill',
   ]);
 
+  requireAll(diagnostics, files.visionWorker, sources.visionWorker, [
+    'ConversationIngestionRuntimeConfig::load_for_current_dir',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'vision_codex_binary.clone()',
+    'vision_codex_model.clone()',
+    'vision_codex_idle_timeout()',
+    'with_conversation_ingestion_config(&conversation_config)',
+    'Vision worker started (codex',
+  ]);
+  forbidAll(diagnostics, files.visionWorker, sources.visionWorker, [
+    '"gpt-5.4".to_string()',
+    'Duration::from_secs(120)',
+    'Vision worker started (codex/gpt-5.4',
+  ]);
+
+  requireAll(diagnostics, files.codexCli, sources.codexCli, [
+    'ConversationIngestionRuntimeConfig',
+    'absolute_timeout',
+    'with_conversation_ingestion_config',
+    'config.vision_codex_absolute_timeout()',
+    'absolute timeout ({}s)',
+  ]);
+  forbidAll(diagnostics, files.codexCli, sources.codexCli, [
+    'const ABSOLUTE_TIMEOUT',
+    'Duration::from_secs(300)',
+  ]);
+
   requireAll(diagnostics, files.mcpConversation, sources.mcpConversation, [
     'ToolDefinition::new',
     '"mission_conversation_query"',
@@ -279,6 +326,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden text present: ${needle}` });
+    }
+  }
+}
+
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-conversation-ingestion-'));
   for (const rel of Object.values(DEFAULT_FILES)) {
@@ -299,7 +354,11 @@ function buildFixture() {
     :timeline-query-default-limit 50
     :timeline-query-max-limit 200
     :timeline-search-default-limit 20
-    :timeline-search-max-limit 100)
+    :timeline-search-max-limit 100
+    :vision-codex-binary "codex"
+    :vision-codex-model "gpt-5.4"
+    :vision-codex-idle-timeout-secs 120
+    :vision-codex-absolute-timeout-secs 300)
   (v2-convergence-map
     (v2-item conversation-ingestion :status runtime-projected))
   (public-surface-map
@@ -315,10 +374,12 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"
              "crates/missiond-daemon/src/handlers/comm/timeline.rs"
              "crates/missiond-daemon/src/handlers/comm/retrospective.rs"
+             "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
+             "crates/missiond-daemon/src/llm/codex_cli.rs"
              "crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "conversation-ingestion-policy read-model default and max limits; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill."))
+      :note "conversation-ingestion-policy read-model default and max limits; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
   (compression-contract
     :checks ["node scripts/check-v3-conversation-ingestion-isomorphism.mjs"]))`,
   );
@@ -328,7 +389,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.v3Runtime),
-    'ConversationIngestionRuntimeConfig parse_conversation_ingestion_policy DEFAULT_CONVERSATION_GET_TAIL DEFAULT_CONVERSATION_SEARCH_LIMIT DEFAULT_MESSAGE_SEARCH_LIMIT DEFAULT_CONVERSATION_EVENTS_LIMIT DEFAULT_AGENT_TRAJECTORY_LIMIT DEFAULT_TIMELINE_QUERY_LIMIT MAX_TIMELINE_QUERY_LIMIT DEFAULT_TIMELINE_SEARCH_LIMIT MAX_TIMELINE_SEARCH_LIMIT conversation-ingestion-policy',
+    'ConversationIngestionRuntimeConfig parse_conversation_ingestion_policy DEFAULT_CONVERSATION_GET_TAIL DEFAULT_CONVERSATION_SEARCH_LIMIT DEFAULT_MESSAGE_SEARCH_LIMIT DEFAULT_CONVERSATION_EVENTS_LIMIT DEFAULT_AGENT_TRAJECTORY_LIMIT DEFAULT_TIMELINE_QUERY_LIMIT MAX_TIMELINE_QUERY_LIMIT DEFAULT_TIMELINE_SEARCH_LIMIT MAX_TIMELINE_SEARCH_LIMIT DEFAULT_VISION_CODEX_BINARY DEFAULT_VISION_CODEX_MODEL DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS vision_codex_binary vision_codex_model vision_codex_idle_timeout vision_codex_absolute_timeout :vision-codex-binary :vision-codex-absolute-timeout-secs conversation-ingestion-policy',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.facade),
@@ -357,6 +418,14 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.retrospective),
     'mission_retrospective_list mission_retrospective_backfill run_analysis get_retrospective_meta list_retrospective_results retro_worker::backfill',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.visionWorker),
+    'ConversationIngestionRuntimeConfig::load_for_current_dir V3_BLUEPRINT_CONFIG_ERROR vision_codex_binary.clone() vision_codex_model.clone() vision_codex_idle_timeout() with_conversation_ingestion_config(&conversation_config) Vision worker started (codex',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.codexCli),
+    'ConversationIngestionRuntimeConfig absolute_timeout with_conversation_ingestion_config config.vision_codex_absolute_timeout() absolute timeout ({}s)',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpConversation),
