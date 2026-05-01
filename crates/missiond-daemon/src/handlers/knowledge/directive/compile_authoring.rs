@@ -13,7 +13,7 @@ use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 use missiond_core::types::DirectiveStatus;
 
-use super::SONNET_COMPILER_MODEL;
+use super::load_sonnet_compiler_model;
 
 pub(super) const COMPILER_MODE_DRY_RUN: &str = "dry_run";
 pub(super) const COMPILER_MODE_SONNET: &str = "sonnet";
@@ -383,11 +383,12 @@ async fn action_compile_sonnet(
             ))
         }
     };
+    let compiler_model = load_sonnet_compiler_model()?;
 
     let mut payload = json!({
         "status": "compiled",
         "compiler_mode": COMPILER_MODE_SONNET,
-        "compiler_model": SONNET_COMPILER_MODEL,
+        "compiler_model": compiler_model.clone(),
         "flow_ref": "F-intent-alignment-plan-execution-loop :: s2 intent-alignment-authoring",
         "utterance": utterance,
         "source": source,
@@ -414,7 +415,7 @@ async fn action_compile_sonnet(
                 &compiled_sexp,
                 1,
                 DirectiveStatus::Draft,
-                Some(SONNET_COMPILER_MODEL),
+                Some(compiler_model.as_str()),
                 Some(&refs_v),
             )
             .await

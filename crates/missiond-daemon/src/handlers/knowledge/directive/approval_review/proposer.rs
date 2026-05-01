@@ -107,6 +107,17 @@ pub(super) async fn request_directive_auto_approve_proposal(
     };
 
     let (proposal, parse_warnings) = parse_llm_auto_approve_proposal(&raw);
+    let compiler_model = match load_sonnet_compiler_model() {
+        Ok(model) => model,
+        Err(err) => {
+            return LlmAutoApproveProposalBundle::unavailable(
+                mode,
+                action,
+                DIRECTIVE_REVIEW_PROPOSER_CALLER,
+                err.to_string(),
+            );
+        }
+    };
     match proposal {
         Some(mut p) => {
             // Pin the deterministic invariants (destructive_check +
@@ -120,7 +131,7 @@ pub(super) async fn request_directive_auto_approve_proposal(
                 unavailable_reason: None,
                 action: action.to_string(),
                 request_caller: Some(DIRECTIVE_REVIEW_PROPOSER_CALLER.to_string()),
-                model: Some(SONNET_COMPILER_MODEL.to_string()),
+                model: Some(compiler_model.clone()),
             }
         }
         None => LlmAutoApproveProposalBundle {
@@ -131,7 +142,7 @@ pub(super) async fn request_directive_auto_approve_proposal(
             unavailable_reason: None,
             action: action.to_string(),
             request_caller: Some(DIRECTIVE_REVIEW_PROPOSER_CALLER.to_string()),
-            model: Some(SONNET_COMPILER_MODEL.to_string()),
+            model: Some(compiler_model),
         },
     }
 }

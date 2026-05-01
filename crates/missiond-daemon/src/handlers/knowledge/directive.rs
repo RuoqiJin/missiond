@@ -26,13 +26,18 @@ use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
 use std::str::FromStr;
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::state::AppState;
 use missiond_core::types::DirectiveStatus;
 
-const SONNET_COMPILER_MODEL: &str = "claude-sonnet";
-
 const DEFAULT_LIST_LIMIT: i64 = 50;
 const MAX_LIST_LIMIT: i64 = 500;
+
+pub(super) fn load_sonnet_compiler_model() -> Result<String> {
+    RouterRuntimeConfig::load_for_current_dir()
+        .map(|config| config.queued_sonnet_model)
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
 
 mod compile_authoring;
 use compile_authoring::action_compile;

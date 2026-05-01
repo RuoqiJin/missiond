@@ -22,7 +22,7 @@ use crate::minimax_client::ChatMessage;
 use crate::state::AppState;
 use missiond_core::types::DirectiveStatus;
 
-use super::{parse_id_arg, require_i32, SONNET_COMPILER_MODEL};
+use super::{load_sonnet_compiler_model, parse_id_arg, require_i32};
 
 /// Action whitelist for the directive surface — the parsed
 /// `review:directive:<id>:v<v>:<action>` envelope's `<action>` segment
@@ -36,7 +36,7 @@ pub(super) const DIRECTIVE_REVIEW_ACTIONS: &[&str] = &["compile", "approve", "ar
 ///
 /// Rules of thumb:
 ///   * `deterministic_mode` = `compiler_model.is_none()` (dry-run leaves
-///     it unset; sonnet records `claude-sonnet`). LLM-driven artifacts
+///     it unset; sonnet records the V3-projected compiler model). LLM-driven artifacts
 ///     ALWAYS block `auto_safe` — refusing to auto-approve unattended
 ///     LLM output is the load-bearing safety contract.
 ///   * `protected_source_or_target` is currently `false` for directive —
