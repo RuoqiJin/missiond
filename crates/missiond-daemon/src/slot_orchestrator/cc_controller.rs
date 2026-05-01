@@ -21,6 +21,8 @@ use missiond_core::types::CliEngine;
 use missiond_core::types::SharedProjectRegistry;
 use missiond_core::LearnedPermissions;
 
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+
 use super::controller::EngineController;
 use super::register_slot_session;
 use super::types::SlotTaskRequest;
@@ -150,6 +152,11 @@ impl EngineController for ClaudeCodeController {
         is_ephemeral: bool,
     ) -> Result<String> {
         info!(slot_id, "ClaudeCodeCtrl: spawning");
+        let runtime_config = WorkstationRuntimeConfig::load_for_project_root(Some(
+            req.cwd.to_string_lossy().as_ref(),
+        ))
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))?;
+        let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
 
         let pty_slot = missiond_core::pty::Slot {
             id: slot_id.to_string(),
@@ -170,7 +177,7 @@ impl EngineController for ClaudeCodeController {
             PTYSpawnOptions {
                 auto_restart: !is_ephemeral,
                 wait_for_idle: true,
-                timeout_secs: Some(120),
+                timeout_secs: Some(spawn_timeout_secs),
                 mcp_config: None,
                 dangerously_skip_permissions: req.skip_permissions,
                 model: req.model.clone(),

@@ -19,7 +19,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
 	  - mission_pty_send waitForResponse timeout is projected from timeout-policy pty-send-blocking.
 	  - Autopilot tick/dispatch/consciousness windows are projected from autopilot-policy.
 	  - mission_compute_slot dynamic template role/description/mcp/default cwd and cwd allow-list are projected from V3.
-	  - mission_compute_slot dynamic spawn timeout is projected from timeout-policy dynamic-slot-spawn.
+	  - mission_compute_slot and Claude/Gemini slot-orchestrator spawn timeouts are projected from timeout-policy dynamic-slot-spawn.
 	`;
 
 const DEFAULT_FILES = {
@@ -30,6 +30,8 @@ const DEFAULT_FILES = {
   slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
   v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
+  ccController: 'crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs',
+  geminiDriver: 'crates/missiond-daemon/src/llm/gemini_driver.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   ccTasks: 'crates/missiond-daemon/src/handlers/compute/cc_tasks.rs',
   mcpComputeSlot: 'crates/missiond-mcp/src/tools/compute/compute_slot.rs',
@@ -102,6 +104,8 @@ function checkFiles(root, files) {
     ':status "code-aligned"',
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/main.rs',
+    'crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs',
+    'crates/missiond-daemon/src/llm/gemini_driver.rs',
     'WorkstationRuntimeConfig::load_for_project_root',
     'V3_BLUEPRINT_CONFIG_ERROR',
     'coding-default-opus-4-7',
@@ -129,7 +133,8 @@ function checkFiles(root, files) {
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
     'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
 	    'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
-	    'mission_compute_slot dynamic slot spawn wait_for_idle timeout MUST project from workstation-config timeout-policy dynamic-slot-spawn',
+	    'mission_compute_slot and Claude/Gemini slot-orchestrator dynamic slot spawn wait_for_idle timeouts MUST project from workstation-config timeout-policy dynamic-slot-spawn',
+	    'Claude/Gemini slot-orchestrator spawn',
 	    'autopilot-policy',
 	    'AutopilotRuntimeConfig MUST load autopilot-policy',
 	    'Autopilot tick windows',
@@ -313,6 +318,26 @@ function checkFiles(root, files) {
     'wait_for_idle',
   ]);
 
+  requireAll(diagnostics, files.ccController, sources.ccController, [
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'dynamic_slot_spawn_timeout_secs',
+    'timeout_secs: Some(spawn_timeout_secs)',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+  ]);
+  forbidAll(diagnostics, files.ccController, sources.ccController, [
+    'timeout_secs: Some(120)',
+  ]);
+
+  requireAll(diagnostics, files.geminiDriver, sources.geminiDriver, [
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'dynamic_slot_spawn_timeout_secs',
+    'timeout_secs: Some(spawn_timeout_secs)',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+  ]);
+  forbidAll(diagnostics, files.geminiDriver, sources.geminiDriver, [
+    'timeout_secs: Some(120)',
+  ]);
+
 	  requireAll(diagnostics, files.autopilot, sources.autopilot, [
 	    'AutopilotRuntimeConfig::load_for_current_dir',
 	    'dispatch_board_tasks_with_config',
@@ -477,7 +502,7 @@ function buildFixture() {
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold"
 	       "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"
 	       "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking"
-	       "mission_compute_slot dynamic slot spawn wait_for_idle timeout MUST project from workstation-config timeout-policy dynamic-slot-spawn"
+	       "mission_compute_slot and Claude/Gemini slot-orchestrator dynamic slot spawn wait_for_idle timeouts MUST project from workstation-config timeout-policy dynamic-slot-spawn"
 	       "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
 	       "BoardStore::clear_board_task_assignee"])
 	  (autopilot-policy
@@ -501,8 +526,10 @@ function buildFixture() {
     (surface workstation-config
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
-             "crates/missiond-daemon/src/main.rs"]
-      :note "WorkstationRuntimeConfig::load_for_project_root projects V3 workstation-config and surfaces V3_BLUEPRINT_CONFIG_ERROR."))
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/slot_orchestrator/cc_controller.rs"
+             "crates/missiond-daemon/src/llm/gemini_driver.rs"]
+      :note "WorkstationRuntimeConfig::load_for_project_root projects V3 workstation-config and surfaces V3_BLUEPRINT_CONFIG_ERROR. Claude/Gemini slot-orchestrator spawn timeouts project from dynamic-slot-spawn."))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-config-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.main, `
@@ -587,6 +614,16 @@ options.extra_env.extend(tracking_env);
 let initial_prompt = options.initial_prompt.take();
 send_fire_and_forget();
 let wait_for_idle = true;`);
+  writeFixture(root, DEFAULT_FILES.ccController, `
+WorkstationRuntimeConfig::load_for_project_root();
+V3_BLUEPRINT_CONFIG_ERROR;
+let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
+timeout_secs: Some(spawn_timeout_secs);`);
+  writeFixture(root, DEFAULT_FILES.geminiDriver, `
+WorkstationRuntimeConfig::load_for_project_root();
+V3_BLUEPRINT_CONFIG_ERROR;
+let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
+timeout_secs: Some(spawn_timeout_secs);`);
 	  writeFixture(root, DEFAULT_FILES.autopilot, `
 	AutopilotRuntimeConfig::load_for_current_dir();
 	dispatch_board_tasks_with_config();
