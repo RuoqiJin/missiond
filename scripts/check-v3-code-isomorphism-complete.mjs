@@ -75,6 +75,9 @@ export const PER_SURFACE_CHECKERS = [
   // Cross-surface historical/public coverage check: V2 effective design and
   // every public MCP tool must have an explicit V3 destination.
   'scripts/check-v3-v2-coverage.mjs',
+  // Cross-surface runtime artifact path hygiene: public/runtime-facing docs
+  // must cite V3 runtime sidecars first and keep V2 only as legacy fallback.
+  'scripts/check-v3-runtime-path-hygiene.mjs',
   'scripts/check-v3-request-lisp-isomorphism.mjs',
   'scripts/check-v3-unified-entry-isomorphism.mjs',
   'scripts/check-v3-file-artifacts-isomorphism.mjs',

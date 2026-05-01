@@ -2060,6 +2060,7 @@
              "node scripts/check-architecture-lisp.mjs --no-structure .missiond/v3/missiond-blueprint.lisp"
              "node scripts/check-v3-pillar-flow-schema.mjs"
              "node scripts/check-v3-v2-coverage.mjs"
+             "node scripts/check-v3-runtime-path-hygiene.mjs"
              "node scripts/check-v3-conversation-ingestion-isomorphism.mjs"
              "node scripts/check-v3-capability-governance-isomorphism.mjs"
              "node scripts/check-v3-compute-primitives-isomorphism.mjs"
