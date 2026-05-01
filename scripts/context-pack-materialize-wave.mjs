@@ -7,9 +7,9 @@
 //   - .missiond/tasks/<wave>/manifest.lisp
 //   - .missiond/tasks/<wave>/<task-id>.lisp task contracts
 //
-// It does not dispatch workers. Downstream orchestration still runs
-// prepare-task-runner-wave.mjs, task-runner-dispatch.mjs, or
-// task-runner-submit-dispatch.mjs.
+// It does not dispatch workers. Downstream orchestration should normally run
+// context-pack-run-wave.mjs, which composes prepare-task-runner-wave.mjs,
+// task-runner-dispatch.mjs, and task-runner-submit-dispatch.mjs.
 
 import fs from 'node:fs';
 import os from 'node:os';
@@ -242,6 +242,8 @@ export function materializeContextPackWave({
     },
     outputs,
     next_commands: [
+      `node scripts/context-pack-run-wave.mjs --context-pack ${contextPackRel}`,
+      `node scripts/context-pack-run-wave.mjs --context-pack ${contextPackRel} --apply`,
       `node scripts/prepare-task-runner-wave.mjs --manifest .missiond/tasks/${outputWave}/manifest.lisp`,
       `node scripts/task-runner-dispatch.mjs --manifest .missiond/tasks/${outputWave}/manifest.lisp --max-parallel 4 --json`,
     ],

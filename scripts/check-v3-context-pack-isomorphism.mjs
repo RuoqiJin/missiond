@@ -189,6 +189,7 @@ function checkFiles(root, files) {
     'runtime_projection',
     'context_pack_path',
     '--allow-default-config',
+    'context-pack-run-wave.mjs',
     'prepare-task-runner-wave.mjs',
     'task-runner-dispatch.mjs',
   ]);
