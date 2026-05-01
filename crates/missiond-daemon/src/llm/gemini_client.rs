@@ -27,6 +27,7 @@ use governor::{
 use tokio::sync::Semaphore;
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::gemini_cli::{GeminiCli, GeminiCliProgress};
 use missiond_core::event::events::{LlmEvent, Provider};
 
@@ -72,6 +73,8 @@ pub(crate) struct GeminiClient {
     /// Phase 8: every LLM event goes through the v2 bus. Optional so tests
     /// can construct a client without a live bus.
     bus: Option<Arc<crate::bus::BusServices>>,
+    pty_queue_timeout: Duration,
+    http_queue_timeout: Duration,
     /// Atomic counters for DaemonStats aggregation.
     pub(crate) request_count: Arc<AtomicU64>,
     pub(crate) error_count: Arc<AtomicU64>,
@@ -116,6 +119,25 @@ impl Drop for RequestGuard<'_> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn queue_timeouts_project_from_router_runtime_config() {
+        let router_config = RouterRuntimeConfig {
+            gemini_pty_queue_timeout_secs: 7,
+            gemini_http_queue_timeout_secs: 11,
+            ..RouterRuntimeConfig::default()
+        };
+
+        let client = GeminiClient::new().with_router_runtime_config(&router_config);
+
+        assert_eq!(client.pty_queue_timeout, Duration::from_secs(7));
+        assert_eq!(client.http_queue_timeout, Duration::from_secs(11));
+    }
+}
+
 impl RequestGuard<'_> {
     fn complete(mut self, result: &Result<serde_json::Value>, retry_count: u32) {
         self.completed = true;
@@ -144,6 +166,8 @@ impl GeminiClient {
             semaphore: Arc::new(Semaphore::new(3)),
             cli: None,
             bus: None,
+            pty_queue_timeout: RouterRuntimeConfig::default().gemini_pty_queue_timeout(),
+            http_queue_timeout: RouterRuntimeConfig::default().gemini_http_queue_timeout(),
             request_count: Arc::new(AtomicU64::new(0)),
             error_count: Arc::new(AtomicU64::new(0)),
             retry_count: Arc::new(AtomicU64::new(0)),
@@ -154,6 +178,12 @@ impl GeminiClient {
     /// flows through the log.
     pub fn with_bus(mut self, bus: Arc<crate::bus::BusServices>) -> Self {
         self.bus = Some(bus);
+        self
+    }
+
+    pub fn with_router_runtime_config(mut self, config: &RouterRuntimeConfig) -> Self {
+        self.pty_queue_timeout = config.gemini_pty_queue_timeout();
+        self.http_queue_timeout = config.gemini_http_queue_timeout();
         self
     }
 
@@ -180,6 +210,8 @@ impl GeminiClient {
             semaphore: Arc::new(Semaphore::new(concurrency)),
             cli: Some(Arc::new(cli)),
             bus: None,
+            pty_queue_timeout: RouterRuntimeConfig::default().gemini_pty_queue_timeout(),
+            http_queue_timeout: RouterRuntimeConfig::default().gemini_http_queue_timeout(),
             request_count: Arc::new(AtomicU64::new(0)),
             error_count: Arc::new(AtomicU64::new(0)),
             retry_count: Arc::new(AtomicU64::new(0)),
@@ -244,9 +276,9 @@ impl GeminiClient {
         //    user-facing requests (router_chat) indefinitely.
         let queue_start = Instant::now();
         let queue_timeout = if self.cli.as_ref().map_or(false, |c| c.has_pty()) {
-            Duration::from_secs(30)
+            self.pty_queue_timeout
         } else {
-            Duration::from_secs(300) // HTTP mode: more generous
+            self.http_queue_timeout
         };
         let permit = tokio::time::timeout(queue_timeout, self.semaphore.clone().acquire_owned())
             .await

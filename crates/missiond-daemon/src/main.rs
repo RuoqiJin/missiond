@@ -592,6 +592,9 @@ async fn main() -> Result<()> {
             .build()
             .expect("Failed to build HTTP client"),
         gemini: {
+            let router_runtime_config =
+                context::v3_blueprint_runtime::RouterRuntimeConfig::load_for_current_dir()
+                    .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
             // Check llm.yaml for provider config
             let llm_yaml = default_mission_home().join("llm.yaml");
             if llm_yaml.exists() {
@@ -634,19 +637,28 @@ async fn main() -> Result<()> {
                                 )
                                 .with_pty(pty_transport),
                             )
+                            .with_router_runtime_config(&router_runtime_config)
                             .with_bus(Arc::clone(&bus_services))
                         } else {
                             info!(provider = %config.provider, "LLM provider: HTTP router");
-                            gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
+                            gemini_client::GeminiClient::new()
+                                .with_router_runtime_config(&router_runtime_config)
+                                .with_bus(Arc::clone(&bus_services))
                         }
                     } else {
-                        gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
+                        gemini_client::GeminiClient::new()
+                            .with_router_runtime_config(&router_runtime_config)
+                            .with_bus(Arc::clone(&bus_services))
                     }
                 } else {
-                    gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
+                    gemini_client::GeminiClient::new()
+                        .with_router_runtime_config(&router_runtime_config)
+                        .with_bus(Arc::clone(&bus_services))
                 }
             } else {
-                gemini_client::GeminiClient::new().with_bus(Arc::clone(&bus_services))
+                gemini_client::GeminiClient::new()
+                    .with_router_runtime_config(&router_runtime_config)
+                    .with_bus(Arc::clone(&bus_services))
             }
         },
         minimax: {
