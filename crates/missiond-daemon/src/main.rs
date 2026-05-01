@@ -86,6 +86,132 @@ fn parse_startup_slot_lifecycle(value: &str) -> Result<missiond_core::types::Lif
     }
 }
 
+fn workstation_pool_model(
+    worker: &context::v3_blueprint_runtime::WorkstationPoolRuntimeConfig,
+    config: &context::v3_blueprint_runtime::WorkstationRuntimeConfig,
+) -> Result<Option<String>> {
+    if let Some(model) = worker.model.as_ref() {
+        return Ok(Some(model.clone()));
+    }
+    match worker.model_profile.as_deref() {
+        Some(profile) => config
+            .spawn_model_for_profile(profile)
+            .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e)),
+        None => Ok(None),
+    }
+}
+
+fn startup_slot_config(
+    startup_slot: &context::v3_blueprint_runtime::StartupSlotRuntimeConfig,
+    config: &context::v3_blueprint_runtime::WorkstationRuntimeConfig,
+    project_root: &Path,
+) -> Result<Option<missiond_core::types::SlotConfig>> {
+    let Some(slot_id) = startup_slot.slot_id.as_ref() else {
+        return Ok(None);
+    };
+    let engine = parse_startup_slot_engine(&startup_slot.engine)?;
+    let lifecycle = parse_startup_slot_lifecycle(&startup_slot.lifecycle)?;
+    let model = match startup_slot.model_profile.as_deref() {
+        Some(profile) => config
+            .spawn_model_for_profile(profile)
+            .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?,
+        None => None,
+    };
+    let mcp_config = if matches!(engine, missiond_core::types::CliEngine::ClaudeCode) {
+        config
+            .slot_template("coder")
+            .and_then(|template| template.mcp_config.clone())
+    } else {
+        None
+    };
+    let traits = if matches!(engine, missiond_core::types::CliEngine::ClaudeCode) {
+        vec![missiond_core::types::SlotTrait::SupportsMcp]
+    } else {
+        vec![]
+    };
+    let root = project_root.to_string_lossy().to_string();
+    Ok(Some(missiond_core::types::SlotConfig {
+        id: slot_id.clone(),
+        role: startup_slot
+            .role
+            .clone()
+            .unwrap_or_else(|| startup_slot.task_type.clone()),
+        description: format!(
+            "[V3 startup] {} | {}",
+            startup_slot.task_type, startup_slot.engine
+        ),
+        engine,
+        cwd: Some(root.clone()),
+        project_root: Some(root),
+        requested_cwd: None,
+        mcp_config,
+        lifecycle: Some(lifecycle),
+        auto_start: None,
+        dangerously_skip_permissions: Some(startup_slot.skip_permissions),
+        model,
+        traits,
+        category: Some("worker".to_string()),
+        env: None,
+        initial_prompt: None,
+    }))
+}
+
+fn workstation_pool_slot_config(
+    worker: &context::v3_blueprint_runtime::WorkstationPoolRuntimeConfig,
+    config: &context::v3_blueprint_runtime::WorkstationRuntimeConfig,
+    project_root: &Path,
+) -> Result<missiond_core::types::SlotConfig> {
+    let engine = parse_startup_slot_engine(&worker.engine)?;
+    let mcp_config = if matches!(engine, missiond_core::types::CliEngine::ClaudeCode) {
+        config
+            .slot_template("coder")
+            .and_then(|template| template.mcp_config.clone())
+    } else {
+        None
+    };
+    let traits = if matches!(engine, missiond_core::types::CliEngine::ClaudeCode) {
+        vec![missiond_core::types::SlotTrait::SupportsMcp]
+    } else {
+        vec![]
+    };
+    let root = project_root.to_string_lossy().to_string();
+    Ok(missiond_core::types::SlotConfig {
+        id: worker.slot_id.clone(),
+        role: worker.role.clone(),
+        description: format!(
+            "[V3 pool] {} | {} | {}",
+            worker.id, worker.engine, worker.default_use
+        ),
+        engine,
+        cwd: Some(root.clone()),
+        project_root: Some(root),
+        requested_cwd: None,
+        mcp_config,
+        lifecycle: Some(missiond_core::types::Lifecycle::Persistent),
+        auto_start: None,
+        dangerously_skip_permissions: Some(true),
+        model: workstation_pool_model(worker, config)?,
+        traits,
+        category: Some("worker".to_string()),
+        env: None,
+        initial_prompt: None,
+    })
+}
+
+async fn register_and_init_runtime_slot(
+    state: &AppState,
+    slot_config: missiond_core::types::SlotConfig,
+) {
+    let pty_slot = missiond_core::PTYSlot {
+        id: slot_config.id.clone(),
+        role: slot_config.role.clone(),
+        cwd: slot_config.cwd.as_deref().map(PathBuf::from),
+        engine: slot_config.engine,
+    };
+    state.pty.init_slot(&pty_slot).await;
+    state.mission.register_runtime_slot(slot_config);
+}
+
 impl AppState {
     pub(crate) async fn call_tool(&self, name: &str, args: Value) -> ToolResult {
         match self.call_tool_inner(name, args).await {
@@ -816,10 +942,41 @@ async fn main() -> Result<()> {
                     skip_permissions: startup_slot.skip_permissions,
                 })
                 .await?;
+            if let Some(slot_config) =
+                startup_slot_config(startup_slot, &workstation_config, &missiond_project_root)?
+            {
+                register_and_init_runtime_slot(&state, slot_config).await;
+            }
+        }
+        for worker in workstation_config.workstation_pool() {
+            let engine = parse_startup_slot_engine(&worker.engine)
+                .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+            let model = workstation_pool_model(worker, &workstation_config)?;
+            state
+                .slot_manager
+                .register(slot_orchestrator::SlotTaskConfig {
+                    task_type: worker.task_type.clone(),
+                    engine,
+                    lifecycle: missiond_core::types::Lifecycle::Persistent,
+                    slot_id: Some(worker.slot_id.clone()),
+                    role: Some(worker.role.clone()),
+                    model: model.clone(),
+                    timeout: std::time::Duration::from_secs(worker.timeout_secs),
+                    cwd: missiond_project_root.clone(),
+                    skip_permissions: true,
+                })
+                .await?;
+            let slot_config =
+                workstation_pool_slot_config(worker, &workstation_config, &missiond_project_root)?;
+            register_and_init_runtime_slot(&state, slot_config).await;
         }
         info!(
             count = workstation_config.startup_slots().len(),
             "SlotManager: startup tasks registered from V3 workstation-config"
+        );
+        info!(
+            count = workstation_config.workstation_pool().len(),
+            "SlotManager: workstation pool registered from V3"
         );
     }
 

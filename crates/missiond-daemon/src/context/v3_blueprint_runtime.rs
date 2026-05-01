@@ -161,6 +161,7 @@ pub(crate) struct WorkstationRuntimeConfig {
     slot_templates: HashMap<String, SlotTemplateRuntimeConfig>,
     model_profile_spawn_args: HashMap<String, Option<String>>,
     startup_slots: Vec<StartupSlotRuntimeConfig>,
+    workstation_pool: Vec<WorkstationPoolRuntimeConfig>,
     allowed_cwd_prefixes: Vec<PathBuf>,
     pub timeout_policy: TimeoutPolicy,
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
@@ -189,6 +190,24 @@ pub(crate) struct StartupSlotRuntimeConfig {
     pub model_profile: Option<String>,
     pub timeout_secs: u64,
     pub skip_permissions: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkstationPoolRuntimeConfig {
+    pub id: String,
+    pub engine: String,
+    pub role: String,
+    pub slot_id: String,
+    pub task_type: String,
+    pub model_profile: Option<String>,
+    pub model: Option<String>,
+    pub task_classes: Vec<String>,
+    pub capabilities: Vec<String>,
+    pub max_concurrency: usize,
+    pub timeout_secs: u64,
+    pub default_use: String,
+    pub accepts_boardtask: bool,
+    pub write_allowed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -542,11 +561,67 @@ impl Default for WorkstationRuntimeConfig {
                 skip_permissions: true,
             },
         ];
+        let workstation_pool = vec![
+            WorkstationPoolRuntimeConfig {
+                id: "claude-code-default".to_string(),
+                engine: "claude-code".to_string(),
+                role: "coder".to_string(),
+                slot_id: "slot-claude-code-default".to_string(),
+                task_type: "claude_code_default".to_string(),
+                model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
+                model: None,
+                task_classes: vec![
+                    "code".to_string(),
+                    "implementation".to_string(),
+                    "review".to_string(),
+                    "context-pack".to_string(),
+                    "ops".to_string(),
+                ],
+                capabilities: vec![
+                    "code-read".to_string(),
+                    "code-write".to_string(),
+                    "scoped-commit".to_string(),
+                    "mcp".to_string(),
+                ],
+                max_concurrency: 1,
+                timeout_secs: 1800,
+                default_use: "code-implementation".to_string(),
+                accepts_boardtask: true,
+                write_allowed: true,
+            },
+            WorkstationPoolRuntimeConfig {
+                id: "gemini-ultra".to_string(),
+                engine: "gemini".to_string(),
+                role: "researcher".to_string(),
+                slot_id: "slot-gemini-ultra".to_string(),
+                task_type: "gemini_ultra".to_string(),
+                model_profile: None,
+                model: None,
+                task_classes: vec![
+                    "research".to_string(),
+                    "review".to_string(),
+                    "context-pack".to_string(),
+                    "lisp-compression".to_string(),
+                    "general".to_string(),
+                ],
+                capabilities: vec![
+                    "read-only".to_string(),
+                    "analysis".to_string(),
+                    "design-review".to_string(),
+                ],
+                max_concurrency: 1,
+                timeout_secs: 900,
+                default_use: "research-review".to_string(),
+                accepts_boardtask: true,
+                write_allowed: false,
+            },
+        ];
         Self {
             slot_default_profiles,
             slot_templates,
             model_profile_spawn_args,
             startup_slots,
+            workstation_pool,
             allowed_cwd_prefixes: DEFAULT_ALLOWED_CWD_PREFIXES
                 .iter()
                 .map(PathBuf::from)
@@ -800,6 +875,39 @@ impl WorkstationRuntimeConfig {
 
     pub(crate) fn startup_slots(&self) -> &[StartupSlotRuntimeConfig] {
         &self.startup_slots
+    }
+
+    pub(crate) fn workstation_pool(&self) -> &[WorkstationPoolRuntimeConfig] {
+        &self.workstation_pool
+    }
+
+    pub(crate) fn boardtask_pool_candidates(
+        &self,
+        task_class: &str,
+    ) -> Vec<&WorkstationPoolRuntimeConfig> {
+        let task_class = task_class.trim();
+        let mut candidates: Vec<&WorkstationPoolRuntimeConfig> = self
+            .workstation_pool
+            .iter()
+            .filter(|worker| {
+                worker.accepts_boardtask
+                    && worker.task_classes.iter().any(|class| {
+                        class == task_class || (task_class == "general" && class == "general")
+                    })
+            })
+            .collect();
+        if candidates.is_empty() && task_class != "code" {
+            candidates = self
+                .workstation_pool
+                .iter()
+                .filter(|worker| {
+                    worker.accepts_boardtask
+                        && worker.task_classes.iter().any(|class| class == "code")
+                })
+                .collect();
+        }
+        candidates.sort_by_key(|worker| if worker.write_allowed { 1 } else { 0 });
+        candidates
     }
 
     #[allow(dead_code)]
@@ -1476,6 +1584,72 @@ pub(crate) fn parse_workstation_config(
                 skip_permissions,
             });
         }
+    }
+    if let Some(pool_block) = find_form(source, "workstation-pool") {
+        let worker_forms = find_forms(&pool_block, "worker");
+        if !worker_forms.is_empty() {
+            config.workstation_pool.clear();
+            for form in worker_forms {
+                let tokens = tokenize_lisp(&form);
+                if tokens.len() < 3 {
+                    continue;
+                }
+                let accepts_boardtask = keyword_value(&tokens, ":accepts-boardtask")
+                    .or_else(|| keyword_value(&tokens, ":accepts_boardtask"))
+                    .and_then(|value| parse_bool_token(&value))
+                    .unwrap_or(true);
+                let write_allowed = keyword_value(&tokens, ":write-allowed")
+                    .or_else(|| keyword_value(&tokens, ":write_allowed"))
+                    .and_then(|value| parse_bool_token(&value))
+                    .unwrap_or(false);
+                let max_concurrency = usize_keyword(&tokens, ":max-concurrency")
+                    .or_else(|_| usize_keyword(&tokens, ":max_concurrency"))?;
+                let timeout_secs = u64_keyword(&tokens, ":timeout-secs")
+                    .or_else(|_| u64_keyword(&tokens, ":timeout_secs"))?;
+                config.workstation_pool.push(WorkstationPoolRuntimeConfig {
+                    id: tokens[2].clone(),
+                    engine: non_empty_keyword(&tokens, ":engine")?,
+                    role: non_empty_keyword(&tokens, ":role")?,
+                    slot_id: non_empty_keyword(&tokens, ":slot-id")
+                        .or_else(|_| non_empty_keyword(&tokens, ":slot_id"))?,
+                    task_type: non_empty_keyword(&tokens, ":task-type")
+                        .or_else(|_| non_empty_keyword(&tokens, ":task_type"))?,
+                    model_profile: optional_non_nil_keyword(&tokens, ":model-profile")
+                        .or_else(|| optional_non_nil_keyword(&tokens, ":model_profile")),
+                    model: optional_non_nil_keyword(&tokens, ":model"),
+                    task_classes: string_list_keyword(&tokens, ":task-classes")
+                        .or_else(|_| string_list_keyword(&tokens, ":task_classes"))?,
+                    capabilities: string_list_keyword(&tokens, ":capabilities")?,
+                    max_concurrency,
+                    timeout_secs,
+                    default_use: non_empty_keyword(&tokens, ":default-use")
+                        .or_else(|_| non_empty_keyword(&tokens, ":default_use"))?,
+                    accepts_boardtask,
+                    write_allowed,
+                });
+            }
+        }
+    }
+    if config.workstation_pool.is_empty() {
+        return Err(BlueprintConfigError::Parse(
+            "workstation-pool must declare at least one worker".into(),
+        ));
+    }
+    if !config.workstation_pool.iter().any(|worker| {
+        worker.accepts_boardtask
+            && worker.engine == "claude-code"
+            && worker.model_profile.as_deref() == Some(DEFAULT_MODEL_PROFILE)
+    }) {
+        return Err(BlueprintConfigError::Parse(
+            "workstation-pool must include a Claude Code default BoardTask worker".into(),
+        ));
+    }
+    if !config.workstation_pool.iter().any(|worker| {
+        worker.accepts_boardtask && worker.engine == "gemini" && !worker.write_allowed
+    }) {
+        return Err(BlueprintConfigError::Parse(
+            "workstation-pool must include a read-only Gemini BoardTask worker".into(),
+        ));
     }
     let timeout_form = find_forms(&block, "timeout-policy")
         .into_iter()
@@ -2412,6 +2586,35 @@ mod tests {
       :max_secs 28800
       :default_extend_secs 3600
       :max_extend_secs 3600))
+  (workstation-pool
+    (worker claude-code-default
+      :engine claude-code
+      :role coder
+      :slot-id "slot-claude-code-default"
+      :task-type claude_code_default
+      :model-profile coding-default-opus-4-7
+      :model nil
+      :task-classes [code implementation review context-pack ops]
+      :capabilities [code-read code-write scoped-commit mcp]
+      :max-concurrency 1
+      :timeout-secs 1800
+      :default-use code-implementation
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker gemini-ultra
+      :engine gemini
+      :role researcher
+      :slot-id "slot-gemini-ultra"
+      :task-type gemini_ultra
+      :model-profile nil
+      :model nil
+      :task-classes [research review context-pack lisp-compression general]
+      :capabilities [read-only analysis design-review]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use research-review
+      :accepts-boardtask true
+      :write-allowed false))
 	  (flow-runtime-policy
 	    :llm-call-default-max-tokens 65536
 	    :slot-task-default-model "opus"
@@ -2576,6 +2779,19 @@ mod tests {
             None
         );
         assert_eq!(cfg.startup_slots().len(), 4);
+        assert_eq!(cfg.workstation_pool().len(), 2);
+        assert_eq!(
+            cfg.boardtask_pool_candidates("research")
+                .first()
+                .map(|worker| worker.id.as_str()),
+            Some("gemini-ultra")
+        );
+        assert_eq!(
+            cfg.boardtask_pool_candidates("code")
+                .first()
+                .map(|worker| worker.id.as_str()),
+            Some("claude-code-default")
+        );
         let lisp_survey = cfg
             .startup_slots()
             .iter()
@@ -2802,7 +3018,10 @@ mod tests {
             r#"(missiond-blueprint
   (workstation-config
     (slot-template coder :role coder :description "Dynamic coder slot (ephemeral)" :default-model-profile coding-default-opus-4-7 :default-cwd "/Users/jinchen/Projects")
-    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"])))"#,
+    (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"]))
+  (workstation-pool
+    (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
+    (worker gemini-ultra :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)))"#,
         )
         .expect_err("missing policy");
         assert!(err
@@ -2844,7 +3063,10 @@ mod tests {
     (timeout-policy dynamic-slot-spawn
       :default_secs 60
       :min_secs 10
-      :max_secs 600)))
+      :max_secs 600))
+  (workstation-pool
+    (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
+    (worker gemini-ultra :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");
         assert!(err.to_string().contains("ttl-policy dynamic-slot"));

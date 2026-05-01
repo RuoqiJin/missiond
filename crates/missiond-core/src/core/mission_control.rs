@@ -2,9 +2,7 @@
 //!
 //! Unified management of task queue, slot configuration, agent processes, and inbox.
 
-use super::{
-    PermissionConfig, PermissionPolicy, PermissionRule, SlotManager,
-};
+use super::{PermissionConfig, PermissionPolicy, PermissionRule, SlotManager};
 use crate::types::{Slot, SlotConfig, SlotsConfig};
 use anyhow::Result;
 use std::path::{Path, PathBuf};
@@ -62,7 +60,9 @@ impl MissionControl {
     pub fn new(options: MissionControlOptions) -> Result<Self> {
         // Logs directory
         let logs_dir = options.logs_dir.unwrap_or_else(|| {
-            options.db_path.as_ref()
+            options
+                .db_path
+                .as_ref()
                 .and_then(|p| p.parent())
                 .unwrap_or_else(|| Path::new("."))
                 .join("logs")
@@ -74,7 +74,9 @@ impl MissionControl {
 
         // Load permission config
         let permission_config_path = options.permission_config_path.unwrap_or_else(|| {
-            options.db_path.as_ref()
+            options
+                .db_path
+                .as_ref()
                 .and_then(|p| p.parent())
                 .unwrap_or_else(|| Path::new("."))
                 .join("config")
@@ -180,6 +182,11 @@ impl MissionControl {
     /// Register a dynamic slot at runtime (dual-source merge with static slots).
     pub fn register_dynamic_slot(&self, config: SlotConfig) {
         self.slot_manager.register_dynamic_slot(config);
+    }
+
+    /// Register a runtime-projected slot without persisting it to slots.yaml.
+    pub fn register_runtime_slot(&self, config: SlotConfig) {
+        self.slot_manager.register_runtime_slot(config);
     }
 
     /// Unregister a dynamic slot (remove from runtime).

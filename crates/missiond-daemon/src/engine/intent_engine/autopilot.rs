@@ -5,7 +5,9 @@ use std::sync::Arc;
 use tracing::{debug, info, warn};
 
 use crate::claude_md_sync::sync_claude_md;
-use crate::context::v3_blueprint_runtime::{AutopilotRuntimeConfig, RouterRuntimeConfig};
+use crate::context::v3_blueprint_runtime::{
+    AutopilotRuntimeConfig, RouterRuntimeConfig, WorkstationRuntimeConfig,
+};
 use crate::engine::learning_engine;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
 use crate::handlers::knowledge::agent_execution;
@@ -621,6 +623,73 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     dispatch_board_tasks_with_config(state, &runtime_config).await
 }
 
+fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'static str {
+    if task.category == "ops" {
+        return "ops";
+    }
+    match task.context_intent.as_deref().map(str::trim) {
+        Some("research") => "research",
+        Some("general") => "general",
+        Some("ops") => "ops",
+        Some("code") => "code",
+        Some("review") => "review",
+        Some("context-pack") => "context-pack",
+        Some("lisp-compression") => "lisp-compression",
+        _ => {
+            let title = task.title.to_ascii_lowercase();
+            let description = task.description.to_ascii_lowercase();
+            if title.contains("read-only")
+                || description.contains("read-only")
+                || title.contains("survey")
+                || description.contains("survey")
+                || title.contains("investigate")
+                || description.contains("investigate")
+            {
+                "research"
+            } else {
+                "code"
+            }
+        }
+    }
+}
+
+async fn select_workstation_pool_slot(
+    state: &AppState,
+    workstation_config: &WorkstationRuntimeConfig,
+    task: &missiond_core::types::BoardTask,
+    dispatched_slots: &HashSet<String>,
+    excluded_roles: &[&str],
+) -> Option<String> {
+    let task_class = board_task_workstation_class(task);
+    for worker in workstation_config.boardtask_pool_candidates(task_class) {
+        if task_class == "code" && !worker.write_allowed {
+            continue;
+        }
+        if dispatched_slots.contains(&worker.slot_id) {
+            continue;
+        }
+        let Some(slot) = state.mission.get_slot(&worker.slot_id) else {
+            continue;
+        };
+        if excluded_roles.contains(&slot.config.role.as_str()) {
+            continue;
+        }
+        if let Some(info) = state.pty.get_status(&worker.slot_id).await {
+            if matches!(
+                info.state,
+                SessionState::Idle | SessionState::Exited | SessionState::Error
+            ) {
+                return Some(worker.slot_id.clone());
+            }
+            continue;
+        }
+        if slot.config.lifecycle == Some(missiond_core::types::Lifecycle::Persistent) {
+            return Some(worker.slot_id.clone());
+        }
+    }
+    None
+}
+
 async fn dispatch_board_tasks_with_config(
     state: &AppState,
     runtime_config: &AutopilotRuntimeConfig,
@@ -629,6 +698,7 @@ async fn dispatch_board_tasks_with_config(
         return Ok(());
     }
     let router_config = RouterRuntimeConfig::load_for_current_dir()?;
+    let workstation_config = WorkstationRuntimeConfig::load_for_current_dir()?;
 
     let tasks = state
         .store
@@ -738,31 +808,23 @@ async fn dispatch_board_tasks_with_config(
                 id.clone()
             }
             None => {
-                let mut candidate: Option<String> = None;
-                for slot in state.mission.list_slots() {
-                    let role = slot.config.role.as_str();
-                    if EXCLUDED_ROLES.contains(&role) {
-                        continue;
-                    }
-                    if dispatched_slots.contains(&slot.config.id) {
-                        continue;
-                    }
-                    if let Some(info) = state.pty.get_status(&slot.config.id).await {
-                        if info.state == SessionState::Idle {
-                            candidate = Some(slot.config.id.clone());
-                            break;
-                        }
-                    }
-                }
-                match candidate {
+                match select_workstation_pool_slot(
+                    state,
+                    &workstation_config,
+                    &task,
+                    &dispatched_slots,
+                    EXCLUDED_ROLES,
+                )
+                .await
+                {
                     Some(id) => {
-                        info!(task_id = %task.id, slot_id = %id, "Autopilot: dynamically assigned idle coder slot");
+                        info!(task_id = %task.id, slot_id = %id, "Autopilot: selected V3 workstation-pool slot");
                         // Don't persist assignee yet — avoid Task Pinning Bug.
                         // If claim/pty fails, task stays unassigned for next tick to re-route.
                         id
                     }
                     None => {
-                        debug!(task_id = %task.id, "Autopilot: no idle coder slot available, deferring");
+                        debug!(task_id = %task.id, "Autopilot: no V3 workstation-pool slot available, deferring");
                         continue;
                     }
                 }

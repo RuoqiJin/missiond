@@ -18,7 +18,7 @@ use crate::control_tree::{ControlManager, CtlProvider};
 /// Map CliEngine → CtlProvider for pause checks.
 fn engine_to_provider(engine: CliEngine) -> CtlProvider {
     match engine {
-        CliEngine::ClaudeCode => CtlProvider::Sonnet, // Claude Code slots use Sonnet model
+        CliEngine::ClaudeCode => CtlProvider::Sonnet, // Historical provider lane for Claude Code slots.
         CliEngine::Gemini => CtlProvider::Gemini,
         CliEngine::Codex => CtlProvider::Codex,
     }

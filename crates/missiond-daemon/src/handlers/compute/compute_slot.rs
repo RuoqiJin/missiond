@@ -640,15 +640,58 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
                 "id": s.config.id,
                 "source": "static",
                 "role": s.config.role,
+                "engine": s.config.engine.to_string(),
+                "model": s.config.model,
+                "project_root": s.config.project_root,
+                "description": s.config.description,
                 "status": if s.session_id.is_some() { "running" } else { "stopped" },
                 "lifecycle": format!("{}", s.config.lifecycle.unwrap_or_default()),
             })
         })
         .collect();
+    let workstation_pool = match WorkstationRuntimeConfig::load_for_current_dir() {
+        Ok(config) => {
+            let mut entries = Vec::new();
+            for worker in config.workstation_pool() {
+                let pty_status = state
+                    .pty
+                    .get_status(&worker.slot_id)
+                    .await
+                    .map(|info| format!("{:?}", info.state).to_ascii_lowercase());
+                let runtime_slot_present = state.mission.get_slot(&worker.slot_id).is_some();
+                entries.push(json!({
+                    "id": worker.id,
+                    "engine": worker.engine,
+                    "role": worker.role,
+                    "slot_id": worker.slot_id,
+                    "task_type": worker.task_type,
+                    "model_profile": worker.model_profile,
+                    "model": worker.model,
+                    "task_classes": worker.task_classes,
+                    "capabilities": worker.capabilities,
+                    "max_concurrency": worker.max_concurrency,
+                    "timeout_secs": worker.timeout_secs,
+                    "default_use": worker.default_use,
+                    "accepts_boardtask": worker.accepts_boardtask,
+                    "write_allowed": worker.write_allowed,
+                    "runtime_slot_present": runtime_slot_present,
+                    "status": pty_status.unwrap_or_else(|| {
+                        if runtime_slot_present { "stopped".to_string() } else { "missing".to_string() }
+                    }),
+                }));
+            }
+            json!(entries)
+        }
+        Err(err) => json!({
+            "error": "V3_BLUEPRINT_CONFIG_ERROR",
+            "message": err.to_string(),
+        }),
+    };
 
     Ok(ToolResult::json_pretty(&json!({
         "static_slots": static_entries,
         "dynamic_slots": dynamic_entries,
+        "workstation_pool": workstation_pool,
         "dynamic_active": dynamic_slots.iter().filter(|s| s.status == "active").count(),
         "dynamic_limit": MAX_DYNAMIC_SLOTS,
     })))

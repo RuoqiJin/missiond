@@ -1,9 +1,12 @@
 use anyhow::{anyhow, Result};
+use missiond_core::types::{CliEngine, Slot};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
 
@@ -21,7 +24,7 @@ struct InboxArgs {
 
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
-        "mission_slots" => Ok(ToolResult::json(&state.mission.list_slots())),
+        "mission_slots" => Ok(ToolResult::json(&projected_mission_slots(state))),
         "mission_inbox" => {
             let InboxArgs { unread_only, limit } =
                 serde_json::from_value(args).unwrap_or(InboxArgs {
@@ -38,6 +41,43 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_slot_history" => handle_slot_history(state, args).await,
         _ => Err(anyhow!("Unknown compute slot tool: {name}")),
     }
+}
+
+fn projected_mission_slots(state: &AppState) -> Vec<Slot> {
+    let slots = state.mission.list_slots();
+    let Ok(config) = WorkstationRuntimeConfig::load_for_current_dir() else {
+        return slots;
+    };
+    let v3_slot_ids: HashSet<String> = config
+        .startup_slots()
+        .iter()
+        .filter_map(|slot| slot.slot_id.clone())
+        .chain(
+            config
+                .workstation_pool()
+                .iter()
+                .map(|worker| worker.slot_id.clone()),
+        )
+        .collect();
+
+    slots
+        .into_iter()
+        .filter(|slot| !is_stopped_legacy_sonnet_residual(slot, &v3_slot_ids))
+        .collect()
+}
+
+fn is_stopped_legacy_sonnet_residual(slot: &Slot, v3_slot_ids: &HashSet<String>) -> bool {
+    if v3_slot_ids.contains(&slot.config.id) {
+        return false;
+    }
+    slot.session_id.is_none()
+        && slot.config.engine == CliEngine::ClaudeCode
+        && slot.config.project_root.is_none()
+        && slot
+            .config
+            .model
+            .as_deref()
+            .is_some_and(|model| model.contains("sonnet"))
 }
 
 fn handle_pause(state: &AppState, args: Value) -> Result<ToolResult> {

@@ -64,7 +64,8 @@ impl SlotManager {
 
     /// Retrieve the declarative pipeline category for a given slot.
     pub fn get_slot_category(&self, slot_id: &str) -> Option<String> {
-        self.get_slot(slot_id).and_then(|s| s.config.category.clone())
+        self.get_slot(slot_id)
+            .and_then(|s| s.config.category.clone())
     }
 
     /// Discover slots by declarative trait (e.g. IsMetaAgent).
@@ -86,7 +87,10 @@ impl SlotManager {
     /// Find the first slot with a given trait
     pub fn find_slot_by_trait(&self, t: crate::types::SlotTrait) -> Option<Slot> {
         let slots = self.slots.read().unwrap();
-        slots.values().find(|s| s.config.traits.contains(&t)).cloned()
+        slots
+            .values()
+            .find(|s| s.config.traits.contains(&t))
+            .cloned()
     }
 
     /// Get all slots with a specific role
@@ -162,7 +166,11 @@ impl SlotManager {
             }
         }
 
-        SlotReloadResult { added, removed, updated }
+        SlotReloadResult {
+            added,
+            removed,
+            updated,
+        }
     }
 
     /// Register a dynamic slot at runtime (dual-source merge).
@@ -170,10 +178,27 @@ impl SlotManager {
         config.apply_default_traits();
         let mut slots = self.slots.write().unwrap();
         info!(slot_id = %config.id, role = %config.role, "Dynamic slot registered");
-        slots.insert(config.id.clone(), Slot {
-            config,
-            session_id: None,
-        });
+        slots.insert(
+            config.id.clone(),
+            Slot {
+                config,
+                session_id: None,
+            },
+        );
+    }
+
+    /// Register a runtime-projected slot without persisting it to slots.yaml.
+    pub fn register_runtime_slot(&self, mut config: SlotConfig) {
+        config.apply_default_traits();
+        let mut slots = self.slots.write().unwrap();
+        info!(slot_id = %config.id, role = %config.role, "Runtime slot registered");
+        slots.insert(
+            config.id.clone(),
+            Slot {
+                config,
+                session_id: None,
+            },
+        );
     }
 
     /// Unregister a dynamic slot (remove from runtime).
