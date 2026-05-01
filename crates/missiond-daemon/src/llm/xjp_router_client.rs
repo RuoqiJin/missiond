@@ -22,6 +22,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::helpers::default_mission_home;
 use missiond_core::embedding::EmbeddingProvider;
 
@@ -30,11 +31,12 @@ const TOKEN_ENV: &str = "MISSION_XJP_ROUTER_AUTH_TOKEN";
 const MODEL_ENV: &str = "MISSION_XJP_ROUTER_EMBED_MODEL";
 const DIM_ENV: &str = "MISSION_XJP_ROUTER_EMBED_DIM";
 const DEFAULT_MODEL: &str = "qwen3";
-const DEFAULT_TIMEOUT_SECS: u64 = 120;
 
 #[derive(Debug, Error)]
 pub(crate) enum XjpRouterError {
-    #[error("xjp-router endpoint not configured (set {ENDPOINT_ENV} or llm.yaml `xjp_router.endpoint`)")]
+    #[error(
+        "xjp-router endpoint not configured (set {ENDPOINT_ENV} or llm.yaml `xjp_router.endpoint`)"
+    )]
     MissingEndpoint,
     #[error("xjp-router auth token not configured (set {TOKEN_ENV} or llm.yaml `xjp_router.auth_token`)")]
     MissingToken,
@@ -48,6 +50,8 @@ pub(crate) enum XjpRouterError {
     CountMismatch { got: usize, want: usize },
     #[error("xjp-router returned vector with dimension {got}, expected {want}")]
     DimensionMismatch { got: usize, want: usize },
+    #[error("V3_BLUEPRINT_CONFIG_ERROR: {0}")]
+    V3BlueprintConfig(String),
 }
 
 #[derive(Debug, Default, Clone, Deserialize)]
@@ -96,14 +100,33 @@ pub(crate) struct XjpRouterConfig {
 }
 
 impl XjpRouterConfig {
-    /// Construct config from already-resolved sources. Pure — used for tests and `resolve()`.
+    /// Construct config from already-resolved sources. Pure — used by tests.
     /// No production hard-coded defaults for endpoint / auth_token.
-    pub fn resolve_from(
+    #[cfg(test)]
+    fn resolve_from(
         endpoint: Option<String>,
         auth_token: Option<String>,
         model: Option<String>,
         timeout_secs: Option<u64>,
         expected_dim: Option<usize>,
+    ) -> Result<Self, XjpRouterError> {
+        Self::resolve_from_with_default_timeout(
+            endpoint,
+            auth_token,
+            model,
+            timeout_secs,
+            expected_dim,
+            RouterRuntimeConfig::default().direct_http_timeout(),
+        )
+    }
+
+    fn resolve_from_with_default_timeout(
+        endpoint: Option<String>,
+        auth_token: Option<String>,
+        model: Option<String>,
+        timeout_secs: Option<u64>,
+        expected_dim: Option<usize>,
+        default_timeout: Duration,
     ) -> Result<Self, XjpRouterError> {
         let endpoint = endpoint
             .unwrap_or_default()
@@ -124,13 +147,17 @@ impl XjpRouterConfig {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-            timeout: Duration::from_secs(timeout_secs.unwrap_or(DEFAULT_TIMEOUT_SECS)),
+            timeout: timeout_secs
+                .map(Duration::from_secs)
+                .unwrap_or(default_timeout),
             expected_dim,
         })
     }
 
     /// Resolve from env vars first, `llm.yaml` second. No production default endpoint/token.
     pub fn resolve() -> Result<Self, XjpRouterError> {
+        let router_config = RouterRuntimeConfig::load_for_current_dir()
+            .map_err(|err| XjpRouterError::V3BlueprintConfig(err.to_string()))?;
         let yaml = read_llm_yaml_xjp_router();
         let endpoint = env::var(ENDPOINT_ENV)
             .ok()
@@ -154,7 +181,14 @@ impl XjpRouterConfig {
             .ok()
             .and_then(|s| s.parse().ok())
             .or_else(|| yaml.as_ref().and_then(|y| y.embedding_dim));
-        Self::resolve_from(endpoint, token, model, timeout_secs, expected_dim)
+        Self::resolve_from_with_default_timeout(
+            endpoint,
+            token,
+            model,
+            timeout_secs,
+            expected_dim,
+            router_config.direct_http_timeout(),
+        )
     }
 
     /// Returns true iff some xjp-router config is present (env or llm.yaml).
@@ -372,8 +406,7 @@ impl EmbeddingProvider for XjpRouterProvider {
 }
 
 /// Hand-off used by `init_embedding_provider`: returns a typed Arc on success.
-pub(crate) async fn try_init_provider(
-) -> Result<Arc<dyn EmbeddingProvider>, XjpRouterError> {
+pub(crate) async fn try_init_provider() -> Result<Arc<dyn EmbeddingProvider>, XjpRouterError> {
     let provider = XjpRouterProvider::try_from_env_or_yaml().await?;
     Ok(Arc::new(provider))
 }
@@ -411,14 +444,8 @@ mod tests {
 
     #[test]
     fn missing_endpoint_returns_structured_error() {
-        let err = XjpRouterConfig::resolve_from(
-            None,
-            Some("token".into()),
-            None,
-            None,
-            None,
-        )
-        .unwrap_err();
+        let err = XjpRouterConfig::resolve_from(None, Some("token".into()), None, None, None)
+            .unwrap_err();
         assert!(matches!(err, XjpRouterError::MissingEndpoint));
         assert!(format!("{err}").contains("endpoint"));
     }
@@ -439,14 +466,9 @@ mod tests {
 
     #[test]
     fn whitespace_endpoint_or_token_treated_as_missing() {
-        let err = XjpRouterConfig::resolve_from(
-            Some("   ".into()),
-            Some("tok".into()),
-            None,
-            None,
-            None,
-        )
-        .unwrap_err();
+        let err =
+            XjpRouterConfig::resolve_from(Some("   ".into()), Some("tok".into()), None, None, None)
+                .unwrap_err();
         assert!(matches!(err, XjpRouterError::MissingEndpoint));
 
         let err = XjpRouterConfig::resolve_from(
@@ -472,8 +494,25 @@ mod tests {
         .unwrap();
         assert_eq!(cfg.endpoint, "https://router.example");
         assert_eq!(cfg.model, DEFAULT_MODEL);
-        assert_eq!(cfg.timeout, Duration::from_secs(DEFAULT_TIMEOUT_SECS));
+        assert_eq!(
+            cfg.timeout,
+            RouterRuntimeConfig::default().direct_http_timeout()
+        );
         assert!(cfg.expected_dim.is_none());
+    }
+
+    #[test]
+    fn resolve_from_uses_v3_default_timeout_when_unspecified() {
+        let cfg = XjpRouterConfig::resolve_from_with_default_timeout(
+            Some("https://router.example".into()),
+            Some("tok".into()),
+            None,
+            None,
+            None,
+            Duration::from_secs(17),
+        )
+        .unwrap();
+        assert_eq!(cfg.timeout, Duration::from_secs(17));
     }
 
     #[test]

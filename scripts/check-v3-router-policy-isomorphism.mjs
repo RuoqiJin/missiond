@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   llmGateway: 'crates/missiond-daemon/src/llm/llm_gateway.rs',
   sonnetGateway: 'crates/missiond-daemon/src/llm/sonnet_gateway.rs',
+  xjpRouterClient: 'crates/missiond-daemon/src/llm/xjp_router_client.rs',
   mcp: 'crates/missiond-mcp/src/tools/comm/router_chat.rs',
   planAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   predicate: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs',
@@ -101,6 +102,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/llm/llm_gateway.rs',
     'crates/missiond-daemon/src/llm/sonnet_gateway.rs',
+    'crates/missiond-daemon/src/llm/xjp_router_client.rs',
     'crates/missiond-mcp/src/tools/comm/router_chat.rs',
     'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
     'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs',
@@ -118,7 +120,9 @@ function checkFiles(root, files) {
     'RouterRuntimeConfig',
     'mission_router_chat default model and max_tokens MUST project from router-runtime-policy',
     'Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model',
+    'xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout',
     'BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy',
+    'xjp-router embedding timeout default',
     ':anthropic-urgent-model',
     ':anthropic-ops-model',
     ':anthropic-docs-test-chore-model',
@@ -250,6 +254,21 @@ function checkFiles(root, files) {
     'V3_BLUEPRINT_CONFIG_ERROR',
   ]);
 
+  requireAll(diagnostics, files.xjpRouterClient, sources.xjpRouterClient, [
+    'RouterRuntimeConfig::load_for_current_dir',
+    'RouterRuntimeConfig::default().direct_http_timeout()',
+    'resolve_from_with_default_timeout',
+    'router_config.direct_http_timeout()',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'timeout_secs',
+    'unwrap_or(default_timeout)',
+  ]);
+  forbidAll(diagnostics, files.xjpRouterClient, sources.xjpRouterClient, [
+    'DEFAULT_TIMEOUT_SECS',
+    'timeout_secs.unwrap_or(120)',
+    'Duration::from_secs(timeout_secs.unwrap_or',
+  ]);
+
   requireAll(diagnostics, files.mcp, sources.mcp, [
     'ToolDefinition::new',
     '"mission_router_chat"',
@@ -359,6 +378,7 @@ function buildFixture() {
 	             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
 	             "crates/missiond-daemon/src/llm/llm_gateway.rs"
 	             "crates/missiond-daemon/src/llm/sonnet_gateway.rs"
+	             "crates/missiond-daemon/src/llm/xjp_router_client.rs"
 	             "crates/missiond-mcp/src/tools/comm/router_chat.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs"
@@ -369,7 +389,7 @@ function buildFixture() {
 	             "scripts/check-router-backend-registry.mjs"
 	             "scripts/check-router-dispatch-descriptor.mjs"
 	             "scripts/check-v3-router-policy-isomorphism.mjs"]
-	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
+	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; xjp-router embedding timeout default; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
 	  (router-runtime-policy
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
@@ -438,6 +458,12 @@ router_config.anthropic_docs_test_chore_model router_config.direct_http_timeout(
 
   writeFixture(root, DEFAULT_FILES.sonnetGateway, `
 RouterRuntimeConfig::load_for_current_dir queued_sonnet_model queued_sonnet_default_max_tokens config.direct_http_timeout() V3_BLUEPRINT_CONFIG_ERROR
+`);
+
+  writeFixture(root, DEFAULT_FILES.xjpRouterClient, `
+RouterRuntimeConfig::load_for_current_dir RouterRuntimeConfig::default().direct_http_timeout()
+resolve_from_with_default_timeout router_config.direct_http_timeout() V3_BLUEPRINT_CONFIG_ERROR
+timeout_secs unwrap_or(default_timeout)
 `);
 
   writeFixture(root, DEFAULT_FILES.mcp, `
