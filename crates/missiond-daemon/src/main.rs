@@ -662,7 +662,7 @@ async fn main() -> Result<()> {
             }
         },
         minimax: {
-            let gw = minimax_gateway::create_minimax_gateway();
+            let gw = minimax_gateway::create_minimax_gateway()?;
             if let Some((handle, gateway)) = gw {
                 let gateway = gateway.with_bus(Arc::clone(&bus_services));
                 info!("MinimaxGateway initialized");

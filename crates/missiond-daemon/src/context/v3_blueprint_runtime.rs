@@ -19,6 +19,9 @@ pub(crate) const MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS: i64 = 600;
 pub(crate) const DEFAULT_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 30;
 pub(crate) const MIN_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 1;
 pub(crate) const MAX_COMPUTE_PTY_SPAWN_TIMEOUT_SECS: i64 = 600;
+pub(crate) const DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS: u64 = 30;
+pub(crate) const DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS: u64 = 60;
+pub(crate) const DEFAULT_MINIMAX_MAX_TOKENS: u32 = 500;
 pub(crate) const WATCHDOG_GRACE_SECS: i64 = 120;
 pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
@@ -189,6 +192,13 @@ pub(crate) struct FlowRuntimeConfig {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct ComputePrimitivesRuntimeConfig {
     pub pty_spawn_timeout_policy: SimpleTimeoutPolicy,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct MinimaxRuntimeConfig {
+    pub direct_http_timeout_secs: u64,
+    pub quota_throttle_secs: u64,
+    pub default_max_tokens: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -552,6 +562,16 @@ impl Default for ComputePrimitivesRuntimeConfig {
     }
 }
 
+impl Default for MinimaxRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            direct_http_timeout_secs: DEFAULT_MINIMAX_DIRECT_HTTP_TIMEOUT_SECS,
+            quota_throttle_secs: DEFAULT_MINIMAX_QUOTA_THROTTLE_SECS,
+            default_max_tokens: DEFAULT_MINIMAX_MAX_TOKENS,
+        }
+    }
+}
+
 impl Default for RouterRuntimeConfig {
     fn default() -> Self {
         Self {
@@ -898,6 +918,48 @@ impl ComputePrimitivesRuntimeConfig {
                 self.pty_spawn_timeout_policy.max_secs,
             )
             .max(1) as u64
+    }
+}
+
+impl MinimaxRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_minimax_runtime_policy(&source)
+    }
+
+    pub(crate) fn direct_http_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.direct_http_timeout_secs.max(1))
+    }
+
+    pub(crate) fn quota_throttle_sleep(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.quota_throttle_secs.max(1))
     }
 }
 
@@ -1577,6 +1639,29 @@ pub(crate) fn parse_compute_runtime_policy(
     Ok(cfg)
 }
 
+pub(crate) fn parse_minimax_runtime_policy(
+    source: &str,
+) -> Result<MinimaxRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "minimax-runtime-policy").ok_or_else(|| {
+        BlueprintConfigError::Parse("missing (minimax-runtime-policy ...)".into())
+    })?;
+    let tokens = tokenize_lisp(&block);
+    let cfg = MinimaxRuntimeConfig {
+        direct_http_timeout_secs: u64_keyword(&tokens, ":direct-http-timeout-secs")?,
+        quota_throttle_secs: u64_keyword(&tokens, ":quota-throttle-secs")?,
+        default_max_tokens: u32_keyword(&tokens, ":default-max-tokens")?,
+    };
+    if cfg.direct_http_timeout_secs == 0
+        || cfg.quota_throttle_secs == 0
+        || cfg.default_max_tokens == 0
+    {
+        return Err(BlueprintConfigError::Parse(
+            "minimax-runtime-policy numeric budgets must be positive".into(),
+        ));
+    }
+    Ok(cfg)
+}
+
 pub(crate) fn parse_router_runtime_policy(
     source: &str,
 ) -> Result<RouterRuntimeConfig, BlueprintConfigError> {
@@ -2238,11 +2323,15 @@ mod tests {
 	    :slot-task-default-timeout-secs 3600
 	    :parallel-slot-default-parallelism 3
 	    :parallel-slot-default-timeout-secs 1800)
-	  (compute-runtime-policy
-	    (timeout-policy tracked-pty-spawn
-	      :default_secs 30
-	      :min_secs 1
-	      :max_secs 600))
+  (compute-runtime-policy
+    (timeout-policy tracked-pty-spawn
+      :default_secs 30
+      :min_secs 1
+      :max_secs 600))
+  (minimax-runtime-policy
+    :direct-http-timeout-secs 30
+    :quota-throttle-secs 60
+    :default-max-tokens 500)
 	  (router-runtime-policy
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
@@ -2456,6 +2545,22 @@ mod tests {
     }
 
     #[test]
+    fn parses_minimax_runtime_policy() {
+        let cfg = parse_minimax_runtime_policy(BLUEPRINT).expect("parse minimax runtime policy");
+        assert_eq!(cfg.direct_http_timeout_secs, 30);
+        assert_eq!(
+            cfg.direct_http_timeout(),
+            std::time::Duration::from_secs(30)
+        );
+        assert_eq!(cfg.quota_throttle_secs, 60);
+        assert_eq!(
+            cfg.quota_throttle_sleep(),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(cfg.default_max_tokens, 500);
+    }
+
+    #[test]
     fn parses_router_runtime_policy() {
         let cfg = parse_router_runtime_policy(BLUEPRINT).expect("parse router runtime policy");
         assert_eq!(cfg.default_chat_model, DEFAULT_ROUTER_CHAT_MODEL);
@@ -2552,6 +2657,16 @@ mod tests {
         );
         let err = parse_compute_runtime_policy(&source).expect_err("missing compute policy");
         assert!(err.to_string().contains("compute-runtime-policy"));
+    }
+
+    #[test]
+    fn missing_minimax_runtime_policy_is_rejected() {
+        let source = BLUEPRINT.replace(
+            "(minimax-runtime-policy",
+            "(minimax-runtime-policy-disabled",
+        );
+        let err = parse_minimax_runtime_policy(&source).expect_err("missing minimax policy");
+        assert!(err.to_string().contains("minimax-runtime-policy"));
     }
 
     #[test]

@@ -9,13 +9,12 @@
 
 use anyhow::{anyhow, Result};
 use serde::{Deserialize, Serialize};
-use std::time::Duration;
 use tracing::warn;
+
+use crate::context::v3_blueprint_runtime::MinimaxRuntimeConfig;
 
 const API_URL: &str = "https://api.minimaxi.com/v1/chat/completions";
 const MODEL: &str = "MiniMax-M2.5-highspeed";
-const DEFAULT_TIMEOUT_SECS: u64 = 30;
-const DEFAULT_MAX_TOKENS: u32 = 500;
 
 #[derive(Debug, Serialize)]
 struct ChatRequest<'a> {
@@ -50,22 +49,27 @@ struct ChoiceMessage {
 pub(crate) struct MiniMaxClient {
     http: reqwest::Client,
     api_key: String,
+    default_max_tokens: u32,
 }
 
 impl MiniMaxClient {
-    pub fn new(api_key: String) -> Self {
+    pub fn new_with_runtime_config(api_key: String, config: &MinimaxRuntimeConfig) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(DEFAULT_TIMEOUT_SECS))
+            .timeout(config.direct_http_timeout())
             .build()
             .expect("failed to build HTTP client");
-        Self { http, api_key }
+        Self {
+            http,
+            api_key,
+            default_max_tokens: config.default_max_tokens,
+        }
     }
 
     /// Send a chat completion request. Returns the assistant's content with `<think>` tags stripped.
     pub async fn chat(&self, messages: &[ChatMessage], max_tokens: Option<u32>) -> Result<String> {
         let body = ChatRequest {
             model: MODEL,
-            max_tokens: max_tokens.unwrap_or(DEFAULT_MAX_TOKENS),
+            max_tokens: max_tokens.unwrap_or(self.default_max_tokens),
             messages,
         };
 
@@ -109,7 +113,7 @@ impl MiniMaxClient {
             role: "user".to_string(),
             content: prompt,
         }];
-        self.chat(&messages, Some(DEFAULT_MAX_TOKENS)).await
+        self.chat(&messages, Some(self.default_max_tokens)).await
     }
 }
 
@@ -177,5 +181,15 @@ mod tests {
         );
         assert_eq!(strip_think_tags("<think>a</think>B<think>c</think>D"), "BD");
         assert_eq!(strip_think_tags("<think>unclosed"), "");
+    }
+
+    #[test]
+    fn projects_default_max_tokens_from_runtime_config() {
+        let config = MinimaxRuntimeConfig {
+            default_max_tokens: 123,
+            ..MinimaxRuntimeConfig::default()
+        };
+        let client = MiniMaxClient::new_with_runtime_config("token".to_string(), &config);
+        assert_eq!(client.default_max_tokens, 123);
     }
 }

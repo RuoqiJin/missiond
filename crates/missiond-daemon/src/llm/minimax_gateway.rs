@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, oneshot, RwLock, Semaphore};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::MinimaxRuntimeConfig;
 use crate::minimax_client::{ChatMessage, MiniMaxClient};
 use missiond_core::event::events::WorkerEvent;
 
@@ -261,6 +262,7 @@ pub(crate) struct MinimaxGateway {
     client: MiniMaxClient,
     quota: Arc<RwLock<QuotaTracker>>,
     concurrency: Arc<Semaphore>,
+    quota_throttle_sleep: Duration,
     /// v2 bus: every `WorkerEvent::LlmCall` is published here.
     bus: Option<Arc<crate::bus::BusServices>>,
 }
@@ -337,9 +339,10 @@ impl MinimaxGateway {
                 // Protected requests wait; low-priority already rejected above
                 warn!(
                     caller = req.caller,
-                    "MinimaxGateway: quota exhausted (300/5h), throttling 60s"
+                    throttle_secs = self.quota_throttle_sleep.as_secs(),
+                    "MinimaxGateway: quota exhausted (300/5h), throttling"
                 );
-                tokio::time::sleep(Duration::from_secs(60)).await;
+                tokio::time::sleep(self.quota_throttle_sleep).await;
             }
 
             if quota_rejected {
@@ -414,9 +417,13 @@ impl MinimaxGateway {
 
 /// Create the gateway and its handle. Call once at startup.
 /// Returns (handle_for_AppState, gateway_actor_to_spawn).
-pub(crate) fn create_minimax_gateway() -> Option<(MinimaxHandle, MinimaxGateway)> {
-    let api_key = crate::minimax_client::load_api_key()?;
-    let client = MiniMaxClient::new(api_key);
+pub(crate) fn create_minimax_gateway() -> Result<Option<(MinimaxHandle, MinimaxGateway)>> {
+    let Some(api_key) = crate::minimax_client::load_api_key() else {
+        return Ok(None);
+    };
+    let runtime_config = MinimaxRuntimeConfig::load_for_current_dir()
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+    let client = MiniMaxClient::new_with_runtime_config(api_key, &runtime_config);
 
     let (tx_interactive, rx_interactive) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_embedding, rx_embedding) = mpsc::channel(CHANNEL_CAPACITY);
@@ -441,8 +448,9 @@ pub(crate) fn create_minimax_gateway() -> Option<(MinimaxHandle, MinimaxGateway)
         client,
         quota,
         concurrency: Arc::new(Semaphore::new(MAX_CONCURRENCY)),
+        quota_throttle_sleep: runtime_config.quota_throttle_sleep(),
         bus: None,
     };
 
-    Some((handle, gateway))
+    Ok(Some((handle, gateway)))
 }
