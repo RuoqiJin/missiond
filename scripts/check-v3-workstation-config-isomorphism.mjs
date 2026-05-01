@@ -329,12 +329,17 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.geminiDriver, sources.geminiDriver, [
+    'RouterRuntimeConfig::load_for_project_root',
+    'router_config.flow_gemini_model.as_str()',
+    'model.unwrap_or(default_model)',
     'WorkstationRuntimeConfig::load_for_project_root',
     'dynamic_slot_spawn_timeout_secs',
     'timeout_secs: Some(spawn_timeout_secs)',
     'V3_BLUEPRINT_CONFIG_ERROR',
   ]);
   forbidAll(diagnostics, files.geminiDriver, sources.geminiDriver, [
+    'const GEMINI_MODEL',
+    '"gemini-3.1-pro-preview"',
     'timeout_secs: Some(120)',
   ]);
 
@@ -620,6 +625,9 @@ V3_BLUEPRINT_CONFIG_ERROR;
 let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
 timeout_secs: Some(spawn_timeout_secs);`);
   writeFixture(root, DEFAULT_FILES.geminiDriver, `
+RouterRuntimeConfig::load_for_project_root();
+router_config.flow_gemini_model.as_str();
+model.unwrap_or(default_model);
 WorkstationRuntimeConfig::load_for_project_root();
 V3_BLUEPRINT_CONFIG_ERROR;
 let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();

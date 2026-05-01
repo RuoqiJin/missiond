@@ -25,10 +25,8 @@ use missiond_core::types::CliEngine;
 use missiond_core::types::SharedProjectRegistry;
 use missiond_core::LearnedPermissions;
 
-use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::context::v3_blueprint_runtime::{RouterRuntimeConfig, WorkstationRuntimeConfig};
 
-/// Default Gemini model.
-const GEMINI_MODEL: &str = "gemini-3.1-pro-preview";
 /// Prompt size threshold for @file mode (bytes).
 const FILE_MODE_THRESHOLD: usize = 32_000;
 /// Timeout for /clear command (ms).
@@ -114,10 +112,14 @@ impl GeminiPtyDriver {
         if self.pty.is_running(slot_id).await {
             return Ok(());
         }
+        let project_root = cwd.to_string_lossy();
         let runtime_config =
-            WorkstationRuntimeConfig::load_for_project_root(Some(cwd.to_string_lossy().as_ref()))
+            WorkstationRuntimeConfig::load_for_project_root(Some(project_root.as_ref()))
                 .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))?;
         let spawn_timeout_secs = runtime_config.dynamic_slot_spawn_timeout_secs();
+        let router_config = RouterRuntimeConfig::load_for_project_root(Some(project_root.as_ref()))
+            .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))?;
+        let default_model = router_config.flow_gemini_model.as_str();
 
         let pty_slot = missiond_core::pty::Slot {
             id: slot_id.to_string(),
@@ -150,7 +152,7 @@ impl GeminiPtyDriver {
                 timeout_secs: Some(spawn_timeout_secs),
                 mcp_config: None,
                 dangerously_skip_permissions: true,
-                model: Some(model.unwrap_or(GEMINI_MODEL).to_string()),
+                model: Some(model.unwrap_or(default_model).to_string()),
                 extra_env,
                 initial_prompt: None,
             },
