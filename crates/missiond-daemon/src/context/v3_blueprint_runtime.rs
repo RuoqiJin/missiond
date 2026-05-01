@@ -107,6 +107,18 @@ pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MAX_ENTRIES: usize = 20;
 pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MAX_TOKENS: u32 = 2000;
 pub(crate) const DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS: i64 = 86400;
 pub(crate) const DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS: i64 = 6 * 3600;
+pub(crate) const DEFAULT_ROUTER_CHAT_MODEL: &str = "gemini-3.1-pro";
+pub(crate) const DEFAULT_ROUTER_CHAT_MAX_TOKENS: u32 = 16384;
+pub(crate) const DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS: u32 = 65536;
+pub(crate) const DEFAULT_ROUTER_FLOW_GEMINI_MODEL: &str = "gemini-3.1-pro";
+pub(crate) const DEFAULT_ROUTER_STATELESS_SONNET_MODEL: &str = "claude-sonnet";
+pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MODEL: &str = "claude-sonnet";
+pub(crate) const DEFAULT_ROUTER_COMPRESS_MODEL: &str = "gemini-3.1-pro";
+pub(crate) const DEFAULT_ROUTER_COMPRESS_CHANNEL: &str = "google";
+pub(crate) const DEFAULT_ROUTER_COMPRESS_MAX_TOKENS: u32 = 2048;
+pub(crate) const DEFAULT_ROUTER_COMPRESS_CHAR_BUDGET_CHARS: usize = 100_000;
+pub(crate) const DEFAULT_ROUTER_DIRECT_HTTP_TIMEOUT_SECS: u64 = 60;
+pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS: u32 = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -210,6 +222,22 @@ pub(crate) struct AutopilotRuntimeConfig {
     pub recent_intents_window_secs: i64,
     pub user_stuck_cooldown_secs: i64,
     pub direction_shift_cooldown_secs: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct RouterRuntimeConfig {
+    pub default_chat_model: String,
+    pub chat_default_max_tokens: u32,
+    pub file_chat_default_max_tokens: u32,
+    pub flow_gemini_model: String,
+    pub stateless_sonnet_model: String,
+    pub queued_sonnet_model: String,
+    pub compress_model: String,
+    pub compress_channel: String,
+    pub compress_max_tokens: u32,
+    pub compress_char_budget_chars: usize,
+    pub direct_http_timeout_secs: u64,
+    pub queued_sonnet_default_max_tokens: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -337,6 +365,25 @@ impl Default for FlowRuntimeConfig {
             slot_task_default_timeout_secs: DEFAULT_FLOW_SLOT_TIMEOUT_SECS,
             parallel_slot_default_parallelism: DEFAULT_FLOW_PARALLELISM,
             parallel_slot_default_timeout_secs: DEFAULT_FLOW_PARALLEL_TIMEOUT_SECS,
+        }
+    }
+}
+
+impl Default for RouterRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            default_chat_model: DEFAULT_ROUTER_CHAT_MODEL.to_string(),
+            chat_default_max_tokens: DEFAULT_ROUTER_CHAT_MAX_TOKENS,
+            file_chat_default_max_tokens: DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS,
+            flow_gemini_model: DEFAULT_ROUTER_FLOW_GEMINI_MODEL.to_string(),
+            stateless_sonnet_model: DEFAULT_ROUTER_STATELESS_SONNET_MODEL.to_string(),
+            queued_sonnet_model: DEFAULT_ROUTER_QUEUED_SONNET_MODEL.to_string(),
+            compress_model: DEFAULT_ROUTER_COMPRESS_MODEL.to_string(),
+            compress_channel: DEFAULT_ROUTER_COMPRESS_CHANNEL.to_string(),
+            compress_max_tokens: DEFAULT_ROUTER_COMPRESS_MAX_TOKENS,
+            compress_char_budget_chars: DEFAULT_ROUTER_COMPRESS_CHAR_BUDGET_CHARS,
+            direct_http_timeout_secs: DEFAULT_ROUTER_DIRECT_HTTP_TIMEOUT_SECS,
+            queued_sonnet_default_max_tokens: DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS,
         }
     }
 }
@@ -554,6 +601,44 @@ impl FlowRuntimeConfig {
                 message: err.to_string(),
             })?;
         parse_flow_runtime_policy(&source)
+    }
+}
+
+impl RouterRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_router_runtime_policy(&source)
+    }
+
+    pub(crate) fn direct_http_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.direct_http_timeout_secs.max(1))
     }
 }
 
@@ -1044,6 +1129,43 @@ pub(crate) fn parse_flow_runtime_policy(
     Ok(cfg)
 }
 
+pub(crate) fn parse_router_runtime_policy(
+    source: &str,
+) -> Result<RouterRuntimeConfig, BlueprintConfigError> {
+    let block = find_form(source, "router-runtime-policy")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing (router-runtime-policy ...)".into()))?;
+    let tokens = tokenize_lisp(&block);
+    let cfg = RouterRuntimeConfig {
+        default_chat_model: non_empty_keyword(&tokens, ":default-chat-model")?,
+        chat_default_max_tokens: u32_keyword(&tokens, ":chat-default-max-tokens")?,
+        file_chat_default_max_tokens: u32_keyword(&tokens, ":file-chat-default-max-tokens")?,
+        flow_gemini_model: non_empty_keyword(&tokens, ":flow-gemini-model")?,
+        stateless_sonnet_model: non_empty_keyword(&tokens, ":stateless-sonnet-model")?,
+        queued_sonnet_model: non_empty_keyword(&tokens, ":queued-sonnet-model")?,
+        compress_model: non_empty_keyword(&tokens, ":compress-model")?,
+        compress_channel: non_empty_keyword(&tokens, ":compress-channel")?,
+        compress_max_tokens: u32_keyword(&tokens, ":compress-max-tokens")?,
+        compress_char_budget_chars: usize_keyword(&tokens, ":compress-char-budget-chars")?,
+        direct_http_timeout_secs: u64_keyword(&tokens, ":direct-http-timeout-secs")?,
+        queued_sonnet_default_max_tokens: u32_keyword(
+            &tokens,
+            ":queued-sonnet-default-max-tokens",
+        )?,
+    };
+    if cfg.chat_default_max_tokens == 0
+        || cfg.file_chat_default_max_tokens == 0
+        || cfg.compress_max_tokens == 0
+        || cfg.compress_char_budget_chars == 0
+        || cfg.direct_http_timeout_secs == 0
+        || cfg.queued_sonnet_default_max_tokens == 0
+    {
+        return Err(BlueprintConfigError::Parse(
+            "router-runtime-policy numeric budgets must be positive".into(),
+        ));
+    }
+    Ok(cfg)
+}
+
 pub(crate) fn parse_project_registry_policy(
     source: &str,
 ) -> Result<ProjectRegistryRuntimeConfig, BlueprintConfigError> {
@@ -1408,6 +1530,18 @@ fn keyword_value(tokens: &[String], key: &str) -> Option<String> {
         .map(|pair| pair[1].clone())
 }
 
+fn non_empty_keyword(tokens: &[String], key: &str) -> Result<String, BlueprintConfigError> {
+    let value = keyword_value(tokens, key)
+        .ok_or_else(|| BlueprintConfigError::Parse(format!("missing {}", key)))?;
+    if value.trim().is_empty() {
+        return Err(BlueprintConfigError::Parse(format!(
+            "{} must not be empty",
+            key
+        )));
+    }
+    Ok(value)
+}
+
 fn parse_bool_token(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "t" | "1" | "yes" | "on" => Some(true),
@@ -1591,15 +1725,28 @@ mod tests {
       :max_secs 28800
       :default_extend_secs 3600
       :max_extend_secs 3600))
-  (flow-runtime-policy
-    :llm-call-default-max-tokens 65536
-    :slot-task-default-model "opus"
-    :slot-task-default-timeout-secs 3600
-    :parallel-slot-default-parallelism 3
-    :parallel-slot-default-timeout-secs 1800)
-  (cascade-policy
-    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
-    :allowed-root "/Users/jinchen/Projects"
+	  (flow-runtime-policy
+	    :llm-call-default-max-tokens 65536
+	    :slot-task-default-model "opus"
+	    :slot-task-default-timeout-secs 3600
+	    :parallel-slot-default-parallelism 3
+	    :parallel-slot-default-timeout-secs 1800)
+	  (router-runtime-policy
+	    :default-chat-model "gemini-3.1-pro"
+	    :chat-default-max-tokens 16384
+	    :file-chat-default-max-tokens 65536
+	    :flow-gemini-model "gemini-3.1-pro"
+	    :stateless-sonnet-model "claude-sonnet"
+	    :queued-sonnet-model "claude-sonnet"
+	    :compress-model "gemini-3.1-pro"
+	    :compress-channel "google"
+	    :compress-max-tokens 2048
+	    :compress-char-budget-chars 100000
+	    :direct-http-timeout-secs 60
+	    :queued-sonnet-default-max-tokens 1024)
+	  (cascade-policy
+	    :default-manifest "/Users/jinchen/Projects/universe.intent.lisp"
+	    :allowed-root "/Users/jinchen/Projects"
     :trigger-enabled true
     :default-max-cycles 3
     :max-cycles-limit 12)
@@ -1726,6 +1873,37 @@ mod tests {
         assert_eq!(cfg.slot_task_default_timeout_secs, 3600);
         assert_eq!(cfg.parallel_slot_default_parallelism, 3);
         assert_eq!(cfg.parallel_slot_default_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn parses_router_runtime_policy() {
+        let cfg = parse_router_runtime_policy(BLUEPRINT).expect("parse router runtime policy");
+        assert_eq!(cfg.default_chat_model, DEFAULT_ROUTER_CHAT_MODEL);
+        assert_eq!(cfg.chat_default_max_tokens, 16384);
+        assert_eq!(cfg.file_chat_default_max_tokens, 65536);
+        assert_eq!(cfg.flow_gemini_model, DEFAULT_ROUTER_FLOW_GEMINI_MODEL);
+        assert_eq!(
+            cfg.stateless_sonnet_model,
+            DEFAULT_ROUTER_STATELESS_SONNET_MODEL
+        );
+        assert_eq!(cfg.queued_sonnet_model, DEFAULT_ROUTER_QUEUED_SONNET_MODEL);
+        assert_eq!(cfg.compress_model, DEFAULT_ROUTER_COMPRESS_MODEL);
+        assert_eq!(cfg.compress_channel, DEFAULT_ROUTER_COMPRESS_CHANNEL);
+        assert_eq!(cfg.compress_max_tokens, 2048);
+        assert_eq!(cfg.compress_char_budget_chars, 100_000);
+        assert_eq!(cfg.direct_http_timeout_secs, 60);
+        assert_eq!(
+            cfg.direct_http_timeout(),
+            std::time::Duration::from_secs(60)
+        );
+        assert_eq!(cfg.queued_sonnet_default_max_tokens, 1024);
+    }
+
+    #[test]
+    fn missing_router_runtime_policy_is_rejected() {
+        let source = BLUEPRINT.replace("(router-runtime-policy", "(router-runtime-policy-disabled");
+        let err = parse_router_runtime_policy(&source).expect_err("missing router runtime policy");
+        assert!(err.to_string().contains("router-runtime-policy"));
     }
 
     #[test]

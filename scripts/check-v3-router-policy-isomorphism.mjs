@@ -19,6 +19,9 @@ const DEFAULT_FILES = {
   chat: 'crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs',
   files: 'crates/missiond-daemon/src/handlers/comm/router_chat/files.rs',
   manage: 'crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs',
+  v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+  llmGateway: 'crates/missiond-daemon/src/llm/llm_gateway.rs',
+  sonnetGateway: 'crates/missiond-daemon/src/llm/sonnet_gateway.rs',
   mcp: 'crates/missiond-mcp/src/tools/comm/router_chat.rs',
   planAdapter: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
   predicate: 'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs',
@@ -88,12 +91,16 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.blueprint, sources.blueprint, [
     'router-policy',
+    'router-runtime-policy',
     '(surface router-policy',
     ':status "code-aligned"',
     'crates/missiond-daemon/src/handlers/comm/router_chat.rs',
     'crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs',
     'crates/missiond-daemon/src/handlers/comm/router_chat/files.rs',
     'crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs',
+    'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
+    'crates/missiond-daemon/src/llm/llm_gateway.rs',
+    'crates/missiond-daemon/src/llm/sonnet_gateway.rs',
     'crates/missiond-mcp/src/tools/comm/router_chat.rs',
     'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs',
     'crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs',
@@ -108,6 +115,9 @@ function checkFiles(root, files) {
     'router_chat/chat.rs owns mission_router_chat',
     'router_chat/files.rs owns attachment denylist and Gemini File API policy',
     'router_chat/manage.rs owns mission_router_chat_manage',
+    'RouterRuntimeConfig',
+    'mission_router_chat default model and max_tokens MUST project from router-runtime-policy',
+    'Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model',
     'plan/router_policy_dry_run.rs owns the advisory dry-run adapter',
     'dry_run_only/runtime_replacement/no_execution invariants',
     'node scripts/check-v3-router-policy-isomorphism.mjs',
@@ -137,6 +147,10 @@ function checkFiles(root, files) {
     'is_file_denied',
     'FILE_MAX_SIZE_BINARY',
     'FILE_MAX_SIZE_TEXT',
+    'RouterRuntimeConfig::load_for_current_dir',
+    'router_config.default_chat_model',
+    'router_config.chat_default_max_tokens',
+    'router_config.file_chat_default_max_tokens',
     'router_chat_get_or_create',
     'router_chat_get_summary',
     'router_chat_load_active_history',
@@ -181,6 +195,41 @@ function checkFiles(root, files) {
     'router_chat_update_summary',
     'REQUEST_CALLER',
     'router_chat_compress',
+    'RouterRuntimeConfig::load_for_current_dir',
+    'router_config.default_chat_model',
+    'router_config.compress_model',
+    'router_config.compress_channel',
+    'router_config.compress_max_tokens',
+    'router_config.compress_char_budget_chars',
+  ]);
+
+  requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
+    'pub(crate) struct RouterRuntimeConfig',
+    'DEFAULT_ROUTER_CHAT_MODEL',
+    'DEFAULT_ROUTER_FLOW_GEMINI_MODEL',
+    'DEFAULT_ROUTER_STATELESS_SONNET_MODEL',
+    'DEFAULT_ROUTER_QUEUED_SONNET_MODEL',
+    'DEFAULT_ROUTER_COMPRESS_MODEL',
+    'parse_router_runtime_policy',
+    'find_form(source, "router-runtime-policy")',
+    'direct_http_timeout',
+  ]);
+
+  requireAll(diagnostics, files.llmGateway, sources.llmGateway, [
+    'RouterRuntimeConfig::load_for_current_dir',
+    'router_config.flow_gemini_model',
+    'router_config.chat_default_max_tokens',
+    'router_config.stateless_sonnet_model',
+    'router_config.direct_http_timeout()',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+  ]);
+
+  requireAll(diagnostics, files.sonnetGateway, sources.sonnetGateway, [
+    'RouterRuntimeConfig::load_for_current_dir',
+    'queued_sonnet_model',
+    'queued_sonnet_default_max_tokens',
+    'config.direct_http_timeout()',
+    'V3_BLUEPRINT_CONFIG_ERROR',
   ]);
 
   requireAll(diagnostics, files.mcp, sources.mcp, [
@@ -274,26 +323,42 @@ function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-router-policy-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
 (missiond-blueprint
-  (implementation-map
-    (surface router-policy
-      :status "code-aligned"
-      :code ["crates/missiond-daemon/src/handlers/comm/router_chat.rs"
-             "crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs"
-             "crates/missiond-daemon/src/handlers/comm/router_chat/files.rs"
-             "crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs"
-             "crates/missiond-mcp/src/tools/comm/router_chat.rs"
+	  (implementation-map
+	    (surface router-policy
+	      :status "code-aligned"
+	      :code ["crates/missiond-daemon/src/handlers/comm/router_chat.rs"
+	             "crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs"
+	             "crates/missiond-daemon/src/handlers/comm/router_chat/files.rs"
+	             "crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs"
+	             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+	             "crates/missiond-daemon/src/llm/llm_gateway.rs"
+	             "crates/missiond-daemon/src/llm/sonnet_gateway.rs"
+	             "crates/missiond-mcp/src/tools/comm/router_chat.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/descriptor.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/schema_parser.rs"
-             "scripts/check-router-policy.mjs"
-             "scripts/check-router-backend-registry.mjs"
-             "scripts/check-router-dispatch-descriptor.mjs"
-             "scripts/check-v3-router-policy-isomorphism.mjs"]
-      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
-  (compression-contract
-    :checks ["node scripts/check-v3-router-policy-isomorphism.mjs"]))`);
+	             "scripts/check-router-policy.mjs"
+	             "scripts/check-router-backend-registry.mjs"
+	             "scripts/check-router-dispatch-descriptor.mjs"
+	             "scripts/check-v3-router-policy-isomorphism.mjs"]
+	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
+	  (router-runtime-policy
+	    :default-chat-model "gemini-3.1-pro"
+	    :chat-default-max-tokens 16384
+	    :file-chat-default-max-tokens 65536
+	    :flow-gemini-model "gemini-3.1-pro"
+	    :stateless-sonnet-model "claude-sonnet"
+	    :queued-sonnet-model "claude-sonnet"
+	    :compress-model "gemini-3.1-pro"
+	    :compress-channel "google"
+	    :compress-max-tokens 2048
+	    :compress-char-budget-chars 100000
+	    :direct-http-timeout-secs 60
+	    :queued-sonnet-default-max-tokens 1024)
+	  (compression-contract
+	    :checks ["node scripts/check-v3-router-policy-isomorphism.mjs"]))`);
 
   writeFixture(root, DEFAULT_FILES.facade, `
 mod chat;
@@ -306,11 +371,12 @@ Unknown router_chat tool
 `);
 
   writeFixture(root, DEFAULT_FILES.chat, `
-handle_chat apply_context_budget MAX_ROUTER_PAYLOAD_BYTES resolve_llm_credentials REQUEST_CALLER
-GeminiFileApi PreparedFile resolve_gemini_api_key is_file_denied FILE_MAX_SIZE_BINARY FILE_MAX_SIZE_TEXT
-router_chat_get_or_create router_chat_get_summary router_chat_load_active_history
-kb_list list_board_tasks send_with_timeout router_chat_append_messages finish_reason context_budget
-`);
+	handle_chat apply_context_budget MAX_ROUTER_PAYLOAD_BYTES resolve_llm_credentials REQUEST_CALLER
+	GeminiFileApi PreparedFile resolve_gemini_api_key is_file_denied FILE_MAX_SIZE_BINARY FILE_MAX_SIZE_TEXT
+	RouterRuntimeConfig::load_for_current_dir router_config.default_chat_model router_config.chat_default_max_tokens router_config.file_chat_default_max_tokens
+	router_chat_get_or_create router_chat_get_summary router_chat_load_active_history
+	kb_list list_board_tasks send_with_timeout router_chat_append_messages finish_reason context_budget
+	`);
 
   writeFixture(root, DEFAULT_FILES.files, `
 FILE_DENY_PATTERNS FILE_DENY_NAMES FILE_MAX_SIZE_TEXT FILE_MAX_SIZE_BINARY resolve_gemini_api_key
@@ -318,11 +384,28 @@ is_file_denied /.ssh/ .env credentials.json
 `);
 
   writeFixture(root, DEFAULT_FILES.manage, `
-handle_consolidated handle_legacy mission_router_chat_history mission_router_chat_list mission_router_chat_stats
-mission_router_chat_clear mission_router_chat_delete mission_router_chat_delete_message
-mission_router_chat_restore mission_router_chat_compress router_chat_load_history router_chat_list
-router_chat_stats router_chat_clear router_chat_delete router_chat_delete_message router_chat_restore
-router_chat_update_summary REQUEST_CALLER router_chat_compress
+	handle_consolidated handle_legacy mission_router_chat_history mission_router_chat_list mission_router_chat_stats
+	mission_router_chat_clear mission_router_chat_delete mission_router_chat_delete_message
+	mission_router_chat_restore mission_router_chat_compress router_chat_load_history router_chat_list
+	router_chat_stats router_chat_clear router_chat_delete router_chat_delete_message router_chat_restore
+	router_chat_update_summary REQUEST_CALLER router_chat_compress RouterRuntimeConfig::load_for_current_dir
+	router_config.default_chat_model router_config.compress_model router_config.compress_channel
+	router_config.compress_max_tokens router_config.compress_char_budget_chars
+	`);
+
+  writeFixture(root, DEFAULT_FILES.v3Runtime, `
+pub(crate) struct RouterRuntimeConfig DEFAULT_ROUTER_CHAT_MODEL DEFAULT_ROUTER_FLOW_GEMINI_MODEL
+DEFAULT_ROUTER_STATELESS_SONNET_MODEL DEFAULT_ROUTER_QUEUED_SONNET_MODEL DEFAULT_ROUTER_COMPRESS_MODEL
+parse_router_runtime_policy find_form(source, "router-runtime-policy") direct_http_timeout
+`);
+
+  writeFixture(root, DEFAULT_FILES.llmGateway, `
+RouterRuntimeConfig::load_for_current_dir router_config.flow_gemini_model router_config.chat_default_max_tokens
+router_config.stateless_sonnet_model router_config.direct_http_timeout() V3_BLUEPRINT_CONFIG_ERROR
+`);
+
+  writeFixture(root, DEFAULT_FILES.sonnetGateway, `
+RouterRuntimeConfig::load_for_current_dir queued_sonnet_model queued_sonnet_default_max_tokens config.direct_http_timeout() V3_BLUEPRINT_CONFIG_ERROR
 `);
 
   writeFixture(root, DEFAULT_FILES.mcp, `

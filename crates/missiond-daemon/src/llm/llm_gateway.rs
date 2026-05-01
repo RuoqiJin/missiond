@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use anyhow::{anyhow, Result};
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::gemini_client::REQUEST_CALLER;
 use crate::state::AppState;
@@ -21,13 +22,15 @@ pub(crate) async fn call_gemini_for_flow(
     prompt: &str,
 ) -> Result<String> {
     // Gate check removed: GeminiClient::send_with_timeout() is the sole choke point (P3)
+    let router_config = RouterRuntimeConfig::load_for_current_dir()
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
     let (base_url, jwt) = resolve_llm_credentials().await?;
-    let model = "gemini-3.1-pro";
+    let model = router_config.flow_gemini_model;
 
     // Get or create conversation for this task (maintains Gemini context across phases)
     let conv_id = state
         .store
-        .router_chat_get_or_create(task_id, model)
+        .router_chat_get_or_create(task_id, &model)
         .await
         .map_err(|e| anyhow!("Failed to get/create router chat conversation: {}", e))?;
 
@@ -58,9 +61,9 @@ pub(crate) async fn call_gemini_for_flow(
 
     let url = format!("{}/v1/chat/completions", base_url);
     let body = serde_json::json!({
-        "model": model,
+        "model": &model,
         "messages": messages,
-        "max_tokens": 16384,
+        "max_tokens": router_config.chat_default_max_tokens,
     });
 
     info!(task_id, conv_id = %conv_id, msg_count = messages.len(), "Flow engine: calling Gemini");
@@ -111,7 +114,7 @@ pub(crate) async fn call_gemini_for_flow(
     Ok(content)
 }
 
-/// Stateless Sonnet call via Router API (claude-sonnet endpoint).
+/// Stateless Sonnet call via Router API.
 /// Direct HTTP POST — bypasses GeminiClient to avoid CLI mode hijacking.
 /// Retries on 429 with exponential backoff (max 3 attempts).
 pub(crate) async fn call_sonnet_stateless(
@@ -123,11 +126,12 @@ pub(crate) async fn call_sonnet_stateless(
 ) -> Result<String> {
     // Kill switch: reject immediately when sonnet gate is closed (AtomicBool — zero I/O)
     crate::llm_gate::check(crate::llm_gate::LlmProvider::Sonnet)?;
+    let router_config = RouterRuntimeConfig::load_for_current_dir()
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
     let (base_url, mut jwt) = resolve_llm_credentials().await?;
-    let model = "claude-sonnet";
     let url = format!("{}/v1/chat/completions", base_url);
     let body = serde_json::json!({
-        "model": model,
+        "model": &router_config.stateless_sonnet_model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user_msg},
@@ -137,7 +141,7 @@ pub(crate) async fn call_sonnet_stateless(
 
     info!(
         caller,
-        model,
+        model = %router_config.stateless_sonnet_model,
         user_len = user_msg.len(),
         "LLM Gateway: calling Sonnet (direct HTTP)"
     );
@@ -154,7 +158,7 @@ pub(crate) async fn call_sonnet_stateless(
             .post(&url)
             .bearer_auth(&jwt)
             .json(&body)
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(router_config.direct_http_timeout())
             .send()
             .await;
 

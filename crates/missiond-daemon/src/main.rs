@@ -479,13 +479,10 @@ async fn main() -> Result<()> {
     let slot_mgr_store = Arc::clone(&store);
     // ── Project Registry: load from DB, build path→project_id index ──
     let project_registry: missiond_core::types::SharedProjectRegistry = {
-        let projects = store
-            .list_projects()
-            .await
-            .unwrap_or_else(|e| {
-                warn!("Failed to load projects from DB: {}", e);
-                vec![]
-            });
+        let projects = store.list_projects().await.unwrap_or_else(|e| {
+            warn!("Failed to load projects from DB: {}", e);
+            vec![]
+        });
         info!(count = projects.len(), "Project registry loaded");
         Arc::new(tokio::sync::RwLock::new(
             missiond_core::types::ProjectRegistry::new(projects),
@@ -646,7 +643,7 @@ async fn main() -> Result<()> {
             }
         },
         sonnet: {
-            let (handle, gateway) = sonnet_gateway::create_sonnet_gateway();
+            let (handle, gateway) = sonnet_gateway::create_sonnet_gateway()?;
             let gateway = gateway.with_bus(Arc::clone(&bus_services));
             info!("SonnetGateway initialized");
             tokio::spawn(gateway.run());
@@ -730,8 +727,7 @@ async fn main() -> Result<()> {
             let cc_tasks_ref = Arc::clone(&state_cc_tasks);
             let gemini_tasks_ref = Arc::clone(&gemini_tasks);
             tokio::spawn(async move {
-                let mut interval =
-                    tokio::time::interval(std::time::Duration::from_millis(250));
+                let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
                 loop {
                     interval.tick().await;
                     // Drain: swap out the current map, persist each entry.
@@ -1160,7 +1156,8 @@ async fn main() -> Result<()> {
             .ok_or_else(|| anyhow!("ws bridge requires the PG pool"))?
             .clone();
         let blob = bus_services.blob_store.clone();
-        let _bridge = bus::spawn_ws_bridge(pool, blob, frontend_events_tx.clone(), shutdown_rx.clone());
+        let _bridge =
+            bus::spawn_ws_bridge(pool, blob, frontend_events_tx.clone(), shutdown_rx.clone());
     }
 
     // --- Phase 8: Retention + orphan-subscription cleanup daily cron ---
@@ -1169,11 +1166,7 @@ async fn main() -> Result<()> {
             .as_ref()
             .ok_or_else(|| anyhow!("retention cron requires the PG pool"))?
             .clone();
-        let _cron = bus::spawn_retention_cron(
-            Arc::clone(&bus_services),
-            pool,
-            shutdown_rx.clone(),
-        );
+        let _cron = bus::spawn_retention_cron(Arc::clone(&bus_services), pool, shutdown_rx.clone());
     }
 
     // --- AST Sync Worker (P2 HCE) ---
@@ -1274,9 +1267,9 @@ async fn main() -> Result<()> {
         tokio::spawn(async move {
             while let Some(incident) = incident_webhook_rx.recv().await {
                 let _ = bus
-                    .publish_incident(
-                        missiond_core::event::events::IncidentEvent::Reported { incident },
-                    )
+                    .publish_incident(missiond_core::event::events::IncidentEvent::Reported {
+                        incident,
+                    })
                     .await;
             }
         });
@@ -1676,10 +1669,7 @@ async fn main() -> Result<()> {
     // Phase 2: Gracefully shut down all PTY sessions
     // This sends /exit to each Claude Code instance, waits 3s, then force-kills
     info!("Shutting down PTY sessions...");
-    match tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        state.pty.shutdown(),
-    ).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), state.pty.shutdown()).await {
         Ok(()) => info!("PTY sessions shut down cleanly"),
         Err(_) => warn!("PTY shutdown timed out after 5s, proceeding with cleanup"),
     }

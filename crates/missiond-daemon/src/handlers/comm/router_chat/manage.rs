@@ -3,6 +3,7 @@ use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::gemini_client::REQUEST_CALLER;
 use crate::state::AppState;
@@ -26,6 +27,8 @@ pub(super) async fn handle_consolidated(state: &AppState, args: Value) -> Result
 }
 
 pub(super) async fn handle_legacy(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    let router_config = RouterRuntimeConfig::load_for_current_dir()
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
     match name {
         "mission_router_chat_history" => {
             let args_val: serde_json::Value = serde_json::from_value(args).unwrap_or_default();
@@ -33,10 +36,9 @@ pub(super) async fn handle_legacy(state: &AppState, name: &str, args: Value) -> 
                 .get("task_id")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("task_id is required"))?;
-            let model = "gemini-3.1-pro"; // default model for lookup
             let conv_id = state
                 .store
-                .router_chat_get_or_create(task_id, model)
+                .router_chat_get_or_create(task_id, &router_config.default_chat_model)
                 .await
                 .map_err(|e| anyhow!("DB error: {}", e))?;
             let history = state
@@ -206,7 +208,7 @@ pub(super) async fn handle_legacy(state: &AppState, name: &str, args: Value) -> 
                 (Some(c), _) => c.to_string(),
                 (None, Some(tid)) => state
                     .store
-                    .router_chat_get_or_create(tid, "gemini-3.1-pro")
+                    .router_chat_get_or_create(tid, &router_config.default_chat_model)
                     .await
                     .map_err(|e| anyhow!("DB error: {}", e))?,
                 _ => return Ok(ToolResult::error("需要提供 conversation_id 或 task_id")),
@@ -251,13 +253,14 @@ pub(super) async fn handle_legacy(state: &AppState, name: &str, args: Value) -> 
             }
 
             // Format messages for summarization, with char budget to prevent token overflow
-            const COMPRESS_CHAR_BUDGET: usize = 100_000; // ~25k tokens, safe for Gemini input
             let mut messages_text = String::new();
             let mut actual_count = 0usize;
             for (_, role, content) in &to_compress {
                 let entry = format!("[{}]: {}\n\n", role, content);
-                if messages_text.len() + entry.len() > COMPRESS_CHAR_BUDGET && actual_count > 0 {
-                    info!(conv_id = %cid, budget = COMPRESS_CHAR_BUDGET,
+                if messages_text.len() + entry.len() > router_config.compress_char_budget_chars
+                    && actual_count > 0
+                {
+                    info!(conv_id = %cid, budget = router_config.compress_char_budget_chars,
                                       "Router chat compress: char budget reached, truncating batch at {} of {} messages",
                                       actual_count, to_compress.len());
                     break;
@@ -293,10 +296,10 @@ pub(super) async fn handle_legacy(state: &AppState, name: &str, args: Value) -> 
             let (base_url, jwt) = resolve_llm_credentials().await?;
             let compress_url = format!("{}/v1/chat/completions", base_url);
             let compress_body = serde_json::json!({
-                "model": "gemini-3.1-pro",
+                "model": &router_config.compress_model,
                 "messages": compress_messages,
-                "max_tokens": 2048,
-                "_channel": "google",  // Force google one channel for compression
+                "max_tokens": router_config.compress_max_tokens,
+                "_channel": &router_config.compress_channel,
             });
 
             let summary_result = REQUEST_CALLER

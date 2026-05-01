@@ -19,6 +19,7 @@ use tokio::sync::{mpsc, oneshot, Semaphore};
 use tokio::time::Instant;
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::minimax_client::ChatMessage;
 use crate::minimax_gateway::{GatewayRequest, Priority, QuotaTracker};
 use missiond_core::event::events::WorkerEvent;
@@ -40,9 +41,6 @@ const MIN_INTER_REQUEST_MS: u64 = 300;
 
 /// Quota reservation threshold for low-priority requests.
 const QUOTA_RESERVE_THRESHOLD: usize = 200;
-
-/// Sonnet model name on xjp-router (cpapi deprecated → claude-sonnet).
-const SONNET_MODEL: &str = "claude-sonnet";
 
 // ── SonnetHandle (Clone, given to workers) ──────────────────────────
 
@@ -175,19 +173,24 @@ impl SonnetHandle {
 
 // ── Sonnet HTTP Backend ─────────────────────────────────────────────
 
-/// HTTP client for xjp-router's claude-sonnet endpoint.
+/// HTTP client for xjp-router's V3-projected Sonnet endpoint.
+#[derive(Clone)]
 struct SonnetBackend {
     http: reqwest::Client,
+    model: String,
+    default_max_tokens: u32,
 }
 
 impl SonnetBackend {
-    fn new() -> Self {
-        Self {
+    fn new(config: &RouterRuntimeConfig) -> Result<Self> {
+        Ok(Self {
             http: reqwest::Client::builder()
-                .timeout(Duration::from_secs(60))
+                .timeout(config.direct_http_timeout())
                 .build()
-                .expect("Failed to create HTTP client"),
-        }
+                .map_err(|e| anyhow!("failed to create Sonnet HTTP client: {}", e))?,
+            model: config.queued_sonnet_model.clone(),
+            default_max_tokens: config.queued_sonnet_default_max_tokens,
+        })
     }
 
     async fn call(&self, messages: &[ChatMessage], max_tokens: Option<u32>) -> Result<String> {
@@ -200,9 +203,9 @@ impl SonnetBackend {
             .collect();
 
         let body = serde_json::json!({
-            "model": SONNET_MODEL,
+            "model": &self.model,
             "messages": openai_messages,
-            "max_tokens": max_tokens.unwrap_or(1024),
+            "max_tokens": max_tokens.unwrap_or(self.default_max_tokens),
         });
 
         let resp = self
@@ -368,13 +371,12 @@ impl SonnetGateway {
             let queue_wait_ms = queue_wait_start.elapsed().as_millis() as u64;
 
             // 5. Execute request (spawned for concurrency)
-            let backend = self.backend.http.clone();
+            let backend = self.backend.clone();
             let bus = self.bus.clone();
             tokio::spawn(async move {
                 let api_start = std::time::Instant::now();
                 let prompt_chars: usize = req.messages.iter().map(|m| m.content.len()).sum();
 
-                let backend = SonnetBackend { http: backend };
                 let result = backend.call(&req.messages, req.max_tokens).await;
 
                 let duration_ms = api_start.elapsed().as_millis() as u64;
@@ -422,9 +424,11 @@ impl SonnetGateway {
 // ── Initialization ─────────────────────────────────────────────────
 
 /// Create the Sonnet gateway and its handle. Call once at startup.
-/// Always succeeds (credentials resolved lazily per-request).
-pub(crate) fn create_sonnet_gateway() -> (SonnetHandle, SonnetGateway) {
-    let backend = SonnetBackend::new();
+/// Credentials are resolved lazily per-request; V3 router policy is loaded at startup.
+pub(crate) fn create_sonnet_gateway() -> Result<(SonnetHandle, SonnetGateway)> {
+    let router_config = RouterRuntimeConfig::load_for_current_dir()
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+    let backend = SonnetBackend::new(&router_config)?;
 
     let (tx_interactive, rx_interactive) = mpsc::channel(CHANNEL_CAPACITY);
     let (tx_translation, rx_translation) = mpsc::channel(CHANNEL_CAPACITY);
@@ -454,5 +458,5 @@ pub(crate) fn create_sonnet_gateway() -> (SonnetHandle, SonnetGateway) {
         bus: None,
     };
 
-    (handle, gateway)
+    Ok((handle, gateway))
 }

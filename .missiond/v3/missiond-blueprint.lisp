@@ -572,6 +572,26 @@
        "Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults."
        "A real MissionD project with .missiond but no flow-runtime-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (router-runtime-policy
+    :desc "Lisp-owned defaults for router chat and internal Router/Sonnet gateway calls; direct caller args still win."
+    :default-chat-model "gemini-3.1-pro"
+    :chat-default-max-tokens 16384
+    :file-chat-default-max-tokens 65536
+    :flow-gemini-model "gemini-3.1-pro"
+    :stateless-sonnet-model "claude-sonnet"
+    :queued-sonnet-model "claude-sonnet"
+    :compress-model "gemini-3.1-pro"
+    :compress-channel "google"
+    :compress-max-tokens 2048
+    :compress-char-budget-chars 100000
+    :direct-http-timeout-secs 60
+    :queued-sonnet-default-max-tokens 1024
+    :invariants
+      ["RouterRuntimeConfig MUST load router-runtime-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
+       "mission_router_chat default model and max_tokens MUST project from router-runtime-policy; explicit caller model/max_tokens still wins."
+       "mission_router_chat_manage history lookup and compression model/channel/token/char budgets MUST project from router-runtime-policy."
+       "Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model and direct HTTP timeout from router-runtime-policy."])
+
   (project-registry-policy
     :desc "Lisp-owned project registry defaults for intent discovery and universe import."
     :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
@@ -833,12 +853,12 @@
       :surface conversation-ingestion
       :note "Conversation query, analysis, timeline, retrospective, embedding, and reconcile tools are physically split and pinned under the V3 conversation-ingestion surface; conversation-ingestion-policy now projects read-model default and max limits into conversation, event, and timeline runtime.")
     (v2-item router-policy-dry-run-chain
-      :status code-aligned
+      :status runtime-projected
       :v2-source ".missiond/v2/intent.lisp :: router-policy-v1 / router-backend-readiness-loop / router-dispatch-descriptor-loop"
       :v3-pillar communication
       :v3-function router-policy
       :surface router-policy
-      :note "Router chat runtime and mission_plan advisory router-policy dry-run chain are physically split and pinned under the V3 router-policy surface.")
+      :note "Router chat runtime, flow/Sonnet gateway defaults, and mission_plan advisory router-policy dry-run chain are physically split and pinned under the V3 router-policy surface; router-runtime-policy projects model/token/timeout/compression budgets into Rust.")
     (v2-item question-incident-governance
       :status code-aligned
       :v2-source ".missiond/v2/intent-worker.lisp :: system-support/incidents + question flow"
@@ -985,7 +1005,7 @@
         :tools [mission_conversation_query mission_conversation_analyze mission_conversation_reconcile
                 mission_timeline mission_retrospective_manage mission_embedding_ops])
       (tool-group router-policy-tools
-        :status code-aligned
+        :status runtime-projected
         :v2-source ".missiond/v2/intent.lisp :: router-policy-v1"
         :v3-pillar communication
         :v3-function router-policy
@@ -1783,6 +1803,9 @@
              "crates/missiond-daemon/src/handlers/comm/router_chat/chat.rs"
              "crates/missiond-daemon/src/handlers/comm/router_chat/files.rs"
              "crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/llm/llm_gateway.rs"
+             "crates/missiond-daemon/src/llm/sonnet_gateway.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/predicate.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/router_policy_dry_run/readiness.rs"
@@ -1792,7 +1815,7 @@
              "scripts/check-router-backend-registry.mjs"
              "scripts/check-router-dispatch-descriptor.mjs"
              "scripts/check-v3-router-policy-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for the V2 router-policy dry-run chain and public router chat tools. router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat request normalization, context injection, LLM dispatch, persistence, and response projection; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage history/list/delete/clear/delete_message/restore/stats/compress. plan/router_policy_dry_run.rs owns the advisory dry-run adapter, predicate.rs owns rule matching, readiness.rs owns trace-index/backend-readiness projection, descriptor.rs owns router dispatch descriptor projection, and schema_parser.rs owns router-policy/backend-registry Lisp parsing. The surface preserves dry_run_only/runtime_replacement/no_execution invariants and deliberately does not claim runtime backend replacement.")
+      :note "Runtime-projected V3 destination for the V2 router-policy dry-run chain and public router chat tools. router-runtime-policy owns default chat/flow/Sonnet models plus token/timeout/compression budgets through RouterRuntimeConfig. router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat request normalization, context injection, LLM dispatch, persistence, and response projection; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage history/list/delete/clear/delete_message/restore/stats/compress. llm_gateway.rs owns flow Gemini and stateless Sonnet calls, while sonnet_gateway.rs owns queued SonnetGateway calls. plan/router_policy_dry_run.rs owns the advisory dry-run adapter, predicate.rs owns rule matching, readiness.rs owns trace-index/backend-readiness projection, descriptor.rs owns router dispatch descriptor projection, and schema_parser.rs owns router-policy/backend-registry Lisp parsing. The surface preserves dry_run_only/runtime_replacement/no_execution invariants and deliberately does not claim router-policy dry-run as automatic runtime backend replacement.")
 
     (surface incident-governance
       :status "code-aligned"

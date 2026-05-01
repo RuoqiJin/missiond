@@ -6,6 +6,7 @@ use missiond_mcp::tools::ToolResult;
 use serde_json::Value;
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::context_budget::{apply_context_budget, MAX_ROUTER_PAYLOAD_BYTES};
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::gemini_client::REQUEST_CALLER;
@@ -19,6 +20,8 @@ use super::files::{
 pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolResult> {
     let params: serde_json::Value =
         serde_json::from_value(args).map_err(|e| anyhow!("Invalid params: {}", e))?;
+    let router_config = RouterRuntimeConfig::load_for_current_dir()
+        .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
 
     // Support `message` shorthand: single string → [{role: "user", content: message}]
     let mut messages: Vec<serde_json::Value> =
@@ -38,8 +41,8 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
     let model = params
         .get("model")
         .and_then(|v| v.as_str())
-        .unwrap_or("gemini-3.1-pro")
-        .to_string();
+        .map(str::to_string)
+        .unwrap_or_else(|| router_config.default_chat_model.clone());
     let has_files = params
         .get("files")
         .and_then(|v| v.as_array())
@@ -49,7 +52,11 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
         .get("max_tokens")
         .and_then(|v| v.as_u64())
         .map(|n| n as u32)
-        .unwrap_or(if has_files { 65536 } else { 16384 });
+        .unwrap_or(if has_files {
+            router_config.file_chat_default_max_tokens
+        } else {
+            router_config.chat_default_max_tokens
+        });
     let search_enabled = params
         .get("search")
         .and_then(|v| v.as_bool())
