@@ -2097,5 +2097,6 @@
              "node scripts/check-v3-board-isomorphism.mjs"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"
              "node scripts/check-v3-request-flow-smoke.mjs"
-             "node scripts/check-v3-code-isomorphism-complete.mjs"]
+             "node scripts/check-v3-code-isomorphism-complete.mjs"
+             "node scripts/check-v3-final-convergence.mjs"]
     :rule "New runtime work should cite v3 first, then v2 source-index for historical evidence."))

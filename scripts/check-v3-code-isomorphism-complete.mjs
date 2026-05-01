@@ -389,7 +389,7 @@ function main() {
   };
 
   if (opts.json) {
-    console.log(JSON.stringify(result, null, 2));
+    fs.writeSync(1, `${JSON.stringify(result, null, 2)}\n`);
   } else if (ok) {
     console.log(
       `v3 code-isomorphism gate OK (${EXPECTED_SURFACES.length} surfaces graduated, ${checkerResults.length} per-surface checkers passed)`,
@@ -730,7 +730,7 @@ function runDryFixture(opts) {
     process.exit(1);
   }
   if (opts.json) {
-    console.log(JSON.stringify({ ok: true, fixtures: cases.length }, null, 2));
+    fs.writeSync(1, `${JSON.stringify({ ok: true, fixtures: cases.length }, null, 2)}\n`);
   } else {
     console.log(`v3 code-isomorphism gate fixtures OK (${cases.length} cases)`);
   }
