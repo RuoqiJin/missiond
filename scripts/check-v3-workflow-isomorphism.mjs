@@ -433,6 +433,7 @@ function checkFiles(root, files) {
     'deterministic generated flow_id',
     'source_kind=\\"methodology\\"',
     '"overwrite_file"',
+    '.missiond/v3/runtime/plans/<plan_id>.evidence.json',
     '"review_gate_policy"',
     '"review_automation_policy"',
     '"auto_sonnet_policy"',
@@ -750,6 +751,7 @@ manager action — see Lisp implemented-surface mission_workflow
 "write_file" enriched V3 workflow artifact carrying :workflow_id/:source_plans/:match_rules/:steps/:status plus :body workflow_sexp; compile_methodology has no Workflow DB row and stamps :workflow_id with the deterministic generated flow_id, packing source_kind=\\"methodology\\" / compiler / compiler_version / source_hash / flow_id / source_path / generated_at into :match_rules
 "run_methodology" artifact_only_no_workflow_row workflow_record_execution(success=true,cost_usd?)
 "overwrite_file" "review_gate_policy" "review_automation_policy"
+.missiond/v3/runtime/plans/<plan_id>.evidence.json
 "auto_sonnet_policy" &["off", "safe_after_rules", "dry_run"]
 Lisp 源: intent-flow.lisp`);
   return root;

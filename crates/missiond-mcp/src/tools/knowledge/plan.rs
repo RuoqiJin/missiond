@@ -32,15 +32,24 @@ fn prop_object_open(description: &str) -> Value {
 fn build_properties() -> Value {
     let mut p: Map<String, Value> = Map::new();
 
-    p.insert("action".into(), prop_enum(
-        "string",
-        "manager action — see Lisp future-surface mission_plan",
-        &[
-            "compile", "list", "get", "by_task",
-            "approve", "mark", "supersede",
-            "execute", "record_evidence",
-        ],
-    ));
+    p.insert(
+        "action".into(),
+        prop_enum(
+            "string",
+            "manager action — see Lisp future-surface mission_plan",
+            &[
+                "compile",
+                "list",
+                "get",
+                "by_task",
+                "approve",
+                "mark",
+                "supersede",
+                "execute",
+                "record_evidence",
+            ],
+        ),
+    );
 
     p.insert("directive_id".into(), prop(
         "string",
@@ -63,10 +72,13 @@ fn build_properties() -> Value {
         &["dry_run", "sonnet"],
     ));
 
-    p.insert("directive_version".into(), prop(
-        "integer",
-        "[compile sonnet] specific directive version (default = version_chain head).",
-    ));
+    p.insert(
+        "directive_version".into(),
+        prop(
+            "integer",
+            "[compile sonnet] specific directive version (default = version_chain head).",
+        ),
+    );
 
     p.insert("allow_unapproved".into(), prop(
         "boolean",
@@ -87,35 +99,55 @@ fn build_properties() -> Value {
         "[compile sonnet] string or array of acceptance criteria woven into the planner prompt.",
     ));
 
-    p.insert("constraints".into(), prop_no_type(
-        "[compile sonnet] string or array of constraints woven into the planner prompt.",
-    ));
+    p.insert(
+        "constraints".into(),
+        prop_no_type(
+            "[compile sonnet] string or array of constraints woven into the planner prompt.",
+        ),
+    );
 
-    p.insert("plan_id".into(), prop(
-        "string",
-        "[get|approve|mark|execute|record_evidence] plan UUID",
-    ));
+    p.insert(
+        "plan_id".into(),
+        prop(
+            "string",
+            "[get|approve|mark|execute|record_evidence] plan UUID",
+        ),
+    );
 
-    p.insert("status".into(), prop_enum(
-        "string",
-        "[list filter | mark target] PlanStatus",
-        &["draft", "awaiting_approval", "approved", "executing", "succeeded", "failed", "superseded"],
-    ));
+    p.insert(
+        "status".into(),
+        prop_enum(
+            "string",
+            "[list filter | mark target] PlanStatus",
+            &[
+                "draft",
+                "awaiting_approval",
+                "approved",
+                "executing",
+                "succeeded",
+                "failed",
+                "superseded",
+            ],
+        ),
+    );
 
-    p.insert("limit".into(), prop(
-        "integer",
-        "[list] cap result count (1-500, default 50)",
-    ));
+    p.insert(
+        "limit".into(),
+        prop("integer", "[list] cap result count (1-500, default 50)"),
+    );
 
-    p.insert("old_plan_id".into(), prop(
-        "string",
-        "[supersede] plan to mark superseded",
-    ));
+    p.insert(
+        "old_plan_id".into(),
+        prop("string", "[supersede] plan to mark superseded"),
+    );
 
-    p.insert("new_plan_id".into(), prop(
-        "string",
-        "[supersede] replacement plan UUID (recorded in result only)",
-    ));
+    p.insert(
+        "new_plan_id".into(),
+        prop(
+            "string",
+            "[supersede] replacement plan UUID (recorded in result only)",
+        ),
+    );
 
     p.insert("target".into(), prop_enum(
         "string",
@@ -177,34 +209,47 @@ fn build_properties() -> Value {
         "[execute internal mission_execution] override parent-design ref (default `directive/<id>` if plan has source_directive_id, else `plan/<plan_id>`)",
     ));
 
-    p.insert("scope".into(), prop(
-        "string",
-        "[execute internal mission_execution] override the human-readable scope string",
-    ));
+    p.insert(
+        "scope".into(),
+        prop(
+            "string",
+            "[execute internal mission_execution] override the human-readable scope string",
+        ),
+    );
 
-    p.insert("owner".into(), prop(
-        "string",
-        "[execute internal mission_execution] execution owner (default `plan-runner`)",
-    ));
+    p.insert(
+        "owner".into(),
+        prop(
+            "string",
+            "[execute internal mission_execution] execution owner (default `plan-runner`)",
+        ),
+    );
 
     p.insert("flow_id".into(), prop(
         "string",
         "[execute internal mission_flow_run] existing flow id. Auto-selection v1: when omitted, runner extracts it from plan.sexp_text :flow-id / :flow_id hints; explicit arg still wins. plan.sexp_text → flow YAML compilation is still future, so the caller (or PLAN hint) must point at an already-registered flow id.",
     ));
 
-    p.insert("params".into(), prop_object_open(
-        "[execute internal mission_flow_run] forwarded as the flow params object",
-    ));
+    p.insert(
+        "params".into(),
+        prop_object_open("[execute internal mission_flow_run] forwarded as the flow params object"),
+    );
 
-    p.insert("priority".into(), prop(
-        "string",
-        "[execute internal mission_task_delegate] passthrough priority",
-    ));
+    p.insert(
+        "priority".into(),
+        prop(
+            "string",
+            "[execute internal mission_task_delegate] passthrough priority",
+        ),
+    );
 
-    p.insert("timeout_secs".into(), prop(
-        "integer",
-        "[execute internal mission_task_delegate] passthrough timeout",
-    ));
+    p.insert(
+        "timeout_secs".into(),
+        prop(
+            "integer",
+            "[execute internal mission_task_delegate] passthrough timeout",
+        ),
+    );
 
     p.insert("dry_run".into(), prop(
         "boolean",
@@ -1028,7 +1073,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          每节点 state transition (ready->running, running->{succeeded|failed}, pending->skipped) 都写一条 plan_dag_node_dispatch 证据；\
          响应字段: scheduler_mode / node_count / max_parallel_nodes / node_results[] / skipped_nodes[] / aggregate_status / concurrency_plan / topological_order；\
          dry_run=true 只返 DAG + concurrency_plan 不 dispatch。\
-         record_evidence 写 sidecar `<project>/.missiond/v2/plans/<plan_id>.evidence.json`；\
+         record_evidence 写 canonical sidecar `<project>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`，\
+         并兼容既有 `<project>/.missiond/v2/plans/<plan_id>.evidence.json`；\
          Wave 12 evidence-collector v0: 新增 evidence_kind / source 两个可选参数 — 当至少一个被传入时,\
          entry 会被 wrap 为带 `schema_version=\"v0\"` + canonical `source` + canonical `kind` 的 typed 形态\
          (kind 默认 `note`, source 默认 `record_evidence_manual`); 两个都不传时仍保留 legacy `{\"evidence\": …}` wire form,\

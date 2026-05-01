@@ -34,8 +34,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
             "string",
             "manager action — see Lisp helper agent-execution-coordination :: mcp-tool-design",
             &[
-                "open", "list", "claim", "heartbeat", "release", "deviate", "decide", "issue",
-                "complete", "status", "audit", "repair", "preflight_commit",
+                "open",
+                "list",
+                "claim",
+                "heartbeat",
+                "release",
+                "deviate",
+                "decide",
+                "issue",
+                "complete",
+                "status",
+                "audit",
+                "repair",
+                "preflight_commit",
             ],
         ),
     );
@@ -156,10 +167,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
     );
     properties.insert(
         "actually_found".into(),
-        prop(
-            "string",
-            "[deviate] what actually happened in code/runtime",
-        ),
+        prop("string", "[deviate] what actually happened in code/runtime"),
     );
     properties.insert(
         "reason".into(),
@@ -181,12 +189,12 @@ pub fn definitions() -> Vec<ToolDefinition> {
     );
     properties.insert(
         "options".into(),
-        prop("string", "[decide] alternatives considered (free-form text)"),
+        prop(
+            "string",
+            "[decide] alternatives considered (free-form text)",
+        ),
     );
-    properties.insert(
-        "chosen".into(),
-        prop("string", "[decide] selected option"),
-    );
+    properties.insert("chosen".into(), prop("string", "[decide] selected option"));
     properties.insert(
         "rationale".into(),
         prop("string", "[decide] why the chosen option won"),
@@ -405,8 +413,9 @@ pub fn definitions() -> Vec<ToolDefinition> {
 
     vec![ToolDefinition::new(
         "mission_execution",
-        "agent-execution-coordination v0.5.x manager — 13 actions over .missiond/v2/<id>.lisp \
-         companion logs (open / list / claim / heartbeat / release / deviate / decide / issue / \
+        "agent-execution-coordination v0.5.x manager — 13 actions over \
+         .missiond/v3/runtime/executions/<id>.lisp companion logs, with legacy \
+         .missiond/v2/<id>.lisp fallback (open / list / claim / heartbeat / release / deviate / decide / issue / \
          complete / status / audit / repair / preflight_commit). ID 分配由 manager 原子化 (id-counters slot), \
          claim 带 lease + heartbeat,deviation/decision/issue/completion 自动编号 D/DC/I/COMP\
          ;status 给 dashboard,audit 检 paren / 单调 ID / 重叠 claim / stale claim / scoped commit \

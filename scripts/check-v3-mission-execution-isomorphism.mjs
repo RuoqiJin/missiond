@@ -853,6 +853,7 @@ const PREFLIGHT_SCOPE_NEEDLES = [
 const MCP_NEEDLES = [
   'ToolDefinition::new(',
   '"mission_execution"',
+  '.missiond/v3/runtime/executions/<id>.lisp',
   '"open"',
   '"claim"',
   '"heartbeat"',
@@ -2105,6 +2106,7 @@ fn require_report_commit_hash() {
 function buildGoodMcp() {
   return `fn definitions() {
   ToolDefinition::new("mission_execution", "x", schema);
+  ".missiond/v3/runtime/executions/<id>.lisp";
   "open"; "claim"; "heartbeat"; "release"; "complete"; "audit"; "repair"; "preflight_commit";
   "dispatch_strategy"; "requested_cwd"; "lease_secs"; "commit_status"; "verifier_status";
   "task_run_verifier_status"; "task_contract_path"; "task_report_path"; "shared_memory_path";

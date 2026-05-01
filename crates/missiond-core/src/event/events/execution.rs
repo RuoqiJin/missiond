@@ -7,8 +7,10 @@
 //!   - intent-flow.lisp :: F-execution-log-governance
 //!   - intent-memory.lisp :: helper agent-execution-coordination v0.5.x
 //!
-//! Durable evidence remains the on-disk `<project_root>/.missiond/v2/<id>.lisp`
-//! companion file. The bus event is a non-authoritative live notification —
+//! Durable evidence remains the on-disk
+//! `<project_root>/.missiond/v3/runtime/executions/<id>.lisp` companion file
+//! (with `.missiond/v2/<id>.lisp` legacy fallback). The bus event is a
+//! non-authoritative live notification —
 //! consumers (status dashboards, notification surfaces, audit projections)
 //! react to it but the file is truth. See `:rationale` in
 //! `planned-event-extensions :: ExecutionEvent`.
@@ -33,8 +35,9 @@ pub enum ExecutionEvent {
     /// execution-strategy-record). They are optional + skipped on serialize
     /// when absent so legacy producers / consumers stay byte-identical with
     /// the original 5-field wire form. Durable truth still lives in the
-    /// on-disk `<project_root>/.missiond/v2/<id>.lisp` companion file; the
-    /// event metadata is a live projection for status / audit consumers.
+    /// on-disk `<project_root>/.missiond/v3/runtime/executions/<id>.lisp`
+    /// companion file; the event metadata is a live projection for status /
+    /// audit consumers.
     Opened {
         execution_id: String,
         parent_design: String,
@@ -260,7 +263,7 @@ pub enum ExecutionEvent {
     },
     /// Per-node lifecycle transition observed by the PLAN DAG runtime v2
     /// (`plan_dag.rs`). Bus is non-authoritative — durable evidence still
-    /// lives in `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`
+    /// lives in `<project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`
     /// (see `evidence_collector` :: `plan_dag_node_dispatch` entries) — but
     /// dashboards / replayers can correlate on `plan_id + node_id + attempt`
     /// without scraping the sidecar file. `from`/`to` mirror the scheduler
@@ -466,7 +469,7 @@ mod tests {
                 parent_design: "intent-event-bus.lisp".into(),
                 scope: "src/event/**".into(),
                 owner: "claude".into(),
-                path: ".missiond/v2/exec-1.lisp".into(),
+                path: ".missiond/v3/runtime/executions/exec-1.lisp".into(),
                 dispatch_strategy: None,
                 target_project: None,
                 requested_cwd: None,
@@ -476,7 +479,7 @@ mod tests {
                 parent_design: "intent-worker.lisp".into(),
                 scope: "src/handlers/**".into(),
                 owner: "claude".into(),
-                path: ".missiond/v2/exec-2.lisp".into(),
+                path: ".missiond/v3/runtime/executions/exec-2.lisp".into(),
                 dispatch_strategy: Some("fresh-code-alignment".into()),
                 target_project: Some("missiond".into()),
                 requested_cwd: Some("/Users/x/Projects/missiond".into()),
@@ -606,7 +609,7 @@ mod tests {
             parent_design: "p.lisp".into(),
             scope: "s".into(),
             owner: "claude".into(),
-            path: ".missiond/v2/exec-disp.lisp".into(),
+            path: ".missiond/v3/runtime/executions/exec-disp.lisp".into(),
             dispatch_strategy: Some("agent-team".into()),
             target_project: Some("missiond".into()),
             requested_cwd: Some("/Users/x/Projects/missiond/crates".into()),
@@ -699,8 +702,18 @@ mod tests {
         for key in ["plan_id", "node_id", "from", "to"] {
             assert!(payload.contains_key(key), "missing required key {}", key);
         }
-        for key in ["target", "dispatch_strategy", "target_project", "attempt", "reason"] {
-            assert!(!payload.contains_key(key), "absent optional {} must skip-serialize", key);
+        for key in [
+            "target",
+            "dispatch_strategy",
+            "target_project",
+            "attempt",
+            "reason",
+        ] {
+            assert!(
+                !payload.contains_key(key),
+                "absent optional {} must skip-serialize",
+                key
+            );
         }
     }
 
@@ -1023,7 +1036,7 @@ mod tests {
             parent_design: "p.lisp".into(),
             scope: "s".into(),
             owner: "claude".into(),
-            path: ".missiond/v2/exec-part.lisp".into(),
+            path: ".missiond/v3/runtime/executions/exec-part.lisp".into(),
             dispatch_strategy: Some("resident-lisp".into()),
             target_project: None,
             requested_cwd: None,
@@ -1081,8 +1094,14 @@ mod tests {
         project: &str,
         cwd: &str,
     ) {
-        assert_eq!(map.get("dispatch_strategy").and_then(|v| v.as_str()), Some(strategy));
-        assert_eq!(map.get("target_project").and_then(|v| v.as_str()), Some(project));
+        assert_eq!(
+            map.get("dispatch_strategy").and_then(|v| v.as_str()),
+            Some(strategy)
+        );
+        assert_eq!(
+            map.get("target_project").and_then(|v| v.as_str()),
+            Some(project)
+        );
         assert_eq!(map.get("requested_cwd").and_then(|v| v.as_str()), Some(cwd));
     }
 
@@ -1166,7 +1185,12 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
         let payload = parsed.get("Heartbeat").and_then(|v| v.as_object()).unwrap();
         assert_eq!(payload.len(), 8);
-        assert_dispatch_keys(payload, "agent-team", "missiond", "/Users/x/Projects/missiond");
+        assert_dispatch_keys(
+            payload,
+            "agent-team",
+            "missiond",
+            "/Users/x/Projects/missiond",
+        );
     }
 
     // ── Released ─────────────────────────────────────────────────────

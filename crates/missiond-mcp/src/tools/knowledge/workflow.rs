@@ -123,7 +123,7 @@ fn build_properties() -> Value {
 
     p.insert("project".into(), prop(
         "string",
-        "[distill|compile_methodology|run_methodology] project id (registry-resolved root); defaults to CWD. distill uses it to locate `.missiond/v2/plans/<plan_id>.evidence.json`.",
+        "[distill|compile_methodology|run_methodology] project id (registry-resolved root); defaults to CWD. distill uses it to locate `.missiond/v3/runtime/plans/<plan_id>.evidence.json`, with `.missiond/v2/plans/<plan_id>.evidence.json` as a legacy fallback.",
     ));
 
     p.insert("target_project".into(), prop(
@@ -245,7 +245,7 @@ fn build_properties() -> Value {
 
     p.insert("auto_chain".into(), prop(
         "boolean",
-        "[distill] (wave-19 / task 09 cross-plan distill auto-chain v1) opt-in cross-plan distill chain recorder anchored on the workflow surface. Default false → response is byte-identical with the wave-18 distill payload (no `auto_chain` block). When true, AFTER the caller-chosen distill mode (`distill_mode=\"dry_run\"|\"sonnet\"`) completes successfully the daemon DERIVES a deterministic chain id from `project_root + plan_id + (workflow_id|name|<unnamed>) + sha256(.evidence.json|<no-evidence>)` (sha256-hashed, prefixed `chain:auto:wf-`), appends ONE chain-record evidence row to `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json` (kind=`distill_chain_record`, source=`workflow_distill_auto_chain`; same kind as wave-18 plan_dag-driven entries so audit queries see both), and splices an `auto_chain` block onto the response (`auto_chain.{requested,status,chain_id,chain_id_source=\"derived_from_workflow_context\",chain_id_inputs,evidence_path|evidence_error}` + top-level shortcuts `auto_chain_status` / `auto_chain_id`). NEVER calls Sonnet implicitly — the auto-chain hook only RECORDS; the upstream distill call already chose its mode. Sidecar append is purely additive (no migration). Failures collapse to status `resolve_failed` (project root unresolvable; no chain id surfaced) or `record_failed` (chain id IS surfaced + `evidence_error`). Inner distill errors are preserved verbatim — auto_chain is skipped on error envelopes (mirrors plan.rs's `apply_distill_chain` policy).",
+        "[distill] (wave-19 / task 09 cross-plan distill auto-chain v1) opt-in cross-plan distill chain recorder anchored on the workflow surface. Default false → response is byte-identical with the wave-18 distill payload (no `auto_chain` block). When true, AFTER the caller-chosen distill mode (`distill_mode=\"dry_run\"|\"sonnet\"`) completes successfully the daemon DERIVES a deterministic chain id from `project_root + plan_id + (workflow_id|name|<unnamed>) + sha256(.evidence.json|<no-evidence>)` (sha256-hashed, prefixed `chain:auto:wf-`), appends ONE chain-record evidence row to canonical `<project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json` (legacy `.missiond/v2/plans/<plan_id>.evidence.json` fallback when present; kind=`distill_chain_record`, source=`workflow_distill_auto_chain`; same kind as wave-18 plan_dag-driven entries so audit queries see both), and splices an `auto_chain` block onto the response (`auto_chain.{requested,status,chain_id,chain_id_source=\"derived_from_workflow_context\",chain_id_inputs,evidence_path|evidence_error}` + top-level shortcuts `auto_chain_status` / `auto_chain_id`). NEVER calls Sonnet implicitly — the auto-chain hook only RECORDS; the upstream distill call already chose its mode. Sidecar append is purely additive (no migration). Failures collapse to status `resolve_failed` (project root unresolvable; no chain id surfaced) or `record_failed` (chain id IS surfaced + `evidence_error`). Inner distill errors are preserved verbatim — auto_chain is skipped on error envelopes (mirrors plan.rs's `apply_distill_chain` policy).",
     ));
 
     p.insert("auto_chain_name".into(), prop(
@@ -343,7 +343,8 @@ pub fn definitions() -> Vec<ToolDefinition> {
          wave-19 / task 09 cross-plan distill auto-chain v1: distill 接 auto_chain=true 即在 inner distill 成功后 \
          derive 确定性 chain id 自 project_root + plan_id + (workflow_id|name|<unnamed>) + sha256(.evidence.json|<no-evidence>) \
          (sha256 哈希, 前缀 `chain:auto:wf-`), append 一条 distill_chain_record (source=`workflow_distill_auto_chain`) \
-         evidence row 到 `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`, 响应附 auto_chain block \
+         evidence row 到 canonical `<project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json` \
+         (兼容既有 `.missiond/v2/plans/<plan_id>.evidence.json` fallback), 响应附 auto_chain block \
          (chain_id / chain_id_source=\"derived_from_workflow_context\" / chain_id_inputs / evidence_path|evidence_error) \
          + top-level shortcuts auto_chain_status / auto_chain_id。default false 保 byte-identical (wave-18 distill 形状不变); \
          永不 implicit sonnet (只 record, 不重派 distiller); sidecar 严格 append-only (无 migration); \

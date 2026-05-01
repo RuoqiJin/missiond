@@ -1770,6 +1770,7 @@ function checkFiles(root, files) {
     '[compile dry_run | execute] compile dry_run renders this into PLAN.lisp as :target',
     'runner scans plan.sexp_text for :target / :target-tool / :tool hints',
     'Source-resolution precedence is explicit_arg > plan_hint > missing',
+    '.missiond/v3/runtime/plans/<plan_id>.evidence.json',
     '[execute internal mission_task_delegate] override the auto-derived objective',
     '[execute internal mission_task_delegate] passthrough timeout',
     'supported per-node fields: id / target / objective / depends-on / condition / failure-policy / timeout-ms / dispatch-strategy / target-project / requested-cwd / flow-id',
@@ -3306,6 +3307,7 @@ let execute_flag = true;`);
 [compile dry_run | execute] compile dry_run renders this into PLAN.lisp as :target
 runner scans plan.sexp_text for :target / :target-tool / :tool hints
 Source-resolution precedence is explicit_arg > plan_hint > missing
+.missiond/v3/runtime/plans/<plan_id>.evidence.json
 [execute internal mission_task_delegate] override the auto-derived objective
 [execute internal mission_task_delegate] passthrough timeout
 supported per-node fields: id / target / objective / depends-on / condition / failure-policy / timeout-ms / dispatch-strategy / target-project / requested-cwd / flow-id
