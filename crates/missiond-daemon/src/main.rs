@@ -635,6 +635,7 @@ async fn main() -> Result<()> {
                                     std::time::Duration::from_secs(cli_cfg.timeout),
                                     Some(api_key_pool),
                                 )
+                                .with_router_runtime_config(&router_runtime_config)
                                 .with_pty(pty_transport),
                             )
                             .with_router_runtime_config(&router_runtime_config)

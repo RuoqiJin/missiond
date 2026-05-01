@@ -14,13 +14,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
+
 const GEMINI_API_BASE: &str = "https://generativelanguage.googleapis.com";
 /// Max inline base64 size (4 MB) — larger files use File API upload.
 const INLINE_MAX_BYTES: u64 = 4 * 1024 * 1024;
 /// File API: poll interval while waiting for ACTIVE state.
 const POLL_INTERVAL: Duration = Duration::from_secs(3);
-/// File API: max wait time for file processing.
-const POLL_TIMEOUT: Duration = Duration::from_secs(300); // 5 min
 
 /// MIME type detection by file extension.
 pub(crate) fn detect_mime(path: &Path) -> &'static str {
@@ -50,6 +50,21 @@ pub(crate) fn detect_mime(path: &Path) -> &'static str {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_poll_timeout_from_router_runtime_config() {
+        let config = RouterRuntimeConfig {
+            gemini_file_poll_timeout_secs: 17,
+            ..RouterRuntimeConfig::default()
+        };
+        let api = GeminiFileApi::new_with_router_runtime_config("token".to_string(), &config);
+        assert_eq!(api.poll_timeout, Duration::from_secs(17));
+    }
+}
+
 /// Compute SHA-256 hash of file content (hex string).
 pub(crate) fn file_hash(data: &[u8]) -> String {
     let mut hasher = Sha256::new();
@@ -61,6 +76,7 @@ pub(crate) fn file_hash(data: &[u8]) -> String {
 pub(crate) struct GeminiFileApi {
     api_key: String,
     http: reqwest::Client,
+    poll_timeout: Duration,
 }
 
 /// Result of preparing a file for Gemini — either inline or via File API.
@@ -75,12 +91,16 @@ pub(crate) enum PreparedFile {
 }
 
 impl GeminiFileApi {
-    pub fn new(api_key: String) -> Self {
+    pub fn new_with_router_runtime_config(api_key: String, config: &RouterRuntimeConfig) -> Self {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(600)) // 10 min for large uploads
+            .timeout(config.gemini_file_upload_timeout())
             .build()
             .expect("Failed to build HTTP client");
-        Self { api_key, http }
+        Self {
+            api_key,
+            http,
+            poll_timeout: config.gemini_file_poll_timeout(),
+        }
     }
 
     /// Prepare a binary file for Gemini: either inline base64 or File API upload.
@@ -244,7 +264,7 @@ impl GeminiFileApi {
             "{}/v1beta/{}?key={}",
             GEMINI_API_BASE, file_name, self.api_key
         );
-        let deadline = tokio::time::Instant::now() + POLL_TIMEOUT;
+        let deadline = tokio::time::Instant::now() + self.poll_timeout;
 
         loop {
             if tokio::time::Instant::now() > deadline {

@@ -141,6 +141,10 @@ pub(crate) const DEFAULT_ROUTER_COMPRESS_CHAR_BUDGET_CHARS: usize = 100_000;
 pub(crate) const DEFAULT_ROUTER_DIRECT_HTTP_TIMEOUT_SECS: u64 = 60;
 pub(crate) const DEFAULT_ROUTER_GEMINI_PTY_QUEUE_TIMEOUT_SECS: u64 = 30;
 pub(crate) const DEFAULT_ROUTER_GEMINI_HTTP_QUEUE_TIMEOUT_SECS: u64 = 300;
+pub(crate) const DEFAULT_ROUTER_GEMINI_FILE_UPLOAD_TIMEOUT_SECS: u64 = 600;
+pub(crate) const DEFAULT_ROUTER_GEMINI_FILE_POLL_TIMEOUT_SECS: u64 = 300;
+pub(crate) const DEFAULT_ROUTER_GEMINI_CLI_ABSOLUTE_TIMEOUT_SECS: u64 = 900;
+pub(crate) const DEFAULT_ROUTER_GEMINI_CLI_TOOL_EXEC_TIMEOUT_SECS: u64 = 300;
 pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_QUOTA_THROTTLE_SECS: u64 = 30;
 pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS: u32 = 1024;
 
@@ -305,6 +309,10 @@ pub(crate) struct RouterRuntimeConfig {
     pub direct_http_timeout_secs: u64,
     pub gemini_pty_queue_timeout_secs: u64,
     pub gemini_http_queue_timeout_secs: u64,
+    pub gemini_file_upload_timeout_secs: u64,
+    pub gemini_file_poll_timeout_secs: u64,
+    pub gemini_cli_absolute_timeout_secs: u64,
+    pub gemini_cli_tool_exec_timeout_secs: u64,
     pub queued_sonnet_quota_throttle_secs: u64,
     pub queued_sonnet_default_max_tokens: u32,
 }
@@ -592,6 +600,10 @@ impl Default for RouterRuntimeConfig {
             direct_http_timeout_secs: DEFAULT_ROUTER_DIRECT_HTTP_TIMEOUT_SECS,
             gemini_pty_queue_timeout_secs: DEFAULT_ROUTER_GEMINI_PTY_QUEUE_TIMEOUT_SECS,
             gemini_http_queue_timeout_secs: DEFAULT_ROUTER_GEMINI_HTTP_QUEUE_TIMEOUT_SECS,
+            gemini_file_upload_timeout_secs: DEFAULT_ROUTER_GEMINI_FILE_UPLOAD_TIMEOUT_SECS,
+            gemini_file_poll_timeout_secs: DEFAULT_ROUTER_GEMINI_FILE_POLL_TIMEOUT_SECS,
+            gemini_cli_absolute_timeout_secs: DEFAULT_ROUTER_GEMINI_CLI_ABSOLUTE_TIMEOUT_SECS,
+            gemini_cli_tool_exec_timeout_secs: DEFAULT_ROUTER_GEMINI_CLI_TOOL_EXEC_TIMEOUT_SECS,
             queued_sonnet_quota_throttle_secs: DEFAULT_ROUTER_QUEUED_SONNET_QUOTA_THROTTLE_SECS,
             queued_sonnet_default_max_tokens: DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS,
         }
@@ -1006,6 +1018,22 @@ impl RouterRuntimeConfig {
 
     pub(crate) fn gemini_http_queue_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.gemini_http_queue_timeout_secs.max(1))
+    }
+
+    pub(crate) fn gemini_file_upload_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.gemini_file_upload_timeout_secs.max(1))
+    }
+
+    pub(crate) fn gemini_file_poll_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.gemini_file_poll_timeout_secs.max(1))
+    }
+
+    pub(crate) fn gemini_cli_absolute_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.gemini_cli_absolute_timeout_secs.max(1))
+    }
+
+    pub(crate) fn gemini_cli_tool_exec_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(self.gemini_cli_tool_exec_timeout_secs.max(1))
     }
 
     pub(crate) fn queued_sonnet_quota_throttle(&self) -> std::time::Duration {
@@ -1688,6 +1716,16 @@ pub(crate) fn parse_router_runtime_policy(
         direct_http_timeout_secs: u64_keyword(&tokens, ":direct-http-timeout-secs")?,
         gemini_pty_queue_timeout_secs: u64_keyword(&tokens, ":gemini-pty-queue-timeout-secs")?,
         gemini_http_queue_timeout_secs: u64_keyword(&tokens, ":gemini-http-queue-timeout-secs")?,
+        gemini_file_upload_timeout_secs: u64_keyword(&tokens, ":gemini-file-upload-timeout-secs")?,
+        gemini_file_poll_timeout_secs: u64_keyword(&tokens, ":gemini-file-poll-timeout-secs")?,
+        gemini_cli_absolute_timeout_secs: u64_keyword(
+            &tokens,
+            ":gemini-cli-absolute-timeout-secs",
+        )?,
+        gemini_cli_tool_exec_timeout_secs: u64_keyword(
+            &tokens,
+            ":gemini-cli-tool-exec-timeout-secs",
+        )?,
         queued_sonnet_quota_throttle_secs: u64_keyword(
             &tokens,
             ":queued-sonnet-quota-throttle-secs",
@@ -1704,6 +1742,10 @@ pub(crate) fn parse_router_runtime_policy(
         || cfg.direct_http_timeout_secs == 0
         || cfg.gemini_pty_queue_timeout_secs == 0
         || cfg.gemini_http_queue_timeout_secs == 0
+        || cfg.gemini_file_upload_timeout_secs == 0
+        || cfg.gemini_file_poll_timeout_secs == 0
+        || cfg.gemini_cli_absolute_timeout_secs == 0
+        || cfg.gemini_cli_tool_exec_timeout_secs == 0
         || cfg.queued_sonnet_quota_throttle_secs == 0
         || cfg.queued_sonnet_default_max_tokens == 0
     {
@@ -2349,6 +2391,10 @@ mod tests {
     :direct-http-timeout-secs 60
     :gemini-pty-queue-timeout-secs 30
     :gemini-http-queue-timeout-secs 300
+    :gemini-file-upload-timeout-secs 600
+    :gemini-file-poll-timeout-secs 300
+    :gemini-cli-absolute-timeout-secs 900
+    :gemini-cli-tool-exec-timeout-secs 300
     :queued-sonnet-quota-throttle-secs 30
     :queued-sonnet-default-max-tokens 1024)
 	  (cascade-policy
@@ -2598,6 +2644,26 @@ mod tests {
         assert_eq!(cfg.gemini_http_queue_timeout_secs, 300);
         assert_eq!(
             cfg.gemini_http_queue_timeout(),
+            std::time::Duration::from_secs(300)
+        );
+        assert_eq!(cfg.gemini_file_upload_timeout_secs, 600);
+        assert_eq!(
+            cfg.gemini_file_upload_timeout(),
+            std::time::Duration::from_secs(600)
+        );
+        assert_eq!(cfg.gemini_file_poll_timeout_secs, 300);
+        assert_eq!(
+            cfg.gemini_file_poll_timeout(),
+            std::time::Duration::from_secs(300)
+        );
+        assert_eq!(cfg.gemini_cli_absolute_timeout_secs, 900);
+        assert_eq!(
+            cfg.gemini_cli_absolute_timeout(),
+            std::time::Duration::from_secs(900)
+        );
+        assert_eq!(cfg.gemini_cli_tool_exec_timeout_secs, 300);
+        assert_eq!(
+            cfg.gemini_cli_tool_exec_timeout(),
             std::time::Duration::from_secs(300)
         );
         assert_eq!(cfg.queued_sonnet_quota_throttle_secs, 30);

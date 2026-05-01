@@ -219,7 +219,7 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
         let gemini_api_key = resolve_gemini_api_key();
         let file_api = gemini_api_key
             .as_ref()
-            .map(|k| GeminiFileApi::new(k.clone()));
+            .map(|k| GeminiFileApi::new_with_router_runtime_config(k.clone(), &router_config));
 
         for file_val in files {
             let path_str = file_val
@@ -383,7 +383,7 @@ pub(super) async fn handle_chat(state: &AppState, args: Value) -> Result<ToolRes
         let api_key = resolve_gemini_api_key().ok_or_else(|| {
             anyhow!("gemini_api_key required for multimodal but not found in llm.yaml")
         })?;
-        let file_api = GeminiFileApi::new(api_key);
+        let file_api = GeminiFileApi::new_with_router_runtime_config(api_key, &router_config);
 
         // Extract the full text prompt from messages
         let text_prompt: String = messages

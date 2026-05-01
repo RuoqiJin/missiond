@@ -9,8 +9,8 @@
 //!
 //! Two-tier idle timeout: Gemini CLI is agentic and calls tools (file reads,
 //! code search) during reasoning. Tool execution can take much longer than text
-//! generation, so we use an extended timeout (5min) between tool_use → tool_result,
-//! and the normal idle timeout (120s) otherwise.
+//! generation, so we use an extended timeout from the V3 router runtime policy
+//! between tool_use → tool_result, and the normal idle timeout otherwise.
 //!
 //! Usage:
 //! ```ignore
@@ -28,12 +28,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::sync::{mpsc, RwLock};
 use tracing::{info, warn};
 
-/// Absolute safety cap: kill process no matter what after this duration.
-const ABSOLUTE_TIMEOUT: Duration = Duration::from_secs(900); // 15 minutes
-
-/// Extended idle timeout when Gemini CLI is executing tools (agentic mode).
-/// Tool execution (file reads, code search) can take much longer than text generation.
-const TOOL_EXEC_TIMEOUT: Duration = Duration::from_secs(300); // 5 minutes
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 
 // ===== API Key Pool =====
 
@@ -171,6 +166,8 @@ pub(crate) struct GeminiCli {
     binary: String,
     default_model: String,
     idle_timeout: Duration,
+    absolute_timeout: Duration,
+    tool_exec_timeout: Duration,
     api_key_pool: Option<Arc<ApiKeyPool>>,
     /// PTY-based transport. When set, all calls route through PTY instead of subprocess.
     pty_transport: Option<Arc<super::gemini_pty::GeminiPtyTransport>>,
@@ -210,9 +207,17 @@ impl GeminiCli {
             binary,
             default_model,
             idle_timeout,
+            absolute_timeout: RouterRuntimeConfig::default().gemini_cli_absolute_timeout(),
+            tool_exec_timeout: RouterRuntimeConfig::default().gemini_cli_tool_exec_timeout(),
             api_key_pool,
             pty_transport: None,
         }
+    }
+
+    pub fn with_router_runtime_config(mut self, config: &RouterRuntimeConfig) -> Self {
+        self.absolute_timeout = config.gemini_cli_absolute_timeout();
+        self.tool_exec_timeout = config.gemini_cli_tool_exec_timeout();
+        self
     }
 
     /// Enable PTY transport mode. All subsequent calls route through PTY.
@@ -548,7 +553,9 @@ impl GeminiCli {
 
         let mut lines = BufReader::new(stdout).lines();
         let mut events: Vec<Value> = Vec::new();
-        let absolute_deadline = tokio::time::Instant::now() + ABSOLUTE_TIMEOUT;
+        let absolute_timeout = self.absolute_timeout;
+        let tool_exec_timeout = self.tool_exec_timeout;
+        let absolute_deadline = tokio::time::Instant::now() + absolute_timeout;
         let mut awaiting_tool_result = false;
         let mut tool_seq: u32 = 0;
 
@@ -557,10 +564,13 @@ impl GeminiCli {
                 let remaining =
                     absolute_deadline.saturating_duration_since(tokio::time::Instant::now());
                 if remaining.is_zero() {
-                    return Err("absolute timeout (15min)".to_string());
+                    return Err(format!(
+                        "absolute timeout ({}s)",
+                        absolute_timeout.as_secs()
+                    ));
                 }
                 let current_idle = if awaiting_tool_result {
-                    TOOL_EXEC_TIMEOUT
+                    tool_exec_timeout
                 } else {
                     idle_timeout
                 };
@@ -1113,4 +1123,27 @@ pub(crate) fn resolve_apikey_pool() -> Vec<String> {
         .into_iter()
         .map(|e| e.key)
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn projects_cli_timeouts_from_router_runtime_config() {
+        let config = RouterRuntimeConfig {
+            gemini_cli_absolute_timeout_secs: 42,
+            gemini_cli_tool_exec_timeout_secs: 24,
+            ..RouterRuntimeConfig::default()
+        };
+        let cli = GeminiCli::new(
+            "gemini".to_string(),
+            "gemini-3.1-pro".to_string(),
+            Duration::from_secs(7),
+            None,
+        )
+        .with_router_runtime_config(&config);
+        assert_eq!(cli.absolute_timeout, Duration::from_secs(42));
+        assert_eq!(cli.tool_exec_timeout, Duration::from_secs(24));
+    }
 }
