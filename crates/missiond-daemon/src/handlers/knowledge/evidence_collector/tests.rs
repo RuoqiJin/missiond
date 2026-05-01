@@ -786,11 +786,11 @@ fn sidecar_append_preserves_order_and_schema_version() {
 /// Failure path: writing into a non-existent directory whose parent we
 /// cannot create must surface a structured error, not silently succeed.
 /// We point the writer at a path under a regular file (which can never
-/// host a `.missiond/v2/plans/` subtree) so `mkdir` reliably fails.
+/// host a `.missiond/v3/runtime/plans/` subtree) so `mkdir` reliably fails.
 #[test]
 fn sidecar_append_surfaces_writer_failure() {
     let tmp = tempfile::tempdir().unwrap();
-    // Create a file, then ask the writer to put `.missiond/v2/plans/` under it.
+    // Create a file, then ask the writer to put `.missiond/v3/runtime/plans/` under it.
     let blocker = tmp.path().join("not_a_dir");
     std::fs::write(&blocker, b"i am a file").unwrap();
     let plan_id = uuid::Uuid::new_v4();
@@ -1005,7 +1005,7 @@ fn distill_chain_records_from_different_chains_coexist() {
     }
 
     let path = root
-        .join(".missiond/v2/plans")
+        .join(".missiond/v3/runtime/plans")
         .join(format!("{}.evidence.json", plan_id));
     let raw = std::fs::read_to_string(&path).expect("sidecar exists");
     let bundle: Value = serde_json::from_str(&raw).expect("valid json");

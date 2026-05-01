@@ -18,6 +18,28 @@ fn require_str_rejects_empty() {
     assert_eq!(require_str(&args2, "k").unwrap(), "v");
 }
 
+#[test]
+fn plan_evidence_sidecar_path_prefers_v3_runtime_and_falls_back_to_legacy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let id = Uuid::parse_str("00000000-0000-0000-0000-000000000123").unwrap();
+
+    let default_path = existing_plan_evidence_sidecar_path(root, id);
+    assert!(default_path
+        .ends_with(std::path::Path::new(COMPANION_DIR).join(format!("{}.evidence.json", id))));
+
+    let legacy_path = root
+        .join(LEGACY_COMPANION_DIR)
+        .join(format!("{}.evidence.json", id));
+    std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_path, br#"{"entries":[]}"#).unwrap();
+    assert_eq!(existing_plan_evidence_sidecar_path(root, id), legacy_path);
+
+    std::fs::create_dir_all(default_path.parent().unwrap()).unwrap();
+    std::fs::write(&default_path, br#"{"entries":[]}"#).unwrap();
+    assert_eq!(existing_plan_evidence_sidecar_path(root, id), default_path);
+}
+
 fn fixture_plan(sexp: &str) -> Plan {
     Plan {
         id: Uuid::parse_str("00000000-0000-0000-0000-000000000abc").unwrap(),
@@ -3039,7 +3061,7 @@ fn build_distill_chain_block_carries_canonical_shape() {
         Some(1),
         None,
         None,
-        Some("/tmp/.missiond/v2/plans/abc.evidence.json"),
+        Some("/tmp/.missiond/v3/runtime/plans/abc.evidence.json"),
         None,
     );
     assert_eq!(block["triggered"], true);
@@ -3051,7 +3073,7 @@ fn build_distill_chain_block_carries_canonical_shape() {
     assert_eq!(block["chain_index_in_plan"], 1);
     assert_eq!(
         block["evidence_path"],
-        "/tmp/.missiond/v2/plans/abc.evidence.json"
+        "/tmp/.missiond/v3/runtime/plans/abc.evidence.json"
     );
     assert!(block.get("distill_result").is_none());
     assert!(block.get("warning").is_none());

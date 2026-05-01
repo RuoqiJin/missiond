@@ -30,7 +30,8 @@ use super::*;
 //      "directive/<id>:<v>" or "board_task/<id>"). Read for keyword
 //      signals only (e.g. "task_delegate" / "agent-team").
 //   3. evidence sidecar at
-//      `<project>/.missiond/v2/plans/<plan_id>.evidence.json` — historical
+//      `<project>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`
+//      (with legacy `.missiond/v2/plans` fallback) — historical
 //      `plan_runner_dispatch` / `workstation_dispatch` entries carry the
 //      target / dispatch_strategy / owned_files we used last time.
 //

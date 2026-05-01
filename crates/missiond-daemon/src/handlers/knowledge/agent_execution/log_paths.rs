@@ -4,7 +4,8 @@ use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-pub(super) const COMPANION_DIR: &str = ".missiond/v2";
+pub(super) const COMPANION_DIR: &str = ".missiond/v3/runtime/executions";
+pub(super) const LEGACY_COMPANION_DIR: &str = ".missiond/v2";
 
 pub(super) async fn resolve_project_root(
     state: &AppState,
@@ -23,14 +24,26 @@ pub(super) async fn resolve_project_root(
     Ok(cwd)
 }
 
-pub(super) fn companion_path(root: &Path, execution_id: &str) -> PathBuf {
-    let mut p = root.join(COMPANION_DIR);
+fn companion_path_in(root: &Path, dir: &str, execution_id: &str) -> PathBuf {
+    let mut p = root.join(dir);
     let mut name = execution_id.to_string();
     if !name.ends_with(".lisp") {
         name.push_str(".lisp");
     }
     p.push(name);
     p
+}
+
+pub(super) fn companion_path(root: &Path, execution_id: &str) -> PathBuf {
+    let canonical = companion_path_in(root, COMPANION_DIR, execution_id);
+    if canonical.exists() {
+        return canonical;
+    }
+    let legacy = companion_path_in(root, LEGACY_COMPANION_DIR, execution_id);
+    if legacy.exists() {
+        return legacy;
+    }
+    canonical
 }
 
 /// Canonical `project` field accessor. Kept so the alias resolver below has

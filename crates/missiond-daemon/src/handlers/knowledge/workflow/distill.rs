@@ -25,7 +25,8 @@ use super::auto_chain::maybe_apply_distill_chain_layers;
 use super::auto_sonnet::{parse_auto_sonnet_policy, validate_auto_sonnet_args};
 use super::{parse_id_arg, resolve_project_root_from_args};
 
-const EVIDENCE_DIR: &str = ".missiond/v2/plans";
+const EVIDENCE_DIR: &str = ".missiond/v3/runtime/plans";
+const LEGACY_EVIDENCE_DIR: &str = ".missiond/v2/plans";
 const DISTILLER_MAX_TOKENS: u32 = 2048;
 
 fn load_sonnet_compiler_model() -> Result<String> {
@@ -487,9 +488,19 @@ pub(super) enum EvidenceOutcome {
 }
 
 pub(super) fn evidence_sidecar_path(project_root: &Path, plan_id: uuid::Uuid) -> PathBuf {
-    project_root
+    let canonical = project_root
         .join(EVIDENCE_DIR)
-        .join(format!("{}.evidence.json", plan_id))
+        .join(format!("{}.evidence.json", plan_id));
+    if canonical.exists() {
+        return canonical;
+    }
+    let legacy = project_root
+        .join(LEGACY_EVIDENCE_DIR)
+        .join(format!("{}.evidence.json", plan_id));
+    if legacy.exists() {
+        return legacy;
+    }
+    canonical
 }
 
 pub(super) fn read_evidence_sidecar(path: &Path) -> EvidenceOutcome {

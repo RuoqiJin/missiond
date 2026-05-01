@@ -10,7 +10,7 @@
 /// const just for the test surface; the duplication is explicitly noted in
 /// the docstring above.
 #[allow(dead_code)]
-pub(super) const COMPANION_DIR: &str = ".missiond/v2/plans";
+pub(super) const COMPANION_DIR: &str = ".missiond/v3/runtime/plans";
 
 /// Schema version stamped onto every evidence entry produced through this
 /// builder. Bump when the `EvidenceEntry` shape gains a non-additive field so

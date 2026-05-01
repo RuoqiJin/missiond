@@ -743,7 +743,7 @@ function checkFiles(root, files) {
     'wrap_legacy_record_evidence',
     'recorded_at',
     'entry_count',
-    'COMPANION_DIR',
+    'existing_plan_evidence_sidecar_path',
     'source_override',
   ]);
 
@@ -2288,7 +2288,7 @@ pub(super) async fn action_record_evidence() {
 }
 pub(crate) async fn append_plan_evidence_entry() {
   "recorded_at";
-  "COMPANION_DIR";
+  existing_plan_evidence_sidecar_path();
 }`);
   writeFixture(root, DEFAULT_FILES.planRouterPolicyAdapter, `
 mod descriptor;

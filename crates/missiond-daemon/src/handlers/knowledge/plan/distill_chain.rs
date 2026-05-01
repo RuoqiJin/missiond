@@ -324,9 +324,7 @@ async fn count_prior_chain_entries_in_plan_sidecar(
         Ok(p) => p,
         Err(_) => return 0,
     };
-    let path = project_root
-        .join(COMPANION_DIR)
-        .join(format!("{}.evidence.json", plan_id));
+    let path = existing_plan_evidence_sidecar_path(&project_root, plan_id);
     if !path.exists() {
         return 0;
     }

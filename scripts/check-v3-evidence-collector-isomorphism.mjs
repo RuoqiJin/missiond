@@ -122,6 +122,8 @@ const BLUEPRINT_NEEDLES = [
   'EVENT_REF_CACHE_CAP',
   '1024',
   'wrap_legacy_record_evidence',
+  '.missiond/v3/runtime/plans',
+  '.missiond/v2/plans',
   'node scripts/check-v3-evidence-collector-isomorphism.mjs',
 ];
 
@@ -173,6 +175,7 @@ const EVIDENCE_COLLECTOR_APPEND_RS_NEEDLES = [
   'pub(crate) enum AppendOutcome',
   'pub(crate) async fn append',
   'pub(crate) fn append_entry_to_project_root',
+  '.missiond/v3/runtime/plans/<plan_id>.evidence.json',
   'super::super::plan::append_plan_evidence_entry',
 ];
 
@@ -498,7 +501,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/plan/evidence_sidecar.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/plan/execution_runtime/internal.rs"]
-      :note "evidence_collector.rs is the compatibility facade. evidence_collector/taxonomy.rs owns EVIDENCE_SCHEMA_VERSION = \\"v0\\" plus source/kind wire constants; evidence_collector/event_ref.rs owns EventRefStatus and EventRefProvenance; evidence_collector/entry.rs owns EvidenceEntry; evidence_collector/append.rs owns AppendOutcome and the sidecar append writer; evidence_collector/legacy.rs owns wrap_legacy_record_evidence. EventRefStatus is the closed enum live | log | unavailable describing whether the ref is live-from-publish, log-recovered post hoc, or simply unavailable. EventRefProvenance further pivots the recovery tier as live | passive_cache | event_log_query | unavailable so consumers can attribute lookups to the wave-16 in-memory passive cache (EVENT_REF_CACHE_CAP = 1024 FIFO entries) vs the wave-18 bounded event_log_query path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, so the verification-receipt artifact stays consistent with what plan.rs already wrote."))
+      :note "evidence_collector.rs is the compatibility facade. evidence_collector/taxonomy.rs owns EVIDENCE_SCHEMA_VERSION = \\"v0\\" plus source/kind wire constants; evidence_collector/event_ref.rs owns EventRefStatus and EventRefProvenance; evidence_collector/entry.rs owns EvidenceEntry; evidence_collector/append.rs owns AppendOutcome and the sidecar append writer under .missiond/v3/runtime/plans with .missiond/v2/plans legacy fallback through plan/evidence_sidecar.rs; evidence_collector/legacy.rs owns wrap_legacy_record_evidence. EventRefStatus is the closed enum live | log | unavailable describing whether the ref is live-from-publish, log-recovered post hoc, or simply unavailable. EventRefProvenance further pivots the recovery tier as live | passive_cache | event_log_query | unavailable so consumers can attribute lookups to the wave-16 in-memory passive cache (EVENT_REF_CACHE_CAP = 1024 FIFO entries) vs the wave-18 bounded event_log_query path. wrap_legacy_record_evidence lifts caller-supplied JSON evidence into the typed EvidenceEntry envelope without losing prior fields, so the verification-receipt artifact stays consistent with what plan.rs already wrote."))
   (compression-contract
     :checks ["node scripts/check-v3-evidence-collector-isomorphism.mjs"]))
 `;
@@ -584,6 +587,7 @@ function buildGoodEvidenceCollectorAppend() {
 pub(crate) enum AppendOutcome { Written, NoOp }
 pub(crate) async fn append() {}
 pub(crate) fn append_entry_to_project_root() {}
+fn path_doc() { ".missiond/v3/runtime/plans/<plan_id>.evidence.json"; }
 fn call_legacy_writer() { let _ = super::super::plan::append_plan_evidence_entry; }
 `;
 }

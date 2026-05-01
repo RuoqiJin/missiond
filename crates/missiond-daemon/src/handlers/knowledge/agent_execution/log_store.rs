@@ -6,6 +6,7 @@ use std::path::Path;
 
 pub(super) use super::log_paths::{
     companion_path, project_or_target_project, require_str, resolve_project_root, COMPANION_DIR,
+    LEGACY_COMPANION_DIR,
 };
 pub(super) use super::log_template::render_canonical_template;
 

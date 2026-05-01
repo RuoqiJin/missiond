@@ -81,8 +81,10 @@ pub(crate) async fn append(
 ///
 /// Keep this in lockstep with `super::plan::append_plan_evidence_entry`'s
 /// on-disk shape — both write to the same canonical path (`<project_root>/
-/// .missiond/v2/plans/<plan_id>.evidence.json`) so the two writers are
-/// interchangeable from a reader's perspective.
+/// .missiond/v3/runtime/plans/<plan_id>.evidence.json`) so the two writers
+/// are interchangeable from a reader's perspective. The AppState-backed
+/// writer additionally updates an existing `.missiond/v2/plans` legacy
+/// sidecar in place when one is already present.
 ///
 /// `#[allow(dead_code)]`: only invoked by `#[cfg(test)]` tests in this
 /// module (`sidecar_append_preserves_order_and_schema_version`,

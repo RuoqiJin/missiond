@@ -78,7 +78,10 @@ pub(super) async fn action_record_evidence(state: &AppState, args: &Value) -> Re
 }
 
 /// Append a single evidence entry to
-/// `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`.
+/// `<project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`.
+///
+/// Existing legacy sidecars under `.missiond/v2/plans` are updated in place so
+/// old plan runs remain append-only and readable during the V3 convergence.
 ///
 /// `entry` is merged with a `recorded_at` timestamp. Returns the sidecar path
 /// and the resulting total entry count for caller-facing reporting. Used by
@@ -105,9 +108,11 @@ pub(crate) async fn append_plan_evidence_entry(
         target_project_arg,
     )
     .await?;
-    let dir = project_root.join(COMPANION_DIR);
+    let path = existing_plan_evidence_sidecar_path(&project_root, plan_id);
+    let dir = path
+        .parent()
+        .ok_or_else(|| anyhow!("cannot resolve parent for {}", path.display()))?;
     std::fs::create_dir_all(&dir).map_err(|e| anyhow!("mkdir {}: {}", dir.display(), e))?;
-    let path = dir.join(format!("{}.evidence.json", plan_id));
 
     let mut bundle = if path.exists() {
         let raw = std::fs::read_to_string(&path)

@@ -221,11 +221,11 @@ fn name_referenced_checks_sexp_and_rules() {
 }
 
 #[test]
-fn evidence_sidecar_path_is_under_v2_plans() {
+fn evidence_sidecar_path_is_under_v3_runtime_plans() {
     let id = uuid::Uuid::nil();
     let path = evidence_sidecar_path(Path::new("/tmp/proj"), id);
     let s = path.display().to_string();
-    assert!(s.ends_with(&format!(".missiond/v2/plans/{}.evidence.json", id)));
+    assert!(s.ends_with(&format!(".missiond/v3/runtime/plans/{}.evidence.json", id)));
 }
 
 // ──────────────────────────────────────────────────────────────

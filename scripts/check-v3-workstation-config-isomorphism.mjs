@@ -13,6 +13,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
   - delegated BoardTask auto-provision starts slots idle via suppress_initial_prompt.
   - project-local Claude hooks and MISSION_IPC_ENDPOINT are injected before PTY spawn.
   - Autopilot owns pty.send, close state, timeout budget, and dispatch guard.
+  - Autopilot synthesizes mission_execution completion when a delegated slot lacks the MCP tool.
   - Autopilot starts pty.send concurrently across different slots within a tick.
   - Autopilot clears stale slot-dyn-* assignee pins after daemon restart.
 	  - mission_cc_swarm pty.send timeout is projected from timeout-policy claudecode-swarm.
@@ -152,6 +153,7 @@ function checkFiles(root, files) {
     ':max_secs 7200',
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
     'The per-slot dispatch guard MUST be held across the entire state.pty.send call',
+    'Autopilot MUST synthesize mission_execution(action=complete',
     'Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick',
     'tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in',
     'Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins',
@@ -360,6 +362,10 @@ function checkFiles(root, files) {
     'fn build_base_prompt',
     'fn append_board_task_id_suffix',
     'fn decide_close_action',
+    'fn extract_delegated_execution_id',
+    'fn maybe_complete_delegated_execution_log',
+    '"agent_name": "autopilot-orchestrator"',
+    'agent_execution::handle(state, "mission_execution"',
     'fn is_dynamic_slot_id',
     'fn should_clear_stale_dynamic_assignee',
     'clear_board_task_assignee(task.id.as_str(), id)',
@@ -526,6 +532,7 @@ function buildFixture() {
 	    (execution-ownership delegated-boardtask
 	      :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
 	      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"
+	      :execution-log-synthesis "Autopilot MUST synthesize mission_execution(action=complete, commit_status=\"not-required\", enforce_scoped_commit=true)"
       :concurrent-slot-dispatch "Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick. The implementation MUST hand each ready BoardTask's send + post-send tail to a tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in."))
   (implementation-map
     (surface workstation-config
@@ -649,6 +656,10 @@ fn derive_board_task_lease_secs() {}
 fn build_base_prompt() {}
 fn append_board_task_id_suffix() {}
 fn decide_close_action() {}
+fn extract_delegated_execution_id() {}
+fn maybe_complete_delegated_execution_log() {}
+"agent_name": "autopilot-orchestrator";
+agent_execution::handle(state, "mission_execution", args).await;
 fn is_dynamic_slot_id() {}
 fn should_clear_stale_dynamic_assignee() {}
 clear_board_task_assignee(task.id.as_str(), id);

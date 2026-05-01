@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Result};
 use std::collections::HashSet;
+use std::path::Path;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
@@ -7,6 +8,7 @@ use crate::claude_md_sync::sync_claude_md;
 use crate::context::v3_blueprint_runtime::{AutopilotRuntimeConfig, RouterRuntimeConfig};
 use crate::engine::learning_engine;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
+use crate::handlers::knowledge::agent_execution;
 use crate::llm_gateway::determine_llm_env;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
@@ -22,6 +24,7 @@ use missiond_core::event::events::{
     BoardEvent, IncidentEvent, SessionEvent, SlotEvent, SystemEvent,
 };
 use missiond_core::SessionState;
+use missiond_mcp::tools::{ToolContent, ToolResult};
 
 // @beacon: orchestration
 
@@ -133,6 +136,120 @@ fn decide_close_action(
         }
         _ => DispatchCloseAction::OwnerClosesAsDone,
     }
+}
+
+fn extract_delegated_execution_id(prompt: &str) -> Option<String> {
+    extract_between(prompt, "Execution log: `", "`")
+        .or_else(|| extract_between(prompt, "execution_id=\"", "\""))
+        .filter(|id| id.starts_with("plan-") && !id.contains(|c: char| c.is_whitespace()))
+}
+
+fn extract_between(source: &str, prefix: &str, suffix: &str) -> Option<String> {
+    let start = source.find(prefix)? + prefix.len();
+    let rest = &source[start..];
+    let end = rest.find(suffix)?;
+    let value = rest[..end].trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_string())
+    }
+}
+
+fn tool_result_json_value(result: &ToolResult) -> Option<serde_json::Value> {
+    result.content.iter().find_map(|content| match content {
+        ToolContent::Text { text } => serde_json::from_str(text).ok(),
+    })
+}
+
+fn execution_status_has_completion(status: &serde_json::Value) -> bool {
+    status
+        .get("completed_phases")
+        .and_then(|v| v.as_array())
+        .map(|items| !items.is_empty())
+        .unwrap_or(false)
+}
+
+async fn project_id_for_execution_log(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    execution_id: &str,
+) -> Option<String> {
+    if let Some(project) = task.project.as_ref().filter(|s| !s.trim().is_empty()) {
+        return Some(project.clone());
+    }
+
+    let file_name = format!("{}.lisp", execution_id);
+    let registry = state.project_registry.read().await;
+    registry.all_projects().iter().find_map(|project| {
+        let root = Path::new(&project.path);
+        let canonical = root
+            .join(".missiond/v3/runtime/executions")
+            .join(&file_name);
+        let legacy = root.join(".missiond/v2").join(&file_name);
+        if canonical.exists() || legacy.exists() {
+            Some(project.id.clone())
+        } else {
+            None
+        }
+    })
+}
+
+async fn maybe_complete_delegated_execution_log(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    full_prompt: &str,
+    worker_response: &str,
+    duration_ms: u64,
+) -> Result<bool> {
+    let Some(execution_id) = extract_delegated_execution_id(full_prompt) else {
+        return Ok(false);
+    };
+    let project_id = project_id_for_execution_log(state, task, &execution_id).await;
+
+    let mut status_args = serde_json::json!({
+        "action": "status",
+        "execution_id": execution_id,
+    });
+    if let Some(project) = &project_id {
+        status_args["project"] = serde_json::json!(project);
+    }
+
+    let status_result = agent_execution::handle(state, "mission_execution", status_args).await?;
+    if status_result.is_error.unwrap_or(false) {
+        return Ok(false);
+    }
+    if tool_result_json_value(&status_result)
+        .map(|v| execution_status_has_completion(&v))
+        .unwrap_or(false)
+    {
+        return Ok(false);
+    }
+
+    let mut complete_args = serde_json::json!({
+        "action": "complete",
+        "execution_id": execution_id,
+        "phase": "delegated-boardtask",
+        "agent_name": "autopilot-orchestrator",
+        "summary": truncate_safe(worker_response, 500),
+        "deliverables": format!(
+            "BoardTask {} completed through Autopilot; orchestrator synthesized the mission_execution completion because the worker returned a final summary instead of calling the MCP tool.",
+            task.id
+        ),
+        "verification": format!(
+            "Autopilot observed pty.send completion after {}ms and stored the worker final summary as the BoardTask completion note.",
+            duration_ms
+        ),
+        "commit_status": "not-required",
+        "enforce_scoped_commit": true,
+    });
+    if let Some(project) = &project_id {
+        complete_args["project"] = serde_json::json!(project);
+    }
+
+    let complete_result =
+        agent_execution::handle(state, "mission_execution", complete_args).await?;
+    Ok(!complete_result.is_error.unwrap_or(false))
 }
 
 /// V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
@@ -1162,6 +1279,23 @@ async fn dispatch_board_tasks_with_config(
                         author: Some("autopilot".to_string()),
                     })
                     .await;
+                match maybe_complete_delegated_execution_log(
+                    state,
+                    task,
+                    &full_prompt,
+                    &res.response,
+                    res.duration_ms,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        info!(task_id = %task.id, "Autopilot: synthesized mission_execution completion");
+                    }
+                    Ok(false) => {}
+                    Err(err) => {
+                        warn!(task_id = %task.id, error = %err, "Autopilot: mission_execution completion synthesis failed");
+                    }
+                }
                 // V3 execution-ownership :: delegated-boardtask :: close-owner.
                 // Autopilot owns closure unless the worker self-closed via
                 // attached board MCP tools (Done) or the task transitioned to
@@ -2512,6 +2646,37 @@ mod tests {
         assert!(
             suffix.contains("Autopilot/orchestrator"),
             "missing handover-to-orchestrator wording: {suffix}"
+        );
+    }
+
+    #[test]
+    fn delegated_execution_id_extracts_preopened_log_id() {
+        let prompt = "Execution log: `plan-abc-123`\n\n## Completion handoff";
+        assert_eq!(
+            extract_delegated_execution_id(prompt).as_deref(),
+            Some("plan-abc-123")
+        );
+    }
+
+    #[test]
+    fn delegated_execution_id_extracts_completion_handoff_id() {
+        let prompt =
+            "call `mission_execution(action=complete, execution_id=\"plan-def-456\")` with args";
+        assert_eq!(
+            extract_delegated_execution_id(prompt).as_deref(),
+            Some("plan-def-456")
+        );
+    }
+
+    #[test]
+    fn delegated_execution_id_rejects_non_plan_or_whitespace_ids() {
+        assert_eq!(
+            extract_delegated_execution_id("Execution log: `exec-1`"),
+            None
+        );
+        assert_eq!(
+            extract_delegated_execution_id("Execution log: `plan-has space`"),
+            None
         );
     }
 

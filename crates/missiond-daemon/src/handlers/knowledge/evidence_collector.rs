@@ -25,8 +25,10 @@
 //!     `AppendOutcome` so write failures stay visible (CLAUDE.md
 //!     `feedback_fail_fast_no_fallback` — never silently swallow them).
 //!   - Stay strictly file-first: NO new DB migration, NO new bus event. The
-//!     sidecar JSON at `<project_root>/.missiond/v2/plans/<plan_id>.evidence.json`
-//!     remains the single source of truth.
+//!     sidecar JSON at
+//!     `<project_root>/.missiond/v3/runtime/plans/<plan_id>.evidence.json`
+//!     remains the single source of truth. Legacy `.missiond/v2/plans`
+//!     sidecars stay readable/updatable as compatibility fallbacks.
 //!
 //! What this module deliberately does NOT do:
 //!   - It does NOT subscribe to the event bus or read live ExecutionEvents.

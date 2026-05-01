@@ -14,6 +14,29 @@ fn fresh_file() -> LogFile {
 }
 
 #[test]
+fn companion_path_prefers_v3_runtime_and_falls_back_to_legacy() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let id = "exec-path-projection";
+
+    let default_path = super::log_paths::companion_path(root, id);
+    assert!(default_path.ends_with(
+        std::path::Path::new(super::log_paths::COMPANION_DIR).join(format!("{}.lisp", id))
+    ));
+
+    let legacy_path = root
+        .join(super::log_paths::LEGACY_COMPANION_DIR)
+        .join(format!("{}.lisp", id));
+    std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+    std::fs::write(&legacy_path, b"(execution-log)").unwrap();
+    assert_eq!(super::log_paths::companion_path(root, id), legacy_path);
+
+    std::fs::create_dir_all(default_path.parent().unwrap()).unwrap();
+    std::fs::write(&default_path, b"(execution-log)").unwrap();
+    assert_eq!(super::log_paths::companion_path(root, id), default_path);
+}
+
+#[test]
 fn template_parses_and_balances() {
     let body = render_canonical_template("e", "p", "s", "o", DEFAULT_DISPATCH_STRATEGY, None, None);
     sexp::check_balance(&body).expect("balanced");

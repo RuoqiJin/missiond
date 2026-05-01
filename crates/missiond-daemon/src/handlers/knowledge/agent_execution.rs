@@ -6,7 +6,10 @@
 //!   - intent-tools.lisp  :: future-surface mission_execution (MCP schema)
 //!   - intent-flow.lisp   :: F-execution-log-governance (cross-pillar choreography)
 //!
-//! Companion logs live at `<project_root>/.missiond/v2/<execution_id>.lisp`.
+//! Companion logs canonically live at
+//! `<project_root>/.missiond/v3/runtime/executions/<execution_id>.lisp`;
+//! historical `<project_root>/.missiond/v2/<execution_id>.lisp` logs remain
+//! readable/writable as compatibility fallbacks.
 //! This handler owns id-counters / claims-with-lease / deviations / decisions /
 //! issues / completions / derived-indexes per the helper-recursive-contract.
 //!

@@ -690,9 +690,7 @@ pub(in crate::handlers::knowledge::plan) async fn read_recent_evidence_entries(
         Ok(p) => p,
         Err(_) => return Vec::new(),
     };
-    let path = project_root
-        .join(COMPANION_DIR)
-        .join(format!("{}.evidence.json", plan_id));
+    let path = existing_plan_evidence_sidecar_path(&project_root, plan_id);
     if !path.exists() {
         return Vec::new();
     }

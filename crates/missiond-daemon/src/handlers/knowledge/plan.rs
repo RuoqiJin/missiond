@@ -38,7 +38,9 @@
 //!                      dispatch_strategy is recorded in response + evidence
 //!                      (mission_execution companion-log persistence is future).
 //!   record_evidence  — full: persists evidence sidecar at
-//!                      <project>/.missiond/v2/plans/<plan_id>.evidence.json
+//!                      <project>/.missiond/v3/runtime/plans/<plan_id>.evidence.json
+//!                      while retaining .missiond/v2/plans as a legacy
+//!                      compatibility fallback.
 
 use anyhow::{anyhow, Result};
 use chrono::{SecondsFormat, Utc};
@@ -72,7 +74,8 @@ use missiond_core::types::{Plan, PlanStatus};
 
 const DEFAULT_LIST_LIMIT: i64 = 50;
 const MAX_LIST_LIMIT: i64 = 500;
-const COMPANION_DIR: &str = ".missiond/v2/plans";
+const COMPANION_DIR: &str = ".missiond/v3/runtime/plans";
+const LEGACY_COMPANION_DIR: &str = ".missiond/v2/plans";
 
 const COMPILER_MODE_DRY_RUN: &str = "dry_run";
 const COMPILER_MODE_SONNET: &str = "sonnet";
@@ -320,6 +323,36 @@ fn require_str<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 
 fn iso_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Secs, true)
+}
+
+fn plan_evidence_sidecar_path(project_root: &std::path::Path, plan_id: uuid::Uuid) -> PathBuf {
+    project_root
+        .join(COMPANION_DIR)
+        .join(format!("{}.evidence.json", plan_id))
+}
+
+fn legacy_plan_evidence_sidecar_path(
+    project_root: &std::path::Path,
+    plan_id: uuid::Uuid,
+) -> PathBuf {
+    project_root
+        .join(LEGACY_COMPANION_DIR)
+        .join(format!("{}.evidence.json", plan_id))
+}
+
+fn existing_plan_evidence_sidecar_path(
+    project_root: &std::path::Path,
+    plan_id: uuid::Uuid,
+) -> PathBuf {
+    let canonical = plan_evidence_sidecar_path(project_root, plan_id);
+    if canonical.exists() {
+        return canonical;
+    }
+    let legacy = legacy_plan_evidence_sidecar_path(project_root, plan_id);
+    if legacy.exists() {
+        return legacy;
+    }
+    canonical
 }
 
 fn sha256_hex(s: &str) -> String {
