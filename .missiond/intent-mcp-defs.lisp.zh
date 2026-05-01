@@ -423,7 +423,7 @@
         (slotId :description-zh "PTY 工位 ID")
         (tasks :description-zh "要执行的任务列表")
         (teammateCount :description-zh "并行 Agent 数量")
-        (timeoutMs))))
+        (timeoutMs :description-zh "PTY 等待超时；默认/上下限由 V3 workstation-config timeout-policy claudecode-swarm 投影"))))
 
   (mcp-module minimax
     :zh "MCP 模块: minimax"

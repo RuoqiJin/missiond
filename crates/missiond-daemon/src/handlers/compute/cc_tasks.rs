@@ -1,8 +1,9 @@
 use anyhow::{anyhow, Result};
-use missiond_mcp::tools::ToolResult;
+use missiond_mcp::tools::{ToolError, ToolResult};
 use serde::Deserialize;
 use serde_json::Value;
 
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::lenient;
 use crate::state::AppState;
 
@@ -190,7 +191,18 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                 timeout_ms,
             } = serde_json::from_value(args)?;
             let teammate_count = teammate_count.unwrap_or(3);
-            let timeout_ms = timeout_ms.unwrap_or(600_000);
+            let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(
+                slot_project_root(state, &slot_id).as_deref(),
+            ) {
+                Ok(config) => config,
+                Err(err) => {
+                    return Ok(ToolResult::structured_error(ToolError::new(
+                        "V3_BLUEPRINT_CONFIG_ERROR",
+                        err.to_string(),
+                    )))
+                }
+            };
+            let timeout_ms = runtime_config.clamp_cc_swarm_timeout_ms(timeout_ms);
 
             let prompt = format!(
                 "请进入 Plan 模式，创建以下任务，然后用 {} 个 teammate 并行执行：\n\n{}\n\n完成后汇报结果。",
@@ -208,5 +220,27 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
         }
 
         _ => Err(anyhow!("Unknown cc_tasks tool: {name}")),
+    }
+}
+
+fn slot_project_root(state: &AppState, slot_id: &str) -> Option<String> {
+    state
+        .mission
+        .get_slot(slot_id)
+        .and_then(|slot| slot.config.project_root.or(slot.config.cwd))
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workstation_runtime_preserves_cc_swarm_default_timeout() {
+        let cfg = WorkstationRuntimeConfig::default();
+        assert_eq!(cfg.clamp_cc_swarm_timeout_ms(None), 600_000);
+        assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(1_000)), 60_000);
+        assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(999_999_999)), 7_200_000);
     }
 }

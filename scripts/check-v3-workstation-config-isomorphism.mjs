@@ -15,6 +15,7 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
   - Autopilot owns pty.send, close state, timeout budget, and dispatch guard.
   - Autopilot starts pty.send concurrently across different slots within a tick.
   - Autopilot clears stale slot-dyn-* assignee pins after daemon restart.
+  - mission_cc_swarm pty.send timeout is projected from timeout-policy claudecode-swarm.
 `;
 
 const DEFAULT_FILES = {
@@ -25,8 +26,10 @@ const DEFAULT_FILES = {
   v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   spawner: 'crates/missiond-daemon/src/slot_orchestrator/spawner.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
+  ccTasks: 'crates/missiond-daemon/src/handlers/compute/cc_tasks.rs',
   mcpComputeSlot: 'crates/missiond-mcp/src/tools/compute/compute_slot.rs',
   mcpTaskDelegate: 'crates/missiond-mcp/src/tools/compute/task_delegate.rs',
+  mcpCcTasks: 'crates/missiond-mcp/src/tools/compute/cc_tasks.rs',
 };
 
 function main() {
@@ -107,9 +110,12 @@ function checkFiles(root, files) {
     'Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot',
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
+    'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
     'timeout-policy boardtask-dispatch',
+    'timeout-policy claudecode-swarm',
     'ttl-policy dynamic-slot',
     ':default_secs 1800',
+    ':default_secs 600',
     ':min_secs 60',
     ':max_secs 7200',
     'mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective',
@@ -170,10 +176,12 @@ function checkFiles(root, files) {
     'pub(crate) struct WorkstationRuntimeConfig',
     'pub(crate) struct TimeoutPolicy',
     'pub(crate) struct SlotTtlPolicy',
+    'pub(crate) struct SimpleTimeoutPolicy',
     'pub(crate) fn load_for_project_root',
     'parse_workstation_config',
     'find_form(source, "workstation-config")',
     'timeout-policy boardtask-dispatch',
+    'timeout-policy claudecode-swarm',
     'ttl-policy dynamic-slot',
     'slot-template',
     'DEFAULT_MODEL_PROFILE',
@@ -187,8 +195,12 @@ function checkFiles(root, files) {
     'MAX_SLOT_TTL_SECS',
     'DEFAULT_SLOT_EXTEND_SECS',
     'MAX_SLOT_EXTEND_SECS',
+    'DEFAULT_CC_SWARM_TIMEOUT_SECS',
+    'MIN_CC_SWARM_TIMEOUT_SECS',
+    'MAX_CC_SWARM_TIMEOUT_SECS',
     'default_slot_extend_secs',
     'max_slot_extend_secs',
+    'clamp_cc_swarm_timeout_ms',
     'MissingBlueprint',
   ]);
 
@@ -238,6 +250,16 @@ function checkFiles(root, files) {
     'DispatchCloseAction::OwnerClosesAsDone',
   ]);
 
+  requireAll(diagnostics, files.ccTasks, sources.ccTasks, [
+    'mission_cc_swarm',
+    'mission_cc_trigger_swarm',
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'slot_project_root',
+    'clamp_cc_swarm_timeout_ms',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'ToolResult::structured_error',
+  ]);
+
   requireAll(diagnostics, files.mcpComputeSlot, sources.mcpComputeSlot, [
     '"initial_prompt"',
     '"initialPrompt"',
@@ -255,6 +277,12 @@ function checkFiles(root, files) {
     '"model_profile"',
     '"modelProfile"',
     'coding-default-opus-4-7',
+  ]);
+
+  requireAll(diagnostics, files.mcpCcTasks, sources.mcpCcTasks, [
+    '"mission_cc_swarm"',
+    'timeout-policy claudecode-swarm',
+    '"default": 600000',
   ]);
 
   return diagnostics;
@@ -288,6 +316,10 @@ function buildFixture() {
       :max_secs 7200
       :watchdog_grace_secs 120
       :missing_session_probe_secs 120)
+    (timeout-policy claudecode-swarm
+      :default_secs 600
+      :min_secs 60
+      :max_secs 7200)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
@@ -304,6 +336,7 @@ function buildFixture() {
        "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold"
+       "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"
        "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
        "BoardStore::clear_board_task_assignee"])
     (execution-ownership delegated-boardtask
@@ -357,11 +390,12 @@ create_args["model_profile"] = v;
 pub(crate) struct WorkstationRuntimeConfig {}
 pub(crate) struct TimeoutPolicy {}
 pub(crate) struct SlotTtlPolicy {}
+pub(crate) struct SimpleTimeoutPolicy {}
 pub(crate) fn load_for_project_root() {}
 fn parse_workstation_config() {}
 fn x() {
   find_form(source, "workstation-config");
-  let a = "timeout-policy boardtask-dispatch ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS default_slot_extend_secs max_slot_extend_secs MissingBlueprint";
+  let a = "timeout-policy boardtask-dispatch timeout-policy claudecode-swarm ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms MissingBlueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
@@ -396,10 +430,20 @@ while let Some(_) = send_jobs.join_next().await {}
 DispatchCloseAction::AlreadySelfClosed;
 DispatchCloseAction::PreserveBlocked;
 DispatchCloseAction::OwnerClosesAsDone;`);
+  writeFixture(root, DEFAULT_FILES.ccTasks, `
+mission_cc_swarm;
+mission_cc_trigger_swarm;
+WorkstationRuntimeConfig::load_for_project_root();
+slot_project_root();
+clamp_cc_swarm_timeout_ms();
+V3_BLUEPRINT_CONFIG_ERROR;
+ToolResult::structured_error;`);
   writeFixture(root, DEFAULT_FILES.mcpComputeSlot, `
 "initial_prompt" "initialPrompt" "objective" "only" "model" "model_profile" "modelProfile" "coding-default-opus-4-7"`);
   writeFixture(root, DEFAULT_FILES.mcpTaskDelegate, `
 "timeout_secs" "default": 1800 "model" "model_profile" "modelProfile" "coding-default-opus-4-7"`);
+  writeFixture(root, DEFAULT_FILES.mcpCcTasks, `
+"mission_cc_swarm" "timeout-policy claudecode-swarm" "default": 600000`);
   return root;
 }
 

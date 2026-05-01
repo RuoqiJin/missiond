@@ -15,6 +15,7 @@ Checks the V3 compute-primitives Lisp/code isomorphism contract:
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  intentMcpDefs: '.missiond/intent-mcp-defs.lisp',
   dispatcher: 'crates/missiond-daemon/src/handlers/mod.rs',
   computeMod: 'crates/missiond-daemon/src/handlers/compute/mod.rs',
   task: 'crates/missiond-daemon/src/handlers/compute/task.rs',
@@ -133,6 +134,7 @@ function checkFiles(root, files) {
     'flow-runtime-policy',
     'mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy',
     'Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults',
+    'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
     'slot.rs owns mission_slots/mission_inbox/mission_pause/mission_slot_history',
     'compute_slot and task_delegate remain owned by workstation-config',
     'node scripts/check-v3-compute-primitives-isomorphism.mjs',
@@ -151,6 +153,11 @@ function checkFiles(root, files) {
     '"mission_inbox"',
     '"mission_slot_history"',
     'slot::handle(state, name, args).await',
+  ]);
+
+  requireAll(diagnostics, files.intentMcpDefs, sources.intentMcpDefs, [
+    '(tool mission_cc_swarm',
+    '(timeoutMs number :default 600000 :description "PTY 等待超时；默认/上下限由 V3 workstation-config timeout-policy claudecode-swarm 投影")',
   ]);
 
   requireAll(diagnostics, files.computeMod, sources.computeMod, [
@@ -279,6 +286,10 @@ function checkFiles(root, files) {
     'mission_cc_overview',
     'mission_cc_in_progress',
     'mission_cc_trigger_swarm',
+    'WorkstationRuntimeConfig::load_for_project_root',
+    'slot_project_root',
+    'clamp_cc_swarm_timeout_ms',
+    'V3_BLUEPRINT_CONFIG_ERROR',
   ]);
 
   requireAll(diagnostics, files.worker, sources.worker, [
@@ -328,6 +339,8 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.mcpCcTasks, sources.mcpCcTasks, [
     '"mission_cc_query"',
     '"mission_cc_swarm"',
+    'timeout-policy claudecode-swarm',
+    '"default": 600000',
   ]);
   requireAll(diagnostics, files.mcpWorker, sources.mcpWorker, [
     '"mission_worker"',
@@ -369,7 +382,8 @@ function buildFixture() {
     :parallel-slot-default-parallelism 3
     :parallel-slot-default-timeout-secs 1800
     :invariants ["mission_flow_run MUST project missing FlowDefinition node defaults from flow-runtime-policy"
-                 "Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults"])
+                 "Explicit Flow YAML node fields MUST win over flow-runtime-policy defaults"
+                 "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"])
   (implementation-map
     (surface compute-primitives
       :status "code-aligned"
@@ -411,6 +425,10 @@ function buildFixture() {
     ' "mission_task_submit" | "mission_task_query" | "mission_task_cancel" "mission_pty_spawn" "mission_agent" => process::handle "mission_cc_query" | "mission_cc_swarm" "mission_worker" | "mission_control" "mission_job_poll" "mission_flow_run" "mission_forge_build" | "mission_forge_lint" "mission_slots" "mission_inbox" "mission_slot_history" "mission_pause" => { slot::handle(state, name, args).await }',
   );
   fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.intentMcpDefs),
+    ' (tool mission_cc_swarm (timeoutMs number :default 600000 :description "PTY 等待超时；默认/上下限由 V3 workstation-config timeout-policy claudecode-swarm 投影"))',
+  );
+  fs.appendFileSync(
     path.join(root, DEFAULT_FILES.computeMod),
     ' pub(crate) mod cc_tasks; pub(crate) mod flow_run; pub(crate) mod forge; pub(crate) mod job; pub(crate) mod minimax; pub(crate) mod process; pub(crate) mod pty; pub(crate) mod slot; pub(crate) mod task; pub(crate) mod worker;',
   );
@@ -450,7 +468,11 @@ function buildFixture() {
   fs.appendFileSync(path.join(root, DEFAULT_FILES.minimax), ' call_interactive');
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.ccTasks),
-    ' mission_cc_sessions mission_cc_tasks mission_cc_overview mission_cc_in_progress mission_cc_trigger_swarm',
+    ' mission_cc_sessions mission_cc_tasks mission_cc_overview mission_cc_in_progress mission_cc_trigger_swarm WorkstationRuntimeConfig::load_for_project_root slot_project_root clamp_cc_swarm_timeout_ms V3_BLUEPRINT_CONFIG_ERROR',
+  );
+  fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.mcpCcTasks),
+    ' timeout-policy claudecode-swarm "default": 600000',
   );
   fs.appendFileSync(path.join(root, DEFAULT_FILES.worker), ' mission_workers mission_worker_control ControlTree');
   fs.appendFileSync(path.join(root, DEFAULT_FILES.forge), ' exit_code project_root command');

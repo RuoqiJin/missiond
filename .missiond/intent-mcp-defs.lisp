@@ -438,7 +438,7 @@
       (slotId    string :required :description "PTY 工位 ID")
       (tasks     array  :required :description "要执行的任务列表")
       (teammateCount number :default 3 :description "并行 Agent 数量")
-      (timeoutMs number :default 600000))
+      (timeoutMs number :default 600000 :description "PTY 等待超时；默认/上下限由 V3 workstation-config timeout-policy claudecode-swarm 投影"))
     :returns "Value"))
 
 (mcp-module minimax

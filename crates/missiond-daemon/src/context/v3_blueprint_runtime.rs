@@ -7,6 +7,9 @@ pub(crate) const DEFAULT_MODEL_PROFILE: &str = "coding-default-opus-4-7";
 pub(crate) const DEFAULT_TIMEOUT_SECS: i64 = 1800;
 pub(crate) const MIN_TIMEOUT_SECS: i64 = 60;
 pub(crate) const MAX_TIMEOUT_SECS: i64 = 7200;
+pub(crate) const DEFAULT_CC_SWARM_TIMEOUT_SECS: i64 = 600;
+pub(crate) const MIN_CC_SWARM_TIMEOUT_SECS: i64 = 60;
+pub(crate) const MAX_CC_SWARM_TIMEOUT_SECS: i64 = 7200;
 pub(crate) const WATCHDOG_GRACE_SECS: i64 = 120;
 pub(crate) const MISSING_SESSION_PROBE_SECS: i64 = 120;
 pub(crate) const DEFAULT_SLOT_TTL_SECS: i64 = 14400;
@@ -73,6 +76,7 @@ pub(crate) const MAX_TIMELINE_SEARCH_LIMIT: i64 = 100;
 pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
     pub timeout_policy: TimeoutPolicy,
+    pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
     pub slot_ttl_policy: SlotTtlPolicy,
 }
 
@@ -92,6 +96,13 @@ pub(crate) struct TimeoutPolicy {
     pub max_secs: i64,
     pub watchdog_grace_secs: i64,
     pub missing_session_probe_secs: i64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SimpleTimeoutPolicy {
+    pub default_secs: i64,
+    pub min_secs: i64,
+    pub max_secs: i64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,6 +200,16 @@ impl Default for TimeoutPolicy {
     }
 }
 
+impl Default for SimpleTimeoutPolicy {
+    fn default() -> Self {
+        Self {
+            default_secs: DEFAULT_CC_SWARM_TIMEOUT_SECS,
+            min_secs: MIN_CC_SWARM_TIMEOUT_SECS,
+            max_secs: MAX_CC_SWARM_TIMEOUT_SECS,
+        }
+    }
+}
+
 impl Default for SlotTtlPolicy {
     fn default() -> Self {
         Self {
@@ -210,6 +231,7 @@ impl Default for WorkstationRuntimeConfig {
         Self {
             slot_default_profiles,
             timeout_policy: TimeoutPolicy::default(),
+            cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
             slot_ttl_policy: SlotTtlPolicy::default(),
         }
     }
@@ -329,6 +351,15 @@ impl WorkstationRuntimeConfig {
             _ => self.timeout_policy.default_secs,
         };
         raw.clamp(self.timeout_policy.min_secs, self.timeout_policy.max_secs)
+    }
+
+    pub(crate) fn clamp_cc_swarm_timeout_ms(&self, timeout_ms: Option<u64>) -> u64 {
+        let min_ms = (self.cc_swarm_timeout_policy.min_secs.max(1) as u64).saturating_mul(1000);
+        let max_ms = (self.cc_swarm_timeout_policy.max_secs.max(1) as u64).saturating_mul(1000);
+        let default_ms =
+            (self.cc_swarm_timeout_policy.default_secs.max(1) as u64).saturating_mul(1000);
+        let raw = timeout_ms.filter(|value| *value > 0).unwrap_or(default_ms);
+        raw.clamp(min_ms, max_ms)
     }
 
     pub(crate) fn clamp_slot_ttl_secs(&self, ttl_secs: Option<i64>) -> i64 {
@@ -635,6 +666,23 @@ pub(crate) fn parse_workstation_config(
         watchdog_grace_secs: int_keyword(&timeout_tokens, ":watchdog_grace_secs")?,
         missing_session_probe_secs: int_keyword(&timeout_tokens, ":missing_session_probe_secs")?,
     };
+    let cc_swarm_timeout_form = find_forms(&block, "timeout-policy")
+        .into_iter()
+        .find(|form| {
+            let tokens = tokenize_lisp(form);
+            tokens.get(2).is_some_and(|name| name == "claudecode-swarm")
+        })
+        .ok_or_else(|| {
+            BlueprintConfigError::Parse(
+                "missing (timeout-policy claudecode-swarm ...) in workstation-config".into(),
+            )
+        })?;
+    let cc_swarm_timeout_tokens = tokenize_lisp(&cc_swarm_timeout_form);
+    config.cc_swarm_timeout_policy = SimpleTimeoutPolicy {
+        default_secs: int_keyword(&cc_swarm_timeout_tokens, ":default_secs")?,
+        min_secs: int_keyword(&cc_swarm_timeout_tokens, ":min_secs")?,
+        max_secs: int_keyword(&cc_swarm_timeout_tokens, ":max_secs")?,
+    };
     let ttl_form = find_forms(&block, "ttl-policy")
         .into_iter()
         .find(|form| {
@@ -657,6 +705,18 @@ pub(crate) fn parse_workstation_config(
     if config.timeout_policy.min_secs > config.timeout_policy.max_secs {
         return Err(BlueprintConfigError::Parse(
             "workstation timeout :min_secs must be <= :max_secs".into(),
+        ));
+    }
+    if config.cc_swarm_timeout_policy.min_secs > config.cc_swarm_timeout_policy.max_secs {
+        return Err(BlueprintConfigError::Parse(
+            "claudecode-swarm timeout :min_secs must be <= :max_secs".into(),
+        ));
+    }
+    if config.cc_swarm_timeout_policy.default_secs < config.cc_swarm_timeout_policy.min_secs
+        || config.cc_swarm_timeout_policy.default_secs > config.cc_swarm_timeout_policy.max_secs
+    {
+        return Err(BlueprintConfigError::Parse(
+            "claudecode-swarm timeout :default_secs must be within :min_secs..:max_secs".into(),
         ));
     }
     if config.slot_ttl_policy.min_secs > config.slot_ttl_policy.max_secs {
@@ -1126,6 +1186,10 @@ mod tests {
       :max_secs 7200
       :watchdog_grace_secs 120
       :missing_session_probe_secs 120)
+    (timeout-policy claudecode-swarm
+      :default_secs 600
+      :min_secs 60
+      :max_secs 7200)
     (ttl-policy dynamic-slot
       :default_secs 14400
       :min_secs 300
@@ -1188,6 +1252,9 @@ mod tests {
         assert_eq!(cfg.timeout_policy.min_secs, 60);
         assert_eq!(cfg.timeout_policy.max_secs, 7200);
         assert_eq!(cfg.timeout_policy.watchdog_grace_secs, 120);
+        assert_eq!(cfg.cc_swarm_timeout_policy.default_secs, 600);
+        assert_eq!(cfg.cc_swarm_timeout_policy.min_secs, 60);
+        assert_eq!(cfg.cc_swarm_timeout_policy.max_secs, 7200);
         assert_eq!(cfg.slot_ttl_policy.default_secs, 14400);
         assert_eq!(cfg.slot_ttl_policy.min_secs, 300);
         assert_eq!(cfg.slot_ttl_policy.max_secs, 28800);
@@ -1202,6 +1269,10 @@ mod tests {
         assert_eq!(cfg.clamp_timeout_secs(Some(5)), 60);
         assert_eq!(cfg.clamp_timeout_secs(Some(99999)), 7200);
         assert_eq!(cfg.clamp_timeout_secs(Some(3300)), 3300);
+        assert_eq!(cfg.clamp_cc_swarm_timeout_ms(None), 600_000);
+        assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(1000)), 60_000);
+        assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(99_999_999)), 7_200_000);
+        assert_eq!(cfg.clamp_cc_swarm_timeout_ms(Some(900_000)), 900_000);
         assert_eq!(cfg.clamp_slot_ttl_secs(None), 14400);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(5)), 300);
         assert_eq!(cfg.clamp_slot_ttl_secs(Some(99_999)), 28800);
@@ -1247,7 +1318,11 @@ mod tests {
       :min_secs 60
       :max_secs 7200
       :watchdog_grace_secs 120
-      :missing_session_probe_secs 120)))
+      :missing_session_probe_secs 120)
+    (timeout-policy claudecode-swarm
+      :default_secs 600
+      :min_secs 60
+      :max_secs 7200)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");
         assert!(err.to_string().contains("ttl-policy dynamic-slot"));

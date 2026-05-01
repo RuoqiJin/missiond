@@ -14,6 +14,9 @@ export const DEFAULT_MODEL_PROFILE = 'coding-default-opus-4-7';
 export const DEFAULT_TIMEOUT_SECS = 1800;
 export const MIN_TIMEOUT_SECS = 60;
 export const MAX_TIMEOUT_SECS = 7200;
+export const DEFAULT_CC_SWARM_TIMEOUT_SECS = 600;
+export const MIN_CC_SWARM_TIMEOUT_SECS = 60;
+export const MAX_CC_SWARM_TIMEOUT_SECS = 7200;
 export const WATCHDOG_GRACE_SECS = 120;
 export const MISSING_SESSION_PROBE_SECS = 120;
 export const DEFAULT_SLOT_TTL_SECS = 14400;
@@ -36,11 +39,13 @@ export class WorkstationRuntimeConfig {
   constructor({
     slotDefaultProfiles = defaultSlotProfiles(),
     timeoutPolicy = defaultTimeoutPolicy(),
+    ccSwarmTimeoutPolicy = defaultCcSwarmTimeoutPolicy(),
     slotTtlPolicy = defaultSlotTtlPolicy(),
     source = 'defaults',
   } = {}) {
     this.slotDefaultProfiles = new Map(slotDefaultProfiles);
     this.timeoutPolicy = { ...timeoutPolicy };
+    this.ccSwarmTimeoutPolicy = { ...ccSwarmTimeoutPolicy };
     this.slotTtlPolicy = { ...slotTtlPolicy };
     this.source = source;
   }
@@ -54,6 +59,16 @@ export class WorkstationRuntimeConfig {
       ? timeoutSecs
       : this.timeoutPolicy.default_secs;
     return Math.max(this.timeoutPolicy.min_secs, Math.min(this.timeoutPolicy.max_secs, raw));
+  }
+
+  clampCcSwarmTimeoutMs(timeoutMs = null) {
+    const raw = Number.isInteger(timeoutMs) && timeoutMs > 0
+      ? timeoutMs
+      : this.ccSwarmTimeoutPolicy.default_secs * 1000;
+    return Math.max(
+      this.ccSwarmTimeoutPolicy.min_secs * 1000,
+      Math.min(this.ccSwarmTimeoutPolicy.max_secs * 1000, raw),
+    );
   }
 
   clampSlotTtlSecs(ttlSecs = null) {
@@ -154,6 +169,21 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
     watchdog_grace_secs: readPositiveInt(props, ':watchdog_grace_secs', file),
     missing_session_probe_secs: readPositiveInt(props, ':missing_session_probe_secs', file),
   };
+  const ccSwarmTimeoutForm = block.children.find((child) => {
+    if (!isList(child) || head(child) !== 'timeout-policy') return false;
+    return nodeText(child.children[1]) === 'claudecode-swarm';
+  });
+  if (!ccSwarmTimeoutForm) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: missing (timeout-policy claudecode-swarm ...)',
+    );
+  }
+  const ccSwarmProps = readKeywordProps(ccSwarmTimeoutForm, { start: 2 });
+  config.ccSwarmTimeoutPolicy = {
+    default_secs: readPositiveInt(ccSwarmProps, ':default_secs', file),
+    min_secs: readPositiveInt(ccSwarmProps, ':min_secs', file),
+    max_secs: readPositiveInt(ccSwarmProps, ':max_secs', file),
+  };
   const ttlForm = block.children.find((child) => {
     if (!isList(child) || head(child) !== 'ttl-policy') return false;
     return nodeText(child.children[1]) === 'dynamic-slot';
@@ -174,6 +204,19 @@ export function parseWorkstationRuntimeConfig(source, file = '<memory>') {
   if (config.timeoutPolicy.min_secs > config.timeoutPolicy.max_secs) {
     throw new V3BlueprintRuntimeConfigError(
       'failed to parse V3 workstation-config: :min_secs exceeds :max_secs',
+    );
+  }
+  if (config.ccSwarmTimeoutPolicy.min_secs > config.ccSwarmTimeoutPolicy.max_secs) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: claudecode-swarm :min_secs exceeds :max_secs',
+    );
+  }
+  if (
+    config.ccSwarmTimeoutPolicy.default_secs < config.ccSwarmTimeoutPolicy.min_secs
+    || config.ccSwarmTimeoutPolicy.default_secs > config.ccSwarmTimeoutPolicy.max_secs
+  ) {
+    throw new V3BlueprintRuntimeConfigError(
+      'failed to parse V3 workstation-config: claudecode-swarm :default_secs outside :min_secs..:max_secs',
     );
   }
   if (config.slotTtlPolicy.min_secs > config.slotTtlPolicy.max_secs) {
@@ -204,6 +247,7 @@ function defaultWorkstationRuntimeConfig(source) {
   return new WorkstationRuntimeConfig({
     slotDefaultProfiles: defaultSlotProfiles(),
     timeoutPolicy: defaultTimeoutPolicy(),
+    ccSwarmTimeoutPolicy: defaultCcSwarmTimeoutPolicy(),
     slotTtlPolicy: defaultSlotTtlPolicy(),
     source,
   });
@@ -224,6 +268,14 @@ function defaultTimeoutPolicy() {
     max_secs: MAX_TIMEOUT_SECS,
     watchdog_grace_secs: WATCHDOG_GRACE_SECS,
     missing_session_probe_secs: MISSING_SESSION_PROBE_SECS,
+  };
+}
+
+function defaultCcSwarmTimeoutPolicy() {
+  return {
+    default_secs: DEFAULT_CC_SWARM_TIMEOUT_SECS,
+    min_secs: MIN_CC_SWARM_TIMEOUT_SECS,
+    max_secs: MAX_CC_SWARM_TIMEOUT_SECS,
   };
 }
 
