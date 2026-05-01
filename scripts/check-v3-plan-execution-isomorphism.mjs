@@ -386,6 +386,10 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.planHandler, sources.planHandler, [
+    'RouterRuntimeConfig',
+    'pub(super) fn load_sonnet_compiler_model',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    'queued_sonnet_model',
     'mod compile_authoring',
     'use compile_authoring::{action_compile, collect_string_list}',
     'mod execution_runtime',
@@ -394,6 +398,10 @@ function checkFiles(root, files) {
     'pub(super) use internal_dispatch::{build_internal_dispatch_args, tool_result_payload}',
     '#[cfg(test)]',
     'mod tests;',
+  ]);
+  forbidAll(diagnostics, files.planHandler, sources.planHandler, [
+    'const SONNET_COMPILER_MODEL',
+    'SONNET_COMPILER_MODEL: &str = "claude-sonnet"',
   ]);
 
   requireAll(diagnostics, files.planTests, sources.planTests, [
@@ -476,11 +484,16 @@ function checkFiles(root, files) {
     'pub(super) fn resolve_dry_run_plan_target',
     'return Ok("mission_task_delegate");',
     'pub(super) fn render_dry_run_plan_sexp',
+    'load_sonnet_compiler_model()',
+    'compiler_model.clone()',
     'String::from("(plan-draft\\n")',
     ':execution-readiness :dry-run-executable-scaffold',
     'push_lisp_string_field(&mut out, "target", input.target);',
     'push_lisp_string_field(&mut out, "objective", input.objective);',
     'out.push_str("  :nodes\\n");',
+  ]);
+  forbidAll(diagnostics, files.planCompileAuthoring, sources.planCompileAuthoring, [
+    'SONNET_COMPILER_MODEL',
   ]);
 
   requireAll(diagnostics, files.planCompileArtifact, sources.planCompileArtifact, [
@@ -561,8 +574,13 @@ function checkFiles(root, files) {
     'pub(super) fn attach_plan_apply_gate_block',
     'pub(super) fn parse_plan_proposer_mode_or_error',
     'pub(super) fn plan_proposer_summary',
+    'load_sonnet_compiler_model()',
     'PLAN_REVIEW_PROPOSER_CALLER',
     'SONNET_PLAN_PROPOSER_MAX_TOKENS',
+  ]);
+  forbidAll(diagnostics, files.planApprovalProposer, sources.planApprovalProposer, [
+    'SONNET_COMPILER_MODEL',
+    'Some("claude-sonnet".to_string())',
   ]);
 
   requireAll(diagnostics, files.planApprovalSubscriber, sources.planApprovalSubscriber, [
@@ -634,8 +652,13 @@ function checkFiles(root, files) {
     'fn reconcile_llm_conflicts',
     'fn build_llm_inference_prompt',
     'async fn request_llm_proposals',
+    'load_sonnet_compiler_model()',
     'fn deterministic_covers_all_fields',
     'async fn read_recent_evidence_entries',
+  ]);
+  forbidAll(diagnostics, files.planFieldInferenceLlm, sources.planFieldInferenceLlm, [
+    'SONNET_COMPILER_MODEL',
+    'Some("claude-sonnet".to_string())',
   ]);
 
   requireAll(diagnostics, files.planFieldInferenceApply, sources.planFieldInferenceApply, [
@@ -1762,6 +1785,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden contract text present: ${needle}` });
+    }
+  }
+}
+
 function requireText(diagnostics, file, source, needle) {
   if (!source.includes(needle)) {
     diagnostics.push({ file, message: `missing required contract text: ${needle}` });
@@ -1895,6 +1926,12 @@ function buildFixture() {
   (compression-contract
     :checks ["node scripts/check-v3-plan-execution-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.planHandler, `
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
+pub(super) fn load_sonnet_compiler_model() {
+  let router_config = RouterRuntimeConfig::load_for_current_dir().unwrap();
+  let _ = "V3_BLUEPRINT_CONFIG_ERROR";
+  let _ = router_config.queued_sonnet_model;
+}
 mod compile_authoring;
 use compile_authoring::{action_compile, collect_string_list};
 mod execution_runtime;
@@ -1990,6 +2027,8 @@ pub(super) use validation::{
 };
 pub(super) fn resolve_dry_run_plan_target() { return Ok("mission_task_delegate"); }
 pub(super) fn render_dry_run_plan_sexp() {
+  let compiler_model = load_sonnet_compiler_model().unwrap();
+  let _ = compiler_model.clone();
   String::from("(plan-draft\\n");
   ":execution-readiness :dry-run-executable-scaffold";
   push_lisp_string_field(&mut out, "target", input.target);
@@ -2075,6 +2114,7 @@ async fn plan_action_supersede_with_policy_only() {
 use super::*;
 pub(super) fn build_plan_automation_ctx() {}
 pub(super) async fn request_plan_auto_approve_proposal() {}
+fn uses_v3_model() { load_sonnet_compiler_model(); }
 fn attach_plan_proposal_block() {}
 pub(super) fn attach_plan_apply_gate_block() {}
 pub(super) fn parse_plan_proposer_mode_or_error() {}
@@ -2160,6 +2200,7 @@ pub(super) fn parse_llm_proposals() {}
 pub(super) fn reconcile_llm_conflicts() {}
 pub(super) fn build_llm_inference_prompt() {}
 pub(super) async fn request_llm_proposals() {}
+fn uses_v3_model() { load_sonnet_compiler_model(); }
 pub(super) fn deterministic_covers_all_fields() {}
 pub(super) async fn read_recent_evidence_entries() {}
 `);

@@ -622,6 +622,10 @@ pub(in crate::handlers::knowledge::plan) async fn request_llm_proposals(
     };
     let (mut proposals, parse_warnings) = parse_llm_proposals(&raw);
     reconcile_llm_conflicts(&mut proposals, deterministic, caller_args);
+    let compiler_model = match load_sonnet_compiler_model() {
+        Ok(model) => model,
+        Err(err) => return LlmProposalBundle::unavailable(err.to_string()),
+    };
     let status = if proposals.is_empty() {
         // Distinguish between "deterministic already covered every field"
         // and "model returned no usable suggestions". The first is a
@@ -639,7 +643,7 @@ pub(in crate::handlers::knowledge::plan) async fn request_llm_proposals(
         proposals,
         parse_warnings,
         unavailable_reason: None,
-        model: Some(SONNET_COMPILER_MODEL.to_string()),
+        model: Some(compiler_model),
         request_caller: Some(SONNET_INFER_CALLER.to_string()),
     }
 }

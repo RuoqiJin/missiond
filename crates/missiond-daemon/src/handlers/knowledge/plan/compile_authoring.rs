@@ -507,11 +507,12 @@ async fn action_compile_sonnet(state: &AppState, args: &Value) -> Result<ToolRes
         Some(d) => format!("directive/{}:{}", d.id, d.version),
         None => format!("board_task/{}", board_task_id),
     };
+    let compiler_model = load_sonnet_compiler_model()?;
 
     let mut payload = json!({
         "status": "compiled",
         "compiler_mode": COMPILER_MODE_SONNET,
-        "compiler_model": SONNET_COMPILER_MODEL,
+        "compiler_model": compiler_model.clone(),
         "flow_ref": "F-intent-alignment-plan-execution-loop :: s4 plan-authoring",
         "directive_id": directive_id_str,
         "directive_version": directive.as_ref().map(|d| d.version),
@@ -541,7 +542,7 @@ async fn action_compile_sonnet(state: &AppState, args: &Value) -> Result<ToolRes
                 &compiled_sexp,
                 &sexp_hash,
                 PlanStatus::AwaitingApproval,
-                Some(SONNET_COMPILER_MODEL),
+                Some(compiler_model.as_str()),
                 Some(&compiled_from),
             )
             .await

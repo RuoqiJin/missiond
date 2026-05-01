@@ -3,7 +3,7 @@ use super::*;
 /// wave-18 / task 07 :: build the deterministic safety context for a
 /// plan-side resolution. Mirrors the directive helper:
 ///   * `deterministic_mode` = `compiler_model.is_none()` (dry-run leaves
-///     it unset; sonnet records `claude-sonnet`). LLM-driven plans
+///     it unset; sonnet records the V3-projected compiler model). LLM-driven plans
 ///     always block `auto_safe`.
 ///   * `protected_source_or_target` is currently `false` — plan rows
 ///     have no merge source/target concept; the rule still records a
@@ -115,6 +115,17 @@ pub(super) async fn request_plan_auto_approve_proposal(
     };
 
     let (proposal, parse_warnings) = parse_llm_auto_approve_proposal(&raw);
+    let compiler_model = match load_sonnet_compiler_model() {
+        Ok(model) => model,
+        Err(err) => {
+            return LlmAutoApproveProposalBundle::unavailable(
+                mode,
+                action,
+                PLAN_REVIEW_PROPOSER_CALLER,
+                err.to_string(),
+            );
+        }
+    };
     match proposal {
         Some(mut p) => {
             enforce_proposal_invariants(&mut p, action);
@@ -126,7 +137,7 @@ pub(super) async fn request_plan_auto_approve_proposal(
                 unavailable_reason: None,
                 action: action.to_string(),
                 request_caller: Some(PLAN_REVIEW_PROPOSER_CALLER.to_string()),
-                model: Some(SONNET_COMPILER_MODEL.to_string()),
+                model: Some(compiler_model.clone()),
             }
         }
         None => LlmAutoApproveProposalBundle {
@@ -137,7 +148,7 @@ pub(super) async fn request_plan_auto_approve_proposal(
             unavailable_reason: None,
             action: action.to_string(),
             request_caller: Some(PLAN_REVIEW_PROPOSER_CALLER.to_string()),
-            model: Some(SONNET_COMPILER_MODEL.to_string()),
+            model: Some(compiler_model),
         },
     }
 }

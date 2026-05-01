@@ -47,6 +47,7 @@ use serde_json::{json, Value};
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::handlers::knowledge::review_gate::{
     apply_compile_review_gates, build_llm_auto_approve_proposal_system_prompt,
     build_llm_auto_approve_proposal_user_prompt, enforce_apply_gate_preflight,
@@ -75,10 +76,6 @@ const COMPANION_DIR: &str = ".missiond/v2/plans";
 
 const COMPILER_MODE_DRY_RUN: &str = "dry_run";
 const COMPILER_MODE_SONNET: &str = "sonnet";
-/// Model name written into `plan.compiler_model` for sonnet-mode rows. Mirrors
-/// `SONNET_MODEL` in `llm/sonnet_gateway.rs`; kept as a string literal so we
-/// don't need to widen its visibility.
-const SONNET_COMPILER_MODEL: &str = "claude-sonnet";
 /// Token cap for the planner call. Plans are sexp DAGs — comfortably under 4K
 /// tokens — but we leave headroom for nested phases / acceptance fields.
 const SONNET_MAX_TOKENS: u32 = 4096;
@@ -96,6 +93,12 @@ const VALID_DISPATCH_STRATEGIES: &[&str] = &[
     "prompt-fallback",
     "unknown",
 ];
+
+pub(super) fn load_sonnet_compiler_model() -> Result<String> {
+    RouterRuntimeConfig::load_for_current_dir()
+        .map(|config| config.queued_sonnet_model)
+        .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))
+}
 
 mod execute_hints;
 pub(super) use execute_hints::{
