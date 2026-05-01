@@ -107,6 +107,7 @@ pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MAX_ENTRIES: usize = 20;
 pub(crate) const DEFAULT_LEARNING_KB_REFLECTION_MAX_TOKENS: u32 = 2000;
 pub(crate) const DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS: i64 = 86400;
 pub(crate) const DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS: i64 = 6 * 3600;
+pub(crate) const DEFAULT_DAILY_SONNET_PROFILE: &str = "daily-sonnet";
 pub(crate) const DEFAULT_ROUTER_CHAT_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_CHAT_MAX_TOKENS: u32 = 16384;
 pub(crate) const DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS: u32 = 65536;
@@ -123,6 +124,7 @@ pub(crate) const DEFAULT_ROUTER_QUEUED_SONNET_MAX_TOKENS: u32 = 1024;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
     slot_default_profiles: HashMap<String, String>,
+    model_profile_spawn_args: HashMap<String, Option<String>>,
     pub timeout_policy: TimeoutPolicy,
     pub cc_swarm_timeout_policy: SimpleTimeoutPolicy,
     pub pty_send_timeout_policy: SimpleTimeoutPolicy,
@@ -346,9 +348,16 @@ impl Default for WorkstationRuntimeConfig {
         let mut slot_default_profiles = HashMap::new();
         slot_default_profiles.insert("coder".to_string(), DEFAULT_MODEL_PROFILE.to_string());
         slot_default_profiles.insert("researcher".to_string(), DEFAULT_MODEL_PROFILE.to_string());
-        slot_default_profiles.insert("ops".to_string(), "daily-sonnet".to_string());
+        slot_default_profiles.insert("ops".to_string(), DEFAULT_DAILY_SONNET_PROFILE.to_string());
+        let mut model_profile_spawn_args = HashMap::new();
+        model_profile_spawn_args.insert(DEFAULT_MODEL_PROFILE.to_string(), None);
+        model_profile_spawn_args.insert(
+            DEFAULT_DAILY_SONNET_PROFILE.to_string(),
+            Some("sonnet".to_string()),
+        );
         Self {
             slot_default_profiles,
+            model_profile_spawn_args,
             timeout_policy: TimeoutPolicy::default(),
             cc_swarm_timeout_policy: SimpleTimeoutPolicy::default(),
             pty_send_timeout_policy: SimpleTimeoutPolicy::pty_send_default(),
@@ -530,6 +539,31 @@ impl WorkstationRuntimeConfig {
 
     pub(crate) fn default_model_profile_for_template(&self, template: &str) -> Option<&str> {
         self.slot_default_profiles.get(template).map(String::as_str)
+    }
+
+    pub(crate) fn default_spawn_model_for_template(
+        &self,
+        template: &str,
+    ) -> Result<Option<String>, BlueprintConfigError> {
+        let profile = self
+            .default_model_profile_for_template(template)
+            .unwrap_or(DEFAULT_MODEL_PROFILE);
+        self.spawn_model_for_profile(profile)
+    }
+
+    pub(crate) fn spawn_model_for_profile(
+        &self,
+        profile: &str,
+    ) -> Result<Option<String>, BlueprintConfigError> {
+        self.model_profile_spawn_args
+            .get(profile)
+            .cloned()
+            .ok_or_else(|| {
+                BlueprintConfigError::Parse(format!(
+                    "unknown workstation model-profile {}",
+                    profile
+                ))
+            })
     }
 
     pub(crate) fn clamp_timeout_secs(&self, timeout_secs: Option<i64>) -> i64 {
@@ -957,6 +991,18 @@ pub(crate) fn parse_workstation_config(
     let block = find_form(source, "workstation-config")
         .ok_or_else(|| BlueprintConfigError::Parse("missing (workstation-config ...)".into()))?;
     let mut config = WorkstationRuntimeConfig::default();
+    for form in find_forms(&block, "model-profile") {
+        let tokens = tokenize_lisp(&form);
+        if tokens.len() < 3 {
+            continue;
+        }
+        let profile = tokens[2].clone();
+        if let Some(spawn_model_arg) = keyword_value(&tokens, ":spawn-model-arg") {
+            config
+                .model_profile_spawn_args
+                .insert(profile, parse_spawn_model_arg(&spawn_model_arg)?);
+        }
+    }
     for form in find_forms(&block, "slot-template") {
         let tokens = tokenize_lisp(&form);
         if tokens.len() < 3 {
@@ -1542,6 +1588,27 @@ fn non_empty_keyword(tokens: &[String], key: &str) -> Result<String, BlueprintCo
     Ok(value)
 }
 
+fn parse_spawn_model_arg(value: &str) -> Result<Option<String>, BlueprintConfigError> {
+    let value = value.trim();
+    if value.is_empty()
+        || matches!(
+            value.to_ascii_lowercase().as_str(),
+            "nil" | "none" | "null" | "default" | "claude-code-default"
+        )
+    {
+        return Ok(None);
+    }
+    if !value
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+    {
+        return Err(BlueprintConfigError::Parse(
+            "model-profile :spawn-model-arg must be a single safe CLI token".into(),
+        ));
+    }
+    Ok(Some(value.to_string()))
+}
+
 fn parse_bool_token(value: &str) -> Option<bool> {
     match value.trim().to_ascii_lowercase().as_str() {
         "true" | "t" | "1" | "yes" | "on" => Some(true),
@@ -1702,6 +1769,7 @@ mod tests {
 (missiond-blueprint
   (workstation-config
     (model-profile coding-default-opus-4-7 :spawn-model-arg nil)
+    (model-profile daily-sonnet :spawn-model-arg "sonnet")
     (slot-template coder :role coder :default-model-profile coding-default-opus-4-7)
     (slot-template researcher :role coder :default-model-profile coding-default-opus-4-7)
     (slot-template ops :role operator :default-model-profile daily-sonnet)
@@ -1824,6 +1892,15 @@ mod tests {
         assert_eq!(
             cfg.default_model_profile_for_template("ops"),
             Some("daily-sonnet")
+        );
+        assert_eq!(cfg.default_spawn_model_for_template("coder").unwrap(), None);
+        assert_eq!(
+            cfg.default_spawn_model_for_template("researcher").unwrap(),
+            None
+        );
+        assert_eq!(
+            cfg.default_spawn_model_for_template("ops").unwrap(),
+            Some("sonnet".to_string())
         );
         assert_eq!(cfg.timeout_policy.default_secs, 1800);
         assert_eq!(cfg.timeout_policy.min_secs, 60);

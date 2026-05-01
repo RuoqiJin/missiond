@@ -753,6 +753,18 @@ async fn main() -> Result<()> {
     // Register SlotManager task configs
     {
         use missiond_core::types::{CliEngine, Lifecycle};
+        let missiond_project_root = std::path::PathBuf::from("/Users/jinchen/Projects/missiond");
+        let workstation_config =
+            context::v3_blueprint_runtime::WorkstationRuntimeConfig::load_for_project_root(Some(
+                missiond_project_root.to_string_lossy().as_ref(),
+            ))
+            .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+        let researcher_model = workstation_config
+            .default_spawn_model_for_template("researcher")
+            .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
+        let coder_model = workstation_config
+            .default_spawn_model_for_template("coder")
+            .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
         state
             .slot_manager
             .register(slot_orchestrator::SlotTaskConfig {
@@ -761,9 +773,9 @@ async fn main() -> Result<()> {
                 lifecycle: Lifecycle::Persistent,
                 slot_id: Some("slot-arch-maint".to_string()),
                 role: Some("arch-maint".to_string()),
-                model: Some("claude-sonnet-4-6".to_string()),
+                model: researcher_model.clone(),
                 timeout: std::time::Duration::from_secs(600),
-                cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
+                cwd: missiond_project_root.clone(),
                 skip_permissions: true,
             })
             .await?;
@@ -777,7 +789,7 @@ async fn main() -> Result<()> {
                 role: Some("strategy".to_string()),
                 model: None, // Uses GEMINI_MODEL constant in controller
                 timeout: std::time::Duration::from_secs(600),
-                cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
+                cwd: missiond_project_root.clone(),
                 skip_permissions: true,
             })
             .await?;
@@ -791,7 +803,7 @@ async fn main() -> Result<()> {
                 role: Some("gemini-router".to_string()),
                 model: None,
                 timeout: std::time::Duration::from_secs(120),
-                cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
+                cwd: missiond_project_root.clone(),
                 skip_permissions: true,
             })
             .await?;
@@ -803,9 +815,9 @@ async fn main() -> Result<()> {
                 lifecycle: Lifecycle::Persistent,
                 slot_id: Some("lisp-surveyor".to_string()),
                 role: Some("coder".to_string()),
-                model: Some("claude-sonnet-4-6".to_string()),
+                model: coder_model,
                 timeout: std::time::Duration::from_secs(900),
-                cwd: std::path::PathBuf::from("/Users/jinchen/Projects/missiond"),
+                cwd: missiond_project_root,
                 skip_permissions: true,
             })
             .await?;
