@@ -3,6 +3,7 @@ use missiond_mcp::tools::ToolResult;
 use serde_json::{json, Value};
 use tracing::{info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::state::AppState;
 
 pub(super) async fn handle(state: &AppState, args: Value) -> Result<ToolResult> {
@@ -144,14 +145,21 @@ async fn gemini_watch(state: &AppState, action: &str) -> Result<ToolResult> {
                 .gemini_watch_started_at
                 .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
 
+            let router_config = RouterRuntimeConfig::load_for_current_dir()
+                .map_err(|err| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))?;
+            let model = router_config.flow_gemini_model;
             let st = state.clone();
+            let watch_model = model.clone();
             let handle = tokio::spawn(async move {
-                gemini_watch_loop(st).await;
+                gemini_watch_loop(st, watch_model).await;
             });
 
             *state.gemini_watch_handle.lock().await = Some(handle);
             info!("Gemini watch started");
-            Ok(ToolResult::text("✅ Gemini 监测已启动。每 10 分钟探测一次 gemini-3.1-pro-preview，恢复后自动创建 Board 通知。"))
+            Ok(ToolResult::text(format!(
+                "✅ Gemini 监测已启动。每 10 分钟探测一次 {}，恢复后自动创建 Board 通知。",
+                model
+            )))
         }
 
         "stop" => {
@@ -190,11 +198,10 @@ async fn gemini_watch(state: &AppState, action: &str) -> Result<ToolResult> {
     }
 }
 
-async fn gemini_watch_loop(state: AppState) {
+async fn gemini_watch_loop(state: AppState, model: String) {
     use std::sync::atomic::Ordering;
     use std::time::Duration;
 
-    let model = "gemini-3.1-pro-preview";
     let probe_timeout = Duration::from_secs(600);
 
     loop {
@@ -203,11 +210,11 @@ async fn gemini_watch_loop(state: AppState) {
         }
 
         let attempt = state.gemini_watch_attempts.fetch_add(1, Ordering::Relaxed) + 1;
-        info!(attempt, model, "Gemini watch: probing...");
+        info!(attempt, model = %model, "Gemini watch: probing...");
 
         let result = tokio::time::timeout(probe_timeout, async {
             tokio::process::Command::new("gemini")
-                .args(["-p", "say OK", "-m", model, "-o", "text", "--yolo"])
+                .args(["-p", "say OK", "-m", model.as_str(), "-o", "text", "--yolo"])
                 .output()
                 .await
         })

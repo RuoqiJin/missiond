@@ -98,6 +98,7 @@ function checkFiles(root, files) {
     'question/question_flow.rs owns mission_question',
     'question/decision.rs owns mission_decision_stats',
     'question/llm_trace.rs owns mission_llm_trace plus legacy Gemini/Jarvis trace aliases',
+    'watch probe model projected from router-runtime-policy flow-gemini-model through RouterRuntimeConfig',
     'question/auth.rs owns mission_gemini_auth llm.yaml/settings.json projection',
     'question/incident.rs owns mission_incident routing plus legacy mission_incident_* execution',
     'node scripts/check-v3-incident-governance-isomorphism.mjs',
@@ -176,6 +177,12 @@ function checkFiles(root, files) {
     'mission_jarvis_logs',
     'jarvis_trace',
     'mission_jarvis_trace',
+    'RouterRuntimeConfig::load_for_current_dir',
+    'router_config.flow_gemini_model',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+  ]);
+  forbidAll(diagnostics, files.llmTrace, sources.llmTrace, [
+    'let model = "gemini-3.1-pro-preview"',
   ]);
 
   requireAll(diagnostics, files.auth, sources.auth, [
@@ -225,6 +232,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden local fallback: ${needle}` });
+    }
+  }
+}
+
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-incident-governance-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
@@ -241,7 +256,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/mod.rs"
              "crates/missiond-mcp/src/tools/comm/question.rs"
              "scripts/check-v3-incident-governance-isomorphism.mjs"]
-      :note "question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace plus legacy Gemini/Jarvis trace aliases; question/auth.rs owns mission_gemini_auth llm.yaml/settings.json projection; question/incident.rs owns mission_incident routing plus legacy mission_incident_* execution."))
+      :note "question.rs is the thin incident-governance facade; question/question_flow.rs owns mission_question; question/decision.rs owns mission_decision_stats; question/llm_trace.rs owns mission_llm_trace plus legacy Gemini/Jarvis trace aliases and watch probe model projected from router-runtime-policy flow-gemini-model through RouterRuntimeConfig; question/auth.rs owns mission_gemini_auth llm.yaml/settings.json projection; question/incident.rs owns mission_incident routing plus legacy mission_incident_* execution."))
   (compression-contract
     :checks ["node scripts/check-v3-incident-governance-isomorphism.mjs"]))`);
 
@@ -284,6 +299,7 @@ QuestionEvent::Created QuestionEvent::Resolved TaskEvent::Completed
 gemini_trace mission_gemini_trace gemini_stats mission_gemini_stats gemini_watch watch_action
 mission_gemini_watch gemini_auth mission_gemini_auth jarvis_logs mission_jarvis_logs
 jarvis_trace mission_jarvis_trace
+RouterRuntimeConfig::load_for_current_dir router_config.flow_gemini_model V3_BLUEPRINT_CONFIG_ERROR
 `);
 
   writeFixture(root, DEFAULT_FILES.auth, 'mission_gemini_auth gemini_auth_mode selectedType Gemini auth mode switched');
