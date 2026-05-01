@@ -604,7 +604,8 @@ async fn main() -> Result<()> {
                     {
                         if config.provider == "gemini-cli" {
                             let cli_cfg = config.gemini_cli.unwrap_or_default();
-                            info!(binary = %cli_cfg.binary, model = %cli_cfg.model, "LLM provider: gemini-cli (PTY transport)");
+                            let cli_model = cli_cfg.resolved_model(&router_runtime_config);
+                            info!(binary = %cli_cfg.binary, model = %cli_model, "LLM provider: gemini-cli (PTY transport)");
                             let initial_count = gemini_cli::resolve_apikey_pool().len();
                             info!(
                                 count = initial_count,
@@ -631,7 +632,7 @@ async fn main() -> Result<()> {
                             gemini_client::GeminiClient::with_cli(
                                 gemini_cli::GeminiCli::new(
                                     cli_cfg.binary,
-                                    cli_cfg.model,
+                                    cli_model,
                                     std::time::Duration::from_secs(cli_cfg.timeout),
                                     Some(api_key_pool),
                                 )

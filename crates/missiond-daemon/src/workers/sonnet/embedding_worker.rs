@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use tracing::{debug, info, warn};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::helpers::char_boundary_at;
 use crate::helpers::default_mission_home;
 use crate::state::{AppState, BackfillPhase, EmbeddingTask};
@@ -74,8 +75,8 @@ pub(crate) struct LlmConfig {
 pub(crate) struct GeminiCliConfig {
     #[serde(default = "GeminiCliConfig::default_binary")]
     pub binary: String,
-    #[serde(default = "GeminiCliConfig::default_model")]
-    pub model: String,
+    #[serde(default)]
+    pub model: Option<String>,
     #[serde(default = "GeminiCliConfig::default_timeout")]
     pub timeout: u64,
 }
@@ -84,7 +85,7 @@ impl Default for GeminiCliConfig {
     fn default() -> Self {
         Self {
             binary: Self::default_binary(),
-            model: Self::default_model(),
+            model: None,
             timeout: Self::default_timeout(),
         }
     }
@@ -94,8 +95,13 @@ impl GeminiCliConfig {
     fn default_binary() -> String {
         "gemini".to_string()
     }
-    fn default_model() -> String {
-        "gemini-3.1-pro-preview".to_string()
+    pub(crate) fn resolved_model(&self, router_config: &RouterRuntimeConfig) -> String {
+        self.model
+            .as_ref()
+            .map(|model| model.trim())
+            .filter(|model| !model.is_empty())
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| router_config.flow_gemini_model.clone())
     }
     fn default_timeout() -> u64 {
         120
@@ -1060,7 +1066,9 @@ impl super::BackgroundWorker for EmbeddingLoopWorker {
                     info!(session = %session_id, "Processing per-turn embeddings");
                     match process_turns_for_session(&state, &session_id, &provider_id).await {
                         Ok(()) => {}
-                        Err(e) => warn!(session = %session_id, error = %e, "Per-turn embedding failed"),
+                        Err(e) => {
+                            warn!(session = %session_id, error = %e, "Per-turn embedding failed")
+                        }
                     }
                 }
                 EmbeddingTask::ProcessKBEntry(id) => {
@@ -1991,4 +1999,40 @@ async fn backfill_message_embeddings(
     let total_success = skip_count + embed_success;
     let phase_done = batch.len() < batch_size as usize;
     (total_success, embed_failed, max_id, phase_done)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gemini_cli_missing_model_projects_router_policy() {
+        let router_config = RouterRuntimeConfig {
+            flow_gemini_model: "project-gemini".to_string(),
+            ..RouterRuntimeConfig::default()
+        };
+
+        let missing = GeminiCliConfig::default();
+        assert_eq!(missing.resolved_model(&router_config), "project-gemini");
+
+        let blank = GeminiCliConfig {
+            model: Some("  ".to_string()),
+            ..GeminiCliConfig::default()
+        };
+        assert_eq!(blank.resolved_model(&router_config), "project-gemini");
+    }
+
+    #[test]
+    fn gemini_cli_explicit_model_wins() {
+        let router_config = RouterRuntimeConfig {
+            flow_gemini_model: "project-gemini".to_string(),
+            ..RouterRuntimeConfig::default()
+        };
+        let explicit = GeminiCliConfig {
+            model: Some("explicit-gemini".to_string()),
+            ..GeminiCliConfig::default()
+        };
+
+        assert_eq!(explicit.resolved_model(&router_config), "explicit-gemini");
+    }
 }

@@ -21,6 +21,7 @@ const DEFAULT_FILES = {
   manage: 'crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs',
   v3Runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   main: 'crates/missiond-daemon/src/main.rs',
+  embeddingWorker: 'crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs',
   geminiClient: 'crates/missiond-daemon/src/llm/gemini_client.rs',
   geminiCli: 'crates/missiond-daemon/src/llm/gemini_cli.rs',
   geminiDriver: 'crates/missiond-daemon/src/llm/gemini_driver.rs',
@@ -106,6 +107,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs',
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/main.rs',
+    'crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs',
     'crates/missiond-daemon/src/llm/gemini_client.rs',
     'crates/missiond-daemon/src/llm/gemini_cli.rs',
     'crates/missiond-daemon/src/llm/gemini_driver.rs',
@@ -131,6 +133,7 @@ function checkFiles(root, files) {
     'mission_router_chat default model and max_tokens MUST project from router-runtime-policy',
     'Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model',
     'GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model',
+    'Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model',
     'GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy',
     'Gemini File API upload and poll timeouts MUST project from router-runtime-policy',
     'Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy',
@@ -272,7 +275,19 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.main, sources.main, [
     'RouterRuntimeConfig::load_for_current_dir',
     'with_router_runtime_config(&router_runtime_config)',
+    'cli_cfg.resolved_model(&router_runtime_config)',
+    'cli_model',
     'V3_BLUEPRINT_CONFIG_ERROR',
+  ]);
+
+  requireAll(diagnostics, files.embeddingWorker, sources.embeddingWorker, [
+    'RouterRuntimeConfig',
+    'pub model: Option<String>',
+    'resolved_model(&self, router_config: &RouterRuntimeConfig)',
+    'router_config.flow_gemini_model.clone()',
+  ]);
+  forbidAll(diagnostics, files.embeddingWorker, sources.embeddingWorker, [
+    '"gemini-3.1-pro-preview"',
   ]);
 
   requireAll(diagnostics, files.geminiClient, sources.geminiClient, [
@@ -486,6 +501,7 @@ function buildFixture() {
 	             "crates/missiond-daemon/src/handlers/comm/router_chat/manage.rs"
 	             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
 	             "crates/missiond-daemon/src/main.rs"
+	             "crates/missiond-daemon/src/workers/sonnet/embedding_worker.rs"
 	             "crates/missiond-daemon/src/llm/gemini_client.rs"
 	             "crates/missiond-daemon/src/llm/gemini_cli.rs"
 	             "crates/missiond-daemon/src/llm/gemini_file_api.rs"
@@ -503,7 +519,7 @@ function buildFixture() {
 	             "scripts/check-router-backend-registry.mjs"
 	             "scripts/check-router-dispatch-descriptor.mjs"
 	             "scripts/check-v3-router-policy-isomorphism.mjs"]
-	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy; Gemini File API upload and poll timeouts MUST project from router-runtime-policy; Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy; Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy; GeminiClient request queue timeouts; Gemini CLI absolute/tool-exec timeouts; Gemini File API upload/poll timeouts; queued Sonnet quota throttle; xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; xjp-router embedding timeout default; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
+	      :note "router_chat.rs is the thin router-policy facade; router_chat/chat.rs owns mission_router_chat; router_chat/files.rs owns attachment denylist and Gemini File API policy; router_chat/manage.rs owns mission_router_chat_manage; RouterRuntimeConfig projects router-runtime-policy; mission_router_chat default model and max_tokens MUST project from router-runtime-policy; Flow daemon Gemini calls, stateless Sonnet calls, and queued SonnetGateway calls MUST project their model; GeminiPtyDriver default slot model MUST project from router-runtime-policy flow-gemini-model; Gemini CLI transport missing llm.yaml model MUST project from router-runtime-policy flow-gemini-model; GeminiClient PTY/HTTP request queue timeouts MUST project from router-runtime-policy; Gemini File API upload and poll timeouts MUST project from router-runtime-policy; Gemini CLI absolute and tool-exec timeouts MUST project from router-runtime-policy; Queued SonnetGateway quota throttle sleep MUST project from router-runtime-policy; GeminiClient request queue timeouts; Gemini CLI absolute/tool-exec timeouts; Gemini File API upload/poll timeouts; queued Sonnet quota throttle; xjp-router embedding client MUST project its missing timeout default from router-runtime-policy direct HTTP timeout; xjp-router embedding timeout default; BoardTask urgent/ops/docs-test-chore ANTHROPIC_MODEL overrides MUST project from router-runtime-policy; plan/router_policy_dry_run.rs owns the advisory dry-run adapter and dry_run_only/runtime_replacement/no_execution invariants."))
 	  (router-runtime-policy
 	    :default-chat-model "gemini-3.1-pro"
 	    :chat-default-max-tokens 16384
@@ -575,7 +591,13 @@ parse_router_runtime_policy find_form(source, "router-runtime-policy") direct_ht
 `);
 
   writeFixture(root, DEFAULT_FILES.main, `
-RouterRuntimeConfig::load_for_current_dir with_router_runtime_config(&router_runtime_config) V3_BLUEPRINT_CONFIG_ERROR
+RouterRuntimeConfig::load_for_current_dir with_router_runtime_config(&router_runtime_config)
+cli_cfg.resolved_model(&router_runtime_config) cli_model V3_BLUEPRINT_CONFIG_ERROR
+`);
+
+  writeFixture(root, DEFAULT_FILES.embeddingWorker, `
+RouterRuntimeConfig pub model: Option<String> resolved_model(&self, router_config: &RouterRuntimeConfig)
+router_config.flow_gemini_model.clone()
 `);
 
   writeFixture(root, DEFAULT_FILES.geminiClient, `
