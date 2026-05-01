@@ -3,40 +3,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tracing::{debug, info, warn};
 
-// ── Autopilot pty.send / watchdog timeout policy ───────────────────────
-// These constants project the same shape as
-// `handlers/compute/task_delegate.rs :: DEFAULT_TIMEOUT_SECS / MAX_TIMEOUT_SECS`
-// so the dispatched pty.send budget matches the BoardTask.timeout_secs that
-// task_delegate already wrote, and the watchdog cannot reclaim a slot while
-// the configured budget is still ticking. See
-// `.missiond/v3/missiond-blueprint.lisp :: workstation-config invariants`
-// for the Lisp authority.
-const PTY_TIMEOUT_DEFAULT_SECS: i64 = 1800;
-const PTY_TIMEOUT_MIN_SECS: i64 = 60;
-const PTY_TIMEOUT_MAX_SECS: i64 = 7200;
-
-/// Extra wait beyond the declared task timeout before the smart watchdog
-/// treats an idle slot as orphaned. Long-running Opus runs sometimes return
-/// the prompt within seconds of the deadline; the grace prevents racing the
-/// natural completion path.
-const WATCHDOG_GRACE_SECS: i64 = 120;
-
-/// Window the watchdog gives a missing PTY session before reclaiming the
-/// task. A missing session means the slot process is gone, so we recover
-/// quickly without waiting for the full configured timeout — this is the
-/// "no-PTY-session" branch the brief mandates we keep fast.
-const WATCHDOG_MISSING_SESSION_PROBE_SECS: i64 = 120;
-
-use crate::slot_dispatch::SlotDispatchGuard;
 use crate::claude_md_sync::sync_claude_md;
+use crate::context::v3_blueprint_runtime::AutopilotRuntimeConfig;
 use crate::engine::learning_engine;
 use crate::flow_engine::{ensure_autopilot_pty, execute_flow_task};
-use missiond_core::event::events::{
-    BoardEvent, IncidentEvent, SessionEvent, SlotEvent, SystemEvent,
-};
 use crate::llm_gateway::determine_llm_env;
 use crate::memory_scheduler::ensure_memory_slot_by_id;
 use crate::memory_scheduler::{dispatch_queued_submit_tasks, reap_stale_submit_tasks};
+use crate::slot_dispatch::SlotDispatchGuard;
 use crate::state::{AppState, MEMORY_SLOT_ID, MEMORY_SLOW_SLOT_ID};
 use crate::supervisor::schedule_supervisor_patrol;
 use crate::supervisor::truncate_safe;
@@ -44,49 +18,55 @@ use crate::supervisor::{
     check_pending_compact_restarts, check_slot_context_levels, check_slot_stuck,
 };
 use crate::supervisor::{is_auth_error, is_quota_exhausted};
+use missiond_core::event::events::{
+    BoardEvent, IncidentEvent, SessionEvent, SlotEvent, SystemEvent,
+};
 use missiond_core::SessionState;
 
 // @beacon: orchestration
 
 /// Clamp `BoardTask.timeout_secs` to the autopilot wait budget.
 ///
-/// Mirrors the shape of `handlers/compute/task_delegate.rs` so the pty.send
-/// budget always lines up with the timeout the delegator already stored:
-///   * `None` / `Some(<= 0)`             → `PTY_TIMEOUT_DEFAULT_SECS` (1800).
-///   * `Some(v) where v < PTY_TIMEOUT_MIN_SECS` → clamped to `PTY_TIMEOUT_MIN_SECS`.
-///   * `Some(v) where v > PTY_TIMEOUT_MAX_SECS` → clamped to `PTY_TIMEOUT_MAX_SECS`.
+/// The default/floor/ceiling come from V3 `workstation-config
+/// timeout-policy boardtask-dispatch`, loaded through `AutopilotRuntimeConfig`,
+/// so the pty.send budget always lines up with the timeout policy the
+/// delegator already used to write `BoardTask.timeout_secs`.
 ///
 /// Pure helper so unit tests can pin the policy without an `AppState`.
-fn derive_pty_timeout_secs(timeout_secs: Option<i64>) -> i64 {
+fn derive_pty_timeout_secs(config: &AutopilotRuntimeConfig, timeout_secs: Option<i64>) -> i64 {
     let raw = match timeout_secs {
         Some(v) if v > 0 => v,
-        _ => PTY_TIMEOUT_DEFAULT_SECS,
+        _ => config.boardtask_timeout_policy.default_secs,
     };
-    raw.clamp(PTY_TIMEOUT_MIN_SECS, PTY_TIMEOUT_MAX_SECS)
+    raw.clamp(
+        config.boardtask_timeout_policy.min_secs,
+        config.boardtask_timeout_policy.max_secs,
+    )
 }
 
 /// Convert the derived timeout into the `pty.send` millisecond budget.
-fn derive_pty_timeout_ms(timeout_secs: Option<i64>) -> u64 {
-    (derive_pty_timeout_secs(timeout_secs) as u64).saturating_mul(1000)
+fn derive_pty_timeout_ms(config: &AutopilotRuntimeConfig, timeout_secs: Option<i64>) -> u64 {
+    (derive_pty_timeout_secs(config, timeout_secs) as u64).saturating_mul(1000)
 }
 
 /// Smallest claimed-age (seconds) at which the watchdog may reclaim an idle
 /// slot still bound to a running task. Equals the derived task timeout plus
-/// `WATCHDOG_GRACE_SECS` so the slot always gets the full configured window
-/// before being treated as orphaned.
-fn idle_watchdog_threshold_secs(timeout_secs: Option<i64>) -> i64 {
-    derive_pty_timeout_secs(timeout_secs).saturating_add(WATCHDOG_GRACE_SECS)
+/// V3 `:watchdog_grace_secs` so the slot always gets the full configured
+/// window before being treated as orphaned.
+fn idle_watchdog_threshold_secs(config: &AutopilotRuntimeConfig, timeout_secs: Option<i64>) -> i64 {
+    derive_pty_timeout_secs(config, timeout_secs)
+        .saturating_add(config.boardtask_timeout_policy.watchdog_grace_secs)
 }
 
 /// Lease horizon Autopilot writes onto a freshly-claimed BoardTask, in
 /// seconds from now. Equals `idle_watchdog_threshold_secs(timeout_secs)` so
 /// that the smart-watchdog reclaim threshold and the claim lease move
 /// together when `BoardTask.timeout_secs` changes. The lease therefore covers
-/// the full pty.send budget plus `WATCHDOG_GRACE_SECS`, never the legacy
+/// the full pty.send budget plus V3 watchdog grace, never the legacy
 /// fixed 20-minute window. Pure helper so unit tests can pin the policy
 /// without an `AppState`.
-fn derive_board_task_lease_secs(timeout_secs: Option<i64>) -> i64 {
-    idle_watchdog_threshold_secs(timeout_secs)
+fn derive_board_task_lease_secs(config: &AutopilotRuntimeConfig, timeout_secs: Option<i64>) -> i64 {
+    idle_watchdog_threshold_secs(config, timeout_secs)
 }
 
 /// Build the base prompt body shown to a delegated worker.
@@ -264,14 +244,17 @@ async fn notify_jarvis_failure(
 
 pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     let tick_start = std::time::Instant::now();
+    let runtime_config = AutopilotRuntimeConfig::load_for_current_dir()?;
 
     // Check PTY slots for low context — mark for graceful restart
     check_slot_context_levels(state).await;
     // Restart marked slots once they become Idle (before any task dispatch)
     check_pending_compact_restarts(state).await;
 
-    // Complete stale active conversations (no messages for > 10 minutes)
-    let cutoff = (chrono::Utc::now() - chrono::TimeDelta::minutes(10)).to_rfc3339();
+    // Complete stale active conversations.
+    let cutoff = (chrono::Utc::now()
+        - chrono::TimeDelta::minutes(runtime_config.stale_conversation_minutes))
+    .to_rfc3339();
     match state.store.complete_stale_conversations(&cutoff).await {
         Ok(n) if n > 0 => info!(count = n, "Completed stale conversations"),
         Err(e) => warn!(error = %e, "Failed to complete stale conversations"),
@@ -279,13 +262,13 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     // Reap expired dynamic slots (TTL lifecycle)
-    reap_expired_dynamic_slots(state).await;
+    reap_expired_dynamic_slots(state, &runtime_config).await;
 
     // GC completed jobs older than 30 minutes
-    gc_completed_jobs(state).await;
+    gc_completed_jobs(state, &runtime_config).await;
 
     // Scale-to-zero: release idle persistent slots after 30 minutes
-    reap_idle_persistent_slots(state).await;
+    reap_idle_persistent_slots(state, &runtime_config).await;
 
     // ControlTree is the single source of truth for pause state.
     // Domain pause is permanent until user explicitly resumes.
@@ -348,7 +331,11 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     // Reaper: force-fail stale slot tasks (pending/running > 30 min)
-    match state.store.reap_stale_slot_tasks(1800).await {
+    match state
+        .store
+        .reap_stale_slot_tasks(runtime_config.slot_task_reap_stale_secs)
+        .await
+    {
         Ok(n) if n > 0 => warn!(count = n, "Reaped stale slot tasks"),
         Err(e) => warn!(error = %e, "Slot task reaper failed"),
         _ => {}
@@ -413,8 +400,10 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                     .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
                     .unwrap_or(0);
 
-                let task_timeout_secs = derive_pty_timeout_secs(rt.timeout_secs);
-                let idle_threshold = idle_watchdog_threshold_secs(rt.timeout_secs);
+                let task_timeout_secs = derive_pty_timeout_secs(&runtime_config, rt.timeout_secs);
+                let idle_threshold = idle_watchdog_threshold_secs(&runtime_config, rt.timeout_secs);
+                let watchdog_grace_secs =
+                    runtime_config.boardtask_timeout_policy.watchdog_grace_secs;
 
                 match state.pty.get_status(slot_id).await {
                     Some(info) if info.state == SessionState::Idle => {
@@ -428,7 +417,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                         warn!(
                             task_id = %rt.id, slot_id, age_secs = claimed_age,
                             timeout_secs = task_timeout_secs,
-                            grace_secs = WATCHDOG_GRACE_SECS,
+                            grace_secs = watchdog_grace_secs,
                             "Watchdog: task exceeded configured timeout/grace — slot idle, recovering"
                         );
                         let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
@@ -437,7 +426,7 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                                 task_id: rt.id.to_string(),
                                 content: format!(
                                     "🔄 **看门狗回收** — 任务超出配置 timeout/grace（claimed_age={}s, timeout={}s, grace={}s, 工位 {} 已 idle）。可能是 pty.send 在预算内自然结束、daemon 重启丢失 send()，或工位已归档结果。已 unclaim，下次 tick 重新执行。",
-                                    claimed_age, task_timeout_secs, WATCHDOG_GRACE_SECS, slot_id
+                                    claimed_age, task_timeout_secs, watchdog_grace_secs, slot_id
                                 ),
                                 note_type: Some("note".to_string()),
                                 author: Some("watchdog".to_string()),
@@ -455,12 +444,15 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
                         // the original send() can never return. Recover after
                         // a small probe window without waiting for the full
                         // task timeout.
-                        if claimed_age < WATCHDOG_MISSING_SESSION_PROBE_SECS {
+                        let missing_session_probe_secs = runtime_config
+                            .boardtask_timeout_policy
+                            .missing_session_probe_secs;
+                        if claimed_age < missing_session_probe_secs {
                             continue;
                         }
                         warn!(
                             task_id = %rt.id, slot_id, age_secs = claimed_age,
-                            probe_secs = WATCHDOG_MISSING_SESSION_PROBE_SECS,
+                            probe_secs = missing_session_probe_secs,
                             "Watchdog: no PTY session for slot — slot process gone, recovering"
                         );
                         let _ = state.store.unclaim_board_task(rt.id.as_str()).await;
@@ -475,16 +467,19 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
     }
 
     // Time-based fallback: recover running tasks stuck > 15 min (catch-all)
-    let _ = state.store.recover_stale_running_tasks(15).await;
+    let _ = state
+        .store
+        .recover_stale_running_tasks(runtime_config.recover_stale_running_minutes)
+        .await;
 
-    dispatch_board_tasks(state).await?;
+    dispatch_board_tasks_with_config(state, &runtime_config).await?;
 
     // Safety net: running tasks with no recent notes → Inbox reminder
-    check_stale_board_progress(state).await;
+    check_stale_board_progress(state, &runtime_config).await;
 
     // Phase 7: Consciousness — evaluate user state for proactive triggers
     if state.intent_analyst_enabled {
-        evaluate_user_state(state).await;
+        evaluate_user_state(state, &runtime_config).await;
     }
 
     // Record tick timing to DaemonStats
@@ -505,6 +500,14 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 /// Board task dispatch — extracted for reuse by idle-triggered dispatch.
 /// Called from autopilot_tick (60s) and event-driven (slot became idle).
 pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
+    let runtime_config = AutopilotRuntimeConfig::load_for_current_dir()?;
+    dispatch_board_tasks_with_config(state, &runtime_config).await
+}
+
+async fn dispatch_board_tasks_with_config(
+    state: &AppState,
+    runtime_config: &AutopilotRuntimeConfig,
+) -> Result<()> {
     if state.control_manager.current().global_paused {
         return Ok(());
     }
@@ -569,11 +572,8 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                     false
                 };
 
-                if should_clear_stale_dynamic_assignee(
-                    id,
-                    runtime_slot_exists,
-                    dynamic_slot_active,
-                ) {
+                if should_clear_stale_dynamic_assignee(id, runtime_slot_exists, dynamic_slot_active)
+                {
                     match state
                         .store
                         .clear_board_task_assignee(task.id.as_str(), id)
@@ -775,7 +775,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
             let fail_map = state.slot_fail_counts.lock().unwrap();
             if let Some(&(count, last_fail)) = fail_map.get(&slot_id) {
                 let now = chrono::Utc::now().timestamp();
-                if count >= 3 && now - last_fail < 1800 {
+                if count >= 3 && now - last_fail < runtime_config.slot_failure_throttle_secs {
                     debug!(slot_id = %slot_id, failures = count, "Autopilot: slot throttled, skipping");
                     continue;
                 }
@@ -796,7 +796,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                 // claim lease, pty.send budget, and smart-watchdog reclaim
                 // threshold all move together. See
                 // derive_board_task_lease_secs for the policy.
-                let lease_secs = derive_board_task_lease_secs(task.timeout_secs);
+                let lease_secs = derive_board_task_lease_secs(runtime_config, task.timeout_secs);
                 let lease =
                     (chrono::Utc::now() + chrono::TimeDelta::seconds(lease_secs)).to_rfc3339();
                 let _ = state
@@ -1011,7 +1011,8 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
         // outer dispatch_board_tasks awaits the JoinSet drain so quota /
         // KB-feedback / deploy-review / retry semantics still complete
         // before the tick returns.
-        let timeout_ms = derive_pty_timeout_ms(task.timeout_secs);
+        let timeout_ms = derive_pty_timeout_ms(runtime_config, task.timeout_secs);
+        let deploy_review_timeout_ms = runtime_config.deploy_review_timeout_ms();
         let send_state = state.clone();
         let send_task = task.clone();
         let send_slot_id = slot_id.clone();
@@ -1351,7 +1352,7 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
                         );
                         let _ = review_state
                             .pty
-                            .send(MEMORY_SLOW_SLOT_ID, &prompt, 600_000)
+                            .send(MEMORY_SLOW_SLOT_ID, &prompt, deploy_review_timeout_ms)
                             .await;
                         info!(task_id = %review_task_id, "Deploy post-mortem review dispatched to memory-slow");
                     });
@@ -1691,7 +1692,7 @@ fn parse_attribution(response: &str, kb_ids: &[String]) -> Option<Vec<(String, S
 }
 
 /// Reap expired dynamic slots: SIGTERM → 30s grace → unregister.
-async fn reap_expired_dynamic_slots(state: &AppState) {
+async fn reap_expired_dynamic_slots(state: &AppState, runtime_config: &AutopilotRuntimeConfig) {
     // Find expired active slots
     let expired = match state.store.find_expired_dynamic_slots().await {
         Ok(slots) => slots,
@@ -1724,8 +1725,12 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
         info!(count = expired.len(), "Reaped expired dynamic slots");
     }
 
-    // TTL warning: alert for slots expiring within 15 minutes
-    if let Ok(expiring) = state.store.find_expiring_dynamic_slots(900).await {
+    // TTL warning: alert for slots expiring soon.
+    if let Ok(expiring) = state
+        .store
+        .find_expiring_dynamic_slots(runtime_config.dynamic_slot_expiring_soon_secs)
+        .await
+    {
         for slot in &expiring {
             debug!(slot_id = %slot.id, expires_at = %slot.expires_at, "Dynamic slot expiring soon (15min warning)");
         }
@@ -1734,7 +1739,7 @@ async fn reap_expired_dynamic_slots(state: &AppState) {
 
 /// Safety net: running Board tasks with no recent progress notes → Inbox reminder.
 /// Runs every 5 ticks (~5 min). Deduplicates by checking existing unread inbox.
-async fn check_stale_board_progress(state: &AppState) {
+async fn check_stale_board_progress(state: &AppState, runtime_config: &AutopilotRuntimeConfig) {
     let tick = state
         .stats
         .autopilot_ticks
@@ -1787,7 +1792,7 @@ async fn check_stale_board_progress(state: &AppState) {
         let reference_time = last_note_at.or(task_start);
         if let Some(ref_time) = reference_time {
             let age_min = (chrono::Utc::now() - ref_time).num_minutes();
-            if age_min >= 30 {
+            if age_min >= runtime_config.stale_board_progress_minutes {
                 // Dedup: skip if unread inbox already has a message about this task
                 let task_prefix = &task.id.as_str()[..8.min(task.id.as_str().len())];
                 let already_notified = recent_inbox.iter().any(|m| m.content.contains(task_prefix));
@@ -1814,10 +1819,11 @@ async fn check_stale_board_progress(state: &AppState) {
 }
 
 /// GC completed/failed jobs older than 30 minutes from the in-memory store.
-async fn gc_completed_jobs(state: &AppState) {
+async fn gc_completed_jobs(state: &AppState, runtime_config: &AutopilotRuntimeConfig) {
     use missiond_core::types::AsyncJobStatus;
 
-    let cutoff = chrono::Utc::now() - chrono::Duration::minutes(30);
+    let cutoff =
+        chrono::Utc::now() - chrono::Duration::minutes(runtime_config.completed_job_gc_minutes);
     let cutoff_str = cutoff.to_rfc3339();
 
     let mut store = state.job_store.write().await;
@@ -1847,9 +1853,13 @@ async fn gc_completed_jobs(state: &AppState) {
 /// Evaluate recent user intents and trigger proactive notifications.
 /// Called from autopilot_tick when intent_analyst is enabled.
 /// Groups intents by session_id to avoid cross-session false aggregation.
-async fn evaluate_user_state(state: &AppState) {
+async fn evaluate_user_state(state: &AppState, runtime_config: &AutopilotRuntimeConfig) {
     // 1. Pull recent intents (last 30 min, global)
-    let intents = match state.store.get_recent_intents(1800).await {
+    let intents = match state
+        .store
+        .get_recent_intents(runtime_config.recent_intents_window_secs)
+        .await
+    {
         Ok(v) => v,
         Err(e) => {
             warn!(error = %e, "evaluate_user_state: failed to get recent intents");
@@ -1881,8 +1891,15 @@ async fn evaluate_user_state(state: &AppState) {
             .copied()
             .collect();
         let ck_stuck = format!("user_stuck:{}", session_id);
-        if stuck.len() >= 3 && !in_cooldown(state, &ck_stuck, 1800, now) {
-            let summary = build_stuck_summary(&stuck);
+        if stuck.len() >= 3
+            && !in_cooldown(
+                state,
+                &ck_stuck,
+                runtime_config.user_stuck_cooldown_secs,
+                now,
+            )
+        {
+            let summary = build_stuck_summary(&stuck, runtime_config.recent_intents_window_secs);
             trigger_jarvis_push(state, "user_stuck", &summary).await;
             set_cooldown(state, &ck_stuck, now);
         }
@@ -1893,7 +1910,12 @@ async fn evaluate_user_state(state: &AppState) {
             .find(|i| i.intent_type == "architecture_explore" && i.confidence > 0.8)
         {
             let ck = format!("direction_shift:{}", session_id);
-            if !in_cooldown(state, &ck, 3600, now) {
+            if !in_cooldown(
+                state,
+                &ck,
+                runtime_config.direction_shift_cooldown_secs,
+                now,
+            ) {
                 trigger_inbox(
                     state,
                     "direction_shift",
@@ -1914,7 +1936,12 @@ async fn evaluate_user_state(state: &AppState) {
             .count();
         if creep_count >= 2 {
             let ck = format!("scope_creep:{}", session_id);
-            if !in_cooldown(state, &ck, 3600, now) {
+            if !in_cooldown(
+                state,
+                &ck,
+                runtime_config.direction_shift_cooldown_secs,
+                now,
+            ) {
                 let has_running = state
                     .store
                     .list_running_autopilot_tasks()
@@ -1999,14 +2026,19 @@ fn set_cooldown(state: &AppState, key: &str, now: i64) {
     guard.insert(key.to_string(), now);
 }
 
-fn build_stuck_summary(intents: &[&missiond_core::types::UserIntent]) -> String {
+fn build_stuck_summary(
+    intents: &[&missiond_core::types::UserIntent],
+    recent_window_secs: i64,
+) -> String {
     let details: Vec<String> = intents
         .iter()
         .filter_map(|i| i.summary.as_deref())
         .map(|s| format!("- {}", s))
         .collect();
+    let window_minutes = (recent_window_secs / 60).max(1);
     format!(
-        "用户在最近 30 分钟内连续 {} 次卡在同一问题上：\n{}\n\n建议：检查是否需要换一种方法，或提供更多上下文帮助用户。",
+        "用户在最近 {} 分钟内连续 {} 次卡在同一问题上：\n{}\n\n建议：检查是否需要换一种方法，或提供更多上下文帮助用户。",
+        window_minutes,
         intents.len(),
         details.join("\n"),
     )
@@ -2057,7 +2089,7 @@ mod tests {
             created_at: String::new(),
         };
         let refs = vec![&i1, &i2, &i3];
-        let summary = build_stuck_summary(&refs);
+        let summary = build_stuck_summary(&refs, 1800);
         assert!(summary.contains("连续 3 次"));
         assert!(summary.contains("CORS"));
         assert!(summary.contains("第三次"));
@@ -2078,81 +2110,111 @@ mod tests {
             created_at: String::new(),
         };
         let refs = vec![&i1];
-        let summary = build_stuck_summary(&refs);
+        let summary = build_stuck_summary(&refs, 1800);
         assert!(summary.contains("连续 1 次"));
     }
 
     // ── PTY timeout / watchdog policy — pure helpers, no AppState ───────
 
+    fn runtime_config() -> AutopilotRuntimeConfig {
+        AutopilotRuntimeConfig::default()
+    }
+
     #[test]
     fn pty_timeout_default_when_field_absent() {
-        assert_eq!(derive_pty_timeout_secs(None), PTY_TIMEOUT_DEFAULT_SECS);
+        let cfg = runtime_config();
         assert_eq!(
-            derive_pty_timeout_ms(None),
-            (PTY_TIMEOUT_DEFAULT_SECS as u64) * 1000
+            derive_pty_timeout_secs(&cfg, None),
+            cfg.boardtask_timeout_policy.default_secs
+        );
+        assert_eq!(
+            derive_pty_timeout_ms(&cfg, None),
+            (cfg.boardtask_timeout_policy.default_secs as u64) * 1000
         );
     }
 
     #[test]
     fn pty_timeout_default_for_invalid_values() {
+        let cfg = runtime_config();
         // Zero and negative values are treated as "absent" and fall back to
         // the default — mirrors task_delegate's safe-default behaviour.
-        assert_eq!(derive_pty_timeout_secs(Some(0)), PTY_TIMEOUT_DEFAULT_SECS);
         assert_eq!(
-            derive_pty_timeout_secs(Some(-300)),
-            PTY_TIMEOUT_DEFAULT_SECS
+            derive_pty_timeout_secs(&cfg, Some(0)),
+            cfg.boardtask_timeout_policy.default_secs
+        );
+        assert_eq!(
+            derive_pty_timeout_secs(&cfg, Some(-300)),
+            cfg.boardtask_timeout_policy.default_secs
         );
     }
 
     #[test]
     fn pty_timeout_clamps_low_values() {
-        // Anything under PTY_TIMEOUT_MIN_SECS rounds up to the floor so a
+        let cfg = runtime_config();
+        // Anything under the configured floor rounds up so a
         // mis-configured 5-second task still gets a usable PTY budget.
-        assert_eq!(derive_pty_timeout_secs(Some(5)), PTY_TIMEOUT_MIN_SECS);
-        assert_eq!(derive_pty_timeout_secs(Some(59)), PTY_TIMEOUT_MIN_SECS);
-        assert_eq!(derive_pty_timeout_secs(Some(60)), 60);
+        assert_eq!(
+            derive_pty_timeout_secs(&cfg, Some(5)),
+            cfg.boardtask_timeout_policy.min_secs
+        );
+        assert_eq!(
+            derive_pty_timeout_secs(&cfg, Some(59)),
+            cfg.boardtask_timeout_policy.min_secs
+        );
+        assert_eq!(derive_pty_timeout_secs(&cfg, Some(60)), 60);
     }
 
     #[test]
     fn pty_timeout_clamps_high_values() {
+        let cfg = runtime_config();
         // The cap mirrors task_delegate::MAX_TIMEOUT_SECS so neither side
         // can drift past the other.
-        assert_eq!(derive_pty_timeout_secs(Some(7200)), PTY_TIMEOUT_MAX_SECS);
-        assert_eq!(derive_pty_timeout_secs(Some(86_400)), PTY_TIMEOUT_MAX_SECS);
+        assert_eq!(
+            derive_pty_timeout_secs(&cfg, Some(7200)),
+            cfg.boardtask_timeout_policy.max_secs
+        );
+        assert_eq!(
+            derive_pty_timeout_secs(&cfg, Some(86_400)),
+            cfg.boardtask_timeout_policy.max_secs
+        );
     }
 
     #[test]
     fn pty_timeout_in_range_passes_through() {
+        let cfg = runtime_config();
         // 55-minute Opus task — the wave31 stability bug case. Must not be
         // shrunk to 10 minutes anywhere along the path.
-        assert_eq!(derive_pty_timeout_secs(Some(3300)), 3300);
-        assert_eq!(derive_pty_timeout_ms(Some(3300)), 3_300_000);
+        assert_eq!(derive_pty_timeout_secs(&cfg, Some(3300)), 3300);
+        assert_eq!(derive_pty_timeout_ms(&cfg, Some(3300)), 3_300_000);
     }
 
     #[test]
     fn idle_watchdog_threshold_adds_grace_to_task_timeout() {
+        let cfg = runtime_config();
         // Default budget + grace.
         assert_eq!(
-            idle_watchdog_threshold_secs(None),
-            PTY_TIMEOUT_DEFAULT_SECS + WATCHDOG_GRACE_SECS
+            idle_watchdog_threshold_secs(&cfg, None),
+            cfg.boardtask_timeout_policy.default_secs
+                + cfg.boardtask_timeout_policy.watchdog_grace_secs
         );
         // Explicit 55-minute task → 3300 + 120 = 3420.
-        assert_eq!(idle_watchdog_threshold_secs(Some(3300)), 3420);
+        assert_eq!(idle_watchdog_threshold_secs(&cfg, Some(3300)), 3420);
     }
 
     #[test]
     fn idle_watchdog_threshold_strictly_above_old_120s_floor() {
+        let cfg = runtime_config();
         // Regression guard for wave31: the legacy 120s floor must never
         // re-emerge for any in-range task timeout.
         for secs in [
-            PTY_TIMEOUT_MIN_SECS,
+            cfg.boardtask_timeout_policy.min_secs,
             300,
             900,
             1800,
             3300,
-            PTY_TIMEOUT_MAX_SECS,
+            cfg.boardtask_timeout_policy.max_secs,
         ] {
-            let threshold = idle_watchdog_threshold_secs(Some(secs));
+            let threshold = idle_watchdog_threshold_secs(&cfg, Some(secs));
             assert!(
                 threshold > 120,
                 "threshold {} for timeout {}s must exceed legacy 120s",
@@ -2164,9 +2226,10 @@ mod tests {
 
     #[test]
     fn idle_watchdog_threshold_does_not_reclaim_within_budget() {
+        let cfg = runtime_config();
         // claimed_age < idle_threshold ⇒ watchdog must not reclaim.
         let timeout = Some(3300);
-        let threshold = idle_watchdog_threshold_secs(timeout);
+        let threshold = idle_watchdog_threshold_secs(&cfg, timeout);
         // Within the budget — reclaim forbidden.
         assert!(900 < threshold);
         assert!(3300 < threshold);
@@ -2178,53 +2241,63 @@ mod tests {
 
     #[test]
     fn board_task_lease_default_when_field_absent() {
+        let cfg = runtime_config();
         // Default budget + grace = lease, mirroring the watchdog threshold
         // so the watchdog never reclaims while the lease is still valid.
         assert_eq!(
-            derive_board_task_lease_secs(None),
-            PTY_TIMEOUT_DEFAULT_SECS + WATCHDOG_GRACE_SECS
+            derive_board_task_lease_secs(&cfg, None),
+            cfg.boardtask_timeout_policy.default_secs
+                + cfg.boardtask_timeout_policy.watchdog_grace_secs
         );
     }
 
     #[test]
     fn board_task_lease_default_for_invalid_values() {
+        let cfg = runtime_config();
         // Zero / negative timeouts fall back to the default budget; lease
         // therefore matches the default watchdog threshold.
-        let expected = PTY_TIMEOUT_DEFAULT_SECS + WATCHDOG_GRACE_SECS;
-        assert_eq!(derive_board_task_lease_secs(Some(0)), expected);
-        assert_eq!(derive_board_task_lease_secs(Some(-300)), expected);
+        let expected = cfg.boardtask_timeout_policy.default_secs
+            + cfg.boardtask_timeout_policy.watchdog_grace_secs;
+        assert_eq!(derive_board_task_lease_secs(&cfg, Some(0)), expected);
+        assert_eq!(derive_board_task_lease_secs(&cfg, Some(-300)), expected);
     }
 
     #[test]
     fn board_task_lease_explicit_3300_is_3420() {
+        let cfg = runtime_config();
         // Wave31 / wave50 case: a 55-minute Opus task gets a 3300s pty
         // budget and a 3420s lease (3300 + 120s grace). The legacy fixed
         // 20-minute lease would have been 1200s — too short.
-        assert_eq!(derive_board_task_lease_secs(Some(3300)), 3420);
+        assert_eq!(derive_board_task_lease_secs(&cfg, Some(3300)), 3420);
     }
 
     #[test]
     fn board_task_lease_clamps_high_values() {
-        // PTY budget caps at PTY_TIMEOUT_MAX_SECS, so the lease caps at
-        // PTY_TIMEOUT_MAX_SECS + WATCHDOG_GRACE_SECS.
+        let cfg = runtime_config();
+        // PTY budget caps at the configured max, so the lease caps at
+        // max + configured watchdog grace.
         assert_eq!(
-            derive_board_task_lease_secs(Some(86_400)),
-            PTY_TIMEOUT_MAX_SECS + WATCHDOG_GRACE_SECS
+            derive_board_task_lease_secs(&cfg, Some(86_400)),
+            cfg.boardtask_timeout_policy.max_secs
+                + cfg.boardtask_timeout_policy.watchdog_grace_secs
         );
     }
 
     #[test]
     fn board_task_lease_clamps_low_values() {
-        // Sub-floor timeouts round up to PTY_TIMEOUT_MIN_SECS, so the lease
-        // is PTY_TIMEOUT_MIN_SECS + WATCHDOG_GRACE_SECS = 180s.
+        let cfg = runtime_config();
+        // Sub-floor timeouts round up to the configured min, so the lease
+        // is min + configured watchdog grace.
         assert_eq!(
-            derive_board_task_lease_secs(Some(5)),
-            PTY_TIMEOUT_MIN_SECS + WATCHDOG_GRACE_SECS
+            derive_board_task_lease_secs(&cfg, Some(5)),
+            cfg.boardtask_timeout_policy.min_secs
+                + cfg.boardtask_timeout_policy.watchdog_grace_secs
         );
     }
 
     #[test]
     fn board_task_lease_matches_idle_watchdog_threshold() {
+        let cfg = runtime_config();
         // Single source of truth: the lease MUST equal the smart-watchdog
         // idle-recovery threshold for every supported timeout shape, so
         // the watchdog cannot reclaim a slot whose lease is still valid.
@@ -2240,8 +2313,8 @@ mod tests {
             Some(86_400),
         ] {
             assert_eq!(
-                derive_board_task_lease_secs(t),
-                idle_watchdog_threshold_secs(t),
+                derive_board_task_lease_secs(&cfg, t),
+                idle_watchdog_threshold_secs(&cfg, t),
                 "lease must equal watchdog threshold for {t:?}"
             );
         }
@@ -2264,13 +2337,14 @@ mod tests {
 
     #[test]
     fn missing_session_probe_independent_of_task_timeout() {
+        let cfg = runtime_config();
         // Even a 2-hour task must let the no-PTY-session branch recover
         // after the small probe window — a missing process can never
         // resume on its own.
-        assert_eq!(WATCHDOG_MISSING_SESSION_PROBE_SECS, 120);
+        assert_eq!(cfg.boardtask_timeout_policy.missing_session_probe_secs, 120);
         assert!(
-            WATCHDOG_MISSING_SESSION_PROBE_SECS
-                < idle_watchdog_threshold_secs(Some(PTY_TIMEOUT_MAX_SECS))
+            cfg.boardtask_timeout_policy.missing_session_probe_secs
+                < idle_watchdog_threshold_secs(&cfg, Some(cfg.boardtask_timeout_policy.max_secs))
         );
     }
 
@@ -2480,10 +2554,7 @@ mod tests {
         );
         drop(g1);
         let g3 = OwnedSlotDispatchGuard::try_acquire(&dispatch, "slot-coder");
-        assert!(
-            g3.is_some(),
-            "after drop, same slot must be re-acquirable"
-        );
+        assert!(g3.is_some(), "after drop, same slot must be re-acquirable");
     }
 
     #[test]
@@ -2540,9 +2611,7 @@ mod tests {
 /// Scale-to-zero: release persistent slots that have been idle > IDLE_TIMEOUT.
 /// The slot will be auto-respawned by ClaudeCodeSlotMgr::execute_persistent
 /// when the next task arrives (lazy-spawn pattern).
-async fn reap_idle_persistent_slots(state: &AppState) {
-    const IDLE_TIMEOUT_SECS: u64 = 30 * 60; // 30 minutes
-
+async fn reap_idle_persistent_slots(state: &AppState, runtime_config: &AutopilotRuntimeConfig) {
     let slots = state.mission.list_slots();
     for slot in &slots {
         if !slot.config.is_persistent() {
@@ -2574,7 +2643,7 @@ async fn reap_idle_persistent_slots(state: &AppState) {
             }
         };
 
-        if idle_secs >= IDLE_TIMEOUT_SECS {
+        if idle_secs >= runtime_config.idle_persistent_slot_secs {
             info!(
                 slot_id,
                 idle_mins = idle_secs / 60,

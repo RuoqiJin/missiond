@@ -15,9 +15,10 @@ Checks the V3 workstation-config Lisp/code isomorphism contract:
   - Autopilot owns pty.send, close state, timeout budget, and dispatch guard.
   - Autopilot starts pty.send concurrently across different slots within a tick.
   - Autopilot clears stale slot-dyn-* assignee pins after daemon restart.
-  - mission_cc_swarm pty.send timeout is projected from timeout-policy claudecode-swarm.
-  - mission_pty_send waitForResponse timeout is projected from timeout-policy pty-send-blocking.
-`;
+	  - mission_cc_swarm pty.send timeout is projected from timeout-policy claudecode-swarm.
+	  - mission_pty_send waitForResponse timeout is projected from timeout-policy pty-send-blocking.
+	  - Autopilot tick/dispatch/consciousness windows are projected from autopilot-policy.
+	`;
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
@@ -111,9 +112,14 @@ function checkFiles(root, files) {
     'Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot',
     'Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget',
     'Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold',
-    'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
-    'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
-    'timeout-policy boardtask-dispatch',
+	    'mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm',
+	    'mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking',
+	    'autopilot-policy',
+	    'AutopilotRuntimeConfig MUST load autopilot-policy',
+	    'Autopilot tick windows',
+	    'Autopilot dispatch windows',
+	    'Autopilot consciousness windows',
+	    'timeout-policy boardtask-dispatch',
     'timeout-policy claudecode-swarm',
     'timeout-policy pty-send-blocking',
     'ttl-policy dynamic-slot',
@@ -177,13 +183,16 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
-    'pub(crate) struct WorkstationRuntimeConfig',
-    'pub(crate) struct TimeoutPolicy',
+	    'pub(crate) struct WorkstationRuntimeConfig',
+	    'pub(crate) struct AutopilotRuntimeConfig',
+	    'pub(crate) struct TimeoutPolicy',
     'pub(crate) struct SlotTtlPolicy',
     'pub(crate) struct SimpleTimeoutPolicy',
     'pub(crate) fn load_for_project_root',
-    'parse_workstation_config',
-    'find_form(source, "workstation-config")',
+	    'parse_workstation_config',
+	    'parse_autopilot_policy',
+	    'find_form(source, "workstation-config")',
+	    'find_form(source, "autopilot-policy")',
     'timeout-policy boardtask-dispatch',
     'timeout-policy claudecode-swarm',
     'ttl-policy dynamic-slot',
@@ -202,15 +211,20 @@ function checkFiles(root, files) {
     'DEFAULT_CC_SWARM_TIMEOUT_SECS',
     'MIN_CC_SWARM_TIMEOUT_SECS',
     'MAX_CC_SWARM_TIMEOUT_SECS',
-    'DEFAULT_PTY_SEND_TIMEOUT_SECS',
-    'MIN_PTY_SEND_TIMEOUT_SECS',
-    'MAX_PTY_SEND_TIMEOUT_SECS',
-    'default_slot_extend_secs',
-    'max_slot_extend_secs',
-    'clamp_cc_swarm_timeout_ms',
-    'clamp_pty_send_timeout_ms',
-    'MissingBlueprint',
-  ]);
+	    'DEFAULT_PTY_SEND_TIMEOUT_SECS',
+	    'MIN_PTY_SEND_TIMEOUT_SECS',
+	    'MAX_PTY_SEND_TIMEOUT_SECS',
+	    'DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS',
+	    'DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS',
+	    'DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS',
+	    'DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS',
+	    'default_slot_extend_secs',
+	    'max_slot_extend_secs',
+	    'clamp_cc_swarm_timeout_ms',
+	    'clamp_pty_send_timeout_ms',
+	    'deploy_review_timeout_ms',
+	    'MissingBlueprint',
+	  ]);
 
   requireAll(diagnostics, files.slotEnv, sources.slotEnv, [
     'MISSION_IPC_ENDPOINT',
@@ -234,12 +248,18 @@ function checkFiles(root, files) {
     'wait_for_idle',
   ]);
 
-  requireAll(diagnostics, files.autopilot, sources.autopilot, [
-    'const PTY_TIMEOUT_DEFAULT_SECS: i64 = 1800',
-    'const PTY_TIMEOUT_MIN_SECS: i64 = 60',
-    'const PTY_TIMEOUT_MAX_SECS: i64 = 7200',
-    'const WATCHDOG_GRACE_SECS: i64 = 120',
-    'fn derive_pty_timeout_secs',
+	  requireAll(diagnostics, files.autopilot, sources.autopilot, [
+	    'AutopilotRuntimeConfig::load_for_current_dir',
+	    'dispatch_board_tasks_with_config',
+	    'runtime_config.slot_task_reap_stale_secs',
+	    'runtime_config.recover_stale_running_minutes',
+	    'runtime_config.slot_failure_throttle_secs',
+	    'runtime_config.deploy_review_timeout_ms()',
+	    'runtime_config.recent_intents_window_secs',
+	    'runtime_config.user_stuck_cooldown_secs',
+	    'runtime_config.direction_shift_cooldown_secs',
+	    'runtime_config.idle_persistent_slot_secs',
+	    'fn derive_pty_timeout_secs',
     'fn idle_watchdog_threshold_secs',
     'fn derive_board_task_lease_secs',
     'fn build_base_prompt',
@@ -348,13 +368,26 @@ function buildFixture() {
        "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold"
-       "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"
-       "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking"
-       "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
-       "BoardStore::clear_board_task_assignee"])
-    (execution-ownership delegated-boardtask
-      :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
-      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"
+	       "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm"
+	       "mission_pty_send waitForResponse budget MUST project from workstation-config timeout-policy pty-send-blocking"
+	       "Restart recovery MUST clear stale slot-dyn-* BoardTask assignee pins"
+	       "BoardStore::clear_board_task_assignee"])
+	  (autopilot-policy
+	    :slot-task-reap-stale-secs 1800
+	    :recover-stale-running-minutes 15
+	    :slot-failure-throttle-secs 1800
+	    :deploy-review-timeout-secs 600
+	    :recent-intents-window-secs 1800
+	    :user-stuck-cooldown-secs 1800
+	    :direction-shift-cooldown-secs 3600
+	    :invariants
+	      ["AutopilotRuntimeConfig MUST load autopilot-policy"
+	       "Autopilot tick windows"
+	       "Autopilot dispatch windows"
+	       "Autopilot consciousness windows"])
+	    (execution-ownership delegated-boardtask
+	      :prompt-owner "mission_task_delegate auto-provision (compute_slot/spawner) MAY warm a dynamic slot but MUST NOT send the task objective"
+	      :dispatch-guard "The per-slot dispatch guard MUST be held across the entire state.pty.send call"
       :concurrent-slot-dispatch "Autopilot dispatch_board_tasks MUST start state.pty.send work concurrently across different slots within a single dispatch tick. The implementation MUST hand each ready BoardTask's send + post-send tail to a tokio::task::JoinSet task with an OwnedSlotDispatchGuard moved in."))
   (implementation-map
     (surface workstation-config
@@ -399,17 +432,20 @@ build_compute_slot_create_args();
 json!({ "suppress_initial_prompt": true });
 create_args["model_profile"] = v;
 // starts idle and Autopilot remains the sole task-prompt owner`);
-  writeFixture(root, DEFAULT_FILES.v3Runtime, `
-pub(crate) struct WorkstationRuntimeConfig {}
-pub(crate) struct TimeoutPolicy {}
-pub(crate) struct SlotTtlPolicy {}
-pub(crate) struct SimpleTimeoutPolicy {}
-pub(crate) fn load_for_project_root() {}
-fn parse_workstation_config() {}
-fn x() {
-  find_form(source, "workstation-config");
-  let a = "timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms MissingBlueprint";
-}`);
+	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
+	pub(crate) struct WorkstationRuntimeConfig {}
+	pub(crate) struct AutopilotRuntimeConfig {}
+	pub(crate) struct TimeoutPolicy {}
+	pub(crate) struct SlotTtlPolicy {}
+	pub(crate) struct SimpleTimeoutPolicy {}
+	pub(crate) fn load_for_project_root() {}
+	fn parse_workstation_config() {}
+	fn parse_autopilot_policy() {}
+	fn x() {
+	  find_form(source, "workstation-config");
+	  find_form(source, "autopilot-policy");
+	  let a = "timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking ttl-policy dynamic-slot slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms deploy_review_timeout_ms MissingBlueprint";
+	}`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
 fn build_slot_tracking_env() {}
@@ -421,12 +457,18 @@ options.extra_env.extend(tracking_env);
 let initial_prompt = options.initial_prompt.take();
 send_fire_and_forget();
 let wait_for_idle = true;`);
-  writeFixture(root, DEFAULT_FILES.autopilot, `
-const PTY_TIMEOUT_DEFAULT_SECS: i64 = 1800;
-const PTY_TIMEOUT_MIN_SECS: i64 = 60;
-const PTY_TIMEOUT_MAX_SECS: i64 = 7200;
-const WATCHDOG_GRACE_SECS: i64 = 120;
-fn derive_pty_timeout_secs() {}
+	  writeFixture(root, DEFAULT_FILES.autopilot, `
+	AutopilotRuntimeConfig::load_for_current_dir();
+	dispatch_board_tasks_with_config();
+	runtime_config.slot_task_reap_stale_secs;
+	runtime_config.recover_stale_running_minutes;
+	runtime_config.slot_failure_throttle_secs;
+	runtime_config.deploy_review_timeout_ms();
+	runtime_config.recent_intents_window_secs;
+	runtime_config.user_stuck_cooldown_secs;
+	runtime_config.direction_shift_cooldown_secs;
+	runtime_config.idle_persistent_slot_secs;
+	fn derive_pty_timeout_secs() {}
 fn idle_watchdog_threshold_secs() {}
 fn derive_board_task_lease_secs() {}
 fn build_base_prompt() {}

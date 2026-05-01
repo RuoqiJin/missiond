@@ -74,6 +74,18 @@ pub(crate) const DEFAULT_TIMELINE_QUERY_LIMIT: i64 = 50;
 pub(crate) const MAX_TIMELINE_QUERY_LIMIT: i64 = 200;
 pub(crate) const DEFAULT_TIMELINE_SEARCH_LIMIT: i64 = 20;
 pub(crate) const MAX_TIMELINE_SEARCH_LIMIT: i64 = 100;
+pub(crate) const DEFAULT_AUTOPILOT_STALE_CONVERSATION_MINUTES: i64 = 10;
+pub(crate) const DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS: i64 = 1800;
+pub(crate) const DEFAULT_AUTOPILOT_RECOVER_STALE_RUNNING_MINUTES: i64 = 15;
+pub(crate) const DEFAULT_AUTOPILOT_SLOT_FAILURE_THROTTLE_SECS: i64 = 1800;
+pub(crate) const DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS: u64 = 600;
+pub(crate) const DEFAULT_AUTOPILOT_DYNAMIC_SLOT_EXPIRING_SOON_SECS: i64 = 900;
+pub(crate) const DEFAULT_AUTOPILOT_STALE_BOARD_PROGRESS_MINUTES: i64 = 30;
+pub(crate) const DEFAULT_AUTOPILOT_COMPLETED_JOB_GC_MINUTES: i64 = 30;
+pub(crate) const DEFAULT_AUTOPILOT_IDLE_PERSISTENT_SLOT_SECS: u64 = 30 * 60;
+pub(crate) const DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS: i64 = 1800;
+pub(crate) const DEFAULT_AUTOPILOT_USER_STUCK_COOLDOWN_SECS: i64 = 1800;
+pub(crate) const DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS: i64 = 3600;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct WorkstationRuntimeConfig {
@@ -162,6 +174,23 @@ pub(crate) struct ConversationIngestionRuntimeConfig {
     pub timeline_search_max_limit: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AutopilotRuntimeConfig {
+    pub boardtask_timeout_policy: TimeoutPolicy,
+    pub stale_conversation_minutes: i64,
+    pub slot_task_reap_stale_secs: i64,
+    pub recover_stale_running_minutes: i64,
+    pub slot_failure_throttle_secs: i64,
+    pub deploy_review_timeout_secs: u64,
+    pub dynamic_slot_expiring_soon_secs: i64,
+    pub stale_board_progress_minutes: i64,
+    pub completed_job_gc_minutes: i64,
+    pub idle_persistent_slot_secs: u64,
+    pub recent_intents_window_secs: i64,
+    pub user_stuck_cooldown_secs: i64,
+    pub direction_shift_cooldown_secs: i64,
+}
+
 #[derive(Debug)]
 pub(crate) enum BlueprintConfigError {
     MissingBlueprint(PathBuf),
@@ -191,6 +220,8 @@ impl fmt::Display for BlueprintConfigError {
         }
     }
 }
+
+impl std::error::Error for BlueprintConfigError {}
 
 impl Default for TimeoutPolicy {
     fn default() -> Self {
@@ -328,6 +359,26 @@ impl Default for ConversationIngestionRuntimeConfig {
             timeline_query_max_limit: MAX_TIMELINE_QUERY_LIMIT,
             timeline_search_default_limit: DEFAULT_TIMELINE_SEARCH_LIMIT,
             timeline_search_max_limit: MAX_TIMELINE_SEARCH_LIMIT,
+        }
+    }
+}
+
+impl Default for AutopilotRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            boardtask_timeout_policy: TimeoutPolicy::default(),
+            stale_conversation_minutes: DEFAULT_AUTOPILOT_STALE_CONVERSATION_MINUTES,
+            slot_task_reap_stale_secs: DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS,
+            recover_stale_running_minutes: DEFAULT_AUTOPILOT_RECOVER_STALE_RUNNING_MINUTES,
+            slot_failure_throttle_secs: DEFAULT_AUTOPILOT_SLOT_FAILURE_THROTTLE_SECS,
+            deploy_review_timeout_secs: DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS,
+            dynamic_slot_expiring_soon_secs: DEFAULT_AUTOPILOT_DYNAMIC_SLOT_EXPIRING_SOON_SECS,
+            stale_board_progress_minutes: DEFAULT_AUTOPILOT_STALE_BOARD_PROGRESS_MINUTES,
+            completed_job_gc_minutes: DEFAULT_AUTOPILOT_COMPLETED_JOB_GC_MINUTES,
+            idle_persistent_slot_secs: DEFAULT_AUTOPILOT_IDLE_PERSISTENT_SLOT_SECS,
+            recent_intents_window_secs: DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS,
+            user_stuck_cooldown_secs: DEFAULT_AUTOPILOT_USER_STUCK_COOLDOWN_SECS,
+            direction_shift_cooldown_secs: DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS,
         }
     }
 }
@@ -650,6 +701,44 @@ impl ConversationIngestionRuntimeConfig {
         requested
             .unwrap_or(self.timeline_search_default_limit)
             .min(self.timeline_search_max_limit)
+    }
+}
+
+impl AutopilotRuntimeConfig {
+    pub(crate) fn load_for_current_dir() -> Result<Self, BlueprintConfigError> {
+        let cwd = std::env::current_dir().map_err(|err| BlueprintConfigError::Read {
+            path: PathBuf::from("."),
+            message: err.to_string(),
+        })?;
+        let root = nearest_missiond_root(&cwd);
+        Self::load_for_project_root(Some(root.to_string_lossy().as_ref()))
+    }
+
+    pub(crate) fn load_for_project_root(
+        project_root: Option<&str>,
+    ) -> Result<Self, BlueprintConfigError> {
+        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
+            return Ok(Self::default());
+        };
+        let root = Path::new(root);
+        let missiond_dir = root.join(".missiond");
+        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
+        if !blueprint_path.exists() {
+            if missiond_dir.exists() {
+                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
+            }
+            return Ok(Self::default());
+        }
+        let source =
+            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+                path: blueprint_path.clone(),
+                message: err.to_string(),
+            })?;
+        parse_autopilot_policy(&source)
+    }
+
+    pub(crate) fn deploy_review_timeout_ms(&self) -> u64 {
+        self.deploy_review_timeout_secs.saturating_mul(1000)
     }
 }
 
@@ -1001,6 +1090,50 @@ pub(crate) fn parse_conversation_ingestion_policy(
     Ok(cfg)
 }
 
+pub(crate) fn parse_autopilot_policy(
+    source: &str,
+) -> Result<AutopilotRuntimeConfig, BlueprintConfigError> {
+    let workstation = parse_workstation_config(source)?;
+    let block = find_form(source, "autopilot-policy")
+        .ok_or_else(|| BlueprintConfigError::Parse("missing (autopilot-policy ...)".into()))?;
+    let tokens = tokenize_lisp(&block);
+    let cfg = AutopilotRuntimeConfig {
+        boardtask_timeout_policy: workstation.timeout_policy,
+        stale_conversation_minutes: int_keyword(&tokens, ":stale-conversation-minutes")?,
+        slot_task_reap_stale_secs: int_keyword(&tokens, ":slot-task-reap-stale-secs")?,
+        recover_stale_running_minutes: int_keyword(&tokens, ":recover-stale-running-minutes")?,
+        slot_failure_throttle_secs: int_keyword(&tokens, ":slot-failure-throttle-secs")?,
+        deploy_review_timeout_secs: u64_keyword(&tokens, ":deploy-review-timeout-secs")?,
+        dynamic_slot_expiring_soon_secs: int_keyword(&tokens, ":dynamic-slot-expiring-soon-secs")?,
+        stale_board_progress_minutes: int_keyword(&tokens, ":stale-board-progress-minutes")?,
+        completed_job_gc_minutes: int_keyword(&tokens, ":completed-job-gc-minutes")?,
+        idle_persistent_slot_secs: u64_keyword(&tokens, ":idle-persistent-slot-secs")?,
+        recent_intents_window_secs: int_keyword(&tokens, ":recent-intents-window-secs")?,
+        user_stuck_cooldown_secs: int_keyword(&tokens, ":user-stuck-cooldown-secs")?,
+        direction_shift_cooldown_secs: int_keyword(&tokens, ":direction-shift-cooldown-secs")?,
+    };
+    if [
+        cfg.stale_conversation_minutes,
+        cfg.slot_task_reap_stale_secs,
+        cfg.recover_stale_running_minutes,
+        cfg.slot_failure_throttle_secs,
+        cfg.dynamic_slot_expiring_soon_secs,
+        cfg.stale_board_progress_minutes,
+        cfg.completed_job_gc_minutes,
+        cfg.recent_intents_window_secs,
+        cfg.user_stuck_cooldown_secs,
+        cfg.direction_shift_cooldown_secs,
+    ]
+    .iter()
+    .any(|value| *value <= 0)
+    {
+        return Err(BlueprintConfigError::Parse(
+            "autopilot-policy numeric windows must be positive".into(),
+        ));
+    }
+    Ok(cfg)
+}
+
 fn string_list_keyword(tokens: &[String], key: &str) -> Result<Vec<String>, BlueprintConfigError> {
     let Some(pos) = tokens.iter().position(|token| token == key) else {
         return Err(BlueprintConfigError::Parse(format!("missing {}", key)));
@@ -1289,7 +1422,20 @@ mod tests {
     :timeline-query-default-limit 50
     :timeline-query-max-limit 200
     :timeline-search-default-limit 20
-    :timeline-search-max-limit 100))
+    :timeline-search-max-limit 100)
+  (autopilot-policy
+    :stale-conversation-minutes 10
+    :slot-task-reap-stale-secs 1800
+    :recover-stale-running-minutes 15
+    :slot-failure-throttle-secs 1800
+    :deploy-review-timeout-secs 600
+    :dynamic-slot-expiring-soon-secs 900
+    :stale-board-progress-minutes 30
+    :completed-job-gc-minutes 30
+    :idle-persistent-slot-secs 1800
+    :recent-intents-window-secs 1800
+    :user-stuck-cooldown-secs 1800
+    :direction-shift-cooldown-secs 3600))
 "#;
 
     #[test]
@@ -1355,6 +1501,33 @@ mod tests {
         assert_eq!(cfg.slot_task_default_timeout_secs, 3600);
         assert_eq!(cfg.parallel_slot_default_parallelism, 3);
         assert_eq!(cfg.parallel_slot_default_timeout_secs, 1800);
+    }
+
+    #[test]
+    fn parses_autopilot_policy() {
+        let cfg = parse_autopilot_policy(BLUEPRINT).expect("parse autopilot policy");
+        assert_eq!(cfg.boardtask_timeout_policy.default_secs, 1800);
+        assert_eq!(cfg.boardtask_timeout_policy.watchdog_grace_secs, 120);
+        assert_eq!(cfg.stale_conversation_minutes, 10);
+        assert_eq!(cfg.slot_task_reap_stale_secs, 1800);
+        assert_eq!(cfg.recover_stale_running_minutes, 15);
+        assert_eq!(cfg.slot_failure_throttle_secs, 1800);
+        assert_eq!(cfg.deploy_review_timeout_secs, 600);
+        assert_eq!(cfg.deploy_review_timeout_ms(), 600_000);
+        assert_eq!(cfg.dynamic_slot_expiring_soon_secs, 900);
+        assert_eq!(cfg.stale_board_progress_minutes, 30);
+        assert_eq!(cfg.completed_job_gc_minutes, 30);
+        assert_eq!(cfg.idle_persistent_slot_secs, 1800);
+        assert_eq!(cfg.recent_intents_window_secs, 1800);
+        assert_eq!(cfg.user_stuck_cooldown_secs, 1800);
+        assert_eq!(cfg.direction_shift_cooldown_secs, 3600);
+    }
+
+    #[test]
+    fn missing_autopilot_policy_is_rejected() {
+        let source = BLUEPRINT.replace("(autopilot-policy", "(autopilot-policy-disabled");
+        let err = parse_autopilot_policy(&source).expect_err("missing autopilot policy");
+        assert!(err.to_string().contains("autopilot-policy"));
     }
 
     #[test]
