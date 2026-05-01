@@ -20,6 +20,7 @@ const DEFAULT_FILES = {
   appender: 'scripts/context-pack-append.mjs',
   compiler: 'scripts/context-pack-compile-shards.mjs',
   materializer: 'scripts/context-pack-materialize-wave.mjs',
+  runner: 'scripts/context-pack-run-wave.mjs',
   v3Runtime: 'scripts/lib/v3_workstation_runtime.mjs',
 };
 
@@ -50,9 +51,15 @@ function main() {
       DEFAULT_FILES.appender,
       DEFAULT_FILES.compiler,
       DEFAULT_FILES.materializer,
+      DEFAULT_FILES.runner,
     ]) {
-      const proc = spawnSync(process.execPath, [path.join(repoRoot, script), '--dry-fixture'], {
-        cwd: repoRoot,
+      const scriptPath =
+        dryFixture && script === DEFAULT_FILES.runner
+          ? path.resolve(process.cwd(), script)
+          : path.join(repoRoot, script);
+      const scriptCwd = dryFixture && script === DEFAULT_FILES.runner ? process.cwd() : repoRoot;
+      const proc = spawnSync(process.execPath, [scriptPath, '--dry-fixture'], {
+        cwd: scriptCwd,
         encoding: 'utf8',
         timeout: 30_000,
       });
@@ -107,11 +114,13 @@ function checkFiles(root, files) {
     'dispatch-groups',
     'context-pack-compile-shards',
     'context-pack-materialize-wave',
+    'context-pack-run-wave',
     'two-stage',
     'code workers consume',
     '(v2-item context-pack-two-stage-parallel-work',
     ':status runtime-projected',
     'materialize-wave',
+    'run-wave',
     'task-runner-manifest',
     'task-contracts',
     '(surface context-pack',
@@ -120,6 +129,7 @@ function checkFiles(root, files) {
     'scripts/context-pack-append.mjs',
     'scripts/context-pack-compile-shards.mjs',
     'scripts/context-pack-materialize-wave.mjs',
+    'scripts/context-pack-run-wave.mjs',
     'scripts/lib/v3_workstation_runtime.mjs',
     'node scripts/check-v3-context-pack-isomorphism.mjs',
   ]);
@@ -179,6 +189,26 @@ function checkFiles(root, files) {
     'task-runner-dispatch.mjs',
   ]);
 
+  requireAll(diagnostics, files.runner, sources.runner, [
+    'missiond.context-pack-run-wave.v0',
+    'runContextPackWave',
+    'materializeContextPackWave',
+    'prepareWave',
+    'runDispatch',
+    'submitDispatch',
+    '--context-pack <context-pack.lisp>',
+    '--max-parallel <n|all>',
+    '--apply',
+    'DEFAULT_MAX_PARALLEL = \'4\'',
+    'context-pack remains the SSOT',
+    'dispatch descriptor',
+    'never calls the daemon or spawns workers unless --apply',
+    'modelProfile',
+    'timeoutSecs',
+    'allowDefaultConfig',
+    'BoardTask ID: assigned by mission_task_delegate',
+  ]);
+
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
     'export class WorkstationRuntimeConfig',
     'export function loadWorkstationRuntimeConfigForRepo',
@@ -221,7 +251,7 @@ function buildFixture() {
     :write-model "multi-agent append-only"
     :entries [claim observation anchor shard-proposal conflict integration-plan]
     :merge "two-stage: investigators append proposals; code workers consume integration-plan accepted-shards and dispatch-groups via context-pack-compile-shards then context-pack-materialize-wave"
-    :flow [compile-shards materialize-wave]
+    :flow [compile-shards materialize-wave run-wave]
     :egress [task-runner-manifest task-contracts])
   (implementation-map
     (surface context-pack
@@ -230,14 +260,16 @@ function buildFixture() {
 	             "scripts/context-pack-append.mjs"
 	             "scripts/context-pack-compile-shards.mjs"
 	             "scripts/context-pack-materialize-wave.mjs"
+	             "scripts/context-pack-run-wave.mjs"
 	             "scripts/lib/v3_workstation_runtime.mjs"]
-	      :note "context-pack-materialize-wave materialize-wave task-runner-manifest task-contracts fixture"))
+	      :note "context-pack-materialize-wave context-pack-run-wave materialize-wave run-wave task-runner-manifest task-contracts fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-context-pack-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.checker, fs.readFileSync(DEFAULT_FILES.checker, 'utf8'));
   writeFixture(root, DEFAULT_FILES.appender, fs.readFileSync(DEFAULT_FILES.appender, 'utf8'));
   writeFixture(root, DEFAULT_FILES.compiler, fs.readFileSync(DEFAULT_FILES.compiler, 'utf8'));
   writeFixture(root, DEFAULT_FILES.materializer, fs.readFileSync(DEFAULT_FILES.materializer, 'utf8'));
+  writeFixture(root, DEFAULT_FILES.runner, fs.readFileSync(DEFAULT_FILES.runner, 'utf8'));
   writeFixture(root, DEFAULT_FILES.v3Runtime, fs.readFileSync(DEFAULT_FILES.v3Runtime, 'utf8'));
   writeFixture(root, 'scripts/lib/missiond_lisp.mjs', fs.readFileSync('scripts/lib/missiond_lisp.mjs', 'utf8'));
   writeFixture(root, 'scripts/check-task-contract.mjs', fs.readFileSync('scripts/check-task-contract.mjs', 'utf8'));

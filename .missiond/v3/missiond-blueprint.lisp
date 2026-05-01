@@ -421,7 +421,7 @@
     :entry-heads [claim observation anchor shard-proposal conflict integration-plan]
     :mutation-owner "append helper / writer-specific entry only; no worker rewrites prior entries"
     :merge-owner "orchestrator or context-integrator appends a single integration-plan after reading proposals"
-    :flow [parallel-claims parallel-observations shard-proposals conflict-notes integration-plan compile-shards materialize-wave dispatch-code-workers verify-and-finalize]
+    :flow [parallel-claims parallel-observations shard-proposals conflict-notes integration-plan compile-shards materialize-wave run-wave dispatch-code-workers verify-and-finalize]
     :roles
       ((context-investigator :writes [claim observation anchor shard-proposal conflict] :forbidden [code-edits commits])
        (context-integrator :writes [integration-plan] :reads [shard-proposal conflict])
@@ -432,7 +432,8 @@
        "Every entry MUST carry :id :agent :seq :at; :seq is strictly increasing and allocated by the append path, not guessed from stale reads."
        "shard-proposal entries MUST declare :shard :owner :write-scope :must-not-touch :acceptance so code workers can execute without re-deriving architecture."
        "integration-plan MUST cite accepted-shards and dispatch-groups; mapped dispatch groups SHOULD use (group :id <id> :shards [...]) so orchestration can compile code-worker waves without narrative parsing."
-       "context-pack-materialize-wave MUST refuse names-only dispatch groups and may only project mapped integration-plan shards into task-runner manifest + task-contract files; it does not dispatch workers."
+       "context-pack-materialize-wave MUST refuse names-only dispatch groups and may only project mapped integration-plan shards into task-runner manifest + task-contract files."
+       "context-pack-run-wave is the single orchestration entry from context-pack SSOT to prepared task-runner wave and dispatch descriptor; it must not submit workers unless --apply is explicit."
        "Accepted shard write-scope entries MUST NOT overlap unless a later conflict entry explicitly routes that hotspot to a single owner."
        "Context pack writers produce evidence and proposals only; code implementation happens in later shard tasks with disjoint write scopes."
        "code workers consume the latest integration-plan through context-pack-compile-shards; they do not reinterpret investigator observations as authority."
@@ -906,7 +907,7 @@
       :v3-pillar coordination
       :v3-function context-pack
       :surface context-pack
-      :note "Shared-memory append practice is lifted into the V3 two-stage context-pack surface; mapped integration-plan dispatch groups now project through scripts/context-pack-materialize-wave.mjs into manifest/task-contract worker shards using V3 workstation-config model_profile and timeout defaults.")
+      :note "Shared-memory append practice is lifted into the V3 two-stage context-pack surface; mapped integration-plan dispatch groups now project through scripts/context-pack-materialize-wave.mjs and scripts/context-pack-run-wave.mjs into prepared manifest/task-contract worker shards using V3 workstation-config model_profile and timeout defaults.")
     (v2-item mission-board-coordination
       :status code-aligned
       :v2-source ".missiond/v2/intent-flow.lisp :: board-task-main-lifecycle"
@@ -1263,12 +1264,13 @@
     (pillar coordination
       (function context-pack
         :surface context-pack
-        :entry [context-pack-append context-pack-compile-shards context-pack-materialize-wave]
+        :entry [context-pack-append context-pack-compile-shards context-pack-materialize-wave context-pack-run-wave]
         :core ((step s1 :logic "append claim/observation/anchor/shard-proposal/conflict entries with locked seq allocation")
                (step s2 :logic "validate accepted shard references and non-overlap")
                (step s3 :logic "compile integration-plan dispatch groups for code workers")
-               (step s4 :logic "materialize mapped dispatch groups into task-runner manifest and task contracts"))
-        :egress [context-pack.lisp dispatchable_groups accepted_shards task-runner-manifest task-contracts])
+               (step s4 :logic "materialize mapped dispatch groups into task-runner manifest and task contracts")
+               (step s5 :logic "prepare briefs and produce dispatch descriptor or explicit apply submission through the single runner"))
+        :egress [context-pack.lisp dispatchable_groups accepted_shards task-runner-manifest task-contracts dispatch_descriptor])
       (function mission-board
         :surface mission_board
         :entry [mission_board.create mission_board.claim mission_board.update mission_board.note_add]
@@ -1776,9 +1778,10 @@
              "scripts/context-pack-append.mjs"
              "scripts/context-pack-compile-shards.mjs"
              "scripts/context-pack-materialize-wave.mjs"
+             "scripts/context-pack-run-wave.mjs"
              "scripts/lib/v3_workstation_runtime.mjs"
              "scripts/check-v3-context-pack-isomorphism.mjs"]
-      :note "Context-pack is the V3 high-density planning surface for two-stage parallel work: context investigators append claim/observation/anchor/shard-proposal/conflict entries to .missiond/tasks/<wave>/context-pack.lisp without code edits, then an orchestrator/integrator appends integration-plan with accepted-shards and dispatch-groups. Mapped dispatch groups use (group :id <id> :shards [...]) so scripts/context-pack-compile-shards.mjs can project the Lisp plan into dispatchable_groups for code workers; legacy bare group ids remain names_only for older packs. scripts/context-pack-materialize-wave.mjs is the next projection boundary: it refuses names_only groups, converts accepted mapped shards into a task-runner-manifest.v2 plus one task-contract.v1 per shard, reads V3 workstation-config through scripts/lib/v3_workstation_runtime.mjs, and projects coder model_profile plus BoardTask timeout defaults into manifest nodes alongside context_pack_path before leaving actual dispatch to prepare-task-runner-wave + task-runner-dispatch/submit. A real MissionD project with .missiond but missing .missiond/v3/missiond-blueprint.lisp raises V3_BLUEPRINT_CONFIG_ERROR unless the caller explicitly opts into fixture/default fallback. The structure deliberately mirrors the proven shared-memory append-only pattern but raises the semantics from lifecycle notes to implementable shard planning. scripts/context-pack-append.mjs is the cooperative mutation path: it creates a missing pack when wave/purpose are supplied, takes a sibling lock, allocates the next :seq, injects :at, validates candidate bytes, and atomically renames, including --dispatch-group-shards for mapped integration plans. scripts/check-context-pack.mjs validates missiond.context-pack.v1 headers, unique ids, strictly increasing seq, ISO timestamps, repo-relative paths, shard-proposal owner/write-scope/must-not-touch/acceptance, integration-plan accepted-shard references, mapped dispatch coverage, and accepted shard write-scope non-overlap. Code workers consume the finalized integration-plan and avoid re-deriving architecture; context investigators may run concurrently because they never rewrite prior entries.")
+      :note "Context-pack is the V3 high-density planning surface for two-stage parallel work: context investigators append claim/observation/anchor/shard-proposal/conflict entries to .missiond/tasks/<wave>/context-pack.lisp without code edits, then an orchestrator/integrator appends integration-plan with accepted-shards and dispatch-groups. Mapped dispatch groups use (group :id <id> :shards [...]) so scripts/context-pack-compile-shards.mjs can project the Lisp plan into dispatchable_groups for code workers; legacy bare group ids remain names_only for older packs. scripts/context-pack-materialize-wave.mjs is the projection boundary that refuses names_only groups, converts accepted mapped shards into a task-runner-manifest.v2 plus one task-contract.v1 per shard, reads V3 workstation-config through scripts/lib/v3_workstation_runtime.mjs, and projects coder model_profile plus BoardTask timeout defaults into manifest nodes alongside context_pack_path. scripts/context-pack-run-wave.mjs is the single orchestration entry: it composes materialize + prepare-task-runner-wave + task-runner-dispatch/submit, defaults to read-only dispatch descriptors, and only calls the daemon or starts workers when --apply is explicit. A real MissionD project with .missiond but missing .missiond/v3/missiond-blueprint.lisp raises V3_BLUEPRINT_CONFIG_ERROR unless the caller explicitly opts into fixture/default fallback. The structure deliberately mirrors the proven shared-memory append-only pattern but raises the semantics from lifecycle notes to implementable shard planning. scripts/context-pack-append.mjs is the cooperative mutation path: it creates a missing pack when wave/purpose are supplied, takes a sibling lock, allocates the next :seq, injects :at, validates candidate bytes, and atomically renames, including --dispatch-group-shards for mapped integration plans. scripts/check-context-pack.mjs validates missiond.context-pack.v1 headers, unique ids, strictly increasing seq, ISO timestamps, repo-relative paths, shard-proposal owner/write-scope/must-not-touch/acceptance, integration-plan accepted-shard references, mapped dispatch coverage, and accepted shard write-scope non-overlap. Code workers consume the finalized integration-plan and avoid re-deriving architecture; context investigators may run concurrently because they never rewrite prior entries.")
 
     (surface workstation-config
       :status "code-aligned"
