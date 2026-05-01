@@ -24,6 +24,7 @@ use tracing::{debug, info, warn};
 use missiond_core::embedding;
 use missiond_core::types::KnowledgeEntry;
 
+use crate::context::v3_blueprint_runtime::ConversationIngestionRuntimeConfig;
 use crate::embedding_worker::resolve_llm_credentials;
 use crate::state::AppState;
 
@@ -33,9 +34,6 @@ const KB_TIMEOUT_MS: u64 = 300;
 const SKILL_TIMEOUT_MS: u64 = 100;
 const CODE_TIMEOUT_MS: u64 = 600;
 const TASK_ACK_TIMEOUT_MS: u64 = 50;
-/// CC slot intent routing timeout. Needs to accommodate cold-slot overhead
-/// (CLAUDE.md loading, skill loading). Observed: supervisor ~2s, cold slot ~6-8s.
-const INTENT_ROUTE_TIMEOUT_MS: u64 = 10000;
 
 // --- Intent triage ---
 /// Minimum RRF score for KB/Skill results. Below this → discard as noise.
@@ -169,10 +167,6 @@ fn classify_intent(query: &str) -> QueryIntent {
 
 // --- v2: Router API Intent Classification ---
 
-/// Model for intent classification via XJP router (clewdr Claude).
-/// Opus 4.6 for best semantic understanding; cost negligible (~200 tokens per call).
-const INTENT_MODEL: &str = "claude-opus-4.6";
-
 /// Result of intent classification.
 #[derive(Debug, Clone)]
 struct IntentResult {
@@ -288,6 +282,10 @@ async fn route_intent_via_router(state: &AppState, query: &str) -> Option<Intent
 
 async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult> {
     let (base_url, jwt) = resolve_llm_credentials().await?;
+    let config = ConversationIngestionRuntimeConfig::load_for_current_dir()
+        .map_err(|err| anyhow::anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", err))?;
+    let model = config.intent_router_model.as_str();
+    let timeout = config.intent_router_timeout();
 
     let prompt = format!(
         "Classify this user query. Respond with ONLY a JSON object, no markdown.\n\
@@ -305,13 +303,13 @@ async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult
 
     let url = format!("{}/v1/chat/completions", base_url);
     let body = serde_json::json!({
-        "model": INTENT_MODEL,
+        "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "max_tokens": 256,
     });
 
     let result = tokio::time::timeout(
-        Duration::from_millis(INTENT_ROUTE_TIMEOUT_MS),
+        timeout,
         state
             .http_client
             .post(&url)
@@ -321,7 +319,7 @@ async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult
             .send(),
     )
     .await
-    .map_err(|_| anyhow::anyhow!("Intent router timeout ({}ms)", INTENT_ROUTE_TIMEOUT_MS))?
+    .map_err(|_| anyhow::anyhow!("Intent router timeout ({}ms)", timeout.as_millis()))?
     .map_err(|e| anyhow::anyhow!("Intent router HTTP error: {}", e))?;
 
     let status = result.status();
@@ -348,7 +346,7 @@ async fn route_intent_http(state: &AppState, query: &str) -> Result<IntentResult
         .ok_or_else(|| anyhow::anyhow!("Intent router: no content in response"))?;
 
     info!(
-        model = INTENT_MODEL,
+        model = %model,
         response_preview = %content.chars().take(200).collect::<String>(),
         "Intent router: classification received"
     );

@@ -24,6 +24,7 @@ const DEFAULT_FILES = {
   maintenance: 'crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs',
   timeline: 'crates/missiond-daemon/src/handlers/comm/timeline.rs',
   retrospective: 'crates/missiond-daemon/src/handlers/comm/retrospective.rs',
+  contextPipeline: 'crates/missiond-daemon/src/context/context_pipeline.rs',
   visionWorker: 'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
   codexCli: 'crates/missiond-daemon/src/llm/codex_cli.rs',
   mcpConversation: 'crates/missiond-mcp/src/tools/comm/conversation.rs',
@@ -98,6 +99,8 @@ function checkFiles(root, files) {
     ':agent-trajectory-default-limit 200',
     ':timeline-query-default-limit 50',
     ':timeline-query-max-limit 200',
+    ':intent-router-model "claude-opus-4.6"',
+    ':intent-router-timeout-ms 10000',
     ':vision-codex-binary "codex"',
     ':vision-codex-model "gpt-5.4"',
     ':vision-codex-idle-timeout-secs 120',
@@ -113,12 +116,14 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs',
     'crates/missiond-daemon/src/handlers/comm/timeline.rs',
     'crates/missiond-daemon/src/handlers/comm/retrospective.rs',
+    'crates/missiond-daemon/src/context/context_pipeline.rs',
     'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
     'crates/missiond-daemon/src/llm/codex_cli.rs',
     'crates/missiond-mcp/src/tools/comm/conversation.rs',
     'crates/missiond-mcp/src/tools/comm/timeline.rs',
     'scripts/check-v3-conversation-ingestion-isomorphism.mjs',
     'conversation-ingestion-policy read-model default and max limits',
+    'UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy',
     'Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy',
     'conversation.rs is the thin conversation-ingestion facade',
     'conversation/router.rs owns mission_conversation_query',
@@ -143,14 +148,20 @@ function checkFiles(root, files) {
     'MAX_TIMELINE_QUERY_LIMIT',
     'DEFAULT_TIMELINE_SEARCH_LIMIT',
     'MAX_TIMELINE_SEARCH_LIMIT',
+    'DEFAULT_INTENT_ROUTER_MODEL',
+    'DEFAULT_INTENT_ROUTER_TIMEOUT_MS',
     'DEFAULT_VISION_CODEX_BINARY',
     'DEFAULT_VISION_CODEX_MODEL',
     'DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS',
     'DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS',
+    'intent_router_model',
+    'intent_router_timeout',
     'vision_codex_binary',
     'vision_codex_model',
     'vision_codex_idle_timeout',
     'vision_codex_absolute_timeout',
+    ':intent-router-model',
+    ':intent-router-timeout-ms',
     ':vision-codex-binary',
     ':vision-codex-absolute-timeout-secs',
     'conversation-ingestion-policy',
@@ -267,6 +278,20 @@ function checkFiles(root, files) {
     'retro_worker::backfill',
   ]);
 
+  requireAll(diagnostics, files.contextPipeline, sources.contextPipeline, [
+    'ConversationIngestionRuntimeConfig::load_for_current_dir',
+    'config.intent_router_model.as_str()',
+    'config.intent_router_timeout()',
+    'V3_BLUEPRINT_CONFIG_ERROR',
+    '"model": model',
+    'timeout.as_millis()',
+  ]);
+  forbidAll(diagnostics, files.contextPipeline, sources.contextPipeline, [
+    'const INTENT_MODEL',
+    'INTENT_ROUTE_TIMEOUT_MS',
+    '"claude-opus-4.6"',
+  ]);
+
   requireAll(diagnostics, files.visionWorker, sources.visionWorker, [
     'ConversationIngestionRuntimeConfig::load_for_current_dir',
     'V3_BLUEPRINT_CONFIG_ERROR',
@@ -355,6 +380,8 @@ function buildFixture() {
     :timeline-query-max-limit 200
     :timeline-search-default-limit 20
     :timeline-search-max-limit 100
+    :intent-router-model "claude-opus-4.6"
+    :intent-router-timeout-ms 10000
     :vision-codex-binary "codex"
     :vision-codex-model "gpt-5.4"
     :vision-codex-idle-timeout-secs 120
@@ -374,12 +401,13 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs"
              "crates/missiond-daemon/src/handlers/comm/timeline.rs"
              "crates/missiond-daemon/src/handlers/comm/retrospective.rs"
+             "crates/missiond-daemon/src/context/context_pipeline.rs"
              "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
              "crates/missiond-daemon/src/llm/codex_cli.rs"
              "crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "conversation-ingestion-policy read-model default and max limits; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
+      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
   (compression-contract
     :checks ["node scripts/check-v3-conversation-ingestion-isomorphism.mjs"]))`,
   );
@@ -389,7 +417,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.v3Runtime),
-    'ConversationIngestionRuntimeConfig parse_conversation_ingestion_policy DEFAULT_CONVERSATION_GET_TAIL DEFAULT_CONVERSATION_SEARCH_LIMIT DEFAULT_MESSAGE_SEARCH_LIMIT DEFAULT_CONVERSATION_EVENTS_LIMIT DEFAULT_AGENT_TRAJECTORY_LIMIT DEFAULT_TIMELINE_QUERY_LIMIT MAX_TIMELINE_QUERY_LIMIT DEFAULT_TIMELINE_SEARCH_LIMIT MAX_TIMELINE_SEARCH_LIMIT DEFAULT_VISION_CODEX_BINARY DEFAULT_VISION_CODEX_MODEL DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS vision_codex_binary vision_codex_model vision_codex_idle_timeout vision_codex_absolute_timeout :vision-codex-binary :vision-codex-absolute-timeout-secs conversation-ingestion-policy',
+    'ConversationIngestionRuntimeConfig parse_conversation_ingestion_policy DEFAULT_CONVERSATION_GET_TAIL DEFAULT_CONVERSATION_SEARCH_LIMIT DEFAULT_MESSAGE_SEARCH_LIMIT DEFAULT_CONVERSATION_EVENTS_LIMIT DEFAULT_AGENT_TRAJECTORY_LIMIT DEFAULT_TIMELINE_QUERY_LIMIT MAX_TIMELINE_QUERY_LIMIT DEFAULT_TIMELINE_SEARCH_LIMIT MAX_TIMELINE_SEARCH_LIMIT DEFAULT_INTENT_ROUTER_MODEL DEFAULT_INTENT_ROUTER_TIMEOUT_MS DEFAULT_VISION_CODEX_BINARY DEFAULT_VISION_CODEX_MODEL DEFAULT_VISION_CODEX_IDLE_TIMEOUT_SECS DEFAULT_VISION_CODEX_ABSOLUTE_TIMEOUT_SECS intent_router_model intent_router_timeout vision_codex_binary vision_codex_model vision_codex_idle_timeout vision_codex_absolute_timeout :intent-router-model :intent-router-timeout-ms :vision-codex-binary :vision-codex-absolute-timeout-secs conversation-ingestion-policy',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.facade),
@@ -418,6 +446,10 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.retrospective),
     'mission_retrospective_list mission_retrospective_backfill run_analysis get_retrospective_meta list_retrospective_results retro_worker::backfill',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.contextPipeline),
+    'ConversationIngestionRuntimeConfig::load_for_current_dir config.intent_router_model.as_str() config.intent_router_timeout() V3_BLUEPRINT_CONFIG_ERROR "model": model timeout.as_millis()',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.visionWorker),
