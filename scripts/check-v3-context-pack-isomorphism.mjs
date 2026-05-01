@@ -126,6 +126,7 @@ function checkFiles(root, files) {
     'dispatch-policy context-pack-run-wave',
     ':default_max_parallel 4',
     'default max_parallel from workstation-config dispatch-policy context-pack-run-wave',
+    'create-only initializes missing shared-memory/session-trace ledgers before prepare',
     '(surface context-pack',
     ':status "code-aligned"',
     'scripts/check-context-pack.mjs',
@@ -201,6 +202,9 @@ function checkFiles(root, files) {
     'submitDispatch',
     'loadWorkstationRuntimeConfigForRepo',
     'contextPackMaxParallel',
+    'ensureWaveLedgers',
+    'writeCreateOnly',
+    '--skip-ledger-init',
     '--context-pack <context-pack.lisp>',
     '--max-parallel <n|all>',
     '--apply',
@@ -210,6 +214,8 @@ function checkFiles(root, files) {
     'modelProfile',
     'timeoutSecs',
     'max_parallel',
+    'ledger_init',
+    'skipped-existing',
     'allowDefaultConfig',
     'BoardTask ID: assigned by mission_task_delegate',
   ]);
@@ -279,7 +285,7 @@ function buildFixture() {
 	             "scripts/context-pack-materialize-wave.mjs"
 	             "scripts/context-pack-run-wave.mjs"
 	             "scripts/lib/v3_workstation_runtime.mjs"]
-		      :note "context-pack-materialize-wave context-pack-run-wave materialize-wave run-wave task-runner-manifest task-contracts default max_parallel from workstation-config dispatch-policy context-pack-run-wave fixture"))
+		      :note "context-pack-materialize-wave context-pack-run-wave materialize-wave run-wave task-runner-manifest task-contracts default max_parallel from workstation-config dispatch-policy context-pack-run-wave create-only initializes missing shared-memory/session-trace ledgers before prepare fixture"))
   (compression-contract
     :checks ["node scripts/check-v3-context-pack-isomorphism.mjs"]))`);
   writeFixture(root, DEFAULT_FILES.checker, fs.readFileSync(DEFAULT_FILES.checker, 'utf8'));

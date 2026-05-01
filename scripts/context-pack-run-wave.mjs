@@ -29,7 +29,7 @@ const usage = `Usage:
     [--estimated-minutes <n>] [--heartbeat-minutes <n>] [--timeout-secs <n>]
     [--model-profile <profile>] [--blueprint <path>] [--allow-default-config]
     [--max-parallel <n|all>] [--force] [--dry-run] [--skip-prepare]
-    [--no-dispatch] [--submit] [--apply] [--allow-missing-briefs]
+    [--skip-ledger-init] [--no-dispatch] [--submit] [--apply] [--allow-missing-briefs]
     [--emit-dispatch-events] [--endpoint <ipc>] [--session-id <id>]
     [--request-id <id> --request-events-dir <dir>]
     [--lifecycle <path>] [--events-dir <dir>] [--receipts <path>] [--json]
@@ -119,6 +119,7 @@ function parseArgs(args) {
     force: false,
     dryRun: false,
     skipPrepare: false,
+    skipLedgerInit: false,
     noDispatch: false,
     submit: false,
     apply: false,
@@ -145,6 +146,7 @@ function parseArgs(args) {
     else if (arg === '--force') opts.force = true;
     else if (arg === '--dry-run') opts.dryRun = true;
     else if (arg === '--skip-prepare') opts.skipPrepare = true;
+    else if (arg === '--skip-ledger-init') opts.skipLedgerInit = true;
     else if (arg === '--no-dispatch') opts.noDispatch = true;
     else if (arg === '--submit') opts.submit = true;
     else if (arg === '--apply') opts.apply = true;
@@ -208,6 +210,7 @@ export async function runContextPackWave({
   force = false,
   dryRun = false,
   skipPrepare = false,
+  skipLedgerInit = false,
   noDispatch = false,
   submit = false,
   apply = false,
@@ -271,12 +274,13 @@ export async function runContextPackWave({
 
   const prepare = skipPrepare
     ? null
-    : prepareWave({
+    : prepareWaveWithLedgers({
+        repo,
+        wave: materialize.wave,
         manifestPath,
-        cwd: repo,
-        dryRun: false,
         force,
         nowIso,
+        skipLedgerInit,
       });
 
   let dispatch = null;
@@ -331,6 +335,7 @@ export async function runContextPackWave({
     manifest_path: manifestRel,
     materialize,
     prepare,
+    ledger_init: prepare?.ledger_init ?? null,
     dispatch,
     runtime_projection: {
       config_source: runtimeConfig.source,
@@ -352,6 +357,56 @@ function nextCommands({ contextPackPath, manifestPath, maxParallel }) {
   ];
 }
 
+function prepareWaveWithLedgers({ repo, wave, manifestPath, force, nowIso, skipLedgerInit }) {
+  const ledgerInit = skipLedgerInit
+    ? { skipped: true, shared_memory: null, session_trace: null }
+    : ensureWaveLedgers({ repo, wave, nowIso });
+  const result = prepareWave({
+    manifestPath,
+    cwd: repo,
+    dryRun: false,
+    force,
+    nowIso,
+  });
+  return { ...result, ledger_init: ledgerInit };
+}
+
+function ensureWaveLedgers({ repo, wave, nowIso }) {
+  const taskDir = path.join(repo, '.missiond', 'tasks', wave);
+  fs.mkdirSync(taskDir, { recursive: true });
+  const sharedMemoryPath = path.join(taskDir, 'shared-memory.lisp');
+  const sessionTracePath = path.join(taskDir, 'session-trace.lisp');
+  return {
+    skipped: false,
+    shared_memory: writeCreateOnly(
+      sharedMemoryPath,
+      `(shared-memory ${wave}
+  :schema "missiond.shared-memory.v1"
+  :wave ${wave}
+  :created-at "${nowIso}"
+  :sequence 0)
+`,
+      repo,
+    ),
+    session_trace: writeCreateOnly(
+      sessionTracePath,
+      `(session-trace ${wave}
+  :schema "missiond.session-trace.v1"
+  :wave ${wave}
+  :created-at "${nowIso}"
+  :sequence 0)
+`,
+      repo,
+    ),
+  };
+}
+
+function writeCreateOnly(file, source, repo) {
+  if (fs.existsSync(file)) return { path: repoPath(repo, file), action: 'skipped-existing' };
+  fs.writeFileSync(file, source);
+  return { path: repoPath(repo, file), action: 'created', bytes: Buffer.byteLength(source) };
+}
+
 async function runFixtures() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-context-pack-run-wave-'));
   try {
@@ -361,8 +416,6 @@ async function runFixtures() {
     const blueprintPath = path.join(tmp, '.missiond/v3/missiond-blueprint.lisp');
     fs.mkdirSync(path.dirname(blueprintPath), { recursive: true });
     fs.writeFileSync(blueprintPath, fixtureBlueprint());
-    seedWaveLedgers(tmp, 'wave99');
-
     const descriptor = await runContextPackWave({
       contextPackPath: packPath,
       repoRoot: tmp,
@@ -371,6 +424,8 @@ async function runFixtures() {
     assert(descriptor.mode === 'descriptor', 'default mode should return dispatch descriptor');
     assert(descriptor.materialize.task_count === 2, 'expected two materialized tasks');
     assert(descriptor.runtime_projection.max_parallel === '1', 'expected V3 projected max parallel');
+    assert(descriptor.ledger_init.shared_memory.action === 'created', 'runner should create missing shared-memory ledger');
+    assert(descriptor.ledger_init.session_trace.action === 'created', 'runner should create missing session-trace ledger');
     assert(descriptor.prepare.briefsWritten === 2, 'expected two rendered briefs');
     assert(descriptor.prepare.skeletonsWritten === 2, 'expected two report skeletons');
     assert(descriptor.dispatch.status === 'ready_to_delegate', 'expected ready dispatch status');
@@ -393,6 +448,7 @@ async function runFixtures() {
       nowIso: '2026-04-29T00:00:00Z',
     });
     assert(override.runtime_projection.max_parallel === '2', 'explicit maxParallel should override V3 default');
+    assert(override.ledger_init.shared_memory.action === 'skipped-existing', 'runner should not rewrite existing shared-memory ledger');
     assert(override.dispatch.delegate_call_count === 2, 'explicit maxParallel=2 should select two tasks');
 
     const submitDry = await runContextPackWave({
@@ -421,47 +477,6 @@ async function runFixtures() {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
-}
-
-function seedWaveLedgers(repo, wave) {
-  const dir = path.join(repo, '.missiond', 'tasks', wave);
-  fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(
-    path.join(dir, 'shared-memory.lisp'),
-    `(shared-memory ${wave}
-  :schema "missiond.shared-memory.v1"
-  :wave ${wave}
-  :created-at "2026-04-29T00:00:00Z"
-  :sequence 1
-
-  (observation
-    :id seed-shared-memory-entry
-    :task ${wave}-bootstrap
-    :agent fixture
-    :seq 1
-    :at "2026-04-29T00:00:00Z"
-    :touched [".missiond/tasks/${wave}/manifest.lisp"]
-    :summary "fixture seed"))
-`,
-  );
-  fs.writeFileSync(
-    path.join(dir, 'session-trace.lisp'),
-    `(session-trace ${wave}
-  :schema "missiond.session-trace.v1"
-  :wave ${wave}
-  :created-at "2026-04-29T00:00:00Z"
-  :sequence 1
-
-  (trace-event
-    :id seed-trace-event
-    :seq 1
-    :at "2026-04-29T00:00:00Z"
-    :task ${wave}-bootstrap
-    :backend fixture
-    :kind dispatch
-    :summary "fixture seed"))
-`,
-  );
 }
 
 function fixtureContextPack() {
