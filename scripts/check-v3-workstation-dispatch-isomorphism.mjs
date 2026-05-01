@@ -169,6 +169,7 @@ const BLUEPRINT_NEEDLES = [
   'build_task_brief',
   'WorkstationProposalBundle',
   'request_workstation_proposals',
+  'proposal model label projects from router-runtime-policy queued_sonnet_model',
   'WorkstationAutoSpawnGateOutcome',
   'evaluate_workstation_auto_spawn_gate',
   'extract_inner_board_task_id',
@@ -202,6 +203,7 @@ const BLUEPRINT_SURFACE_BODY_ANCHORS = [
   'run_workstation_dispatch_with_contract_and_trace',
   'classify_task_kind',
   'build_task_brief',
+  'proposal model label projects from router-runtime-policy queued_sonnet_model',
   'extract_inner_board_task_id',
   'dry_run_no_dispatch',
 ];
@@ -309,6 +311,9 @@ const WORKSTATION_BRIEF_RS_NEEDLES = [
 ];
 
 const WORKSTATION_PROPOSAL_RS_NEEDLES = [
+  'RouterRuntimeConfig::load_for_current_dir',
+  'V3_BLUEPRINT_CONFIG_ERROR',
+  'queued_sonnet_model',
   'pub(crate) const WORKSTATION_PROPOSAL_FIELDS',
   'pub(crate) const WORKSTATION_PROPOSAL_CAP',
   'pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER',
@@ -328,6 +333,12 @@ const WORKSTATION_PROPOSAL_RS_NEEDLES = [
   '"applied": false',
   '"auto_spawn": false',
   'no fallback to claude -p',
+];
+
+const WORKSTATION_PROPOSAL_RS_FORBIDDEN = [
+  'SONNET_WORKSTATION_PROPOSAL_MODEL',
+  'const SONNET_WORKSTATION_PROPOSAL_MODEL',
+  'Some("claude-sonnet".to_string())',
 ];
 
 const WORKSTATION_AUTO_SPAWN_RS_NEEDLES = [
@@ -467,6 +478,12 @@ function checkFiles(root, files) {
     sources.workstationProposal,
     WORKSTATION_PROPOSAL_RS_NEEDLES,
   );
+  forbidAll(
+    diagnostics,
+    files.workstationProposal,
+    sources.workstationProposal,
+    WORKSTATION_PROPOSAL_RS_FORBIDDEN,
+  );
   requireAll(
     diagnostics,
     files.workstationAutoSpawn,
@@ -517,6 +534,14 @@ function requireAll(diagnostics, file, source, needles) {
   for (const needle of needles) {
     if (!source.includes(needle)) {
       diagnostics.push({ file, message: `missing required contract text: ${needle}` });
+    }
+  }
+}
+
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden contract text present: ${needle}` });
     }
   }
 }
@@ -741,7 +766,7 @@ function buildGoodBlueprint() {
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn/input.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/auto_spawn/outcome.rs"
              "crates/missiond-daemon/src/handlers/knowledge/workstation_dispatch/tests.rs"]
-      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. workstation_dispatch/outcome.rs owns WorkstationDispatchOutcome, SafeDescriptorReason, and outcome_to_response_fields; WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/runner.rs owns run_workstation_dispatch / run_workstation_dispatch_with_contract / run_workstation_dispatch_with_contract_and_trace, the mission_task_delegate inner adapter, task_contract_source_path/session_trace_path threading, and the evidence sidecar append. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. workstation_dispatch/decision.rs owns InferenceContext and evaluate_dispatch_decision, the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). workstation_dispatch/brief.rs owns BriefTaskKind, classify_task_kind, and build_task_brief / build_task_brief_with_source / build_task_brief_with_source_and_trace, including the Completion handoff (scoped commit), Session trace block, and AGENT_TEAM_OBJECTIVE_HINT projection. workstation_dispatch/proposal.rs owns WorkstationProposalBundle, request_workstation_proposals, parse_workstation_proposals, proposal safety/confidence enums, applied=false, auto_spawn=false, and the no fallback to claude -p invariant. workstation_dispatch/auto_spawn.rs owns the auto-spawn facade; auto_spawn/input.rs owns strict gate inputs; auto_spawn/hash.rs owns proposal hash projection; auto_spawn/outcome.rs owns WorkstationAutoSpawnGateOutcome; auto_spawn/gate.rs owns enforce_auto_spawn_preflight and evaluate_workstation_auto_spawn_gate for the mission_task_delegate true-spawn gate. extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
+      :note "workstation-dispatch is the substrate that mission_plan execute_internal drives when target=mission_task_delegate is inferred or explicit. workstation_dispatch/outcome.rs owns WorkstationDispatchOutcome, SafeDescriptorReason, and outcome_to_response_fields; WorkstationDispatchOutcome is the closed enum (Dispatched | DryRun | InnerError | SafeDescriptor) returned by run_workstation_dispatch_with_contract_and_trace; outcome_to_response_fields projects each variant onto a stable wire shape the outer plan-execute response wraps. workstation_dispatch/runner.rs owns run_workstation_dispatch / run_workstation_dispatch_with_contract / run_workstation_dispatch_with_contract_and_trace, the mission_task_delegate inner adapter, task_contract_source_path/session_trace_path threading, and the evidence sidecar append. workstation_dispatch/descriptor.rs owns ParsedTaskContract and parse_task_contract so task-contract v1 Lisp projection is physically split from the substrate facade. workstation_dispatch/decision.rs owns InferenceContext and evaluate_dispatch_decision, the single auto-inference + opt-in gate (target=mission_task_delegate + INFERABLE strategy + non-empty objective + scoping signal). workstation_dispatch/brief.rs owns BriefTaskKind, classify_task_kind, and build_task_brief / build_task_brief_with_source / build_task_brief_with_source_and_trace, including the Completion handoff (scoped commit), Session trace block, and AGENT_TEAM_OBJECTIVE_HINT projection. workstation_dispatch/proposal.rs owns WorkstationProposalBundle, request_workstation_proposals, parse_workstation_proposals, proposal safety/confidence enums, applied=false, auto_spawn=false, proposal model label projects from router-runtime-policy queued_sonnet_model, and the no fallback to claude -p invariant. workstation_dispatch/auto_spawn.rs owns the auto-spawn facade; auto_spawn/input.rs owns strict gate inputs; auto_spawn/hash.rs owns proposal hash projection; auto_spawn/outcome.rs owns WorkstationAutoSpawnGateOutcome; auto_spawn/gate.rs owns enforce_auto_spawn_preflight and evaluate_workstation_auto_spawn_gate for the mission_task_delegate true-spawn gate. extract_inner_board_task_id projects the delegated BoardTask UUID from the inner mission_task_delegate payload onto a top-level delegated_board_task_id field. The substrate emits a fixed status vocabulary readable from the response: workstation_dispatch_status='dispatched' | 'dry_run_no_dispatch' | 'inner_returned_error' | safe-descriptor reasons. Wire fields callers and smokes pin: runner_status='workstation_dispatch_v0' (set by mission_plan), execute_mode='internal', target_tool=mission_task_delegate, dispatch_strategy, task_brief_preview, delegated_board_task_id (Dispatched only), inner_result. Bridge mode is no longer accepted as a no-dispatch proof; both --execute-dry-run and --execute-real-dispatch route through this substrate."))
   (compression-contract
     :checks ["node scripts/check-v3-workstation-dispatch-isomorphism.mjs"]))
 `;
@@ -877,6 +902,7 @@ pub(crate) fn build_task_brief_with_source_and_trace() {
 function buildGoodWorkstationProposal() {
   return `// fixture
 use serde_json::{json, Value};
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 pub(crate) const WORKSTATION_PROPOSAL_FIELDS: &[&str] = &["target", "dispatch_strategy", "objective", "scope"];
 pub(crate) const WORKSTATION_PROPOSAL_CAP: usize = 6;
 pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER: &str = "workstation_dispatch_proposal";
@@ -892,6 +918,9 @@ pub(crate) fn build_workstation_proposal_prompt() {}
 pub(crate) fn parse_workstation_proposals() {}
 pub(crate) fn classify_proposal_safety() {}
 pub(crate) async fn request_workstation_proposals() {
+    let router_config = RouterRuntimeConfig::load_for_current_dir().unwrap();
+    let _ = "V3_BLUEPRINT_CONFIG_ERROR";
+    let _ = router_config.queued_sonnet_model;
     let _ = "applied\": false";
     let _ = "auto_spawn\": false";
     let _ = "no fallback to claude -p";

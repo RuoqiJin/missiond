@@ -1,5 +1,6 @@
 use serde_json::{json, Value};
 
+use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::state::AppState;
 
 // ── wave-21 / task 04 — autonomous workstation LLM proposal v0 ─────────
@@ -56,11 +57,6 @@ const SONNET_WORKSTATION_PROPOSAL_MAX_TOKENS: u32 = 1024;
 /// `plan_field_inference` (wave-20 / task 07) so observers can tell the
 /// two passes apart on the trace surface.
 pub(crate) const SONNET_WORKSTATION_PROPOSAL_CALLER: &str = "workstation_dispatch_proposal";
-
-/// Hard-coded model id for the response surface. Mirrors the literal used
-/// by `plan.rs::SONNET_COMPILER_MODEL`; we keep a local copy rather than
-/// re-export so the workstation layer stays free of plan internals.
-const SONNET_WORKSTATION_PROPOSAL_MODEL: &str = "claude-sonnet";
 
 /// Allowlisted target values. Mirrors the wave-15 plan-runner whitelist.
 pub(crate) const PROPOSAL_VALID_TARGETS: &[&str] = &[
@@ -649,6 +645,16 @@ pub(crate) async fn request_workstation_proposals(
              (no fallback to claude -p / prompt mode in v0)",
         );
     };
+    let router_config = match RouterRuntimeConfig::load_for_current_dir() {
+        Ok(config) => config,
+        Err(err) => {
+            return WorkstationProposalBundle::unavailable(format!(
+                "V3_BLUEPRINT_CONFIG_ERROR: {}; autonomous workstation proposal unavailable \
+                 (no fallback to claude -p / prompt mode in v0)",
+                err
+            ));
+        }
+    };
     let (system, user) = build_workstation_proposal_prompt(plan_sexp, compiled_from);
     let messages = vec![
         crate::minimax_client::ChatMessage {
@@ -688,7 +694,7 @@ pub(crate) async fn request_workstation_proposals(
         proposals,
         parse_warnings,
         unavailable_reason: None,
-        model: Some(SONNET_WORKSTATION_PROPOSAL_MODEL.to_string()),
+        model: Some(router_config.queued_sonnet_model),
         request_caller: Some(SONNET_WORKSTATION_PROPOSAL_CALLER.to_string()),
     }
 }
