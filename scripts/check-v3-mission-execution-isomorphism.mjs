@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readBlueprintWithEvidenceSidecars } from './lib/v3_blueprint_contract_source.mjs';
 
 const usage = `Usage:
   node scripts/check-v3-mission-execution-isomorphism.mjs [--json] [--dry-fixture]
@@ -915,7 +916,7 @@ function checkFiles(root, files) {
   const sources = {};
   for (const [key, rel] of Object.entries(files)) {
     try {
-      sources[key] = fs.readFileSync(path.join(root, rel), 'utf8');
+      sources[key] = key === 'blueprint' ? readBlueprintWithEvidenceSidecars(root, rel) : fs.readFileSync(path.join(root, rel), 'utf8');
     } catch (err) {
       diagnostics.push({ file: rel, message: `cannot read: ${err.message}` });
     }

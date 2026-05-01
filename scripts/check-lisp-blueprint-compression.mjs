@@ -21,7 +21,12 @@ Checks the Lisp compression boundary:
       axioms, artifact-contracts, unified-entry, state-machines, policies,
       implementation-map, compression-contract
   - v3 declares the required artifacts and state machines
+  - long explanatory notes live in .missiond/v3/evidence/blueprint-notes.lisp,
+    keeping V3 as the executable SSOT rather than a prose archive
 `;
+
+const MAX_BLUEPRINT_NOTE_CHARS = 1100;
+const BLUEPRINT_NOTES_SIDECAR = '.missiond/v3/evidence/blueprint-notes.lisp';
 
 function main() {
   const args = process.argv.slice(2);
@@ -52,6 +57,7 @@ function main() {
   validateV1Manifest(path.join(repoRoot, '.missiond/v1/manifest.lisp'), repoRoot, diagnostics);
   validateV3Blueprint(
     path.join(repoRoot, '.missiond/v3/missiond-blueprint.lisp'),
+    repoRoot,
     diagnostics,
   );
 
@@ -106,12 +112,14 @@ function validateV1Manifest(file, repoRoot, diagnostics) {
   }
 }
 
-function validateV3Blueprint(file, diagnostics) {
+function validateV3Blueprint(file, repoRoot, diagnostics) {
   const forms = safeRead(file, diagnostics);
   if (!forms) return;
   const root = singleRoot(file, forms, 'missiond-blueprint', diagnostics);
   if (!root) return;
   validateV3Root(file, root, diagnostics);
+  validateNoteDensity(file, root, diagnostics);
+  validateBlueprintNotesSidecar(path.join(repoRoot, BLUEPRINT_NOTES_SIDECAR), diagnostics);
 }
 
 function validateV3Root(file, root, diagnostics) {
@@ -173,6 +181,44 @@ function validateV3Root(file, root, diagnostics) {
   }
 }
 
+function validateNoteDensity(file, root, diagnostics) {
+  for (const node of findKeywordValues(root, ':note')) {
+    const text = nodeText(node);
+    if (text && text.length > MAX_BLUEPRINT_NOTE_CHARS) {
+      diagnostics.push(
+        diag(
+          file,
+          node,
+          `:note too long (${text.length} chars > ${MAX_BLUEPRINT_NOTE_CHARS}); move detail to ${BLUEPRINT_NOTES_SIDECAR}`,
+        ),
+      );
+    }
+  }
+}
+
+function validateBlueprintNotesSidecar(file, diagnostics) {
+  const forms = safeRead(file, diagnostics);
+  if (!forms) return;
+  const root = singleRoot(file, forms, 'missiond-v3-blueprint-note-evidence', diagnostics);
+  if (!root) return;
+  const notes = findAll(root, 'note');
+  if (notes.length < 10) {
+    diagnostics.push(diag(file, root, `expected moved blueprint note evidence, found ${notes.length}`));
+  }
+  const ids = new Set();
+  for (const note of notes) {
+    const props = readKeywordProps(note, { start: 1 });
+    const id = nodeText(props[':id']?.value);
+    const text = nodeText(props[':text']?.value);
+    if (!id) diagnostics.push(diag(file, note, 'sidecar note missing :id'));
+    else if (ids.has(id)) diagnostics.push(diag(file, note, `duplicate sidecar note id: ${id}`));
+    else ids.add(id);
+    if (!text || text.length <= MAX_BLUEPRINT_NOTE_CHARS) {
+      diagnostics.push(diag(file, note, 'sidecar note :text should hold the moved long explanation'));
+    }
+  }
+}
+
 function safeRead(file, diagnostics) {
   try {
     return readLispFile(file);
@@ -212,6 +258,15 @@ function findAll(node, wantedHead, out = []) {
     if (head(node) === wantedHead) out.push(node);
     for (const child of node.children) findAll(child, wantedHead, out);
   }
+  return out;
+}
+
+function findKeywordValues(node, keyword, out = []) {
+  if (!isList(node)) return out;
+  for (let i = 0; i < node.children.length - 1; i += 1) {
+    if (nodeText(node.children[i]) === keyword) out.push(node.children[i + 1]);
+  }
+  for (const child of node.children) findKeywordValues(child, keyword, out);
   return out;
 }
 
