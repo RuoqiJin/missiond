@@ -35,10 +35,12 @@
 //! Persistence model (mark / ack):
 //!   intent-memory.lisp suggests `daemon_state capability_usage_snapshot/v1` as
 //!   storage. The actual `daemon_state` trait stores `i64` only — not JSON. To
-//!   avoid adding a migration this batch, mark/ack writes a JSON sidecar at
-//!   `<project_root>/.missiond/v2/capability-usage-review.json` (file-based,
-//!   no DB schema). Snapshot/report/candidates do not persist; each call
-//!   re-aggregates from `conversation_tool_calls` + `board_tasks.flow_*`.
+//!   avoid adding a migration this batch, mark/ack writes a JSON sidecar at the
+//!   V3-projected capability-governance path (currently
+//!   `<project_root>/.missiond/v3/runtime/capability-usage-review.json`) with a
+//!   read-only legacy fallback for `<project_root>/.missiond/v2/capability-usage-review.json`.
+//!   Snapshot/report/candidates do not persist; each call re-aggregates from
+//!   `conversation_tool_calls` + `board_tasks.flow_*`.
 
 use anyhow::{anyhow, Result};
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -52,6 +54,8 @@ use tracing::warn;
 
 use crate::context::v3_blueprint_runtime::CapabilityGovernanceRuntimeConfig;
 use crate::state::AppState;
+
+const LEGACY_CAPABILITY_REVIEW_SIDECAR: &str = ".missiond/v2/capability-usage-review.json";
 
 /// Forward an `ObservabilityEvent` and log (but never propagate) publish
 /// failures. Capability usage events are ephemeral observability — losing one
@@ -769,7 +773,10 @@ fn build_source_coverage_dict(
     );
 
     let review_note = match review_entry_count {
-        Some(n) if n > 0 => format!("{} entries in .missiond/v2/capability-usage-review.json", n),
+        Some(n) if n > 0 => format!(
+            "{} entries in .missiond/v3/runtime/capability-usage-review.json",
+            n
+        ),
         Some(_) => "review sidecar empty".to_string(),
         None => "review sidecar absent or unreadable".to_string(),
     };
@@ -1043,18 +1050,30 @@ impl ReviewState {
     fn path(project_root: &Path, governance_config: &CapabilityGovernanceRuntimeConfig) -> PathBuf {
         project_root.join(&governance_config.review_sidecar_path)
     }
+
+    fn legacy_path(project_root: &Path) -> PathBuf {
+        project_root.join(LEGACY_CAPABILITY_REVIEW_SIDECAR)
+    }
+
+    fn read_from(path: &Path) -> Result<Self> {
+        let text = std::fs::read_to_string(path)?;
+        serde_json::from_str(&text)
+            .map_err(|e| anyhow!("review state at {} is malformed: {}", path.display(), e))
+    }
+
     fn load(
         project_root: &Path,
         governance_config: &CapabilityGovernanceRuntimeConfig,
     ) -> Result<Self> {
         let p = Self::path(project_root, governance_config);
-        if !p.exists() {
-            return Ok(Self::default());
+        if p.exists() {
+            return Self::read_from(&p);
         }
-        let text = std::fs::read_to_string(&p)?;
-        let parsed: ReviewState = serde_json::from_str(&text)
-            .map_err(|e| anyhow!("review state at {} is malformed: {}", p.display(), e))?;
-        Ok(parsed)
+        let legacy = Self::legacy_path(project_root);
+        if legacy != p && legacy.exists() {
+            return Self::read_from(&legacy);
+        }
+        Ok(Self::default())
     }
     fn save(
         &self,
@@ -2681,6 +2700,12 @@ mod tests {
         }"#;
         std::fs::write(v2.join("capability-usage-review.json"), raw).unwrap();
         let loaded = ReviewState::load(dir.path(), &test_governance_config()).unwrap();
+        assert!(
+            !dir.path()
+                .join(".missiond/v3/runtime/capability-usage-review.json")
+                .exists(),
+            "legacy fallback load must not create the V3 sidecar until a mark/ack write"
+        );
         assert_eq!(loaded.entries.len(), 1);
         let entry = loaded.entries.get("mission_old").unwrap();
         assert_eq!(entry.decision, "merge");
@@ -2708,7 +2733,9 @@ mod tests {
             },
         );
         let config = test_governance_config();
-        s.save(dir.path(), &config).unwrap();
+        let saved_path = s.save(dir.path(), &config).unwrap();
+        assert!(saved_path.ends_with(".missiond/v3/runtime/capability-usage-review.json"));
+        assert!(saved_path.exists());
         let loaded = ReviewState::load(dir.path(), &config).unwrap();
         let entry = loaded.entries.get("mission_old").unwrap();
         assert_eq!(entry.replacement_target.as_deref(), Some("mission_new"));

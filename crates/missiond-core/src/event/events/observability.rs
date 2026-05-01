@@ -52,7 +52,7 @@ pub enum ObservabilityEvent {
     /// `mission_capability_usage(action=snapshot|report)` finished computing
     /// a capability hotness snapshot. Live notification only — durable
     /// evidence remains in `conversation_tool_calls` / `board_tasks` and the
-    /// JSON sidecar at `.missiond/v2/capability-usage-review.json`. See
+    /// JSON sidecar at `.missiond/v3/runtime/capability-usage-review.json`. See
     /// frozen lisp `planned-event-extensions :: CapabilityUsageObservability`.
     CapabilityUsageSnapshot {
         /// Primary classification window: `"7d" | "30d" | "90d" | "all"`.

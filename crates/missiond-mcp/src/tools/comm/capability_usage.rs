@@ -26,7 +26,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
          + intent-tools.lisp :: future-surface mission_capability_usage。\
          注意: ObservabilityEvent::CapabilityUsageSnapshot/CapabilityStaleCandidate 在 \
          snapshot/report/candidates 已发射,daemon_state 是 i64-only,mark/ack 写 \
-         .missiond/v2/capability-usage-review.json sidecar (entries 含 decision, rationale, \
+         .missiond/v3/runtime/capability-usage-review.json sidecar (entries 含 decision, rationale, \
          replacement_target, replacement_target_source — 新字段 Option,旧 sidecar 兼容加载)。",
         json!({
             "type": "object",

@@ -88,7 +88,7 @@ function checkFiles(root, files) {
     '(v2-item capability-governance',
     ':status runtime-projected',
     '(capability-governance-policy',
-    ':review-sidecar ".missiond/v2/capability-usage-review.json"',
+    ':review-sidecar ".missiond/v3/runtime/capability-usage-review.json"',
     ':protected-tool-patterns',
     ':protected-flow-patterns',
     '(tool-group capability-audit-tools',
@@ -131,6 +131,7 @@ function checkFiles(root, files) {
     'CapabilityGovernanceRuntimeConfig',
     'load_governance_config',
     'V3_BLUEPRINT_CONFIG_ERROR',
+    'LEGACY_CAPABILITY_REVIEW_SIDECAR',
     'review_sidecar_path',
     'protected_tool_patterns',
     'protected_flow_patterns',
@@ -241,7 +242,7 @@ function buildFixture() {
     `
 (missiond-blueprint
   (capability-governance-policy
-    :review-sidecar ".missiond/v2/capability-usage-review.json"
+    :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
     :protected-tool-patterns ["mission_execution" "mission_intent" "mission_forge_"]
     :protected-flow-patterns ["engineering" "F-execution-log-governance"])
   (v2-convergence-map
@@ -274,7 +275,7 @@ function buildFixture() {
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.capabilityRuntime),
-    'mission_capability_usage snapshot|report|candidates|mark|ack CapabilityUsageSnapshot CapabilityStaleCandidate CapabilityGovernanceRuntimeConfig load_governance_config V3_BLUEPRINT_CONFIG_ERROR review_sidecar_path protected_tool_patterns protected_flow_patterns action_snapshot action_report action_candidates action_mark action_ack source_coverage conversation_tool_calls board_tasks_flow_template event_log_flow_events lisp_semantic_hints review_sidecar workflow_execution_stats compute_protected_target_policy compute_review_required pick_merge_target apply_hint_overlay observability',
+    'mission_capability_usage snapshot|report|candidates|mark|ack CapabilityUsageSnapshot CapabilityStaleCandidate CapabilityGovernanceRuntimeConfig load_governance_config V3_BLUEPRINT_CONFIG_ERROR LEGACY_CAPABILITY_REVIEW_SIDECAR review_sidecar_path protected_tool_patterns protected_flow_patterns action_snapshot action_report action_candidates action_mark action_ack source_coverage conversation_tool_calls board_tasks_flow_template event_log_flow_events lisp_semantic_hints review_sidecar workflow_execution_stats compute_protected_target_policy compute_review_required pick_merge_target apply_hint_overlay observability',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.v3Runtime),

@@ -700,7 +700,7 @@
 
   (capability-governance-policy
     :desc "Lisp-owned capability audit policy; runtime review paths and protected lists are projections, not Rust-only constants."
-    :review-sidecar ".missiond/v2/capability-usage-review.json"
+    :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
     :protected-tool-patterns ["mission_execution"
                               "mission_intent"
                               "mission_forge_"
