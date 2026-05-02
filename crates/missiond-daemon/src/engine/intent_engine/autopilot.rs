@@ -481,6 +481,21 @@ fn is_tui_artifact_line(line: &str) -> bool {
     if t.contains("ctrl+o to expand") || t.contains("ctrl+b to run in background") {
         return true;
     }
+    if t.starts_with("YOLO Ctrl+Y") || (t.contains("GEMINI.md file") && t.contains("skills")) {
+        return true;
+    }
+    if t.starts_with("*   Type your message") || t.starts_with("* Type your message") {
+        return true;
+    }
+    if t.starts_with("workspace (/directory)") {
+        return true;
+    }
+    if t.starts_with("~/")
+        && t.contains("no sandbox")
+        && (t.contains("Gemini") || t.contains("gemini-") || t.contains("Auto ("))
+    {
+        return true;
+    }
     // User-input echo prefix used by the TUI when re-rendering the user's
     // last paste / typed line. A bare leading `>` followed by space matches
     // the echo; worker markdown blockquotes survive because Markdown
@@ -3542,7 +3557,11 @@ mod tests {
              │ ✓  Shell git status --short             │\n\
              ╰─────────────────────────────────────────╯\n\n\
              ✦ Fix: This was a read-only smoke of MissionD Autopilot/PTY completion capture.\n\
-               Verification: Current commit is 03fe34ac and only pre-existing packages/board/src/App.tsx is dirty.",
+               Verification: Current commit is 03fe34ac and only pre-existing packages/board/src/App.tsx is dirty.\n\n\
+             YOLO Ctrl+Y                                                                               1 GEMINI.md file · 12 skills\n\
+             *   Type your message or @path/to/file\n\
+             workspace (/directory)               branch              sandbox                  /model                         quota\n\
+             ~/Projects/missiond                  main                no sandbox               Auto (Gemini 3)              3% used",
             prompt = prompt
         );
         let summary = extract_worker_final_summary(&response, &prompt);
@@ -3560,6 +3579,13 @@ mod tests {
         assert!(
             summary.contains("Verification: Current commit is 03fe34ac"),
             "Verification line dropped: {summary}"
+        );
+        assert!(
+            !summary.contains("YOLO Ctrl+Y")
+                && !summary.contains("Type your message")
+                && !summary.contains("workspace (/directory)")
+                && !summary.contains("Auto (Gemini 3)"),
+            "Gemini footer lines leaked: {summary}"
         );
     }
 

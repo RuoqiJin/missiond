@@ -2162,6 +2162,21 @@ fn is_tui_chrome_line(line: &str) -> bool {
     if t.contains("gemini-") && t.contains("context left") {
         return true;
     }
+    if t.starts_with("YOLO Ctrl+Y") || (t.contains("GEMINI.md file") && t.contains("skills")) {
+        return true;
+    }
+    if t.starts_with("*   Type your message") || t.starts_with("* Type your message") {
+        return true;
+    }
+    if t.starts_with("workspace (/directory)") {
+        return true;
+    }
+    if t.starts_with("~/")
+        && t.contains("no sandbox")
+        && (t.contains("Gemini") || t.contains("gemini-") || t.contains("Auto ("))
+    {
+        return true;
+    }
     if t == ">" || t.starts_with("> ") {
         return true;
     }
@@ -2287,6 +2302,9 @@ mod tests {
 ✦ Fix: This was a read-only smoke of MissionD Autopilot/PTY completion capture.
   Verification: Current commit is 03fe34ac and only pre-existing packages/board/src/App.tsx is dirty.
 
+ YOLO Ctrl+Y                                                                               1 GEMINI.md file · 12 skills
+ *   Type your message or @path/to/file
+ workspace (/directory)               branch              sandbox                  /model                         quota
 ~/Projects/missiond main no sandbox Auto (Gemini 3) 3% used
 ";
         let result = maybe_enrich_completion(CliEngine::Gemini, event_content, screen);
@@ -2304,6 +2322,13 @@ mod tests {
         assert!(
             result.contains("Verification: Current commit is 03fe34ac"),
             "expected Verification closeout, got: {result}"
+        );
+        assert!(
+            !result.contains("YOLO Ctrl+Y")
+                && !result.contains("Type your message")
+                && !result.contains("workspace (/directory)")
+                && !result.contains("Auto (Gemini 3)"),
+            "Gemini footer lines must be stripped, got: {result}"
         );
     }
 
