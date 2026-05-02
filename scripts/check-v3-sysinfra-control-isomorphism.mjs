@@ -115,6 +115,9 @@ function checkFiles(root, files) {
     'permission.rs owns mission_permission_query/mutate',
     'power.rs owns mission_power_control',
     'system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update',
+    'mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job',
+    'survive daemon kickstart',
+    'skip_build remains the synchronous already-built artifact restart path',
     'global_instruction.rs owns mission_global_instruction',
     'node scripts/check-v3-sysinfra-control-isomorphism.mjs',
   ]);
@@ -194,6 +197,12 @@ function checkFiles(root, files) {
     'daemon_update',
     'LAUNCHD_LABEL',
     'current_exe',
+    'scripts/deploy-daemon.sh',
+    'daemon-update-',
+    'async deploy job started',
+    'Stdio::null',
+    'setsid',
+    'pre_exec',
     'codesign',
     'launchctl',
     'missiond-update.sh',
@@ -310,7 +319,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/sysinfra/global_instruction.rs"
              "crates/missiond-mcp/src/tools/sysinfra/permission.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "infra.rs owns mission_infra_query/ops; permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update; global_instruction.rs owns mission_global_instruction."))
+      :note "infra.rs owns mission_infra_query/ops; permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update. mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to survive daemon kickstart; skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction."))
   (compression-contract
     :checks ["node scripts/check-v3-sysinfra-control-isomorphism.mjs"]))`;
   ensureFile(root, DEFAULT_FILES.blueprint, blueprint);
@@ -342,7 +351,7 @@ function buildFixture() {
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.system),
-    ' ALLOWED_CONFIGS resolve_config_path sys_config_patch find_latest_log daemon_update LAUNCHD_LABEL current_exe codesign launchctl missiond-update.sh',
+    ' ALLOWED_CONFIGS resolve_config_path sys_config_patch find_latest_log daemon_update LAUNCHD_LABEL current_exe scripts/deploy-daemon.sh daemon-update- async deploy job started Stdio::null setsid pre_exec codesign launchctl missiond-update.sh',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.globalInstruction),

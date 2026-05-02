@@ -1626,8 +1626,9 @@
         :surface sysinfra-control
         :entry [mission_infra_query mission_infra_ops mission_permission_query mission_permission_mutate mission_power_control mission_sys_logs mission_sys_config mission_daemon_update mission_global_instruction]
         :core ((step s1 :logic "normalize sysinfra, permission, power, daemon, and global instruction operations")
-               (step s2 :logic "enforce explicit side-effect policy and keep operational state separate from request artifacts")
-               (step s3 :logic "return bounded operational status or mutation receipt"))
+               (step s2 :logic "for mission_daemon_update, return an async logged deploy job for full builds and reserve synchronous restart for skip_build")
+               (step s3 :logic "enforce explicit side-effect policy and keep operational state separate from request artifacts")
+               (step s4 :logic "return bounded operational status or mutation receipt"))
         :egress [infra_result permission_receipt daemon_update_status global_instruction_state])
       (function ops-infra
         :surface ops-infra
@@ -2362,7 +2363,7 @@
              "crates/missiond-mcp/src/tools/sysinfra/system.rs"
              "crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and reachability probes; permission.rs owns mission_permission_query/mutate including get, learned_list, merged_for_slot, set_role, set_slot, auto_allow, reload, and revoke; power.rs owns mission_power_control status/wake/suspend and removes power from the legacy misc hot path; system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update; global_instruction.rs owns mission_global_instruction read/edit/manual-reload.")
+      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and reachability probes; permission.rs owns mission_permission_query/mutate including get, learned_list, merged_for_slot, set_role, set_slot, auto_allow, reload, and revoke; power.rs owns mission_power_control status/wake/suspend and removes power from the legacy misc hot path; system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update. mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to stay below MCP tools/call timeout and survive daemon kickstart; skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction read/edit/manual-reload.")
 
     (surface ops-infra
       :status "code-aligned"

@@ -293,7 +293,7 @@ async fn sys_logs(args: Value) -> Result<ToolResult> {
 const LAUNCHD_LABEL: &str = "com.missiond.daemon";
 
 async fn daemon_update(args: Value) -> Result<ToolResult> {
-    use std::process::Command;
+    use std::process::{Command, Stdio};
     use tracing::info;
 
     let skip_build = args
@@ -308,7 +308,10 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     // so the cp would silently land at the wrong path and the kickstart would relaunch
     // the stale binary every time.
     let binary_dest = std::env::current_exe().map_err(|e| {
-        anyhow::anyhow!("daemon_update: could not resolve current executable path: {}", e)
+        anyhow::anyhow!(
+            "daemon_update: could not resolve current executable path: {}",
+            e
+        )
     })?;
 
     // Resolve workspace root from compile-time CARGO_MANIFEST_DIR
@@ -322,31 +325,80 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     // cargo build output is `missiond` (binary name from Cargo.toml)
     let build_target = project_root.join("target/release/missiond");
 
-    // Step 1: Build (unless skip_build)
+    // Step 1: Full build+deploy is intentionally asynchronous. MCP clients have
+    // a hard tools/call budget; release builds can exceed it and used to report a
+    // false timeout while the daemon kept building in the background. The
+    // canonical deploy script owns the long path and records durable logs.
     if !skip_build {
-        info!("daemon_update: starting cargo build --release");
-        let project_root_clone = project_root.clone();
-        let build_output = tokio::task::spawn_blocking(move || {
-            // Resolve cargo path — launchd doesn't inherit shell PATH
-            let cargo = std::env::var("CARGO")
-                .or_else(|_| std::env::var("HOME").map(|h| format!("{}/.cargo/bin/cargo", h)))
-                .unwrap_or_else(|_| "cargo".to_string());
-            Command::new(&cargo)
-                .args(["build", "--release", "--package", "missiond-daemon"])
-                .current_dir(&project_root_clone)
-                .output()
-        })
-        .await??;
-
-        if !build_output.status.success() {
-            let stderr = String::from_utf8_lossy(&build_output.stderr);
+        let deploy_script = project_root.join("scripts/deploy-daemon.sh");
+        if !deploy_script.exists() {
             return Ok(ToolResult::error(format!(
-                "cargo build failed (exit {})\n{}",
-                build_output.status, stderr
+                "Deploy script not found at {}",
+                deploy_script.display()
             )));
         }
-        info!("daemon_update: build succeeded");
+
+        let home = missiond_core::ipc::default_mission_home();
+        let log_dir = home.join("logs");
+        std::fs::create_dir_all(&log_dir)?;
+        let started_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let log_path = log_dir.join(format!(
+            "daemon-update-{}-{}.log",
+            started_at,
+            std::process::id()
+        ));
+        let stdout = std::fs::File::create(&log_path)?;
+        let stderr = stdout.try_clone()?;
+        let socket_path = home.join("missiond.sock");
+
+        let mut command = Command::new(&deploy_script);
+        command
+            .current_dir(&project_root)
+            .env("MISSIOND_BIN_PATH", &binary_dest)
+            .env("MISSIOND_SOCKET_PATH", &socket_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout))
+            .stderr(Stdio::from(stderr));
+        #[cfg(unix)]
+        unsafe {
+            use std::os::unix::process::CommandExt;
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+
+        let child = command.spawn()?;
+
+        info!(
+            pid = child.id(),
+            log = %log_path.display(),
+            "daemon_update: async deploy job started"
+        );
+        return Ok(ToolResult::text(format!(
+            "Daemon update job started asynchronously.\n\
+             - PID: {}\n\
+             - Script: {}\n\
+             - Log: {}\n\
+             - Binary target: {}\n\
+             - Socket: {}\n\
+             Use `tail -f {}` or `mission_sys_logs` after restart to observe completion.",
+            child.id(),
+            deploy_script.display(),
+            log_path.display(),
+            binary_dest.display(),
+            socket_path.display(),
+            log_path.display()
+        )));
     }
+
+    // Step 1: skip_build=true uses the already-built release artifact and returns
+    // synchronously because it only copies/codesigns/kickstarts.
 
     // Step 2: Verify new binary exists
     if !build_target.exists() {
@@ -391,7 +443,12 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     #[cfg(target_os = "macos")]
     {
         let sign_status = Command::new("codesign")
-            .args(["-s", "-", "--force", binary_dest.to_str().unwrap_or("missiond")])
+            .args([
+                "-s",
+                "-",
+                "--force",
+                binary_dest.to_str().unwrap_or("missiond"),
+            ])
             .status();
         match sign_status {
             Ok(s) if s.success() => info!("daemon_update: codesign succeeded"),
