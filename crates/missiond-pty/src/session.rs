@@ -1668,12 +1668,48 @@ impl PTYSession {
 
         match result {
             Ok(Ok(response)) => {
+                // Provider-aware completion fallback for Gemini / Ink-style CLIs.
+                //
+                // Live-smoke from BoardTask 42b2385e showed that for slot-gemini-ultra
+                // the screen frame after the turn ended contained the worker's final
+                // closeout (`  Fix:` / `  Verification:` indented prose), but the
+                // `TextOutput::Complete` event content (assembled by streaming) had
+                // already truncated at `Autopilot Smoke Test: …`. Because that event
+                // is what `send()` returns and what callers feed to Autopilot summary
+                // extraction / `mission_pty_read(history)`, the Board note was
+                // missing the closeout that was clearly on screen.
+                //
+                // For non-Claude CLIs we settle briefly, capture the last screen
+                // frame, sanitize TUI chrome (Ink rounded boxes, status footer,
+                // input echo) enough to recover the final assistant prose, and
+                // prefer the screen-derived text only when it carries the closeout
+                // pair the streamed event is missing. ClaudeCode keeps the streamed
+                // event verbatim (`maybe_enrich_completion` short-circuits) so its
+                // Summary-block extraction is unchanged.
+                let enriched = if self.engine != missiond_shared::CliEngine::ClaudeCode {
+                    tokio::time::sleep(Duration::from_millis(250)).await;
+                    let buffer_lines = (self.rows as usize).saturating_mul(2).max(80);
+                    let screen_text = self.get_last_lines(buffer_lines).await.join("\n");
+                    let chosen = maybe_enrich_completion(self.engine, response, &screen_text);
+                    if tracing::enabled!(tracing::Level::DEBUG) {
+                        debug!(
+                            slot = %self.slot_id,
+                            engine = %self.engine,
+                            chosen_len = chosen.len(),
+                            "send() applied provider-aware completion fallback"
+                        );
+                    }
+                    chosen
+                } else {
+                    response
+                };
+
                 // Record assistant message
                 {
                     let mut history = self.history.write().await;
                     history.push(Message {
                         role: MessageRole::Assistant,
-                        content: response.clone(),
+                        content: enriched.clone(),
                         timestamp: Utc::now().timestamp_millis(),
                     });
                     if history.len() > MAX_HISTORY_MESSAGES {
@@ -1681,7 +1717,7 @@ impl PTYSession {
                         history.drain(..drain);
                     }
                 }
-                Ok(response)
+                Ok(enriched)
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(anyhow!("Timeout waiting for response")),
@@ -1993,5 +2029,312 @@ impl BlockClassifier {
         // file paths, data rows) belong to whatever block we're currently in.
         // If we're InTool, they're tool output. If InAssistant, they're text.
         self.current_block
+    }
+}
+
+// ========== Provider-aware completion fallback ==========
+//
+// Gemini / Codex CLIs render their conversation in an Ink-style TUI: tool
+// calls and the input prompt sit inside rounded `╭ │ ╰` boxes, and the
+// assistant's prose is interleaved between those boxes. The streamed
+// `TextOutputEvent::Complete` content can truncate before the worker's final
+// closeout (`Fix:` / `Verification:`) when the screen flickers idle as the
+// last paragraph is still being painted, but the screen frame captured a
+// moment later still carries the full closeout. The helpers below sanitize
+// chrome out of that screen frame and decide whether the screen-derived text
+// is richer than the streamed event content.
+
+/// Apply the provider-aware enrichment rule used by `PTYSession::send`.
+///
+/// For ClaudeCode this is the identity (the streamed event content is already
+/// authoritative because Claude Code does not hide the final answer behind
+/// repaint boxes). For non-Claude engines, sanitize the raw screen frame and
+/// promote it only when the streamed event lacks the `Fix:` / `Verification:`
+/// closeout that the screen carries.
+pub(crate) fn maybe_enrich_completion(
+    engine: missiond_shared::CliEngine,
+    event_content: String,
+    screen_text: &str,
+) -> String {
+    if engine == missiond_shared::CliEngine::ClaudeCode {
+        return event_content;
+    }
+    let sanitized = sanitize_tui_chrome(screen_text);
+    choose_richer_completion(event_content, sanitized)
+}
+
+/// Strip Ink-style TUI chrome from a screen frame so the assistant prose
+/// (including indented `  Fix:` / `  Verification:` lines) is preserved.
+///
+/// Drops:
+/// - Any line whose first non-space char is a box-drawing glyph (`╭ ╮ ╰ ╯`,
+///   `│ ─ ━ ═ ║`, `┌ ┐ └ ┘ ├ ┤ ┬ ┴ ┼`). Gemini wraps tool panels and the
+///   input prompt in rounded boxes; assistant prose is never boxed.
+/// - The Gemini status footer (path + sandbox + model + context badge),
+///   recognised by the `gemini-` model id co-occurring with `context left`.
+/// - The bare user-input echo (`> ` line) the prompt box leaks on partial
+///   redraws when the box border has already scrolled away.
+///
+/// Runs of blank lines are collapsed to one so the resulting blob is easy to
+/// scan for closeout anchors.
+pub(crate) fn sanitize_tui_chrome(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut prev_blank = false;
+    for raw_line in raw.lines() {
+        let line = raw_line.trim_end();
+        if is_tui_chrome_line(line) {
+            continue;
+        }
+        if line.trim().is_empty() {
+            if prev_blank {
+                continue;
+            }
+            prev_blank = true;
+        } else {
+            prev_blank = false;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+fn is_tui_chrome_line(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.is_empty() {
+        return false;
+    }
+    if let Some(c) = t.chars().next() {
+        if matches!(
+            c,
+            '╭' | '╮'
+                | '╯'
+                | '╰'
+                | '│'
+                | '─'
+                | '━'
+                | '═'
+                | '║'
+                | '┌'
+                | '┐'
+                | '└'
+                | '┘'
+                | '├'
+                | '┤'
+                | '┬'
+                | '┴'
+                | '┼'
+        ) {
+            return true;
+        }
+    }
+    if t.contains("gemini-") && t.contains("context left") {
+        return true;
+    }
+    if t == ">" || t.starts_with("> ") {
+        return true;
+    }
+    false
+}
+
+/// Pick between the streamed event content and the sanitized screen frame.
+///
+/// Promotes the sanitized screen text only when the streamed event lacks the
+/// `Fix:` / `Verification:` closeout pair that the sanitized text carries.
+/// In every other case (event already has the closeout, or neither does) the
+/// streamed event wins so we never widen the response beyond what the worker
+/// actually produced.
+pub(crate) fn choose_richer_completion(event_content: String, sanitized_screen: String) -> String {
+    let event_has = has_fix_verification_closeout(&event_content);
+    let screen_has = has_fix_verification_closeout(&sanitized_screen);
+    if screen_has && !event_has {
+        sanitized_screen
+    } else {
+        event_content
+    }
+}
+
+/// Mirror of `autopilot::find_fix_verification_anchor`'s qualification rule:
+/// the text contains a `Fix:` line (start of line, optionally with `**`
+/// markdown emphasis or whitespace before it) followed somewhere later by
+/// the literal `Verification:`. Matching the autopilot rule keeps the
+/// promotion decision aligned with the downstream summary-extraction anchor.
+fn has_fix_verification_closeout(text: &str) -> bool {
+    let mut search_start = 0;
+    while let Some(rel) = text[search_start..].find("Fix:") {
+        let abs = search_start + rel;
+        let line_start = text[..abs].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
+        let leading = &text[line_start..abs];
+        let leading_trimmed = leading.trim_start();
+        let line_start_ok = leading_trimmed.is_empty() || leading_trimmed == "**";
+        if line_start_ok && text[abs + "Fix:".len()..].contains("Verification:") {
+            return true;
+        }
+        search_start = abs + "Fix:".len();
+    }
+    false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use missiond_shared::CliEngine;
+
+    /// Live shape from BoardTask 42b2385e: the streamed `TextOutput::Complete`
+    /// content for slot-gemini-ultra truncated at `Autopilot Smoke Test: …`,
+    /// while the screen frame still carried the worker's final indented
+    /// `  Fix:` / `  Verification:` closeout. The enrichment must promote the
+    /// sanitized screen text so the value returned from `send()` (and pushed
+    /// into history) carries the closeout, and chrome lines (rounded boxes,
+    /// status footer, prompt echo) must not leak through.
+    #[test]
+    fn enriches_truncated_gemini_event_with_screen_closeout() {
+        let event_content =
+            "Investigating BoardTask 42b2385e — running cargo test ...\n\nAutopilot Smoke Test: "
+                .to_string();
+        let screen = "\
+ ╭───────────────────────────────────────────────────────────╮
+ │ ✔ ReadFile crates/missiond-pty/src/session.rs             │
+ │   1: //! PTY Session                                      │
+ │   ...                                                     │
+ ╰───────────────────────────────────────────────────────────╯
+✦ I traced the truncation to the streamed Complete event.
+
+  Autopilot Smoke Test: passed.
+
+  Fix: Capture the post-Idle screen frame and promote it when the streamed
+       event content is missing the closeout.
+  Verification: cargo test -p missiond-pty passes; the live re-run on
+                slot-gemini-ultra shows Fix/Verification in the BoardTask note.
+
+ ╭───────────────────────────────────────────────────────────╮
+ │ > _                                                       │
+ ╰───────────────────────────────────────────────────────────╯
+~/Projects/missiond (main*)  no sandbox (see /docs)  gemini-2.5-pro (95% context left)
+";
+        let result = maybe_enrich_completion(CliEngine::Gemini, event_content.clone(), screen);
+
+        assert!(
+            result.contains("Fix: Capture the post-Idle screen frame"),
+            "expected enriched result to carry the Fix: closeout, got: {result}"
+        );
+        assert!(
+            result.contains("Verification: cargo test -p missiond-pty passes"),
+            "expected enriched result to carry the Verification: closeout, got: {result}"
+        );
+        assert!(
+            !result.contains('╭') && !result.contains('╰') && !result.contains('│'),
+            "chrome box characters must be stripped, got: {result}"
+        );
+        assert!(
+            !result.contains("gemini-2.5-pro"),
+            "Gemini status footer must be stripped, got: {result}"
+        );
+        assert!(
+            !result.contains("> _"),
+            "input prompt echo must be stripped, got: {result}"
+        );
+    }
+
+    /// ClaudeCode pinning: the streamed event already carries the worker's
+    /// full final answer (Claude Code does not repaint final prose behind
+    /// boxes), so enrichment must be a strict no-op for it. This guards
+    /// against the Gemini fallback bleeding into Claude Code's existing
+    /// summary-block extraction path.
+    #[test]
+    fn claude_code_completion_unchanged_by_enrichment() {
+        let event =
+            "⏺ Summary\n\nAll acceptance gates pass.\nFix: x\nVerification: y\n".to_string();
+        // Even with a screen blob that contains chrome and a different closeout,
+        // ClaudeCode must short-circuit and return the streamed event byte-for-byte.
+        let screen = "\
+ ╭──────╮
+ │ tool │
+ ╰──────╯
+Fix: DIFFERENT
+Verification: DIFFERENT
+";
+        let result = maybe_enrich_completion(CliEngine::ClaudeCode, event.clone(), screen);
+        assert_eq!(result, event);
+    }
+
+    /// When both the streamed event and the sanitized screen carry the
+    /// closeout pair, the streamed event wins (it is the authoritative
+    /// per-turn assembly; promoting the screen would risk re-introducing
+    /// the prompt echo / context fragments that the assembler already
+    /// filtered out).
+    #[test]
+    fn prefers_event_when_event_already_has_closeout() {
+        let event = "Done.\n\nFix: streamed-fix\nVerification: streamed-verification\n".to_string();
+        let screen = "\
+ ╭──────╮
+ │ tool │
+ ╰──────╯
+Fix: screen-fix
+Verification: screen-verification
+";
+        let result = maybe_enrich_completion(CliEngine::Gemini, event.clone(), screen);
+        assert_eq!(result, event);
+    }
+
+    /// When neither the event nor the screen carry the closeout pair, the
+    /// streamed event is kept (no enrichment is justified).
+    #[test]
+    fn keeps_event_when_neither_has_closeout() {
+        let event = "Investigating ...".to_string();
+        let screen = "\
+ ╭──────╮
+ │ tool │
+ ╰──────╯
+Some chatter without a closeout.
+";
+        let result = maybe_enrich_completion(CliEngine::Gemini, event.clone(), screen);
+        assert_eq!(result, event);
+    }
+
+    /// Sanitizer keeps indented closeout prose intact while dropping every
+    /// flavour of Ink chrome (rounded corners, vertical bars, the model /
+    /// context-left status footer, and the bare prompt echo).
+    #[test]
+    fn sanitize_tui_chrome_keeps_indented_closeout_and_drops_chrome() {
+        let raw = "\
+ ╭───╮
+ │ x │
+ ╰───╯
+Some prose.
+  Fix: indented fix line
+  Verification: indented verification line
+>
+~/foo  gemini-2.5-pro (90% context left)
+";
+        let cleaned = sanitize_tui_chrome(raw);
+        assert!(cleaned.contains("Some prose."));
+        assert!(cleaned.contains("  Fix: indented fix line"));
+        assert!(cleaned.contains("  Verification: indented verification line"));
+        assert!(!cleaned.contains('╭'));
+        assert!(!cleaned.contains('│'));
+        assert!(!cleaned.contains('╰'));
+        assert!(!cleaned.contains("gemini-2.5-pro"));
+        assert!(!cleaned.contains("> \n"));
+    }
+
+    /// The closeout detector must require both a `Fix:` line and a later
+    /// `Verification:` token, mirroring the autopilot anchor rule so the
+    /// promotion decision lines up with the downstream summary extractor.
+    #[test]
+    fn closeout_detector_requires_both_fix_and_verification() {
+        assert!(has_fix_verification_closeout("Fix: a\nVerification: b\n"));
+        assert!(has_fix_verification_closeout(
+            "  Fix: indented\n  Verification: also indented\n"
+        ));
+        assert!(has_fix_verification_closeout(
+            "**Fix: bold-emphasis\nVerification: ok\n"
+        ));
+        assert!(!has_fix_verification_closeout("Fix: lonely\n"));
+        assert!(!has_fix_verification_closeout("Verification: b\nFix: a\n"));
+        // `Fix:` must be at the start of a line (not embedded mid-prose).
+        assert!(!has_fix_verification_closeout(
+            "We need to Fix: something. Verification: ok\n"
+        ));
     }
 }
