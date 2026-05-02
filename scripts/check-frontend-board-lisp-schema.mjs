@@ -269,7 +269,8 @@ function validateFrontendRuntimeConfig(diagnostics, file, node) {
   const taxonomy = child(node, 'task-taxonomy');
   const flow = child(node, 'flow');
   const routes = child(node, 'event-routes');
-  for (const [name, section] of [['tabs', tabs], ['task-taxonomy', taxonomy], ['flow', flow], ['event-routes', routes]]) {
+  const timelineVisuals = child(node, 'timeline-visuals');
+  for (const [name, section] of [['tabs', tabs], ['task-taxonomy', taxonomy], ['flow', flow], ['event-routes', routes], ['timeline-visuals', timelineVisuals]]) {
     if (!section) diagnostics.push(diag(file, node.loc, `frontend-runtime-config missing (${name} ...)`));
   }
 
@@ -308,6 +309,17 @@ function validateFrontendRuntimeConfig(diagnostics, file, node) {
     }
     const hasNarration = childrenByHead(routes, 'prefix-route').some((route) => nodeText(readKeywordProps(route, { start: 1 })[':prefix']?.value) === 'narration_');
     if (!hasNarration) diagnostics.push(diag(file, routes.loc, 'event-routes missing narration_ prefix route'));
+  }
+
+  if (timelineVisuals) {
+    for (const [kind, expected] of [['event', 30], ['slot-color', 5], ['slot-fallback-line', 4], ['swimlane', 8], ['session-color', 8], ['window-option', 6]]) {
+      const count = childrenByHead(timelineVisuals, kind).length;
+      if (count < expected) diagnostics.push(diag(file, timelineVisuals.loc, `timeline-visuals must declare at least ${expected} ${kind} entries, got ${count}`));
+    }
+    for (const requiredType of ['slot_task_dispatched', 'board_task_updated', 'narration_failed']) {
+      const found = childrenByHead(timelineVisuals, 'event').some((event) => nodeText(readKeywordProps(event, { start: 1 })[':type']?.value) === requiredType);
+      if (!found) diagnostics.push(diag(file, timelineVisuals.loc, `timeline-visuals missing event ${requiredType}`));
+    }
   }
 }
 
@@ -389,7 +401,14 @@ function buildFixture() {
       (route :events [health_snapshot] :bump [engineVersion] :health-snapshot true)
       (custom-event :event briefing_summary_generated :name "timeline-summary-update" :detail [target_seq summary])
       (custom-event :event jarvis_task_completed :name "jarvis-task-completed" :detail [conversation_id task_id])
-      (prefix-route :prefix "narration_" :bump [timelineVersion] :delay-ms 500)))
+      (prefix-route :prefix "narration_" :bump [timelineVersion] :delay-ms 500))
+    (timeline-visuals
+      ${Array.from({ length: 30 }, (_, i) => `(event :type ${i === 0 ? 'slot_task_dispatched' : i === 1 ? 'board_task_updated' : i === 2 ? 'narration_failed' : `event_${i}`} :dot "d" :glow "g" :bg "b" :text "t" :label "l" :icon Activity)`).join('\n      ')}
+      ${Array.from({ length: 5 }, (_, i) => `(slot-color :id slot-${i} :badge "b" :border "br" :line "l")`).join('\n      ')}
+      ${Array.from({ length: 4 }, (_, i) => `(slot-fallback-line :value "line-${i}")`).join('\n      ')}
+      ${Array.from({ length: 8 }, (_, i) => `(swimlane :id lane-${i} :label "Lane" :dot "d" :css "#fff" :bg "b" :types [event_${i}])`).join('\n      ')}
+      ${Array.from({ length: 8 }, (_, i) => `(session-color :dot "d" :line "l" :ring "r")`).join('\n      ')}
+      ${Array.from({ length: 6 }, (_, i) => `(window-option :label "${i}m" :value "${i}min")`).join('\n      ')}))
   (pillar-flow-map
     ${REQUIRED_PILLARS.map((pillar, i) => `(pillar ${pillar}
       (function fn-${i + 1} :surface ${REQUIRED_SURFACES[i]} :entry [in] :core ((step s1 :logic "do")) :egress [out]))`).join('\n    ')})

@@ -112,7 +112,8 @@ function readConfig(filePath, fileLabel) {
   const taxonomyNode = child(runtime, 'task-taxonomy');
   const flowNode = child(runtime, 'flow');
   const eventRoutesNode = child(runtime, 'event-routes');
-  for (const [name, node] of [['tabs', tabsNode], ['task-taxonomy', taxonomyNode], ['flow', flowNode], ['event-routes', eventRoutesNode]]) {
+  const timelineVisualsNode = child(runtime, 'timeline-visuals');
+  for (const [name, node] of [['tabs', tabsNode], ['task-taxonomy', taxonomyNode], ['flow', flowNode], ['event-routes', eventRoutesNode], ['timeline-visuals', timelineVisualsNode]]) {
     if (!node) fail(`${fileLabel}: frontend-runtime-config missing (${name} ...)`);
   }
 
@@ -125,6 +126,7 @@ function readConfig(filePath, fileLabel) {
     taxonomy: parseTaxonomy(taxonomyNode),
     flow: parseFlow(flowNode),
     eventRoutes: parseEventRoutes(eventRoutesNode),
+    timelineVisuals: parseTimelineVisuals(timelineVisualsNode),
   };
 }
 
@@ -235,6 +237,59 @@ function parseEventRoutes(node) {
   };
 }
 
+function parseTimelineVisuals(node) {
+  return {
+    events: children(node, 'event').map((event) => {
+      const p = readKeywordProps(event, { start: 1 });
+      return {
+        type: requiredText(p, ':type', 'event'),
+        dot: requiredText(p, ':dot', 'event'),
+        glow: requiredText(p, ':glow', 'event'),
+        bg: requiredText(p, ':bg', 'event'),
+        text: requiredText(p, ':text', 'event'),
+        label: requiredText(p, ':label', 'event'),
+        icon: requiredText(p, ':icon', 'event'),
+      };
+    }),
+    slotColors: children(node, 'slot-color').map((slot) => {
+      const p = readKeywordProps(slot, { start: 1 });
+      return {
+        id: requiredText(p, ':id', 'slot-color'),
+        badge: requiredText(p, ':badge', 'slot-color'),
+        border: requiredText(p, ':border', 'slot-color'),
+        line: requiredText(p, ':line', 'slot-color'),
+      };
+    }),
+    slotFallbackLines: children(node, 'slot-fallback-line').map((line) => requiredText(readKeywordProps(line, { start: 1 }), ':value', 'slot-fallback-line')),
+    swimlanes: children(node, 'swimlane').map((lane) => {
+      const p = readKeywordProps(lane, { start: 1 });
+      return {
+        id: requiredText(p, ':id', 'swimlane'),
+        label: requiredText(p, ':label', 'swimlane'),
+        dot: requiredText(p, ':dot', 'swimlane'),
+        css: requiredText(p, ':css', 'swimlane'),
+        bg: requiredText(p, ':bg', 'swimlane'),
+        types: requiredList(p, ':types', 'swimlane'),
+      };
+    }),
+    sessionColors: children(node, 'session-color').map((color) => {
+      const p = readKeywordProps(color, { start: 1 });
+      return {
+        dot: requiredText(p, ':dot', 'session-color'),
+        line: requiredText(p, ':line', 'session-color'),
+        ring: requiredText(p, ':ring', 'session-color'),
+      };
+    }),
+    windowOptions: children(node, 'window-option').map((option) => {
+      const p = readKeywordProps(option, { start: 1 });
+      return {
+        label: requiredText(p, ':label', 'window-option'),
+        value: requiredText(p, ':value', 'window-option'),
+      };
+    }),
+  };
+}
+
 function renderConfig(config, { blueprintRel, outputRel }) {
   const tabIds = config.tabs.items.map((tab) => tab.id);
   const eventKeys = config.eventRoutes.resyncBumps;
@@ -276,6 +331,28 @@ function renderConfig(config, { blueprintRel, outputRel }) {
     '  delayMs?: number;',
     '}',
     '',
+    'export interface TimelineEventVisualConfig {',
+    '  dot: string;',
+    '  glow: string;',
+    '  bg: string;',
+    '  text: string;',
+    '  label: string;',
+    '  icon: string;',
+    '}',
+    '',
+    'export interface TimelineSlotColorConfig {',
+    '  badge: string;',
+    '  border: string;',
+    '  line: string;',
+    '}',
+    '',
+    'export interface TimelineSwimlaneConfig {',
+    '  id: string;',
+    '  label: string;',
+    '  accent: { dot: string; css: string; bg: string };',
+    '  types: readonly string[];',
+    '}',
+    '',
     `export const DEFAULT_TAB: BoardTabId = ${q(config.tabs.default)};`,
     `export const BOARD_TABS = ${arrayLiteral(config.tabs.items, renderTab)} as const satisfies readonly BoardTabConfig[];`,
     `export const TAB_MIGRATION = ${objectLiteral(config.tabs.migrations.map((m) => [m.from, m.to]), 0)} as const satisfies Record<string, BoardTabId>;`,
@@ -293,6 +370,13 @@ function renderConfig(config, { blueprintRel, outputRel }) {
     `export const EVENT_ROUTE_TABLE = ${arrayLiteral(config.eventRoutes.routes, renderRoute)} as const satisfies readonly EventRouteConfig[];`,
     `export const EVENT_CUSTOM_EVENTS = ${arrayLiteral(config.eventRoutes.customEvents, renderCustomEvent)} as const satisfies readonly EventCustomEventConfig[];`,
     `export const EVENT_PREFIX_ROUTES = ${arrayLiteral(config.eventRoutes.prefixRoutes, renderPrefixRoute)} as const satisfies readonly EventPrefixRouteConfig[];`,
+    '',
+    `export const TIMELINE_EVENT_VISUALS = ${objectLiteral(config.timelineVisuals.events.map((event) => [event.type, { dot: event.dot, glow: event.glow, bg: event.bg, text: event.text, label: event.label, icon: event.icon }]), 0)} as const satisfies Record<string, TimelineEventVisualConfig>;`,
+    `export const TIMELINE_SLOT_COLORS = ${objectLiteral(config.timelineVisuals.slotColors.map((slot) => [slot.id, { badge: slot.badge, border: slot.border, line: slot.line }]), 0)} as const satisfies Record<string, TimelineSlotColorConfig>;`,
+    `export const TIMELINE_SLOT_FALLBACK_LINES = ${arrayLiteral(config.timelineVisuals.slotFallbackLines, q)} as const;`,
+    `export const TIMELINE_SWIMLANES = ${arrayLiteral(config.timelineVisuals.swimlanes, renderSwimlane)} as const satisfies readonly TimelineSwimlaneConfig[];`,
+    `export const TIMELINE_SESSION_COLORS = ${arrayLiteral(config.timelineVisuals.sessionColors, renderSessionColor)} as const;`,
+    `export const TIMELINE_WINDOW_OPTIONS = ${arrayLiteral(config.timelineVisuals.windowOptions, renderWindowOption)} as const;`,
     '',
   ];
   return lines.join('\n');
@@ -324,6 +408,18 @@ function renderPrefixRoute(route) {
   ];
   if (route.delayMs != null) parts.push(`delayMs: ${route.delayMs}`);
   return `{ ${parts.join(', ')} }`;
+}
+
+function renderSwimlane(lane) {
+  return `{ id: ${q(lane.id)}, label: ${q(lane.label)}, accent: { dot: ${q(lane.dot)}, css: ${q(lane.css)}, bg: ${q(lane.bg)} }, types: ${arrayLiteral(lane.types, q)} }`;
+}
+
+function renderSessionColor(color) {
+  return `{ dot: ${q(color.dot)}, line: ${q(color.line)}, ring: ${q(color.ring)} }`;
+}
+
+function renderWindowOption(option) {
+  return `{ label: ${q(option.label)}, value: ${q(option.value)} }`;
 }
 
 function arrayLiteral(items, render) {

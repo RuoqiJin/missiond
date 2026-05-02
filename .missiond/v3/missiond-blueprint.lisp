@@ -2182,6 +2182,8 @@
              "packages/board/src/lib/missiond.ts"
              "packages/board/src/components/Terminal.tsx"
              "packages/board/src/components/TaskDialog.tsx"
+             "packages/board/src/components/timeline/constants.tsx"
+             "packages/board/src/components/timeline/helpers.ts"
              "packages/board/src/app/api/slots/route.ts"
              "scripts/project-frontend-board-config.mjs"
              "scripts/check-frontend-board-lisp-schema.mjs"

@@ -21,7 +21,7 @@ const REQUIRED_SURFACES = new Map([
   ['board-task-ui', ['packages/board/src/types.ts', 'packages/board/src/api.ts', 'packages/board/src/store.ts', 'packages/board/src/constants.ts', 'packages/board/src/generated/board-frontend-config.ts', 'packages/board/src/components/TaskDialog.tsx']],
   ['workstation-terminal-ui', ['packages/board/src/components/Terminal.tsx', 'packages/board/src/components/ExecDashboard.tsx', 'packages/board/src/components/AutopilotMonitor.tsx', 'packages/board/src/app/api/pty/status/route.ts']],
   ['event-stream-ui', ['packages/board/src/eventStream.ts', 'packages/board/src/generated/board-frontend-config.ts', 'packages/board/src/hooks/useEventStream.ts']],
-  ['timeline-log-ui', ['packages/board/src/components/timeline/CognitiveTimeline.tsx', 'packages/board/src/components/LogsConsolidated.tsx', 'packages/board/src/components/Conversations.tsx']],
+  ['timeline-log-ui', ['packages/board/src/components/timeline/CognitiveTimeline.tsx', 'packages/board/src/components/timeline/constants.tsx', 'packages/board/src/components/timeline/helpers.ts', 'packages/board/src/components/LogsConsolidated.tsx', 'packages/board/src/components/Conversations.tsx']],
   ['knowledge-system-ui', ['packages/board/src/components/KnowledgeConsolidated.tsx', 'packages/board/src/components/SystemDashboard.tsx', 'packages/board/src/components/architecture/ArchitectureView.tsx', 'packages/board/src/components/JarvisChat.tsx']],
   ['frontend-design-system', ['packages/board/src/app/globals.css', 'packages/board/src/components/ui/button.tsx']],
 ]);
@@ -42,6 +42,8 @@ const REQUIRED_MAJOR_FILES = [
   'packages/board/src/components/JarvisChat.tsx',
   'packages/board/src/components/Conversations.tsx',
   'packages/board/src/components/timeline/CognitiveTimeline.tsx',
+  'packages/board/src/components/timeline/constants.tsx',
+  'packages/board/src/components/timeline/helpers.ts',
   'packages/board/src/app/api/slots/route.ts',
   'packages/board/src/app/api/tasks/route.ts',
   'scripts/project-frontend-board-config.mjs',

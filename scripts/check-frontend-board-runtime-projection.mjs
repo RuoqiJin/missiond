@@ -18,6 +18,7 @@ const FILES = {
   app: 'packages/board/src/App.tsx',
   eventStream: 'packages/board/src/eventStream.ts',
   autopilotMonitor: 'packages/board/src/components/AutopilotMonitor.tsx',
+  timelineConstants: 'packages/board/src/components/timeline/constants.tsx',
 };
 
 function main() {
@@ -79,6 +80,7 @@ function checkRepo(repo) {
     ':checker "node scripts/project-frontend-board-config.mjs --check"',
     ':output "packages/board/src/generated/board-frontend-config.ts"',
     '(event-routes',
+    '(timeline-visuals',
   ]);
 
   requireText(diagnostics, FILES.types, src.types, [
@@ -109,6 +111,10 @@ function checkRepo(repo) {
     'export const EVENT_CUSTOM_EVENTS',
     'export const EVENT_PREFIX_ROUTES',
     'export const RESYNC_VERSION_KEYS',
+    'export const TIMELINE_EVENT_VISUALS',
+    'export const TIMELINE_SLOT_COLORS',
+    'export const TIMELINE_SWIMLANES',
+    'export const TIMELINE_WINDOW_OPTIONS',
   ]);
 
   requireText(diagnostics, FILES.generator, src.generator, [
@@ -116,6 +122,7 @@ function checkRepo(repo) {
     "const OUTPUT = 'packages/board/src/generated/board-frontend-config.ts'",
     'frontend-runtime-config',
     'EVENT_ROUTE_TABLE',
+    'TIMELINE_EVENT_VISUALS',
   ]);
 
   requireText(diagnostics, FILES.slotsRoute, src.slotsRoute, [
@@ -170,6 +177,14 @@ function checkRepo(repo) {
     "import { FLOW_PHASE_LABELS, FLOW_PHASES } from '../constants'",
   ]);
 
+  requireText(diagnostics, FILES.timelineConstants, src.timelineConstants, [
+    "from '../../generated/board-frontend-config'",
+    'TIMELINE_EVENT_VISUALS',
+    'TIMELINE_SLOT_COLORS',
+    'TIMELINE_SWIMLANES',
+    'EVENT_ICON_MAP',
+  ]);
+
   return diagnostics;
 }
 
@@ -186,17 +201,18 @@ function buildFixture() {
   (runtime-projection
     (projection workstation-slots :source [mission_slots mission_pty_status workstation-pool] :fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind latestConversation] :forbid [SLOT_OPTIONS hardcoded-sonnet-label])
     (projection pty-recognition :rule "Terminal labels must describe the selected provider/session generically"))
-  (frontend-runtime-config :generator "node scripts/project-frontend-board-config.mjs --write" :checker "node scripts/project-frontend-board-config.mjs --check" :output "packages/board/src/generated/board-frontend-config.ts" (event-routes)))`);
+  (frontend-runtime-config :generator "node scripts/project-frontend-board-config.mjs --write" :checker "node scripts/project-frontend-board-config.mjs --check" :output "packages/board/src/generated/board-frontend-config.ts" (event-routes) (timeline-visuals)))`);
   fs.writeFileSync(path.join(root, FILES.types), 'export interface SlotDef { provider?: string; engine?: string; modelProfile?: string; acceptsBoardTask?: boolean; latestConversation?: { source?: string } }\n');
   fs.writeFileSync(path.join(root, FILES.constants), "export { CATEGORY_CONFIG, FLOW_PHASES, FLOW_TEMPLATE_OPTIONS } from './generated/board-frontend-config';\n");
-  fs.writeFileSync(path.join(root, FILES.generated), 'GENERATED_FROM: .missiond/frontend/board-blueprint.lisp\nexport const BOARD_TABS = []; export const DEFAULT_TAB = "board"; export const TAB_MIGRATION = {}; export const EVENT_ROUTE_TABLE = []; export const EVENT_CUSTOM_EVENTS = []; export const EVENT_PREFIX_ROUTES = []; export const RESYNC_VERSION_KEYS = [];\n');
-  fs.writeFileSync(path.join(root, FILES.generator), "const BLUEPRINT = '.missiond/frontend/board-blueprint.lisp'; const OUTPUT = 'packages/board/src/generated/board-frontend-config.ts'; frontend-runtime-config; EVENT_ROUTE_TABLE;\n");
+  fs.writeFileSync(path.join(root, FILES.generated), 'GENERATED_FROM: .missiond/frontend/board-blueprint.lisp\nexport const BOARD_TABS = []; export const DEFAULT_TAB = "board"; export const TAB_MIGRATION = {}; export const EVENT_ROUTE_TABLE = []; export const EVENT_CUSTOM_EVENTS = []; export const EVENT_PREFIX_ROUTES = []; export const RESYNC_VERSION_KEYS = []; export const TIMELINE_EVENT_VISUALS = {}; export const TIMELINE_SLOT_COLORS = {}; export const TIMELINE_SWIMLANES = []; export const TIMELINE_WINDOW_OPTIONS = [];\n');
+  fs.writeFileSync(path.join(root, FILES.generator), "const BLUEPRINT = '.missiond/frontend/board-blueprint.lisp'; const OUTPUT = 'packages/board/src/generated/board-frontend-config.ts'; frontend-runtime-config; EVENT_ROUTE_TABLE; TIMELINE_EVENT_VISUALS;\n");
   fs.writeFileSync(path.join(root, FILES.slotsRoute), "callTool('mission_slots'); callTool('mission_pty_status'); provider; engine; modelProfile; latestConversation; acceptsBoardTask; confidence;\n");
   fs.writeFileSync(path.join(root, FILES.taskDialog), "import type { SlotDef } from '../types'; fetch('/api/slots'); availableSlots; setAvailableSlots;\n");
   fs.writeFileSync(path.join(root, FILES.terminal), 'providerLabel; Starting session; No active session;\n');
   fs.writeFileSync(path.join(root, FILES.app), "import type { SlotDef } from './types'; BOARD_TABS; DEFAULT_TAB; TAB_MIGRATION; fetchSlots; /api/slots;\n");
   fs.writeFileSync(path.join(root, FILES.eventStream), 'EVENT_ROUTE_TABLE; EVENT_PREFIX_ROUTES; EVENT_CUSTOM_EVENTS; RESYNC_VERSION_KEYS; dispatchConfiguredCustomEvent; bumpKeys;\n');
   fs.writeFileSync(path.join(root, FILES.autopilotMonitor), "import { FLOW_PHASE_LABELS, FLOW_PHASES } from '../constants';\n");
+  fs.writeFileSync(path.join(root, FILES.timelineConstants), "import { TIMELINE_EVENT_VISUALS, TIMELINE_SLOT_COLORS, TIMELINE_SWIMLANES } from '../../generated/board-frontend-config'; EVENT_ICON_MAP;\n");
   return root;
 }
 
