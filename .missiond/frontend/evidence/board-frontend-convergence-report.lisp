@@ -6,7 +6,10 @@
   :generated_by codex
   :summary "Board frontend now has a project-local Lisp SSOT registered from backend V3. Current UI behavior is preserved; runtime workstation identity projects from MissionD slots/PTY state, and tabs/task taxonomy/flow phases/EventBus routes project from board-blueprint.lisp into generated TypeScript."
   :surfaces [app-shell missiond-proxy board-task-ui workstation-terminal-ui event-stream-ui timeline-log-ui knowledge-system-ui frontend-design-system]
-  :runtime-projections [workstation-slots pty-recognition frontend-runtime-config timeline-visuals board-task-api-contract eventbus-cache-invalidation board-task-contract]
+  :runtime-projections [workstation-slots pty-recognition terminal-slot-selector frontend-runtime-config timeline-visuals board-task-api-contract eventbus-cache-invalidation board-task-contract]
+  :terminal-slot-selector
+    (:status code-aligned
+     :result "Terminal slot selection is now pinned in Lisp and code to live inside the Terminal panel, list all projected slots, keep dynamic labels single-line, and use horizontal overflow instead of consuming the global top bar.")
   :checks ["node scripts/check-frontend-board-lisp-schema.mjs"
            "node scripts/project-frontend-board-config.mjs --check"
            "node scripts/check-frontend-board-code-isomorphism.mjs"

@@ -33,6 +33,12 @@
       :entry ["packages/board/src/components/Terminal.tsx"]
       :fields [state statusText blockedKind provider confidence]
       :rule "Terminal labels must describe the selected provider/session generically; no Claude-only copy in shared PTY surfaces.")
+    (projection terminal-slot-selector
+      :source [mission_slots mission_pty_status localStorage]
+      :entry ["packages/board/src/App.tsx"
+              "packages/board/src/components/Terminal.tsx"]
+      :fields [id label role running state provider taskClass acceptsBoardTask activeSlot]
+      :rule "Terminal slot selection lives inside the Terminal panel, lists all projected slots, never wraps long labels, and scrolls horizontally instead of consuming the global top bar.")
     (projection eventbus-cache-invalidation
       :source [eventbus-ws]
       :entry ["packages/board/src/eventStream.ts"]
@@ -237,9 +243,11 @@
         :entry [slots-api mission_pty_status pty-websocket Terminal ExecDashboard AutopilotMonitor]
         :core ((step s1 :logic "load slot rows from MissionD runtime projection and PTY recognition snapshots")
                (step s2 :logic "sort running slots first and preserve the selected slot when still present")
-               (step s3 :logic "connect xterm to the selected PTY websocket only when the slot is running")
-               (step s4 :logic "render provider-neutral state, spawn, reconnect, stop, screenshot, and blocked-status controls")
-               (step s5 :logic "show Autopilot slot/task correlation without owning dispatch or closure"))
+               (step s3 :logic "render Terminal tab slot selection inside the Terminal panel, not in the global navigation/action bar")
+               (step s4 :logic "keep dynamic slot labels single-line with horizontal overflow; long labels must not wrap or occlude the terminal")
+               (step s5 :logic "connect xterm to the selected PTY websocket only when the slot is running")
+               (step s6 :logic "render provider-neutral state, spawn, reconnect, stop, screenshot, and blocked-status controls")
+               (step s7 :logic "show Autopilot slot/task correlation without owning dispatch or closure"))
         :egress [slot-list terminal-screen pty-state autopilot-monitor]))
 
     (pillar event-stream-ui

@@ -35,6 +35,14 @@ function isBoardTabId(value: string): value is BoardTabId {
   return BOARD_TABS.some((tab) => tab.id === value);
 }
 
+function slotStateLabel(slot: SlotDef) {
+  return slot.state || (slot.running ? 'running' : 'stopped');
+}
+
+function slotProviderLabel(slot: SlotDef) {
+  return slot.provider || slot.engine || slot.role;
+}
+
 export default function App() {
   useEventStream(); // Global EventBus WS connection
   const wsState = useConnectionState();
@@ -150,24 +158,6 @@ export default function App() {
             )}
             title={`EventBus: ${wsState}`}
           />
-          {tab === 'terminal' && slots.filter((s) => s.running).length > 0 && (
-            <div className="flex items-center gap-1 mr-2">
-              {slots.filter((s) => s.running).map((slot) => (
-                <button
-                  key={slot.id}
-                  onClick={() => setActiveSlot(slot.id)}
-                  className={cn(
-                    'px-2 py-1 text-[10px] rounded transition-colors font-mono',
-                    activeSlot === slot.id
-                      ? 'bg-orange-500/20 text-orange-400 border border-orange-500/30'
-                      : 'text-neutral-600 hover:text-neutral-400 border border-transparent',
-                  )}
-                >
-                  {slot.label}
-                </button>
-              ))}
-            </div>
-          )}
           {tab === 'board' && (
             <Button size="sm" variant="outline" onClick={() => openAddDialog()} className="gap-1 border-neutral-800 text-neutral-400 hover:text-white">
               <Plus className="w-4 h-4" />
@@ -183,12 +173,46 @@ export default function App() {
       ) : tab === 'board' ? (
         <BoardConsolidated />
       ) : tab === 'terminal' ? (
-        <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden">
-          {activeSlot ? (
-            <Terminal key={activeSlot} slotId={activeSlot} />
-          ) : (
-            <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading slots...</div>
-          )}
+        <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden flex flex-col">
+          <div className="shrink-0 border-b border-neutral-800 bg-neutral-950/70 px-2 py-2">
+            {slots.length > 0 ? (
+              <div className="flex items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
+                {slots.map((slot) => {
+                  const isActive = activeSlot === slot.id;
+                  const stateLabel = slotStateLabel(slot);
+                  const providerLabel = slotProviderLabel(slot);
+                  return (
+                    <button
+                      key={slot.id}
+                      onClick={() => setActiveSlot(slot.id)}
+                      title={`${slot.label} · ${stateLabel}${providerLabel ? ` · ${providerLabel}` : ''}`}
+                      className={cn(
+                        'shrink-0 min-w-[160px] max-w-[280px] rounded-md border px-2.5 py-1 text-left font-mono text-[10px] leading-none transition-colors',
+                        isActive
+                          ? 'border-orange-500/40 bg-orange-500/15 text-orange-300'
+                          : 'border-neutral-800 bg-neutral-900/70 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300',
+                      )}
+                    >
+                      <span className="flex min-w-0 items-center gap-1.5">
+                        <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', slot.running ? 'bg-emerald-400' : 'bg-neutral-600')} />
+                        <span className="min-w-0 flex-1 truncate">{slot.label}</span>
+                        <span className="shrink-0 text-neutral-600">{stateLabel}</span>
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="px-1 text-xs text-neutral-600">Loading slots...</div>
+            )}
+          </div>
+          <div className="min-h-0 flex-1">
+            {activeSlot ? (
+              <Terminal key={activeSlot} slotId={activeSlot} />
+            ) : (
+              <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading slots...</div>
+            )}
+          </div>
         </div>
       ) : tab === 'exec' ? (
         <ExecDashboard slots={slots} />

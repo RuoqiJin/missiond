@@ -187,6 +187,18 @@ function checkRepo(repo, blueprintRel, v3Rel) {
       requireListIncludes(diagnostics, blueprintRel, props, ':source', ['mission_slots', 'mission_pty_status', 'workstation-pool'], workstation.loc);
       requireListIncludes(diagnostics, blueprintRel, props, ':forbid', ['SLOT_OPTIONS', 'hardcoded-sonnet-label'], workstation.loc);
     }
+    const terminalSelector = runtime.children.find((n) => isList(n) && head(n) === 'projection' && nodeText(n.children[1]) === 'terminal-slot-selector');
+    if (!terminalSelector) {
+      diagnostics.push(diag(blueprintRel, runtime.loc, 'runtime-projection missing terminal-slot-selector projection'));
+    } else {
+      const props = readKeywordProps(terminalSelector, { start: 2 });
+      requireListIncludes(diagnostics, blueprintRel, props, ':source', ['mission_slots', 'mission_pty_status', 'localStorage'], terminalSelector.loc);
+      requireListIncludes(diagnostics, blueprintRel, props, ':fields', ['id', 'label', 'running', 'state', 'activeSlot'], terminalSelector.loc);
+      const rule = nodeText(props[':rule']?.value) ?? '';
+      if (!rule.includes('inside the Terminal panel') || !rule.includes('scrolls horizontally')) {
+        diagnostics.push(diag(blueprintRel, terminalSelector.loc, 'terminal-slot-selector rule must pin panel placement and horizontal overflow behavior'));
+      }
+    }
   }
 
   if (frontendRuntime) validateFrontendRuntimeConfig(diagnostics, blueprintRel, frontendRuntime);
@@ -379,7 +391,8 @@ function buildFixture() {
   :schema "missiond.frontend-blueprint.v1" :project board :root "packages/board" :authority "project-local-lisp-ssot"
   (project :id board)
   (runtime-projection
-    (projection workstation-slots :source [mission_slots mission_pty_status workstation-pool] :forbid [SLOT_OPTIONS hardcoded-sonnet-label]))
+    (projection workstation-slots :source [mission_slots mission_pty_status workstation-pool] :forbid [SLOT_OPTIONS hardcoded-sonnet-label])
+    (projection terminal-slot-selector :source [mission_slots mission_pty_status localStorage] :fields [id label running state activeSlot] :rule "Terminal slot selection lives inside the Terminal panel and scrolls horizontally."))
   (frontend-runtime-config
     :schema "missiond.frontend-runtime-config.v1"
     :generator "node scripts/project-frontend-board-config.mjs --write"

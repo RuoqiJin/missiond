@@ -78,6 +78,9 @@ function checkRepo(repo) {
     ':forbid [SLOT_OPTIONS hardcoded-sonnet-label]',
     '(projection pty-recognition',
     'Terminal labels must describe the selected provider/session generically',
+    '(projection terminal-slot-selector',
+    ':source [mission_slots mission_pty_status localStorage]',
+    'Terminal slot selection lives inside the Terminal panel',
     '(frontend-runtime-config',
     ':generator "node scripts/project-frontend-board-config.mjs --write"',
     ':checker "node scripts/project-frontend-board-config.mjs --check"',
@@ -191,7 +194,14 @@ function checkRepo(repo) {
     'TAB_MIGRATION',
     'fetchSlots',
     '/api/slots',
+    'slotStateLabel',
+    'overflow-x-auto overflow-y-hidden whitespace-nowrap',
+    'min-w-[160px] max-w-[280px]',
+    'truncate',
   ]);
+  if (/slots\.filter\(\(s\)\s*=>\s*s\.running\)\.map/.test(src.app)) {
+    diagnostics.push({ file: FILES.app, message: 'Terminal slot selector must list all projected slots inside the panel, not only running slots in the global top bar' });
+  }
 
   requireText(diagnostics, FILES.eventStream, src.eventStream, [
     'EVENT_ROUTE_TABLE',
@@ -229,7 +239,8 @@ function buildFixture() {
   fs.writeFileSync(path.join(root, FILES.blueprint), `(missiond-frontend-blueprint
   (runtime-projection
     (projection workstation-slots :source [mission_slots mission_pty_status workstation-pool] :fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind latestConversation] :forbid [SLOT_OPTIONS hardcoded-sonnet-label])
-    (projection pty-recognition :rule "Terminal labels must describe the selected provider/session generically"))
+    (projection pty-recognition :rule "Terminal labels must describe the selected provider/session generically")
+    (projection terminal-slot-selector :source [mission_slots mission_pty_status localStorage] :rule "Terminal slot selection lives inside the Terminal panel"))
   (frontend-runtime-config :generator "node scripts/project-frontend-board-config.mjs --write" :checker "node scripts/project-frontend-board-config.mjs --check" :output "packages/board/src/generated/board-frontend-config.ts" (board-task-api-contract) (event-routes) (timeline-visuals)))`);
   fs.writeFileSync(path.join(root, FILES.types), 'export interface SlotDef { provider?: string; engine?: string; modelProfile?: string; acceptsBoardTask?: boolean; latestConversation?: { source?: string } }\n');
   fs.writeFileSync(path.join(root, FILES.constants), "export { CATEGORY_CONFIG, FLOW_PHASES, FLOW_TEMPLATE_OPTIONS } from './generated/board-frontend-config';\n");
@@ -241,7 +252,7 @@ function buildFixture() {
   fs.writeFileSync(path.join(root, FILES.slotsRoute), "callTool('mission_slots'); callTool('mission_pty_status'); provider; engine; modelProfile; latestConversation; acceptsBoardTask; confidence;\n");
   fs.writeFileSync(path.join(root, FILES.taskDialog), "import type { SlotDef } from '../types'; fetch('/api/slots'); availableSlots; setAvailableSlots;\n");
   fs.writeFileSync(path.join(root, FILES.terminal), 'providerLabel; Starting session; No active session;\n');
-  fs.writeFileSync(path.join(root, FILES.app), "import type { SlotDef } from './types'; BOARD_TABS; DEFAULT_TAB; TAB_MIGRATION; fetchSlots; /api/slots;\n");
+  fs.writeFileSync(path.join(root, FILES.app), "import type { SlotDef } from './types'; BOARD_TABS; DEFAULT_TAB; TAB_MIGRATION; fetchSlots; /api/slots; slotStateLabel; overflow-x-auto overflow-y-hidden whitespace-nowrap; min-w-[160px] max-w-[280px]; truncate;\n");
   fs.writeFileSync(path.join(root, FILES.eventStream), 'EVENT_ROUTE_TABLE; EVENT_PREFIX_ROUTES; EVENT_CUSTOM_EVENTS; RESYNC_VERSION_KEYS; dispatchConfiguredCustomEvent; bumpKeys;\n');
   fs.writeFileSync(path.join(root, FILES.autopilotMonitor), "import { FLOW_PHASE_LABELS, FLOW_PHASES } from '../constants';\n");
   fs.writeFileSync(path.join(root, FILES.timelineConstants), "import { TIMELINE_EVENT_VISUALS, TIMELINE_SLOT_COLORS, TIMELINE_SWIMLANES } from '../../generated/board-frontend-config'; EVENT_ICON_MAP;\n");
