@@ -39,6 +39,7 @@ const DEFAULT_FILES = {
   learningIdle: 'crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs',
   learningHistorical: 'crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
+  eventProjection: 'crates/missiond-core/src/event/projection.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
 };
 
@@ -140,6 +141,7 @@ function checkFiles(root, files) {
     'Realtime extraction MUST claim the extraction lane before running pending-message DB probes',
     'pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans',
     'deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans',
+    'Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
     'kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting',
@@ -275,6 +277,19 @@ function checkFiles(root, files) {
     'timeline_error_limit',
     'timeline_llm_sample_limit',
     'timeline_slow_threshold_ms',
+  ]);
+
+  requireAll(diagnostics, files.eventProjection, sources.eventProjection, [
+    'ts >= ${}::timestamptz',
+    'ts <= ${}::timestamptz',
+    'WHERE ts >= $1::timestamptz AND ts <= $2::timestamptz',
+  ]);
+  forbidAll(diagnostics, files.eventProjection, sources.eventProjection, [
+    'format!("ts >= ${}", param_idx)',
+    'format!("ts <= ${}", param_idx)',
+    'format!("ts >= ${}", idx)',
+    'format!("ts <= ${}", idx)',
+    'WHERE ts >= $1 AND ts <= $2',
   ]);
 
   requireAll(diagnostics, files.learningIdle, sources.learningIdle, [
@@ -526,7 +541,8 @@ function buildFixture() {
 	    :habit-scan-timeout-secs 600
 	    :timeline-analysis-interval-secs 43200
 	    :cooccurrence-refresh-interval-secs 21600
-	    :invariants ["LearningEngineRuntimeConfig MUST load learning-engine-policy"])
+	    :invariants ["LearningEngineRuntimeConfig MUST load learning-engine-policy"
+	                 "Timeline projection SQL MUST cast string-bound since/until parameters as ::timestamptz when comparing against event_log.ts"])
 	  (implementation-map
     (surface memory-kb
       :status "code-aligned"
@@ -690,6 +706,11 @@ pub(super) async fn handle_code_search() {
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningTimeline, `
 	LearningEngineRuntimeConfig; timeline_analysis_interval_secs; timeline_window_arg; timeline_error_limit; timeline_llm_sample_limit; timeline_slow_threshold_ms;
+	`);
+	  writeFixture(root, DEFAULT_FILES.eventProjection, `
+	conditions.push(format!("ts >= \${}::timestamptz", idx));
+	conditions.push(format!("ts <= \${}::timestamptz", idx));
+	WHERE ts >= $1::timestamptz AND ts <= $2::timestamptz
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningIdle, `
 	LearningEngineRuntimeConfig; idle_explore_interval_secs;

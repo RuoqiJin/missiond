@@ -154,9 +154,7 @@ fn parse_event_type_filter(event_type: &str) -> (Option<String>, Option<String>)
     if let Some((d, k)) = event_type.split_once("::") {
         return (Some(d.to_string()), Some(k.to_string()));
     }
-    if let Some((d, k)) =
-        crate::event::wire_format::v1_wire_type_to_v2_parts(event_type)
-    {
+    if let Some((d, k)) = crate::event::wire_format::v1_wire_type_to_v2_parts(event_type) {
         return (Some(d.to_string()), k.map(|s| s.to_string()));
     }
     (None, None)
@@ -190,7 +188,10 @@ pub async fn query_timeline_since(
     .fetch_all(pool)
     .await
     .map_err(DbError::from)?;
-    Ok(rows.into_iter().map(RawEventLogRow::into_timeline_row).collect())
+    Ok(rows
+        .into_iter()
+        .map(RawEventLogRow::into_timeline_row)
+        .collect())
 }
 
 /// Filtered query: by event_type ("domain::kind"), trace_id, time range.
@@ -238,12 +239,14 @@ pub async fn query_timeline_filtered(
         tid_val = Some(uuid);
     }
     if let Some(s) = since {
-        conditions.push(format!("ts >= ${}", param_idx));
+        // event_log.ts is timestamptz; bound parameters arrive as text and must be cast
+        // explicitly or PG raises `operator does not exist: timestamp with time zone >= text`.
+        conditions.push(format!("ts >= ${}::timestamptz", param_idx));
         param_idx += 1;
         since_val = Some(parse_since(s));
     }
     if let Some(u) = until {
-        conditions.push(format!("ts <= ${}", param_idx));
+        conditions.push(format!("ts <= ${}::timestamptz", param_idx));
         param_idx += 1;
         until_val = Some(parse_until(u));
     }
@@ -280,7 +283,10 @@ pub async fn query_timeline_filtered(
     q = q.bind(limit).bind(offset);
 
     let rows = q.fetch_all(pool).await.map_err(DbError::from)?;
-    Ok(rows.into_iter().map(RawEventLogRow::into_timeline_row).collect())
+    Ok(rows
+        .into_iter()
+        .map(RawEventLogRow::into_timeline_row)
+        .collect())
 }
 
 /// Stratified: up to `per_type_limit` per (domain, kind) within [since, until].
@@ -311,7 +317,7 @@ pub async fn query_timeline_stratified(
          FROM (
              SELECT *, ROW_NUMBER() OVER (PARTITION BY domain, kind ORDER BY seq DESC) as rn
              FROM event_log
-             WHERE ts >= $1 AND ts <= $2
+             WHERE ts >= $1::timestamptz AND ts <= $2::timestamptz
          ) sub
          WHERE rn <= ({})
          ORDER BY seq DESC",
@@ -324,14 +330,14 @@ pub async fn query_timeline_stratified(
         .fetch_all(pool)
         .await
         .map_err(DbError::from)?;
-    Ok(rows.into_iter().map(RawEventLogRow::into_timeline_row).collect())
+    Ok(rows
+        .into_iter()
+        .map(RawEventLogRow::into_timeline_row)
+        .collect())
 }
 
 /// All events sharing a trace_id, in causal order.
-pub async fn query_timeline_by_trace(
-    pool: &PgPool,
-    trace_id: &str,
-) -> DbResult<Vec<TimelineRow>> {
+pub async fn query_timeline_by_trace(pool: &PgPool, trace_id: &str) -> DbResult<Vec<TimelineRow>> {
     let uuid = uuid::Uuid::parse_str(trace_id)
         .map_err(|e| DbError::Other(format!("trace_id not a UUID: {e}")))?;
     let rows: Vec<RawEventLogRow> = sqlx::query_as(
@@ -342,7 +348,10 @@ pub async fn query_timeline_by_trace(
     .fetch_all(pool)
     .await
     .map_err(DbError::from)?;
-    Ok(rows.into_iter().map(RawEventLogRow::into_timeline_row).collect())
+    Ok(rows
+        .into_iter()
+        .map(RawEventLogRow::into_timeline_row)
+        .collect())
 }
 
 /// Stats: total count + per-type distribution + trace stats + Gemini latency.
@@ -356,12 +365,13 @@ pub async fn query_timeline_stats(
     let mut until_val: Option<String> = None;
     let mut idx: u32 = 1;
     if let Some(s) = since {
-        conditions.push(format!("ts >= ${}", idx));
+        // event_log.ts is timestamptz; cast text-bound parameter explicitly.
+        conditions.push(format!("ts >= ${}::timestamptz", idx));
         idx += 1;
         since_val = Some(parse_since(s));
     }
     if let Some(u) = until {
-        conditions.push(format!("ts <= ${}", idx));
+        conditions.push(format!("ts <= ${}::timestamptz", idx));
         // idx += 1; // unused after last
         until_val = Some(parse_until(u));
     }
@@ -420,7 +430,8 @@ pub async fn query_timeline_stats(
         "SELECT CAST(payload_inline->'LegacyGeminiRequestCompleted'->>'duration_ms' AS BIGINT)
          FROM event_log
          WHERE domain = 'llm' AND kind = 'legacy_gemini_request_completed'
-         ORDER BY seq DESC LIMIT 100".to_string()
+         ORDER BY seq DESC LIMIT 100"
+            .to_string()
     } else {
         format!(
             "SELECT CAST(payload_inline->'LegacyGeminiRequestCompleted'->>'duration_ms' AS BIGINT)
@@ -437,8 +448,7 @@ pub async fn query_timeline_stats(
     if let Some(ref v) = until_val {
         q = q.bind(v);
     }
-    let duration_rows: Vec<(Option<i64>,)> =
-        q.fetch_all(pool).await.map_err(DbError::from)?;
+    let duration_rows: Vec<(Option<i64>,)> = q.fetch_all(pool).await.map_err(DbError::from)?;
     let durations: Vec<i64> = duration_rows.into_iter().filter_map(|r| r.0).collect();
     let gemini_latency = if durations.is_empty() {
         None
@@ -484,12 +494,13 @@ pub async fn query_timeline_search(
     let mut until_val: Option<String> = None;
     let mut idx: u32 = 2;
     if let Some(s) = since {
-        conditions.push(format!("ts >= ${}", idx));
+        // event_log.ts is timestamptz; cast text-bound parameter explicitly.
+        conditions.push(format!("ts >= ${}::timestamptz", idx));
         idx += 1;
         since_val = Some(parse_since(s));
     }
     if let Some(u) = until {
-        conditions.push(format!("ts <= ${}", idx));
+        conditions.push(format!("ts <= ${}::timestamptz", idx));
         idx += 1;
         until_val = Some(parse_until(u));
     }
@@ -510,7 +521,10 @@ pub async fn query_timeline_search(
     }
     q = q.bind(limit);
     let rows = q.fetch_all(pool).await.map_err(DbError::from)?;
-    Ok(rows.into_iter().map(RawEventLogRow::into_timeline_row).collect())
+    Ok(rows
+        .into_iter()
+        .map(RawEventLogRow::into_timeline_row)
+        .collect())
 }
 
 #[cfg(test)]

@@ -36,6 +36,7 @@ const FILES = {
   slotTool: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
   slotManager: 'crates/missiond-core/src/core/slot_manager.rs',
   missionControl: 'crates/missiond-core/src/core/mission_control.rs',
+  supervisor: 'crates/missiond-daemon/src/supervisor.rs',
   aggregate: 'scripts/check-v3-code-isomorphism-complete.mjs',
 };
 
@@ -151,6 +152,17 @@ function checkFiles(root) {
   requireAll(diagnostics, FILES.missionControl, sources.missionControl, [
     'pub fn register_runtime_slot(&self, config: SlotConfig)',
     'self.slot_manager.register_runtime_slot(config)',
+  ]);
+  requireAll(diagnostics, FILES.blueprint, sources.blueprint, [
+    'Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration',
+  ]);
+  requireAll(diagnostics, FILES.supervisor, sources.supervisor, [
+    'fn schedule_supervisor_patrol',
+    'let supervisor_registered',
+    '.mission',
+    '.list_slots()',
+    's.config.id == SUPERVISOR_SLOT_ID',
+    'if !supervisor_registered',
   ]);
   requireAll(diagnostics, FILES.aggregate, sources.aggregate, [
     "'workstation-pool'",
@@ -326,6 +338,7 @@ function buildFixture() {
       :default-use research-review
       :accepts-boardtask true
       :write-allowed false)
+    :invariants ["Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration"]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
   (implementation-map
     (surface workstation-pool
@@ -381,6 +394,11 @@ pub fn register_runtime_slot(&self, mut config: SlotConfig) {}
 "Runtime slot registered";`);
   write(root, 'missionControl', `
 pub fn register_runtime_slot(&self, config: SlotConfig) { self.slot_manager.register_runtime_slot(config); }`);
+  write(root, 'supervisor', `
+pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
+    let supervisor_registered = state.mission.list_slots().into_iter().any(|s| s.config.id == SUPERVISOR_SLOT_ID);
+    if !supervisor_registered { return; }
+}`);
   write(root, 'aggregate', `
 'workstation-pool';
 scripts/check-v3-workstation-pool-isomorphism.mjs;`);

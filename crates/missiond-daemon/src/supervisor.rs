@@ -276,7 +276,23 @@ const SUPERVISOR_PATROL_INTERVAL_SECS: i64 = 300;
 // @beacon: slot
 /// The supervisor uses Opus model to inspect all slot PTY screens, detect anomalies,
 /// and take corrective action (kill misbehaving slots, report issues).
+///
+/// V3 gating: the supervisor patrol is only active when `slot-supervisor` is
+/// registered as a worker through the V3 workstation-pool / runtime config.
+/// Absent a workstation-pool entry, the patrol stays inert — we no longer
+/// repeatedly call ensure_memory_slot_by_id and emit "Memory slot not
+/// configured in slots.yaml" (slots.yaml is retired in V3).
 pub(crate) async fn schedule_supervisor_patrol(state: &AppState) {
+    // V3 SSOT: supervisor must be projected from workstation-pool / runtime config.
+    let supervisor_registered = state
+        .mission
+        .list_slots()
+        .into_iter()
+        .any(|s| s.config.id == SUPERVISOR_SLOT_ID);
+    if !supervisor_registered {
+        return;
+    }
+
     let now = chrono::Utc::now().timestamp();
     let last = state
         .last_supervisor_patrol_at
