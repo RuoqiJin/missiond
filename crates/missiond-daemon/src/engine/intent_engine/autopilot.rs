@@ -390,7 +390,8 @@ fn focus_final_summary_region(input: &str) -> &str {
 /// BoardTask:` / `All acceptance gates pass` lead-ins.
 ///
 /// A `Fix:` candidate qualifies when it appears at the start of a line
-/// (preceded only by optional `**` markdown emphasis and whitespace) and the
+/// (preceded only by optional `**` markdown emphasis, Gemini's `✦` assistant
+/// bullet, and whitespace) and the
 /// remaining input contains the literal `Verification:`. The literal-colon
 /// match deliberately excludes `**Verification**:` (where `:` sits outside
 /// the bold), so blocks already covered by the closeout-phrase anchors keep
@@ -402,8 +403,9 @@ fn find_fix_verification_anchor(input: &str) -> Option<usize> {
         let abs = search_start + rel;
         let line_start = input[..abs].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
         let leading = &input[line_start..abs];
-        let leading_trimmed = leading.trim_start();
-        let line_start_ok = leading_trimmed.is_empty() || leading_trimmed == "**";
+        let leading_trimmed = leading.trim();
+        let line_start_ok =
+            leading_trimmed.is_empty() || leading_trimmed == "**" || leading_trimmed == "✦";
         if line_start_ok && input[abs + "Fix:".len()..].contains("Verification:") {
             best = Some(line_start);
         }
@@ -3523,6 +3525,41 @@ mod tests {
         assert!(
             summary.contains("Verification: live Gemini reachable"),
             "Verification block dropped: {summary}"
+        );
+    }
+
+    #[test]
+    fn extract_worker_final_summary_anchors_on_gemini_bullet_fix_verification_pair() {
+        // BoardTask 9aeb14b6 regression: Gemini can render the final answer as
+        // `✦ Fix:` on the same line as its assistant bullet. Treat that bullet
+        // as TUI prose chrome so the final BoardTask note does not keep the
+        // earlier status sentence.
+        let prompt = dispatched_prompt("task-9aeb14b6");
+        let response = format!(
+            "{prompt}\n\n\
+             只读冒烟测试验证: 执行只读冒烟测试，验证部署后的状态。\n\n\
+             ╭─────────────────────────────────────────╮\n\
+             │ ✓  Shell git status --short             │\n\
+             ╰─────────────────────────────────────────╯\n\n\
+             ✦ Fix: This was a read-only smoke of MissionD Autopilot/PTY completion capture.\n\
+               Verification: Current commit is 03fe34ac and only pre-existing packages/board/src/App.tsx is dirty.",
+            prompt = prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+
+        assert!(
+            !summary.contains("只读冒烟测试验证"),
+            "early Gemini status sentence leaked: {summary}"
+        );
+        assert!(
+            summary.contains(
+                "✦ Fix: This was a read-only smoke of MissionD Autopilot/PTY completion capture."
+            ),
+            "Gemini bullet Fix line dropped: {summary}"
+        );
+        assert!(
+            summary.contains("Verification: Current commit is 03fe34ac"),
+            "Verification line dropped: {summary}"
         );
     }
 

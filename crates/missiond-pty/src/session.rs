@@ -6,6 +6,7 @@
 //! - alacritty_terminal: Parses ANSI sequences, maintains virtual screen
 //! - semantic: State detection and confirmation dialog parsing
 
+use std::borrow::Cow;
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Write as IoWrite};
 use std::path::PathBuf;
@@ -1687,18 +1688,13 @@ impl PTYSession {
                 // event verbatim (`maybe_enrich_completion` short-circuits) so its
                 // Summary-block extraction is unchanged.
                 let enriched = if self.engine != missiond_shared::CliEngine::ClaudeCode {
-                    tokio::time::sleep(Duration::from_millis(250)).await;
-                    let buffer_lines = (self.rows as usize).saturating_mul(2).max(80);
-                    let screen_text = self.get_last_lines(buffer_lines).await.join("\n");
-                    let chosen = maybe_enrich_completion(self.engine, response, &screen_text);
-                    if tracing::enabled!(tracing::Level::DEBUG) {
-                        debug!(
-                            slot = %self.slot_id,
-                            engine = %self.engine,
-                            chosen_len = chosen.len(),
-                            "send() applied provider-aware completion fallback"
-                        );
-                    }
+                    let chosen = self.enrich_completion_from_settled_screen(response).await;
+                    debug!(
+                        slot = %self.slot_id,
+                        engine = %self.engine,
+                        chosen_len = chosen.len(),
+                        "send() applied provider-aware completion fallback"
+                    );
                     chosen
                 } else {
                     response
@@ -1721,6 +1717,29 @@ impl PTYSession {
             }
             Ok(Err(e)) => Err(e),
             Err(_) => Err(anyhow!("Timeout waiting for response")),
+        }
+    }
+
+    async fn enrich_completion_from_settled_screen(&self, response: String) -> String {
+        if has_fix_verification_closeout(&response) {
+            return response;
+        }
+
+        let buffer_lines = (self.rows as usize).saturating_mul(2).max(80);
+        let started = std::time::Instant::now();
+        let mut delay_ms = 250;
+
+        loop {
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+            let screen_text = self.get_last_lines(buffer_lines).await.join("\n");
+            let chosen = maybe_enrich_completion(self.engine, response.clone(), &screen_text);
+            if chosen != response {
+                return chosen;
+            }
+            if started.elapsed() >= Duration::from_millis(2_000) {
+                return response;
+            }
+            delay_ms = 150;
         }
     }
 
@@ -2093,10 +2112,22 @@ pub(crate) fn sanitize_tui_chrome(raw: &str) -> String {
         } else {
             prev_blank = false;
         }
-        out.push_str(line);
+        let normalized = normalize_tui_prose_line(line);
+        out.push_str(normalized.as_ref());
         out.push('\n');
     }
     out
+}
+
+fn normalize_tui_prose_line(line: &str) -> Cow<'_, str> {
+    let t = line.trim_start();
+    if let Some(rest) = t.strip_prefix("✦ ") {
+        if rest.starts_with("Fix:") || rest.starts_with("Verification:") {
+            let prefix_len = line.len() - t.len();
+            return Cow::Owned(format!("{}{}", &line[..prefix_len], rest));
+        }
+    }
+    Cow::Borrowed(line)
 }
 
 fn is_tui_chrome_line(line: &str) -> bool {
@@ -2165,8 +2196,9 @@ fn has_fix_verification_closeout(text: &str) -> bool {
         let abs = search_start + rel;
         let line_start = text[..abs].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
         let leading = &text[line_start..abs];
-        let leading_trimmed = leading.trim_start();
-        let line_start_ok = leading_trimmed.is_empty() || leading_trimmed == "**";
+        let leading_trimmed = leading.trim();
+        let line_start_ok =
+            leading_trimmed.is_empty() || leading_trimmed == "**" || leading_trimmed == "✦";
         if line_start_ok && text[abs + "Fix:".len()..].contains("Verification:") {
             return true;
         }
@@ -2233,6 +2265,45 @@ mod tests {
         assert!(
             !result.contains("> _"),
             "input prompt echo must be stripped, got: {result}"
+        );
+    }
+
+    /// Live shape from BoardTask 9aeb14b6: Gemini's final answer can start the
+    /// closeout line with its assistant bullet marker (`✦ Fix:`). The
+    /// sanitizer must normalize that line to plain `Fix:` and the enrichment
+    /// poll must still treat it as the closeout pair.
+    #[test]
+    fn enriches_gemini_bullet_fix_closeout_from_screen() {
+        let event_content = "只读冒烟测试验证: 执行只读冒烟测试，验证部署后的状态。".to_string();
+        let screen = "\
+  只读冒烟测试验证: 执行只读冒烟测试，验证部署后的状态。
+
+╭────────────────────────────────────────────────────────────────────╮
+│ ✓  Shell git status --short && git rev-parse --short HEAD          │
+│  M packages/board/src/App.tsx                                      │
+│ 03fe34ac                                                           │
+╰────────────────────────────────────────────────────────────────────╯
+
+✦ Fix: This was a read-only smoke of MissionD Autopilot/PTY completion capture.
+  Verification: Current commit is 03fe34ac and only pre-existing packages/board/src/App.tsx is dirty.
+
+~/Projects/missiond main no sandbox Auto (Gemini 3) 3% used
+";
+        let result = maybe_enrich_completion(CliEngine::Gemini, event_content, screen);
+
+        assert!(
+            result.contains(
+                "Fix: This was a read-only smoke of MissionD Autopilot/PTY completion capture."
+            ),
+            "expected Gemini bullet closeout to normalize to Fix:, got: {result}"
+        );
+        assert!(
+            !result.contains("✦ Fix:"),
+            "assistant bullet marker should not remain on the closeout line: {result}"
+        );
+        assert!(
+            result.contains("Verification: Current commit is 03fe34ac"),
+            "expected Verification closeout, got: {result}"
         );
     }
 
@@ -2329,6 +2400,9 @@ Some prose.
         ));
         assert!(has_fix_verification_closeout(
             "**Fix: bold-emphasis\nVerification: ok\n"
+        ));
+        assert!(has_fix_verification_closeout(
+            "✦ Fix: gemini bullet\n  Verification: ok\n"
         ));
         assert!(!has_fix_verification_closeout("Fix: lonely\n"));
         assert!(!has_fix_verification_closeout("Verification: b\nFix: a\n"));
