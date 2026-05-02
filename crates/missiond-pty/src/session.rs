@@ -2162,6 +2162,9 @@ fn is_tui_chrome_line(line: &str) -> bool {
     if t.contains("gemini-") && t.contains("context left") {
         return true;
     }
+    if t.starts_with("? for shortcuts") {
+        return true;
+    }
     if t.starts_with("YOLO Ctrl+Y") || (t.contains("GEMINI.md file") && t.contains("skills")) {
         return true;
     }
@@ -2194,7 +2197,9 @@ pub(crate) fn choose_richer_completion(event_content: String, sanitized_screen: 
     let event_has = has_fix_verification_closeout(&event_content);
     let screen_has = has_fix_verification_closeout(&sanitized_screen);
     if screen_has && !event_has {
-        sanitized_screen
+        focus_fix_verification_closeout(&sanitized_screen)
+            .unwrap_or(sanitized_screen.as_str())
+            .to_string()
     } else {
         event_content
     }
@@ -2206,6 +2211,15 @@ pub(crate) fn choose_richer_completion(event_content: String, sanitized_screen: 
 /// the literal `Verification:`. Matching the autopilot rule keeps the
 /// promotion decision aligned with the downstream summary-extraction anchor.
 fn has_fix_verification_closeout(text: &str) -> bool {
+    focus_fix_verification_closeout(text).is_some()
+}
+
+fn focus_fix_verification_closeout(text: &str) -> Option<&str> {
+    find_fix_verification_anchor(text).map(|idx| &text[idx..])
+}
+
+fn find_fix_verification_anchor(text: &str) -> Option<usize> {
+    let mut best: Option<usize> = None;
     let mut search_start = 0;
     while let Some(rel) = text[search_start..].find("Fix:") {
         let abs = search_start + rel;
@@ -2215,11 +2229,11 @@ fn has_fix_verification_closeout(text: &str) -> bool {
         let line_start_ok =
             leading_trimmed.is_empty() || leading_trimmed == "**" || leading_trimmed == "✦";
         if line_start_ok && text[abs + "Fix:".len()..].contains("Verification:") {
-            return true;
+            best = Some(line_start);
         }
         search_start = abs + "Fix:".len();
     }
-    false
+    best
 }
 
 #[cfg(test)]
@@ -2272,6 +2286,10 @@ mod tests {
         assert!(
             !result.contains('╭') && !result.contains('╰') && !result.contains('│'),
             "chrome box characters must be stripped, got: {result}"
+        );
+        assert!(
+            !result.contains("Investigating BoardTask 42b2385e"),
+            "promoted screen result should focus on closeout only, got: {result}"
         );
         assert!(
             !result.contains("gemini-2.5-pro"),
@@ -2329,6 +2347,10 @@ mod tests {
                 && !result.contains("workspace (/directory)")
                 && !result.contains("Auto (Gemini 3)"),
             "Gemini footer lines must be stripped, got: {result}"
+        );
+        assert!(
+            !result.contains("执行只读冒烟测试"),
+            "promoted screen result should drop earlier Gemini status prose: {result}"
         );
     }
 
