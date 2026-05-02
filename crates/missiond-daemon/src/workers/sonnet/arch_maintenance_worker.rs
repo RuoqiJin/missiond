@@ -42,7 +42,10 @@ impl BackgroundWorker for ArchMaintenanceWorker {
     async fn run(self, state: Arc<AppState>, mut ctx: WorkerContext) {
         let mut sub = match state
             .bus
-            .subscribe::<SystemEvent>("arch_maintenance", SubscriptionOpts::named("arch_maintenance"))
+            .subscribe::<SystemEvent>(
+                "arch_maintenance",
+                SubscriptionOpts::named("arch_maintenance"),
+            )
             .await
         {
             Ok(s) => s,

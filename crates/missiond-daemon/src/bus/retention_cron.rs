@@ -95,10 +95,7 @@ pub(crate) async fn run_one_tick(bus: &Arc<BusServices>, pool: &PgPool) {
 /// Delete rows in `event_subscriptions` whose `last_seen_at` is > 30 days
 /// old. Emit one `IncidentEvent::StaleSubscription` per row so ops can tell
 /// which consumer disappeared.
-async fn sweep_orphan_cursors(
-    bus: &Arc<BusServices>,
-    pool: &PgPool,
-) -> Result<u64, sqlx::Error> {
+async fn sweep_orphan_cursors(bus: &Arc<BusServices>, pool: &PgPool) -> Result<u64, sqlx::Error> {
     // Pull the victims first so we can emit one incident per name, then
     // DELETE — two statements, same pool.
     let rows: Vec<(String, String, Option<DateTime<Utc>>)> = sqlx::query_as(
@@ -155,8 +152,7 @@ async fn sweep_orphan_cursors(
 
 /// Duration from `now` to 00:00 UTC the next day.
 fn duration_until_next_midnight(now: DateTime<Utc>) -> Duration {
-    let secs_today: i64 =
-        now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64;
+    let secs_today: i64 = now.hour() as i64 * 3600 + now.minute() as i64 * 60 + now.second() as i64;
     let remainder: i64 = (24 * 3600_i64).saturating_sub(secs_today);
     Duration::from_secs(remainder.max(1) as u64)
 }

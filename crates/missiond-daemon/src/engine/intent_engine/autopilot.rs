@@ -54,6 +54,30 @@ fn derive_pty_timeout_ms(config: &AutopilotRuntimeConfig, timeout_secs: Option<i
     (derive_pty_timeout_secs(config, timeout_secs) as u64).saturating_mul(1000)
 }
 
+/// Default settle window after `pty.send` reports completion before Autopilot
+/// writes the durable BoardTask close state.
+///
+/// PTY return is only a high-confidence completion signal, not the durable
+/// provider log itself. The short window lets Claude/Codex/Gemini JSONL/SSE
+/// final messages and MissionD conversation ingestion land before the
+/// orchestrator writes the BoardTask summary and `mission_execution` synthesis.
+pub(crate) const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 1200;
+
+fn worker_final_settle_window_ms() -> u64 {
+    std::env::var("MISSIOND_AUTOPILOT_FINAL_SETTLE_MS")
+        .ok()
+        .and_then(|raw| raw.trim().parse::<u64>().ok())
+        .map(|ms| ms.min(30_000))
+        .unwrap_or(AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT)
+}
+
+async fn wait_for_worker_final_settle_window() {
+    let settle_ms = worker_final_settle_window_ms();
+    if settle_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(settle_ms)).await;
+    }
+}
+
 /// Smallest claimed-age (seconds) at which the watchdog may reclaim an idle
 /// slot still bound to a running task. Equals the derived task timeout plus
 /// V3 `:watchdog_grace_secs` so the slot always gets the full configured
@@ -138,6 +162,89 @@ fn decide_close_action(
         }
         _ => DispatchCloseAction::OwnerClosesAsDone,
     }
+}
+
+fn is_durable_completion_summary_note(note: &missiond_core::types::BoardTaskNote) -> bool {
+    if note.note_type != missiond_core::types::BoardNoteType::Summary {
+        return false;
+    }
+    let content = note.content.trim();
+    !content.is_empty()
+        && !content.contains("PTY 返回了仍在运行")
+        && !content.contains("Autopilot 未关闭任务")
+}
+
+fn has_durable_completion_summary_after_claim(
+    notes: &[missiond_core::types::BoardTaskNote],
+    claimed_at: Option<&str>,
+) -> bool {
+    let claimed_at = claimed_at.and_then(|raw| chrono::DateTime::parse_from_rfc3339(raw).ok());
+    notes.iter().any(|note| {
+        if !is_durable_completion_summary_note(note) {
+            return false;
+        }
+        let Some(claimed_at) = claimed_at else {
+            return true;
+        };
+        chrono::DateTime::parse_from_rfc3339(note.created_at.as_str())
+            .map(|note_at| note_at >= claimed_at)
+            .unwrap_or(true)
+    })
+}
+
+async fn close_idle_running_task_from_durable_summary(
+    state: &AppState,
+    task_id: &str,
+    slot_id: &str,
+) -> Result<bool> {
+    let Some(task_with_notes) = state.store.get_board_task_with_notes(task_id).await? else {
+        return Ok(false);
+    };
+    if task_with_notes.task.status != missiond_core::types::BoardTaskStatus::Running {
+        return Ok(false);
+    }
+    if !has_durable_completion_summary_after_claim(
+        &task_with_notes.notes,
+        task_with_notes.task.claimed_at.as_deref(),
+    ) {
+        return Ok(false);
+    }
+
+    state
+        .store
+        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+            task_id: task_id.to_string(),
+            content: format!(
+                "✅ **Durable completion observed** — 工位 {} 已 idle，且 BoardTask 已有 claim 之后写入的 summary note；Autopilot 使用 durable note + idle slot 闭合任务，未单独依赖 PTY running/idle 文本。",
+                slot_id
+            ),
+            note_type: Some("note".to_string()),
+            author: Some("autopilot".to_string()),
+        })
+        .await?;
+    state
+        .store
+        .update_board_task(
+            task_id,
+            &missiond_core::types::UpdateBoardTaskInput {
+                status: Some("done".to_string()),
+                ..Default::default()
+            },
+        )
+        .await?;
+    let _ = state
+        .bus
+        .publish_board(BoardEvent::StatusChanged {
+            task_id: task_id.to_string(),
+            old_status: format!("{:?}", task_with_notes.task.status),
+            new_status: "done".to_string(),
+        })
+        .await;
+    info!(
+        task_id,
+        slot_id, "Autopilot: closed idle running task from durable completion summary note"
+    );
+    Ok(true)
 }
 
 fn extract_delegated_execution_id(prompt: &str) -> Option<String> {
@@ -871,6 +978,15 @@ pub(crate) async fn autopilot_tick(state: &AppState) -> Result<()> {
 
                 match state.pty.get_status(slot_id).await {
                     Some(info) if info.state == SessionState::Idle => {
+                        if let Ok(true) = close_idle_running_task_from_durable_summary(
+                            state,
+                            rt.id.as_str(),
+                            slot_id,
+                        )
+                        .await
+                        {
+                            continue;
+                        }
                         // Slot is idle. Only reclaim once the configured task
                         // budget plus grace has elapsed; otherwise the slot may
                         // simply be between the natural prompt return and the
@@ -1671,6 +1787,14 @@ async fn dispatch_board_tasks_with_config(
                     // tick will short-circuit on global_paused above.
                     return;
                 }
+
+                // V3 resident-master-control :: evidence-authority / settle-policy.
+                // `pty.send` completion is a high-confidence turn-level signal,
+                // but provider JSONL/SSE final text and MissionD conversation
+                // ingestion can lag the prompt returning. Wait briefly before
+                // writing the durable BoardTask close state; PTY idle alone is
+                // never used as completion authority.
+                wait_for_worker_final_settle_window().await;
 
                 // V3 execution-ownership :: delegated-boardtask :: summary-note source.
                 // Extract the worker final summary so the `**Autopilot 执行完成**`
@@ -3041,6 +3165,77 @@ mod tests {
         assert_eq!(
             decide_close_action(None),
             DispatchCloseAction::OwnerClosesAsDone
+        );
+    }
+
+    fn test_note(
+        note_type: missiond_core::types::BoardNoteType,
+        content: &str,
+        created_at: &str,
+    ) -> missiond_core::types::BoardTaskNote {
+        missiond_core::types::BoardTaskNote {
+            id: "note-1".to_string(),
+            task_id: "task-1".to_string(),
+            content: content.to_string(),
+            note_type,
+            author: Some("codex".to_string()),
+            created_at: created_at.to_string(),
+        }
+    }
+
+    #[test]
+    fn durable_completion_summary_note_rejects_progress_warning() {
+        let note = test_note(
+            missiond_core::types::BoardNoteType::Note,
+            "⚠️ PTY 返回了仍在运行的进度帧，Autopilot 未关闭任务",
+            "2026-05-02T15:19:39Z",
+        );
+        assert!(!is_durable_completion_summary_note(&note));
+
+        let summary = test_note(
+            missiond_core::types::BoardNoteType::Summary,
+            "Read-only smoke inspected git status; no files were changed.",
+            "2026-05-02T15:19:50Z",
+        );
+        assert!(is_durable_completion_summary_note(&summary));
+    }
+
+    #[test]
+    fn durable_completion_summary_must_be_after_claim_when_known() {
+        let before = test_note(
+            missiond_core::types::BoardNoteType::Summary,
+            "old summary",
+            "2026-05-02T15:18:00Z",
+        );
+        let after = test_note(
+            missiond_core::types::BoardNoteType::Summary,
+            "new durable summary",
+            "2026-05-02T15:19:50Z",
+        );
+        assert!(!has_durable_completion_summary_after_claim(
+            &[before],
+            Some("2026-05-02T15:18:41Z")
+        ));
+        assert!(has_durable_completion_summary_after_claim(
+            &[after],
+            Some("2026-05-02T15:18:41Z")
+        ));
+    }
+
+    #[test]
+    fn autopilot_final_settle_window_is_pinned_before_close() {
+        // PTY completion is a high-confidence turn signal, but provider JSONL
+        // and MissionD conversation ingestion may settle just after the TUI
+        // returns. Keep a non-zero default and pin the close path to the helper
+        // so a future refactor cannot close on PTY idle alone.
+        assert!(
+            AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT >= 500,
+            "default settle window must leave room for provider final evidence"
+        );
+        let src = include_str!("./autopilot.rs");
+        assert!(
+            src.contains("wait_for_worker_final_settle_window().await"),
+            "Autopilot close path must wait for durable final evidence settle window"
         );
     }
 

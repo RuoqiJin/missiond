@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use missiond_core::types::{CliEngine, Slot};
+use missiond_core::types::{CliEngine, Conversation, Slot};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -7,6 +7,7 @@ use std::collections::HashSet;
 use tracing::{info, warn};
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::engine::master_control;
 use crate::lenient;
 use crate::state::AppState;
 
@@ -25,7 +26,9 @@ struct InboxArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         "mission_slots" => Ok(ToolResult::json(&projected_mission_slots(state).await)),
-        "mission_master_status" => Ok(ToolResult::json(&mission_master_status(state).await)),
+        "mission_master_status" => Ok(ToolResult::json(
+            &master_control::mission_master_status(state).await,
+        )),
         "mission_inbox" => {
             let InboxArgs { unread_only, limit } =
                 serde_json::from_value(args).unwrap_or(InboxArgs {
@@ -42,63 +45,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_slot_history" => handle_slot_history(state, args).await,
         _ => Err(anyhow!("Unknown compute slot tool: {name}")),
     }
-}
-
-async fn mission_master_status(state: &AppState) -> Value {
-    let config = WorkstationRuntimeConfig::load_for_current_dir().ok();
-    let worker = config.as_ref().and_then(|config| {
-        config
-            .workstation_pool()
-            .iter()
-            .find(|worker| worker.id == "codex-master-control")
-    });
-    let slot_id = worker
-        .map(|worker| worker.slot_id.as_str())
-        .unwrap_or("slot-codex-master-control");
-    let pty_status = state.pty.get_status(slot_id).await;
-    let mission_slot_record = state
-        .mission
-        .list_slots()
-        .into_iter()
-        .find(|slot| slot.config.id == slot_id);
-    let checkpoint_root = mission_slot_record
-        .as_ref()
-        .and_then(|slot| slot.config.project_root.clone().or(slot.config.cwd.clone()))
-        .map(std::path::PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
-    let mission_slot = mission_slot_record.and_then(|slot| serde_json::to_value(slot).ok());
-    let checkpoint_path =
-        checkpoint_root.join(".missiond/v3/runtime/master-control-checkpoint.lisp");
-    let checkpoint_text = std::fs::read_to_string(&checkpoint_path).ok();
-
-    json!({
-        "schema": "missiond.master-status.v1",
-        "worker": "codex-master-control",
-        "slotId": slot_id,
-        "configured": worker.is_some(),
-        "acceptsBoardTask": worker.map(|worker| worker.accepts_boardtask).unwrap_or(false),
-        "writeAllowed": worker.map(|worker| worker.write_allowed).unwrap_or(false),
-        "modelProfile": worker.and_then(|worker| worker.model_profile.clone()),
-        "reasoningEffort": worker.and_then(|worker| worker.reasoning_effort.clone()),
-        "searchEnabled": worker.map(|worker| worker.search_enabled).unwrap_or(false),
-        "sandbox": worker.and_then(|worker| worker.sandbox.clone()),
-        "approvalPolicy": worker.and_then(|worker| worker.approval_policy.clone()),
-        "pty": pty_status.and_then(|status| serde_json::to_value(status).ok()),
-        "slot": mission_slot,
-        "checkpoint": {
-            "path": checkpoint_path.display().to_string(),
-            "exists": checkpoint_text.is_some(),
-            "preview": checkpoint_text
-                .as_ref()
-                .map(|text| text.chars().take(1600).collect::<String>()),
-        },
-        "authority": {
-            "primary": ["provider_jsonl", "codex_sqlite", "claude_jsonl", "gemini_chat_file"],
-            "secondary": ["missiond_event_bus", "board_task_lifecycle"],
-            "diagnostic": ["pty_recognition_snapshot"]
-        }
-    })
 }
 
 async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
@@ -141,19 +87,15 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
             }
         }
 
+        let mut latest_is_codex_placeholder = false;
         if let Ok(Some(session_id)) = state.store.get_slot_session(&slot.config.id).await {
             value["sessionId"] = json!(session_id);
             if let Ok(Some(conv)) = state.store.get_conversation(&session_id).await {
                 if conversation_source_matches_engine(slot.config.engine, &conv.source) {
-                    value["latestConversation"] = json!({
-                        "id": conv.id,
-                        "source": conv.source,
-                        "chatType": conv.chat_type,
-                        "conversationType": conv.conversation_type,
-                        "messageCount": conv.message_count,
-                        "status": conv.status,
-                        "updatedAt": conv.updated_at,
-                    });
+                    latest_is_codex_placeholder = slot.config.engine == CliEngine::Codex
+                        && conv.message_count == 0
+                        && conv.id.starts_with("pty-slot-");
+                    value["latestConversation"] = conversation_summary_json(&conv);
                 } else {
                     value["latestConversationMismatch"] = json!({
                         "id": conv.id,
@@ -162,6 +104,23 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
                     });
                 }
             }
+        }
+        if slot.config.engine == CliEngine::Codex
+            && (value.get("latestConversation").is_none() || latest_is_codex_placeholder)
+        {
+            if let Some(conv) = latest_provider_conversation_for_slot(state, &slot).await {
+                value["providerConversationId"] = json!(conv.id.clone());
+                value["latestConversation"] = conversation_summary_json(&conv);
+            }
+        }
+        if slot.config.id == master_control::MASTER_SLOT_ID {
+            let mcp_enabled = master_control::probe_codex_mcp_ready().await;
+            let approval = master_control::probe_codex_mcp_approval_ready();
+            value["mcpReady"] = json!(mcp_enabled && approval.ready);
+            value["mcpEnabled"] = json!(mcp_enabled);
+            value["mcpApprovalReady"] = json!(approval.ready);
+            value["mcpApprovalMissingTools"] = json!(approval.missing_tools);
+            value["mcpSource"] = json!("~/.codex/config.toml");
         }
         out.push(value);
     }
@@ -179,6 +138,44 @@ fn canonical_source_for_engine(engine: CliEngine) -> &'static str {
 
 fn conversation_source_matches_engine(engine: CliEngine, source: &str) -> bool {
     source == canonical_source_for_engine(engine)
+}
+
+async fn latest_provider_conversation_for_slot(
+    state: &AppState,
+    slot: &Slot,
+) -> Option<Conversation> {
+    let source = canonical_source_for_engine(slot.config.engine);
+    let conversations = state
+        .store
+        .list_conversations(None, 10, None, None, None, None, Some(source))
+        .await
+        .ok()?;
+    conversations
+        .into_iter()
+        .find(|conv| conversation_matches_slot_project(conv, slot))
+}
+
+fn conversation_matches_slot_project(conv: &Conversation, slot: &Slot) -> bool {
+    let Some(project) = conv.project.as_deref() else {
+        return false;
+    };
+    slot.config
+        .project_root
+        .as_deref()
+        .or(slot.config.cwd.as_deref())
+        .is_some_and(|root| project == root || project.starts_with(root))
+}
+
+fn conversation_summary_json(conv: &Conversation) -> Value {
+    json!({
+        "id": conv.id,
+        "source": conv.source,
+        "chatType": conv.chat_type,
+        "conversationType": conv.conversation_type,
+        "messageCount": conv.message_count,
+        "status": conv.status,
+        "updatedAt": conv.updated_at,
+    })
 }
 
 fn is_stopped_legacy_sonnet_residual(slot: &Slot, v3_slot_ids: &HashSet<String>) -> bool {

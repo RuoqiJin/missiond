@@ -231,32 +231,8 @@ async fn register_and_init_runtime_slot(
         engine: slot_config.engine,
     };
     state.pty.init_slot(&pty_slot).await;
-    maybe_write_master_control_startup_checkpoint(&slot_config);
+    engine::master_control::write_startup_checkpoint_for_slot(&slot_config).await;
     state.mission.register_runtime_slot(slot_config);
-}
-
-fn maybe_write_master_control_startup_checkpoint(slot_config: &missiond_core::types::SlotConfig) {
-    if slot_config.id != "slot-codex-master-control" {
-        return;
-    }
-    let Some(cwd) = slot_config.cwd.as_deref() else {
-        return;
-    };
-    let root = PathBuf::from(cwd);
-    let runtime_dir = root.join(".missiond/v3/runtime");
-    let checkpoint_path = runtime_dir.join("master-control-checkpoint.lisp");
-    if let Err(err) = std::fs::create_dir_all(&runtime_dir) {
-        warn!(error = %err, path = %runtime_dir.display(), "Failed to create master-control checkpoint directory");
-        return;
-    }
-    let now = chrono::Utc::now().to_rfc3339();
-    let body = format!(
-        "(master-control-checkpoint\n  :schema \"missiond.master-control-checkpoint.v1\"\n  :worker codex-master-control\n  :slot-id \"{}\"\n  :event daemon-startup\n  :checkpoint-at \"{}\"\n  :objective \"resident master-control slot registered from V3 workstation-pool\"\n  :resume-from [BoardTask mission_execution event-bus provider-log]\n)\n",
-        slot_config.id, now
-    );
-    if let Err(err) = std::fs::write(&checkpoint_path, body) {
-        warn!(error = %err, path = %checkpoint_path.display(), "Failed to write master-control startup checkpoint");
-    }
 }
 
 impl AppState {
@@ -1231,6 +1207,11 @@ async fn main() -> Result<()> {
     // observers). They run alongside the v1 timeline subscribers until
     // Phase 8 removes the v1 path.
     bus::start_v2_subscribers(&bus_services, &state, shutdown_rx.clone());
+    engine::master_control::start_master_control_service(
+        &bus_services,
+        &state,
+        shutdown_rx.clone(),
+    );
 
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
     workers::spawn_worker(

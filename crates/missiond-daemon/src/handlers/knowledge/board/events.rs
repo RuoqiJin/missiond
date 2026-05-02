@@ -7,6 +7,7 @@ pub(super) fn publish_board_created(state: &AppState, task: &missiond_core::type
         title: task.title.clone(),
         category: task.category.clone(),
     };
+    crate::engine::master_control::notify_board_event_direct(&ev);
     let bus = Arc::clone(&state.bus);
     tokio::spawn(async move {
         let _ = bus.publish_board(ev).await;
@@ -20,6 +21,7 @@ pub(super) fn publish_board_update(state: &AppState, task: &missiond_core::types
         status: format!("{:?}", task.status),
         category: task.category.clone(),
     };
+    crate::engine::master_control::notify_board_event_direct(&ev);
     let bus = Arc::clone(&state.bus);
     tokio::spawn(async move {
         let _ = bus.publish_board(ev).await;
@@ -37,6 +39,7 @@ pub(super) fn publish_board_status_changed(
         old_status: old_status.to_string(),
         new_status: format!("{:?}", task.status),
     };
+    crate::engine::master_control::notify_board_event_direct(&ev);
     let bus = Arc::clone(&state.bus);
     tokio::spawn(async move {
         let _ = bus.publish_board(ev).await;

@@ -1,0 +1,1370 @@
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
+
+use missiond_core::event::events::{BoardEvent, QuestionEvent, SlotEvent};
+use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
+use missiond_core::event::DomainEvent;
+use missiond_core::types::CreateBoardTaskInput;
+use missiond_core::{PTYSlot, PTYSpawnOptions, SessionState};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::process::Command;
+use tokio::sync::{watch, Notify, RwLock};
+use tracing::{info, warn};
+
+use crate::bus::BusServices;
+use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::state::AppState;
+
+pub(crate) const MASTER_WORKER_ID: &str = "codex-master-control";
+pub(crate) const MASTER_SLOT_ID: &str = "slot-codex-master-control";
+pub(crate) const CHECKPOINT_RELATIVE_PATH: &str =
+    ".missiond/v3/runtime/master-control-checkpoint.lisp";
+const MASTER_EVENT_SUBSCRIBER_CONSUMER: &str = "master_event_subscriber";
+const MASTER_BOARD_SUBSCRIPTION: &str = "master_event_subscriber_board_v2_live";
+const MASTER_SLOT_SUBSCRIPTION: &str = "master_event_subscriber_slot_v2_live";
+const MASTER_QUESTION_SUBSCRIPTION: &str = "master_event_subscriber_question_v2_live";
+const MASTER_MCP_APPROVED_TOOLS: &[&str] = &[
+    "mission_intent",
+    "mission_board_query",
+    "mission_conversation_query",
+    "mission_kb_query",
+    "mission_board_create",
+    "mission_board_update",
+    "mission_board_note_add",
+    "mission_kb_remember",
+    "mission_task_delegate",
+    "mission_compute_slot",
+    "mission_master_status",
+    "mission_slots",
+    "mission_pty_status",
+];
+
+static MASTER_CONTROL_RUNTIME: OnceLock<Arc<MasterControlRuntime>> = OnceLock::new();
+
+#[derive(Debug)]
+pub(crate) struct MasterControlRuntime {
+    queued_events: AtomicU64,
+    processed_ticks: AtomicU64,
+    last_event_seq: AtomicI64,
+    last_checkpoint_at_epoch: AtomicI64,
+    drift_backfill_tasks_created: AtomicU64,
+    control_turns_sent: AtomicU64,
+    last_control_turn_at_epoch: AtomicI64,
+    notify: Notify,
+    last_event_cursor: RwLock<Option<String>>,
+    last_event_summary: RwLock<Option<String>>,
+    last_tick_id: RwLock<Option<String>>,
+    blocked_reason: RwLock<Option<String>>,
+    last_mcp_ready: RwLock<Option<bool>>,
+    last_control_turn_error: RwLock<Option<String>>,
+    last_drift_backfill_task_id: RwLock<Option<String>>,
+}
+
+impl Default for MasterControlRuntime {
+    fn default() -> Self {
+        Self {
+            queued_events: AtomicU64::new(0),
+            processed_ticks: AtomicU64::new(0),
+            last_event_seq: AtomicI64::new(0),
+            last_checkpoint_at_epoch: AtomicI64::new(0),
+            drift_backfill_tasks_created: AtomicU64::new(0),
+            control_turns_sent: AtomicU64::new(0),
+            last_control_turn_at_epoch: AtomicI64::new(0),
+            notify: Notify::new(),
+            last_event_cursor: RwLock::new(None),
+            last_event_summary: RwLock::new(None),
+            last_tick_id: RwLock::new(None),
+            blocked_reason: RwLock::new(None),
+            last_mcp_ready: RwLock::new(None),
+            last_control_turn_error: RwLock::new(None),
+            last_drift_backfill_task_id: RwLock::new(None),
+        }
+    }
+}
+
+impl MasterControlRuntime {
+    async fn record_wakeup(&self, domain: &str, kind: &str, seq: i64, preview: String) {
+        self.queued_events.fetch_add(1, Ordering::Relaxed);
+        self.last_event_seq.store(seq, Ordering::Relaxed);
+        *self.last_event_cursor.write().await = Some(format!("{domain}:{seq}"));
+        *self.last_event_summary.write().await = Some(format!("{domain}.{kind}: {preview}"));
+        self.notify.notify_one();
+    }
+
+    async fn record_checkpoint_context(&self, domain: &str, kind: &str, seq: i64, preview: String) {
+        self.last_event_seq.store(seq, Ordering::Relaxed);
+        *self.last_event_cursor.write().await = Some(format!("{domain}:{seq}"));
+        *self.last_event_summary.write().await = Some(format!("{domain}.{kind}: {preview}"));
+    }
+
+    async fn mark_tick(&self, reason: &str, mcp_ready: bool) -> String {
+        let tick = self.processed_ticks.fetch_add(1, Ordering::Relaxed) + 1;
+        let tick_id = format!("master-tick-{tick:012}");
+        *self.last_tick_id.write().await = Some(tick_id.clone());
+        *self.last_mcp_ready.write().await = Some(mcp_ready);
+        *self.blocked_reason.write().await = if mcp_ready {
+            None
+        } else {
+            Some("codex missiond MCP not ready".to_string())
+        };
+        self.last_checkpoint_at_epoch
+            .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+        tracing::debug!(tick_id = %tick_id, reason = reason, "master-control tick recorded");
+        tick_id
+    }
+
+    async fn record_control_turn(&self, result: Result<(), String>) {
+        match result {
+            Ok(()) => {
+                self.control_turns_sent.fetch_add(1, Ordering::Relaxed);
+                self.last_control_turn_at_epoch
+                    .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
+                *self.last_control_turn_error.write().await = None;
+            }
+            Err(err) => {
+                *self.last_control_turn_error.write().await = Some(err);
+            }
+        }
+    }
+
+    pub(crate) async fn snapshot(&self) -> MasterControlRuntimeSnapshot {
+        MasterControlRuntimeSnapshot {
+            queued_events: self.queued_events.load(Ordering::Relaxed),
+            processed_ticks: self.processed_ticks.load(Ordering::Relaxed),
+            last_event_seq: self.last_event_seq.load(Ordering::Relaxed),
+            last_checkpoint_at_epoch: self.last_checkpoint_at_epoch.load(Ordering::Relaxed),
+            drift_backfill_tasks_created: self.drift_backfill_tasks_created.load(Ordering::Relaxed),
+            control_turns_sent: self.control_turns_sent.load(Ordering::Relaxed),
+            last_control_turn_at_epoch: self.last_control_turn_at_epoch.load(Ordering::Relaxed),
+            last_event_cursor: self.last_event_cursor.read().await.clone(),
+            last_event_summary: self.last_event_summary.read().await.clone(),
+            last_tick_id: self.last_tick_id.read().await.clone(),
+            blocked_reason: self.blocked_reason.read().await.clone(),
+            last_mcp_ready: *self.last_mcp_ready.read().await,
+            last_control_turn_error: self.last_control_turn_error.read().await.clone(),
+            last_drift_backfill_task_id: self.last_drift_backfill_task_id.read().await.clone(),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct MasterControlRuntimeSnapshot {
+    pub(crate) queued_events: u64,
+    pub(crate) processed_ticks: u64,
+    pub(crate) last_event_seq: i64,
+    pub(crate) last_checkpoint_at_epoch: i64,
+    pub(crate) drift_backfill_tasks_created: u64,
+    pub(crate) control_turns_sent: u64,
+    pub(crate) last_control_turn_at_epoch: i64,
+    pub(crate) last_event_cursor: Option<String>,
+    pub(crate) last_event_summary: Option<String>,
+    pub(crate) last_tick_id: Option<String>,
+    pub(crate) blocked_reason: Option<String>,
+    pub(crate) last_mcp_ready: Option<bool>,
+    pub(crate) last_control_turn_error: Option<String>,
+    pub(crate) last_drift_backfill_task_id: Option<String>,
+}
+
+pub(crate) fn runtime() -> Arc<MasterControlRuntime> {
+    MASTER_CONTROL_RUNTIME
+        .get_or_init(|| Arc::new(MasterControlRuntime::default()))
+        .clone()
+}
+
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+pub(crate) enum WorkerCompletionEvidence {
+    ProviderDurableLog {
+        provider: &'static str,
+        conversation_id: String,
+    },
+    MissionEvent {
+        cursor: String,
+    },
+    BoardLifecycle {
+        task_id: String,
+        status: String,
+    },
+    PtyDiagnostic {
+        provider: &'static str,
+        state: String,
+        confidence: f64,
+    },
+}
+
+impl WorkerCompletionEvidence {
+    pub(crate) fn authority_tier(&self) -> &'static str {
+        match self {
+            Self::ProviderDurableLog { .. } => "t1-provider-durable",
+            Self::MissionEvent { .. } | Self::BoardLifecycle { .. } => "t2-mission-state",
+            Self::PtyDiagnostic { .. } => "t3-diagnostic-only",
+        }
+    }
+}
+
+pub(crate) struct MasterControlService {
+    bus: Arc<BusServices>,
+    state: AppState,
+    runtime: Arc<MasterControlRuntime>,
+}
+
+impl MasterControlService {
+    pub(crate) fn new(
+        bus: Arc<BusServices>,
+        state: AppState,
+        runtime: Arc<MasterControlRuntime>,
+    ) -> Self {
+        Self {
+            bus,
+            state,
+            runtime,
+        }
+    }
+
+    pub(crate) fn spawn(self, shutdown: watch::Receiver<bool>) {
+        let service = Arc::new(self);
+        spawn_master_event_subscriber(service.clone(), shutdown.clone());
+        spawn_master_decision_loop(service, shutdown);
+    }
+
+    async fn tick(&self, reason: &str) {
+        if matches!(reason, "daemon-startup" | "event-wakeup") {
+            match self.ensure_code_drift_backfill_task().await {
+                Ok(Some(task_id)) => {
+                    self.runtime
+                        .drift_backfill_tasks_created
+                        .fetch_add(1, Ordering::Relaxed);
+                    *self.runtime.last_drift_backfill_task_id.write().await = Some(task_id);
+                }
+                Ok(None) => {}
+                Err(err) => warn!(error = %err, "code-drift backfill reconciliation failed"),
+            }
+        }
+        let mcp_ready = probe_codex_mcp_control_ready().await;
+        let tick_id = self.runtime.mark_tick(reason, mcp_ready).await;
+        if let Err(err) = self.write_checkpoint(reason, &tick_id, mcp_ready).await {
+            warn!(error = %err, "master-control checkpoint write failed");
+        }
+        if reason == "daemon-startup" && mcp_ready {
+            if let Err(err) = self.ensure_master_slot_running().await {
+                warn!(error = %err, "master-control resident slot auto-start failed");
+            }
+        }
+        if should_dispatch_control_turn(reason, &self.runtime.snapshot().await, mcp_ready) {
+            let snapshot = self.runtime.snapshot().await;
+            let prompt = build_master_tick_prompt(&snapshot, reason, mcp_ready);
+            let result = self.dispatch_control_turn(&prompt).await;
+            self.runtime.record_control_turn(result).await;
+        }
+    }
+
+    async fn ensure_code_drift_backfill_task(&self) -> anyhow::Result<Option<String>> {
+        ensure_code_drift_backfill_task_for_state(&self.state).await
+    }
+
+    async fn write_checkpoint(
+        &self,
+        reason: &str,
+        tick_id: &str,
+        mcp_ready: bool,
+    ) -> std::io::Result<()> {
+        let root = master_project_root(&self.state);
+        let path = checkpoint_path_for_root(&root);
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        let snapshot = self.runtime.snapshot().await;
+        let prompt_preview =
+            should_dispatch_control_turn(reason, &snapshot, mcp_ready).then(|| {
+                build_master_tick_prompt(&snapshot, reason, mcp_ready)
+                    .chars()
+                    .take(1200)
+                    .collect::<String>()
+            });
+        let body = render_checkpoint(&MasterCheckpointRender {
+            slot_id: MASTER_SLOT_ID,
+            reason,
+            tick_id,
+            mcp_ready,
+            snapshot: &snapshot,
+            prompt_preview,
+        });
+        tokio::fs::write(path, body).await
+    }
+
+    async fn dispatch_control_turn(&self, prompt: &str) -> Result<(), String> {
+        self.ensure_master_slot_running().await?;
+        self.wait_for_master_slot_ready(Duration::from_secs(20))
+            .await?;
+        self.ensure_master_slot_expected_model().await?;
+        self.state
+            .pty
+            .send_fire_and_forget(MASTER_SLOT_ID, prompt)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
+    async fn wait_for_master_slot_ready(&self, timeout: Duration) -> Result<(), String> {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            match self.state.pty.get_status(MASTER_SLOT_ID).await {
+                Some(info)
+                    if matches!(info.state, SessionState::Idle | SessionState::SlashMenu) =>
+                {
+                    return Ok(());
+                }
+                Some(info) if matches!(info.state, SessionState::Exited | SessionState::Error) => {
+                    return Err(format!("master slot not running: {:?}", info.state));
+                }
+                Some(_) => {}
+                None => return Err(format!("No PTY session for slot: {MASTER_SLOT_ID}")),
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "master slot did not become idle within {:?}",
+                    timeout
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    }
+
+    async fn ensure_master_slot_expected_model(&self) -> Result<(), String> {
+        let Some(screen) = self.state.pty.get_screen_text(MASTER_SLOT_ID).await else {
+            return Ok(());
+        };
+        let Some(actual) = codex_master_model_mismatch(&screen) else {
+            return Ok(());
+        };
+        warn!(
+            actual = %actual,
+            expected = "gpt-5.5 xhigh",
+            "master-control Codex slot model mismatch; restarting before control turn"
+        );
+        self.state
+            .pty
+            .kill(MASTER_SLOT_ID)
+            .await
+            .map_err(|err| err.to_string())?;
+        self.ensure_master_slot_running().await?;
+        self.wait_for_master_slot_ready(Duration::from_secs(60))
+            .await?;
+        if let Some(screen) = self.state.pty.get_screen_text(MASTER_SLOT_ID).await {
+            if let Some(actual) = codex_master_model_mismatch(&screen) {
+                return Err(format!(
+                    "master Codex model mismatch after restart: expected gpt-5.5 xhigh, saw {actual}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    async fn ensure_master_slot_running(&self) -> Result<(), String> {
+        if let Some(info) = self.state.pty.get_status(MASTER_SLOT_ID).await {
+            if !matches!(info.state, SessionState::Exited | SessionState::Error) {
+                return Ok(());
+            }
+        }
+        let slot = self
+            .state
+            .mission
+            .list_slots()
+            .into_iter()
+            .find(|slot| slot.config.id == MASTER_SLOT_ID)
+            .ok_or_else(|| format!("master slot not configured: {MASTER_SLOT_ID}"))?;
+        let pty_slot = PTYSlot {
+            id: slot.config.id.clone(),
+            role: slot.config.role.clone(),
+            cwd: slot
+                .config
+                .project_root
+                .clone()
+                .or(slot.config.cwd.clone())
+                .map(PathBuf::from),
+            engine: slot.config.engine,
+        };
+        crate::slot_orchestrator::spawner::spawn_tracked_slot(
+            &self.state.pty,
+            &self.state.store,
+            &self.state.pty_session_uuids,
+            &self.state.project_registry,
+            self.state.permission.learned(),
+            &pty_slot,
+            PTYSpawnOptions {
+                auto_restart: true,
+                wait_for_idle: false,
+                timeout_secs: None,
+                mcp_config: slot.config.mcp_config.clone().map(PathBuf::from),
+                dangerously_skip_permissions: slot
+                    .config
+                    .dangerously_skip_permissions
+                    .unwrap_or(false),
+                model: slot.config.model.clone(),
+                reasoning_effort: slot.config.reasoning_effort.clone(),
+                search_enabled: slot.config.search_enabled.unwrap_or(false),
+                sandbox: slot.config.sandbox.clone(),
+                approval_policy: slot.config.approval_policy.clone(),
+                extra_env: std::collections::HashMap::new(),
+                initial_prompt: slot.config.initial_prompt.clone(),
+            },
+            slot.config.env.as_ref(),
+        )
+        .await
+        .map(|_| ())
+        .map_err(|err| err.to_string())
+    }
+}
+
+pub(crate) async fn ensure_code_drift_backfill_task_for_state(
+    state: &AppState,
+) -> anyhow::Result<Option<String>> {
+    let Some(drift) = detect_code_first_drift(&master_project_root(state)).await? else {
+        return Ok(None);
+    };
+    if let Some(existing) = state
+        .store
+        .find_open_task_by_dedupe_key(&drift.dedupe_key)
+        .await?
+    {
+        return Ok(Some(existing.id.to_string()));
+    }
+    let input = CreateBoardTaskInput {
+        title: "Backfill Lisp/checker for code-first change".to_string(),
+        description: Some(format!(
+            "MissionD detected code changes without a same-diff Lisp/evidence delta.\n\nChanged files:\n{}\n\nRequired closeout:\n1. Map the behavior to the relevant project/V3 Lisp surface.\n2. Add or update checker coverage.\n3. Add evidence or a concise waiver note explaining why code-first was necessary.",
+            drift.files.join("\n")
+        )),
+        priority: Some("medium".to_string()),
+        category: Some("dev".to_string()),
+        project: Some("missiond".to_string()),
+        auto_execute: Some(false),
+        hidden: Some(false),
+        dedupe_key: Some(drift.dedupe_key.clone()),
+        context_intent: Some("code".to_string()),
+        ..Default::default()
+    };
+    let task = state.store.create_board_task(&input).await?;
+    let ev = BoardEvent::TaskCreated {
+        task_id: task.id.to_string(),
+        title: task.title.clone(),
+        category: task.category.clone(),
+    };
+    notify_board_event_direct(&ev);
+    let _ = state.bus.publish_board(ev).await;
+    Ok(Some(task.id.to_string()))
+}
+
+pub(crate) fn start_master_control_service(
+    bus: &Arc<BusServices>,
+    state: &AppState,
+    shutdown_rx: watch::Receiver<bool>,
+) {
+    let service = MasterControlService::new(bus.clone(), state.clone(), runtime());
+    service.spawn(shutdown_rx);
+    info!("master-control service started (event subscriber + checkpoint loop)");
+}
+
+pub(crate) fn notify_board_event_direct(event: &BoardEvent) {
+    let event = event.clone();
+    tokio::spawn(async move {
+        if !should_wake_for_board_event(&event, true) {
+            return;
+        }
+        let kind = event.kind();
+        let preview = board_event_preview(&event);
+        runtime()
+            .record_wakeup("BoardEvent", kind, 0, preview)
+            .await;
+    });
+}
+
+fn spawn_master_event_subscriber(
+    service: Arc<MasterControlService>,
+    shutdown: watch::Receiver<bool>,
+) {
+    spawn_board_event_sub(service.clone(), shutdown.clone());
+    spawn_slot_event_sub(service.clone(), shutdown.clone());
+    spawn_question_event_sub(service, shutdown);
+}
+
+fn master_live_subscription_opts() -> SubscriptionOpts {
+    let mut opts = SubscriptionOpts::named(MASTER_EVENT_SUBSCRIBER_CONSUMER);
+    opts.start_from = StartFrom::Latest;
+    opts.cursor_flush = CursorFlush::PerEvent;
+    opts
+}
+
+fn spawn_board_event_sub(service: Arc<MasterControlService>, mut shutdown: watch::Receiver<bool>) {
+    tokio::spawn(async move {
+        let mut sub = match service
+            .bus
+            .subscribe::<BoardEvent>(MASTER_BOARD_SUBSCRIPTION, master_live_subscription_opts())
+            .await
+        {
+            Ok(sub) => sub,
+            Err(err) => {
+                warn!(error = %err, "master-control board subscription failed");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    let seq = ack.seq().0;
+                    if seq <= 0 || !should_wake_for_board_event(ack.event(), false) {
+                        ack.ack().await;
+                        continue;
+                    }
+                    let kind = ack.event().kind();
+                    let preview = board_event_preview(ack.event());
+                    service.runtime.record_wakeup("BoardEvent", kind, seq, preview).await;
+                    ack.ack().await;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_slot_event_sub(service: Arc<MasterControlService>, mut shutdown: watch::Receiver<bool>) {
+    tokio::spawn(async move {
+        let mut sub = match service
+            .bus
+            .subscribe::<SlotEvent>(MASTER_SLOT_SUBSCRIPTION, master_live_subscription_opts())
+            .await
+        {
+            Ok(sub) => sub,
+            Err(err) => {
+                warn!(error = %err, "master-control slot subscription failed");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    let seq = ack.seq().0;
+                    if !should_wake_for_slot_event(ack.event(), seq) {
+                        ack.ack().await;
+                        continue;
+                    }
+                    let kind = ack.event().kind();
+                    let preview = slot_event_preview(ack.event());
+                    service.runtime.record_wakeup("SlotEvent", kind, seq, preview).await;
+                    ack.ack().await;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_question_event_sub(
+    service: Arc<MasterControlService>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        let mut sub = match service
+            .bus
+            .subscribe::<QuestionEvent>(
+                MASTER_QUESTION_SUBSCRIPTION,
+                master_live_subscription_opts(),
+            )
+            .await
+        {
+            Ok(sub) => sub,
+            Err(err) => {
+                warn!(error = %err, "master-control question subscription failed");
+                return;
+            }
+        };
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => break,
+                ack = sub.next() => {
+                    let Some(ack) = ack else { break; };
+                    let seq = ack.seq().0;
+                    if seq <= 0 {
+                        ack.ack().await;
+                        continue;
+                    }
+                    let kind = ack.event().kind();
+                    let preview = question_event_preview(ack.event());
+                    service.runtime.record_wakeup("QuestionEvent", kind, seq, preview).await;
+                    ack.ack().await;
+                }
+            }
+        }
+    });
+}
+
+fn spawn_master_decision_loop(
+    service: Arc<MasterControlService>,
+    mut shutdown: watch::Receiver<bool>,
+) {
+    tokio::spawn(async move {
+        service.tick("daemon-startup").await;
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = shutdown.changed() => {
+                    service.tick("daemon-restart-before-exit").await;
+                    break;
+                }
+                _ = service.runtime.notify.notified() => {
+                    service.tick("event-wakeup").await;
+                }
+                _ = interval.tick() => {
+                    service.tick("periodic-heartbeat").await;
+                }
+            }
+        }
+    });
+}
+
+pub(crate) async fn write_startup_checkpoint_for_slot(
+    slot_config: &missiond_core::types::SlotConfig,
+) {
+    if slot_config.id != MASTER_SLOT_ID {
+        return;
+    }
+    let Some(cwd) = slot_config.cwd.as_deref() else {
+        return;
+    };
+    let root = PathBuf::from(cwd);
+    let runtime = runtime();
+    runtime
+        .record_checkpoint_context(
+            "DaemonRestart",
+            "startup",
+            0,
+            "runtime slot registered".to_string(),
+        )
+        .await;
+    let snapshot = runtime.snapshot().await;
+    let path = checkpoint_path_for_root(&root);
+    if let Some(parent) = path.parent() {
+        if let Err(err) = tokio::fs::create_dir_all(parent).await {
+            warn!(error = %err, path = %parent.display(), "Failed to create master-control checkpoint directory");
+            return;
+        }
+    }
+    let body = render_checkpoint(&MasterCheckpointRender {
+        slot_id: MASTER_SLOT_ID,
+        reason: "runtime-slot-registered",
+        tick_id: "master-startup-registration",
+        mcp_ready: false,
+        snapshot: &snapshot,
+        prompt_preview: None,
+    });
+    if let Err(err) = tokio::fs::write(&path, body).await {
+        warn!(error = %err, path = %path.display(), "Failed to write master-control startup checkpoint");
+    }
+}
+
+pub(crate) fn checkpoint_path_for_root(root: &Path) -> PathBuf {
+    root.join(CHECKPOINT_RELATIVE_PATH)
+}
+
+struct MasterCheckpointRender<'a> {
+    slot_id: &'a str,
+    reason: &'a str,
+    tick_id: &'a str,
+    mcp_ready: bool,
+    snapshot: &'a MasterControlRuntimeSnapshot,
+    prompt_preview: Option<String>,
+}
+
+fn render_checkpoint(input: &MasterCheckpointRender<'_>) -> String {
+    let updated_at = chrono::Utc::now().to_rfc3339();
+    format!(
+        "(master-control-checkpoint\n  :schema \"missiond.master-control-checkpoint.v2\"\n  :worker codex-master-control\n  :slot-id {}\n  :tick-id {}\n  :reason {}\n  :checkpoint-at {}\n  :event-cursor {}\n  :last-event-seq {}\n  :last-event {}\n  :queued-events {}\n  :processed-ticks {}\n  :drift-backfill-tasks-created {}\n  :last-drift-backfill-task-id {}\n  :control-turns-sent {}\n  :last-control-turn-at-epoch {}\n  :last-control-turn-error {}\n  :mcp-ready {}\n  :blocked-reason {}\n  :objective \"resident master-control watches MissionD events and delegates through BoardTask/Autopilot\"\n  :resume-from [latest-master-control-checkpoint BoardTask mission_execution event-bus provider-log]\n  :resume-plan ((step s1 :logic \"read this checkpoint and open master-control Board objectives\")\n                (step s2 :logic \"inspect durable provider logs before relying on PTY diagnostics\")\n                (step s3 :logic \"delegate via BoardTask with context-pack/write-scope/acceptance metadata\"))\n  :last-control-prompt {}\n  :updated-at {}\n)\n",
+        lisp_string(input.slot_id),
+        lisp_string(input.tick_id),
+        lisp_string(input.reason),
+        lisp_string(&updated_at),
+        lisp_option_string(input.snapshot.last_event_cursor.as_deref()),
+        input.snapshot.last_event_seq,
+        lisp_option_string(input.snapshot.last_event_summary.as_deref()),
+        input.snapshot.queued_events,
+        input.snapshot.processed_ticks,
+        input.snapshot.drift_backfill_tasks_created,
+        lisp_option_string(input.snapshot.last_drift_backfill_task_id.as_deref()),
+        input.snapshot.control_turns_sent,
+        input.snapshot.last_control_turn_at_epoch,
+        lisp_option_string(input.snapshot.last_control_turn_error.as_deref()),
+        if input.mcp_ready { "true" } else { "false" },
+        lisp_option_string(input.snapshot.blocked_reason.as_deref()),
+        lisp_option_string(input.prompt_preview.as_deref()),
+        lisp_string(&updated_at),
+    )
+}
+
+pub(crate) fn build_master_tick_prompt(
+    snapshot: &MasterControlRuntimeSnapshot,
+    reason: &str,
+    mcp_ready: bool,
+) -> String {
+    format!(
+        "MissionD master-control tick.\nreason: {reason}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nRules:\n1. Use MissionD MCP first: mission_intent(project=\"missiond\", action=\"summary\"), mission_board_query, mission_conversation_query, mission_kb_query as needed.\n2. Do not run broad shell scans such as repo-wide ls/rg/find unless the MCP surfaces are missing; if you must use shell, explain the gap first.\n3. For BoardTaskCreated/Updated, query that BoardTask by id before deciding.\n4. For implementation work, use the two-stage context-pack workflow: first delegate read-only context organizers, then delegate exact file/region shards only after an integration plan provides context_pack_path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, task_class, pool_hint, and engine_hint.\n5. If a task asks for worker delegation, call mission_task_delegate directly with the available two-stage metadata. Use mission_board_note_add for progress/summary notes and mission_board_update only for status/parent/metadata changes.\n6. Return a compact decision: no-op, create/update BoardTask, delegate worker, write KB note, or blocked.\n7. Do not edit code directly.",
+        snapshot
+            .last_event_cursor
+            .as_deref()
+            .unwrap_or("none"),
+        snapshot
+            .last_event_summary
+            .as_deref()
+            .unwrap_or("none"),
+        snapshot.queued_events,
+        mcp_ready
+    )
+}
+
+pub(crate) fn codex_master_model_mismatch(screen: &str) -> Option<String> {
+    for line in screen.lines() {
+        let normalized = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if !normalized.contains("gpt-") {
+            continue;
+        }
+        let is_model_line = normalized.contains("model:")
+            || normalized.contains("·")
+            || normalized.contains("/model to change");
+        if !is_model_line {
+            continue;
+        }
+        if normalized.contains("gpt-5.5") && normalized.contains("xhigh") {
+            return None;
+        }
+        return Some(normalized);
+    }
+    None
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CodeFirstDrift {
+    pub(crate) files: Vec<String>,
+    pub(crate) dedupe_key: String,
+}
+
+pub(crate) async fn detect_code_first_drift(root: &Path) -> anyhow::Result<Option<CodeFirstDrift>> {
+    let output = Command::new("git")
+        .args(["diff", "--name-only"])
+        .current_dir(root)
+        .output()
+        .await?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let changed: Vec<String> = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    if !has_code_surface_delta(&changed) || has_lisp_or_evidence_delta(&changed) {
+        return Ok(None);
+    }
+    let mut digest = Sha256::new();
+    for file in &changed {
+        if is_code_surface_file(file) {
+            digest.update(file.as_bytes());
+            digest.update(b"\n");
+        }
+    }
+    let hash = format!("{:x}", digest.finalize());
+    Ok(Some(CodeFirstDrift {
+        files: changed
+            .into_iter()
+            .filter(|file| is_code_surface_file(file))
+            .collect(),
+        dedupe_key: format!("lisp-code-drift:{}", &hash[..16]),
+    }))
+}
+
+fn has_code_surface_delta(files: &[String]) -> bool {
+    files.iter().any(|file| is_code_surface_file(file))
+}
+
+fn has_lisp_or_evidence_delta(files: &[String]) -> bool {
+    files
+        .iter()
+        .any(|file| file.ends_with(".lisp") || file.contains("/evidence/"))
+}
+
+fn is_code_surface_file(file: &str) -> bool {
+    file.starts_with("crates/") || file.starts_with("packages/") || file.starts_with("scripts/")
+}
+
+pub(crate) fn should_dispatch_control_turn(
+    reason: &str,
+    snapshot: &MasterControlRuntimeSnapshot,
+    mcp_ready: bool,
+) -> bool {
+    if !mcp_ready || !master_control_turns_enabled() {
+        return false;
+    }
+    if reason != "event-wakeup" {
+        return false;
+    }
+    let now = chrono::Utc::now().timestamp();
+    snapshot.last_control_turn_at_epoch == 0
+        || now.saturating_sub(snapshot.last_control_turn_at_epoch) >= 30
+}
+
+fn master_control_turns_enabled() -> bool {
+    match std::env::var("MISSIOND_MASTER_CONTROL_TURNS") {
+        Ok(value) => {
+            let value = value.trim().to_ascii_lowercase();
+            !(value == "0" || value == "false" || value == "off" || value == "disabled")
+        }
+        Err(_) => true,
+    }
+}
+
+pub(crate) async fn mission_master_status(state: &AppState) -> Value {
+    let config = WorkstationRuntimeConfig::load_for_current_dir().ok();
+    let worker = config.as_ref().and_then(|config| {
+        config
+            .workstation_pool()
+            .iter()
+            .find(|worker| worker.id == MASTER_WORKER_ID)
+    });
+    let slot_id = worker
+        .map(|worker| worker.slot_id.as_str())
+        .unwrap_or(MASTER_SLOT_ID);
+    let pty_status = state.pty.get_status(slot_id).await;
+    let mission_slot_record = state
+        .mission
+        .list_slots()
+        .into_iter()
+        .find(|slot| slot.config.id == slot_id);
+    let checkpoint_root = mission_slot_record
+        .as_ref()
+        .and_then(|slot| slot.config.project_root.clone().or(slot.config.cwd.clone()))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| master_project_root(state));
+    let mission_slot = mission_slot_record.and_then(|slot| serde_json::to_value(slot).ok());
+    let checkpoint_path = checkpoint_path_for_root(&checkpoint_root);
+    let checkpoint_text = std::fs::read_to_string(&checkpoint_path).ok();
+    let runtime_snapshot = runtime().snapshot().await;
+    let mcp_enabled = probe_codex_mcp_ready().await;
+    let approval = probe_codex_mcp_approval_ready();
+    let mcp_ready = mcp_enabled && approval.ready;
+
+    json!({
+        "schema": "missiond.master-status.v2",
+        "worker": MASTER_WORKER_ID,
+        "slotId": slot_id,
+        "configured": worker.is_some(),
+        "acceptsBoardTask": worker.map(|worker| worker.accepts_boardtask).unwrap_or(false),
+        "writeAllowed": worker.map(|worker| worker.write_allowed).unwrap_or(false),
+        "modelProfile": worker.and_then(|worker| worker.model_profile.clone()),
+        "reasoningEffort": worker.and_then(|worker| worker.reasoning_effort.clone()),
+        "searchEnabled": worker.map(|worker| worker.search_enabled).unwrap_or(false),
+        "sandbox": worker.and_then(|worker| worker.sandbox.clone()),
+        "approvalPolicy": worker.and_then(|worker| worker.approval_policy.clone()),
+        "mcpReady": mcp_ready,
+        "mcpEnabled": mcp_enabled,
+        "mcpApprovalReady": approval.ready,
+        "mcp": {
+            "source": "~/.codex/config.toml",
+            "probe": "codex mcp list",
+            "missiond": {"ready": mcp_enabled},
+            "approval": {
+                "ready": approval.ready,
+                "requiredTools": MASTER_MCP_APPROVED_TOOLS,
+                "missingTools": approval.missing_tools
+            }
+        },
+        "pty": pty_status.and_then(|status| serde_json::to_value(status).ok()),
+        "slot": mission_slot,
+        "service": {
+            "mode": "hybrid",
+            "status": "registered",
+            "surfaces": [
+                "master-checkpoint",
+                "master-event-subscriber",
+                "master-decision-loop",
+                "master-delegation",
+                "master-recovery",
+                "night-scheduler"
+            ],
+            "queuedEvents": runtime_snapshot.queued_events,
+            "processedTicks": runtime_snapshot.processed_ticks,
+            "driftBackfillTasksCreated": runtime_snapshot.drift_backfill_tasks_created,
+            "lastDriftBackfillTaskId": runtime_snapshot.last_drift_backfill_task_id,
+            "controlTurnsSent": runtime_snapshot.control_turns_sent,
+            "lastControlTurnAtEpoch": runtime_snapshot.last_control_turn_at_epoch,
+            "lastControlTurnError": runtime_snapshot.last_control_turn_error,
+            "eventCursor": runtime_snapshot.last_event_cursor,
+            "lastEvent": runtime_snapshot.last_event_summary,
+            "lastTickId": runtime_snapshot.last_tick_id,
+            "lastCheckpointAtEpoch": runtime_snapshot.last_checkpoint_at_epoch,
+            "lastMcpReady": runtime_snapshot.last_mcp_ready,
+            "blockedReason": runtime_snapshot.blocked_reason
+        },
+        "checkpoint": {
+            "path": checkpoint_path.display().to_string(),
+            "exists": checkpoint_text.is_some(),
+            "preview": checkpoint_text
+                .as_ref()
+                .map(|text| text.chars().take(1600).collect::<String>()),
+        },
+        "authority": {
+            "primary": ["provider_jsonl", "codex_sqlite", "claude_jsonl", "gemini_chat_file"],
+            "secondary": ["missiond_event_bus", "board_task_lifecycle", "mission_execution"],
+            "diagnostic": ["pty_recognition_snapshot"]
+        }
+    })
+}
+
+pub(crate) async fn probe_codex_mcp_ready() -> bool {
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        Command::new("codex").args(["mcp", "list"]).output(),
+    )
+    .await;
+    match output {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            codex_mcp_ready_from_output(&stdout, &stderr)
+        }
+        Ok(Err(err)) => {
+            warn!(error = %err, "codex mcp list probe failed");
+            false
+        }
+        Err(_) => {
+            warn!("codex mcp list probe timed out");
+            false
+        }
+    }
+}
+
+pub(crate) async fn probe_codex_mcp_control_ready() -> bool {
+    probe_codex_mcp_ready().await && probe_codex_mcp_approval_ready().ready
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CodexMcpApprovalReadiness {
+    pub(crate) ready: bool,
+    pub(crate) missing_tools: Vec<String>,
+}
+
+pub(crate) fn probe_codex_mcp_approval_ready() -> CodexMcpApprovalReadiness {
+    let config_path = home_dir().join(".codex/config.toml");
+    match std::fs::read_to_string(config_path) {
+        Ok(config) => codex_mcp_approval_ready_from_config(&config),
+        Err(_) => CodexMcpApprovalReadiness {
+            ready: false,
+            missing_tools: MASTER_MCP_APPROVED_TOOLS
+                .iter()
+                .map(|tool| (*tool).to_string())
+                .collect(),
+        },
+    }
+}
+
+pub(crate) fn codex_mcp_approval_ready_from_config(config: &str) -> CodexMcpApprovalReadiness {
+    let missing_tools: Vec<String> = MASTER_MCP_APPROVED_TOOLS
+        .iter()
+        .filter(|tool| !codex_mcp_tool_approval_is_approve(config, tool))
+        .map(|tool| (*tool).to_string())
+        .collect();
+    CodexMcpApprovalReadiness {
+        ready: missing_tools.is_empty(),
+        missing_tools,
+    }
+}
+
+fn codex_mcp_tool_approval_is_approve(config: &str, tool: &str) -> bool {
+    let header = format!("[mcp_servers.missiond.tools.{tool}]");
+    let Some(start) = config.find(&header) else {
+        return false;
+    };
+    let section = &config[start + header.len()..];
+    let end = section.find("\n[").unwrap_or(section.len());
+    let body = &section[..end];
+    body.lines().any(|line| {
+        let line = line.trim();
+        line == "approval_mode = \"approve\"" || line == "approval_mode='approve'"
+    })
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+pub(crate) fn codex_mcp_ready_from_output(stdout: &str, stderr: &str) -> bool {
+    let combined = format!("{stdout}\n{stderr}");
+    combined.lines().any(|line| {
+        let lower = line.to_ascii_lowercase();
+        lower.contains("missiond")
+            && lower.contains("enabled")
+            && !lower.contains("disabled")
+            && !lower.contains("failed")
+    })
+}
+
+fn master_project_root(state: &AppState) -> PathBuf {
+    state
+        .mission
+        .list_slots()
+        .into_iter()
+        .find(|slot| slot.config.id == MASTER_SLOT_ID)
+        .and_then(|slot| slot.config.project_root.or(slot.config.cwd))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn lisp_option_string(value: Option<&str>) -> String {
+    value.map(lisp_string).unwrap_or_else(|| "nil".to_string())
+}
+
+fn lisp_string(value: &str) -> String {
+    let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
+    format!("\"{escaped}\"")
+}
+
+pub(crate) fn board_event_preview(event: &BoardEvent) -> String {
+    match event {
+        BoardEvent::TaskCreated {
+            task_id,
+            title,
+            category,
+        } => format!("task_id={task_id} category={category} title={title}"),
+        BoardEvent::StatusChanged {
+            task_id,
+            old_status,
+            new_status,
+        } => format!("task_id={task_id} {old_status}->{new_status}"),
+        BoardEvent::NoteAdded {
+            task_id,
+            note_id,
+            content_preview,
+        } => format!("task_id={task_id} note_id={note_id} preview={content_preview}"),
+        BoardEvent::Claimed { task_id, slot_id } => {
+            format!("task_id={task_id} slot_id={slot_id}")
+        }
+        BoardEvent::Deleted { task_id, title } => format!("task_id={task_id} title={title}"),
+        BoardEvent::Updated {
+            task_id,
+            status,
+            category,
+        } => format!("task_id={task_id} status={status} category={category}"),
+    }
+}
+
+fn should_wake_for_board_event(event: &BoardEvent, direct_notify: bool) -> bool {
+    match event {
+        BoardEvent::TaskCreated { .. } => true,
+        BoardEvent::Updated { status, .. } => !status.eq_ignore_ascii_case("done"),
+        BoardEvent::StatusChanged { new_status, .. } => {
+            let status = new_status.trim().to_ascii_lowercase();
+            status != "done" && status != "completed" && status != "closed"
+        }
+        BoardEvent::NoteAdded { .. } => direct_notify,
+        BoardEvent::Claimed { .. } | BoardEvent::Deleted { .. } => false,
+    }
+}
+
+fn slot_event_preview(event: &SlotEvent) -> String {
+    match event {
+        SlotEvent::BecameIdle { slot_id } => format!("slot_id={slot_id}"),
+        SlotEvent::StateChanged {
+            slot_id,
+            new_state,
+            prev_state,
+        } => format!("slot_id={slot_id} {prev_state}->{new_state}"),
+        SlotEvent::TaskDispatched {
+            slot_id,
+            task_id,
+            purpose,
+            prompt_chars,
+            ..
+        } => format!(
+            "slot_id={slot_id} task_id={} purpose={purpose} prompt_chars={prompt_chars}",
+            task_id.as_deref().unwrap_or("none")
+        ),
+        SlotEvent::Stuck {
+            slot_id,
+            reason,
+            last_activity_ms_ago,
+        } => {
+            format!("slot_id={slot_id} reason={reason} last_activity_ms_ago={last_activity_ms_ago}")
+        }
+    }
+}
+
+fn slot_event_slot_id(event: &SlotEvent) -> &str {
+    match event {
+        SlotEvent::BecameIdle { slot_id }
+        | SlotEvent::StateChanged { slot_id, .. }
+        | SlotEvent::TaskDispatched { slot_id, .. }
+        | SlotEvent::Stuck { slot_id, .. } => slot_id.as_str(),
+    }
+}
+
+fn should_wake_for_slot_event(event: &SlotEvent, seq: i64) -> bool {
+    seq > 0
+        && slot_event_slot_id(event) != MASTER_SLOT_ID
+        && !matches!(event, SlotEvent::BecameIdle { .. })
+}
+
+fn question_event_preview(event: &QuestionEvent) -> String {
+    match event {
+        QuestionEvent::Created { question_id } => format!("question_id={question_id}"),
+        QuestionEvent::Resolved {
+            question_id,
+            resolution,
+        } => format!("question_id={question_id} resolution={resolution}"),
+        QuestionEvent::DecisionResolved {
+            question_id,
+            tier,
+            duration_ms,
+        } => format!("question_id={question_id} tier={tier} duration_ms={duration_ms}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_mcp_ready_requires_enabled_missiond_row() {
+        let output = "Name Status\nmissiond /path enabled Unsupported\n";
+        assert!(codex_mcp_ready_from_output(output, ""));
+        assert!(!codex_mcp_ready_from_output(
+            "missiond /path disabled Unsupported",
+            ""
+        ));
+        assert!(!codex_mcp_ready_from_output("other /path enabled", ""));
+    }
+
+    #[test]
+    fn codex_mcp_approval_ready_requires_master_tools() {
+        let config = MASTER_MCP_APPROVED_TOOLS
+            .iter()
+            .map(|tool| {
+                format!("[mcp_servers.missiond.tools.{tool}]\napproval_mode = \"approve\"\n")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(codex_mcp_approval_ready_from_config(&config).ready);
+
+        let partial = "[mcp_servers.missiond.tools.mission_intent]\napproval_mode = \"approve\"\n";
+        let readiness = codex_mcp_approval_ready_from_config(partial);
+        assert!(!readiness.ready);
+        assert!(readiness
+            .missing_tools
+            .contains(&"mission_board_query".to_string()));
+    }
+
+    #[test]
+    fn pty_diagnostic_is_not_completion_authority() {
+        let evidence = WorkerCompletionEvidence::PtyDiagnostic {
+            provider: "codex_cli",
+            state: "idle".to_string(),
+            confidence: 0.98,
+        };
+        assert_eq!(evidence.authority_tier(), "t3-diagnostic-only");
+    }
+
+    #[test]
+    fn checkpoint_path_uses_v3_runtime_directory() {
+        let path = checkpoint_path_for_root(Path::new("/tmp/project"));
+        assert_eq!(
+            path,
+            PathBuf::from("/tmp/project/.missiond/v3/runtime/master-control-checkpoint.lisp")
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_checkpoint_context_does_not_queue_control_wakeup() {
+        let runtime = MasterControlRuntime::default();
+        runtime
+            .record_checkpoint_context(
+                "DaemonRestart",
+                "startup",
+                0,
+                "runtime slot registered".to_string(),
+            )
+            .await;
+        let snapshot = runtime.snapshot().await;
+        assert_eq!(snapshot.queued_events, 0);
+        assert_eq!(
+            snapshot.last_event_summary.as_deref(),
+            Some("DaemonRestart.startup: runtime slot registered")
+        );
+    }
+
+    #[test]
+    fn control_turn_dispatch_is_mcp_ready_event_wakeup_only() {
+        let snapshot = MasterControlRuntimeSnapshot {
+            queued_events: 1,
+            processed_ticks: 1,
+            last_event_seq: 42,
+            last_checkpoint_at_epoch: 0,
+            drift_backfill_tasks_created: 0,
+            control_turns_sent: 0,
+            last_control_turn_at_epoch: 0,
+            last_event_cursor: Some("BoardEvent:42".to_string()),
+            last_event_summary: None,
+            last_tick_id: None,
+            blocked_reason: None,
+            last_mcp_ready: Some(true),
+            last_control_turn_error: None,
+            last_drift_backfill_task_id: None,
+        };
+        assert!(should_dispatch_control_turn(
+            "event-wakeup",
+            &snapshot,
+            true
+        ));
+        assert!(!should_dispatch_control_turn(
+            "periodic-heartbeat",
+            &snapshot,
+            true
+        ));
+        assert!(!should_dispatch_control_turn(
+            "event-wakeup",
+            &snapshot,
+            false
+        ));
+    }
+
+    #[test]
+    fn master_tick_prompt_is_mcp_first_and_event_scoped() {
+        let snapshot = MasterControlRuntimeSnapshot {
+            queued_events: 2,
+            processed_ticks: 1,
+            last_event_seq: 42,
+            last_checkpoint_at_epoch: 0,
+            drift_backfill_tasks_created: 0,
+            control_turns_sent: 0,
+            last_control_turn_at_epoch: 0,
+            last_event_cursor: Some("BoardEvent:42".to_string()),
+            last_event_summary: Some("BoardEvent.task_created: task_id=abc".to_string()),
+            last_tick_id: None,
+            blocked_reason: None,
+            last_mcp_ready: Some(true),
+            last_control_turn_error: None,
+            last_drift_backfill_task_id: None,
+        };
+        let prompt = build_master_tick_prompt(&snapshot, "event-wakeup", true);
+        assert!(prompt.contains("event_summary: BoardEvent.task_created: task_id=abc"));
+        assert!(prompt.contains("mission_intent(project=\"missiond\", action=\"summary\")"));
+        assert!(prompt.contains("Do not run broad shell scans"));
+        assert!(prompt.contains("query that BoardTask by id"));
+        assert!(prompt.contains("call mission_task_delegate directly"));
+        assert!(prompt.contains("mission_board_note_add"));
+    }
+
+    #[test]
+    fn codex_master_model_guard_detects_downgrade_footer() {
+        let good = "│ model:     gpt-5.5 xhigh   /model to change │\n";
+        assert_eq!(codex_master_model_mismatch(good), None);
+
+        let downgraded = "  gpt-5.4-mini medium · ~/Projects/missiond\n";
+        assert_eq!(
+            codex_master_model_mismatch(downgraded),
+            Some("gpt-5.4-mini medium · ~/Projects/missiond".to_string())
+        );
+    }
+
+    #[test]
+    fn slot_event_slot_id_extracts_master_slot() {
+        let event = SlotEvent::BecameIdle {
+            slot_id: MASTER_SLOT_ID.to_string(),
+        };
+        assert_eq!(slot_event_slot_id(&event), MASTER_SLOT_ID);
+    }
+
+    #[test]
+    fn slot_wakeup_filter_rejects_volatile_idle_noise() {
+        let idle = SlotEvent::BecameIdle {
+            slot_id: "slot-claude-code-default".to_string(),
+        };
+        assert!(!should_wake_for_slot_event(&idle, 0));
+        assert!(!should_wake_for_slot_event(&idle, 42));
+
+        let master_changed = SlotEvent::StateChanged {
+            slot_id: MASTER_SLOT_ID.to_string(),
+            new_state: "Idle".to_string(),
+            prev_state: "Thinking".to_string(),
+        };
+        assert!(!should_wake_for_slot_event(&master_changed, 42));
+
+        let dispatched = SlotEvent::TaskDispatched {
+            slot_id: "slot-claude-code-default".to_string(),
+            task_id: Some("task-1".to_string()),
+            purpose: "boardtask".to_string(),
+            prompt_chars: 10,
+            preview: "read-only".to_string(),
+            cited_kb_ids: vec![],
+        };
+        assert!(should_wake_for_slot_event(&dispatched, 42));
+    }
+
+    #[test]
+    fn board_wakeup_filter_rejects_low_value_done_status_changes() {
+        let created = BoardEvent::TaskCreated {
+            task_id: "t".to_string(),
+            title: "new work".to_string(),
+            category: "dev".to_string(),
+        };
+        assert!(should_wake_for_board_event(&created, false));
+
+        let done = BoardEvent::StatusChanged {
+            task_id: "t".to_string(),
+            old_status: "Open".to_string(),
+            new_status: "Done".to_string(),
+        };
+        assert!(!should_wake_for_board_event(&done, true));
+        assert!(!should_wake_for_board_event(&done, false));
+
+        let blocked = BoardEvent::StatusChanged {
+            task_id: "t".to_string(),
+            old_status: "Open".to_string(),
+            new_status: "Blocked".to_string(),
+        };
+        assert!(should_wake_for_board_event(&blocked, false));
+    }
+
+    #[test]
+    fn master_event_subscriber_is_live_only_and_per_event_flush() {
+        assert!(MASTER_BOARD_SUBSCRIPTION.ends_with("_v2_live"));
+        assert!(MASTER_SLOT_SUBSCRIPTION.ends_with("_v2_live"));
+        assert!(MASTER_QUESTION_SUBSCRIPTION.ends_with("_v2_live"));
+
+        let opts = master_live_subscription_opts();
+        assert_eq!(opts.start_from, StartFrom::Latest);
+        assert!(matches!(opts.cursor_flush, CursorFlush::PerEvent));
+        assert_eq!(opts.consumer_name, MASTER_EVENT_SUBSCRIBER_CONSUMER);
+    }
+
+    #[test]
+    fn code_first_drift_predicate_requires_code_without_lisp() {
+        let code_only = vec!["packages/board/src/App.tsx".to_string()];
+        assert!(has_code_surface_delta(&code_only));
+        assert!(!has_lisp_or_evidence_delta(&code_only));
+
+        let covered = vec![
+            "packages/board/src/App.tsx".to_string(),
+            ".missiond/frontend/board-blueprint.lisp".to_string(),
+        ];
+        assert!(has_code_surface_delta(&covered));
+        assert!(has_lisp_or_evidence_delta(&covered));
+    }
+}

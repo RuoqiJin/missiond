@@ -26,6 +26,7 @@ pub(super) async fn handle_delete(state: &AppState, args: Value) -> Result<ToolR
             task_id: id.clone(),
             title: task_title.clone(),
         };
+        crate::engine::master_control::notify_board_event_direct(&ev);
         let _ = state.bus.publish_board(ev).await;
     }
     Ok(ToolResult::json(&serde_json::json!({

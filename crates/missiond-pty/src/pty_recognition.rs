@@ -132,6 +132,9 @@ fn fuse_with_session_state(
     current_state: SessionState,
     snapshot: PtyRecognitionSnapshot,
 ) -> PtyRecognitionSnapshot {
+    if matches!(current_state, SessionState::Exited | SessionState::Error) {
+        return session_state_snapshot(provider, current_state);
+    }
     if current_state == SessionState::Confirming {
         return snapshot;
     }
@@ -793,6 +796,26 @@ mod tests {
         assert_eq!(result.source, "session_state");
         assert!(result.reason.starts_with("session_state:"));
         assert!(result.blocked_kind.is_none());
+    }
+
+    #[test]
+    fn fusion_exited_session_state_overrides_stale_running_screen() {
+        // Live Codex startup shape: an auto-update spinner remained on screen
+        // after the process exited with "Please restart Codex". The durable
+        // session state must win so frontends/watchdogs do not show stale
+        // running status.
+        let result = recognize_screen(
+            CliEngine::Codex,
+            &lines(&[
+                "Updating Codex via `npm install -g @openai/codex`...",
+                "🎉  Update ran successfully! Please restart Codex.",
+                "⠴",
+            ]),
+            SessionState::Exited,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+        assert_eq!(result.source, "session_state");
+        assert_eq!(result.reason, "session_state:Exited");
     }
 
     #[test]

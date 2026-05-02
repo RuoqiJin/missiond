@@ -88,7 +88,7 @@ struct ParsedToolCall {
 /// Parsed text message (agent or user) from JSONL.
 #[derive(Debug, Clone)]
 struct ParsedMessage {
-    role: String,       // "assistant" or "user"
+    role: String, // "assistant" or "user"
     content: String,
     timestamp: String,
 }

@@ -22,8 +22,8 @@ use std::sync::{Arc, LazyLock};
 use tokio::sync::Notify;
 use tracing::{debug, info, warn};
 
-use missiond_core::event::events::{MemoryEvent, SystemEvent};
 use crate::state::AppState;
+use missiond_core::event::events::{MemoryEvent, SystemEvent};
 
 use super::{BackgroundWorker, WorkerContext, WorkerKind};
 

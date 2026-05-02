@@ -2,11 +2,11 @@
 //! Persists FlowContext to the Board Task's flow_context column after each node.
 
 use anyhow::Result;
-use tracing::{info, warn, error};
+use tracing::{error, info, warn};
 
-use crate::state::AppState;
-use super::{FlowDefinition, FlowContext, FlowNode, ErrorPolicy};
 use super::handlers::execute_node;
+use super::{ErrorPolicy, FlowContext, FlowDefinition, FlowNode};
+use crate::state::AppState;
 
 /// Run a flow to completion. Persists context to Board Task after each node.
 ///
@@ -19,55 +19,55 @@ pub(crate) fn run_flow<'a>(
     task_id: &'a str,
 ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
-    let start_node = ctx.current_node;
+        let start_node = ctx.current_node;
 
-    for (i, node) in flow.nodes.iter().enumerate().skip(start_node) {
-        ctx.current_node = i;
+        for (i, node) in flow.nodes.iter().enumerate().skip(start_node) {
+            ctx.current_node = i;
 
-        info!(
-            flow = %flow.id,
-            node = %node.id,
-            index = i,
-            total = flow.nodes.len(),
-            "Flow: executing node"
-        );
+            info!(
+                flow = %flow.id,
+                node = %node.id,
+                index = i,
+                total = flow.nodes.len(),
+                "Flow: executing node"
+            );
 
-        let result = execute_with_retry(state, node, ctx, task_id).await;
+            let result = execute_with_retry(state, node, ctx, task_id).await;
 
-        match result {
-            Ok(output) => {
-                if let Some(ref key) = node.save_as {
-                    ctx.set(key, &output);
+            match result {
+                Ok(output) => {
+                    if let Some(ref key) = node.save_as {
+                        ctx.set(key, &output);
+                    }
+                    ctx.completed_nodes.push(node.id.clone());
+                    ctx.last_error = None;
+
+                    persist_context(state, task_id, ctx).await;
+
+                    info!(
+                        flow = %flow.id,
+                        node = %node.id,
+                        output_len = output.len(),
+                        "Flow: node completed"
+                    );
                 }
-                ctx.completed_nodes.push(node.id.clone());
-                ctx.last_error = None;
+                Err(e) => {
+                    ctx.last_error = Some(e.to_string());
+                    persist_context(state, task_id, ctx).await;
 
-                persist_context(state, task_id, ctx).await;
-
-                info!(
-                    flow = %flow.id,
-                    node = %node.id,
-                    output_len = output.len(),
-                    "Flow: node completed"
-                );
-            }
-            Err(e) => {
-                ctx.last_error = Some(e.to_string());
-                persist_context(state, task_id, ctx).await;
-
-                error!(
-                    flow = %flow.id,
-                    node = %node.id,
-                    error = %e,
-                    "Flow: node failed"
-                );
-                return Err(e);
+                    error!(
+                        flow = %flow.id,
+                        node = %node.id,
+                        error = %e,
+                        "Flow: node failed"
+                    );
+                    return Err(e);
+                }
             }
         }
-    }
 
-    info!(flow = %flow.id, nodes = flow.nodes.len(), "Flow: completed all nodes");
-    Ok(())
+        info!(flow = %flow.id, nodes = flow.nodes.len(), "Flow: completed all nodes");
+        Ok(())
     }) // Box::pin
 }
 

@@ -74,7 +74,9 @@ function checkRepo(repo) {
   requireText(diagnostics, FILES.blueprint, src.blueprint, [
     '(projection workstation-slots',
     ':source [mission_slots mission_pty_status workstation-pool]',
-    ':fields [id label role running state provider engine modelProfile reasoningEffort searchEnabled sandbox approvalPolicy taskClass acceptsBoardTask confidence reason activeTool blockedKind currentTaskId activeBoardTaskId latestConversation]',
+    ':fields [id label role running state provider engine modelProfile reasoningEffort searchEnabled sandbox approvalPolicy taskClass acceptsBoardTask mcpReady mcpEnabled mcpApprovalReady mcpApprovalMissingTools mcpSource providerConversationId confidence reason activeTool blockedKind currentTaskId activeBoardTaskId latestConversation]',
+    'Codex master-control rows must surface missiond MCP readiness and MCP approval readiness',
+    'Codex rows must prefer providerConversationId/latest real codex_cli conversation',
     ':state-contract',
     'Normalize PTY state case before classification',
     ':forbid [SLOT_OPTIONS hardcoded-sonnet-label stale-status-running]',
@@ -82,7 +84,7 @@ function checkRepo(repo) {
     'Terminal labels must describe the selected provider/session generically',
     '(projection terminal-slot-selector',
     ':source [mission_slots mission_pty_status localStorage]',
-    'Terminal slot selection lives inside the Terminal panel',
+    'Terminal slot selection lives inside the Terminal cockpit',
     '(frontend-runtime-config',
     ':generator "node scripts/project-frontend-board-config.mjs --write"',
     ':checker "node scripts/project-frontend-board-config.mjs --check"',
@@ -98,6 +100,12 @@ function checkRepo(repo) {
     'engine?: string',
     'modelProfile?: string',
     'acceptsBoardTask?: boolean',
+    'mcpReady?: boolean',
+    'mcpEnabled?: boolean',
+    'mcpApprovalReady?: boolean',
+    'mcpApprovalMissingTools?: string[]',
+    'mcpSource?: string',
+    'providerConversationId?: string',
     'currentTaskId?: string',
     'activeBoardTaskId?: string',
     'latestConversation?:',
@@ -172,6 +180,12 @@ function checkRepo(repo) {
     'approvalPolicy',
     'latestConversation',
     'acceptsBoardTask',
+    'mcpReady',
+    'mcpEnabled',
+    'mcpApprovalReady',
+    'mcpApprovalMissingTools',
+    'mcpSource',
+    'providerConversationId',
     'confidence',
   ]);
 
@@ -190,6 +204,9 @@ function checkRepo(repo) {
   }
   requireText(diagnostics, FILES.terminal, src.terminal, [
     'providerLabel',
+    'mcpLabel',
+    'MCP ready',
+    'MCP approval',
     'Starting session',
     'No active session',
   ]);
@@ -202,8 +219,14 @@ function checkRepo(repo) {
     'fetchSlots',
     '/api/slots',
     'slotStateLabel',
-    'overflow-x-auto overflow-y-hidden whitespace-nowrap',
-    'min-w-[160px] max-w-[280px]',
+    'slotProviderGroup',
+    'slotsByProvider',
+    'Workstations',
+    'Evidence',
+    'Durable Conversation',
+    'Diagnostics',
+    'activeBoardTaskId',
+    'latestConversation',
     'truncate',
   ]);
   if (/slots\.filter\(\(s\)\s*=>\s*s\.running\)\.map/.test(src.app)) {

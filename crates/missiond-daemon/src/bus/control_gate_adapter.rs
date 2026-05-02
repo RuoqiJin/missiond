@@ -14,7 +14,7 @@
 //! Global pause is checked inside `ControlTree::is_domain_paused`; we simply
 //! forward.
 
-use missiond_core::event::dispatcher::{ControlGate, control_gate::CtlDomain as CoreCtlDomain};
+use missiond_core::event::dispatcher::{control_gate::CtlDomain as CoreCtlDomain, ControlGate};
 use tokio::sync::watch;
 
 use crate::control_tree::{ControlTree, CtlDomain as DaemonCtlDomain};

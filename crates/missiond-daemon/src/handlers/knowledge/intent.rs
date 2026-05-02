@@ -13,9 +13,7 @@ const INTENT_CANDIDATES: &[&str] = &[
 ];
 
 /// Sections always included in full for the summary action.
-const SUMMARY_SECTIONS: &[&str] = &[
-    "design-constraints",
-];
+const SUMMARY_SECTIONS: &[&str] = &["design-constraints"];
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
     let action = args
@@ -115,9 +113,8 @@ async fn handle_read(
             )))
         }
         "section" => {
-            let name = section_name.ok_or_else(|| {
-                anyhow!("section parameter is required for action=section")
-            })?;
+            let name = section_name
+                .ok_or_else(|| anyhow!("section parameter is required for action=section"))?;
             match extract_section(&content, name) {
                 Some(block) => Ok(ToolResult::text(format!(
                     "# intent.lisp — {} :: ({})\n\n{}",
@@ -149,9 +146,14 @@ async fn handle_read(
             // Extract pillar index: just the pillar names + first-line descriptions
             let pillar_index = extract_pillar_index(&content);
             if !pillar_index.is_empty() {
-                parts.push(format!(";; PILLAR INDEX ({} pillars)\n{}",
-                    pillar_index.lines().filter(|l| l.starts_with("  (pillar")).count(),
-                    pillar_index));
+                parts.push(format!(
+                    ";; PILLAR INDEX ({} pillars)\n{}",
+                    pillar_index
+                        .lines()
+                        .filter(|l| l.starts_with("  (pillar"))
+                        .count(),
+                    pillar_index
+                ));
             }
             let available = list_top_level_sections(&content);
             let summary = parts.join("\n\n");
@@ -188,7 +190,11 @@ async fn handle_paths(state: &AppState, project_id: Option<&str>) -> Result<Tool
         if let Ok(rd) = std::fs::read_dir(&missiond_dir) {
             for entry in rd.filter_map(|e| e.ok()) {
                 let p = entry.path();
-                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if name.starts_with("intent") && name.ends_with(".lisp") {
                     let lines = std::fs::read_to_string(&p)
                         .map(|c| c.lines().count())
@@ -209,7 +215,11 @@ async fn handle_paths(state: &AppState, project_id: Option<&str>) -> Result<Tool
         if let Ok(rd) = std::fs::read_dir(&jarvis_dir) {
             for entry in rd.filter_map(|e| e.ok()) {
                 let p = entry.path();
-                let name = p.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let name = p
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
                 if name.starts_with("intent") && name.ends_with(".lisp") {
                     let lines = std::fs::read_to_string(&p)
                         .map(|c| c.lines().count())
@@ -239,10 +249,14 @@ async fn handle_paths(state: &AppState, project_id: Option<&str>) -> Result<Tool
 
     // Sort by name for deterministic output
     files.sort_by(|a, b| {
-        a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or(""))
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
     });
 
-    let total_lines: usize = files.iter()
+    let total_lines: usize = files
+        .iter()
         .map(|f| f["lines"].as_u64().unwrap_or(0) as usize)
         .sum();
 
@@ -265,8 +279,7 @@ async fn resolve_project(
         Some(id) => id.to_string(),
         None => {
             // Infer from CWD
-            let cwd = std::env::current_dir()
-                .map_err(|e| anyhow!("Cannot get CWD: {}", e))?;
+            let cwd = std::env::current_dir().map_err(|e| anyhow!("Cannot get CWD: {}", e))?;
             let cwd_str = cwd.to_str().unwrap_or("");
             let reg = state.project_registry.read().await;
             match reg.resolve(cwd_str) {
@@ -294,15 +307,14 @@ async fn resolve_project(
     };
 
     let (resolved_id, p) = project;
-    let intent_file = resolve_intent_path(&p.path, p.intent_path.as_deref())
-        .ok_or_else(|| {
-            anyhow!(
-                "No intent.lisp found for project '{}' at {}. Checked: {}",
-                resolved_id,
-                p.path,
-                INTENT_CANDIDATES.join(", ")
-            )
-        })?;
+    let intent_file = resolve_intent_path(&p.path, p.intent_path.as_deref()).ok_or_else(|| {
+        anyhow!(
+            "No intent.lisp found for project '{}' at {}. Checked: {}",
+            resolved_id,
+            p.path,
+            INTENT_CANDIDATES.join(", ")
+        )
+    })?;
     Ok((resolved_id, p.path, intent_file))
 }
 
@@ -399,7 +411,11 @@ fn extract_section(content: &str, section_name: &str) -> Option<String> {
         let trimmed = line.trim();
         if trimmed.starts_with(&pattern)
             && (trimmed.len() == pattern.len()
-                || trimmed.as_bytes().get(pattern.len()).map(|b| b.is_ascii_whitespace() || *b == b'\n' || *b == b')') == Some(true))
+                || trimmed
+                    .as_bytes()
+                    .get(pattern.len())
+                    .map(|b| b.is_ascii_whitespace() || *b == b'\n' || *b == b')')
+                    == Some(true))
         {
             start = Some(i);
             break;
@@ -444,13 +460,21 @@ fn extract_pillar_index(content: &str) -> String {
             let mut children = Vec::new();
             let mut depth: i32 = 0;
             for ch in trimmed.chars() {
-                match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
+                match ch {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
             }
             let mut j = i + 1;
             while j < lines.len() && depth > 0 {
                 let line = lines[j].trim();
                 for ch in line.chars() {
-                    match ch { '(' => depth += 1, ')' => depth -= 1, _ => {} }
+                    match ch {
+                        '(' => depth += 1,
+                        ')' => depth -= 1,
+                        _ => {}
+                    }
                 }
                 // Capture module-catalog entries or top-level child form names
                 if line.starts_with("(module-catalog") || line.starts_with("(data-model") {
@@ -458,18 +482,31 @@ fn extract_pillar_index(content: &str) -> String {
                     let mut k = j + 1;
                     let mut inner_depth: i32 = 0;
                     for ch in line.chars() {
-                        match ch { '(' => inner_depth += 1, ')' => inner_depth -= 1, _ => {} }
+                        match ch {
+                            '(' => inner_depth += 1,
+                            ')' => inner_depth -= 1,
+                            _ => {}
+                        }
                     }
                     while k < lines.len() && inner_depth > 0 {
                         let inner = lines[k].trim();
                         for ch in inner.chars() {
-                            match ch { '(' => inner_depth += 1, ')' => inner_depth -= 1, _ => {} }
+                            match ch {
+                                '(' => inner_depth += 1,
+                                ')' => inner_depth -= 1,
+                                _ => {}
+                            }
                         }
                         // Extract module/table names
-                        if inner.starts_with("(mod ") || inner.starts_with("(table ") || inner.starts_with("(view ") {
+                        if inner.starts_with("(mod ")
+                            || inner.starts_with("(table ")
+                            || inner.starts_with("(view ")
+                        {
                             if let Some(end) = inner[1..].find(|c: char| c.is_whitespace()) {
                                 let after_keyword = &inner[1 + end..].trim_start();
-                                if let Some(name_end) = after_keyword.find(|c: char| c.is_whitespace() || c == ')' || c == '"') {
+                                if let Some(name_end) = after_keyword
+                                    .find(|c: char| c.is_whitespace() || c == ')' || c == '"')
+                                {
                                     children.push(after_keyword[..name_end].to_string());
                                 }
                             }
@@ -516,10 +553,13 @@ fn list_top_level_sections(content: &str) -> Vec<String> {
         // Look for forms that start with ( at indentation >= 2 spaces
         if line.starts_with("  (") || line.starts_with("\t(") {
             // Extract the form name
-            if let Some(name_end) = trimmed[1..].find(|c: char| c.is_whitespace() || c == ')' || c == '\n') {
+            if let Some(name_end) =
+                trimmed[1..].find(|c: char| c.is_whitespace() || c == ')' || c == '\n')
+            {
                 let name = &trimmed[1..1 + name_end];
                 // Filter out comment-only lines and very short names
-                if name.len() > 1 && !name.starts_with(';') && !sections.contains(&name.to_string()) {
+                if name.len() > 1 && !name.starts_with(';') && !sections.contains(&name.to_string())
+                {
                     sections.push(name.to_string());
                 }
             }

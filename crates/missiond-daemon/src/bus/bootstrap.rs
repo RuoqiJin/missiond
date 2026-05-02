@@ -131,10 +131,7 @@ impl BusServices {
     /// Build every subsystem. Safe to call on any tokio runtime — the
     /// `LogWriter` task is spawned here but the dispatcher tail + metrics
     /// emitter wait for [`Self::start`].
-    pub async fn bootstrap(
-        pool: PgPool,
-        control_manager: &ControlManager,
-    ) -> Result<Arc<Self>> {
+    pub async fn bootstrap(pool: PgPool, control_manager: &ControlManager) -> Result<Arc<Self>> {
         info!("bus: bootstrap starting");
 
         // Blob store (Postgres-backed per DC006).
@@ -165,11 +162,9 @@ impl BusServices {
         let control_gate = ControlTreeGate::new(control_manager.subscribe());
 
         // Tail source backing the dispatcher. Uses the Postgres tail reader.
-        let tail_source: Arc<dyn TailSource> =
-            Arc::new(missiond_core::event::dispatcher::PgTailSource::new(
-                pool.clone(),
-                blob_store.clone(),
-            ));
+        let tail_source: Arc<dyn TailSource> = Arc::new(
+            missiond_core::event::dispatcher::PgTailSource::new(pool.clone(), blob_store.clone()),
+        );
 
         info!("bus: bootstrap complete");
 
@@ -209,13 +204,13 @@ impl BusServices {
         let tail_source = self.tail_source.clone();
         let blob = self.blob_store.clone();
         let gate = self.control_gate.clone();
-        let dispatcher_join = tokio::spawn(async move {
-            dispatcher.run(tail_source, blob, gate, shutdown_rx).await
-        });
+        let dispatcher_join =
+            tokio::spawn(async move { dispatcher.run(tail_source, blob, gate, shutdown_rx).await });
 
         // Metrics emitter — needs an ObservabilityAppender.
-        let appender: Arc<dyn ObservabilityAppender> =
-            Arc::new(LogObservabilityAdapter { log: self.log.clone() });
+        let appender: Arc<dyn ObservabilityAppender> = Arc::new(LogObservabilityAdapter {
+            log: self.log.clone(),
+        });
         let metrics_handle = spawn_bus_metrics_emitter(
             self.metrics.clone(),
             appender,
@@ -248,10 +243,7 @@ impl BusServices {
         self.publish(ev, default_opts("task")).await
     }
 
-    pub async fn publish_question(
-        &self,
-        ev: QuestionEvent,
-    ) -> Result<AppendAck, AppendError> {
+    pub async fn publish_question(&self, ev: QuestionEvent) -> Result<AppendAck, AppendError> {
         self.publish(ev, default_opts("question")).await
     }
 
@@ -313,17 +305,11 @@ impl BusServices {
         self.publish(ev, opts).await
     }
 
-    pub async fn publish_incident(
-        &self,
-        ev: IncidentEvent,
-    ) -> Result<AppendAck, AppendError> {
+    pub async fn publish_incident(&self, ev: IncidentEvent) -> Result<AppendAck, AppendError> {
         self.publish(ev, default_opts("incident")).await
     }
 
-    pub async fn publish_execution(
-        &self,
-        ev: ExecutionEvent,
-    ) -> Result<AppendAck, AppendError> {
+    pub async fn publish_execution(&self, ev: ExecutionEvent) -> Result<AppendAck, AppendError> {
         // Execution events are durable projections of the on-disk companion
         // log — keep them persistent (default) so audit consumers can replay.
         self.publish(ev, default_opts("execution")).await
@@ -340,10 +326,7 @@ impl BusServices {
     /// producer treats `Committed` / `Volatile` / `AlreadyExists` uniformly:
     /// each variant returns the same `Seq` (`AlreadyExists` reuses the
     /// dedupe-existing seq, which is the right id to correlate against).
-    pub async fn publish_execution_with_seq(
-        &self,
-        ev: ExecutionEvent,
-    ) -> Result<Seq, AppendError> {
+    pub async fn publish_execution_with_seq(&self, ev: ExecutionEvent) -> Result<Seq, AppendError> {
         let ack = self.publish_execution(ev).await?;
         Ok(ack.seq())
     }
@@ -372,7 +355,10 @@ impl BusServices {
         &self,
         name: &str,
         opts: missiond_core::event::subscription::SubscriptionOpts,
-    ) -> Result<missiond_core::event::subscription::Subscription<T>, missiond_core::event::subscription::SubscribeError>
+    ) -> Result<
+        missiond_core::event::subscription::Subscription<T>,
+        missiond_core::event::subscription::SubscribeError,
+    >
     where
         T: DomainEvent,
     {

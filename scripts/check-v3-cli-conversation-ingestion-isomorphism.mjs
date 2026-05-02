@@ -89,6 +89,7 @@ function checkFiles(root, files) {
     ':legacy-aliases ["claude_cli" "pty_jsonl"]',
     'Conversation sources MUST be canonicalized before DB write',
     'mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine',
+    'mission_slots MUST fall back to the latest real codex_cli conversation',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
   ]);
 
@@ -154,6 +155,10 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.slotHandler, sources.slotHandler, [
     'conversation_source_matches_engine',
+    'latest_provider_conversation_for_slot',
+    'conversation_matches_slot_project',
+    'providerConversationId',
+    'pty-slot-',
     'canonical_source_for_engine',
     'latestConversationMismatch',
     'CliEngine::ClaudeCode => "claude_code"',

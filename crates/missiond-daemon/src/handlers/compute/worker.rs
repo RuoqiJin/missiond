@@ -172,9 +172,9 @@ async fn handle_control(state: &AppState, args: Value) -> Result<ToolResult> {
         }
         _ => {
             return Ok(ToolResult::error(format!(
-                "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role, project",
-                target_type
-            )))
+            "Unknown target_type: '{}'. Use: global, provider, domain, worker, slot_role, project",
+            target_type
+        )))
         }
     }
 

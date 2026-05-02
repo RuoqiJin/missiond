@@ -124,7 +124,9 @@ pub(crate) async fn health_scan(state: &AppState) {
             // triages via `aiops::process_incident`.
             if let Err(e) = state
                 .bus
-                .publish_incident(missiond_core::event::events::IncidentEvent::Reported { incident })
+                .publish_incident(missiond_core::event::events::IncidentEvent::Reported {
+                    incident,
+                })
                 .await
             {
                 warn!(server_id = %server_id, error = %e, "Failed to publish health-check incident");

@@ -123,7 +123,15 @@ pub(crate) async fn harvest_decisions_for_task(state: &AppState, task_id: &str, 
                     if boosted > existing_confidence {
                         let _ = state
                             .store
-                            .kb_update(&result.entry.key, None, None, None, Some(boosted), None, None)
+                            .kb_update(
+                                &result.entry.key,
+                                None,
+                                None,
+                                None,
+                                Some(boosted),
+                                None,
+                                None,
+                            )
                             .await;
                         reinforced += 1;
                         if boosted > 0.95 {

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import type { ElementType } from 'react';
 import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -51,27 +51,64 @@ function slotActiveRank(slot: SlotDef): number {
   return 2;
 }
 
+function slotProviderGroup(slot: SlotDef): string {
+  const raw = `${slot.provider || ''} ${slot.engine || ''} ${slot.id || ''}`.toLowerCase();
+  if (raw.includes('codex')) return 'Codex';
+  if (raw.includes('gemini')) return 'Gemini';
+  if (raw.includes('claude')) return 'ClaudeCode';
+  return slotProviderLabel(slot) || 'Other';
+}
+
+function slotStateTone(slot: SlotDef): string {
+  const state = slotStateLabel(slot).toLowerCase();
+  if (slot.running || ['thinking', 'responding', 'tool_running', 'starting'].includes(state)) return 'bg-emerald-400';
+  if (['confirming', 'blocked'].includes(state)) return 'bg-amber-400';
+  if (['error'].includes(state)) return 'bg-red-400';
+  if (['idle', 'slash_menu'].includes(state)) return 'bg-sky-400';
+  return 'bg-neutral-600';
+}
+
+function slotStateTextTone(slot: SlotDef): string {
+  const state = slotStateLabel(slot).toLowerCase();
+  if (slot.running || ['thinking', 'responding', 'tool_running', 'starting'].includes(state)) return 'text-emerald-300';
+  if (['confirming', 'blocked'].includes(state)) return 'text-amber-300';
+  if (['error'].includes(state)) return 'text-red-300';
+  if (['idle', 'slash_menu'].includes(state)) return 'text-sky-300';
+  return 'text-neutral-500';
+}
+
+function formatSlotTime(value?: string | null): string | null {
+  if (!value) return null;
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
+}
+
 export default function App() {
   useEventStream(); // Global EventBus WS connection
   const wsState = useConnectionState();
   const openAddDialog = useTaskCenterStore((s) => s.openAddDialog);
   const fetchTasks = useTaskCenterStore((s) => s.fetchTasks);
   const isLoading = useTaskCenterStore((s) => s.isLoading);
-  const taskCount = useTaskCenterStore((s) => s.tasks.filter((t) => t.status === 'open' && t.category !== 'research').length);
-  const tasksById = useTaskCenterStore((s) => {
-    const map = new Map<string, (typeof s.tasks)[number]>();
-    for (const t of s.tasks) map.set(t.id, t);
+  const tasks = useTaskCenterStore((s) => s.tasks);
+  const taskCount = useMemo(
+    () => tasks.filter((t) => t.status === 'open' && t.category !== 'research').length,
+    [tasks],
+  );
+  const tasksById = useMemo(() => {
+    const map = new Map<string, (typeof tasks)[number]>();
+    for (const t of tasks) map.set(t.id, t);
     return map;
-  });
-  const tasksByExecutor = useTaskCenterStore((s) => {
-    const map = new Map<string, (typeof s.tasks)[number]>();
-    for (const t of s.tasks) {
+  }, [tasks]);
+  const tasksByExecutor = useMemo(() => {
+    const map = new Map<string, (typeof tasks)[number]>();
+    for (const t of tasks) {
       if (t.status !== 'running') continue;
       const key = t.claimExecutorId || t.assignee;
       if (key && !map.has(key)) map.set(key, t);
     }
     return map;
-  });
+  }, [tasks]);
   const [mounted, setMounted] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
     if (typeof window === 'undefined') return DEFAULT_TAB;
@@ -84,6 +121,29 @@ export default function App() {
     if (typeof window === 'undefined') return '';
     return localStorage.getItem('board:slot') || '';
   });
+  const sortedSlots = useMemo(
+    () => [...slots].sort((a, b) => slotActiveRank(a) - slotActiveRank(b) || a.id.localeCompare(b.id)),
+    [slots],
+  );
+  const slotsByProvider = useMemo(() => {
+    const groups = new Map<string, SlotDef[]>();
+    for (const slot of sortedSlots) {
+      const key = slotProviderGroup(slot);
+      const existing = groups.get(key) ?? [];
+      existing.push(slot);
+      groups.set(key, existing);
+    }
+    return Array.from(groups.entries());
+  }, [sortedSlots]);
+  const activeSlotDef = useMemo(
+    () => slots.find((s) => s.id === activeSlot) ?? null,
+    [activeSlot, slots],
+  );
+  const activeTaskId = activeSlotDef?.activeBoardTaskId ?? activeSlotDef?.currentTaskId;
+  const activeSlotTask = (activeTaskId && tasksById.get(activeTaskId)) || (activeSlot ? tasksByExecutor.get(activeSlot) : undefined);
+  const terminalActiveTask = activeSlotTask
+    ? { id: activeSlotTask.id, title: activeSlotTask.title, status: activeSlotTask.status }
+    : null;
 
   // Persist tab & slot to localStorage
   useEffect(() => { localStorage.setItem('board:tab', tab); }, [tab]);
@@ -195,73 +255,142 @@ export default function App() {
       ) : tab === 'board' ? (
         <BoardConsolidated />
       ) : tab === 'terminal' ? (
-        <div className="flex-1 min-h-0 mx-4 sm:mx-8 mb-4 rounded-lg border border-neutral-800 overflow-hidden flex flex-col">
-          <div className="shrink-0 border-b border-neutral-800 bg-neutral-950/70 px-2 py-2">
-            {slots.length > 0 ? (
-              <div className="flex items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
-                {[...slots].sort((a, b) => slotActiveRank(a) - slotActiveRank(b)).map((slot) => {
-                  const isActive = activeSlot === slot.id;
-                  const stateLabel = slotStateLabel(slot);
-                  const providerLabel = slotProviderLabel(slot);
-                  const activeTaskId = slot.activeBoardTaskId ?? slot.currentTaskId;
-                  const slotTask = (activeTaskId && tasksById.get(activeTaskId)) || tasksByExecutor.get(slot.id);
-                  return (
-                    <button
-                      key={slot.id}
-                      onClick={() => setActiveSlot(slot.id)}
-                      title={[
-                        slot.label,
-                        `state: ${stateLabel}`,
-                        providerLabel ? `provider: ${providerLabel}` : null,
-                        slotTask ? `task: ${slotTask.id} ${slotTask.title}` : null,
-                        slot.activeTool ? `tool: ${slot.activeTool}` : null,
-                        slot.blockedKind ? `blocked: ${slot.blockedKind}` : null,
-                      ].filter(Boolean).join('\n')}
-                      className={cn(
-                        'shrink-0 min-w-[160px] max-w-[280px] rounded-md border px-2.5 py-1 text-left font-mono text-[10px] leading-none transition-colors',
-                        isActive
-                          ? 'border-orange-500/40 bg-orange-500/15 text-orange-300'
-                          : slot.running
-                            ? 'border-emerald-500/30 bg-emerald-500/5 text-neutral-300 hover:border-emerald-400/50'
-                            : 'border-neutral-800 bg-neutral-900/70 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300',
-                      )}
-                    >
-                      <span className="flex min-w-0 items-center gap-1.5">
-                        <span className={cn(
-                          'h-1.5 w-1.5 shrink-0 rounded-full',
-                          slot.running ? 'bg-emerald-400 animate-pulse' : slot.state ? 'bg-emerald-400/30' : 'bg-neutral-600',
-                        )} />
-                        <span className="min-w-0 flex-1 truncate">{slot.label}</span>
-                        {slotTask ? (
-                          <span className="shrink-0 text-orange-300/80 font-mono" title={slotTask.title}>
-                            #{slotTask.id.slice(0, 6)}
-                          </span>
-                        ) : null}
-                        <span className="shrink-0 text-neutral-600">{stateLabel}</span>
-                      </span>
-                    </button>
-                  );
-                })}
-              </div>
-            ) : (
-              <div className="px-1 text-xs text-neutral-600">Loading slots...</div>
-            )}
-          </div>
-          <div className="min-h-0 flex-1">
+        <div className="mx-4 mb-4 flex min-h-0 flex-1 flex-col overflow-hidden rounded-lg border border-neutral-800 bg-neutral-950/60 sm:mx-8 lg:flex-row">
+          <aside className="flex max-h-48 shrink-0 flex-col border-b border-neutral-800 bg-neutral-950/80 lg:max-h-none lg:w-72 lg:border-b-0 lg:border-r">
+            <div className="shrink-0 border-b border-neutral-800 px-3 py-2">
+              <div className="text-xs font-medium text-neutral-300">Workstations</div>
+              <div className="mt-0.5 text-[10px] text-neutral-600">{slots.length} projected slots</div>
+            </div>
+            <div className="min-h-0 flex-1 overflow-auto p-2">
+              {slotsByProvider.length > 0 ? (
+                <div className="space-y-3">
+                  {slotsByProvider.map(([provider, providerSlots]) => (
+                    <div key={provider}>
+                      <div className="mb-1 flex items-center justify-between px-1 text-[10px] uppercase tracking-wide text-neutral-600">
+                        <span>{provider}</span>
+                        <span>{providerSlots.length}</span>
+                      </div>
+                      <div className="space-y-1">
+                        {providerSlots.map((slot) => {
+                          const isActive = activeSlot === slot.id;
+                          const stateLabel = slotStateLabel(slot);
+                          const activeTaskForSlotId = slot.activeBoardTaskId ?? slot.currentTaskId;
+                          const slotTask = (activeTaskForSlotId && tasksById.get(activeTaskForSlotId)) || tasksByExecutor.get(slot.id);
+                          return (
+                            <button
+                              key={slot.id}
+                              onClick={() => setActiveSlot(slot.id)}
+                              title={[
+                                slot.id,
+                                slot.label,
+                                `state: ${stateLabel}`,
+                                slotProviderLabel(slot) ? `provider: ${slotProviderLabel(slot)}` : null,
+                                slot.mcpReady !== undefined ? `MCP: ${slot.mcpReady ? 'ready' : 'not unattended-ready'}` : null,
+                                slot.mcpApprovalMissingTools?.length
+                                  ? `missing MCP approvals: ${slot.mcpApprovalMissingTools.join(', ')}`
+                                  : null,
+                                slotTask ? `task: ${slotTask.id} ${slotTask.title}` : null,
+                                slot.activeTool ? `tool: ${slot.activeTool}` : null,
+                                slot.blockedKind ? `blocked: ${slot.blockedKind}` : null,
+                              ].filter(Boolean).join('\n')}
+                              className={cn(
+                                'w-full rounded-md border px-2 py-2 text-left transition-colors',
+                                isActive
+                                  ? 'border-orange-500/45 bg-orange-500/15 text-orange-200'
+                                  : 'border-neutral-900 bg-neutral-900/40 text-neutral-400 hover:border-neutral-700 hover:bg-neutral-900/80 hover:text-neutral-200',
+                              )}
+                            >
+                              <div className="flex min-w-0 items-center gap-2">
+                                <span className={cn('h-2 w-2 shrink-0 rounded-full', slotStateTone(slot), slot.running && 'animate-pulse')} />
+                                <span className="min-w-0 flex-1 truncate text-xs font-medium">{slot.label || slot.id}</span>
+                                <span className={cn('shrink-0 text-[10px] font-mono', slotStateTextTone(slot))}>{stateLabel}</span>
+                              </div>
+                              <div className="mt-1 flex min-w-0 items-center gap-1 text-[10px] text-neutral-600">
+                                <span className="truncate">{slot.modelProfile || slot.engine || slot.role}</span>
+                                {slotTask ? <span className="shrink-0 text-orange-300/80">#{slotTask.id.slice(0, 6)}</span> : null}
+                              </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="px-1 text-xs text-neutral-600">Loading slots...</div>
+              )}
+            </div>
+          </aside>
+
+          <main className="min-h-0 flex-1">
             {activeSlot ? (
-              (() => {
-                const slot = slots.find((s) => s.id === activeSlot);
-                const activeTaskId = slot?.activeBoardTaskId ?? slot?.currentTaskId;
-                const slotTask = (activeTaskId && tasksById.get(activeTaskId)) || tasksByExecutor.get(activeSlot);
-                const activeTask = slotTask
-                  ? { id: slotTask.id, title: slotTask.title, status: slotTask.status }
-                  : null;
-                return <Terminal key={activeSlot} slotId={activeSlot} slot={slot} activeTask={activeTask} />;
-              })()
+              <Terminal key={activeSlot} slotId={activeSlot} slot={activeSlotDef ?? undefined} activeTask={terminalActiveTask} />
             ) : (
-              <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading slots...</div>
+              <div className="flex h-full items-center justify-center text-sm text-neutral-500">Loading slots...</div>
             )}
-          </div>
+          </main>
+
+          <aside className="hidden w-80 shrink-0 flex-col border-l border-neutral-800 bg-neutral-950/80 xl:flex">
+            <div className="border-b border-neutral-800 px-3 py-2">
+              <div className="text-xs font-medium text-neutral-300">Evidence</div>
+              <div className="mt-0.5 truncate text-[10px] text-neutral-600" title={activeSlotDef?.id}>{activeSlotDef?.id || 'No slot selected'}</div>
+            </div>
+            <div className="min-h-0 flex-1 space-y-4 overflow-auto p-3 text-xs">
+              <section>
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-600">Runtime</div>
+                <dl className="space-y-1.5 text-neutral-400">
+                  <div className="flex justify-between gap-3"><dt>Provider</dt><dd className="truncate text-neutral-300">{activeSlotDef ? slotProviderLabel(activeSlotDef) : '—'}</dd></div>
+                  <div className="flex justify-between gap-3"><dt>State</dt><dd className={cn('font-mono', activeSlotDef && slotStateTextTone(activeSlotDef))}>{activeSlotDef ? slotStateLabel(activeSlotDef) : '—'}</dd></div>
+                  <div className="flex justify-between gap-3"><dt>Model</dt><dd className="truncate text-neutral-300">{activeSlotDef?.modelProfile || activeSlotDef?.engine || '—'}</dd></div>
+                  <div className="flex justify-between gap-3"><dt>Confidence</dt><dd className="font-mono text-neutral-300">{activeSlotDef?.confidence !== undefined ? activeSlotDef.confidence.toFixed(2) : '—'}</dd></div>
+                  <div className="flex justify-between gap-3"><dt>Reason</dt><dd className="max-w-44 truncate text-neutral-300" title={activeSlotDef?.reason}>{activeSlotDef?.reason || '—'}</dd></div>
+                </dl>
+              </section>
+
+              <section>
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-600">BoardTask</div>
+                {terminalActiveTask ? (
+                  <div className="rounded-md border border-neutral-800 bg-neutral-900/50 p-2">
+                    <div className="font-mono text-[10px] text-orange-300">#{terminalActiveTask.id}</div>
+                    <div className="mt-1 text-neutral-200">{terminalActiveTask.title}</div>
+                    <div className="mt-1 text-[10px] text-neutral-600">{terminalActiveTask.status}</div>
+                  </div>
+                ) : (
+                  <div className="text-neutral-600">No active BoardTask binding.</div>
+                )}
+              </section>
+
+              <section>
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-600">Durable Conversation</div>
+                {activeSlotDef?.latestConversation ? (
+                  <dl className="space-y-1.5 text-neutral-400">
+                    <div className="flex justify-between gap-3"><dt>Source</dt><dd className="text-neutral-300">{activeSlotDef.latestConversation.source || '—'}</dd></div>
+                    <div className="flex justify-between gap-3"><dt>Status</dt><dd className="text-neutral-300">{activeSlotDef.latestConversation.status || '—'}</dd></div>
+                    <div className="flex justify-between gap-3"><dt>Messages</dt><dd className="font-mono text-neutral-300">{activeSlotDef.latestConversation.messageCount ?? '—'}</dd></div>
+                    <div className="flex justify-between gap-3"><dt>Updated</dt><dd className="max-w-44 truncate text-neutral-300">{formatSlotTime(activeSlotDef.latestConversation.updatedAt) || '—'}</dd></div>
+                    <div className="truncate font-mono text-[10px] text-neutral-600" title={activeSlotDef.latestConversation.id}>{activeSlotDef.latestConversation.id}</div>
+                  </dl>
+                ) : (
+                  <div className="text-neutral-600">No durable conversation yet.</div>
+                )}
+              </section>
+
+              <section>
+                <div className="mb-1 text-[10px] uppercase tracking-wide text-neutral-600">Diagnostics</div>
+                <dl className="space-y-1.5 text-neutral-400">
+                  <div className="flex justify-between gap-3"><dt>MCP</dt><dd className={activeSlotDef?.mcpReady ? 'text-emerald-300' : 'text-neutral-500'}>{activeSlotDef?.mcpReady === undefined ? '—' : activeSlotDef.mcpReady ? 'ready' : 'not ready'}</dd></div>
+                  <div className="flex justify-between gap-3"><dt>Approvals</dt><dd className={activeSlotDef?.mcpApprovalReady ? 'text-emerald-300' : 'text-neutral-500'}>{activeSlotDef?.mcpApprovalReady === undefined ? '—' : activeSlotDef.mcpApprovalReady ? 'ready' : 'missing'}</dd></div>
+                  <div className="flex justify-between gap-3"><dt>Tool</dt><dd className="max-w-44 truncate text-neutral-300" title={activeSlotDef?.activeTool}>{activeSlotDef?.activeTool || '—'}</dd></div>
+                  <div className="flex justify-between gap-3"><dt>Blocked</dt><dd className="max-w-44 truncate text-neutral-300" title={activeSlotDef?.blockedKind}>{activeSlotDef?.blockedKind || '—'}</dd></div>
+                </dl>
+                {activeSlotDef?.mcpApprovalMissingTools?.length ? (
+                  <div className="mt-2 rounded-md border border-amber-500/20 bg-amber-500/5 p-2 text-[10px] text-amber-200">
+                    {activeSlotDef.mcpApprovalMissingTools.join(', ')}
+                  </div>
+                ) : null}
+              </section>
+            </div>
+          </aside>
         </div>
       ) : tab === 'exec' ? (
         <ExecDashboard slots={slots} />

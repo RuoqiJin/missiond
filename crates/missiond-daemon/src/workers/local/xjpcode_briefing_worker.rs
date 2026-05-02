@@ -47,11 +47,7 @@ async fn generate_and_write(state: &AppState) -> anyhow::Result<()> {
         .list_board_tasks(Some("failed"), false)
         .await
         .unwrap_or_default();
-    let incidents = state
-        .store
-        .list_incidents(5)
-        .await
-        .unwrap_or_default();
+    let incidents = state.store.list_incidents(5).await.unwrap_or_default();
     let projects = state.store.list_projects().await.unwrap_or_default();
 
     let markdown = render_markdown(&running, &failed, &incidents, &projects);
@@ -103,10 +99,7 @@ fn render_markdown(
 
     let mut failed_sorted: Vec<&missiond_core::types::BoardTask> = failed.iter().collect();
     failed_sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-    out.push_str(&format!(
-        "**Recently Failed ({}):**\n",
-        failed_sorted.len()
-    ));
+    out.push_str(&format!("**Recently Failed ({}):**\n", failed_sorted.len()));
     if failed_sorted.is_empty() {
         out.push_str("- (none)\n");
     } else {

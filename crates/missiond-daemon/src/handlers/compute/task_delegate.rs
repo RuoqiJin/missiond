@@ -74,6 +74,19 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     let model_arg = string_arg(&args, &["model"]).map(str::to_string);
     let model_profile_arg =
         string_arg(&args, &["model_profile", "modelProfile"]).map(str::to_string);
+    let delegation_metadata = DelegationMetadata {
+        task_class: string_arg(&args, &["task_class", "taskClass"]).map(str::to_string),
+        pool_hint: string_arg(&args, &["pool_hint", "poolHint"]).map(str::to_string),
+        engine_hint: string_arg(&args, &["engine_hint", "engineHint"]).map(str::to_string),
+        context_pack_path: string_arg(&args, &["context_pack_path", "contextPackPath"])
+            .map(str::to_string),
+        write_scope: string_list_arg(&args, &["write_scope", "writeScope"]),
+        must_not_touch: string_list_arg(&args, &["must_not_touch", "mustNotTouch"]),
+        acceptance: string_list_arg(
+            &args,
+            &["acceptance", "acceptance_commands", "acceptanceCommands"],
+        ),
+    };
 
     let cwd = args.get("cwd").and_then(|v| v.as_str());
 
@@ -229,6 +242,13 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
 
     // 3. Build context from hints (Phase 6.3: with size limits)
     let mut description = objective.to_string();
+    let metadata_block = render_delegation_metadata_block(&delegation_metadata);
+    if !metadata_block.is_empty() {
+        description = format!(
+            "{}\n\n## Dispatch metadata\n{}",
+            description, metadata_block
+        );
+    }
     if !context_hints.is_empty() {
         let keywords = context_hints.join(" ");
         if let Ok(context) = build_context(state, &keywords).await {
@@ -287,14 +307,13 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     // converts BoardEvent::TaskCreated into board_dispatch_notify, so
     // delegated work is driven by the same nervous-system path as explicit
     // mission_board_create calls.
-    let _ = state
-        .bus
-        .publish_board(BoardEvent::TaskCreated {
-            task_id: task_id.clone(),
-            title: input.title.clone(),
-            category: input.category.clone().unwrap_or_else(|| "dev".to_string()),
-        })
-        .await;
+    let ev = BoardEvent::TaskCreated {
+        task_id: task_id.clone(),
+        title: input.title.clone(),
+        category: input.category.clone().unwrap_or_else(|| "dev".to_string()),
+    };
+    crate::engine::master_control::notify_board_event_direct(&ev);
+    let _ = state.bus.publish_board(ev).await;
 
     // Legacy local fast-path while older producers finish moving to bus
     // causality. Duplicate Notify wakeups are coalesced and harmless.
@@ -308,12 +327,30 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "template": template,
         "model": requested_model,
         "model_profile": effective_model_profile,
+        "task_class": delegation_metadata.task_class,
+        "pool_hint": delegation_metadata.pool_hint,
+        "engine_hint": delegation_metadata.engine_hint,
+        "context_pack_path": delegation_metadata.context_pack_path,
+        "write_scope": delegation_metadata.write_scope,
+        "must_not_touch": delegation_metadata.must_not_touch,
+        "acceptance": delegation_metadata.acceptance,
         "provisioned_new_slot": provisioned,
         "timeout_secs": timeout_secs,
         "routes_to_gemini_researcher": routes_to_gemini_researcher,
         "gemini_researcher_slot": gemini_researcher_slot_id,
         "hint": "结果将通过 TaskNotification 自动回报。也可用 mission_board_get 查询进度。"
     })))
+}
+
+#[derive(Debug, Clone, Default)]
+struct DelegationMetadata {
+    task_class: Option<String>,
+    pool_hint: Option<String>,
+    engine_hint: Option<String>,
+    context_pack_path: Option<String>,
+    write_scope: Vec<String>,
+    must_not_touch: Vec<String>,
+    acceptance: Vec<String>,
 }
 
 /// V3 workstation-pool :: gemini researcher acquire.
@@ -460,6 +497,60 @@ fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .find_map(|key| args.get(*key).and_then(|v| v.as_str()))
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+fn string_list_arg(args: &Value, keys: &[&str]) -> Vec<String> {
+    keys.iter()
+        .find_map(|key| args.get(*key))
+        .and_then(|value| value.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::trim))
+                .filter(|item| !item.is_empty())
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// V3 resident-master-control :: master-delegation projection.
+///
+/// `mission_task_delegate` is the common BoardTask entry used by Codex master,
+/// context-pack-run-wave, and direct MCP callers. Structured metadata is kept
+/// visible in the durable BoardTask description so Autopilot/worker prompts can
+/// carry context-pack path, write scope, must-not-touch, acceptance, model, and
+/// timeout without relying on out-of-band PTY text.
+fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
+    let mut lines = Vec::new();
+    if let Some(value) = &metadata.task_class {
+        lines.push(format!("- task_class: {}", value));
+    }
+    if let Some(value) = &metadata.pool_hint {
+        lines.push(format!("- pool_hint: {}", value));
+    }
+    if let Some(value) = &metadata.engine_hint {
+        lines.push(format!("- engine_hint: {}", value));
+    }
+    if let Some(value) = &metadata.context_pack_path {
+        lines.push(format!("- context_pack_path: {}", value));
+    }
+    if !metadata.write_scope.is_empty() {
+        lines.push(format!(
+            "- write_scope: {}",
+            metadata.write_scope.join(", ")
+        ));
+    }
+    if !metadata.must_not_touch.is_empty() {
+        lines.push(format!(
+            "- must_not_touch: {}",
+            metadata.must_not_touch.join(", ")
+        ));
+    }
+    if !metadata.acceptance.is_empty() {
+        lines.push(format!("- acceptance: {}", metadata.acceptance.join(" | ")));
+    }
+    lines.join("\n")
 }
 
 /// Phase 6.3: Build context from KB/Skills with size limits.
@@ -618,6 +709,47 @@ mod tests {
         assert!(args.get("cwd").is_none());
         assert!(args.get("model").is_none());
         assert!(args.get("model_profile").is_none());
+    }
+
+    #[test]
+    fn delegation_metadata_block_projects_two_stage_worker_contract() {
+        let metadata = DelegationMetadata {
+            task_class: Some("context-pack".to_string()),
+            pool_hint: Some("claude-code-default".to_string()),
+            engine_hint: Some("claude-code".to_string()),
+            context_pack_path: Some(".missiond/tasks/wave99/context-pack.lisp".to_string()),
+            write_scope: vec!["crates/a.rs".to_string()],
+            must_not_touch: vec!["packages/**".to_string()],
+            acceptance: vec!["cargo test -p missiond-daemon autopilot".to_string()],
+        };
+        let block = render_delegation_metadata_block(&metadata);
+        for expected in [
+            "- task_class: context-pack",
+            "- pool_hint: claude-code-default",
+            "- engine_hint: claude-code",
+            "- context_pack_path: .missiond/tasks/wave99/context-pack.lisp",
+            "- write_scope: crates/a.rs",
+            "- must_not_touch: packages/**",
+            "- acceptance: cargo test -p missiond-daemon autopilot",
+        ] {
+            assert!(block.contains(expected), "missing {expected}: {block}");
+        }
+    }
+
+    #[test]
+    fn string_list_arg_accepts_snake_and_camel_metadata_keys() {
+        let args = json!({
+            "writeScope": ["a.rs", " ", "b.rs"],
+            "acceptance_commands": ["cargo test"]
+        });
+        assert_eq!(
+            string_list_arg(&args, &["write_scope", "writeScope"]),
+            vec!["a.rs", "b.rs"]
+        );
+        assert_eq!(
+            string_list_arg(&args, &["acceptance", "acceptance_commands"]),
+            vec!["cargo test"]
+        );
     }
 
     // ── V3 workstation-pool :: gemini researcher binding ─────────────────

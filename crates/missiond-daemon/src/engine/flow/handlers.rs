@@ -13,8 +13,8 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tracing::info;
 
+use super::{FlowContext, GatherStrategy, NodeType, ParallelTaskSpec};
 use crate::state::AppState;
-use super::{GatherStrategy, NodeType, FlowContext, ParallelTaskSpec};
 
 /// Execute a single flow node, returning the output string.
 pub(crate) async fn execute_node(
@@ -24,11 +24,19 @@ pub(crate) async fn execute_node(
     task_id: &str,
 ) -> Result<String> {
     match node_type {
-        NodeType::LlmCall { provider, prompt, max_tokens } => {
+        NodeType::LlmCall {
+            provider,
+            prompt,
+            max_tokens,
+        } => {
             let resolved = ctx.resolve_vars(prompt);
             execute_llm_call(state, provider, &resolved, *max_tokens, task_id).await
         }
-        NodeType::SlotTask { model, prompt, timeout_secs } => {
+        NodeType::SlotTask {
+            model,
+            prompt,
+            timeout_secs,
+        } => {
             let resolved = ctx.resolve_vars(prompt);
             execute_slot_task(state, model, &resolved, *timeout_secs, task_id).await
         }
@@ -44,7 +52,12 @@ pub(crate) async fn execute_node(
                     .unwrap_or_else(|_| params.clone());
             execute_daemon_action(state, action, resolved, task_id).await
         }
-        NodeType::ParallelSlotTasks { parallelism, tasks, gather, timeout_secs } => {
+        NodeType::ParallelSlotTasks {
+            parallelism,
+            tasks,
+            gather,
+            timeout_secs,
+        } => {
             // POC: fire-and-forget semantics — 返回派发回执而非 slot 真实执行结果。
             // 真实结果回流（wait for submit_phase_result + per-task timeout wrapping）见 Phase 2。
             let _ = timeout_secs; // Phase 2: wrap each spawn with tokio::time::timeout
@@ -64,9 +77,7 @@ async fn execute_llm_call(
 ) -> Result<String> {
     info!(provider, prompt_len = prompt.len(), "Flow: LlmCall");
     match provider {
-        "gemini" => {
-            crate::llm_gateway::call_gemini_for_flow(state, task_id, prompt).await
-        }
+        "gemini" => crate::llm_gateway::call_gemini_for_flow(state, task_id, prompt).await,
         "sonnet" => {
             crate::llm_gateway::call_sonnet_stateless(
                 state,
@@ -74,7 +85,8 @@ async fn execute_llm_call(
                 prompt,
                 max_tokens,
                 "flow_node",
-            ).await
+            )
+            .await
         }
         _ => Err(anyhow!("Unknown LLM provider: {}", provider)),
     }
@@ -116,10 +128,16 @@ async fn execute_slot_task(
     }
 
     // Send prompt
-    state.pty.send_fire_and_forget(&slot_id, prompt).await
+    state
+        .pty
+        .send_fire_and_forget(&slot_id, prompt)
+        .await
         .map_err(|e| anyhow!("Failed to send to slot {}: {}", slot_id, e))?;
 
-    Ok(format!("SlotTask dispatched to {} (timeout={}s)", slot_id, timeout_secs))
+    Ok(format!(
+        "SlotTask dispatched to {} (timeout={}s)",
+        slot_id, timeout_secs
+    ))
 }
 
 // ── ParallelSlotTasks ────────────────────────────────────────────────
@@ -164,11 +182,7 @@ async fn execute_parallel_slot_tasks(
     }
 
     // 2. Effective parallelism = min(parallelism, candidates, tasks), clamped to >= 1.
-    let effective = std::cmp::min(
-        std::cmp::min(parallelism, candidates.len()),
-        tasks.len(),
-    )
-    .max(1);
+    let effective = std::cmp::min(std::cmp::min(parallelism, candidates.len()), tasks.len()).max(1);
 
     info!(
         tasks = tasks.len(),
@@ -257,7 +271,9 @@ async fn execute_mcp_tool(
 ) -> Result<String> {
     info!(tool = tool_name, "Flow: McpTool");
     let result = crate::handlers::dispatch_tool(state, tool_name, params).await?;
-    let text = result.content.iter()
+    let text = result
+        .content
+        .iter()
         .filter_map(|c| match c {
             missiond_mcp::tools::ToolContent::Text { text } => Some(text.as_str()),
             _ => None,
@@ -282,7 +298,8 @@ async fn execute_daemon_action(
     info!(action, "Flow: DaemonAction");
     match action {
         "read_intent_lisp" => {
-            let project = params.get("project")
+            let project = params
+                .get("project")
                 .and_then(|v| v.as_str())
                 .ok_or_else(|| anyhow!("read_intent_lisp: 'project' required"))?;
             let args = serde_json::json!({ "action": "read", "project": project });
@@ -290,10 +307,16 @@ async fn execute_daemon_action(
             extract_tool_text(&result)
         }
         "close_flow" => {
-            state.store.update_board_task(task_id, &missiond_core::types::UpdateBoardTaskInput {
-                status: Some("done".to_string()),
-                ..Default::default()
-            }).await?;
+            state
+                .store
+                .update_board_task(
+                    task_id,
+                    &missiond_core::types::UpdateBoardTaskInput {
+                        status: Some("done".to_string()),
+                        ..Default::default()
+                    },
+                )
+                .await?;
             info!(task_id, "Flow: task closed");
             Ok("Flow completed".to_string())
         }
@@ -302,7 +325,9 @@ async fn execute_daemon_action(
 }
 
 fn extract_tool_text(result: &missiond_mcp::tools::ToolResult) -> Result<String> {
-    let text = result.content.iter()
+    let text = result
+        .content
+        .iter()
         .filter_map(|c| match c {
             missiond_mcp::tools::ToolContent::Text { text } => Some(text.as_str()),
             _ => None,

@@ -59,8 +59,7 @@ const USER_PREVIEW_MAX_BYTES: usize = 80;
 /// Matches detached HEAD: `[detached HEAD 56cbfdd] fix something`
 /// Captures: (1) branch/ref, (2) hash, (3) summary
 static GIT_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"\[([a-zA-Z0-9_\-/\.\s]+?)\s+(?:\([^\)]+\)\s+)?([a-f0-9]{7,40})\]\s+(.*)")
-        .unwrap()
+    Regex::new(r"\[([a-zA-Z0-9_\-/\.\s]+?)\s+(?:\([^\)]+\)\s+)?([a-f0-9]{7,40})\]\s+(.*)").unwrap()
 });
 
 /// A git commit detected from conversation content.
@@ -205,12 +204,17 @@ async fn reconcile_missed_sessions(state: &AppState) {
                 }
             }
             Ok(_) => {}
-            Err(e) => warn!(session = %sid, error = %e, "TaggerChunker: reconciliation process failed"),
+            Err(e) => {
+                warn!(session = %sid, error = %e, "TaggerChunker: reconciliation process failed")
+            }
         }
     }
 
     if recovered > 0 {
-        info!(recovered, "TaggerChunker: reconciliation sweep recovered missed sessions");
+        info!(
+            recovered,
+            "TaggerChunker: reconciliation sweep recovered missed sessions"
+        );
     }
 }
 
@@ -264,7 +268,8 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
 /// This pipeline is independent of turn extraction and must always run,
 /// even when the session is active and turns are incomplete.
 async fn analyze_messages(state: &AppState, session_id: &str, messages: &[ConversationMessage]) {
-    let user_msgs: Vec<_> = messages.iter()
+    let user_msgs: Vec<_> = messages
+        .iter()
         .filter(|m| m.role == "user")
         .map(|m| (m.id, user_preview(&m.content)))
         .collect();
@@ -276,7 +281,10 @@ async fn analyze_messages(state: &AppState, session_id: &str, messages: &[Conver
     );
     for (id, preview) in &user_msgs {
         if GIT_COMMIT_RE.is_match(preview) {
-            info!(message_id = id, preview, "TaggerChunker: commit regex MATCH");
+            info!(
+                message_id = id,
+                preview, "TaggerChunker: commit regex MATCH"
+            );
         }
     }
 
@@ -450,9 +458,8 @@ fn extract_turns(messages: &[ConversationMessage]) -> Vec<RawTurn> {
 const OUTCOME_MAX_CHARS: usize = 500;
 
 /// Regex to extract file_path from tool_use content: `file_path: "/path/to/file"`
-static FILE_PATH_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"file_path:\s*"([^"]+)""#).unwrap()
-});
+static FILE_PATH_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"file_path:\s*"([^"]+)""#).unwrap());
 
 /// One entry in the turn skeleton: a tool call with message IDs for on-demand retrieval.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -602,8 +609,16 @@ impl TurnBuilder {
                 let cmd = if name == "Bash" {
                     // Extract short command hint for Bash (first 3 words)
                     let full = extract_bash_command(&msg.content);
-                    let short: String = full.split_whitespace().take(3).collect::<Vec<_>>().join(" ");
-                    if short.is_empty() { None } else { Some(short) }
+                    let short: String = full
+                        .split_whitespace()
+                        .take(3)
+                        .collect::<Vec<_>>()
+                        .join(" ");
+                    if short.is_empty() {
+                        None
+                    } else {
+                        Some(short)
+                    }
                 } else {
                     None
                 };
@@ -664,10 +679,7 @@ impl TurnBuilder {
 fn extract_file_short_name(content: &str) -> Option<String> {
     let caps = FILE_PATH_RE.captures(content)?;
     let full_path = caps.get(1)?.as_str();
-    let short = full_path
-        .rsplit('/')
-        .next()
-        .unwrap_or(full_path);
+    let short = full_path.rsplit('/').next().unwrap_or(full_path);
     if short.is_empty() {
         return None;
     }
@@ -793,7 +805,7 @@ fn extract_bash_command(content: &str) -> &str {
     // Try to find `command: "` pattern
     if let Some(start) = content.find("command: \"") {
         let after = &content[start + 10..]; // skip `command: "`
-        // Find the closing quote (handle escaped quotes)
+                                            // Find the closing quote (handle escaped quotes)
         if let Some(end) = after.find("\", description:") {
             return &after[..end];
         }
@@ -1054,9 +1066,18 @@ mod tests {
 
         // Should produce 3 labels: tool_action, commit_hash, commit_branch
         assert_eq!(labels.len(), 3);
-        assert_eq!(labels[0], (10, "tool_action".to_string(), "commit".to_string()));
-        assert_eq!(labels[1], (10, "commit_hash".to_string(), "9facdfa".to_string()));
-        assert_eq!(labels[2], (10, "commit_branch".to_string(), "main".to_string()));
+        assert_eq!(
+            labels[0],
+            (10, "tool_action".to_string(), "commit".to_string())
+        );
+        assert_eq!(
+            labels[1],
+            (10, "commit_hash".to_string(), "9facdfa".to_string())
+        );
+        assert_eq!(
+            labels[2],
+            (10, "commit_branch".to_string(), "main".to_string())
+        );
 
         assert_eq!(commits.len(), 1);
         assert_eq!(commits[0].commit_hash, "9facdfa");
@@ -1096,11 +1117,15 @@ mod tests {
     #[test]
     fn test_extract_file_short_name() {
         assert_eq!(
-            extract_file_short_name(r#"[Tool: Read] file_path: "/Users/jinchen/Projects/missiond/src/main.rs""#),
+            extract_file_short_name(
+                r#"[Tool: Read] file_path: "/Users/jinchen/Projects/missiond/src/main.rs""#
+            ),
             Some("main.rs".to_string())
         );
         assert_eq!(
-            extract_file_short_name(r#"[Tool: Read] file_path: "/a/b/c.rs", limit: 120, offset: 1"#),
+            extract_file_short_name(
+                r#"[Tool: Read] file_path: "/a/b/c.rs", limit: 120, offset: 1"#
+            ),
             Some("c.rs".to_string())
         );
         assert_eq!(
@@ -1115,7 +1140,11 @@ mod tests {
         read_msg.has_tool_use = true;
         read_msg.tool_name = Some("Read".to_string());
 
-        let mut edit_msg = make_msg(4, "assistant", r#"[Tool: Edit] file_path: "/a/b/bar.rs", old_string: "x""#);
+        let mut edit_msg = make_msg(
+            4,
+            "assistant",
+            r#"[Tool: Edit] file_path: "/a/b/bar.rs", old_string: "x""#,
+        );
         edit_msg.has_tool_use = true;
         edit_msg.tool_name = Some("Edit".to_string());
 
@@ -1125,13 +1154,20 @@ mod tests {
             make_msg(3, "tool_result", "file contents"),
             edit_msg,
             make_msg(5, "tool_result", "edit ok"),
-            make_msg(6, "assistant", "I've fixed the bug in bar.rs by changing x to y."),
+            make_msg(
+                6,
+                "assistant",
+                "I've fixed the bug in bar.rs by changing x to y.",
+            ),
         ];
         let turns = extract_turns(&msgs);
         assert_eq!(turns.len(), 1);
         assert_eq!(turns[0].files_read, "foo.rs");
         assert_eq!(turns[0].files_changed, "bar.rs");
-        assert_eq!(turns[0].outcome, "I've fixed the bug in bar.rs by changing x to y.");
+        assert_eq!(
+            turns[0].outcome,
+            "I've fixed the bug in bar.rs by changing x to y."
+        );
     }
 
     #[test]
@@ -1194,7 +1230,11 @@ mod tests {
     fn test_system_command_noise_not_false_positive() {
         // Normal messages with angle brackets should NOT be filtered
         let msgs = vec![
-            make_msg(1, "user", "<task-notification>task result</task-notification>"),
+            make_msg(
+                1,
+                "user",
+                "<task-notification>task result</task-notification>",
+            ),
             make_msg(2, "assistant", "Got it"),
         ];
         let turns = extract_turns(&msgs);
@@ -1215,6 +1255,9 @@ mod tests {
         let turns = extract_turns(&msgs);
         assert_eq!(turns.len(), 1);
         // Outcome should be the real answer, not the instruction leak
-        assert_eq!(turns[0].outcome, "审计结果：这个 commit 质量很高，架构优雅。");
+        assert_eq!(
+            turns[0].outcome,
+            "审计结果：这个 commit 质量很高，架构优雅。"
+        );
     }
 }

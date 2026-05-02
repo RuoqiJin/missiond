@@ -38,6 +38,11 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
         .unwrap_or(false);
     let is_status_change = args.get("status").and_then(|v| v.as_str()).is_some();
     let update_template: missiond_core::types::UpdateBoardTaskInput = serde_json::from_value(args)?;
+    if is_marking_done {
+        if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
+            return Ok(blocked);
+        }
+    }
     let mut results = Vec::new();
     let (mut success_count, mut fail_count) = (0u32, 0u32);
     for id in &ids {
@@ -87,14 +92,20 @@ async fn handle_batch_update(state: &AppState, args: Value) -> Result<ToolResult
 
 async fn handle_toggle(state: &AppState, args: Value) -> Result<ToolResult> {
     let BoardIdArgs { id } = serde_json::from_value(args)?;
-    let old_status = state
+    let Some(existing) = state
         .store
         .get_board_task(&id)
         .await
-        .ok()
-        .flatten()
-        .map(|t| format!("{:?}", t.status))
-        .unwrap_or_else(|| "unknown".to_string());
+        .map_err(|e| anyhow!("DB error: {}", e))?
+    else {
+        return Ok(ToolResult::error("Task not found"));
+    };
+    if existing.status != missiond_core::types::BoardTaskStatus::Done {
+        if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
+            return Ok(blocked);
+        }
+    }
+    let old_status = format!("{:?}", existing.status);
     let task = state
         .store
         .toggle_board_task(&id)
@@ -130,6 +141,11 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
         .and_then(|v| v.as_str())
         .map(|s| s == "done")
         .unwrap_or(false);
+    if is_marking_done {
+        if let Some(blocked) = guard_done_close_against_code_drift(state).await? {
+            return Ok(blocked);
+        }
+    }
     let old_status = if is_status_change {
         state
             .store
@@ -167,4 +183,17 @@ async fn handle_single_update(state: &AppState, args: Value) -> Result<ToolResul
         }
         None => Ok(ToolResult::error("Task not found")),
     }
+}
+
+async fn guard_done_close_against_code_drift(state: &AppState) -> Result<Option<ToolResult>> {
+    let backfill_task_id =
+        crate::engine::master_control::ensure_code_drift_backfill_task_for_state(state)
+            .await
+            .map_err(|e| anyhow!("code drift guard failed: {}", e))?;
+    let Some(backfill_task_id) = backfill_task_id else {
+        return Ok(None);
+    };
+    Ok(Some(ToolResult::error(format!(
+        "BoardTask close blocked by Lisp/code drift. Code changes under crates/packages/scripts have no same-diff Lisp or evidence update. Backfill task created or reused: {backfill_task_id}. Complete the backfill before marking this task done."
+    ))))
 }

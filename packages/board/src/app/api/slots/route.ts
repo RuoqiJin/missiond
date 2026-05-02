@@ -20,6 +20,12 @@ interface SlotInfo {
   taskClass?: string;
   accepts_boardtask?: boolean;
   acceptsBoardTask?: boolean;
+  mcpReady?: boolean;
+  mcpEnabled?: boolean;
+  mcpApprovalReady?: boolean;
+  mcpApprovalMissingTools?: string[];
+  mcpSource?: string;
+  providerConversationId?: string;
   latest_conversation?: PtyStatus['latest_conversation'];
   latestConversation?: PtyStatus['latestConversation'];
 }
@@ -43,6 +49,8 @@ interface PtyStatus {
     id?: string;
     source?: string;
     title?: string;
+    messageCount?: number;
+    status?: string;
     updated_at?: string;
     updatedAt?: string;
   } | null;
@@ -50,6 +58,8 @@ interface PtyStatus {
     id?: string;
     source?: string;
     title?: string;
+    messageCount?: number;
+    status?: string;
     updated_at?: string;
     updatedAt?: string;
   } | null;
@@ -111,6 +121,8 @@ function latestConversation(status: PtyStatus | null, slot: SlotInfo) {
     id: latest.id,
     source: latest.source,
     title: latest.title,
+    messageCount: latest.messageCount,
+    status: latest.status,
     updatedAt: latest.updatedAt ?? latest.updated_at,
   };
 }
@@ -150,6 +162,12 @@ export async function GET() {
         approvalPolicy: s.approvalPolicy ?? s.approval_policy,
         taskClass: s.taskClass ?? s.task_class,
         acceptsBoardTask: s.acceptsBoardTask ?? s.accepts_boardtask,
+        mcpReady: s.mcpReady,
+        mcpEnabled: s.mcpEnabled,
+        mcpApprovalReady: s.mcpApprovalReady,
+        mcpApprovalMissingTools: s.mcpApprovalMissingTools,
+        mcpSource: s.mcpSource,
+        providerConversationId: s.providerConversationId,
         confidence: recognition?.confidence ?? status?.confidence,
         reason: recognition?.reason ?? status?.reason,
         activeTool: recognition?.activeTool ?? recognition?.active_tool ?? status?.activeTool ?? status?.active_tool,

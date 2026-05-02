@@ -251,8 +251,7 @@ pub(crate) struct AppState {
     /// Shared watcher-cursor map: `jsonl_path → highest-acked byte offset`.
     /// `conversation_logger` writes to this (replacing the old
     /// `cursor_ack_tx` MPSC) and the watcher persists by reading drains.
-    pub(crate) conversation_cursor_map:
-        Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
+    pub(crate) conversation_cursor_map: Arc<tokio::sync::Mutex<HashMap<String, u64>>>,
 }
 
 /// v0.5.0: Memory-hook task submission.
@@ -280,7 +279,9 @@ pub(crate) async fn submit_task(
             format!("[memory] {}", &prompt[..prompt.len().min(MAX_TITLE)])
         } else if first_line.len() > MAX_TITLE {
             let mut end = MAX_TITLE;
-            while !first_line.is_char_boundary(end) && end > 0 { end -= 1; }
+            while !first_line.is_char_boundary(end) && end > 0 {
+                end -= 1;
+            }
             format!("{}…", &first_line[..end])
         } else {
             first_line.to_string()

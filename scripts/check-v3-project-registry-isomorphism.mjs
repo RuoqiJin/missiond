@@ -107,9 +107,18 @@ function checkFiles(root, files) {
     'project.rs is the thin mission_project facade',
     'ProjectRegistryRuntimeConfig loads V3 project-registry-policy',
     'ProjectRegistry::resolve owns longest-prefix project lookup',
-    'resolve_target_project_root owns project-root spawn cwd policy',
-    'node scripts/check-v3-project-registry-isomorphism.mjs',
-  ]);
+	    'resolve_target_project_root owns project-root spawn cwd policy',
+	    '(project-blueprint-registry',
+	    ':id jarvis-forge',
+	    ':backend ".missiond/backend/forge-backend-blueprint.lisp"',
+	    ':frontend ".missiond/frontend/forge-ui-blueprint.lisp"',
+	    ':id deploy-center',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center"',
+	    ':id xjp-deploy-center',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"',
+	    ':capability deploy-ops',
+	    'node scripts/check-v3-project-registry-isomorphism.mjs',
+	  ]);
 
   requireAll(diagnostics, files.runtimeConfig, sources.runtimeConfig, [
     'ProjectRegistryRuntimeConfig',
@@ -258,10 +267,14 @@ function buildFixture() {
   (v2-convergence-map
     (v2-item project-registry
       :status runtime-projected))
-  (project-registry-policy
-    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
-    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
-  (implementation-map
+	  (project-registry-policy
+	    :intent-path-candidates [".missiond/intent.lisp" ".jarvis/intent.lisp" "intent.lisp"]
+	    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
+	  (project-blueprint-registry
+	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
+	    (project :id deploy-center :root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center" :capability deploy-ops)
+	    (project :id xjp-deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops))
+	  (implementation-map
     (surface project-registry
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"

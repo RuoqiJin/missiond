@@ -51,15 +51,7 @@ async fn handle_recent(state: &AppState, args: Value) -> Result<ToolResult> {
     // long-lived threads that just got fresh tool calls.
     let convs = state
         .store
-        .list_conversations(
-            None,
-            500,
-            None,
-            None,
-            None,
-            None,
-            Some("codex_cli"),
-        )
+        .list_conversations(None, 500, None, None, None, None, Some("codex_cli"))
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 
@@ -185,9 +177,7 @@ async fn handle_thread(state: &AppState, args: Value) -> Result<ToolResult> {
         }
     };
 
-    let tool_filter_slice: Option<Vec<String>> = tool_filter
-        .as_ref()
-        .map(|f| vec![f.clone()]);
+    let tool_filter_slice: Option<Vec<String>> = tool_filter.as_ref().map(|f| vec![f.clone()]);
 
     // Pull EVERYTHING then sort by timestamp DESC and truncate. The store layer
     // sorts by `id ASC` (call_id is a random hash, not a clock), so a small SQL
@@ -259,15 +249,7 @@ async fn handle_tool_stats(state: &AppState, args: Value) -> Result<ToolResult> 
 
     let convs = state
         .store
-        .list_conversations(
-            None,
-            500,
-            None,
-            None,
-            None,
-            None,
-            Some("codex_cli"),
-        )
+        .list_conversations(None, 500, None, None, None, None, Some("codex_cli"))
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
 

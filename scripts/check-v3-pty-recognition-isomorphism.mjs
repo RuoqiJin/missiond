@@ -83,6 +83,7 @@ function checkFiles(root, files) {
     'recognize_screen MUST fuse SessionState with screen heuristics',
     'screen_fused',
     'explicit Confirming SessionState always preserves Blocked',
+    'Exited/terminal SessionState overrides stale running screen evidence',
     'Codex MCP approval menus',
     'human-like keyboard navigation',
     'recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI',
@@ -101,6 +102,7 @@ function checkFiles(root, files) {
     'recognize_gemini',
     'recognize_claude_code',
     'fuse_with_session_state',
+    'SessionState::Exited | SessionState::Error',
     'active_running_evidence',
     'screen_fused',
     'is_codex_approval_menu',
@@ -146,6 +148,8 @@ function checkFiles(root, files) {
     'pub recognition: Option<PtyRecognitionSnapshot>',
     'SessionEvent::RecognitionUpdate(snapshot)',
     'session_state_snapshot',
+    'normalize_agent_info',
+    'exited_status_overrides_stale_running_recognition',
   ]);
 
   requireAll(diagnostics, files.ptyLib, sources.ptyLib, [

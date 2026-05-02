@@ -95,10 +95,14 @@ function checkFiles(root) {
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     'node scripts/check-v3-autopilot-runtime-isomorphism.mjs',
     // Summary-note pollution invariant: raw res.response forbidden as note source.
-    ':summary-note-source',
-    'extract_worker_final_summary(res.response, full_prompt)',
-    'paste again to expand',
-  ]);
+	    ':summary-note-source',
+	    ':settle-window',
+	    ':idle-durable-summary-close',
+	    'extract_worker_final_summary(res.response, full_prompt)',
+	    'wait_for_worker_final_settle_window',
+	    'durable summary note + idle slot evidence',
+	    'paste again to expand',
+	  ]);
 
   requireAll(diagnostics, FILES.subscribers, sources.subscribers, [
     'spawn_autopilot_board_event_sub',
@@ -121,7 +125,9 @@ function checkFiles(root) {
 
   requireAll(diagnostics, FILES.taskDelegate, sources.taskDelegate, [
     'missiond_core::event::events::BoardEvent',
-    'publish_board(BoardEvent::TaskCreated',
+    'BoardEvent::TaskCreated',
+    'notify_board_event_direct(&ev)',
+    'state.bus.publish_board(ev).await',
     'event-bus cause',
     'state.board_dispatch_notify.notify_one()',
   ]);
@@ -136,10 +142,17 @@ function checkFiles(root) {
     // success path; legacy `res.duration_ms, res.response` pairing is
     // forbidden so a refactor cannot regress to the polluted note shape.
     'fn extract_worker_final_summary',
-    'AUTOPILOT_SUMMARY_NOTE_MAX_BYTES',
+	    'AUTOPILOT_SUMMARY_NOTE_MAX_BYTES',
+	    'AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT',
+	    'fn worker_final_settle_window_ms',
+    'wait_for_worker_final_settle_window().await',
+    'close_idle_running_task_from_durable_summary',
+    'has_durable_completion_summary_after_claim',
+    'is_durable_completion_summary_note',
+    'get_board_task_with_notes',
     'extract_worker_final_summary(&res.response, &full_prompt)',
-    'truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)',
-  ]);
+	    'truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)',
+	  ]);
   forbidAll(diagnostics, FILES.autopilot, sources.autopilot, [
     'res.duration_ms, res.response',
   ]);
@@ -199,9 +212,11 @@ function buildFixture() {
         :entry [BoardEvent.TaskCreated SlotEvent.BecameIdle]
         :core ((step s1 :logic "x"))
         :egress [BoardEvent SlotEvent])))
-  (execution-ownership delegated-boardtask
-    :close-owner
-      (:summary-note-source "extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, tool logs, and \`paste again to expand\` collapse markers."))
+	  (execution-ownership delegated-boardtask
+	    :close-owner
+	      (:summary-note-source "extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, tool logs, and \`paste again to expand\` collapse markers."
+	       :settle-window "wait_for_worker_final_settle_window projects the high-confidence final summary settle policy."
+	       :idle-durable-summary-close "delayed active-frame tasks close from durable summary note + idle slot evidence."))
   (implementation-map
     (surface autopilot-runtime
       :status "code-aligned"
@@ -219,14 +234,20 @@ fn slot_event_should_wake_autopilot(e: &SlotEvent) -> bool { matches!(e, SlotEve
 `);
   write(root, 'taskDelegate', `
 use missiond_core::event::events::BoardEvent;
-async fn x() { let _ = state.bus.publish_board(BoardEvent::TaskCreated { task_id, title, category }).await; state.board_dispatch_notify.notify_one(); /* event-bus cause */ }`);
+async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; notify_board_event_direct(&ev); let _ = state.bus.publish_board(ev).await; state.board_dispatch_notify.notify_one(); /* event-bus cause */ }`);
   write(root, 'autopilot', `
-const AUTOPILOT_SUMMARY_NOTE_MAX_BYTES: usize = 4000;
-fn extract_worker_final_summary(_r: &str, _p: &str) -> String { String::new() }
-async fn dispatch_board_tasks() {
-    let _g = OwnedSlotDispatchGuard;
-    state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
-    let final_summary = extract_worker_final_summary(&res.response, &full_prompt);
+	const AUTOPILOT_SUMMARY_NOTE_MAX_BYTES: usize = 4000;
+	const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 1200;
+	fn worker_final_settle_window_ms() -> u64 { AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT }
+	fn extract_worker_final_summary(_r: &str, _p: &str) -> String { String::new() }
+	fn is_durable_completion_summary_note() {}
+	fn has_durable_completion_summary_after_claim() {}
+	async fn close_idle_running_task_from_durable_summary() { get_board_task_with_notes(); }
+	async fn dispatch_board_tasks() {
+	    let _g = OwnedSlotDispatchGuard;
+	    state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
+	    wait_for_worker_final_settle_window().await;
+	    let final_summary = extract_worker_final_summary(&res.response, &full_prompt);
     let _summary = truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
     maybe_complete_delegated_execution_log();
     publish_slot(SlotEvent::TaskDispatched{});

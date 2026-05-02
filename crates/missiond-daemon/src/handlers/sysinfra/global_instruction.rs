@@ -204,7 +204,11 @@ async fn edit_action(path: &Path, args: Value) -> Result<ToolResult> {
     let tmp = dir.join(format!(".CLAUDE.md.tmp.{}", stamp));
     if let Err(e) = tokio::fs::write(&tmp, new_content.as_bytes()).await {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err(anyhow!("failed to write temp file {}: {}", tmp.display(), e));
+        return Err(anyhow!(
+            "failed to write temp file {}: {}",
+            tmp.display(),
+            e
+        ));
     }
     if let Err(e) = tokio::fs::rename(&tmp, path).await {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -430,7 +434,9 @@ mod tests {
     async fn edit_creates_file_when_missing() {
         let dir = TempDir::new().unwrap();
         let path = dir.path().join("CLAUDE.md");
-        let res = edit_at_for_test(&path, "fresh", false, false).await.unwrap();
+        let res = edit_at_for_test(&path, "fresh", false, false)
+            .await
+            .unwrap();
         let v = extract_json(&res);
         assert_eq!(v["status"], "written");
         assert_eq!(v["prior_exists"], false);

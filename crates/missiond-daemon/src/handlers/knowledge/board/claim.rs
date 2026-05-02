@@ -28,6 +28,7 @@ pub(super) async fn handle_claim(state: &AppState, args: Value) -> Result<ToolRe
                 task_id: task.id.to_string(),
                 slot_id: executor_id.to_string(),
             };
+            crate::engine::master_control::notify_board_event_direct(&ev);
             let _ = state.bus.publish_board(ev).await;
             Ok(ToolResult::json_pretty(&task))
         }

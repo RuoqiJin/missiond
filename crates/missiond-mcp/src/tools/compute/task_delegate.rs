@@ -23,7 +23,22 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "context_hints": {"type": "array", "description": "上下文关键词，预加载 KB/Skill"},
                     "model": {"type": "string", "description": "可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model"},
                     "model_profile": {"type": "string", "description": "可选模型 profile；coding-default-opus-4-7 表示 Claude Code Default(Opus 4.7/1M)"},
-                    "modelProfile": {"type": "string", "description": "model_profile camelCase alias"}
+                    "modelProfile": {"type": "string", "description": "model_profile camelCase alias"},
+                    "task_class": {"type": "string", "description": "两阶段工位任务类型，如 context-pack/code/review/ops"},
+                    "taskClass": {"type": "string", "description": "task_class camelCase alias"},
+                    "pool_hint": {"type": "string", "description": "建议工位池，如 claude-code-default / gemini-ultra-pro"},
+                    "poolHint": {"type": "string", "description": "pool_hint camelCase alias"},
+                    "engine_hint": {"type": "string", "description": "建议引擎，如 claude-code / gemini / codex"},
+                    "engineHint": {"type": "string", "description": "engine_hint camelCase alias"},
+                    "context_pack_path": {"type": "string", "description": "两阶段 context-pack Lisp 路径"},
+                    "contextPackPath": {"type": "string", "description": "context_pack_path camelCase alias"},
+                    "write_scope": {"type": "array", "description": "允许写入路径列表"},
+                    "writeScope": {"type": "array", "description": "write_scope camelCase alias"},
+                    "must_not_touch": {"type": "array", "description": "禁止修改路径列表"},
+                    "mustNotTouch": {"type": "array", "description": "must_not_touch camelCase alias"},
+                    "acceptance": {"type": "array", "description": "验收命令列表"},
+                    "acceptance_commands": {"type": "array", "description": "acceptance alias"},
+                    "acceptanceCommands": {"type": "array", "description": "acceptance_commands camelCase alias"}
                 }
             }),
         ),

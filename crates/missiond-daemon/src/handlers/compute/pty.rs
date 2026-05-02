@@ -583,6 +583,10 @@ fn confirm_response_from_value(response: &Value) -> anyhow::Result<missiond_core
                 Ok(missiond_core::ConfirmResponse::Yes)
             } else if matches!(lower.as_str(), "n" | "no" | "deny" | "reject" | "cancel") {
                 Ok(missiond_core::ConfirmResponse::No)
+            } else if matches!(lower.as_str(), "allow for this session" | "session") {
+                Ok(missiond_core::ConfirmResponse::Option(2))
+            } else if matches!(lower.as_str(), "always allow" | "always") {
+                Ok(missiond_core::ConfirmResponse::Option(3))
             } else if let Some(rest) = lower.strip_prefix("option:") {
                 let n = rest
                     .trim()
@@ -683,6 +687,14 @@ mod tests {
         let trimmed = confirm_response_from_value(&Value::String("2 ".into()))
             .expect("trimmed option index should parse");
         assert!(matches!(trimmed, missiond_core::ConfirmResponse::Option(2)));
+
+        let session = confirm_response_from_value(&Value::String("allow for this session".into()))
+            .expect("session allow label should parse");
+        assert!(matches!(session, missiond_core::ConfirmResponse::Option(2)));
+
+        let always = confirm_response_from_value(&Value::String("always allow".into()))
+            .expect("always allow label should parse");
+        assert!(matches!(always, missiond_core::ConfirmResponse::Option(3)));
 
         let raw = confirm_response_from_value(&Value::String("type this raw text".into()));
         assert!(

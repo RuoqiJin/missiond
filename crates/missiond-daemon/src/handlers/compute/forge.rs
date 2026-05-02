@@ -69,7 +69,11 @@ pub(crate) async fn handle_build(state: &AppState, args: Value) -> Result<ToolRe
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let exit_code = output.status.code().unwrap_or(-1);
-    let status = if output.status.success() { "ok" } else { "error" };
+    let status = if output.status.success() {
+        "ok"
+    } else {
+        "error"
+    };
 
     Ok(ToolResult::json_pretty(&json!({
         "status": status,
@@ -112,7 +116,11 @@ pub(crate) async fn handle_lint(state: &AppState, args: Value) -> Result<ToolRes
     let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let exit_code = output.status.code().unwrap_or(-1);
-    let status = if output.status.success() { "ok" } else { "error" };
+    let status = if output.status.success() {
+        "ok"
+    } else {
+        "error"
+    };
 
     Ok(ToolResult::json_pretty(&json!({
         "status": status,

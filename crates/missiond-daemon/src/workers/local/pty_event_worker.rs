@@ -327,7 +327,9 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
             // Still emit completion signal so dispatcher wakes up.
             let _ = s
                 .bus
-                .publish_task(TaskEvent::Completed { task_id: String::new() })
+                .publish_task(TaskEvent::Completed {
+                    task_id: String::new(),
+                })
                 .await;
             return;
         }
@@ -372,8 +374,9 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
         if task.claim_executor_id.as_deref() != Some(slot_id) {
             continue;
         }
-        let started_ms = parse_rfc3339_to_ms(task.claimed_at.as_deref().unwrap_or(&task.updated_at))
-            .unwrap_or(now_ms);
+        let started_ms =
+            parse_rfc3339_to_ms(task.claimed_at.as_deref().unwrap_or(&task.updated_at))
+                .unwrap_or(now_ms);
         let elapsed = now_ms - started_ms;
         if elapsed < MIN_JSONL_EXECUTION_MS {
             debug!(
@@ -389,7 +392,8 @@ async fn handle_submit_task_closure(s: &AppState, slot_id: &str) {
             );
             continue;
         }
-        let result_text = jsonl_resp.clone()
+        let result_text = jsonl_resp
+            .clone()
             .or_else(|| {
                 if pty_resp.is_some() {
                     warn!(task_id = %task.id, "JSONL result unavailable, falling back to PTY");

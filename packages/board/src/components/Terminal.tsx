@@ -402,9 +402,19 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
   const providerBits = [slot?.provider, slot?.engine, slot?.modelProfile, slot?.taskClass].filter(
     (v): v is string => !!v && v.length > 0,
   );
+  const mcpLabel =
+    slot?.mcpReady === undefined
+      ? null
+      : slot.mcpReady
+        ? 'MCP ready'
+        : slot.mcpEnabled === false
+          ? 'MCP missing'
+          : slot.mcpApprovalReady === false
+            ? 'MCP approval'
+            : 'MCP missing';
   const lastActivity = slot?.latestConversation?.updatedAt ?? null;
   const lastActivityLabel = lastActivity ? new Date(lastActivity).toLocaleTimeString() : null;
-  const showInfoRow = !!(activeTask || providerBits.length > 0 || slot?.activeTool || slot?.blockedKind || lastActivityLabel);
+  const showInfoRow = !!(activeTask || providerBits.length > 0 || mcpLabel || slot?.activeTool || slot?.blockedKind || lastActivityLabel);
 
   return (
     <div className="flex flex-col h-full">
@@ -455,6 +465,19 @@ function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
             {providerBits.length > 0 && (
               <span className="text-neutral-600 truncate shrink-0" title={providerBits.join(' · ')}>
                 {activeTask ? '· ' : ''}{providerBits.join(' · ')}
+              </span>
+            )}
+            {mcpLabel && (
+              <span
+                className={`shrink-0 truncate ${slot?.mcpReady ? 'text-emerald-400/70' : 'text-amber-400/80'}`}
+                title={[
+                  slot?.mcpSource,
+                  slot?.mcpApprovalMissingTools?.length
+                    ? `missing approvals: ${slot.mcpApprovalMissingTools.join(', ')}`
+                    : null,
+                ].filter(Boolean).join('\n')}
+              >
+                · {mcpLabel}
               </span>
             )}
             {slot?.activeTool && (

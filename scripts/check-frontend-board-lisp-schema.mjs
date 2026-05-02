@@ -195,8 +195,10 @@ function checkRepo(repo, blueprintRel, v3Rel) {
       requireListIncludes(diagnostics, blueprintRel, props, ':source', ['mission_slots', 'mission_pty_status', 'localStorage'], terminalSelector.loc);
       requireListIncludes(diagnostics, blueprintRel, props, ':fields', ['id', 'label', 'running', 'state', 'activeSlot'], terminalSelector.loc);
       const rule = nodeText(props[':rule']?.value) ?? '';
-      if (!rule.includes('inside the Terminal panel') || !rule.includes('scrolls horizontally')) {
-        diagnostics.push(diag(blueprintRel, terminalSelector.loc, 'terminal-slot-selector rule must pin panel placement and horizontal overflow behavior'));
+      const oldPanelRule = rule.includes('inside the Terminal panel') && rule.includes('scrolls horizontally');
+      const cockpitRule = rule.includes('Terminal cockpit') && rule.includes('provider group') && rule.includes('durable conversation');
+      if (!oldPanelRule && !cockpitRule) {
+        diagnostics.push(diag(blueprintRel, terminalSelector.loc, 'terminal-slot-selector rule must pin cockpit/panel placement and overflow/evidence behavior'));
       }
     }
   }
@@ -392,7 +394,7 @@ function buildFixture() {
   (project :id board)
   (runtime-projection
     (projection workstation-slots :source [mission_slots mission_pty_status workstation-pool] :forbid [SLOT_OPTIONS hardcoded-sonnet-label])
-    (projection terminal-slot-selector :source [mission_slots mission_pty_status localStorage] :fields [id label running state activeSlot] :rule "Terminal slot selection lives inside the Terminal panel and scrolls horizontally."))
+    (projection terminal-slot-selector :source [mission_slots mission_pty_status localStorage] :fields [id label running state activeSlot] :rule "Terminal slot selection lives inside the Terminal cockpit, lists slots by provider group, and surfaces durable conversation diagnostics."))
   (frontend-runtime-config
     :schema "missiond.frontend-runtime-config.v1"
     :generator "node scripts/project-frontend-board-config.mjs --write"

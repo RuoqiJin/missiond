@@ -127,6 +127,7 @@ function checkFiles(root, files) {
     'model_profile=coding-default-opus-4-7 both mean no CLI --model override',
     'mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg',
     'task_delegate must pass model/model_profile through to compute_slot',
+    'mission_task_delegate MUST accept structured two-stage delegation metadata',
     'Project-bound workstation spawn MUST sync MissionD Claude hooks',
     'MISSION_IPC_ENDPOINT',
     'Autopilot pty.send budget MUST project from BoardTask.timeout_secs',
@@ -232,6 +233,23 @@ function checkFiles(root, files) {
     '"suppress_initial_prompt": true',
     'create_args["model_profile"]',
     'starts idle and Autopilot remains the sole task-prompt owner',
+    'struct DelegationMetadata',
+    'fn string_list_arg',
+    'fn render_delegation_metadata_block',
+    'context_pack_path',
+    'write_scope',
+    'must_not_touch',
+    'acceptance',
+  ]);
+
+  requireAll(diagnostics, files.mcpTaskDelegate, sources.mcpTaskDelegate, [
+    '"task_class"',
+    '"pool_hint"',
+    '"engine_hint"',
+    '"context_pack_path"',
+    '"write_scope"',
+    '"must_not_touch"',
+    '"acceptance"',
   ]);
 
   requireAll(diagnostics, files.v3Runtime, sources.v3Runtime, [
@@ -503,10 +521,11 @@ function buildFixture() {
        "daemon startup SlotManager ClaudeCode task configs MUST project coder/researcher model profiles from workstation-config"
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries"
        "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot"
-       "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
-       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg"
-       "task_delegate must pass model/model_profile through to compute_slot"
-       "Project-bound workstation spawn MUST sync MissionD Claude hooks"
+	       "model=\\"default\\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
+	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg"
+	       "task_delegate must pass model/model_profile through to compute_slot"
+	       "mission_task_delegate MUST accept structured two-stage delegation metadata"
+	       "Project-bound workstation spawn MUST sync MissionD Claude hooks"
        "MISSION_IPC_ENDPOINT"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs"
        "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot"
@@ -595,10 +614,14 @@ let target_project_root = None;
 auto_provision_slot();
 auto_provision_slot_ttl_secs();
 runtime_config.clamp_slot_ttl_secs(None);
-build_compute_slot_create_args();
-json!({ "suppress_initial_prompt": true });
-create_args["model_profile"] = v;
-// starts idle and Autopilot remains the sole task-prompt owner`);
+	build_compute_slot_create_args();
+	json!({ "suppress_initial_prompt": true });
+	create_args["model_profile"] = v;
+	struct DelegationMetadata;
+	fn string_list_arg() {}
+	fn render_delegation_metadata_block() {}
+	let _ = "context_pack_path write_scope must_not_touch acceptance";
+	// starts idle and Autopilot remains the sole task-prompt owner`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
 	pub(crate) struct WorkstationRuntimeConfig {}
 	pub(crate) struct SlotTemplateRuntimeConfig {}
@@ -683,7 +706,8 @@ ToolResult::structured_error;`);
   writeFixture(root, DEFAULT_FILES.mcpComputeSlot, `
 "initial_prompt" "initialPrompt" "objective" "only" "model" "model_profile" "modelProfile" "coding-default-opus-4-7"`);
   writeFixture(root, DEFAULT_FILES.mcpTaskDelegate, `
-"timeout_secs" "default": 1800 "model" "model_profile" "modelProfile" "coding-default-opus-4-7"`);
+	"timeout_secs" "default": 1800 "model" "model_profile" "modelProfile" "coding-default-opus-4-7"
+	"task_class" "pool_hint" "engine_hint" "context_pack_path" "write_scope" "must_not_touch" "acceptance"`);
   writeFixture(root, DEFAULT_FILES.mcpCcTasks, `
 "mission_cc_swarm" "timeout-policy claudecode-swarm" "default": 600000`);
   return root;

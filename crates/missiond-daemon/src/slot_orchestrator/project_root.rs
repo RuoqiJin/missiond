@@ -83,9 +83,9 @@ pub async fn resolve_target_project_root(
             .ok_or_else(|| ResolutionError::CwdOutsideRegisteredProject {
                 cwd: cwd.to_path_buf(),
             })?;
-        let project = reg.get(&resolved_id).ok_or_else(|| {
-            ResolutionError::UnknownProjectId(resolved_id.clone())
-        })?;
+        let project = reg
+            .get(&resolved_id)
+            .ok_or_else(|| ResolutionError::UnknownProjectId(resolved_id.clone()))?;
         let root = PathBuf::from(&project.path);
         let requested = sub_path_or_none(cwd, &root);
         return Ok(ProjectRootResolution {
@@ -160,7 +160,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.project_id, "missiond");
-        assert_eq!(r.project_root, PathBuf::from("/Users/jin/Projects/missiond"));
+        assert_eq!(
+            r.project_root,
+            PathBuf::from("/Users/jin/Projects/missiond")
+        );
         assert!(r.requested_cwd.is_none());
         assert_eq!(r.source, ResolutionSource::ExplicitProjectId);
     }
@@ -173,7 +176,10 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.project_id, "missiond");
-        assert_eq!(r.project_root, PathBuf::from("/Users/jin/Projects/missiond"));
+        assert_eq!(
+            r.project_root,
+            PathBuf::from("/Users/jin/Projects/missiond")
+        );
         assert_eq!(r.requested_cwd, Some(cwd));
         assert_eq!(r.source, ResolutionSource::CwdLongestPrefix);
     }
@@ -196,7 +202,10 @@ mod tests {
         let err = resolve_target_project_root(None, Some(&cwd), None, &reg)
             .await
             .unwrap_err();
-        assert!(matches!(err, ResolutionError::CwdOutsideRegisteredProject { .. }));
+        assert!(matches!(
+            err,
+            ResolutionError::CwdOutsideRegisteredProject { .. }
+        ));
     }
 
     #[tokio::test]
@@ -224,6 +233,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(r.source, ResolutionSource::FallbackProjectId);
-        assert_eq!(r.project_root, PathBuf::from("/Users/jin/Projects/missiond"));
+        assert_eq!(
+            r.project_root,
+            PathBuf::from("/Users/jin/Projects/missiond")
+        );
     }
 }

@@ -65,7 +65,10 @@ fn sync_inner(
         .collect();
 
     if allow_entries.is_empty() && deny_entries.is_empty() {
-        debug!(role, "No learned permissions for this role; skipping settings sync");
+        debug!(
+            role,
+            "No learned permissions for this role; skipping settings sync"
+        );
         return Ok(());
     }
 
@@ -150,8 +153,7 @@ fn sync_inner(
 
     let serialized = serde_json::to_string_pretty(&root)?;
     let tmp = settings_path.with_extension("json.tmp");
-    std::fs::write(&tmp, serialized)
-        .with_context(|| format!("write {}", tmp.display()))?;
+    std::fs::write(&tmp, serialized).with_context(|| format!("write {}", tmp.display()))?;
     std::fs::rename(&tmp, &settings_path)
         .with_context(|| format!("rename {} → {}", tmp.display(), settings_path.display()))?;
 
@@ -186,7 +188,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let yaml_path = dir.path().join("perms.yaml");
         let learned = Arc::new(LearnedPermissions::new(&yaml_path).unwrap());
-        learned.learn("role", "coder", "Bash", "allow", Some("python3:*")).unwrap();
+        learned
+            .learn("role", "coder", "Bash", "allow", Some("python3:*"))
+            .unwrap();
 
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -197,7 +201,11 @@ mod tests {
         let content = std::fs::read_to_string(&settings_path).unwrap();
         let v: Value = serde_json::from_str(&content).unwrap();
         let allow = &v["permissions"]["allow"];
-        assert!(allow.as_array().unwrap().iter().any(|e| e == "Bash(python3:*)"));
+        assert!(allow
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|e| e == "Bash(python3:*)"));
     }
 
     #[test]
@@ -205,7 +213,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let yaml_path = dir.path().join("perms.yaml");
         let learned = Arc::new(LearnedPermissions::new(&yaml_path).unwrap());
-        learned.learn("role", "coder", "Bash", "allow", Some("python3:*")).unwrap();
+        learned
+            .learn("role", "coder", "Bash", "allow", Some("python3:*"))
+            .unwrap();
 
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(cwd.join(".claude")).unwrap();
@@ -239,7 +249,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let yaml_path = dir.path().join("perms.yaml");
         let learned = Arc::new(LearnedPermissions::new(&yaml_path).unwrap());
-        learned.learn("role", "coder", "Bash", "allow", Some("python3:*")).unwrap();
+        learned
+            .learn("role", "coder", "Bash", "allow", Some("python3:*"))
+            .unwrap();
 
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -263,12 +275,20 @@ mod tests {
         let yaml_path = dir.path().join("perms.yaml");
         let learned = Arc::new(LearnedPermissions::new(&yaml_path).unwrap());
         // Duplicate (Bash, python3:*) at both role and project.
-        learned.learn("role", "coder", "Bash", "allow", Some("python3:*")).unwrap();
-        learned.learn("project", "missiond", "Bash", "allow", Some("python3:*")).unwrap();
+        learned
+            .learn("role", "coder", "Bash", "allow", Some("python3:*"))
+            .unwrap();
+        learned
+            .learn("project", "missiond", "Bash", "allow", Some("python3:*"))
+            .unwrap();
         // Project-only WebFetch allow.
-        learned.learn("project", "missiond", "WebFetch", "allow", None).unwrap();
+        learned
+            .learn("project", "missiond", "WebFetch", "allow", None)
+            .unwrap();
         // Role-only Read allow.
-        learned.learn("role", "coder", "Read", "allow", None).unwrap();
+        learned
+            .learn("role", "coder", "Read", "allow", None)
+            .unwrap();
 
         let cwd = dir.path().join("project");
         std::fs::create_dir_all(&cwd).unwrap();

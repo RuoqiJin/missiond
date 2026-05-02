@@ -280,6 +280,8 @@ impl PTYManager {
                     if let Some(info) = agent_info.get_mut(&slot.id) {
                         info.state = SessionState::Exited;
                         info.pid = None;
+                        info.status_text = None;
+                        info.recognition = Some(session_state_snapshot(info.engine, info.state));
                     }
                 } else {
                     // Session exists but not running — clean it up
@@ -411,6 +413,9 @@ impl PTYManager {
                             if let Some(entry) = info.get_mut(&slot_id_for_events) {
                                 entry.state = SessionState::Exited;
                                 entry.pid = None;
+                                entry.status_text = None;
+                                entry.recognition =
+                                    Some(session_state_snapshot(entry.engine, entry.state));
                             }
                         }
                         let _ = event_tx.send(ManagerEvent::Exited {
@@ -470,6 +475,7 @@ impl PTYManager {
                 info.pid = pid;
                 info.state = state;
                 info.started_at = Some(Utc::now().timestamp_millis());
+                info.recognition = Some(session_state_snapshot(info.engine, info.state));
             }
         }
 
@@ -641,6 +647,10 @@ impl PTYManager {
                                         agent_info.pid = pid;
                                         agent_info.state = state;
                                         agent_info.started_at = Some(Utc::now().timestamp_millis());
+                                        agent_info.recognition = Some(session_state_snapshot(
+                                            agent_info.engine,
+                                            agent_info.state,
+                                        ));
                                     }
                                 }
 
@@ -937,6 +947,8 @@ impl PTYManager {
             if let Some(info) = agent_info.get_mut(slot_id) {
                 info.state = SessionState::Exited;
                 info.pid = None;
+                info.status_text = None;
+                info.recognition = Some(session_state_snapshot(info.engine, info.state));
             }
         }
 
@@ -962,12 +974,23 @@ impl PTYManager {
 
     /// Get session status
     pub async fn get_status(&self, slot_id: &str) -> Option<PTYAgentInfo> {
-        self.agent_info.read().await.get(slot_id).cloned()
+        self.agent_info
+            .read()
+            .await
+            .get(slot_id)
+            .cloned()
+            .map(normalize_agent_info)
     }
 
     /// Get all session statuses
     pub async fn get_all_status(&self) -> Vec<PTYAgentInfo> {
-        self.agent_info.read().await.values().cloned().collect()
+        self.agent_info
+            .read()
+            .await
+            .values()
+            .cloned()
+            .map(normalize_agent_info)
+            .collect()
     }
 
     /// Check if session is available (idle)
@@ -1069,6 +1092,8 @@ impl PTYManager {
                 if let Some(ai) = info.get_mut(&slot_id) {
                     ai.state = SessionState::Exited;
                     ai.pid = None;
+                    ai.status_text = None;
+                    ai.recognition = Some(session_state_snapshot(ai.engine, ai.state));
                 }
                 info!(slot_id = %slot_id, "PTY session killed");
             });
@@ -1079,6 +1104,15 @@ impl PTYManager {
     }
 }
 
+fn normalize_agent_info(mut info: PTYAgentInfo) -> PTYAgentInfo {
+    if matches!(info.state, SessionState::Exited | SessionState::Error) {
+        info.pid = None;
+        info.status_text = None;
+        info.recognition = Some(session_state_snapshot(info.engine, info.state));
+    }
+    info
+}
+
 /// Manager statistics
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct ManagerStats {
@@ -1087,4 +1121,44 @@ pub struct ManagerStats {
     pub idle: usize,
     pub busy: usize,
     pub stopped: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::pty_recognition::{PtyCanonicalState, PtyRecognitionSnapshot};
+    use missiond_shared::CliEngine;
+
+    #[test]
+    fn exited_status_overrides_stale_running_recognition() {
+        let info = PTYAgentInfo {
+            slot_id: "slot-codex-master-control".to_string(),
+            role: "orchestrator".to_string(),
+            engine: CliEngine::Codex,
+            pid: Some(947),
+            state: SessionState::Exited,
+            status_text: Some("Updating Codex".to_string()),
+            recognition: Some(PtyRecognitionSnapshot {
+                provider: CliEngine::Codex,
+                state: PtyCanonicalState::Running,
+                confidence: 0.8,
+                reason: "session_state:Thinking".to_string(),
+                phase: None,
+                active_tool: None,
+                elapsed_secs: None,
+                blocked_kind: None,
+                source: "session_state".to_string(),
+            }),
+            started_at: Some(1),
+            current_task_id: None,
+            log_file: PathBuf::from("/tmp/pty.log"),
+        };
+
+        let normalized = normalize_agent_info(info);
+        assert_eq!(normalized.pid, None);
+        assert_eq!(normalized.status_text, None);
+        let recognition = normalized.recognition.expect("recognition");
+        assert_eq!(recognition.state, PtyCanonicalState::Complete);
+        assert_eq!(recognition.reason, "session_state:Exited");
+    }
 }

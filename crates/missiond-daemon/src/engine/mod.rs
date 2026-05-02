@@ -6,6 +6,7 @@
 pub mod flow;
 pub mod intent_engine;
 pub mod learning_engine;
+pub mod master_control;
 
 // ── Backward-compatible re-exports ──
 // Keeps `use engine::autopilot` / `use crate::autopilot` working everywhere.

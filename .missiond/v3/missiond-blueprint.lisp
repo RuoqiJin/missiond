@@ -600,10 +600,11 @@
        "daemon startup SlotManager task configs MUST be generated from workstation-config startup-slot entries, including engine/lifecycle/slot_id/role/timeout_secs/skip_permissions"
        "mission_compute_slot dynamic template role/description/mcp_config/default_cwd and allowed cwd prefixes MUST project from workstation-config slot-template + cwd-policy dynamic-slot, not a Rust-local template table"
        "model=\"default\" and model_profile=coding-default-opus-4-7 both mean no CLI --model override"
-       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
-       "caller-supplied model wins over model_profile, but must be a single shell token"
-       "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
-       "mission_task_delegate intent=research without an explicit Claude coding model/model_profile MUST prefer the workstation-pool gemini researcher slot (slot-gemini-ultra) when registered; the researcher slot-template's :default-model-profile is research-default, which binds to the gemini-ultra worker. Auto-provisioning a dynamic Claude slot for research is forbidden while a V3 gemini researcher slot exists; the BoardTask is queued unassigned and the autopilot routes it to the gemini slot once idle. Explicit model_profile=coding-default-opus-4-7 (or any Claude profile) still routes the BoardTask to Claude."
+	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
+	       "caller-supplied model wins over model_profile, but must be a single shell token"
+	       "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
+	       "mission_task_delegate MUST accept structured two-stage delegation metadata (task_class, pool_hint, engine_hint, context_pack_path, write_scope, must_not_touch, acceptance) and persist it into the BoardTask description so Autopilot workers see context-pack path, exact write scope, forbidden paths, and acceptance commands without relying on side-channel PTY text."
+	       "mission_task_delegate intent=research without an explicit Claude coding model/model_profile MUST prefer the workstation-pool gemini researcher slot (slot-gemini-ultra) when registered; the researcher slot-template's :default-model-profile is research-default, which binds to the gemini-ultra worker. Auto-provisioning a dynamic Claude slot for research is forbidden while a V3 gemini researcher slot exists; the BoardTask is queued unassigned and the autopilot routes it to the gemini slot once idle. Explicit model_profile=coding-default-opus-4-7 (or any Claude profile) still routes the BoardTask to Claude."
        "Project-bound workstation spawn MUST sync MissionD Claude hooks into <project>/.claude/settings.local.json before PTY start and MUST inject MISSION_IPC_ENDPOINT into the slot env; this preserves global ~/.claude/settings.json while making SessionStart UUID capture and UserPromptSubmit context prefetch local, idempotent, and project-scoped"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs (default 1800s, clamped 60..7200) — never a fixed 600_000ms — so a delegated long-running task gets the timeout the delegator already declared"
        "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm (default 600s, clamped 60..7200) — never a local 600_000ms literal"
@@ -613,7 +614,9 @@
        "Dynamic slot TTL and per-request extension budget MUST project from workstation-config ttl-policy dynamic-slot (create default 14400s, clamped 300..28800; extend default/max 3600s) — direct mission_compute_slot create/extend and delegated task_delegate auto-provision must not hardcode the TTL window"
        "Smart watchdog idle-recovery threshold MUST equal the projected pty.send budget plus a small grace (default 120s); only the no-PTY-session branch may reclaim sooner so a missing process can never wedge the slot"
        "Autopilot BoardTask claim lease MUST equal the smart-watchdog idle-recovery threshold (projected pty.send budget plus grace); the legacy fixed 20-minute lease is forbidden because it lets the watchdog reclaim a slot whose claim is still legitimately ticking inside the declared timeout"
-       "Autopilot summary-note source MUST be extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response is forbidden in the **Autopilot 执行完成** note format string and in the synthesized mission_execution(action=complete) summary because the Claude Code TUI screen capture surfaces the echoed task contract, ●/⎿ tool log lines, and `[Pasted text +N lines, paste again to expand]` collapse markers — the auth-error and quota-exhausted diagnostic notes intentionally bypass this extractor and keep the raw response so on-call sees the verbatim platform error"]
+       "Autopilot summary-note source MUST be extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response is forbidden in the **Autopilot 执行完成** note format string and in the synthesized mission_execution(action=complete) summary because the Claude Code TUI screen capture surfaces the echoed task contract, ●/⎿ tool log lines, and `[Pasted text +N lines, paste again to expand]` collapse markers — the auth-error and quota-exhausted diagnostic notes intentionally bypass the extractor and keep the raw response so on-call sees the verbatim platform error"
+       "Autopilot close path MUST call wait_for_worker_final_settle_window() after pty.send completion and before summary-note / mission_execution / BoardTask done writes; PTY idle alone is diagnostic, while pty.send completion plus settle window is the fallback high-confidence final summary path when provider JSONL is not directly attached to the slot."
+       "If pty.send returns an active/progress frame but the provider or master later writes a durable BoardTask summary note and the claimed slot is idle, Autopilot watchdog MUST close the running BoardTask from durable summary note + idle slot evidence; it MUST NOT wait for the full timeout/grace or close from PTY idle alone."]
     (prompt-tool-contract autopilot-claudecode-prompt
       :applies-to [coder researcher ops]
       :always-shown
@@ -635,8 +638,10 @@
         (:default "Autopilot is the close owner — when state.pty.send returns Complete, Autopilot transitions the BoardTask running→done and writes the summary note."
          :worker-self-close "If the slot has board MCP tools attached and the worker already drove the BoardTask to Done via mission_board_update before pty.send returns, Autopilot preserves the worker's Done state and only logs that the task self-closed."
          :execution-log-synthesis "If the delegated prompt carries a pre-opened mission_execution log and the slot returned a final summary without appending a completion, Autopilot MUST synthesize mission_execution(action=complete, commit_status=\"not-required\", enforce_scoped_commit=true) before closing the BoardTask."
-         :summary-note-source "The `**Autopilot 执行完成**` BoardTask summary note and the synthesized mission_execution(action=complete) summary MUST be projected through extract_worker_final_summary(res.response, full_prompt) and capped via truncate_safe; passing raw res.response into the note format string is forbidden because the Claude Code TUI screen capture includes the echoed prompt + task contract, tool-call log lines (●/⎿), and `[Pasted text +N lines, paste again to expand]` collapse markers, all of which pollute the BoardTask record. Auth-error and quota-exhausted diagnostic notes intentionally bypass the extractor and keep the raw response so on-call operators see the verbatim platform error."
-         :blocked "If the task transitioned to Blocked (e.g. mission_question_create) during execution, Autopilot preserves the Blocked state on pty.send return and never overwrites it with done.")
+	         :summary-note-source "The `**Autopilot 执行完成**` BoardTask summary note and the synthesized mission_execution(action=complete) summary MUST be projected through extract_worker_final_summary(res.response, full_prompt) and capped via truncate_safe; passing raw res.response into the note format string is forbidden because the Claude Code TUI screen capture includes the echoed prompt + task contract, tool-call log lines (●/⎿), and `[Pasted text +N lines, paste again to expand]` collapse markers, all of which pollute the BoardTask record. Auth-error and quota-exhausted diagnostic notes intentionally bypass the extractor and keep the raw response so on-call operators see the verbatim platform error."
+	         :settle-window "After pty.send returns Complete, Autopilot MUST wait through wait_for_worker_final_settle_window() before writing the summary note, synthesizing mission_execution completion, or transitioning the BoardTask to Done; this projects resident-master-control settle-policy into the muscle layer."
+	         :idle-durable-summary-close "If pty.send returned an active/progress frame and left the BoardTask running, a later watchdog tick MAY close only when the claimed slot is Idle AND get_board_task_with_notes shows a claim-after durable summary note; this closes from durable evidence plus idle diagnosis, never from PTY idle alone."
+	         :blocked "If the task transitioned to Blocked (e.g. mission_question_create) during execution, Autopilot preserves the Blocked state on pty.send return and never overwrites it with done.")
       :dispatch-guard
         "The per-slot dispatch guard MUST be held across the entire state.pty.send call; the legacy release-before-send pattern allowed a second caller to dispatch to the same slot mid-flight. The guard is per-slot, so holding it does not starve callers targeting other slots."
       :concurrent-slot-dispatch
@@ -749,6 +754,7 @@
     :role [orchestrator brain]
     :permissions [read-code read-lisp read-board write-board write-kb write-execution-log dispatch-workers read-event-bus]
     :default-code-write false
+    :surfaces [master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler]
     :checkpoint
       (:sources [mission_execution companion-log BoardTask-note master-control-checkpoint]
        :write-on [turn-start delegation-created delegation-complete daemon-restart-before-exit periodic-heartbeat]
@@ -767,11 +773,77 @@
        (tier t3 :source [provider-aware-pty-recognition screen-buffer] :use "diagnostic state only; never sole completion authority"))
     :settle-policy
       "A worker can be closed only after durable final event or high-confidence final summary plus settle window; idle PTY alone is insufficient because provider SSE/final JSONL can lag the prompt returning."
+    (master-checkpoint
+      :entry [daemon-startup event-wakeup periodic-heartbeat daemon-restart-before-exit]
+      :core
+        ((step s1 :logic "read latest event cursor, queue counters, blocked reason, MCP readiness, and current objective")
+         (step s2 :logic "record daemon restart/startup context for checkpoint visibility without calling notify or incrementing queued control events")
+         (step s3 :logic "resolve checkpoint root from the V3-projected master slot project_root/cwd; never infer it from daemon process current_dir")
+         (step s4 :logic "render master-control-checkpoint.lisp under .missiond/v3/runtime; last-control-prompt is nil for heartbeat/startup ticks and present only when a control turn is dispatchable")
+         (step s5 :logic "store resume plan with provider-log-first evidence authority"))
+      :egress [".missiond/v3/runtime/master-control-checkpoint.lisp" "mission_master_status.checkpoint"]
+      :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::write_startup_checkpoint_for_slot"
+                 "crates/missiond-daemon/src/engine/master_control.rs::render_checkpoint"])
+    (master-event-subscriber
+      :entry [BoardEvent SlotEvent QuestionEvent ProjectRegistryChanged DaemonRestart StaleTask NightSchedule]
+      :core
+        ((step s1 :logic "subscribe to BoardEvent, SlotEvent, and QuestionEvent with live-only v2 subscription names, StartFrom::Latest, and PerEvent cursor flush so daemon restart does not replay historical backlog")
+         (step s2 :logic "ignore slot-codex-master-control self SlotEvents so the resident brain cannot trigger an infinite self-prompt loop")
+         (step s3 :logic "ignore seq=0 volatile events and ordinary SlotEvent.became_idle noise; PTY idle is diagnostic only, not a master-control wakeup authority")
+         (step s4 :logic "filter low-value Board completion acknowledgements before the model: status_changed->done/completed/closed, claimed, and deleted events do not wake the resident master; created/open/blocked/failed/meaningful-updated events still wake")
+         (step s5 :logic "same-process Board tool handlers also call notify_board_event_direct immediately after durable DB mutation and before/alongside event-log publish, so master wakeup is not blocked behind dispatcher backlog; Board notes authored by codex-master-control MUST NOT direct-notify the master again")
+         (step s6 :logic "record only wakeup metadata and ack immediately")
+         (step s7 :logic "notify master-decision-loop; never run long worker dispatch inline"))
+      :egress [master-control-runtime.event-cursor master-control-runtime.queued-events master-control-runtime.notify]
+      :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::spawn_master_event_subscriber"])
+    (master-decision-loop
+      :entry [master-control-runtime.notify periodic-heartbeat]
+      :core
+        ((step s1 :logic "probe codex MCP server readiness from codex mcp list and unattended approval readiness from ~/.codex/config.toml tool approval_mode entries")
+	         (step s2 :logic "build short Codex control prompt with event_cursor + event_summary; require MissionD MCP first (mission_intent, mission_board_query, mission_conversation_query, mission_kb_query), query BoardTask by id for Board events, call mission_task_delegate directly for delegation requests with two-stage metadata when available, use mission_board_note_add for progress/summary notes, and forbid broad shell scans unless MCP surfaces are missing")
+         (step s3 :logic "write checkpoint before any durable Board/KB/dispatch action")
+         (step s4 :logic "on daemon-startup, ensure slot-codex-master-control is spawned when Exited/Error but do not consume a control turn; startup is for residency, not decision work")
+         (step s5 :logic "before sending an event control turn, ensure slot-codex-master-control is spawned when Exited/Error, wait briefly for Idle/SlashMenu, and verify the visible Codex footer still matches gpt-5.5 xhigh; if the slot was downgraded by an interactive model/rate-limit prompt, restart it before dispatch")
+         (step s6 :logic "send control turns to slot-codex-master-control only on event-wakeup, with MCP server ready, required MCP tool approvals ready, and rate-limit guard")
+         (step s7 :logic "detect code-first diffs and create a deduped backfill BoardTask instead of silently accepting Lisp/code drift")
+         (step s8 :logic "defer long work to BoardTask/Autopilot and provider durable logs"))
+      :egress [master-control-checkpoint mission_master_status.service]
+      :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::spawn_master_decision_loop"
+                 "crates/missiond-daemon/src/engine/master_control.rs::build_master_tick_prompt"])
+    (master-delegation
+      :entry [dispatchable-objective exact-shard context-pack]
+      :core
+        ((step s1 :logic "create read-only context organizer BoardTasks before code shards")
+         (step s2 :logic "compile accepted context-pack into exact file/region write scopes")
+         (step s3 :logic "delegate Claude/Gemini/Codex workers only through BoardTask/Autopilot metadata")
+         (step s4 :logic "require BoardTask ID, context-pack path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs in every prompt"))
+      :egress [BoardTaskCreated SlotEvent::TaskDispatched mission_execution])
+    (master-recovery
+      :entry [daemon-restart startup-checkpoint stale-task durable-provider-log]
+      :core
+        ((step s1 :logic "load checkpoint event cursor, delegated task ids, blocked reason, and resume plan")
+         (step s2 :logic "reconcile Board open tasks against provider JSONL/Codex sqlite/Gemini chat files")
+         (step s3 :logic "resume or requeue only from durable evidence; PTY recognition is diagnostic")
+         (step s4 :logic "never auto-hide, skip, delete, or mutate historical Board cleanup candidates; legacy ops cleanup remains user-directed"))
+      :egress [mission_master_status.service BoardTask-note])
+    (night-scheduler
+      :entry [schedule-metadata manual-objective]
+      :core
+        ((step s1 :logic "materialize night tasks as BoardTasks with explicit project and evidence scope")
+         (step s2 :logic "prefer read-only upstream-source audit and context-pack generation")
+         (step s3 :logic "checkpoint before and after each batch so daemon restart can resume"))
+      :egress [BoardTaskCreated master-control-checkpoint])
+    :mcp-readiness
+      (:source "~/.codex/config.toml"
+       :probe "codex mcp list"
+       :required-server missiond
+       :required-tool-approvals [mission_intent mission_board_query mission_conversation_query mission_kb_query mission_board_create mission_board_update mission_board_note_add mission_kb_remember mission_task_delegate mission_compute_slot mission_master_status mission_slots mission_pty_status]
+       :status-surface [mission_master_status.mcpReady mission_master_status.mcpEnabled mission_master_status.mcpApprovalReady])
     :checker "node scripts/check-v3-master-control-isomorphism.mjs")
 
   (lisp-code-drift-policy
     :desc "Governance rule for code changes that arrive before their Lisp SSOT design delta."
-    :normal-rule "Feature/code changes must map to a V3/project blueprint surface changed in the same task or to an existing surface whose checker pins the behavior."
+    :normal-rule "Feature/code changes must map to a V3/project blueprint surface changed in the same task or to an existing surface whose checker pins the behavior; BoardTask close-to-done is blocked while unbackfilled code-first drift exists."
     :emergency-waiver
       (:allowed true
        :requires [waiver-id reason changed-files affected-surface expiry]
@@ -779,7 +851,12 @@
     :backfill-task
       (:title "Backfill Lisp/checker for emergency code change"
        :owner resident-master-control
+       :trigger "git diff contains code surfaces under crates/packages/scripts but no .lisp or evidence delta"
+       :dedupe-key "lisp-code-drift:<changed-code-file-hash>"
        :must-include [blueprint-delta checker-delta evidence-note surface-map])
+    :close-gate
+      (:entry [mission_board_update mission_board_batch_update mission_board_toggle]
+       :rule "status=done/toggle-to-done calls drift guard before mutating the task; on drift, return a structured error and keep the original task open while creating/reusing the visible backfill task")
     :checker "node scripts/check-v3-direct-code-drift-policy.mjs")
 
   (hot-reload-policy
@@ -972,13 +1049,20 @@
       :status project-ssot-owned
       :missiond-role "registered project; Lisp/component reuse engine, not MissionD runtime orchestrator"
       :surface project-registry)
-    (project :id deploy-center
-      :kind ops-service
-      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
-      :intent ".missiond/intent.lisp"
-      :status evidence-registered
-      :capability deploy-ops
-      :surface project-registry))
+	    (project :id deploy-center
+	      :kind ops-service
+	      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center"
+	      :intent ".missiond/intent.lisp"
+	      :status universe-imported
+	      :capability deploy-ops
+	      :surface project-registry)
+	    (project :id xjp-deploy-center
+	      :kind ops-service-source
+	      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
+	      :intent ".missiond/intent.lisp"
+	      :status runtime-registered
+	      :capability deploy-ops
+	      :surface project-registry))
 
   (capability-governance-policy
     :desc "Lisp-owned capability audit policy; runtime review paths and protected lists are projections, not Rust-only constants."
@@ -1094,6 +1178,7 @@
        "Legacy claude_cli and PTY transport pty_jsonl remain read aliases only; new non-transport source fields MUST name the canonical CLI."
        "mission_pty_status and mission_slots observability MUST be joinable with the latest conversation row by slot/session id and source."
        "mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine; stale provider drift must never masquerade as current state."
+       "Codex CLI slot_sessions may contain a PTY placeholder id; mission_slots MUST fall back to the latest real codex_cli conversation for the slot project instead of surfacing a messageCount=0 placeholder as the latest durable conversation."
        "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."]
     :checker "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs")
 
@@ -1133,6 +1218,7 @@
        "Autopilot watchdogs MUST treat low-confidence unknown as diagnostic state rather than automatic BoardTask closure evidence."
        "If an upstream TUI signal changes, checker failure is preferred over silent downgrade to generic prompt heuristics."
        "recognize_screen MUST fuse SessionState with screen heuristics: an active processing SessionState (Thinking, Responding, ToolRunning) MUST NOT be demoted to Blocked from screen_fallback confirmation or model-picker text; the fused snapshot is sourced from screen_fused active evidence or session_state, and explicit Confirming SessionState always preserves Blocked."
+       "Exited/terminal SessionState overrides stale running screen evidence; mission_pty_status and mission_slots MUST NOT expose recognition.state=running when the durable PTY session state is exited or error."
        "Codex MCP approval menus (`Allow the ... MCP server to run tool`, `Allow for this session`, `enter to submit | esc to cancel`) are explicit blocked TUI source signatures and MUST NOT be demoted to Running just because the SessionState is Thinking."
        "mission_pty_confirm MUST confirm option menus by human-like keyboard navigation (Down/Up then Enter), never by sending numeric shortcut keys; this applies to ClaudeCode, Codex CLI, and Gemini CLI."
        "recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI (Enter to confirm, Do you want to proceed/make this edit/allow/use this api key, Select model, approval request); the bare words `approval` or `permission(s)` -- including the `bypass permissions on` composer-mode footer toggle and historical task-brief prose -- MUST NOT trigger Blocked on Idle or completed screens."]
@@ -1653,12 +1739,13 @@
         :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status])
       (function lisp-code-drift
         :surface lisp-code-drift-policy
-        :entry [git-diff task-contract blueprint-registry emergency-waiver]
+        :entry [git-diff task-contract blueprint-registry emergency-waiver board-task-close]
         :core ((step s1 :logic "map changed files to V3/project blueprint surfaces")
                (step s2 :logic "require same-task Lisp/checker delta for normal behavior changes")
                (step s3 :logic "allow emergency code-first fixes only with waiver metadata")
-               (step s4 :logic "create backfill BoardTask for Lisp/checker/evidence convergence"))
-        :egress [drift_result waiver_record backfill_boardtask]))
+               (step s4 :logic "create backfill BoardTask for Lisp/checker/evidence convergence")
+               (step s5 :logic "block BoardTask close-to-done until drift has a Lisp/checker/evidence backfill"))
+        :egress [drift_result waiver_record backfill_boardtask close_blocked_error]))
 
     (pillar coordination
       (function context-pack
@@ -1709,8 +1796,8 @@
         :core ((step s1 :logic "subscribe to event-bus BoardEvent and SlotEvent nerves")
                (step s2 :logic "wake the dedicated Autopilot task without running pty.send inside the subscriber")
                (step s3 :logic "claim eligible BoardTask rows, select or provision slots, and hold per-slot dispatch guards")
-               (step s4 :logic "send prompts once through Autopilot, emit SlotEvent::TaskDispatched, and reconcile mission_execution completion")
-               (step s5 :logic "close BoardTask through Autopilot-owned status transition or preserve worker self-close/blocked states"))
+	               (step s4 :logic "send prompts once through Autopilot, emit SlotEvent::TaskDispatched, wait_for_worker_final_settle_window, and reconcile mission_execution completion")
+	               (step s5 :logic "close BoardTask only after durable/high-confidence final evidence settle, close delayed active-frame tasks from durable summary note plus idle slot evidence, or preserve worker self-close/blocked states"))
         :egress [BoardEvent SlotEvent ExecutionEvent board_task_status mission_execution_completion])
       (function workstation-dispatch
         :surface workstation-dispatch
@@ -2211,9 +2298,11 @@
       :status "code-aligned"
       :implements [lisp-code-drift]
       :code [".missiond/v3/missiond-blueprint.lisp"
+             "crates/missiond-daemon/src/engine/master_control.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/board/update.rs"
              "scripts/check-v3-direct-code-drift-policy.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "lisp-code-drift-policy is the governance surface for code-first exceptions. Normal behavior changes must carry a same-task Lisp/checker delta or map to an already pinned surface. Emergency code-first fixes are allowed only with waiver metadata and must immediately create a backfill BoardTask that adds the missing blueprint, checker, and evidence; the checker pins the policy and can be run in explicit diff-enforcement mode by later hooks.")
+      :note "lisp-code-drift-policy is the governance surface for code-first exceptions. Normal behavior changes must carry a same-task Lisp/checker delta or map to an already pinned surface. Emergency code-first fixes are allowed only with waiver metadata and must immediately create a visible backfill BoardTask that adds the missing blueprint, checker, and evidence. The runtime close gate in mission_board_update/mission_board_batch_update/mission_board_toggle blocks status=done while unresolved code-first drift exists, so code-first work cannot be closed without Lisp/checker/evidence convergence.")
 
     (surface context-pack
       :status "code-aligned"
@@ -2241,7 +2330,7 @@
              "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-mcp/src/tools/compute/compute_slot.rs"
              "crates/missiond-mcp/src/tools/compute/task_delegate.rs"]
-	    :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. main.rs startup SlotManager registration loads WorkstationRuntimeConfig and generates persistent SlotTaskConfig rows by iterating workstation-config startup-slot entries; ClaudeCode startup slots project their model_profile through spawn_model_for_profile, so arch maintenance and Lisp survey no longer hardcode claude-sonnet-4-6 or local timeout literals. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-012]")
+	    :note "mission_compute_slot and mission_task_delegate accept model/model_profile; coder/researcher default to Claude Code Default(Opus 4.7/1M) by omitting --model. mission_task_delegate also accepts two-stage delegation metadata (task_class, pool_hint, engine_hint, context_pack_path, write_scope, must_not_touch, acceptance) and records it into the BoardTask description for Autopilot worker prompts. main.rs startup SlotManager registration loads WorkstationRuntimeConfig and generates persistent SlotTaskConfig rows by iterating workstation-config startup-slot entries; ClaudeCode startup slots project their model_profile through spawn_model_for_profile, so arch maintenance and Lisp survey no longer hardcode claude-sonnet-4-6 or local timeout literals. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-012]")
 
     (surface workstation-pool
       :status "code-aligned"
@@ -2261,14 +2350,16 @@
 
     (surface resident-master-control
       :status "code-aligned"
-      :implements [resident-master-control]
+      :implements [resident-master-control master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler]
       :code [".missiond/v3/missiond-blueprint.lisp"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/engine/master_control.rs"
              "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/handlers/compute/slot.rs"
              "crates/missiond-pty/src/session.rs"
              "crates/missiond-core/src/types/slot.rs"
              "scripts/check-v3-master-control-isomorphism.mjs"]
-      :note "resident-master-control promotes Codex to a first-class, non-shard orchestrator worker. V3 declares codex-master-control with GPT-5.5, xhigh reasoning, search enabled, read-only code sandbox, and Board/KB/execution-log/dispatch permissions. Runtime projection carries model/reasoning/search/sandbox/approval through SlotConfig and PTYSpawnOptions into the Codex CLI command; daemon startup writes master-control-checkpoint.lisp when the slot is registered; mission_master_status exposes the V3 worker projection, PTY recognition snapshot, evidence authority, and latest checkpoint so restart recovery is observable.")
+      :note "resident-master-control promotes Codex to a first-class, non-shard orchestrator worker. V3 declares codex-master-control with GPT-5.5, xhigh reasoning, search enabled, read-only code sandbox, and Board/KB/execution-log/dispatch permissions. Runtime projection carries model/reasoning/search/sandbox/approval through SlotConfig and PTYSpawnOptions into the Codex CLI command. MasterControlService subscribes to BoardEvent/SlotEvent/QuestionEvent, records wakeup metadata, writes master-control-checkpoint.lisp, probes Codex MCP readiness through codex mcp list, and exposes eventCursor/queuedEvents/MCP readiness through mission_master_status. Durable provider logs remain completion authority; PTY recognition is diagnostic only.")
 
     (surface autopilot-runtime
       :status "code-aligned"

@@ -16,6 +16,12 @@ export interface SlotDef {
   modelProfile?: string;
   taskClass?: string;
   acceptsBoardTask?: boolean;
+  mcpReady?: boolean;
+  mcpEnabled?: boolean;
+  mcpApprovalReady?: boolean;
+  mcpApprovalMissingTools?: string[];
+  mcpSource?: string;
+  providerConversationId?: string;
   confidence?: number;
   reason?: string;
   activeTool?: string;
@@ -26,6 +32,8 @@ export interface SlotDef {
     id?: string;
     source?: string;
     title?: string;
+    messageCount?: number;
+    status?: string;
     updatedAt?: string;
   } | null;
 }
