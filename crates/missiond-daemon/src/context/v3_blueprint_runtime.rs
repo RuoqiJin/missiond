@@ -132,6 +132,7 @@ pub(crate) const DEFAULT_LEARNING_DECISION_HARVEST_INTERVAL_SECS: i64 = 86400;
 pub(crate) const DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS: i64 = 6 * 3600;
 pub(crate) const DEFAULT_DAILY_SONNET_PROFILE: &str = "daily-sonnet";
 pub(crate) const DEFAULT_QUICK_HAIKU_PROFILE: &str = "quick-haiku";
+pub(crate) const DEFAULT_RESEARCH_PROFILE: &str = "research-default";
 pub(crate) const DEFAULT_ROUTER_CHAT_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_CHAT_MAX_TOKENS: u32 = 16384;
 pub(crate) const DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS: u32 = 65536;
@@ -478,7 +479,7 @@ fn default_slot_templates() -> HashMap<String, SlotTemplateRuntimeConfig> {
             name: "researcher".to_string(),
             role: "coder".to_string(),
             description: "Dynamic researcher slot (read-only analysis)".to_string(),
-            default_model_profile: Some(DEFAULT_MODEL_PROFILE.to_string()),
+            default_model_profile: Some(DEFAULT_RESEARCH_PROFILE.to_string()),
             mcp_config: Some(DEFAULT_SLOT_MCP_CONFIG.to_string()),
             default_cwd: DEFAULT_SLOT_DEFAULT_CWD.to_string(),
         },
@@ -511,6 +512,7 @@ impl Default for WorkstationRuntimeConfig {
             .collect();
         let mut model_profile_spawn_args = HashMap::new();
         model_profile_spawn_args.insert(DEFAULT_MODEL_PROFILE.to_string(), None);
+        model_profile_spawn_args.insert(DEFAULT_RESEARCH_PROFILE.to_string(), None);
         model_profile_spawn_args.insert(
             DEFAULT_DAILY_SONNET_PROFILE.to_string(),
             Some("sonnet".to_string()),
@@ -930,6 +932,9 @@ impl WorkstationRuntimeConfig {
             "default" | "claude-code-default" | "coding-default" | "opus-4-7-default" => {
                 DEFAULT_MODEL_PROFILE
             }
+            "research" | "research-default" | "gemini-default" | "gemini-researcher" => {
+                DEFAULT_RESEARCH_PROFILE
+            }
             "sonnet" => DEFAULT_DAILY_SONNET_PROFILE,
             "haiku" => DEFAULT_QUICK_HAIKU_PROFILE,
             other => other,
@@ -943,6 +948,34 @@ impl WorkstationRuntimeConfig {
                     profile
                 ))
             })
+    }
+
+    /// V3 workstation-config :: model-profile research-default binding.
+    ///
+    /// Returns true when the given profile name (after alias normalization)
+    /// pins routing to the workstation-pool gemini researcher worker. This is
+    /// the signal mission_task_delegate uses to prefer the gemini researcher
+    /// slot over auto-provisioning a Claude coder slot for read-only research.
+    pub(crate) fn profile_routes_to_gemini_researcher(profile: &str) -> bool {
+        let normalized = normalize_model_profile_name(profile);
+        matches!(
+            normalized.as_str(),
+            "research" | "research-default" | "gemini-default" | "gemini-researcher"
+        )
+    }
+
+    /// V3 workstation-pool :: gemini researcher candidate.
+    ///
+    /// Returns the slot_id of the first registered workstation-pool worker
+    /// that accepts BoardTasks, runs Gemini, and is read-only. None when the
+    /// pool has no such worker (e.g. before V3 startup registers the pool).
+    pub(crate) fn gemini_researcher_pool_slot_id(&self) -> Option<&str> {
+        self.workstation_pool
+            .iter()
+            .find(|worker| {
+                worker.accepts_boardtask && worker.engine == "gemini" && worker.role == "researcher"
+            })
+            .map(|worker| worker.slot_id.as_str())
     }
 
     pub(crate) fn clamp_timeout_secs(&self, timeout_secs: Option<i64>) -> i64 {

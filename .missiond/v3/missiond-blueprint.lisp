@@ -487,6 +487,11 @@
       :effective-model "Opus 4.7 with 1M context"
       :spawn-model-arg nil
       :rule "Omit --model so Claude Code uses the user's Default model selection.")
+    (model-profile research-default
+      :applies-to [research review context-pack lisp-compression]
+      :pool-binding gemini-ultra
+      :spawn-model-arg nil
+      :rule "Research-class delegations route to the workstation-pool gemini researcher slot. spawn-model-arg is nil because the binding is to a pre-spawned Gemini PTY; explicit caller model_profile=coding-default-opus-4-7 overrides this and pins the work to Claude.")
     (model-profile daily-sonnet
       :applies-to [ops low-risk-maintenance]
       :spawn-model-arg "sonnet"
@@ -504,7 +509,7 @@
     (slot-template researcher
       :role coder
       :description "Dynamic researcher slot (read-only analysis)"
-      :default-model-profile coding-default-opus-4-7
+      :default-model-profile research-default
       :mcp-config "/Users/jinchen/.xjp-mission/xjp-mcp-config.json"
       :default-cwd "/Users/jinchen/Projects")
     (slot-template ops
@@ -584,6 +589,7 @@
        "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg, not a Rust-local profile table"
        "caller-supplied model wins over model_profile, but must be a single shell token"
        "task_delegate must pass model/model_profile through to compute_slot and must not reuse an idle slot with a conflicting model override"
+       "mission_task_delegate intent=research without an explicit Claude coding model/model_profile MUST prefer the workstation-pool gemini researcher slot (slot-gemini-ultra) when registered; the researcher slot-template's :default-model-profile is research-default, which binds to the gemini-ultra worker. Auto-provisioning a dynamic Claude slot for research is forbidden while a V3 gemini researcher slot exists; the BoardTask is queued unassigned and the autopilot routes it to the gemini slot once idle. Explicit model_profile=coding-default-opus-4-7 (or any Claude profile) still routes the BoardTask to Claude."
        "Project-bound workstation spawn MUST sync MissionD Claude hooks into <project>/.claude/settings.local.json before PTY start and MUST inject MISSION_IPC_ENDPOINT into the slot env; this preserves global ~/.claude/settings.json while making SessionStart UUID capture and UserPromptSubmit context prefetch local, idempotent, and project-scoped"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs (default 1800s, clamped 60..7200) — never a fixed 600_000ms — so a delegated long-running task gets the timeout the delegator already declared"
        "mission_cc_swarm pty.send budget MUST project from workstation-config timeout-policy claudecode-swarm (default 600s, clamped 60..7200) — never a local 600_000ms literal"

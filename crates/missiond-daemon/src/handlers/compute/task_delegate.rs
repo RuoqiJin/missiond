@@ -155,16 +155,40 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         }
     };
 
+    // V3 workstation-pool gemini researcher binding. Research-class delegations
+    // without an explicit Claude raw model token go to the read-only Gemini
+    // researcher slot when one is registered. The signal is the effective
+    // model_profile: research-default (or its aliases) routes to gemini, every
+    // other Claude profile (coding-default-opus-4-7, daily-sonnet, quick-haiku,
+    // explicit caller model) falls through to the existing Claude path.
+    let routes_to_gemini_researcher = model_arg.is_none()
+        && effective_model_profile
+            .map(WorkstationRuntimeConfig::profile_routes_to_gemini_researcher)
+            .unwrap_or(false);
+    let gemini_researcher_slot_id = runtime_config
+        .gemini_researcher_pool_slot_id()
+        .map(str::to_string);
+    let prefer_gemini_researcher =
+        routes_to_gemini_researcher && gemini_researcher_slot_id.is_some();
+
     // Phase 6.1: Find idle slot with RAII guard (atomic check+reserve).
     // intent-flow.lisp F-task-delegate-autoprovision :: s2 requires
     // slot.project_root == target_project_root for reuse.
-    let guard = find_and_reserve_slot(
-        state,
-        template,
-        target_project_root.as_deref(),
-        requested_model.as_deref(),
-    )
-    .await;
+    let guard = if prefer_gemini_researcher {
+        find_and_reserve_gemini_researcher_slot(
+            state,
+            gemini_researcher_slot_id.as_deref().unwrap(),
+        )
+        .await
+    } else {
+        find_and_reserve_slot(
+            state,
+            template,
+            target_project_root.as_deref(),
+            requested_model.as_deref(),
+        )
+        .await
+    };
     let assignee = guard
         .as_ref()
         .map(|g| g.slot_id().to_string())
@@ -173,28 +197,31 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     // 2. If no idle slot, try auto-provision dynamic slot
     let (assignee, provisioned) = if !assignee.is_empty() {
         (assignee, false)
-    } else {
+    } else if prefer_gemini_researcher {
+        // V3: never auto-provision a dynamic Claude slot for research while a
+        // gemini researcher slot is registered. Queue unassigned so the
+        // autopilot can route the BoardTask to the gemini slot once idle.
+        (String::new(), false)
+    } else if template == "ops" {
         // Phase 6.2: Guard uses template, not intent — prevents intent escape
-        if template == "ops" {
-            // Queue without assignee; autopilot will pick up when a slot frees
-            (String::new(), false)
-        } else {
-            match auto_provision_slot(
-                state,
-                template,
-                objective,
-                &runtime_config,
-                cwd,
-                model_arg.as_deref(),
-                effective_model_profile,
-            )
-            .await
-            {
-                Ok(id) => (id, true),
-                Err(e) => {
-                    tracing::warn!("Auto-provision failed, queueing without assignee: {}", e);
-                    (String::new(), false)
-                }
+        // Queue without assignee; autopilot will pick up when a slot frees
+        (String::new(), false)
+    } else {
+        match auto_provision_slot(
+            state,
+            template,
+            objective,
+            &runtime_config,
+            cwd,
+            model_arg.as_deref(),
+            effective_model_profile,
+        )
+        .await
+        {
+            Ok(id) => (id, true),
+            Err(e) => {
+                tracing::warn!("Auto-provision failed, queueing without assignee: {}", e);
+                (String::new(), false)
             }
         }
     };
@@ -283,8 +310,32 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "model_profile": effective_model_profile,
         "provisioned_new_slot": provisioned,
         "timeout_secs": timeout_secs,
+        "routes_to_gemini_researcher": routes_to_gemini_researcher,
+        "gemini_researcher_slot": gemini_researcher_slot_id,
         "hint": "结果将通过 TaskNotification 自动回报。也可用 mission_board_get 查询进度。"
     })))
+}
+
+/// V3 workstation-pool :: gemini researcher acquire.
+///
+/// Atomically reserves the workstation-pool gemini researcher slot via the
+/// dispatch guard if it exists and is idle. Returns the RAII guard on success;
+/// None when the slot is not registered, busy, or its PTY is missing/non-idle.
+/// Project-root match is intentionally not enforced — the gemini researcher
+/// slot is read-only and serves any project (matches autopilot's
+/// `select_workstation_pool_slot` behaviour).
+async fn find_and_reserve_gemini_researcher_slot<'a>(
+    state: &'a AppState,
+    slot_id: &str,
+) -> Option<SlotAcquireGuard<'a>> {
+    if state.mission.get_slot(slot_id).is_none() {
+        return None;
+    }
+    let guard = state.slot_dispatch.try_acquire_guard(slot_id)?;
+    match state.pty.get_status(guard.slot_id()).await {
+        Some(info) if info.state == SessionState::Idle => Some(guard),
+        _ => None, // guard dropped here → auto-releases
+    }
 }
 
 /// Phase 6.1: Find an idle slot and atomically reserve it via RAII guard.
@@ -567,5 +618,92 @@ mod tests {
         assert!(args.get("cwd").is_none());
         assert!(args.get("model").is_none());
         assert!(args.get("model_profile").is_none());
+    }
+
+    // ── V3 workstation-pool :: gemini researcher binding ─────────────────
+    //
+    // Pins the routing decision research-default → gemini-ultra. Pure-helper
+    // tests run against `WorkstationRuntimeConfig::default()` which mirrors the
+    // blueprint defaults for `researcher` slot-template and the gemini-ultra
+    // workstation-pool worker, so the audit's `model_profile=research-default`
+    // case stops failing and research intent without an explicit Claude pin
+    // routes to slot-gemini-ultra instead of a dynamic Claude coder slot.
+
+    #[test]
+    fn research_default_profile_resolves_to_no_spawn_model() {
+        let cfg = WorkstationRuntimeConfig::default();
+        // Was the live failure mode: research-default was not registered.
+        assert_eq!(
+            cfg.spawn_model_for_profile("research-default").unwrap(),
+            None
+        );
+        // Aliases route through the same canonical profile.
+        assert_eq!(cfg.spawn_model_for_profile("research").unwrap(), None);
+        assert_eq!(cfg.spawn_model_for_profile("gemini-default").unwrap(), None);
+    }
+
+    #[test]
+    fn researcher_template_default_profile_is_research_default() {
+        let cfg = WorkstationRuntimeConfig::default();
+        assert_eq!(
+            cfg.default_model_profile_for_template("researcher"),
+            Some("research-default")
+        );
+        // Coder template stays on Claude coding-default.
+        assert_eq!(
+            cfg.default_model_profile_for_template("coder"),
+            Some("coding-default-opus-4-7")
+        );
+    }
+
+    #[test]
+    fn research_intent_default_routes_to_gemini_pool() {
+        let cfg = WorkstationRuntimeConfig::default();
+        // intent=research with no explicit model/profile: effective profile is
+        // the researcher template default (research-default) which the
+        // routing helper recognizes as a Gemini pin.
+        let template_default = cfg
+            .default_model_profile_for_template("researcher")
+            .unwrap();
+        assert!(WorkstationRuntimeConfig::profile_routes_to_gemini_researcher(template_default));
+        // Explicit Claude profile stays on Claude.
+        assert!(
+            !WorkstationRuntimeConfig::profile_routes_to_gemini_researcher(
+                "coding-default-opus-4-7"
+            )
+        );
+        // Daily Sonnet / Haiku stay on Claude.
+        assert!(!WorkstationRuntimeConfig::profile_routes_to_gemini_researcher("daily-sonnet"));
+        assert!(!WorkstationRuntimeConfig::profile_routes_to_gemini_researcher("quick-haiku"));
+    }
+
+    #[test]
+    fn gemini_researcher_pool_slot_is_registered() {
+        let cfg = WorkstationRuntimeConfig::default();
+        assert_eq!(
+            cfg.gemini_researcher_pool_slot_id(),
+            Some("slot-gemini-ultra")
+        );
+    }
+
+    #[test]
+    fn explicit_coding_default_profile_for_research_intent_keeps_claude_path() {
+        let cfg = WorkstationRuntimeConfig::default();
+        // Caller explicitly pins coding-default-opus-4-7 on a research delegation.
+        // resolve_model_projection returns None (no --model arg) so the slot
+        // selector sees a Claude-coder shaped request, not a gemini ping.
+        let resolved = super::super::compute_slot::resolve_model_projection(
+            "researcher",
+            None,
+            Some("coding-default-opus-4-7"),
+            &cfg,
+        )
+        .unwrap();
+        assert_eq!(resolved, None);
+        assert!(
+            !WorkstationRuntimeConfig::profile_routes_to_gemini_researcher(
+                "coding-default-opus-4-7"
+            )
+        );
     }
 }
