@@ -94,6 +94,10 @@ function checkFiles(root) {
     'crates/missiond-daemon/src/bus/v2_subscribers.rs',
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     'node scripts/check-v3-autopilot-runtime-isomorphism.mjs',
+    // Summary-note pollution invariant: raw res.response forbidden as note source.
+    ':summary-note-source',
+    'extract_worker_final_summary(res.response, full_prompt)',
+    'paste again to expand',
   ]);
 
   requireAll(diagnostics, FILES.subscribers, sources.subscribers, [
@@ -128,6 +132,16 @@ function checkFiles(root) {
     'state.pty.send(&slot_id, &full_prompt, timeout_ms).await',
     'maybe_complete_delegated_execution_log',
     'publish_slot(SlotEvent::TaskDispatched',
+    // Summary-note pollution: extractor + cap MUST be wired into the
+    // success path; legacy `res.duration_ms, res.response` pairing is
+    // forbidden so a refactor cannot regress to the polluted note shape.
+    'fn extract_worker_final_summary',
+    'AUTOPILOT_SUMMARY_NOTE_MAX_BYTES',
+    'extract_worker_final_summary(&res.response, &full_prompt)',
+    'truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES)',
+  ]);
+  forbidAll(diagnostics, FILES.autopilot, sources.autopilot, [
+    'res.duration_ms, res.response',
   ]);
 
   requireAll(diagnostics, FILES.boardEvents, sources.boardEvents, [
@@ -185,6 +199,9 @@ function buildFixture() {
         :entry [BoardEvent.TaskCreated SlotEvent.BecameIdle]
         :core ((step s1 :logic "x"))
         :egress [BoardEvent SlotEvent])))
+  (execution-ownership delegated-boardtask
+    :close-owner
+      (:summary-note-source "extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, tool logs, and \`paste again to expand\` collapse markers."))
   (implementation-map
     (surface autopilot-runtime
       :status "code-aligned"
@@ -204,7 +221,16 @@ fn slot_event_should_wake_autopilot(e: &SlotEvent) -> bool { matches!(e, SlotEve
 use missiond_core::event::events::BoardEvent;
 async fn x() { let _ = state.bus.publish_board(BoardEvent::TaskCreated { task_id, title, category }).await; state.board_dispatch_notify.notify_one(); /* event-bus cause */ }`);
   write(root, 'autopilot', `
-async fn dispatch_board_tasks() { let _g = OwnedSlotDispatchGuard; state.pty.send(&slot_id, &full_prompt, timeout_ms).await; maybe_complete_delegated_execution_log(); publish_slot(SlotEvent::TaskDispatched{}); }`);
+const AUTOPILOT_SUMMARY_NOTE_MAX_BYTES: usize = 4000;
+fn extract_worker_final_summary(_r: &str, _p: &str) -> String { String::new() }
+async fn dispatch_board_tasks() {
+    let _g = OwnedSlotDispatchGuard;
+    state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
+    let final_summary = extract_worker_final_summary(&res.response, &full_prompt);
+    let _summary = truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+    maybe_complete_delegated_execution_log();
+    publish_slot(SlotEvent::TaskDispatched{});
+}`);
   write(root, 'boardEvents', `
 fn publish_board_created() { let ev = BoardEvent::TaskCreated {}; bus.publish_board(ev).await; }`);
   write(root, 'boardEvent', `

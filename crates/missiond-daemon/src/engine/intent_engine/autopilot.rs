@@ -254,6 +254,158 @@ async fn maybe_complete_delegated_execution_log(
     Ok(!complete_result.is_error.unwrap_or(false))
 }
 
+/// Maximum byte length of the worker final summary written into the
+/// `**Autopilot 执行完成**` BoardTask note. The legacy site embedded the
+/// entire `res.response` screen capture (echoed prompt, task contract, tool
+/// logs, paste-collapse markers) which polluted every completed BoardTask
+/// record. The cap pairs with `truncate_safe` (UTF-safe, char-boundary)
+/// so a long worker tail still produces a readable note.
+pub(crate) const AUTOPILOT_SUMMARY_NOTE_MAX_BYTES: usize = 4000;
+
+/// V3 execution-ownership :: delegated-boardtask :: summary-note source.
+///
+/// Extract the worker's concise final summary from the raw PTY screen
+/// capture (`res.response`) so the `**Autopilot 执行完成**` note and the
+/// delegated `mission_execution(action=complete)` summary record only the
+/// worker's actual final answer — never the echoed prompt, task contract,
+/// tool log lines, or `[Pasted text +N lines, paste again to expand]`
+/// collapse markers that the Claude Code TUI surfaces in the screen blob.
+///
+/// The extractor is a deterministic, allocation-cheap pure helper so the
+/// note path and the `mission_execution` completion path always project
+/// the same sanitized summary, and so the rule can be unit-tested without
+/// constructing an `AppState`. Auth-error and quota-exhausted diagnostic
+/// notes intentionally use the raw response and bypass this extractor.
+pub(crate) fn extract_worker_final_summary(response: &str, dispatched_prompt: &str) -> String {
+    let after_echo = strip_prompt_echo(response, dispatched_prompt);
+    let final_region = focus_final_summary_region(after_echo);
+    let cleaned = strip_tui_artifacts(final_region);
+    cleaned.trim().to_string()
+}
+
+/// Strip the echoed dispatched prompt from the screen capture.
+///
+/// The dispatched prompt always ends with the `append_board_task_id_suffix`
+/// tail block; its terminal phrase is unique enough that the LAST occurrence
+/// in the screen capture marks the boundary between the echoed task contract
+/// and the worker's actual output. When the TUI collapsed the paste so the
+/// terminal phrase never reached the screen, fall back to the BoardTask
+/// label anchor and skip its line. When neither anchor exists, return the
+/// input unchanged so artifact stripping can still run.
+fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str {
+    const TAIL_ANCHOR: &str = "负责关闭此 BoardTask。";
+    if let Some(idx) = response.rfind(TAIL_ANCHOR) {
+        let cut = idx + TAIL_ANCHOR.len();
+        return &response[cut..];
+    }
+    const LABEL_ANCHOR: &str = "📋 **Board Task ID**:";
+    if let Some(idx) = response.rfind(LABEL_ANCHOR) {
+        let after = &response[idx..];
+        if let Some(nl) = after.find('\n') {
+            return &response[idx + nl + 1..];
+        }
+    }
+    response
+}
+
+/// Prefer the final assistant summary region when the TUI screen contains the
+/// whole investigation transcript. Claude Code often leaves "Now let me ..."
+/// narration, diffs, and tool cards before the final `Summary` heading; keeping
+/// the last summary block makes the Board note useful instead of merely less
+/// polluted.
+fn focus_final_summary_region(input: &str) -> &str {
+    const ANCHORS: [&str; 6] = [
+        "\n⏺ Smoke Summary",
+        "\n⏺ Summary",
+        "\nSmoke Summary",
+        "\nFinal Summary",
+        "\nSummary",
+        "\n  Summary",
+    ];
+    let Some((idx, anchor)) = ANCHORS
+        .iter()
+        .filter_map(|anchor| input.rfind(anchor).map(|idx| (idx, *anchor)))
+        .max_by_key(|(idx, _)| *idx)
+    else {
+        return input;
+    };
+
+    let after_anchor = &input[idx + anchor.len()..];
+    match after_anchor.find('\n') {
+        Some(nl) => &after_anchor[nl + 1..],
+        None => after_anchor,
+    }
+}
+
+/// Drop Claude Code TUI artifact lines (paste collapse markers, tool-call
+/// log markers, status / hint bars, user-input echoes) and collapse runs of
+/// blank lines.
+fn strip_tui_artifacts(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut prev_blank = false;
+    for raw in input.lines() {
+        let line = raw.trim_end();
+        if is_tui_artifact_line(line) {
+            continue;
+        }
+        if line.trim().is_empty() {
+            if prev_blank {
+                continue;
+            }
+            prev_blank = true;
+        } else {
+            prev_blank = false;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
+/// Predicate: is this line a Claude Code TUI screen artifact rather than
+/// worker-authored content? The matchers are intentionally narrow — they
+/// only recognize markers the TUI emits — so worker prose containing
+/// e.g. a `>` quote at the start of a line is not stripped.
+fn is_tui_artifact_line(line: &str) -> bool {
+    let t = line.trim_start();
+    if t.is_empty() {
+        return false;
+    }
+    if t.contains("paste again to expand") || t.starts_with("[Pasted text") {
+        return true;
+    }
+    // Hint / status bar rendered at the bottom of the TUI.
+    if t.starts_with("⏵⏵") || t.starts_with("? for shortcuts") {
+        return true;
+    }
+    // Tool-call log markers emitted by Claude Code TUI: `● Tool(args)` for
+    // older captures, `⏺ Tool(args)` for current Claude Code, and `⎿ ...`
+    // for a tool result line.
+    if let Some(first) = t.chars().next() {
+        if matches!(first, '●' | '⏺' | '⎿') {
+            return true;
+        }
+    }
+    if matches!(
+        t.chars().next(),
+        Some('✻' | '✽' | '✳' | '✶' | '✢' | '·' | '❯')
+    ) {
+        return true;
+    }
+    if t.contains("ctrl+o to expand") || t.contains("ctrl+b to run in background") {
+        return true;
+    }
+    // User-input echo prefix used by the TUI when re-rendering the user's
+    // last paste / typed line. A bare leading `>` followed by space matches
+    // the echo; worker markdown blockquotes survive because Markdown
+    // blockquotes typically appear inside a paragraph, while the echo line
+    // is the entire visual line.
+    if t == ">" || t.starts_with("> ") {
+        return true;
+    }
+    false
+}
+
 /// V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
 ///
 /// Owned RAII handle for the per-slot dispatch lock. Mirrors
@@ -1327,10 +1479,20 @@ async fn dispatch_board_tasks_with_config(
                     return;
                 }
 
-                // Record result as a board note
+                // V3 execution-ownership :: delegated-boardtask :: summary-note source.
+                // Extract the worker final summary so the `**Autopilot 执行完成**`
+                // note records only the worker's actual final answer rather than
+                // the echoed prompt + task contract + tool logs + paste-collapse
+                // markers that the Claude Code TUI screen capture surfaces in the
+                // raw `res.response`. Auth/quota diagnostic notes above
+                // intentionally bypass this extractor and keep the raw response.
+                let final_summary =
+                    extract_worker_final_summary(&res.response, &full_prompt);
+                let summary_for_note =
+                    truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
                 let note_content = format!(
                     "**Autopilot 执行完成** ({}ms)\n\n{}",
-                    res.duration_ms, res.response
+                    res.duration_ms, summary_for_note
                 );
                 let _ = state
                     .store
@@ -1345,7 +1507,7 @@ async fn dispatch_board_tasks_with_config(
                     state,
                     task,
                     &full_prompt,
-                    &res.response,
+                    &final_summary,
                     res.duration_ms,
                 )
                 .await
@@ -2708,6 +2870,248 @@ mod tests {
         assert!(
             suffix.contains("Autopilot/orchestrator"),
             "missing handover-to-orchestrator wording: {suffix}"
+        );
+    }
+
+    // ── Summary-note pollution: worker final summary extractor ─────────
+
+    fn dispatched_prompt(task_id: &str) -> String {
+        // Mirrors append_board_task_id_suffix's tail block so the extractor's
+        // anchor strategy is exercised against a real-shaped prompt.
+        append_board_task_id_suffix("Refactor the autopilot summary path", task_id)
+    }
+
+    #[test]
+    fn extract_worker_final_summary_strips_echoed_boardtask_contract() {
+        // The TUI screen capture starts with the echoed user paste (which
+        // includes the `📋 Board Task ID` block ending in `负责关闭此 BoardTask。`)
+        // followed by the worker's actual final answer. The extractor MUST
+        // return only the worker's tail, never the echoed contract.
+        let prompt = dispatched_prompt("task-abc");
+        let response = format!(
+            "{}\n\n执行摘要：\n- 已完成 sanitizer 实现\n- 单元测试 PASS",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("📋 **Board Task ID**"),
+            "echoed task-id label leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("负责关闭此 BoardTask。"),
+            "echoed task-contract tail leaked: {summary}"
+        );
+        assert!(
+            summary.contains("已完成 sanitizer 实现"),
+            "worker final answer must survive: {summary}"
+        );
+        assert!(
+            summary.contains("单元测试 PASS"),
+            "worker final answer must survive: {summary}"
+        );
+    }
+
+    #[test]
+    fn extract_worker_final_summary_strips_paste_collapse_marker() {
+        // Claude Code TUI collapses long pastes into `[Pasted text +N lines,
+        // paste again to expand]`. That marker must never reach the BoardTask
+        // summary note.
+        let prompt = dispatched_prompt("task-paste");
+        let response = format!(
+            "> [Pasted text #3 +120 lines, paste again to expand]\n\n{}\n\n最终摘要：完成。",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("paste again to expand"),
+            "paste collapse marker leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("[Pasted text"),
+            "pasted-text bracket leaked: {summary}"
+        );
+        assert!(summary.contains("最终摘要：完成。"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_strips_tool_call_log_lines() {
+        // Tool-call log lines (`●` legacy invocation, `⏺` current Claude Code
+        // invocation, `⎿` result) are TUI artifacts — the worker's final
+        // summary alone should reach the BoardTask note.
+        let prompt = dispatched_prompt("task-tools");
+        let response = format!(
+            "{}\n\n● Read(file=\"foo.rs\")\n⎿ ok, 42 lines\n⏺ Bash(cargo test)\n⎿ test result: ok\n\n最终结论：通过。",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("● Read"),
+            "tool invocation marker leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("⏺ Bash"),
+            "current Claude Code tool invocation marker leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("⎿"),
+            "tool result marker leaked: {summary}"
+        );
+        assert!(summary.contains("最终结论：通过。"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_strips_user_echo_and_status_bar() {
+        // The TUI sometimes re-renders the user's last paste as a `> ...` echo
+        // line and shows a `⏵⏵` hint bar at the bottom.
+        let prompt = dispatched_prompt("task-echo");
+        let response = format!(
+            "{}\n> please continue\n\n收尾：done.\n\n⏵⏵ accept edits on (shift+tab to cycle)",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(!summary.contains("> please continue"));
+        assert!(!summary.contains("⏵⏵ accept edits"));
+        assert!(summary.contains("收尾：done."));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_prefers_last_summary_block() {
+        // Real Autopilot notes previously captured the entire screen after
+        // the prompt echo: planning narration, edit hunks, repeated tool
+        // headings, then the final Summary. The extractor should focus the
+        // final block rather than merely deleting a few marker lines.
+        let prompt = dispatched_prompt("task-summary-anchor");
+        let legacy_bad_pair = format!("res.duration_ms, res.{}", "response");
+        let response = format!(
+            "{}\n\n⏺ Now let me look at the v3 blueprint and checker:\n\
+             ⏺ Update(crates/missiond-daemon/src/engine/intent_engine/autopilot.rs)\n\
+             1454 -                    {}\n\
+             1455 +                    res.duration_ms, summary_for_note\n\
+             ⏺ All acceptance commands pass. Now let me commit the owned files:\n\
+             ⏺ Summary\n\n\
+             - Implemented deterministic summary extraction.\n\
+             - Tests and V3 checker pass.",
+            prompt, legacy_bad_pair
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("Now let me"),
+            "planning narration leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("res.duration_ms"),
+            "edit hunk leaked: {summary}"
+        );
+        assert!(summary.contains("Implemented deterministic summary extraction."));
+        assert!(summary.contains("Tests and V3 checker pass."));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_keeps_clean_worker_text_intact() {
+        // No echo, no artifacts — extractor must be a near no-op (only
+        // trimming surrounding whitespace).
+        let prompt = dispatched_prompt("task-clean");
+        let response = "  执行结果：所有断言通过。  \n";
+        let summary = extract_worker_final_summary(response, &prompt);
+        assert_eq!(summary, "执行结果：所有断言通过。");
+    }
+
+    #[test]
+    fn extract_worker_final_summary_handles_empty_response() {
+        let prompt = dispatched_prompt("task-empty");
+        let summary = extract_worker_final_summary("", &prompt);
+        assert_eq!(summary, "");
+    }
+
+    #[test]
+    fn extract_worker_final_summary_uses_last_anchor_when_repeated() {
+        // If the worker quoted the task contract earlier in its output, the
+        // LAST occurrence of the anchor still marks the boundary between
+        // echoed contract and worker tail.
+        let prompt = dispatched_prompt("task-repeat");
+        let response = format!(
+            "echo-1\n{prompt}\nintermediate\n{prompt}\n最终：done.",
+            prompt = prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(summary.starts_with("最终：done."));
+        assert!(!summary.contains("intermediate"));
+        assert!(!summary.contains("echo-1"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_falls_back_to_label_anchor_when_paste_collapsed() {
+        // When the paste was collapsed and only the label `📋 **Board Task ID**:`
+        // line is visible (no `负责关闭此 BoardTask。` tail), the extractor must
+        // skip the label line and still recover the worker tail.
+        let response =
+            "📋 **Board Task ID**: `task-collapsed`\n[Pasted text +200 lines, paste again to expand]\n\n执行总结：合格。";
+        let prompt = dispatched_prompt("task-collapsed");
+        let summary = extract_worker_final_summary(response, &prompt);
+        assert!(
+            !summary.contains("📋 **Board Task ID**"),
+            "label anchor leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("paste again to expand"),
+            "paste marker leaked: {summary}"
+        );
+        assert!(summary.contains("执行总结：合格。"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_collapses_blank_runs() {
+        // Multiple consecutive blank lines (left behind after artifact
+        // stripping) MUST collapse to a single blank so the note is compact.
+        let prompt = dispatched_prompt("task-blank");
+        let response = format!(
+            "{}\n\n● Tool(x)\n\n\n\n\n⎿ ok\n\n\n\n最终：合格。",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("\n\n\n"),
+            "extractor must collapse blank runs: {summary:?}"
+        );
+        assert!(summary.contains("最终：合格。"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_truncate_safe_pairs_at_char_boundary() {
+        // The note site applies `truncate_safe(&summary, MAX)`; the extractor
+        // must return a UTF-8 string so multibyte boundaries survive the cap.
+        let prompt = dispatched_prompt("task-utf");
+        // 1000 chars of CJK ≈ 3000 bytes — exceeds the 4000-byte cap with
+        // remaining headroom but still triggers truncation when the prompt
+        // header + repeats are added below.
+        let body = "测试".repeat(2500);
+        let response = format!("{}\n\n{}", prompt, body);
+        let summary = extract_worker_final_summary(&response, &prompt);
+        let capped = truncate_safe(&summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+        // Capped output MUST be valid UTF-8 (slice on a char boundary).
+        assert!(capped.is_char_boundary(0));
+        assert!(capped.is_char_boundary(capped.len()));
+        assert!(capped.len() <= AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+    }
+
+    #[test]
+    fn autopilot_note_site_no_longer_passes_raw_res_response() {
+        // Source-level guard: the `**Autopilot 执行完成**` note literal MUST
+        // be paired with a sanitized summary, never `res.response`. This
+        // prevents a refactor from accidentally re-introducing the legacy
+        // pollution path. The needles are composed at runtime so the guard
+        // does not trip on its own assertion text.
+        let src = include_str!("./autopilot.rs");
+        let banner = "**Autopilot \u{6267}\u{884c}\u{5b8c}\u{6210}** ({}ms)";
+        let raw_pair = format!("res.duration_ms, res.{}", "response");
+        assert!(
+            src.contains(banner),
+            "summary-note banner must remain present"
+        );
+        assert!(
+            !src.contains(&raw_pair),
+            "autopilot.rs must not pass raw res.response into the summary-note format string; \
+             use extract_worker_final_summary + truncate_safe instead"
         );
     }
 
