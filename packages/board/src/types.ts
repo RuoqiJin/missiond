@@ -20,6 +20,8 @@ export interface SlotDef {
   reason?: string;
   activeTool?: string;
   blockedKind?: string;
+  currentTaskId?: string;
+  activeBoardTaskId?: string;
   latestConversation?: {
     id?: string;
     source?: string;

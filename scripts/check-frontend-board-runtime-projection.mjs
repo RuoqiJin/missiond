@@ -74,8 +74,10 @@ function checkRepo(repo) {
   requireText(diagnostics, FILES.blueprint, src.blueprint, [
     '(projection workstation-slots',
     ':source [mission_slots mission_pty_status workstation-pool]',
-    ':fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind latestConversation]',
-    ':forbid [SLOT_OPTIONS hardcoded-sonnet-label]',
+    ':fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind currentTaskId activeBoardTaskId latestConversation]',
+    ':state-contract',
+    'Normalize PTY state case before classification',
+    ':forbid [SLOT_OPTIONS hardcoded-sonnet-label stale-status-running]',
     '(projection pty-recognition',
     'Terminal labels must describe the selected provider/session generically',
     '(projection terminal-slot-selector',
@@ -96,6 +98,8 @@ function checkRepo(repo) {
     'engine?: string',
     'modelProfile?: string',
     'acceptsBoardTask?: boolean',
+    'currentTaskId?: string',
+    'activeBoardTaskId?: string',
     'latestConversation?:',
   ]);
 

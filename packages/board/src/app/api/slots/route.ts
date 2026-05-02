@@ -26,6 +26,10 @@ interface PtyStatus {
   activeTool?: string;
   blocked_kind?: string;
   blockedKind?: string;
+  current_task_id?: string;
+  currentTaskId?: string;
+  active_board_task_id?: string;
+  activeBoardTaskId?: string;
   latest_conversation?: {
     id?: string;
     source?: string;
@@ -50,6 +54,37 @@ interface PtyStatus {
     blocked_kind?: string;
     blockedKind?: string;
   };
+}
+
+// State buckets — keep aligned with PtyCanonicalState (running/idle/blocked/complete/unknown)
+// and SessionState (starting/idle/slash_menu/thinking/responding/tool_running/confirming/error/exited).
+// `running` is reserved for states where a worker is actively producing output or waiting on a
+// confirmation it owns. `idle` is an active-but-quiescent session and must NOT count as running.
+const RUNNING_STATES = new Set([
+  'running',
+  'thinking',
+  'responding',
+  'tool_running',
+  'confirming',
+  'blocked',
+  'starting',
+]);
+
+const INACTIVE_STATES = new Set([
+  'complete',
+  'completed',
+  'exited',
+  'not_running',
+  'stopped',
+  'dead',
+  'missing',
+  'error',
+]);
+
+function normalizeState(state?: string | null) {
+  return typeof state === 'string' && state.trim()
+    ? state.trim().toLowerCase()
+    : null;
 }
 
 function labelForSlot(slot: SlotInfo) {
@@ -84,8 +119,9 @@ export async function GET() {
     const slots = filtered.map((s, i) => {
       const status = statuses[i].status === 'fulfilled' ? (statuses[i] as PromiseFulfilledResult<PtyStatus | null>).value : null;
       const recognition = status?.recognition;
-      const state = recognition?.state ?? status?.state;
-      const running = status?.running ?? (!!state && state !== 'exited' && state !== 'not_running');
+      const state = normalizeState(recognition?.state ?? status?.state);
+      const running = !!state && RUNNING_STATES.has(state);
+      const active = !!state && !INACTIVE_STATES.has(state);
       return {
         id: s.id,
         role: s.role,
@@ -101,13 +137,22 @@ export async function GET() {
         reason: recognition?.reason ?? status?.reason,
         activeTool: recognition?.activeTool ?? recognition?.active_tool ?? status?.activeTool ?? status?.active_tool,
         blockedKind: recognition?.blockedKind ?? recognition?.blocked_kind ?? status?.blockedKind ?? status?.blocked_kind,
+        currentTaskId: status?.currentTaskId ?? status?.current_task_id,
+        activeBoardTaskId: status?.activeBoardTaskId ?? status?.active_board_task_id ?? status?.currentTaskId ?? status?.current_task_id,
         latestConversation: latestConversation(status),
+        // Internal sort hint; consumers may ignore.
+        __activeRank: active ? 1 : 2,
       };
     });
 
-    // Running slots first
-    slots.sort((a, b) => (a.running === b.running ? 0 : a.running ? -1 : 1));
-    return NextResponse.json(slots);
+    // Running first, then active sessions (idle), then inactive (complete/exited/etc).
+    slots.sort((a, b) => {
+      const rank = (x: typeof a) => (x.running ? 0 : x.__activeRank);
+      return rank(a) - rank(b);
+    });
+    // Drop the internal sort hint before serialising.
+    const cleaned = slots.map(({ __activeRank: _drop, ...rest }) => rest);
+    return NextResponse.json(cleaned);
   } catch (err) {
     return NextResponse.json({ error: String(err) }, { status: 502 });
   }

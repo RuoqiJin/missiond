@@ -34,6 +34,45 @@ function usePtyScreen(slotId: string | null, enabled: boolean) {
   return { screen, loading };
 }
 
+// ─── Slot helpers ───
+const INACTIVE_SLOT_STATES = new Set(['complete', 'completed', 'exited', 'not_running', 'stopped', 'dead', 'missing', 'error']);
+function normalizedSlotState(slot: SlotDef): string | null {
+  return typeof slot.state === 'string' && slot.state.trim()
+    ? slot.state.trim().toLowerCase()
+    : null;
+}
+function isSlotActive(slot: SlotDef): boolean {
+  const state = normalizedSlotState(slot);
+  return !!slot.running || (!!state && !INACTIVE_SLOT_STATES.has(state));
+}
+function slotStateLabel(slot: SlotDef): string {
+  const state = normalizedSlotState(slot);
+  if (state) return state;
+  return slot.running ? 'running' : 'no session';
+}
+function slotMetaLine(slot: SlotDef): string {
+  return [slot.provider, slot.engine, slot.taskClass]
+    .filter((v): v is string => !!v)
+    .join(' · ');
+}
+function slotTooltip(slot: SlotDef, task?: Task): string {
+  const parts: string[] = [slot.id];
+  if (slot.role) parts.push(`role: ${slot.role}`);
+  if (slot.provider) parts.push(`provider: ${slot.provider}`);
+  if (slot.engine) parts.push(`engine: ${slot.engine}`);
+  if (slot.modelProfile) parts.push(`model: ${slot.modelProfile}`);
+  if (slot.taskClass) parts.push(`taskClass: ${slot.taskClass}`);
+  if (slot.acceptsBoardTask !== undefined) parts.push(`acceptsBoardTask: ${slot.acceptsBoardTask}`);
+  parts.push(`state: ${slotStateLabel(slot)}`);
+  if (slot.confidence != null) parts.push(`confidence: ${Math.round(slot.confidence * 100)}%`);
+  if (slot.reason) parts.push(`reason: ${slot.reason}`);
+  if (slot.activeTool) parts.push(`tool: ${slot.activeTool}`);
+  if (slot.blockedKind) parts.push(`blockedKind: ${slot.blockedKind}`);
+  if (slot.latestConversation?.title) parts.push(`latest: ${slot.latestConversation.title}`);
+  if (task) parts.push(`task: ${task.id} ${task.title}`);
+  return parts.join('\n');
+}
+
 // ─── Slot Card ───
 function SlotCard({ slot, task, isSelected, onClick }: {
   slot: SlotDef;
@@ -41,31 +80,42 @@ function SlotCard({ slot, task, isSelected, onClick }: {
   isSelected: boolean;
   onClick: () => void;
 }) {
+  const active = isSlotActive(slot);
   const stateColor = slot.running
     ? task?.status === 'running' ? 'bg-orange-400' : 'bg-emerald-400'
+    : active
+    ? 'bg-emerald-400/40'
     : 'bg-neutral-600';
+  const meta = slotMetaLine(slot);
+  const stateLabel = slotStateLabel(slot);
 
   return (
     <button
       onClick={onClick}
+      title={slotTooltip(slot, task)}
       className={cn(
-        'flex flex-col gap-1 p-3 rounded-lg border text-left transition-all min-w-[140px]',
+        'flex flex-col gap-1 p-3 rounded-lg border text-left transition-all min-w-[160px] max-w-[240px]',
         isSelected
           ? 'border-orange-500/40 bg-orange-500/5'
           : 'border-neutral-800 bg-neutral-900/50 hover:border-neutral-700',
       )}
     >
-      <div className="flex items-center gap-2">
-        <div className={cn('w-2 h-2 rounded-full', stateColor, slot.running && task?.status === 'running' && 'animate-pulse')} />
-        <span className="text-xs font-mono text-neutral-300 truncate">{slot.label}</span>
-        <span className="text-[10px] text-neutral-600 ml-auto">{slot.role}</span>
+      <div className="flex items-center gap-2 min-w-0">
+        <div className={cn('w-2 h-2 rounded-full shrink-0', stateColor, slot.running && task?.status === 'running' && 'animate-pulse')} />
+        <span className="text-xs font-mono text-neutral-300 truncate min-w-0 flex-1">{slot.label}</span>
+        <span className="text-[10px] text-neutral-600 shrink-0">{slot.role}</span>
       </div>
+      {meta && (
+        <p className="text-[9px] text-neutral-600 truncate" title={meta}>
+          {meta}
+        </p>
+      )}
       {task ? (
         <p className="text-[10px] text-neutral-500 truncate" title={task.title}>
           {task.title}
         </p>
       ) : (
-        <p className="text-[10px] text-neutral-600 italic">idle</p>
+        <p className="text-[10px] text-neutral-600 italic truncate">{stateLabel}</p>
       )}
     </button>
   );
@@ -284,17 +334,7 @@ export function AutopilotMonitor({ slots }: { slots: SlotDef[] }) {
   // Active slot for PTY preview
   const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
 
-  // Auto-select first running slot
-  useEffect(() => {
-    if (selectedSlot && slots.some(s => s.id === selectedSlot && s.running)) return;
-    const firstRunning = slots.find(s => s.running);
-    setSelectedSlot(firstRunning?.id ?? null);
-  }, [slots, selectedSlot]);
-
-  // PTY screen for selected slot
-  const { screen, loading: screenLoading } = usePtyScreen(selectedSlot, true);
-
-  // Map slot → running task
+  // Map slot → running BoardTask (correlate via assignee or claimExecutorId).
   const slotTaskMap = useMemo(() => {
     const map = new Map<string, Task>();
     for (const t of runningTasks) {
@@ -304,6 +344,38 @@ export function AutopilotMonitor({ slots }: { slots: SlotDef[] }) {
     }
     return map;
   }, [runningTasks]);
+
+  // Auto-select preference: slot-with-running-BoardTask → active non-complete slot → any slot.
+  useEffect(() => {
+    if (selectedSlot) {
+      const cur = slots.find(s => s.id === selectedSlot);
+      if (cur && (cur.running || isSlotActive(cur) || slotTaskMap.has(cur.id))) return;
+    }
+    const slotWithTask = slots.find(s => slotTaskMap.has(s.id));
+    if (slotWithTask) { setSelectedSlot(slotWithTask.id); return; }
+    const active = slots.find(isSlotActive);
+    if (active) { setSelectedSlot(active.id); return; }
+    setSelectedSlot(slots[0]?.id ?? null);
+  }, [slots, selectedSlot, slotTaskMap]);
+
+  // PTY screen for selected slot
+  const { screen, loading: screenLoading } = usePtyScreen(selectedSlot, true);
+
+  const selectedSlotData = useMemo(
+    () => (selectedSlot ? slots.find(s => s.id === selectedSlot) ?? null : null),
+    [selectedSlot, slots],
+  );
+
+  // Resolve the slot's current task — prefer the BoardTask correlation, fall back to the
+  // slot's own currentTaskId surfaced from the daemon (covers non-autopilot tasks).
+  const selectedTask = useMemo(() => {
+    if (!selectedSlot) return null;
+    const fromBoard = slotTaskMap.get(selectedSlot);
+    if (fromBoard) return fromBoard;
+    const currentTaskId = selectedSlotData?.activeBoardTaskId ?? selectedSlotData?.currentTaskId;
+    if (!currentTaskId) return null;
+    return tasks.find(t => t.id === currentTaskId) ?? null;
+  }, [selectedSlot, selectedSlotData, slotTaskMap, tasks]);
 
   const runningCount = slots.filter(s => s.running).length;
 
@@ -368,20 +440,66 @@ export function AutopilotMonitor({ slots }: { slots: SlotDef[] }) {
         </div>
 
         {/* Right: PTY screen preview */}
-        <div className="w-[420px] flex-shrink-0 rounded-lg border border-neutral-800 overflow-hidden bg-black/30">
-          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-neutral-800 bg-neutral-900/50">
+        <div className="w-[420px] flex-shrink-0 rounded-lg border border-neutral-800 overflow-hidden bg-black/30 flex flex-col">
+          <div className="flex items-center gap-2 px-3 py-1.5 border-b border-neutral-800 bg-neutral-900/50 shrink-0">
             <div className={cn(
-              'w-2 h-2 rounded-full',
-              selectedSlot && slots.find(s => s.id === selectedSlot)?.running
+              'w-2 h-2 rounded-full shrink-0',
+              selectedSlotData?.running
                 ? 'bg-emerald-400'
+                : selectedSlotData && isSlotActive(selectedSlotData)
+                ? 'bg-emerald-400/40'
                 : 'bg-neutral-600',
             )} />
-            <span className="text-[10px] font-mono text-neutral-500">
+            <span className="text-[10px] font-mono text-neutral-500 truncate" title={selectedSlot ?? ''}>
               {selectedSlot || 'no slot selected'}
             </span>
-            {screenLoading && <Loader2 className="w-3 h-3 animate-spin text-neutral-600 ml-auto" />}
+            {selectedSlotData?.state && (
+              <span className="text-[10px] text-neutral-600 shrink-0">· {selectedSlotData.state}</span>
+            )}
+            {screenLoading && <Loader2 className="w-3 h-3 animate-spin text-neutral-600 ml-auto shrink-0" />}
           </div>
-          <div className="h-[calc(100%-28px)]">
+          {selectedSlotData && (
+            <div className="px-3 py-1.5 border-b border-neutral-800 bg-neutral-950/50 space-y-0.5 shrink-0">
+              {selectedTask && (
+                <div className="text-[10px] text-neutral-300 truncate" title={`${selectedTask.id}\n${selectedTask.title}`}>
+                  <span className="font-mono text-neutral-500">{selectedTask.id.slice(0, 8)}</span>
+                  <span className="ml-1.5">{selectedTask.title}</span>
+                </div>
+              )}
+              {(selectedSlotData.provider || selectedSlotData.engine || selectedSlotData.modelProfile || selectedSlotData.taskClass) && (
+                <div className="flex items-center gap-1.5 text-[10px] text-neutral-500 flex-wrap">
+                  {selectedSlotData.provider && <span>{selectedSlotData.provider}</span>}
+                  {selectedSlotData.engine && <span className="text-neutral-600">· {selectedSlotData.engine}</span>}
+                  {selectedSlotData.modelProfile && <span className="text-neutral-600">· {selectedSlotData.modelProfile}</span>}
+                  {selectedSlotData.taskClass && <span className="text-neutral-600">· {selectedSlotData.taskClass}</span>}
+                  {selectedSlotData.acceptsBoardTask && (
+                    <span className="ml-auto text-emerald-500/70 text-[9px]">board ✓</span>
+                  )}
+                </div>
+              )}
+              {(selectedSlotData.confidence != null || selectedSlotData.reason) && (
+                <div className="text-[10px] text-neutral-600 truncate" title={selectedSlotData.reason ?? ''}>
+                  {selectedSlotData.confidence != null && (
+                    <span className="font-mono">{Math.round(selectedSlotData.confidence * 100)}%</span>
+                  )}
+                  {selectedSlotData.reason && (
+                    <span className={selectedSlotData.confidence != null ? 'ml-1.5' : ''}>{selectedSlotData.reason}</span>
+                  )}
+                </div>
+              )}
+              {selectedSlotData.activeTool && (
+                <div className="text-[10px] text-neutral-600 truncate" title={selectedSlotData.activeTool}>
+                  tool: <span className="font-mono">{selectedSlotData.activeTool}</span>
+                </div>
+              )}
+              {selectedSlotData.latestConversation?.title && (
+                <div className="text-[10px] text-neutral-600 truncate" title={selectedSlotData.latestConversation.title}>
+                  conv: {selectedSlotData.latestConversation.title}
+                </div>
+              )}
+            </div>
+          )}
+          <div className="flex-1 min-h-0">
             <PtyPreview screen={screen} loading={screenLoading} />
           </div>
         </div>
