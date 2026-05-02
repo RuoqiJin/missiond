@@ -80,6 +80,9 @@ function checkFiles(root, files) {
     '/Users/jinchen/Downloads/claudecode/claudecode',
     'PtyRecognitionSnapshot',
     'mission_pty_status',
+    'recognize_screen MUST fuse SessionState with screen heuristics',
+    'screen_fused',
+    'explicit Confirming SessionState always preserves Blocked',
     'node scripts/check-v3-pty-recognition-isomorphism.mjs',
   ]);
 
@@ -92,6 +95,9 @@ function checkFiles(root, files) {
     'recognize_codex',
     'recognize_gemini',
     'recognize_claude_code',
+    'fuse_with_session_state',
+    'active_running_evidence',
+    'screen_fused',
     'codex:status_indicator_widget',
     'gemini:loading_indicator_responding',
     'claude_code:active_spinner',

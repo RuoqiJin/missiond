@@ -116,7 +116,115 @@ pub fn recognize_screen(
     if snapshot.state == PtyCanonicalState::Unknown {
         snapshot = session_state_snapshot(provider, current_state);
     }
+    fuse_with_session_state(provider, lines, current_state, snapshot)
+}
+
+/// Provider-aware state fusion: a `screen_fallback` Blocked snapshot that
+/// contradicts an actively processing SessionState reflects stale terminal
+/// text (a confirmation or model-picker line that the worker has already
+/// resolved). When SessionState is Thinking/Responding/ToolRunning we either
+/// promote a fused active-evidence snapshot from the same screen or fall back
+/// to the SessionState baseline. Explicit `Confirming` SessionState always
+/// preserves Blocked, so true approval gates are not misreported as Running.
+fn fuse_with_session_state(
+    provider: CliEngine,
+    lines: &[String],
+    current_state: SessionState,
+    snapshot: PtyRecognitionSnapshot,
+) -> PtyRecognitionSnapshot {
+    if current_state == SessionState::Confirming {
+        return snapshot;
+    }
+    if snapshot.state == PtyCanonicalState::Blocked
+        && snapshot.source == "screen_fallback"
+        && current_state.is_processing()
+    {
+        if let Some(active) = active_running_evidence(provider, lines) {
+            return active;
+        }
+        return session_state_snapshot(provider, current_state);
+    }
     snapshot
+}
+
+fn active_running_evidence(
+    provider: CliEngine,
+    lines: &[String],
+) -> Option<PtyRecognitionSnapshot> {
+    let text = joined_text(lines);
+    let lower = text.to_ascii_lowercase();
+    let elapsed = extract_elapsed_secs(&text);
+    match provider {
+        CliEngine::ClaudeCode => {
+            if lower.contains("esc to interrupt")
+                || lower.contains("almost done thinking")
+                || lower.contains("thinking with")
+                || has_active_claude_spinner(lines)
+            {
+                let mut snapshot = PtyRecognitionSnapshot::new(
+                    CliEngine::ClaudeCode,
+                    PtyCanonicalState::Running,
+                    0.9,
+                    "claude_code:active_spinner",
+                )
+                .with_elapsed(elapsed)
+                .with_source("screen_fused");
+                snapshot = if let Some(tool) = extract_tool_name(lines) {
+                    snapshot.with_tool(tool).with_phase("tool")
+                } else {
+                    snapshot.with_phase("thinking")
+                };
+                Some(snapshot)
+            } else {
+                None
+            }
+        }
+        CliEngine::Codex => {
+            if lower.contains("working (")
+                || lower.contains(" esc to interrupt")
+                || lower.contains("running command")
+                || lower.contains("command running")
+                || has_spinner(lines)
+            {
+                let mut snapshot = PtyRecognitionSnapshot::new(
+                    CliEngine::Codex,
+                    PtyCanonicalState::Running,
+                    0.9,
+                    "codex:status_indicator_widget",
+                )
+                .with_elapsed(elapsed)
+                .with_source("screen_fused");
+                if let Some(tool) = extract_tool_name(lines) {
+                    snapshot = snapshot.with_tool(tool);
+                }
+                Some(snapshot)
+            } else {
+                None
+            }
+        }
+        CliEngine::Gemini => {
+            if lower.contains("executing")
+                || lower.contains("coretoolcallstatus.executing")
+                || lower.contains("streamingstate.responding")
+                || lower.contains("thinking...")
+                || lower.contains("esc to cancel")
+                || has_spinner(lines)
+            {
+                let snapshot = PtyRecognitionSnapshot::new(
+                    CliEngine::Gemini,
+                    PtyCanonicalState::Running,
+                    0.9,
+                    "gemini:loading_indicator_responding",
+                )
+                .with_phase("thinking")
+                .with_elapsed(elapsed)
+                .with_source("screen_fused");
+                Some(snapshot)
+            } else {
+                None
+            }
+        }
+    }
 }
 
 fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
@@ -600,5 +708,75 @@ mod tests {
             "› auto mode on (shift+tab to cycle)",
         ]));
         assert_eq!(result.state, PtyCanonicalState::Complete);
+    }
+
+    #[test]
+    fn fusion_active_session_overrides_stale_confirmation_text() {
+        // Screen carries leftover confirmation/picker words from a moment ago,
+        // but the worker is already actively running per SessionState. Fusion
+        // must produce Running grounded in the live spinner, not Blocked.
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&[
+                "Do you want to proceed with this approval? (y/n)",
+                "Select model: Sonnet 4",
+                "* Spelunking... (3s · esc to interrupt)",
+                "›",
+            ]),
+            SessionState::ToolRunning,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.source, "screen_fused");
+        assert_eq!(result.reason, "claude_code:active_spinner");
+        assert!(result.blocked_kind.is_none());
+    }
+
+    #[test]
+    fn fusion_active_session_without_active_screen_falls_back_to_session_state() {
+        // Screen has confirmation text but no active spinner / esc-to-interrupt.
+        // Session is Thinking, so the stale Blocked must demote to Running
+        // sourced from session_state, not stay Blocked.
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&[
+                "Do you want to proceed?",
+                "permission to read /etc/hosts",
+            ]),
+            SessionState::Thinking,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Running);
+        assert_eq!(result.source, "session_state");
+        assert!(result.reason.starts_with("session_state:"));
+        assert!(result.blocked_kind.is_none());
+    }
+
+    #[test]
+    fn fusion_true_confirming_state_keeps_blocked() {
+        // Same confirmation text, but SessionState explicitly says Confirming.
+        // The screen evidence and the session state agree -- preserve Blocked.
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&[
+                "Do you want to proceed?",
+                "permission to read /etc/hosts",
+            ]),
+            SessionState::Confirming,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.blocked_kind.as_deref(), Some("confirmation"));
+        assert_eq!(result.reason, "claude_code:confirmation_or_picker");
+    }
+
+    #[test]
+    fn fusion_does_not_promote_idle_session_state() {
+        // Confirmation text on screen with an Idle SessionState must keep the
+        // screen-derived Blocked (no active processing to fuse with).
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&["Do you want to proceed?"]),
+            SessionState::Idle,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.reason, "claude_code:confirmation_or_picker");
     }
 }

@@ -988,7 +988,8 @@
       ["Codex CLI and Gemini CLI MUST use provider-specific StateParser implementations and MUST NOT fall back to the ClaudeCode parser."
        "mission_pty_status MUST include PtyRecognitionSnapshot with provider, state, confidence, reason, phase/tool/blocked details when available."
        "Autopilot watchdogs MUST treat low-confidence unknown as diagnostic state rather than automatic BoardTask closure evidence."
-       "If an upstream TUI signal changes, checker failure is preferred over silent downgrade to generic prompt heuristics."]
+       "If an upstream TUI signal changes, checker failure is preferred over silent downgrade to generic prompt heuristics."
+       "recognize_screen MUST fuse SessionState with screen heuristics: an active processing SessionState (Thinking, Responding, ToolRunning) MUST NOT be demoted to Blocked from screen_fallback confirmation or model-picker text; the fused snapshot is sourced from screen_fused active evidence or session_state, and explicit Confirming SessionState always preserves Blocked."]
     :checker "node scripts/check-v3-pty-recognition-isomorphism.mjs")
 
   (ops-infra
