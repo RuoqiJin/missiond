@@ -2188,15 +2188,20 @@ fn is_tui_chrome_line(line: &str) -> bool {
 
 /// Pick between the streamed event content and the sanitized screen frame.
 ///
-/// Promotes the sanitized screen text only when the streamed event lacks the
-/// `Fix:` / `Verification:` closeout pair that the sanitized text carries.
-/// In every other case (event already has the closeout, or neither does) the
-/// streamed event wins so we never widen the response beyond what the worker
-/// actually produced.
+/// If the streamed event already carries a `Fix:` / `Verification:` closeout
+/// pair, keep that authoritative source but focus it on the closeout region so
+/// PTY history does not retain prompt echo or provider-added diagnostic tails.
+/// Otherwise promote the sanitized screen text only when it carries a closeout
+/// the event missed. If neither source carries the pair, keep the streamed event
+/// unchanged.
 pub(crate) fn choose_richer_completion(event_content: String, sanitized_screen: String) -> String {
     let event_has = has_fix_verification_closeout(&event_content);
     let screen_has = has_fix_verification_closeout(&sanitized_screen);
-    if screen_has && !event_has {
+    if event_has {
+        focus_fix_verification_closeout(&event_content)
+            .unwrap_or(event_content.as_str())
+            .to_string()
+    } else if screen_has {
         focus_fix_verification_closeout(&sanitized_screen)
             .unwrap_or(sanitized_screen.as_str())
             .to_string()
@@ -2215,7 +2220,7 @@ fn has_fix_verification_closeout(text: &str) -> bool {
 }
 
 fn focus_fix_verification_closeout(text: &str) -> Option<&str> {
-    find_fix_verification_anchor(text).map(|idx| &text[idx..])
+    find_fix_verification_anchor(text).map(|idx| trim_board_summary_tail(&text[idx..]))
 }
 
 fn find_fix_verification_anchor(text: &str) -> Option<usize> {
@@ -2234,6 +2239,51 @@ fn find_fix_verification_anchor(text: &str) -> Option<usize> {
         search_start = abs + "Fix:".len();
     }
     best
+}
+
+fn trim_board_summary_tail(text: &str) -> &str {
+    let mut seen_verification = false;
+    let mut separator_start: Option<usize> = None;
+    let mut offset = 0;
+
+    for line in text.split_inclusive('\n') {
+        let line_start = offset;
+        let trimmed = line.trim();
+
+        if !seen_verification {
+            if trimmed.contains("Verification:") {
+                seen_verification = true;
+            }
+            offset += line.len();
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            offset += line.len();
+            continue;
+        }
+
+        if trimmed == "---" {
+            separator_start.get_or_insert(line_start);
+            offset += line.len();
+            continue;
+        }
+
+        if is_board_summary_heading(trimmed) {
+            let cut = separator_start.unwrap_or(line_start);
+            return text[..cut].trim_end();
+        }
+
+        separator_start = None;
+        offset += line.len();
+    }
+
+    text.trim_end()
+}
+
+fn is_board_summary_heading(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("任务诊断摘要") || compact.to_ascii_lowercase().contains("boardtasksummary")
 }
 
 #[cfg(test)]
@@ -2378,9 +2428,8 @@ Verification: DIFFERENT
 
     /// When both the streamed event and the sanitized screen carry the
     /// closeout pair, the streamed event wins (it is the authoritative
-    /// per-turn assembly; promoting the screen would risk re-introducing
-    /// the prompt echo / context fragments that the assembler already
-    /// filtered out).
+    /// per-turn assembly) but is still focused to the closeout block so PTY
+    /// history does not retain provider prelude text.
     #[test]
     fn prefers_event_when_event_already_has_closeout() {
         let event = "Done.\n\nFix: streamed-fix\nVerification: streamed-verification\n".to_string();
@@ -2392,7 +2441,35 @@ Fix: screen-fix
 Verification: screen-verification
 ";
         let result = maybe_enrich_completion(CliEngine::Gemini, event.clone(), screen);
-        assert_eq!(result, event);
+        assert_eq!(
+            result,
+            "Fix: streamed-fix\nVerification: streamed-verification"
+        );
+    }
+
+    /// Live shape from BoardTask 1600de56: Gemini obeyed the requested
+    /// Fix/Verification closeout and then appended the generic BoardTask
+    /// diagnostic summary from the task suffix. The PTY history should retain
+    /// only the closeout pair so downstream BoardTask notes do not double-log
+    /// the same completion in two formats.
+    #[test]
+    fn trims_gemini_board_summary_tail_after_closeout() {
+        let event = "\
+Fix: read-only smoke of MissionD Autopilot/PTY completion capture
+  Verification: current commit is 182c0f7f and only pre-existing packages/board/src/App.tsx is dirty.
+
+  ---
+  任 务 诊 断 摘 要  (Board Task Summary)
+  已 完 成 对 MissionD Autopilot/PTY 完 成 捕 获 的 最 终 冒 烟 检 查 。
+"
+        .to_string();
+        let result = maybe_enrich_completion(CliEngine::Gemini, event, "");
+        assert_eq!(
+            result,
+            "Fix: read-only smoke of MissionD Autopilot/PTY completion capture\n  Verification: current commit is 182c0f7f and only pre-existing packages/board/src/App.tsx is dirty."
+        );
+        assert!(!result.contains("Board Task Summary"));
+        assert!(!result.contains("任 务 诊 断 摘 要"));
     }
 
     /// When neither the event nor the screen carry the closeout pair, the

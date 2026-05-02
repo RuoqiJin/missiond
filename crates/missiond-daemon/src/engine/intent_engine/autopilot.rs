@@ -280,7 +280,7 @@ pub(crate) fn extract_worker_final_summary(response: &str, dispatched_prompt: &s
     let after_echo = strip_prompt_echo(response, dispatched_prompt);
     let final_region = focus_final_summary_region(after_echo);
     let cleaned = strip_tui_artifacts(final_region);
-    cleaned.trim().to_string()
+    trim_board_summary_tail(&cleaned).trim().to_string()
 }
 
 /// Strip the echoed dispatched prompt from the screen capture.
@@ -412,6 +412,51 @@ fn find_fix_verification_anchor(input: &str) -> Option<usize> {
         search_start = abs + "Fix:".len();
     }
     best
+}
+
+fn trim_board_summary_tail(input: &str) -> &str {
+    let mut seen_verification = false;
+    let mut separator_start: Option<usize> = None;
+    let mut offset = 0;
+
+    for line in input.split_inclusive('\n') {
+        let line_start = offset;
+        let trimmed = line.trim();
+
+        if !seen_verification {
+            if trimmed.contains("Verification:") {
+                seen_verification = true;
+            }
+            offset += line.len();
+            continue;
+        }
+
+        if trimmed.is_empty() {
+            offset += line.len();
+            continue;
+        }
+
+        if trimmed == "---" {
+            separator_start.get_or_insert(line_start);
+            offset += line.len();
+            continue;
+        }
+
+        if is_board_summary_heading(trimmed) {
+            let cut = separator_start.unwrap_or(line_start);
+            return input[..cut].trim_end();
+        }
+
+        separator_start = None;
+        offset += line.len();
+    }
+
+    input.trim_end()
+}
+
+fn is_board_summary_heading(line: &str) -> bool {
+    let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+    compact.contains("任务诊断摘要") || compact.to_ascii_lowercase().contains("boardtasksummary")
 }
 
 /// Drop Claude Code TUI artifact lines (paste collapse markers, tool-call
@@ -3587,6 +3632,32 @@ mod tests {
                 && !summary.contains("Auto (Gemini 3)"),
             "Gemini footer lines leaked: {summary}"
         );
+    }
+
+    #[test]
+    fn extract_worker_final_summary_trims_board_summary_tail_after_closeout() {
+        // BoardTask 1600de56 regression: Gemini obeyed the requested concise
+        // Fix/Verification closeout, then appended the generic BoardTask
+        // diagnostic-summary block from the dispatch suffix. The Board note
+        // should keep the closeout pair and drop the second summary block.
+        let prompt = dispatched_prompt("task-1600de56");
+        let response = format!(
+            "{prompt}\n\n\
+             Fix: read-only smoke of MissionD Autopilot/PTY completion capture\n\
+               Verification: current commit is 182c0f7f and only pre-existing packages/board/src/App.tsx is dirty.\n\n\
+               ---\n\
+               任 务 诊 断 摘 要  (Board Task Summary)\n\
+               已 完 成 对 MissionD Autopilot/PTY 完 成 捕 获 的 最 终 冒 烟 检 查 。",
+            prompt = prompt
+        );
+
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert_eq!(
+            summary,
+            "Fix: read-only smoke of MissionD Autopilot/PTY completion capture\nVerification: current commit is 182c0f7f and only pre-existing packages/board/src/App.tsx is dirty."
+        );
+        assert!(!summary.contains("Board Task Summary"));
+        assert!(!summary.contains("任 务 诊 断 摘 要"));
     }
 
     #[test]
