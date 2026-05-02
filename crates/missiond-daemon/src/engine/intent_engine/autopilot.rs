@@ -314,7 +314,7 @@ fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str
 /// the last summary block makes the Board note useful instead of merely less
 /// polluted.
 ///
-/// Two anchor classes cooperate:
+/// Three anchor classes cooperate:
 ///
 /// 1. Heading anchors (`\nSummary`, `\n⏺ Summary`, `\n## Summary`, ...): the
 ///    leading `\n` is consumed so the heading line is kept, and multi-section
@@ -328,10 +328,17 @@ fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str
 ///    everything before it — `⏺ Now I'll edit ...` narration, `+`/`-` diff
 ///    hunk lines that survive `strip_tui_artifacts`, and other transcript
 ///    cruft — is dropped.
+/// 3. Fix:/Verification: closeout-pair fallback (Gemini-style): the worker
+///    omits both a `Summary` heading and the standard closeout lead-in,
+///    ending instead with a `Fix: …` line followed somewhere later by a
+///    `Verification: …` line beneath a `诊断报告` / English diagnosis
+///    bullets block. Used only when no heading or phrase anchor matched, so
+///    the existing closeout-phrase tests (which prefer the lead-in line) are
+///    not regressed.
 ///
-/// Across both classes we take the LAST anchor occurrence (whichever ends up
-/// later in the response wins) so a final closeout phrase that comes after an
-/// earlier mid-investigation `Summary` mention still wins.
+/// Across heading and phrase classes we take the LAST anchor occurrence
+/// (whichever ends up later in the response wins) so a final closeout phrase
+/// that comes after an earlier mid-investigation `Summary` mention still wins.
 fn focus_final_summary_region(input: &str) -> &str {
     const HEADING_ANCHORS: [&str; 8] = [
         "\n⏺ Smoke Summary",
@@ -365,10 +372,44 @@ fn focus_final_summary_region(input: &str) -> &str {
         }
     }
 
+    if best.is_none() {
+        if let Some(idx) = find_fix_verification_anchor(input) {
+            best = Some(idx);
+        }
+    }
+
     match best {
         Some(idx) => &input[idx..],
         None => input,
     }
+}
+
+/// Locate the start of the LAST `Fix:` line whose companion `Verification:`
+/// follows it. Used as a fallback closeout anchor for Gemini-style outputs
+/// that omit a `Summary` heading and the `diagnostic summary for the
+/// BoardTask:` / `All acceptance gates pass` lead-ins.
+///
+/// A `Fix:` candidate qualifies when it appears at the start of a line
+/// (preceded only by optional `**` markdown emphasis and whitespace) and the
+/// remaining input contains the literal `Verification:`. The literal-colon
+/// match deliberately excludes `**Verification**:` (where `:` sits outside
+/// the bold), so blocks already covered by the closeout-phrase anchors keep
+/// their existing lead-in line and this fallback does not steal them.
+fn find_fix_verification_anchor(input: &str) -> Option<usize> {
+    let mut best: Option<usize> = None;
+    let mut search_start = 0;
+    while let Some(rel) = input[search_start..].find("Fix:") {
+        let abs = search_start + rel;
+        let line_start = input[..abs].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
+        let leading = &input[line_start..abs];
+        let leading_trimmed = leading.trim_start();
+        let line_start_ok = leading_trimmed.is_empty() || leading_trimmed == "**";
+        if line_start_ok && input[abs + "Fix:".len()..].contains("Verification:") {
+            best = Some(line_start);
+        }
+        search_start = abs + "Fix:".len();
+    }
+    best
 }
 
 /// Drop Claude Code TUI artifact lines (paste collapse markers, tool-call
@@ -3421,6 +3462,68 @@ mod tests {
         assert!(!summary.contains("stale fix A"));
         assert!(summary.contains("live fix B"));
         assert!(summary.contains("Verification: ok."));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_anchors_on_gemini_fix_verification_pair() {
+        // BoardTask 7dbddf43 regression (live Gemini smoke 02e5da3f). The
+        // gemini-cli worker did NOT emit a `Summary` heading and did NOT use
+        // the `diagnostic summary for the BoardTask:` / `All acceptance gates
+        // pass` lead-in. Its transcript opened with a `Researching ...`
+        // status line, included tool-box drawings (╭...╰), then a Chinese
+        // 诊断报告 bullets block, ending with a tight `Fix: N/A` /
+        // `Verification: ...` pair. Without a Fix-Verification fallback the
+        // extractor fell through to the whole stripped transcript, so the
+        // BoardTask note captured the initial `Researching ...` line instead
+        // of the closeout block.
+        let prompt = dispatched_prompt("task-7dbddf43");
+        let response = format!(
+            "{prompt}\n\n\
+             Researching MissionD Deployment: Performing live smoke test...\n\n\
+             ╭─────────────────────────────────────────╮\n\
+             │ gemini-cli :: research-default          │\n\
+             ╰─────────────────────────────────────────╯\n\n\
+             **诊断报告**\n\
+             - 部署链路确认存活，Gemini 路由命中 research-default 槽位。\n\
+             - Live smoke run 全程未触发降级，无 fallback 痕迹。\n\
+             - V3 workstation pool 显示 researcher slot 持有该任务。\n\n\
+             Fix: N/A — routing already deployed in a371d114; live smoke confirms behavior.\n\
+             Verification: live Gemini reachable; researcher slot returned diagnostic block; no quota error.",
+            prompt = prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        // The initial Gemini status line and tool-box drawings must NOT leak
+        // into the BoardTask note.
+        assert!(
+            !summary.contains("Researching MissionD Deployment"),
+            "Gemini status line leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("Performing live smoke test"),
+            "Gemini status line tail leaked: {summary}"
+        );
+        assert!(
+            !summary.contains('╭'),
+            "tool-box top edge leaked: {summary}"
+        );
+        assert!(
+            !summary.contains('╰'),
+            "tool-box bottom edge leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("gemini-cli :: research-default"),
+            "tool-box body line leaked: {summary}"
+        );
+        // The Fix + Verification closeout pair survives.
+        assert!(summary.contains("Fix: N/A"), "Fix block dropped: {summary}");
+        assert!(
+            summary.contains("routing already deployed in a371d114"),
+            "Fix body dropped: {summary}"
+        );
+        assert!(
+            summary.contains("Verification: live Gemini reachable"),
+            "Verification block dropped: {summary}"
+        );
     }
 
     #[test]
