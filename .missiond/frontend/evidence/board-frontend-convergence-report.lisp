@@ -14,6 +14,8 @@
            "node scripts/check-v3-code-isomorphism-complete.mjs"
            "node scripts/check-v3-final-convergence.mjs"
            "pnpm --dir packages/board build"
+           "node scripts/check-v3-context-pack-isomorphism.mjs"
+           "node scripts/context-pack-run-wave.mjs --dry-fixture --json"
            "cargo test --workspace"
            "git diff --check"]
   :real-dispatch-smoke
@@ -21,8 +23,12 @@
      :delegated_board_task_id "a3428eac-d8a8-41e5-9813-825848c8d15d"
      :status done
      :result "MissionD created a read-only delegated BoardTask, Autopilot/worker completed it, and the request-local smoke directory was cleaned up without tracked worktree pollution.")
-  :next-shards
-    [(shard frontend-blueprint-dispatch-runner
-       :owner claude-code-default
-       :write_scope ["scripts/context-pack-run-wave.mjs" ".missiond/frontend/context-packs/"]
-       :goal "Teach MissionD to materialize frontend-blueprint context packs into BoardTasks with disjoint write scopes.")]))
+  :dispatch-runner
+    (:status closed
+     :implementation "scripts/context-pack-run-wave.mjs"
+     :evidence ["node scripts/check-v3-context-pack-isomorphism.mjs"
+                "node scripts/context-pack-run-wave.mjs --dry-fixture --json"
+                "node scripts/context-pack-materialize-wave.mjs --dry-fixture --json"
+                "node scripts/check-context-pack.mjs --dry-fixture --json"]
+     :result "Generic context-pack runner already materializes mapped frontend or backend context packs into task-runner manifests/contracts and can submit/apply through MissionD only when explicitly requested.")
+  :next-shards []))
