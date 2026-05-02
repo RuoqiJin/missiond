@@ -313,16 +313,23 @@ fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str
 /// narration, diffs, and tool cards before the final `Summary` heading; keeping
 /// the last summary block makes the Board note useful instead of merely less
 /// polluted.
+///
+/// The heading line itself is preserved (we skip only the leading `\n` of the
+/// anchor) so multi-section finals like `⏺ Summary` / `⏺ Diagnosis` /
+/// `⏺ Validation` carry their section labels into the BoardTask note, and so
+/// inline-style headings (`⏺ Summary: implemented X`) keep their content.
 fn focus_final_summary_region(input: &str) -> &str {
-    const ANCHORS: [&str; 6] = [
+    const ANCHORS: [&str; 8] = [
         "\n⏺ Smoke Summary",
+        "\n⏺ Final Summary",
         "\n⏺ Summary",
         "\nSmoke Summary",
         "\nFinal Summary",
         "\nSummary",
         "\n  Summary",
+        "\n## Summary",
     ];
-    let Some((idx, anchor)) = ANCHORS
+    let Some((idx, _anchor)) = ANCHORS
         .iter()
         .filter_map(|anchor| input.rfind(anchor).map(|idx| (idx, *anchor)))
         .max_by_key(|(idx, _)| *idx)
@@ -330,11 +337,8 @@ fn focus_final_summary_region(input: &str) -> &str {
         return input;
     };
 
-    let after_anchor = &input[idx + anchor.len()..];
-    match after_anchor.find('\n') {
-        Some(nl) => &after_anchor[nl + 1..],
-        None => after_anchor,
-    }
+    // Skip only the leading `\n` of the anchor so the heading line is kept.
+    &input[idx + 1..]
 }
 
 /// Drop Claude Code TUI artifact lines (paste collapse markers, tool-call
@@ -378,13 +382,22 @@ fn is_tui_artifact_line(line: &str) -> bool {
     if t.starts_with("⏵⏵") || t.starts_with("? for shortcuts") {
         return true;
     }
-    // Tool-call log markers emitted by Claude Code TUI: `● Tool(args)` for
-    // older captures, `⏺ Tool(args)` for current Claude Code, and `⎿ ...`
-    // for a tool result line.
-    if let Some(first) = t.chars().next() {
-        if matches!(first, '●' | '⏺' | '⎿') {
-            return true;
-        }
+    // Tool-result marker — Claude Code TUI emits `⎿ …` for every tool result
+    // line. Tool results are never assistant prose and never section labels,
+    // so always strip them.
+    if t.starts_with('⎿') {
+        return true;
+    }
+    // Tool-call invocation marker. Claude Code uses `⏺` / `●` as the bullet
+    // for ALL assistant content blocks (including `⏺ Summary`, `⏺ Diagnosis`,
+    // `⏺ Validation` section headings and brief one-line answers), so we MUST
+    // NOT strip every `⏺`/`●` line — that would truncate a multi-section
+    // final summary down to a single body block. Only strip lines that look
+    // like a function-call signature: `⏺ Ident(...)` / `● Ident(...)`. The
+    // worker's prose and section labels never match the `Ident(...)` shape,
+    // so they survive. Auth-error / quota notes bypass this extractor.
+    if (t.starts_with('⏺') || t.starts_with('●')) && looks_like_tool_call_marker(t) {
+        return true;
     }
     if matches!(
         t.chars().next(),
@@ -404,6 +417,33 @@ fn is_tui_artifact_line(line: &str) -> bool {
         return true;
     }
     false
+}
+
+/// Heuristic: does this `⏺ …` / `● …` line look like a tool-call signature
+/// (`⏺ Read(path)`, `⏺ Bash(cmd)`, `⏺ Update(file.rs)`) rather than worker
+/// prose or a section heading? The first non-bullet whitespace-delimited
+/// token must contain `(` so that `⏺ Summary`, `⏺ Diagnosis`,
+/// `⏺ Validation`, `⏺ Done. Fix verified.`, `⏺ The fix is in autopilot.rs
+/// (line 234).` all survive — only `⏺ Tool(args)`-shaped lines are stripped.
+fn looks_like_tool_call_marker(trimmed: &str) -> bool {
+    let after_marker = trimmed
+        .trim_start_matches(|c| c == '⏺' || c == '●')
+        .trim_start();
+    let Some(first_token) = after_marker.split_whitespace().next() else {
+        return false;
+    };
+    let Some(paren_at) = first_token.find('(') else {
+        return false;
+    };
+    // Require the prefix before `(` to look like an identifier — letters,
+    // digits, `_`, `-`, `.`, `:` — so `⏺ The fix is (X).` is NOT treated as
+    // a tool call (its first token is `The`, no `(`), but a real tool call
+    // like `⏺ missiond_kb-search(query="…")` is. Empty prefix is rejected.
+    let prefix = &first_token[..paren_at];
+    !prefix.is_empty()
+        && prefix
+            .chars()
+            .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
 }
 
 /// V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
@@ -3064,16 +3104,154 @@ mod tests {
         // Multiple consecutive blank lines (left behind after artifact
         // stripping) MUST collapse to a single blank so the note is compact.
         let prompt = dispatched_prompt("task-blank");
-        let response = format!(
-            "{}\n\n● Tool(x)\n\n\n\n\n⎿ ok\n\n\n\n最终：合格。",
-            prompt
-        );
+        let response = format!("{}\n\n● Tool(x)\n\n\n\n\n⎿ ok\n\n\n\n最终：合格。", prompt);
         let summary = extract_worker_final_summary(&response, &prompt);
         assert!(
             !summary.contains("\n\n\n"),
             "extractor must collapse blank runs: {summary:?}"
         );
         assert!(summary.contains("最终：合格。"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_keeps_multi_section_final_summary() {
+        // Real-shaped Claude Code final summary: the worker writes
+        // `⏺ Summary` / `⏺ Diagnosis` / `⏺ Validation` as section headings
+        // with bullets under each. Section labels MUST survive — the legacy
+        // extractor stripped every `⏺` line, which truncated multi-section
+        // finals down to the body of the first block.
+        let prompt = dispatched_prompt("task-multi-section");
+        let response = format!(
+            "{prompt}\n\n\
+             ⏺ Update(crates/missiond-daemon/src/engine/intent_engine/autopilot.rs)\n\
+             ⎿ ok, 12 lines\n\n\
+             ⏺ Summary\n\
+             - Implemented deterministic summary extraction.\n\
+             - Multi-section labels survive the BoardTask note.\n\n\
+             ⏺ Diagnosis\n\
+             - Root cause: legacy strip stripped every `⏺` line, including\n\
+               section labels and brief one-line answers.\n\n\
+             ⏺ Validation\n\
+             - cargo test -p missiond-daemon autopilot PASS\n\
+             - V3 isomorphism checker PASS",
+            prompt = prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        // Tool-call invocation + result lines are still stripped.
+        assert!(
+            !summary.contains("⏺ Update("),
+            "tool-call invocation leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("⎿ ok, 12 lines"),
+            "tool-result marker leaked: {summary}"
+        );
+        // Section labels survive (they are NOT tool calls).
+        assert!(
+            summary.contains("⏺ Summary"),
+            "Summary section label dropped: {summary}"
+        );
+        assert!(
+            summary.contains("⏺ Diagnosis"),
+            "Diagnosis section label dropped: {summary}"
+        );
+        assert!(
+            summary.contains("⏺ Validation"),
+            "Validation section label dropped: {summary}"
+        );
+        // Section bodies survive.
+        assert!(summary.contains("deterministic summary extraction"));
+        assert!(summary.contains("legacy strip stripped every"));
+        assert!(summary.contains("V3 isomorphism checker PASS"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_keeps_brief_single_line_answer() {
+        // When the worker's final answer is a single bullet line like
+        // `⏺ Done. Fix verified.`, the legacy extractor stripped the line
+        // because it began with `⏺` and produced an empty note. Prose
+        // `⏺` lines that are NOT shaped like `Ident(args)` MUST survive.
+        let prompt = dispatched_prompt("task-brief");
+        let response = format!("{}\n\n⏺ Done. Fix verified — cargo test PASS.", prompt);
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(!summary.is_empty(), "brief final answer truncated to empty");
+        assert!(
+            summary.contains("Done. Fix verified"),
+            "brief final answer dropped: {summary}"
+        );
+        assert!(
+            summary.contains("cargo test PASS"),
+            "brief final answer dropped: {summary}"
+        );
+    }
+
+    #[test]
+    fn extract_worker_final_summary_keeps_inline_summary_heading_content() {
+        // When the heading line carries inline summary content
+        // (`⏺ Summary: implemented X`), the legacy focus discarded the
+        // remainder of the heading line by skipping past the next newline.
+        // The extractor MUST keep the inline content.
+        let prompt = dispatched_prompt("task-inline-heading");
+        let response = format!(
+            "{}\n\n⏺ Summary: Implemented deterministic extraction; tests pass.",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            summary.contains("Implemented deterministic extraction"),
+            "inline heading content dropped: {summary}"
+        );
+        assert!(
+            summary.contains("tests pass"),
+            "inline heading content dropped: {summary}"
+        );
+    }
+
+    #[test]
+    fn extract_worker_final_summary_keeps_prose_with_parenthetical_aside() {
+        // Worker prose like `⏺ The fix is in autopilot.rs (line 234).` looks
+        // superficially like it has parentheses, but it is NOT a tool call
+        // signature. The strip rule only matches `⏺ Ident(...)`-shaped first
+        // tokens, so this prose survives.
+        let prompt = dispatched_prompt("task-paren-aside");
+        let response = format!(
+            "{}\n\n⏺ The fix is in autopilot.rs (line 234) and tests pass.",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            summary.contains("The fix is in autopilot.rs"),
+            "prose with parenthetical aside dropped: {summary}"
+        );
+        assert!(summary.contains("tests pass"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_strips_tool_calls_within_final_region() {
+        // Inside the final region, leftover tool-call invocations and result
+        // lines (e.g. a final `⏺ Bash(cargo test)` smoke check) MUST still
+        // be stripped — only prose / section labels survive.
+        let prompt = dispatched_prompt("task-mixed-region");
+        let response = format!(
+            "{}\n\n⏺ Summary\n\
+             ⏺ Bash(cargo test)\n\
+             ⎿ test result: ok\n\
+             - Implemented X.\n\
+             - Verified by cargo test.",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("⏺ Bash("),
+            "tool-call invocation in final region leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("⎿ test result"),
+            "tool-result line in final region leaked: {summary}"
+        );
+        assert!(summary.contains("⏺ Summary"));
+        assert!(summary.contains("Implemented X."));
+        assert!(summary.contains("Verified by cargo test."));
     }
 
     #[test]
