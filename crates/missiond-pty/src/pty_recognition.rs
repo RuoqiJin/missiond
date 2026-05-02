@@ -377,11 +377,19 @@ fn recognize_claude_code(lines: &[String]) -> PtyRecognitionSnapshot {
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
 
+    // Only explicit confirmation / model-picker UI surfaces count. Generic
+    // mentions of `approval` or `permission(s)` in the visible scroll buffer
+    // (task brief prose, historical tool output, the "bypass permissions on"
+    // composer-mode footer toggle) MUST NOT trigger Blocked: those words live
+    // on idle and completed screens. We pin the upstream modal phrases from
+    // src/components/permissions/* and ModelPicker.tsx instead.
     if lower.contains("enter to confirm")
         || lower.contains("do you want to proceed")
+        || lower.contains("do you want to make this edit")
+        || lower.contains("do you want to allow")
+        || lower.contains("do you want to use this api key")
         || lower.contains("select model")
-        || lower.contains("approval")
-        || lower.contains("permission")
+        || lower.contains("approval request")
     {
         return PtyRecognitionSnapshot::new(
             CliEngine::ClaudeCode,
@@ -778,5 +786,85 @@ mod tests {
         );
         assert_eq!(result.state, PtyCanonicalState::Blocked);
         assert_eq!(result.reason, "claude_code:confirmation_or_picker");
+    }
+
+    #[test]
+    fn claude_code_completed_screen_with_permission_footer_is_complete() {
+        // Live false-positive shape: turn finished, brief still mentions
+        // approval generically, footer shows the "bypass permissions on"
+        // composer-mode toggle. Recognition must report Complete, not Blocked.
+        let result = recognize_claude_code(&lines(&[
+            "Brief: route the approval workflow through the new gate",
+            "* Worked for 12s",
+            "› bypass permissions on (shift+tab to cycle)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+        assert!(result.blocked_kind.is_none());
+    }
+
+    #[test]
+    fn claude_code_idle_screen_with_permission_footer_is_idle() {
+        // Same false-positive shape minus the completion line: still must
+        // not be Blocked just because the scroll buffer carries `approval`
+        // and the footer is the bypass-permissions toggle.
+        let result = recognize_claude_code(&lines(&[
+            "Earlier discussion of the approval workflow stays here.",
+            "› bypass permissions on (shift+tab to cycle)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Idle);
+        assert!(result.blocked_kind.is_none());
+    }
+
+    #[test]
+    fn fusion_idle_session_with_permission_footer_is_not_blocked() {
+        // Mirrors the live mission_pty_status snapshot: SessionState=Idle but
+        // screen still contains historical `approval` prose plus the
+        // `bypass permissions on` footer. The fused recognition MUST NOT be
+        // Blocked, because no explicit modal is on screen.
+        let result = recognize_screen(
+            CliEngine::ClaudeCode,
+            &lines(&[
+                "Brief: handle approval flow for the migration",
+                "* Worked for 7s",
+                "› bypass permissions on (shift+tab to cycle)",
+            ]),
+            SessionState::Idle,
+        );
+        assert_ne!(result.state, PtyCanonicalState::Blocked);
+        assert!(result.blocked_kind.is_none());
+        assert_eq!(result.state, PtyCanonicalState::Complete);
+    }
+
+    #[test]
+    fn claude_code_explicit_confirmation_modal_is_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "Do you want to proceed?",
+            "❯ 1. Yes",
+            "  2. No, and tell Claude what to do differently (esc)",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.blocked_kind.as_deref(), Some("confirmation"));
+        assert_eq!(result.reason, "claude_code:confirmation_or_picker");
+    }
+
+    #[test]
+    fn claude_code_model_picker_is_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "Select model",
+            "Switch between available Claude models",
+            "❯ Opus 4.7",
+            "  Sonnet 4.6",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.blocked_kind.as_deref(), Some("confirmation"));
+    }
+
+    #[test]
+    fn claude_code_approval_request_phrase_is_blocked() {
+        let result = recognize_claude_code(&lines(&[
+            "Plan approval request from teammate",
+            "Press Enter to confirm",
+        ]));
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
     }
 }

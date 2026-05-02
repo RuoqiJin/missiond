@@ -83,6 +83,9 @@ function checkFiles(root, files) {
     'recognize_screen MUST fuse SessionState with screen heuristics',
     'screen_fused',
     'explicit Confirming SessionState always preserves Blocked',
+    'recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI',
+    'bypass permissions on',
+    'MUST NOT trigger Blocked on Idle or completed screens',
     'node scripts/check-v3-pty-recognition-isomorphism.mjs',
   ]);
 
@@ -101,6 +104,19 @@ function checkFiles(root, files) {
     'codex:status_indicator_widget',
     'gemini:loading_indicator_responding',
     'claude_code:active_spinner',
+    '"do you want to proceed"',
+    '"do you want to make this edit"',
+    '"do you want to allow"',
+    '"select model"',
+    '"approval request"',
+  ]);
+
+  forbidAll(diagnostics, files.ptyRecognition, sources.ptyRecognition, [
+    // Generic single-word matchers MUST NOT reappear: they false-positive on
+    // task-brief prose and the `bypass permissions on` composer footer.
+    'lower.contains("approval")',
+    'lower.contains("permission")',
+    'lower.contains("permissions")',
   ]);
 
   requireAll(diagnostics, files.ptySession, sources.ptySession, [
@@ -133,6 +149,13 @@ function checkFiles(root, files) {
 function requireAll(diagnostics, file, source, needles) {
   for (const needle of needles) {
     if (!source.includes(needle)) diagnostics.push({ file, message: `missing ${needle}` });
+  }
+}
+
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle))
+      diagnostics.push({ file, message: `forbidden substring present: ${needle}` });
   }
 }
 
