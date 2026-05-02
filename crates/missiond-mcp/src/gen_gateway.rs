@@ -2,17 +2,16 @@
 // Source: .missiond/intent.lisp (rpc-gateway missiond-mcp)
 // Pattern: rpc-gateway (generalized interface layer)
 
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use anyhow::Result;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-#[cfg(unix)]
-#[allow(unused_imports)]
-use tokio::net::UnixListener;
 #[cfg(windows)]
 #[allow(unused_imports)]
 use tokio::net::TcpListener;
-
+#[cfg(unix)]
+#[allow(unused_imports)]
+use tokio::net::UnixListener;
 
 pub mod error_codes {
     pub const UNKNOWN_TOOL: &str = "UNKNOWN_TOOL";
@@ -90,8 +89,12 @@ impl RpcError {
 
     pub fn message(&self) -> String {
         match self {
-            RpcError::ParseError(m) => format!("Parse error: {}", m.as_deref().unwrap_or("invalid JSON")),
-            RpcError::InvalidRequest(m) => format!("Invalid request: {}", m.as_deref().unwrap_or("")),
+            RpcError::ParseError(m) => {
+                format!("Parse error: {}", m.as_deref().unwrap_or("invalid JSON"))
+            }
+            RpcError::InvalidRequest(m) => {
+                format!("Invalid request: {}", m.as_deref().unwrap_or(""))
+            }
             RpcError::MethodNotFound(m) => format!("Method not found: {m}"),
             RpcError::InvalidParams(m) => format!("Invalid params: {m}"),
             RpcError::InternalError(m) => format!("Internal error: {m}"),
@@ -101,14 +104,23 @@ impl RpcError {
 
 impl Response {
     pub fn success(id: RequestId, result: Value) -> Self {
-        Self { jsonrpc: "2.0".into(), result: Some(result), error: None, id }
+        Self {
+            jsonrpc: "2.0".into(),
+            result: Some(result),
+            error: None,
+            id,
+        }
     }
 
     pub fn from_error(id: RequestId, err: RpcError) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             result: None,
-            error: Some(ErrorObject { code: err.code(), message: err.message(), data: None }),
+            error: Some(ErrorObject {
+                code: err.code(),
+                message: err.message(),
+                data: None,
+            }),
             id,
         }
     }
@@ -120,27 +132,58 @@ impl Response {
 
 pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value) -> Result<Value> {
     match name {
-        "mission_task_submit" | "mission_task_query" | "mission_task_cancel" | "mission_task_delegate" => handler.handle_task(name, args).await,
-        "mission_pty_spawn" | "mission_pty_send" | "mission_pty_read" | "mission_pty_status" | "mission_pty_screenshot" | "mission_pty_confirm" | "mission_pty_signal" => handler.handle_pty(name, args).await,
-        "mission_slots" | "mission_slot_history" | "mission_compute_slot" | "mission_agents" => handler.handle_slot(name, args).await,
+        "mission_task_submit"
+        | "mission_task_query"
+        | "mission_task_cancel"
+        | "mission_task_delegate" => handler.handle_task(name, args).await,
+        "mission_pty_spawn"
+        | "mission_pty_send"
+        | "mission_pty_read"
+        | "mission_pty_status"
+        | "mission_pty_screenshot"
+        | "mission_pty_confirm"
+        | "mission_pty_signal" => handler.handle_pty(name, args).await,
+        "mission_slots"
+        | "mission_slot_history"
+        | "mission_compute_slot"
+        | "mission_agents"
+        | "mission_master_status" => handler.handle_slot(name, args).await,
         "mission_cc_query" | "mission_cc_swarm" => handler.handle_cc_tasks(name, args).await,
         "mission_worker" => handler.handle_worker(name, args).await,
         "mission_job_poll" => handler.handle_job(name, args).await,
         "mission_flow_run" => handler.handle_worker(name, args).await,
-        "mission_board_create" | "mission_board_query" | "mission_board_update" | "mission_board_delete" | "mission_board_claim" | "mission_board_decompose" | "mission_board_note_add" | "mission_board_retry" => handler.handle_board(name, args).await,
-        "mission_skill_query" | "mission_skill_exec" | "mission_skill_mutate" | "mission_skill_context" => handler.handle_skill(name, args).await,
+        "mission_board_create"
+        | "mission_board_query"
+        | "mission_board_update"
+        | "mission_board_delete"
+        | "mission_board_claim"
+        | "mission_board_decompose"
+        | "mission_board_note_add"
+        | "mission_board_retry" => handler.handle_board(name, args).await,
+        "mission_skill_query"
+        | "mission_skill_exec"
+        | "mission_skill_mutate"
+        | "mission_skill_context" => handler.handle_skill(name, args).await,
         "mission_memory" => handler.handle_memory(name, args).await,
         "mission_insight" => handler.handle_insight(name, args).await,
         "mission_embedding_ops" => handler.handle_embedding(name, args).await,
         "mission_question" => handler.handle_question(name, args).await,
-        "mission_router_chat" | "mission_router_chat_manage" => handler.handle_router_chat(name, args).await,
+        "mission_router_chat" | "mission_router_chat_manage" => {
+            handler.handle_router_chat(name, args).await
+        }
         "mission_timeline" => handler.handle_timeline(name, args).await,
         "mission_audit" => handler.handle_audit(name, args).await,
         "mission_retrospective_manage" => handler.handle_retrospective(name, args).await,
         "mission_decision_stats" => handler.handle_decision(name, args).await,
         "mission_infra_query" | "mission_infra_ops" => handler.handle_infra(name, args).await,
-        "mission_permission_query" | "mission_permission_mutate" => handler.handle_permission(name, args).await,
-        "mission_sys_config" | "mission_sys_logs" | "mission_power_control" | "mission_control" | "mission_pause" => handler.handle_system(name, args).await,
+        "mission_permission_query" | "mission_permission_mutate" => {
+            handler.handle_permission(name, args).await
+        }
+        "mission_sys_config"
+        | "mission_sys_logs"
+        | "mission_power_control"
+        | "mission_control"
+        | "mission_pause" => handler.handle_system(name, args).await,
         n if n.starts_with("mission_kb_") => handler.handle_kb(n, args).await,
         n if n.starts_with("mission_board_") => handler.handle_board(n, args).await,
         n if n.starts_with("mission_conversation_") => handler.handle_conversation(n, args).await,
@@ -158,15 +201,22 @@ pub async fn run_stdio<H: MissiondMcp>(handler: &H) -> Result<()> {
     loop {
         line.clear();
         let bytes = reader.read_line(&mut line).await?;
-        if bytes == 0 { break; }
+        if bytes == 0 {
+            break;
+        }
 
         let trimmed = line.trim();
-        if trimmed.is_empty() { continue; }
+        if trimmed.is_empty() {
+            continue;
+        }
 
         let request: Request = match serde_json::from_str(trimmed) {
             Ok(r) => r,
             Err(e) => {
-                let resp = Response::from_error(RequestId::Null, RpcError::ParseError(Some(e.to_string())));
+                let resp = Response::from_error(
+                    RequestId::Null,
+                    RpcError::ParseError(Some(e.to_string())),
+                );
                 let json = serde_json::to_string(&resp)?;
                 stdout.write_all(json.as_bytes()).await?;
                 stdout.write_all(b"\n").await?;
@@ -178,11 +228,34 @@ pub async fn run_stdio<H: MissiondMcp>(handler: &H) -> Result<()> {
         let is_notification = request.id.is_none();
         let id = request.id.clone().unwrap_or(RequestId::Null);
         let response = match request.method.as_str() {
-            "initialize" => handler.handle_initialize(id.clone(), request.params.unwrap_or(Value::Null)).await,
-            "notifications/initialized" => handler.handle_notifications_initialized(id.clone(), request.params.unwrap_or(Value::Null)).await,
-            "tools/list" => handler.handle_tools_list(id.clone(), request.params.unwrap_or(Value::Null)).await,
-            "tools/call" => handler.handle_tools_call(id.clone(), request.params.unwrap_or(Value::Null)).await,
-            "ping" => handler.handle_ping(id.clone(), request.params.unwrap_or(Value::Null)).await,
+            "initialize" => {
+                handler
+                    .handle_initialize(id.clone(), request.params.unwrap_or(Value::Null))
+                    .await
+            }
+            "notifications/initialized" => {
+                handler
+                    .handle_notifications_initialized(
+                        id.clone(),
+                        request.params.unwrap_or(Value::Null),
+                    )
+                    .await
+            }
+            "tools/list" => {
+                handler
+                    .handle_tools_list(id.clone(), request.params.unwrap_or(Value::Null))
+                    .await
+            }
+            "tools/call" => {
+                handler
+                    .handle_tools_call(id.clone(), request.params.unwrap_or(Value::Null))
+                    .await
+            }
+            "ping" => {
+                handler
+                    .handle_ping(id.clone(), request.params.unwrap_or(Value::Null))
+                    .await
+            }
             other => Response::from_error(id, RpcError::MethodNotFound(other.to_string())),
         };
 
@@ -200,8 +273,8 @@ pub async fn run_stdio<H: MissiondMcp>(handler: &H) -> Result<()> {
 
 // IPC transport: newline-delimited JSON over Unix socket / TCP loopback
 pub async fn handle_ipc_message(message: &str) -> Result<String> {
-    let request: Request = serde_json::from_str(message)
-        .map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
+    let request: Request =
+        serde_json::from_str(message).map_err(|e| anyhow::anyhow!("parse error: {e}"))?;
     let id = request.id.clone().unwrap_or(RequestId::Null);
     // Route to handler — implement in custom.rs
     let response = Response::from_error(id, RpcError::InternalError("not implemented".into()));
@@ -297,6 +370,4 @@ pub trait MissiondMcp: Send + Sync {
 
     /// Handle tools in the 'external' domain
     async fn handle_external(&self, tool_name: &str, args: Value) -> Result<Value>;
-
 }
-

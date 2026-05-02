@@ -74,7 +74,7 @@ function checkRepo(repo) {
   requireText(diagnostics, FILES.blueprint, src.blueprint, [
     '(projection workstation-slots',
     ':source [mission_slots mission_pty_status workstation-pool]',
-    ':fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind currentTaskId activeBoardTaskId latestConversation]',
+    ':fields [id label role running state provider engine modelProfile reasoningEffort searchEnabled sandbox approvalPolicy taskClass acceptsBoardTask confidence reason activeTool blockedKind currentTaskId activeBoardTaskId latestConversation]',
     ':state-contract',
     'Normalize PTY state case before classification',
     ':forbid [SLOT_OPTIONS hardcoded-sonnet-label stale-status-running]',
@@ -167,6 +167,9 @@ function checkRepo(repo) {
     'provider',
     'engine',
     'modelProfile',
+    'reasoningEffort',
+    'searchEnabled',
+    'approvalPolicy',
     'latestConversation',
     'acceptsBoardTask',
     'confidence',

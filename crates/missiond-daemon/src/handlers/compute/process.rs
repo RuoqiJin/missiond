@@ -111,6 +111,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .dangerously_skip_permissions
                         .unwrap_or(false),
                     model: slot.config.model.clone(),
+                    reasoning_effort: slot.config.reasoning_effort.clone(),
+                    search_enabled: slot.config.search_enabled.unwrap_or(false),
+                    sandbox: slot.config.sandbox.clone(),
+                    approval_policy: slot.config.approval_policy.clone(),
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
                 },
@@ -181,6 +185,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .dangerously_skip_permissions
                         .unwrap_or(false),
                     model: slot.config.model.clone(),
+                    reasoning_effort: slot.config.reasoning_effort.clone(),
+                    search_enabled: slot.config.search_enabled.unwrap_or(false),
+                    sandbox: slot.config.sandbox.clone(),
+                    approval_policy: slot.config.approval_policy.clone(),
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
                 },

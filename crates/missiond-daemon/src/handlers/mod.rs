@@ -154,9 +154,11 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         | "mission_retrospective_backfill" => retrospective::handle(state, name, args).await,
 
         // ===== Compute runtime slot/process control =====
-        "mission_slots" | "mission_inbox" | "mission_slot_history" | "mission_pause" => {
-            slot::handle(state, name, args).await
-        }
+        "mission_slots"
+        | "mission_inbox"
+        | "mission_slot_history"
+        | "mission_pause"
+        | "mission_master_status" => slot::handle(state, name, args).await,
 
         // ===== Legacy LLM trace aliases now owned by comm/question =====
         "mission_jarvis_logs"

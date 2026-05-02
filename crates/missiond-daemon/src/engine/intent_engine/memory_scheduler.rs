@@ -57,6 +57,10 @@ pub(crate) async fn ensure_memory_slot_by_id(state: &AppState, slot_id: &str) ->
             mcp_config,
             dangerously_skip_permissions: slot.config.dangerously_skip_permissions.unwrap_or(false),
             model: slot.config.model.clone(),
+            reasoning_effort: slot.config.reasoning_effort.clone(),
+            search_enabled: slot.config.search_enabled.unwrap_or(false),
+            sandbox: slot.config.sandbox.clone(),
+            approval_policy: slot.config.approval_policy.clone(),
             extra_env: std::collections::HashMap::new(),
             initial_prompt: None,
         },
@@ -125,7 +129,10 @@ pub(crate) async fn dispatch_queued_submit_tasks(state: &AppState) -> bool {
         return false;
     }
 
-    info!(count = queued.len(), "Autopilot: found queued memory-hook tasks");
+    info!(
+        count = queued.len(),
+        "Autopilot: found queued memory-hook tasks"
+    );
 
     let mut any_dispatched = false;
     // Track slots used in this dispatch round to avoid sending multiple tasks to the same slot
@@ -341,8 +348,9 @@ pub(crate) async fn reap_stale_submit_tasks(state: &AppState) {
     const SUBMIT_TASK_TIMEOUT_MS: i64 = 15 * 60 * 1000; // 15 minutes: hard timeout
 
     for task in &running {
-        let started_ms = parse_rfc3339_to_ms(task.claimed_at.as_deref().unwrap_or(&task.updated_at))
-            .unwrap_or(now_ms);
+        let started_ms =
+            parse_rfc3339_to_ms(task.claimed_at.as_deref().unwrap_or(&task.updated_at))
+                .unwrap_or(now_ms);
         let elapsed = now_ms - started_ms;
 
         if elapsed < JSONL_CHECK_THRESHOLD_MS {
@@ -447,7 +455,12 @@ fn parse_rfc3339_to_ms(ts: &str) -> Option<i64> {
 /// Resolve the JSONL path for a given slot via slot_sessions → conversations.
 async fn resolve_jsonl_path(state: &AppState, slot_id: &str) -> Option<String> {
     let session_uuid = state.store.get_slot_session(slot_id).await.ok().flatten()?;
-    let conv = state.store.get_conversation(&session_uuid).await.ok().flatten()?;
+    let conv = state
+        .store
+        .get_conversation(&session_uuid)
+        .await
+        .ok()
+        .flatten()?;
     conv.jsonl_path
 }
 

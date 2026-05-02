@@ -83,6 +83,8 @@ function checkFiles(root, files) {
     'recognize_screen MUST fuse SessionState with screen heuristics',
     'screen_fused',
     'explicit Confirming SessionState always preserves Blocked',
+    'Codex MCP approval menus',
+    'human-like keyboard navigation',
     'recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI',
     'bypass permissions on',
     'MUST NOT trigger Blocked on Idle or completed screens',
@@ -101,6 +103,9 @@ function checkFiles(root, files) {
     'fuse_with_session_state',
     'active_running_evidence',
     'screen_fused',
+    'is_codex_approval_menu',
+    'codex:mcp_approval_menu',
+    'tui_source_signature',
     'codex:status_indicator_widget',
     'gemini:loading_indicator_responding',
     'claude_code:active_spinner',
@@ -124,6 +129,17 @@ function checkFiles(root, files) {
     'CodexCliStateParser::new()',
     'GeminiCliUpstreamStateParser::new()',
     'recognize_screen(engine, &last_lines, current_state)',
+    'navigate_to_option_then_enter',
+    'confirmation_navigation_sequence',
+    'confirmation_navigation_uses_arrow_keys_not_numeric_shortcuts',
+    'screen_is_blocked_confirmation',
+    'reject_option_index',
+  ]);
+  forbidAll(diagnostics, files.ptySession, sources.ptySession, [
+    'press_digit_then_enter',
+    'std::char::from_digit',
+    'write_all(b"2',
+    'write_all(b"3',
   ]);
 
   requireAll(diagnostics, files.ptyManager, sources.ptyManager, [
@@ -141,6 +157,13 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.ptyHandler, sources.ptyHandler, [
     '"mission_pty_status"',
     'serde_json::to_value(&info)',
+    'confirm_response_from_value',
+    'mission_pty_confirm must not send arbitrary raw text',
+  ]);
+  forbidAll(diagnostics, files.ptyHandler, sources.ptyHandler, [
+    'format!("{}\\r", s)',
+    'directly maps',
+    'full chain from keystroke',
   ]);
 
   return diagnostics;

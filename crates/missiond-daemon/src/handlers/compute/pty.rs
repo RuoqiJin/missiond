@@ -203,6 +203,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
                         .dangerously_skip_permissions
                         .unwrap_or(false),
                     model: slot.config.model.clone(),
+                    reasoning_effort: slot.config.reasoning_effort.clone(),
+                    search_enabled: slot.config.search_enabled.unwrap_or(false),
+                    sandbox: slot.config.sandbox.clone(),
+                    approval_policy: slot.config.approval_policy.clone(),
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: slot.config.initial_prompt.clone(),
                 },
@@ -364,47 +368,10 @@ async fn handle_inner(state: &AppState, name: &str, args: Value) -> Result<ToolR
             // Capture pending confirm info before confirming (for auto-allow recording)
             let pending = state.pty.get_pending_confirm(&slot_id).await;
 
-            // Map Node-style response (boolean/number/string) to PTY confirm input.
-            let resp = match response {
-                Value::Bool(true) => missiond_core::ConfirmResponse::Yes,
-                Value::Bool(false) => missiond_core::ConfirmResponse::No,
-                Value::Number(n) => {
-                    let n = n.as_u64().unwrap_or(1) as usize;
-                    if n == 1 {
-                        missiond_core::ConfirmResponse::Yes
-                    } else if n == 3 {
-                        missiond_core::ConfirmResponse::No
-                    } else {
-                        missiond_core::ConfirmResponse::Option(n)
-                    }
-                }
-                Value::String(s) => {
-                    if s == "y" || s == "Y" || s == "1" {
-                        missiond_core::ConfirmResponse::Yes
-                    } else if s == "n" || s == "N" || s == "3" {
-                        missiond_core::ConfirmResponse::No
-                    } else if let Ok(n) = s.parse::<usize>() {
-                        if n == 1 {
-                            missiond_core::ConfirmResponse::Yes
-                        } else if n == 3 {
-                            missiond_core::ConfirmResponse::No
-                        } else {
-                            missiond_core::ConfirmResponse::Option(n)
-                        }
-                    } else {
-                        // Fallback: write raw input + enter
-                        let response_text = s.clone();
-                        let input = format!("{}\r", s);
-                        state.pty.write(&slot_id, &input).await?;
-                        return Ok(ToolResult::json(&serde_json::json!({
-                            "success": true,
-                            "slotId": slot_id,
-                            "response": response_text,
-                        })));
-                    }
-                }
-                _ => missiond_core::ConfirmResponse::Yes,
-            };
+            // Map caller intent to a semantic option. The PTY layer turns this
+            // into Down/Up + Enter navigation; mission_pty_confirm never sends
+            // raw numeric shortcut keys to ClaudeCode/Codex/Gemini.
+            let resp = confirm_response_from_value(&response)?;
 
             // Determine if this is an approval (Yes, Option(1), Option(2))
             let is_approval = matches!(
@@ -602,6 +569,46 @@ fn slot_project_root(state: &AppState, slot_id: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn confirm_response_from_value(response: &Value) -> anyhow::Result<missiond_core::ConfirmResponse> {
+    match response {
+        Value::Bool(true) => Ok(missiond_core::ConfirmResponse::Yes),
+        Value::Bool(false) => Ok(missiond_core::ConfirmResponse::No),
+        Value::Number(n) => Ok(confirm_response_from_option_index(
+            n.as_u64().unwrap_or(1) as usize
+        )),
+        Value::String(s) => {
+            let trimmed = s.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            if matches!(lower.as_str(), "y" | "yes" | "allow" | "approve" | "1") {
+                Ok(missiond_core::ConfirmResponse::Yes)
+            } else if matches!(lower.as_str(), "n" | "no" | "deny" | "reject" | "cancel") {
+                Ok(missiond_core::ConfirmResponse::No)
+            } else if let Some(rest) = lower.strip_prefix("option:") {
+                let n = rest
+                    .trim()
+                    .parse::<usize>()
+                    .map_err(|_| anyhow!("invalid mission_pty_confirm option index: {trimmed}"))?;
+                Ok(confirm_response_from_option_index(n))
+            } else if let Ok(n) = trimmed.parse::<usize>() {
+                Ok(confirm_response_from_option_index(n))
+            } else {
+                Err(anyhow!(
+                    "mission_pty_confirm response must be a boolean, option index, or yes/no/allow/cancel label; use mission_pty_send for raw text"
+                ))
+            }
+        }
+        _ => Ok(missiond_core::ConfirmResponse::Yes),
+    }
+}
+
+fn confirm_response_from_option_index(index: usize) -> missiond_core::ConfirmResponse {
+    match index {
+        0 | 1 => missiond_core::ConfirmResponse::Yes,
+        3 => missiond_core::ConfirmResponse::No,
+        n => missiond_core::ConfirmResponse::Option(n),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,30 +616,19 @@ mod tests {
     use std::sync::Arc;
     use tempfile::tempdir;
 
-    /// E2E: verify that sending numeric `2` as the confirm response correctly maps
-    /// to ConfirmResponse::Option(2), extracts the "don't ask" pattern from the
+    /// E2E: verify that selecting option 2 as caller intent maps to
+    /// ConfirmResponse::Option(2), extracts the "don't ask" pattern from the
     /// option text, learns it via LearnedPermissions, and syncs the entry into
-    /// `.claude/settings.local.json` — the full chain from keystroke to file.
+    /// `.claude/settings.local.json`. The PTY layer later executes this intent
+    /// with arrow-key navigation, never with numeric shortcut keystrokes.
     #[test]
-    fn option2_numeric_learns_and_syncs_to_settings_json() {
-        // Step 1: numeric 2 maps to ConfirmResponse::Option(2)
+    fn option2_intent_learns_and_syncs_to_settings_json() {
+        // Step 1: option index 2 maps to ConfirmResponse::Option(2)
         let response = Value::Number(serde_json::Number::from(2u64));
-        let resp = match response {
-            Value::Number(n) => {
-                let n = n.as_u64().unwrap_or(1) as usize;
-                if n == 1 {
-                    missiond_core::ConfirmResponse::Yes
-                } else if n == 3 {
-                    missiond_core::ConfirmResponse::No
-                } else {
-                    missiond_core::ConfirmResponse::Option(n)
-                }
-            }
-            _ => unreachable!(),
-        };
+        let resp = confirm_response_from_value(&response).expect("confirm response");
         assert!(
             matches!(resp, missiond_core::ConfirmResponse::Option(2)),
-            "numeric 2 must map to Option(2)"
+            "option index 2 must map to Option(2)"
         );
         let is_allowlist = matches!(resp, missiond_core::ConfirmResponse::Option(2));
         assert!(is_allowlist);
@@ -679,6 +675,19 @@ mod tests {
             allow.iter().any(|e| e == "Bash(python3:*)"),
             "Bash(python3:*) not found in allowlist: {:?}",
             allow
+        );
+    }
+
+    #[test]
+    fn confirm_response_is_semantic_not_raw_text() {
+        let trimmed = confirm_response_from_value(&Value::String("2 ".into()))
+            .expect("trimmed option index should parse");
+        assert!(matches!(trimmed, missiond_core::ConfirmResponse::Option(2)));
+
+        let raw = confirm_response_from_value(&Value::String("type this raw text".into()));
+        assert!(
+            raw.is_err(),
+            "mission_pty_confirm must not send arbitrary raw text; use mission_pty_send"
         );
     }
 }

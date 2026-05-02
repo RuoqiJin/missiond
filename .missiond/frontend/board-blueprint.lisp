@@ -26,11 +26,14 @@
                   "packages/board/src/components/TaskDialog.tsx"
                   "packages/board/src/components/AutopilotMonitor.tsx"
                   "packages/board/src/components/ExecDashboard.tsx"]
-      :fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind currentTaskId activeBoardTaskId latestConversation]
+      :fields [id label role running state provider engine modelProfile reasoningEffort searchEnabled sandbox approvalPolicy taskClass acceptsBoardTask confidence reason activeTool blockedKind currentTaskId activeBoardTaskId latestConversation]
       :state-contract
         ((running-states [running thinking responding tool_running confirming blocked starting])
          (inactive-states [complete completed exited not_running stopped dead missing error])
          (rule "Normalize PTY state case before classification; never trust stale raw status.running for terminal states.")
+         (rule "All V3 projected pool providers must be visible: claude-code-default, claude-code-fast-patch, gemini-ultra-pro, gemini-fast-survey, and codex-master-control.")
+         (rule "Codex master and Gemini PTYs must be selectable exactly like ClaudeCode PTYs; provider-specific copy lives in labels, not in visibility filters.")
+         (rule "A stale placeholder conversation or future timestamp must be marked diagnostic/mismatch and cannot make a stopped PTY appear running.")
          (rule "BoardTask-to-slot visibility must prefer runtime-projected activeBoardTaskId/currentTaskId, then BoardTask claimExecutorId/assignee."))
       :forbid [SLOT_OPTIONS hardcoded-sonnet-label stale-status-running])
     (projection pty-recognition

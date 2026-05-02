@@ -133,6 +133,8 @@ pub(crate) const DEFAULT_LEARNING_COOCCURRENCE_REFRESH_INTERVAL_SECS: i64 = 6 * 
 pub(crate) const DEFAULT_DAILY_SONNET_PROFILE: &str = "daily-sonnet";
 pub(crate) const DEFAULT_QUICK_HAIKU_PROFILE: &str = "quick-haiku";
 pub(crate) const DEFAULT_RESEARCH_PROFILE: &str = "research-default";
+pub(crate) const DEFAULT_CODEX_MASTER_PROFILE: &str = "codex-master-gpt-5-5-xhigh";
+pub(crate) const DEFAULT_GEMINI_ULTRA_PRO_PROFILE: &str = "gemini-ultra-pro-preview";
 pub(crate) const DEFAULT_ROUTER_CHAT_MODEL: &str = "gemini-3.1-pro";
 pub(crate) const DEFAULT_ROUTER_CHAT_MAX_TOKENS: u32 = 16384;
 pub(crate) const DEFAULT_ROUTER_FILE_CHAT_MAX_TOKENS: u32 = 65536;
@@ -209,6 +211,10 @@ pub(crate) struct WorkstationPoolRuntimeConfig {
     pub default_use: String,
     pub accepts_boardtask: bool,
     pub write_allowed: bool,
+    pub reasoning_effort: Option<String>,
+    pub search_enabled: bool,
+    pub sandbox: Option<String>,
+    pub approval_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -521,6 +527,14 @@ impl Default for WorkstationRuntimeConfig {
             DEFAULT_QUICK_HAIKU_PROFILE.to_string(),
             Some("haiku".to_string()),
         );
+        model_profile_spawn_args.insert(
+            DEFAULT_CODEX_MASTER_PROFILE.to_string(),
+            Some("gpt-5.5".to_string()),
+        );
+        model_profile_spawn_args.insert(
+            DEFAULT_GEMINI_ULTRA_PRO_PROFILE.to_string(),
+            Some("gemini-3.1-pro-preview".to_string()),
+        );
         let startup_slots = vec![
             StartupSlotRuntimeConfig {
                 task_type: "arch_maintenance".to_string(),
@@ -590,14 +604,18 @@ impl Default for WorkstationRuntimeConfig {
                 default_use: "code-implementation".to_string(),
                 accepts_boardtask: true,
                 write_allowed: true,
+                reasoning_effort: None,
+                search_enabled: false,
+                sandbox: None,
+                approval_policy: None,
             },
             WorkstationPoolRuntimeConfig {
-                id: "gemini-ultra".to_string(),
+                id: "gemini-ultra-pro".to_string(),
                 engine: "gemini".to_string(),
                 role: "researcher".to_string(),
                 slot_id: "slot-gemini-ultra".to_string(),
                 task_type: "gemini_ultra".to_string(),
-                model_profile: None,
+                model_profile: Some(DEFAULT_GEMINI_ULTRA_PRO_PROFILE.to_string()),
                 model: None,
                 task_classes: vec![
                     "research".to_string(),
@@ -616,6 +634,97 @@ impl Default for WorkstationRuntimeConfig {
                 default_use: "research-review".to_string(),
                 accepts_boardtask: true,
                 write_allowed: false,
+                reasoning_effort: None,
+                search_enabled: false,
+                sandbox: None,
+                approval_policy: None,
+            },
+            WorkstationPoolRuntimeConfig {
+                id: "claude-code-fast-patch".to_string(),
+                engine: "claude-code".to_string(),
+                role: "patcher".to_string(),
+                slot_id: "slot-claude-code-fast-patch".to_string(),
+                task_type: "claude_code_fast_patch".to_string(),
+                model_profile: Some(DEFAULT_DAILY_SONNET_PROFILE.to_string()),
+                model: None,
+                task_classes: vec![
+                    "patch".to_string(),
+                    "test".to_string(),
+                    "chore".to_string(),
+                    "low-risk-fast-path".to_string(),
+                ],
+                capabilities: vec![
+                    "code-read".to_string(),
+                    "code-write".to_string(),
+                    "scoped-commit".to_string(),
+                    "narrow-patch".to_string(),
+                    "mcp".to_string(),
+                ],
+                max_concurrency: 1,
+                timeout_secs: 900,
+                default_use: "narrow-patch".to_string(),
+                accepts_boardtask: true,
+                write_allowed: true,
+                reasoning_effort: None,
+                search_enabled: false,
+                sandbox: None,
+                approval_policy: None,
+            },
+            WorkstationPoolRuntimeConfig {
+                id: "gemini-fast-survey".to_string(),
+                engine: "gemini".to_string(),
+                role: "survey".to_string(),
+                slot_id: "slot-gemini-fast-survey".to_string(),
+                task_type: "gemini_fast_survey".to_string(),
+                model_profile: None,
+                model: Some("gemini-2.5-flash".to_string()),
+                task_classes: vec![
+                    "survey".to_string(),
+                    "summary".to_string(),
+                    "mechanical-scan".to_string(),
+                ],
+                capabilities: vec!["read-only".to_string(), "summary".to_string()],
+                max_concurrency: 1,
+                timeout_secs: 600,
+                default_use: "low-authority-survey".to_string(),
+                accepts_boardtask: true,
+                write_allowed: false,
+                reasoning_effort: None,
+                search_enabled: false,
+                sandbox: None,
+                approval_policy: None,
+            },
+            WorkstationPoolRuntimeConfig {
+                id: "codex-master-control".to_string(),
+                engine: "codex".to_string(),
+                role: "orchestrator".to_string(),
+                slot_id: "slot-codex-master-control".to_string(),
+                task_type: "codex_master_control".to_string(),
+                model_profile: Some(DEFAULT_CODEX_MASTER_PROFILE.to_string()),
+                model: None,
+                task_classes: vec![
+                    "master-control".to_string(),
+                    "orchestration".to_string(),
+                    "governance".to_string(),
+                    "night-audit".to_string(),
+                ],
+                capabilities: vec![
+                    "board-write".to_string(),
+                    "kb-write".to_string(),
+                    "execution-log".to_string(),
+                    "dispatch".to_string(),
+                    "search".to_string(),
+                    "mcp".to_string(),
+                ],
+                max_concurrency: 1,
+                timeout_secs: 7200,
+                default_use: "resident-master-control".to_string(),
+                accepts_boardtask: false,
+                write_allowed: false,
+                reasoning_effort: Some("xhigh".to_string()),
+                search_enabled: true,
+                sandbox: Some("read-only".to_string()),
+                approval_policy: Some("never".to_string()),
             },
         ];
         Self {
@@ -1639,6 +1748,11 @@ pub(crate) fn parse_workstation_config(
                     .or_else(|_| usize_keyword(&tokens, ":max_concurrency"))?;
                 let timeout_secs = u64_keyword(&tokens, ":timeout-secs")
                     .or_else(|_| u64_keyword(&tokens, ":timeout_secs"))?;
+                let search_enabled = keyword_value(&tokens, ":search")
+                    .or_else(|| keyword_value(&tokens, ":search-enabled"))
+                    .or_else(|| keyword_value(&tokens, ":search_enabled"))
+                    .and_then(|value| parse_bool_token(&value))
+                    .unwrap_or(false);
                 config.workstation_pool.push(WorkstationPoolRuntimeConfig {
                     id: tokens[2].clone(),
                     engine: non_empty_keyword(&tokens, ":engine")?,
@@ -1659,6 +1773,12 @@ pub(crate) fn parse_workstation_config(
                         .or_else(|_| non_empty_keyword(&tokens, ":default_use"))?,
                     accepts_boardtask,
                     write_allowed,
+                    reasoning_effort: optional_non_nil_keyword(&tokens, ":reasoning-effort")
+                        .or_else(|| optional_non_nil_keyword(&tokens, ":reasoning_effort")),
+                    search_enabled,
+                    sandbox: optional_non_nil_keyword(&tokens, ":sandbox"),
+                    approval_policy: optional_non_nil_keyword(&tokens, ":approval-policy")
+                        .or_else(|| optional_non_nil_keyword(&tokens, ":approval_policy")),
                 });
             }
         }
@@ -1682,6 +1802,19 @@ pub(crate) fn parse_workstation_config(
     }) {
         return Err(BlueprintConfigError::Parse(
             "workstation-pool must include a read-only Gemini BoardTask worker".into(),
+        ));
+    }
+    if !config.workstation_pool.iter().any(|worker| {
+        worker.id == "codex-master-control"
+            && worker.engine == "codex"
+            && worker.role == "orchestrator"
+            && worker.model_profile.as_deref() == Some(DEFAULT_CODEX_MASTER_PROFILE)
+            && worker.reasoning_effort.as_deref() == Some("xhigh")
+            && worker.search_enabled
+            && !worker.accepts_boardtask
+    }) {
+        return Err(BlueprintConfigError::Parse(
+            "workstation-pool must include a non-shard Codex master-control worker".into(),
         ));
     }
     let timeout_form = find_forms(&block, "timeout-policy")
@@ -2634,12 +2767,26 @@ mod tests {
       :default-use code-implementation
       :accepts-boardtask true
       :write-allowed true)
-    (worker gemini-ultra
+    (worker claude-code-fast-patch
+      :engine claude-code
+      :role patcher
+      :slot-id "slot-claude-code-fast-patch"
+      :task-type claude_code_fast_patch
+      :model-profile daily-sonnet
+      :model nil
+      :task-classes [patch test chore low-risk-fast-path]
+      :capabilities [code-read code-write scoped-commit narrow-patch mcp]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use narrow-patch
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker gemini-ultra-pro
       :engine gemini
       :role researcher
       :slot-id "slot-gemini-ultra"
       :task-type gemini_ultra
-      :model-profile nil
+      :model-profile gemini-ultra-pro-preview
       :model nil
       :task-classes [research review context-pack lisp-compression general]
       :capabilities [read-only analysis design-review]
@@ -2647,6 +2794,38 @@ mod tests {
       :timeout-secs 900
       :default-use research-review
       :accepts-boardtask true
+      :write-allowed false)
+    (worker gemini-fast-survey
+      :engine gemini
+      :role survey
+      :slot-id "slot-gemini-fast-survey"
+      :task-type gemini_fast_survey
+      :model-profile nil
+      :model "gemini-2.5-flash"
+      :task-classes [survey summary mechanical-scan]
+      :capabilities [read-only summary]
+      :max-concurrency 1
+      :timeout-secs 600
+      :default-use low-authority-survey
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker codex-master-control
+      :engine codex
+      :role orchestrator
+      :slot-id "slot-codex-master-control"
+      :task-type codex_master_control
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox read-only
+      :approval-policy never
+      :task-classes [master-control orchestration governance night-audit]
+      :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp]
+      :max-concurrency 1
+      :timeout-secs 7200
+      :default-use resident-master-control
+      :accepts-boardtask false
       :write-allowed false))
 	  (flow-runtime-policy
 	    :llm-call-default-max-tokens 65536
@@ -2811,13 +2990,18 @@ mod tests {
                 .unwrap(),
             None
         );
+        assert_eq!(
+            cfg.spawn_model_for_profile(DEFAULT_CODEX_MASTER_PROFILE)
+                .unwrap(),
+            Some("gpt-5.5".to_string())
+        );
         assert_eq!(cfg.startup_slots().len(), 4);
-        assert_eq!(cfg.workstation_pool().len(), 2);
+        assert_eq!(cfg.workstation_pool().len(), 5);
         assert_eq!(
             cfg.boardtask_pool_candidates("research")
                 .first()
                 .map(|worker| worker.id.as_str()),
-            Some("gemini-ultra")
+            Some("gemini-ultra-pro")
         );
         assert_eq!(
             cfg.boardtask_pool_candidates("code")
@@ -2825,6 +3009,19 @@ mod tests {
                 .map(|worker| worker.id.as_str()),
             Some("claude-code-default")
         );
+        let master = cfg
+            .workstation_pool()
+            .iter()
+            .find(|worker| worker.id == "codex-master-control")
+            .expect("codex master worker");
+        assert_eq!(master.engine, "codex");
+        assert_eq!(
+            master.model_profile.as_deref(),
+            Some(DEFAULT_CODEX_MASTER_PROFILE)
+        );
+        assert_eq!(master.reasoning_effort.as_deref(), Some("xhigh"));
+        assert!(master.search_enabled);
+        assert!(!master.accepts_boardtask);
         let lisp_survey = cfg
             .startup_slots()
             .iter()
@@ -3054,7 +3251,8 @@ mod tests {
     (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"]))
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
-    (worker gemini-ultra :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)))"#,
+    (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
+    (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox read-only :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed false)))"#,
         )
         .expect_err("missing policy");
         assert!(err
@@ -3099,7 +3297,8 @@ mod tests {
       :max_secs 600))
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
-    (worker gemini-ultra :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile nil :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)))
+    (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
+    (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox read-only :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed false)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");
         assert!(err.to_string().contains("ttl-policy dynamic-slot"));

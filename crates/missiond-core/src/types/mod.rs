@@ -2,33 +2,33 @@
 //!
 //! Mirrors the TypeScript definitions in packages/missiond/src/types.ts
 
-mod slot;
-mod task;
+mod async_job;
 mod board;
-mod question;
-mod knowledge;
-mod skill;
 mod conversation;
+mod directive;
+mod dynamic_slot;
 mod incident;
 mod infra;
-mod dynamic_slot;
-mod async_job;
+mod knowledge;
 mod project;
-mod directive;
+mod question;
+mod skill;
+mod slot;
+mod task;
 
-pub use slot::*;
-pub use task::*;
+pub use async_job::*;
 pub use board::*;
-pub use question::*;
-pub use knowledge::*;
-pub use skill::*;
 pub use conversation::*;
+pub use directive::*;
+pub use dynamic_slot::*;
 pub use incident::*;
 pub use infra::*;
-pub use dynamic_slot::*;
-pub use async_job::*;
+pub use knowledge::*;
 pub use project::*;
-pub use directive::*;
+pub use question::*;
+pub use skill::*;
+pub use slot::*;
+pub use task::*;
 
 #[cfg(test)]
 mod tests {
@@ -108,6 +108,11 @@ mod tests {
             auto_start: Some(true),
             dangerously_skip_permissions: None,
             model: None,
+            model_profile: None,
+            reasoning_effort: None,
+            search_enabled: None,
+            sandbox: None,
+            approval_policy: None,
             traits: vec![],
             env: None,
             category: None,
@@ -149,10 +154,27 @@ mod tests {
     fn test_engine_capability_inference() {
         // Claude Code should get SupportsMcp
         let mut config = SlotConfig {
-            id: "s1".into(), role: "worker".into(), description: "test".into(),
+            id: "s1".into(),
+            role: "worker".into(),
+            description: "test".into(),
             engine: CliEngine::ClaudeCode,
-            cwd: None, project_root: None, requested_cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
-            dangerously_skip_permissions: None, model: None, traits: vec![], env: None, category: None, initial_prompt: None,
+            cwd: None,
+            project_root: None,
+            requested_cwd: None,
+            mcp_config: None,
+            lifecycle: None,
+            auto_start: None,
+            dangerously_skip_permissions: None,
+            model: None,
+            model_profile: None,
+            reasoning_effort: None,
+            search_enabled: None,
+            sandbox: None,
+            approval_policy: None,
+            traits: vec![],
+            env: None,
+            category: None,
+            initial_prompt: None,
         };
         config.apply_default_traits();
         assert!(config.supports_mcp());
@@ -160,10 +182,27 @@ mod tests {
 
         // Codex should get SupportsVision
         let mut config = SlotConfig {
-            id: "s2".into(), role: "vision".into(), description: "test".into(),
+            id: "s2".into(),
+            role: "vision".into(),
+            description: "test".into(),
             engine: CliEngine::Codex,
-            cwd: None, project_root: None, requested_cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
-            dangerously_skip_permissions: None, model: None, traits: vec![], env: None, category: None, initial_prompt: None,
+            cwd: None,
+            project_root: None,
+            requested_cwd: None,
+            mcp_config: None,
+            lifecycle: None,
+            auto_start: None,
+            dangerously_skip_permissions: None,
+            model: None,
+            model_profile: None,
+            reasoning_effort: None,
+            search_enabled: None,
+            sandbox: None,
+            approval_policy: None,
+            traits: vec![],
+            env: None,
+            category: None,
+            initial_prompt: None,
         };
         config.apply_default_traits();
         assert!(config.supports_vision());
@@ -171,10 +210,27 @@ mod tests {
 
         // Memory role + Claude engine should get both IsMetaAgent and SupportsMcp
         let mut config = SlotConfig {
-            id: "s3".into(), role: "memory".into(), description: "test".into(),
+            id: "s3".into(),
+            role: "memory".into(),
+            description: "test".into(),
             engine: CliEngine::ClaudeCode,
-            cwd: None, project_root: None, requested_cwd: None, mcp_config: None, lifecycle: None, auto_start: None,
-            dangerously_skip_permissions: None, model: None, traits: vec![], env: None, category: None, initial_prompt: None,
+            cwd: None,
+            project_root: None,
+            requested_cwd: None,
+            mcp_config: None,
+            lifecycle: None,
+            auto_start: None,
+            dangerously_skip_permissions: None,
+            model: None,
+            model_profile: None,
+            reasoning_effort: None,
+            search_enabled: None,
+            sandbox: None,
+            approval_policy: None,
+            traits: vec![],
+            env: None,
+            category: None,
+            initial_prompt: None,
         };
         config.apply_default_traits();
         assert!(config.is_meta_agent());
@@ -204,7 +260,8 @@ mod tests {
         assert!(!config.is_persistent());
 
         // lifecycle overrides auto_start
-        let json = r#"{"id":"s5","role":"w","description":"t","lifecycle":"on_demand","autoStart":true}"#;
+        let json =
+            r#"{"id":"s5","role":"w","description":"t","lifecycle":"on_demand","autoStart":true}"#;
         let config: SlotConfig = serde_json::from_str(json).unwrap();
         assert!(!config.is_persistent());
     }

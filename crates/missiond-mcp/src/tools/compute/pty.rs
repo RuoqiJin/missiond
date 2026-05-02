@@ -67,13 +67,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_pty_confirm =====
         ToolDefinition::new(
             "mission_pty_confirm",
-            "发送确认响应(工具使用确认对话框)",
+            "发送确认响应(工具使用确认对话框)。response 表达语义选择；运行时用上下键/回车操作菜单，不发送数字快捷键。",
             json!({
                 "type": "object",
                 "required": ["slotId", "response"],
                 "properties": {
                     "slotId": {"type": "string"},
-                    "response": {"type": "string", "description": "true/false 或选项编号或直接输入"}
+                    "response": {
+                        "oneOf": [{"type": "boolean"}, {"type": "number"}, {"type": "string"}],
+                        "description": "true/false、yes/no/allow/cancel、或选项编号/option:N。禁止直接输入原始文本；原始文本请用 mission_pty_send。"
+                    }
                 }
             }),
         ),

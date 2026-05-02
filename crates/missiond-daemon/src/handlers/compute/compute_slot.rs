@@ -337,6 +337,29 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
         auto_start: None,
         dangerously_skip_permissions: Some(false), // ALWAYS false for dynamic slots
         model,
+        model_profile: args
+            .get("model_profile")
+            .or_else(|| args.get("modelProfile"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        reasoning_effort: args
+            .get("reasoning_effort")
+            .or_else(|| args.get("reasoningEffort"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        search_enabled: args
+            .get("search_enabled")
+            .or_else(|| args.get("searchEnabled"))
+            .and_then(|v| v.as_bool()),
+        sandbox: args
+            .get("sandbox")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        approval_policy: args
+            .get("approval_policy")
+            .or_else(|| args.get("approvalPolicy"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         traits: vec![],
         category: None,
         env: None,
@@ -423,6 +446,10 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 mcp_config,
                 dangerously_skip_permissions: false,
                 model: slot_config.model.clone(),
+                reasoning_effort: slot_config.reasoning_effort.clone(),
+                search_enabled: slot_config.search_enabled.unwrap_or(false),
+                sandbox: slot_config.sandbox.clone(),
+                approval_policy: slot_config.approval_policy.clone(),
                 extra_env: HashMap::new(),
                 initial_prompt: initial_prompt_for_spawn,
             },
@@ -884,6 +911,11 @@ mod tests {
             auto_start: None,
             dangerously_skip_permissions: None,
             model: None,
+            model_profile: None,
+            reasoning_effort: None,
+            search_enabled: None,
+            sandbox: None,
+            approval_policy: None,
             traits: vec![],
             category: None,
             env: None,
@@ -975,6 +1007,11 @@ mod tests {
             auto_start: None,
             dangerously_skip_permissions: None,
             model: None,
+            model_profile: None,
+            reasoning_effort: None,
+            search_enabled: None,
+            sandbox: None,
+            approval_policy: None,
             traits: vec![],
             category: None,
             env: None,

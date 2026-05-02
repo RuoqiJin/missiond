@@ -9,10 +9,19 @@ interface SlotInfo {
   engine?: string;
   model_profile?: string;
   modelProfile?: string;
+  reasoning_effort?: string;
+  reasoningEffort?: string;
+  search_enabled?: boolean;
+  searchEnabled?: boolean;
+  sandbox?: string;
+  approval_policy?: string;
+  approvalPolicy?: string;
   task_class?: string;
   taskClass?: string;
   accepts_boardtask?: boolean;
   acceptsBoardTask?: boolean;
+  latest_conversation?: PtyStatus['latest_conversation'];
+  latestConversation?: PtyStatus['latestConversation'];
 }
 
 interface PtyStatus {
@@ -91,8 +100,12 @@ function labelForSlot(slot: SlotInfo) {
   return slot.description || slot.id.replace(/^slot-/, '').replace(/-\d+$/, '');
 }
 
-function latestConversation(status: PtyStatus | null) {
-  const latest = status?.latestConversation ?? status?.latest_conversation ?? null;
+function latestConversation(status: PtyStatus | null, slot: SlotInfo) {
+  const latest = status?.latestConversation
+    ?? status?.latest_conversation
+    ?? slot.latestConversation
+    ?? slot.latest_conversation
+    ?? null;
   if (!latest) return null;
   return {
     id: latest.id,
@@ -131,6 +144,10 @@ export async function GET() {
         provider: recognition?.provider ?? status?.provider ?? s.provider,
         engine: status?.engine ?? s.engine,
         modelProfile: s.modelProfile ?? s.model_profile,
+        reasoningEffort: s.reasoningEffort ?? s.reasoning_effort,
+        searchEnabled: s.searchEnabled ?? s.search_enabled,
+        sandbox: s.sandbox,
+        approvalPolicy: s.approvalPolicy ?? s.approval_policy,
         taskClass: s.taskClass ?? s.task_class,
         acceptsBoardTask: s.acceptsBoardTask ?? s.accepts_boardtask,
         confidence: recognition?.confidence ?? status?.confidence,
@@ -139,7 +156,7 @@ export async function GET() {
         blockedKind: recognition?.blockedKind ?? recognition?.blocked_kind ?? status?.blockedKind ?? status?.blocked_kind,
         currentTaskId: status?.currentTaskId ?? status?.current_task_id,
         activeBoardTaskId: status?.activeBoardTaskId ?? status?.active_board_task_id ?? status?.currentTaskId ?? status?.current_task_id,
-        latestConversation: latestConversation(status),
+        latestConversation: latestConversation(status, s),
         // Internal sort hint; consumers may ignore.
         __activeRank: active ? 1 : 2,
       };

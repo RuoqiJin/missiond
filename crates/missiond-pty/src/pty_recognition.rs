@@ -232,6 +232,18 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
     let lower = text.to_ascii_lowercase();
     let elapsed = extract_elapsed_secs(&text);
 
+    if is_codex_approval_menu(&lower) {
+        return PtyRecognitionSnapshot::new(
+            CliEngine::Codex,
+            PtyCanonicalState::Blocked,
+            0.96,
+            "codex:mcp_approval_menu",
+        )
+        .with_blocked_kind("approval")
+        .with_elapsed(elapsed)
+        .with_source("tui_source_signature");
+    }
+
     if lower.contains("approval request")
         || lower.contains("request approval")
         || lower.contains("requires approval")
@@ -299,6 +311,14 @@ fn recognize_codex(lines: &[String]) -> PtyRecognitionSnapshot {
         0.2,
         "codex:no_match",
     )
+}
+
+fn is_codex_approval_menu(lower: &str) -> bool {
+    lower.contains("allow the ")
+        && lower.contains(" mcp server to run tool")
+        && lower.contains("allow for this session")
+        && lower.contains("enter to submit")
+        && lower.contains("esc to cancel")
 }
 
 fn recognize_gemini(lines: &[String]) -> PtyRecognitionSnapshot {
@@ -684,6 +704,26 @@ mod tests {
     }
 
     #[test]
+    fn codex_mcp_approval_menu_stays_blocked_during_thinking() {
+        let result = recognize_screen(
+            CliEngine::Codex,
+            &lines(&[
+                "Field 1/1",
+                "Allow the missiond MCP server to run tool \"mission_execution\"?",
+                "› 1. Allow",
+                "  2. Allow for this session",
+                "  3. Always allow",
+                "  4. Cancel",
+                "enter to submit | esc to cancel",
+            ]),
+            SessionState::Thinking,
+        );
+        assert_eq!(result.state, PtyCanonicalState::Blocked);
+        assert_eq!(result.source, "tui_source_signature");
+        assert_eq!(result.blocked_kind.as_deref(), Some("approval"));
+    }
+
+    #[test]
     fn gemini_loading_indicator_is_running() {
         let result = recognize_gemini(&lines(&["⠙ Thinking... (esc to cancel, 5s)", "│ >"]));
         assert_eq!(result.state, PtyCanonicalState::Running);
@@ -746,10 +786,7 @@ mod tests {
         // sourced from session_state, not stay Blocked.
         let result = recognize_screen(
             CliEngine::ClaudeCode,
-            &lines(&[
-                "Do you want to proceed?",
-                "permission to read /etc/hosts",
-            ]),
+            &lines(&["Do you want to proceed?", "permission to read /etc/hosts"]),
             SessionState::Thinking,
         );
         assert_eq!(result.state, PtyCanonicalState::Running);
@@ -764,10 +801,7 @@ mod tests {
         // The screen evidence and the session state agree -- preserve Blocked.
         let result = recognize_screen(
             CliEngine::ClaudeCode,
-            &lines(&[
-                "Do you want to proceed?",
-                "permission to read /etc/hosts",
-            ]),
+            &lines(&["Do you want to proceed?", "permission to read /etc/hosts"]),
             SessionState::Confirming,
         );
         assert_eq!(result.state, PtyCanonicalState::Blocked);

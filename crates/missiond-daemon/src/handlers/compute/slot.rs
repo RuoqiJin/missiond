@@ -25,6 +25,7 @@ struct InboxArgs {
 pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
     match name {
         "mission_slots" => Ok(ToolResult::json(&projected_mission_slots(state).await)),
+        "mission_master_status" => Ok(ToolResult::json(&mission_master_status(state).await)),
         "mission_inbox" => {
             let InboxArgs { unread_only, limit } =
                 serde_json::from_value(args).unwrap_or(InboxArgs {
@@ -41,6 +42,63 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_slot_history" => handle_slot_history(state, args).await,
         _ => Err(anyhow!("Unknown compute slot tool: {name}")),
     }
+}
+
+async fn mission_master_status(state: &AppState) -> Value {
+    let config = WorkstationRuntimeConfig::load_for_current_dir().ok();
+    let worker = config.as_ref().and_then(|config| {
+        config
+            .workstation_pool()
+            .iter()
+            .find(|worker| worker.id == "codex-master-control")
+    });
+    let slot_id = worker
+        .map(|worker| worker.slot_id.as_str())
+        .unwrap_or("slot-codex-master-control");
+    let pty_status = state.pty.get_status(slot_id).await;
+    let mission_slot_record = state
+        .mission
+        .list_slots()
+        .into_iter()
+        .find(|slot| slot.config.id == slot_id);
+    let checkpoint_root = mission_slot_record
+        .as_ref()
+        .and_then(|slot| slot.config.project_root.clone().or(slot.config.cwd.clone()))
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let mission_slot = mission_slot_record.and_then(|slot| serde_json::to_value(slot).ok());
+    let checkpoint_path =
+        checkpoint_root.join(".missiond/v3/runtime/master-control-checkpoint.lisp");
+    let checkpoint_text = std::fs::read_to_string(&checkpoint_path).ok();
+
+    json!({
+        "schema": "missiond.master-status.v1",
+        "worker": "codex-master-control",
+        "slotId": slot_id,
+        "configured": worker.is_some(),
+        "acceptsBoardTask": worker.map(|worker| worker.accepts_boardtask).unwrap_or(false),
+        "writeAllowed": worker.map(|worker| worker.write_allowed).unwrap_or(false),
+        "modelProfile": worker.and_then(|worker| worker.model_profile.clone()),
+        "reasoningEffort": worker.and_then(|worker| worker.reasoning_effort.clone()),
+        "searchEnabled": worker.map(|worker| worker.search_enabled).unwrap_or(false),
+        "sandbox": worker.and_then(|worker| worker.sandbox.clone()),
+        "approvalPolicy": worker.and_then(|worker| worker.approval_policy.clone()),
+        "pty": pty_status.and_then(|status| serde_json::to_value(status).ok()),
+        "slot": mission_slot,
+        "checkpoint": {
+            "path": checkpoint_path.display().to_string(),
+            "exists": checkpoint_text.is_some(),
+            "preview": checkpoint_text
+                .as_ref()
+                .map(|text| text.chars().take(1600).collect::<String>()),
+        },
+        "authority": {
+            "primary": ["provider_jsonl", "codex_sqlite", "claude_jsonl", "gemini_chat_file"],
+            "secondary": ["missiond_event_bus", "board_task_lifecycle"],
+            "diagnostic": ["pty_recognition_snapshot"]
+        }
+    })
 }
 
 async fn projected_mission_slots(state: &AppState) -> Vec<Value> {

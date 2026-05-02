@@ -19,7 +19,11 @@ pub struct ToolDefinition {
 
 impl ToolDefinition {
     /// Create a new tool definition
-    pub fn new(name: impl Into<String>, description: impl Into<String>, input_schema: Value) -> Self {
+    pub fn new(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        input_schema: Value,
+    ) -> Self {
         ToolDefinition {
             name: name.into(),
             description: description.into(),
@@ -67,17 +71,15 @@ impl ToolResult {
 
     /// Create a successful JSON result
     pub fn json<T: Serialize>(value: &T) -> Self {
-        let text = serde_json::to_string(value).unwrap_or_else(|e| {
-            json!({ "error": e.to_string() }).to_string()
-        });
+        let text = serde_json::to_string(value)
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }).to_string());
         ToolResult::text(text)
     }
 
     /// Create a pretty-printed JSON result
     pub fn json_pretty<T: Serialize>(value: &T) -> Self {
-        let text = serde_json::to_string_pretty(value).unwrap_or_else(|e| {
-            json!({ "error": e.to_string() }).to_string()
-        });
+        let text = serde_json::to_string_pretty(value)
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }).to_string());
         ToolResult::text(text)
     }
 
@@ -95,9 +97,8 @@ impl ToolResult {
     pub fn structured_error(err: ToolError) -> Self {
         ToolResult {
             content: vec![ToolContent::Text {
-                text: serde_json::to_string(&err).unwrap_or_else(|e| {
-                    json!({ "error": e.to_string() }).to_string()
-                }),
+                text: serde_json::to_string(&err)
+                    .unwrap_or_else(|e| json!({ "error": e.to_string() }).to_string()),
             }],
             is_error: Some(true),
         }
@@ -165,19 +166,21 @@ pub mod error_codes {
     pub const EXTERNAL_ERROR: &str = "EXTERNAL_ERROR";
 }
 
-
-mod knowledge;
-mod compute;
 mod comm;
+mod compute;
+mod knowledge;
 mod sysinfra;
 
 // Domain aliases for readability
+use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
+use compute::{
+    cc_tasks, compute_slot, flow_run, forge, job, minimax, process, pty, slot, task, task_delegate,
+    worker,
+};
 use knowledge::{
     agent_execution, board, cascade, directive, insight, intent, kb, memory, plan, project,
     request, skill, workflow,
 };
-use compute::{task, task_delegate, process, pty, cc_tasks, minimax, worker, slot, compute_slot, job, flow_run, forge};
-use comm::{audit, capability_usage, codex_ops, conversation, question, router_chat, timeline};
 use sysinfra::{global_instruction, infra, permission, power, system};
 
 /// Generate all tool definitions
@@ -258,7 +261,10 @@ mod tests {
             "mission_kb_remember",
             "mission_cc_query",
         ] {
-            assert!(names.contains(required), "missing required tool: {required}");
+            assert!(
+                names.contains(required),
+                "missing required tool: {required}"
+            );
         }
     }
 
@@ -321,16 +327,33 @@ mod tests {
     fn test_mission_job_poll_registered() {
         let tools = all_tools();
         let names: HashSet<_> = tools.iter().map(|t| t.name.as_str()).collect();
-        assert!(names.contains("mission_job_poll"), "mission_job_poll tool not registered");
+        assert!(
+            names.contains("mission_job_poll"),
+            "mission_job_poll tool not registered"
+        );
     }
 
     #[test]
     fn test_directive_plan_workflow_surfaces_registered() {
         let tools = all_tools();
         let names: HashSet<_> = tools.iter().map(|t| t.name.as_str()).collect();
-        for n in ["mission_request", "mission_directive", "mission_plan", "mission_workflow"] {
+        for n in [
+            "mission_request",
+            "mission_directive",
+            "mission_plan",
+            "mission_workflow",
+        ] {
             assert!(names.contains(n), "{} not registered", n);
         }
+    }
+
+    #[test]
+    fn test_master_status_surface_registered() {
+        let def = get_tool("mission_master_status").expect("mission_master_status not registered");
+        assert!(
+            def.description.contains("Codex master-control"),
+            "mission_master_status description should identify the resident master surface"
+        );
     }
 
     #[test]
@@ -378,7 +401,11 @@ mod tests {
             })
             .unwrap_or_default();
         for a in ["read", "edit", "reload"] {
-            assert!(enums.contains(a), "mission_global_instruction missing action `{}`", a);
+            assert!(
+                enums.contains(a),
+                "mission_global_instruction missing action `{}`",
+                a
+            );
         }
     }
 
@@ -402,7 +429,11 @@ mod tests {
             "archive",
             "version_chain",
         ] {
-            assert!(enums.contains(a), "mission_directive missing action `{}`", a);
+            assert!(
+                enums.contains(a),
+                "mission_directive missing action `{}`",
+                a
+            );
         }
     }
 

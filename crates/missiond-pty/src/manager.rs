@@ -61,6 +61,14 @@ pub struct PTYSpawnOptions {
     pub dangerously_skip_permissions: bool,
     /// Model override (e.g., "sonnet", "opus"). Passed as --model to Claude Code.
     pub model: Option<String>,
+    /// Provider-specific reasoning effort, currently projected to Codex config.
+    pub reasoning_effort: Option<String>,
+    /// Enable provider search/web mode when supported.
+    pub search_enabled: bool,
+    /// Provider sandbox profile when supported.
+    pub sandbox: Option<String>,
+    /// Provider approval profile when supported.
+    pub approval_policy: Option<String>,
     /// Extra environment variables to inject into the PTY child process
     /// Used for slot tracking (MISSIOND_SLOT_ID, MISSIOND_SESSION_FILE)
     pub extra_env: HashMap<String, String>,
@@ -320,6 +328,10 @@ impl PTYManager {
             mcp_config: options.mcp_config.clone(),
             dangerously_skip_permissions: options.dangerously_skip_permissions,
             model: options.model.clone(),
+            reasoning_effort: options.reasoning_effort.clone(),
+            search_enabled: options.search_enabled,
+            sandbox: options.sandbox.clone(),
+            approval_policy: options.approval_policy.clone(),
         })?;
 
         // Set up permission check
@@ -596,6 +608,10 @@ impl PTYManager {
                             dangerously_skip_permissions: restart_options
                                 .dangerously_skip_permissions,
                             model: restart_options.model.clone(),
+                            reasoning_effort: restart_options.reasoning_effort.clone(),
+                            search_enabled: restart_options.search_enabled,
+                            sandbox: restart_options.sandbox.clone(),
+                            approval_policy: restart_options.approval_policy.clone(),
                         }) {
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();

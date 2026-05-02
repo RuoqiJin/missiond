@@ -489,9 +489,23 @@
       :rule "Omit --model so Claude Code uses the user's Default model selection.")
     (model-profile research-default
       :applies-to [research review context-pack lisp-compression]
-      :pool-binding gemini-ultra
+      :pool-binding gemini-ultra-pro
       :spawn-model-arg nil
       :rule "Research-class delegations route to the workstation-pool gemini researcher slot. spawn-model-arg is nil because the binding is to a pre-spawned Gemini PTY; explicit caller model_profile=coding-default-opus-4-7 overrides this and pins the work to Claude.")
+    (model-profile gemini-ultra-pro-preview
+      :applies-to [research review context-pack lisp-compression language-explanation]
+      :pool-binding gemini-ultra-pro
+      :spawn-model-arg "gemini-3.1-pro-preview"
+      :rule "Gemini Ultra defaults to Gemini 3.1 Pro Preview for high-level read-only investigation; lower-authority fast survey lanes must be explicitly requested.")
+    (model-profile codex-master-gpt-5-5-xhigh
+      :applies-to [master-control orchestration governance night-audit]
+      :pool-binding codex-master-control
+      :spawn-model-arg "gpt-5.5"
+      :reasoning-effort xhigh
+      :search true
+      :sandbox read-only
+      :approval-policy never
+      :rule "Resident master control uses Codex GPT-5.5 with xhigh reasoning. It is not a normal code shard worker and defaults to read-only code access plus Board/KB/execution-log writes.")
     (model-profile daily-sonnet
       :applies-to [ops low-risk-maintenance]
       :spawn-model-arg "sonnet"
@@ -651,12 +665,26 @@
       :default-use code-implementation
       :accepts-boardtask true
       :write-allowed true)
-    (worker gemini-ultra
+    (worker claude-code-fast-patch
+      :engine claude-code
+      :role patcher
+      :slot-id "slot-claude-code-fast-patch"
+      :task-type claude_code_fast_patch
+      :model-profile daily-sonnet
+      :model nil
+      :task-classes [patch test chore low-risk-fast-path]
+      :capabilities [code-read code-write scoped-commit narrow-patch mcp]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use narrow-patch
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker gemini-ultra-pro
       :engine gemini
       :role researcher
       :slot-id "slot-gemini-ultra"
       :task-type gemini_ultra
-      :model-profile nil
+      :model-profile gemini-ultra-pro-preview
       :model nil
       :task-classes [research review context-pack lisp-compression general]
       :capabilities [read-only analysis design-review]
@@ -665,8 +693,43 @@
       :default-use research-review
       :accepts-boardtask true
       :write-allowed false)
+    (worker gemini-fast-survey
+      :engine gemini
+      :role survey
+      :slot-id "slot-gemini-fast-survey"
+      :task-type gemini_fast_survey
+      :model-profile nil
+      :model "gemini-2.5-flash"
+      :task-classes [survey summary mechanical-scan]
+      :capabilities [read-only summary]
+      :max-concurrency 1
+      :timeout-secs 600
+      :default-use low-authority-survey
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker codex-master-control
+      :engine codex
+      :role orchestrator
+      :slot-id "slot-codex-master-control"
+      :task-type codex_master_control
+      :model-profile codex-master-gpt-5-5-xhigh
+      :model nil
+      :reasoning-effort xhigh
+      :search true
+      :sandbox read-only
+      :approval-policy never
+      :task-classes [master-control orchestration governance night-audit]
+      :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp]
+      :max-concurrency 1
+      :timeout-secs 7200
+      :default-use resident-master-control
+      :accepts-boardtask false
+      :write-allowed false)
     :invariants
       ["Claude coding workers use coding-default-opus-4-7, which means no Claude Code --model override; Sonnet cannot be the coding default."
+       "Codex master-control is a resident orchestrator lane, not a normal BoardTask code shard candidate; it may read code, write Board/KB/execution logs, and dispatch workers, but does not directly compete for ordinary code tasks."
+       "Claude fast-patch may use Sonnet only for narrow atomic tasks whose context-pack already identifies exact files/regions; it is not a default coding lane."
+       "Gemini Ultra Pro is the high-language read-only investigation lane using gemini-3.1-pro-preview; Gemini fast survey is explicitly low-authority mechanical scan/summary work."
        "Gemini is initially read-only: research, review, context-pack, and Lisp compression advice may route there; scoped write/commit work stays on Claude until a separate Gemini write smoke passes."
        "Autopilot unassigned BoardTasks select from workstation-pool by task class before considering any legacy slot; old slots.yaml Sonnet entries are not generic coding candidates."
        "mission_compute_slot action=list must expose workstation_pool with runtime slot presence and idle/busy/stopped status."
@@ -674,6 +737,57 @@
        "V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots; mission_compute_slot list MUST tag any static slot whose id is not in the V3 projection as legacy=true and dispatchable=false (or split it into legacy_static_slots) so retired Sonnet entries (autopilot/topology-guardian/extraction-worker/delta-validator/...) cannot resurface as candidates."
        "mission_compute_slot list status MUST derive from PTYManager (state.pty.get_status) for every slot it surfaces, so it cannot contradict mission_pty_status for V3 pool slots; the SlotManager session_id field is only a fallback when no PTY status exists, and it MUST NOT report 'running' when no PTY is attached."]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
+
+  (resident-master-control
+    :desc "Resident Codex brain layer: event-driven orchestrator that reads Lisp SSOT, Board, KB, project registry, execution logs, and worker telemetry, then delegates exact work to pool workers."
+    :worker codex-master-control
+    :slot-id "slot-codex-master-control"
+    :engine codex
+    :model-profile codex-master-gpt-5-5-xhigh
+    :model "gpt-5.5"
+    :reasoning-effort xhigh
+    :role [orchestrator brain]
+    :permissions [read-code read-lisp read-board write-board write-kb write-execution-log dispatch-workers read-event-bus]
+    :default-code-write false
+    :checkpoint
+      (:sources [mission_execution companion-log BoardTask-note master-control-checkpoint]
+       :write-on [turn-start delegation-created delegation-complete daemon-restart-before-exit periodic-heartbeat]
+       :resume-from [latest-master-control-checkpoint open-master-control-boardtask latest-execution-log])
+    :event-subscriptions
+      [BoardTaskCreated BoardTaskStatusChanged SlotEvent QuestionEvent DaemonRestart StaleTask NightSchedule ProjectRegistryChanged]
+    :loop
+      ((step s1 :logic "load latest checkpoint, active Board objectives, V3/project Lisp registries, and recent event tail")
+       (step s2 :logic "classify events into decision-required, dispatchable, blocked, stale, or informational")
+       (step s3 :logic "for dispatchable work, emit context-pack organizer tasks first, then exact write-scope shards")
+       (step s4 :logic "delegate Claude/Gemini/Codex workers through BoardTask/Autopilot only; never bypass durable event/Board state")
+       (step s5 :logic "write checkpoint + Board note + execution companion log after every decision boundary"))
+    :evidence-authority
+      ((tier t1 :source [provider-jsonl codex-sqlite claude-jsonl gemini-chat-file] :use "durable final/progress facts")
+       (tier t2 :source [missiond-event-bus BoardTask-lifecycle mission_execution] :use "causal workflow state")
+       (tier t3 :source [provider-aware-pty-recognition screen-buffer] :use "diagnostic state only; never sole completion authority"))
+    :settle-policy
+      "A worker can be closed only after durable final event or high-confidence final summary plus settle window; idle PTY alone is insufficient because provider SSE/final JSONL can lag the prompt returning."
+    :checker "node scripts/check-v3-master-control-isomorphism.mjs")
+
+  (lisp-code-drift-policy
+    :desc "Governance rule for code changes that arrive before their Lisp SSOT design delta."
+    :normal-rule "Feature/code changes must map to a V3/project blueprint surface changed in the same task or to an existing surface whose checker pins the behavior."
+    :emergency-waiver
+      (:allowed true
+       :requires [waiver-id reason changed-files affected-surface expiry]
+       :egress "Create a backfill BoardTask that adds Lisp, checker, and evidence immediately after the emergency fix.")
+    :backfill-task
+      (:title "Backfill Lisp/checker for emergency code change"
+       :owner resident-master-control
+       :must-include [blueprint-delta checker-delta evidence-note surface-map])
+    :checker "node scripts/check-v3-direct-code-drift-policy.mjs")
+
+  (hot-reload-policy
+    :desc "Safe self-improvement boundary: Lisp/prompt/pool/signature/frontend config may reload at runtime; Rust code still rolls through deploy/restart."
+    :runtime-reload [v3-lisp project-blueprints workstation-pool pty-signatures prompt-contracts frontend-config]
+    :rolling-restart [rust-daemon mcp-tools pty-runtime]
+    :forbidden [unsafe-dylib-hot-swap hidden-git-state-mutation restart-without-checkpoint]
+    :rule "Before daemon restart, resident master-control writes a checkpoint; after restart, Autopilot/master resumes from Board + execution log instead of PTY-only memory.")
 
   (event-causality-runtime
     :desc "MissionD nervous-system contract: every meaningful runtime transition emits an event with causal ancestry, and downstream muscles subscribe to events instead of polling hidden state."
@@ -700,10 +814,10 @@
        (board-task-created
          :event BoardEvent::TaskCreated
          :caused-by task-runner-manifest-materialized
-         :triggers [autopilot-runtime.dispatch-boardtask])
+         :triggers [autopilot-runtime.dispatch-boardtask resident-master-control.tick])
        (slot-became-idle
          :event SlotEvent::BecameIdle
-         :triggers [autopilot-runtime.dispatch-boardtask])
+         :triggers [autopilot-runtime.dispatch-boardtask resident-master-control.tick])
        (boardtask-prompt-sent
          :event SlotEvent::TaskDispatched
          :caused-by BoardEvent::TaskCreated
@@ -848,7 +962,23 @@
                "node scripts/check-frontend-board-code-isomorphism.mjs"
                "node scripts/check-frontend-board-runtime-projection.mjs"
                "node scripts/project-frontend-board-config.mjs --check"]
-      :surface board-frontend))
+      :surface board-frontend)
+    (project :id jarvis-forge
+      :kind multi-crate-nextjs
+      :root "/Users/jinchen/Projects/jarvis-forge"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/forge-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/forge-ui-blueprint.lisp"
+      :status project-ssot-owned
+      :missiond-role "registered project; Lisp/component reuse engine, not MissionD runtime orchestrator"
+      :surface project-registry)
+    (project :id deploy-center
+      :kind ops-service
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
+      :intent ".missiond/intent.lisp"
+      :status evidence-registered
+      :capability deploy-ops
+      :surface project-registry))
 
   (capability-governance-policy
     :desc "Lisp-owned capability audit policy; runtime review paths and protected lists are projections, not Rust-only constants."
@@ -1003,6 +1133,8 @@
        "Autopilot watchdogs MUST treat low-confidence unknown as diagnostic state rather than automatic BoardTask closure evidence."
        "If an upstream TUI signal changes, checker failure is preferred over silent downgrade to generic prompt heuristics."
        "recognize_screen MUST fuse SessionState with screen heuristics: an active processing SessionState (Thinking, Responding, ToolRunning) MUST NOT be demoted to Blocked from screen_fallback confirmation or model-picker text; the fused snapshot is sourced from screen_fused active evidence or session_state, and explicit Confirming SessionState always preserves Blocked."
+       "Codex MCP approval menus (`Allow the ... MCP server to run tool`, `Allow for this session`, `enter to submit | esc to cancel`) are explicit blocked TUI source signatures and MUST NOT be demoted to Running just because the SessionState is Thinking."
+       "mission_pty_confirm MUST confirm option menus by human-like keyboard navigation (Down/Up then Enter), never by sending numeric shortcut keys; this applies to ClaudeCode, Codex CLI, and Gemini CLI."
        "recognize_claude_code Blocked MUST require explicit confirmation/model-picker UI (Enter to confirm, Do you want to proceed/make this edit/allow/use this api key, Select model, approval request); the bare words `approval` or `permission(s)` -- including the `bypass permissions on` composer-mode footer toggle and historical task-brief prose -- MUST NOT trigger Blocked on Idle or completed screens."]
     :checker "node scripts/check-v3-pty-recognition-isomorphism.mjs")
 
@@ -1118,6 +1250,13 @@
       :v3-function source-hygiene
       :surface source-hygiene
       :note "V2 source hygiene rules are executable in staged/source guard scripts and task-scope guard.")
+    (v2-item lisp-code-drift-governance
+      :status code-aligned
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: SSOT-before-code invariant + task contract write scope"
+      :v3-pillar source-control
+      :v3-function lisp-code-drift
+      :surface lisp-code-drift-policy
+      :note "V2 SSOT discipline is made explicit as the V3 direct-code-drift policy: ordinary code changes need a Lisp/checker归宿, while emergency fixes must create a backfill BoardTask.")
     (v2-item context-pack-two-stage-parallel-work
       :status runtime-projected
       :v2-source ".missiond/v2/intent.lisp :: task-runner loop evidence + wave29 context-pack upgrade"
@@ -1146,6 +1285,13 @@
       :v3-function workstation-pool
       :surface workstation-pool
       :note "V2 workstation orchestration and later multi-agent dispatch evidence converge into the compact V3 workstation-pool: Claude Code Default and Gemini CLI are declared once in Lisp, projected into SlotManager/MissionControl runtime slots, selected by Autopilot for unassigned BoardTasks, and exposed by mission_compute_slot list.")
+    (v2-item resident-codex-master-control
+      :status runtime-projected
+      :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router + user brain/neural-eventbus design notes"
+      :v3-pillar workstation
+      :v3-function resident-master-control
+      :surface resident-master-control
+      :note "The event-bus nervous-system philosophy now has a resident Codex master-control lane: GPT-5.5 xhigh reads Board/KB/Lisp/events, checkpoints decisions, and dispatches Claude/Gemini/Codex workers through durable BoardTask/Autopilot events.")
     (v2-item event-driven-autopilot-runtime
       :status code-aligned
       :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router / BoardTaskCreated / SlotBecameIdle"
@@ -1299,6 +1445,13 @@
         :v3-function workstation-config
         :surface workstation-config
         :tools [mission_compute_slot mission_task_delegate])
+      (tool-group resident-master-entry
+        :status code-aligned
+        :v2-source ".missiond/v2/intent-worker.lisp :: orchestration brain/checkpoint"
+        :v3-pillar workstation
+        :v3-function resident-master-control
+        :surface resident-master-control
+        :tools [mission_master_status])
       (tool-group compute-runtime-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: worker path runtime primitives"
@@ -1497,7 +1650,15 @@
         :core ((step s1 :logic "inspect staged or supplied files without mutating git")
                (step s2 :logic "reject raw NUL bytes and git diff whitespace errors")
                (step s3 :logic "enforce task contract write-scope and must-not-touch patterns"))
-        :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status]))
+        :egress [source_hygiene_result scope_guard_diagnostics hook_doctor_status])
+      (function lisp-code-drift
+        :surface lisp-code-drift-policy
+        :entry [git-diff task-contract blueprint-registry emergency-waiver]
+        :core ((step s1 :logic "map changed files to V3/project blueprint surfaces")
+               (step s2 :logic "require same-task Lisp/checker delta for normal behavior changes")
+               (step s3 :logic "allow emergency code-first fixes only with waiver metadata")
+               (step s4 :logic "create backfill BoardTask for Lisp/checker/evidence convergence"))
+        :egress [drift_result waiver_record backfill_boardtask]))
 
     (pillar coordination
       (function context-pack
@@ -1533,6 +1694,15 @@
                (step s3 :logic "classify unassigned BoardTasks and select an idle pool worker before considering legacy/static slots")
                (step s4 :logic "expose pool status through mission_compute_slot list so Claude/Gemini lanes are observable"))
         :egress [runtime_slot pool_status boardtask_slot_selection])
+      (function resident-master-control
+        :surface resident-master-control
+        :entry [resident-master-control BoardTaskCreated SlotEvent QuestionEvent mission_master_status]
+        :core ((step s1 :logic "restore checkpoint from Board/execution log and load recent event tail")
+               (step s2 :logic "make top-level decisions and record them before delegation")
+               (step s3 :logic "dispatch investigation/context-pack workers before code shards")
+               (step s4 :logic "delegate ordinary implementation to Claude/Gemini/Codex pool workers through BoardTask/Autopilot")
+               (step s5 :logic "write checkpoint and durable final note after each decision boundary"))
+        :egress [master_checkpoint delegated_boardtasks governance_notes mission_master_status])
       (function delegated-boardtask-runtime
         :surface autopilot-runtime
         :entry [BoardEvent.TaskCreated BoardEvent.StatusChanged SlotEvent.BecameIdle board_dispatch_notify autopilot.dispatch_board_tasks]
@@ -2037,6 +2207,14 @@
              "scripts/check-v3-source-hygiene-isomorphism.mjs"]
       :note "check-staged-source-hygiene.mjs is the read-only staged/source preflight: default mode reads staged ACMR files, rejects raw NUL bytes from staged blobs, runs git diff --cached --check, and delegates to task-scope-guard.mjs when --task or MISSIOND_TASK_CONTRACT is set; --files mode checks supplied files without reading git blobs. task-scope-guard.mjs owns task contract write-scope/must-not-touch enforcement for staged and commit modes. .githooks/pre-commit is opt-in per task via MISSIOND_TASK_CONTRACT; check-missiond-hooks.mjs is a read-only doctor and install-missiond-hooks.mjs is the only mutating hook installer. verify-task-runner-batch imports checkSuppliedFiles for source-hygiene fixture coverage without mutating git.")
 
+    (surface lisp-code-drift-policy
+      :status "code-aligned"
+      :implements [lisp-code-drift]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             "scripts/check-v3-direct-code-drift-policy.mjs"
+             "scripts/check-v3-code-isomorphism-complete.mjs"]
+      :note "lisp-code-drift-policy is the governance surface for code-first exceptions. Normal behavior changes must carry a same-task Lisp/checker delta or map to an already pinned surface. Emergency code-first fixes are allowed only with waiver metadata and must immediately create a backfill BoardTask that adds the missing blueprint, checker, and evidence; the checker pins the policy and can be run in explicit diff-enforcement mode by later hooks.")
+
     (surface context-pack
       :status "code-aligned"
       :implements [multi-agent-context-pack]
@@ -2070,13 +2248,27 @@
       :implements [workstation-pool]
       :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-pty/src/session.rs"
+             "crates/missiond-pty/src/manager.rs"
+             "crates/missiond-core/src/types/slot.rs"
              "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-daemon/src/handlers/compute/compute_slot.rs"
              "crates/missiond-daemon/src/handlers/compute/slot.rs"
              "crates/missiond-core/src/core/slot_manager.rs"
              "scripts/check-v3-workstation-pool-isomorphism.mjs"]
       :evidence ".missiond/v3/evidence/workstation-pool.lisp"
-      :note "workstation-pool is the compact V3 compute-account SSOT for the current single-login phase: claude-code-default maps code/implementation/ops BoardTasks to a persistent Claude Code slot with coding-default-opus-4-7 (no --model override), and gemini-ultra maps research/review/context-pack/lisp-compression/general BoardTasks to a read-only Gemini slot. WorkstationRuntimeConfig parses worker entries, main.rs registers startup slots plus pool workers into AgentSlotManager and MissionControl runtime slots, initializes their PTY slots immediately, Autopilot selects unassigned BoardTasks from this pool by task class before legacy slots, mission_compute_slot action=list exposes workstation_pool status for observability, and mission_slots filters stopped legacy Sonnet residual slots that are not V3-projected so the dispatch view is not polluted by old slots.yaml state.")
+      :note "workstation-pool is the compact V3 compute-account SSOT for the current single-login phase: claude-code-default maps code/implementation/ops BoardTasks to a persistent Claude Code slot with coding-default-opus-4-7 (no --model override), claude-code-fast-patch maps exact narrow patches to Sonnet only after context-pack atomization, gemini-ultra-pro maps research/review/context-pack/lisp-compression/general BoardTasks to a read-only Gemini 3.1 Pro Preview slot, gemini-fast-survey is a low-authority mechanical scan lane, and codex-master-control is a resident GPT-5.5 xhigh orchestrator lane rather than a normal code shard candidate. WorkstationRuntimeConfig parses worker entries and provider options, main.rs registers startup slots plus pool workers into AgentSlotManager and MissionControl runtime slots, PTYSpawnOptions projects Codex --model/-c model_reasoning_effort/--search/--sandbox/--ask-for-approval, Autopilot selects unassigned BoardTasks from this pool by task class before legacy slots, mission_compute_slot list exposes workstation_pool status for observability, and mission_slots filters stopped legacy Sonnet residual slots that are not V3-projected.")
+
+    (surface resident-master-control
+      :status "code-aligned"
+      :implements [resident-master-control]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-pty/src/session.rs"
+             "crates/missiond-core/src/types/slot.rs"
+             "scripts/check-v3-master-control-isomorphism.mjs"]
+      :note "resident-master-control promotes Codex to a first-class, non-shard orchestrator worker. V3 declares codex-master-control with GPT-5.5, xhigh reasoning, search enabled, read-only code sandbox, and Board/KB/execution-log/dispatch permissions. Runtime projection carries model/reasoning/search/sandbox/approval through SlotConfig and PTYSpawnOptions into the Codex CLI command; daemon startup writes master-control-checkpoint.lisp when the slot is registered; mission_master_status exposes the V3 worker projection, PTY recognition snapshot, evidence authority, and latest checkpoint so restart recovery is observable.")
 
     (surface autopilot-runtime
       :status "code-aligned"
@@ -2418,6 +2610,8 @@
 	             "node scripts/check-v3-context-pack-isomorphism.mjs"
 	             "node scripts/check-v3-workstation-config-isomorphism.mjs"
 	             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
+             "node scripts/check-v3-master-control-isomorphism.mjs"
+             "node scripts/check-v3-direct-code-drift-policy.mjs"
 	             "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
              "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
              "node scripts/check-v3-board-isomorphism.mjs"

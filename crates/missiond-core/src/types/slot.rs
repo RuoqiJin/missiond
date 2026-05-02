@@ -90,9 +90,43 @@ pub struct SlotConfig {
     )]
     pub dangerously_skip_permissions: Option<bool>,
     /// Model override for the CLI session (e.g., "sonnet", "opus", "haiku").
-    /// Passed as `--model <model>` to Claude Code. Ignored for other engines.
+    /// Passed as the provider-specific model flag when supported.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<String>,
+    /// Declarative profile used to resolve model/runtime options from Lisp.
+    /// The resolved `model` remains the CLI argument; this is preserved for
+    /// observability and downstream projection.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "model_profile"
+    )]
+    pub model_profile: Option<String>,
+    /// Provider-specific reasoning effort. Codex projects this as
+    /// `-c model_reasoning_effort="<value>"`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "reasoning_effort"
+    )]
+    pub reasoning_effort: Option<String>,
+    /// Enable provider web/search mode when supported.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "search_enabled"
+    )]
+    pub search_enabled: Option<bool>,
+    /// Provider sandbox profile, e.g. Codex `read-only` or `workspace-write`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox: Option<String>,
+    /// Provider approval profile, e.g. Codex `never` or `on-request`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "approval_policy"
+    )]
+    pub approval_policy: Option<String>,
     /// Declarative traits controlling pipeline behavior.
     /// If empty/absent, defaults are inferred from role at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

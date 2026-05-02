@@ -19,7 +19,7 @@ const usage = `Usage:
   node scripts/check-v3-workstation-pool-isomorphism.mjs [--json] [--dry-fixture]
 
 Checks the V3 workstation-pool Lisp/code isomorphism contract:
-  - V3 declares Claude Code Default and Gemini Ultra pool workers.
+  - V3 declares Claude Code Default, Claude fast-patch, Gemini, and Codex master workers.
   - Claude coding default remains coding-default-opus-4-7, which omits --model.
   - Gemini remains read-only until a separate write smoke promotes it.
   - Rust projects the pool into SlotManager, MissionControl runtime slots,
@@ -93,7 +93,10 @@ function checkFiles(root) {
     'workstation-pool-evidence',
     'single-login-phase',
     'claude-code-default',
-    'gemini-ultra',
+    'claude-code-fast-patch',
+    'gemini-ultra-pro',
+    'gemini-fast-survey',
+    'codex-master-control',
     'read-only',
     'mission_compute_slot action=list exposes workstation_pool',
   ]);
@@ -106,14 +109,20 @@ function checkFiles(root) {
     'find_form(source, "workstation-pool")',
     'workstation-pool must include a Claude Code default BoardTask worker',
     'workstation-pool must include a read-only Gemini BoardTask worker',
+    'workstation-pool must include a non-shard Codex master-control worker',
     '"claude-code-default"',
-    '"gemini-ultra"',
+    '"gemini-ultra-pro"',
+    '"codex-master-control"',
+    'reasoning_effort',
+    'search_enabled',
   ]);
 
   requireAll(diagnostics, FILES.main, sources.main, [
     'fn workstation_pool_model',
     'fn startup_slot_config',
     'fn workstation_pool_slot_config',
+    'reasoning_effort: worker.reasoning_effort.clone()',
+    'search_enabled: Some(worker.search_enabled).filter',
     'async fn register_and_init_runtime_slot',
     'state.pty.init_slot(&pty_slot).await',
     'for worker in workstation_config.workstation_pool()',
@@ -168,6 +177,7 @@ function checkFiles(root) {
     'Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration',
     'V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots',
     'mission_compute_slot list status MUST derive from PTYManager',
+    'Codex master-control is a resident orchestrator lane',
   ]);
   requireAll(diagnostics, FILES.supervisor, sources.supervisor, [
     'fn schedule_supervisor_patrol',
@@ -213,7 +223,10 @@ function validateBlueprint(file, source, diagnostics) {
   const workers = pool.children.filter((child) => isList(child) && head(child) === 'worker');
   const byId = new Map(workers.map((worker) => [nodeText(worker.children[1]), worker]));
   validateClaudeWorker(file, byId.get('claude-code-default'), diagnostics);
-  validateGeminiWorker(file, byId.get('gemini-ultra'), diagnostics);
+  validateFastPatchWorker(file, byId.get('claude-code-fast-patch'), diagnostics);
+  validateGeminiWorker(file, byId.get('gemini-ultra-pro'), diagnostics);
+  validateGeminiFastWorker(file, byId.get('gemini-fast-survey'), diagnostics);
+  validateCodexMasterWorker(file, byId.get('codex-master-control'), diagnostics);
 
   const impl = root.children.find((form) => isList(form) && head(form) === 'implementation-map');
   const surface = impl?.children.find(
@@ -262,7 +275,7 @@ function validateClaudeWorker(file, worker, diagnostics) {
 
 function validateGeminiWorker(file, worker, diagnostics) {
   if (!worker) {
-    diagnostics.push({ file, message: 'workstation-pool missing gemini-ultra worker' });
+    diagnostics.push({ file, message: 'workstation-pool missing gemini-ultra-pro worker' });
     return;
   }
   const props = readKeywordProps(worker, { start: 2 });
@@ -270,7 +283,7 @@ function validateGeminiWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':role', 'researcher');
   requirePropText(diagnostics, file, props, ':slot-id', 'slot-gemini-ultra');
   requirePropText(diagnostics, file, props, ':task-type', 'gemini_ultra');
-  requirePropText(diagnostics, file, props, ':model-profile', 'nil');
+  requirePropText(diagnostics, file, props, ':model-profile', 'gemini-ultra-pro-preview');
   requirePropText(diagnostics, file, props, ':model', 'nil');
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
   requirePropBool(diagnostics, file, props, ':write-allowed', false);
@@ -281,6 +294,53 @@ function validateGeminiWorker(file, worker, diagnostics) {
     'lisp-compression',
   ]);
   requireListItems(diagnostics, file, props, ':capabilities', ['read-only', 'analysis', 'design-review']);
+}
+
+function validateFastPatchWorker(file, worker, diagnostics) {
+  if (!worker) {
+    diagnostics.push({ file, message: 'workstation-pool missing claude-code-fast-patch worker' });
+    return;
+  }
+  const props = readKeywordProps(worker, { start: 2 });
+  requirePropText(diagnostics, file, props, ':engine', 'claude-code');
+  requirePropText(diagnostics, file, props, ':role', 'patcher');
+  requirePropText(diagnostics, file, props, ':model-profile', 'daily-sonnet');
+  requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
+  requirePropBool(diagnostics, file, props, ':write-allowed', true);
+  requireListItems(diagnostics, file, props, ':task-classes', ['patch', 'low-risk-fast-path']);
+  requireListItems(diagnostics, file, props, ':capabilities', ['narrow-patch', 'scoped-commit']);
+}
+
+function validateGeminiFastWorker(file, worker, diagnostics) {
+  if (!worker) {
+    diagnostics.push({ file, message: 'workstation-pool missing gemini-fast-survey worker' });
+    return;
+  }
+  const props = readKeywordProps(worker, { start: 2 });
+  requirePropText(diagnostics, file, props, ':engine', 'gemini');
+  requirePropText(diagnostics, file, props, ':role', 'survey');
+  requirePropText(diagnostics, file, props, ':model', 'gemini-2.5-flash');
+  requirePropBool(diagnostics, file, props, ':write-allowed', false);
+  requireListItems(diagnostics, file, props, ':task-classes', ['survey', 'mechanical-scan']);
+}
+
+function validateCodexMasterWorker(file, worker, diagnostics) {
+  if (!worker) {
+    diagnostics.push({ file, message: 'workstation-pool missing codex-master-control worker' });
+    return;
+  }
+  const props = readKeywordProps(worker, { start: 2 });
+  requirePropText(diagnostics, file, props, ':engine', 'codex');
+  requirePropText(diagnostics, file, props, ':role', 'orchestrator');
+  requirePropText(diagnostics, file, props, ':slot-id', 'slot-codex-master-control');
+  requirePropText(diagnostics, file, props, ':model-profile', 'codex-master-gpt-5-5-xhigh');
+  requirePropText(diagnostics, file, props, ':reasoning-effort', 'xhigh');
+  requirePropText(diagnostics, file, props, ':sandbox', 'read-only');
+  requirePropText(diagnostics, file, props, ':approval-policy', 'never');
+  requirePropBool(diagnostics, file, props, ':search', true);
+  requirePropBool(diagnostics, file, props, ':accepts-boardtask', false);
+  requirePropBool(diagnostics, file, props, ':write-allowed', false);
+  requireListItems(diagnostics, file, props, ':capabilities', ['board-write', 'kb-write', 'dispatch']);
 }
 
 function requirePropText(diagnostics, file, props, key, expected) {

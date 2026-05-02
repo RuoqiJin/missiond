@@ -71,6 +71,7 @@ fn parse_startup_slot_engine(value: &str) -> Result<missiond_core::types::CliEng
     match value {
         "claude-code" | "claude_code" => Ok(missiond_core::types::CliEngine::ClaudeCode),
         "gemini" | "gemini-cli" | "gemini_cli" => Ok(missiond_core::types::CliEngine::Gemini),
+        "codex" | "codex-cli" | "codex_cli" => Ok(missiond_core::types::CliEngine::Codex),
         other => Err(anyhow!("unknown workstation startup-slot engine {}", other)),
     }
 }
@@ -99,6 +100,17 @@ fn workstation_pool_model(
             .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e)),
         None => Ok(None),
     }
+}
+
+fn should_register_workstation_pool_task(
+    worker: &context::v3_blueprint_runtime::WorkstationPoolRuntimeConfig,
+    engine: missiond_core::types::CliEngine,
+) -> bool {
+    // Codex master is a resident control-plane PTY, not a normal BoardTask
+    // execution lane. Until a Codex EngineSlotManager exists, register it as a
+    // visible runtime slot only; ordinary dispatch must not try to route through
+    // the Claude/Gemini task manager map.
+    !matches!(engine, missiond_core::types::CliEngine::Codex) || worker.accepts_boardtask
 }
 
 fn startup_slot_config(
@@ -149,6 +161,11 @@ fn startup_slot_config(
         auto_start: None,
         dangerously_skip_permissions: Some(startup_slot.skip_permissions),
         model,
+        model_profile: startup_slot.model_profile.clone(),
+        reasoning_effort: None,
+        search_enabled: None,
+        sandbox: None,
+        approval_policy: None,
         traits,
         category: Some("worker".to_string()),
         env: None,
@@ -191,6 +208,11 @@ fn workstation_pool_slot_config(
         auto_start: None,
         dangerously_skip_permissions: Some(true),
         model: workstation_pool_model(worker, config)?,
+        model_profile: worker.model_profile.clone(),
+        reasoning_effort: worker.reasoning_effort.clone(),
+        search_enabled: Some(worker.search_enabled).filter(|enabled| *enabled),
+        sandbox: worker.sandbox.clone(),
+        approval_policy: worker.approval_policy.clone(),
         traits,
         category: Some("worker".to_string()),
         env: None,
@@ -209,7 +231,32 @@ async fn register_and_init_runtime_slot(
         engine: slot_config.engine,
     };
     state.pty.init_slot(&pty_slot).await;
+    maybe_write_master_control_startup_checkpoint(&slot_config);
     state.mission.register_runtime_slot(slot_config);
+}
+
+fn maybe_write_master_control_startup_checkpoint(slot_config: &missiond_core::types::SlotConfig) {
+    if slot_config.id != "slot-codex-master-control" {
+        return;
+    }
+    let Some(cwd) = slot_config.cwd.as_deref() else {
+        return;
+    };
+    let root = PathBuf::from(cwd);
+    let runtime_dir = root.join(".missiond/v3/runtime");
+    let checkpoint_path = runtime_dir.join("master-control-checkpoint.lisp");
+    if let Err(err) = std::fs::create_dir_all(&runtime_dir) {
+        warn!(error = %err, path = %runtime_dir.display(), "Failed to create master-control checkpoint directory");
+        return;
+    }
+    let now = chrono::Utc::now().to_rfc3339();
+    let body = format!(
+        "(master-control-checkpoint\n  :schema \"missiond.master-control-checkpoint.v1\"\n  :worker codex-master-control\n  :slot-id \"{}\"\n  :event daemon-startup\n  :checkpoint-at \"{}\"\n  :objective \"resident master-control slot registered from V3 workstation-pool\"\n  :resume-from [BoardTask mission_execution event-bus provider-log]\n)\n",
+        slot_config.id, now
+    );
+    if let Err(err) = std::fs::write(&checkpoint_path, body) {
+        warn!(error = %err, path = %checkpoint_path.display(), "Failed to write master-control startup checkpoint");
+    }
 }
 
 impl AppState {
@@ -952,20 +999,22 @@ async fn main() -> Result<()> {
             let engine = parse_startup_slot_engine(&worker.engine)
                 .map_err(|e| anyhow!("V3_BLUEPRINT_CONFIG_ERROR: {}", e))?;
             let model = workstation_pool_model(worker, &workstation_config)?;
-            state
-                .slot_manager
-                .register(slot_orchestrator::SlotTaskConfig {
-                    task_type: worker.task_type.clone(),
-                    engine,
-                    lifecycle: missiond_core::types::Lifecycle::Persistent,
-                    slot_id: Some(worker.slot_id.clone()),
-                    role: Some(worker.role.clone()),
-                    model: model.clone(),
-                    timeout: std::time::Duration::from_secs(worker.timeout_secs),
-                    cwd: missiond_project_root.clone(),
-                    skip_permissions: true,
-                })
-                .await?;
+            if should_register_workstation_pool_task(worker, engine) {
+                state
+                    .slot_manager
+                    .register(slot_orchestrator::SlotTaskConfig {
+                        task_type: worker.task_type.clone(),
+                        engine,
+                        lifecycle: missiond_core::types::Lifecycle::Persistent,
+                        slot_id: Some(worker.slot_id.clone()),
+                        role: Some(worker.role.clone()),
+                        model: model.clone(),
+                        timeout: std::time::Duration::from_secs(worker.timeout_secs),
+                        cwd: missiond_project_root.clone(),
+                        skip_permissions: true,
+                    })
+                    .await?;
+            }
             let slot_config =
                 workstation_pool_slot_config(worker, &workstation_config, &missiond_project_root)?;
             register_and_init_runtime_slot(&state, slot_config).await;
@@ -1608,6 +1657,10 @@ async fn main() -> Result<()> {
                                             .dangerously_skip_permissions
                                             .unwrap_or(false),
                                         model: slot.config.model.clone(),
+                                        reasoning_effort: slot.config.reasoning_effort.clone(),
+                                        search_enabled: slot.config.search_enabled.unwrap_or(false),
+                                        sandbox: slot.config.sandbox.clone(),
+                                        approval_policy: slot.config.approval_policy.clone(),
                                         extra_env: std::collections::HashMap::new(),
                                         initial_prompt: slot.config.initial_prompt.clone(),
                                     },
@@ -1849,5 +1902,42 @@ async fn main() -> Result<()> {
 
     info!("Graceful shutdown complete");
     Ok(())
+}
+
+#[cfg(test)]
+mod resident_master_startup_tests {
+    use super::*;
+
+    #[test]
+    fn startup_engine_parser_accepts_codex_cli_aliases() {
+        assert!(matches!(
+            parse_startup_slot_engine("codex").unwrap(),
+            missiond_core::types::CliEngine::Codex
+        ));
+        assert!(matches!(
+            parse_startup_slot_engine("codex-cli").unwrap(),
+            missiond_core::types::CliEngine::Codex
+        ));
+        assert!(matches!(
+            parse_startup_slot_engine("codex_cli").unwrap(),
+            missiond_core::types::CliEngine::Codex
+        ));
+    }
+
+    #[test]
+    fn non_boardtask_codex_master_is_runtime_slot_only() {
+        let config = context::v3_blueprint_runtime::WorkstationRuntimeConfig::default();
+        let worker = config
+            .workstation_pool()
+            .iter()
+            .find(|worker| worker.id == "codex-master-control")
+            .expect("default pool has resident codex master");
+
+        assert!(!worker.accepts_boardtask);
+        assert!(!should_register_workstation_pool_task(
+            worker,
+            missiond_core::types::CliEngine::Codex
+        ));
+    }
 }
 mod services;

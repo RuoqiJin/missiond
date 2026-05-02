@@ -56,7 +56,8 @@ use semantic_terminal::{
 };
 
 use crate::pty_recognition::{
-    recognize_screen, CodexCliStateParser, GeminiCliUpstreamStateParser, PtyRecognitionSnapshot,
+    recognize_screen, CodexCliStateParser, GeminiCliUpstreamStateParser, PtyCanonicalState,
+    PtyRecognitionSnapshot,
 };
 
 // ========== Types ==========
@@ -199,6 +200,14 @@ pub struct PTYSessionOptions {
     pub dangerously_skip_permissions: bool,
     /// Model override (e.g., "sonnet", "opus"). Passed as --model to Claude Code.
     pub model: Option<String>,
+    /// Provider-specific reasoning effort.
+    pub reasoning_effort: Option<String>,
+    /// Enable provider web/search mode when supported.
+    pub search_enabled: bool,
+    /// Provider sandbox profile when supported.
+    pub sandbox: Option<String>,
+    /// Provider approval profile when supported.
+    pub approval_policy: Option<String>,
 }
 
 impl Default for PTYSessionOptions {
@@ -214,6 +223,10 @@ impl Default for PTYSessionOptions {
             mcp_config: None,
             dangerously_skip_permissions: false,
             model: None,
+            reasoning_effort: None,
+            search_enabled: false,
+            sandbox: None,
+            approval_policy: None,
         }
     }
 }
@@ -286,6 +299,10 @@ pub struct PTYSession {
 
     // Model override (--model flag)
     model: Option<String>,
+    reasoning_effort: Option<String>,
+    search_enabled: bool,
+    sandbox: Option<String>,
+    approval_policy: Option<String>,
 
     // Extra environment variables (slot tracking, etc.)
     env: Option<HashMap<String, String>>,
@@ -340,6 +357,10 @@ fn build_cli_command(
     mcp_config: Option<&std::path::Path>,
     dangerously_skip_permissions: bool,
     model: Option<&str>,
+    reasoning_effort: Option<&str>,
+    search_enabled: bool,
+    sandbox: Option<&str>,
+    approval_policy: Option<&str>,
 ) -> String {
     use missiond_shared::CliEngine;
 
@@ -377,13 +398,40 @@ fn build_cli_command(
         CliEngine::Codex => {
             // Codex CLI: interactive mode
             // Working directory is set via CommandBuilder::cwd(), not CLI flag
-            let parts = "codex".to_string();
+            let mut parts = "codex".to_string();
+            if let Some(m) = model {
+                parts.push_str(&format!(" --model {}", shell_quote(m)));
+                info!(model = %m, "Codex CLI: model override");
+            }
+            if let Some(effort) = reasoning_effort {
+                parts.push_str(&format!(
+                    " -c {}",
+                    shell_quote(&format!("model_reasoning_effort=\"{}\"", effort))
+                ));
+                info!(reasoning_effort = %effort, "Codex CLI: reasoning effort override");
+            }
+            if search_enabled {
+                parts.push_str(" --search");
+                info!("Codex CLI: search enabled");
+            }
+            if let Some(profile) = sandbox {
+                parts.push_str(&format!(" --sandbox {}", shell_quote(profile)));
+                info!(sandbox = %profile, "Codex CLI: sandbox override");
+            }
+            if let Some(policy) = approval_policy {
+                parts.push_str(&format!(" --ask-for-approval {}", shell_quote(policy)));
+                info!(approval_policy = %policy, "Codex CLI: approval policy override");
+            }
             if let Some(mcp) = mcp_config {
                 info!(mcp_config = %mcp.display(), "MCP config ignored for Codex CLI (not supported)");
             }
             parts
         }
     }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 impl PTYSession {
@@ -449,6 +497,10 @@ impl PTYSession {
             mcp_config: options.mcp_config,
             dangerously_skip_permissions: options.dangerously_skip_permissions,
             model: options.model,
+            reasoning_effort: options.reasoning_effort,
+            search_enabled: options.search_enabled,
+            sandbox: options.sandbox,
+            approval_policy: options.approval_policy,
             env: options.env,
             log_file: options.log_file,
 
@@ -601,6 +653,10 @@ impl PTYSession {
             self.mcp_config.as_deref(),
             self.dangerously_skip_permissions,
             self.model.as_deref(),
+            self.reasoning_effort.as_deref(),
+            self.search_enabled,
+            self.sandbox.as_deref(),
+            self.approval_policy.as_deref(),
         );
 
         #[cfg(unix)]
@@ -1328,9 +1384,10 @@ impl PTYSession {
                                         continue;
                                     }
                                     PermissionDecision::Deny => {
-                                        // Auto-deny (down, down, enter)
+                                        // Auto-deny through menu navigation, never numeric shortcuts.
                                         if let Some(writer) = pty_writer.lock().await.as_mut() {
-                                            let _ = writer.write_all(b"\x1b[B\x1b[B\r");
+                                            let keys = confirmation_navigation_sequence(3);
+                                            let _ = writer.write_all(keys.as_bytes());
                                         }
                                         continue;
                                     }
@@ -1759,35 +1816,58 @@ impl PTYSession {
     /// Send confirmation response
     pub async fn confirm(&self, response: ConfirmResponse) -> Result<()> {
         let state = self.state().await;
-        if state != SessionState::Confirming {
+        if state != SessionState::Confirming && !self.screen_is_blocked_confirmation(state).await {
             warn!(state = ?state, "Not in confirming state");
             return Ok(());
         }
 
-        // Claude Code's tool-use confirm dialog accepts numeric selection
-        // ("1"/"2"/"3" then Enter), but the digit and Enter must arrive as
-        // two distinct PTY events with a small human-like gap — sending them
-        // in a single write batches them together and the TUI's input handler
-        // discards or mis-matches the chunk. Verified empirically 2026-04-12:
-        // sequential write with ~80ms gap works, single write does not.
-        match response {
-            ConfirmResponse::Yes => self.write("\r").await,
-            ConfirmResponse::No => self.press_digit_then_enter('3').await,
-            ConfirmResponse::Option(n) => {
-                let digit = std::char::from_digit(n as u32, 10).unwrap_or('1');
-                self.press_digit_then_enter(digit).await
+        let target_index = match response {
+            ConfirmResponse::Yes => 1,
+            ConfirmResponse::No => self.reject_option_index().await,
+            ConfirmResponse::Option(n) => n.max(1),
+        };
+        self.navigate_to_option_then_enter(target_index).await
+    }
+
+    /// Confirmation UIs are interactive menus. Even when an upstream TUI also
+    /// accepts number shortcuts, MissionD uses human-like navigation so Codex,
+    /// Claude Code, and Gemini share one safe substrate.
+    async fn navigate_to_option_then_enter(&self, target_index: usize) -> Result<()> {
+        for key in confirmation_navigation_steps(target_index) {
+            self.write(key).await?;
+            if key != "\r" {
+                tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             }
+        }
+        Ok(())
+    }
+
+    async fn reject_option_index(&self) -> usize {
+        let pending = self.pending_tool_confirm.read().await.clone();
+        if let Some(info) = pending {
+            if let Some((idx, _)) = info.options.iter().enumerate().find(|(_, option)| {
+                let lower = option.to_ascii_lowercase();
+                lower.contains("cancel")
+                    || lower.contains("deny")
+                    || lower.contains("reject")
+                    || lower.contains("no")
+            }) {
+                return idx + 1;
+            }
+            if !info.options.is_empty() {
+                return info.options.len();
+            }
+        }
+        match self.engine {
+            missiond_shared::CliEngine::Codex => 4,
+            _ => 3,
         }
     }
 
-    /// Send a digit followed by Enter as two separate writes with a brief
-    /// inter-key delay. Simulates a human pressing the keys.
-    async fn press_digit_then_enter(&self, digit: char) -> Result<()> {
-        let mut buf = [0u8; 4];
-        let s = digit.encode_utf8(&mut buf);
-        self.write(s).await?;
-        tokio::time::sleep(std::time::Duration::from_millis(80)).await;
-        self.write("\r").await
+    async fn screen_is_blocked_confirmation(&self, state: SessionState) -> bool {
+        let lines = self.get_last_lines(80).await;
+        let recognition = recognize_screen(self.engine, &lines, state);
+        recognition.state == PtyCanonicalState::Blocked
     }
 
     /// Send interrupt (Ctrl+C)
@@ -1913,6 +1993,20 @@ pub enum ConfirmResponse {
     Yes,
     No,
     Option(usize),
+}
+
+fn confirmation_navigation_steps(target_index: usize) -> Vec<&'static str> {
+    let down_count = target_index.saturating_sub(1);
+    let mut steps = Vec::with_capacity(down_count + 1);
+    for _ in 0..down_count {
+        steps.push("\x1b[B");
+    }
+    steps.push("\r");
+    steps
+}
+
+fn confirmation_navigation_sequence(target_index: usize) -> String {
+    confirmation_navigation_steps(target_index).concat()
 }
 
 // ========== Helper Functions ==========
@@ -2319,6 +2413,15 @@ mod tests {
     use super::*;
     use missiond_shared::CliEngine;
 
+    #[test]
+    fn confirmation_navigation_uses_arrow_keys_not_numeric_shortcuts() {
+        assert_eq!(confirmation_navigation_sequence(1), "\r");
+        assert_eq!(confirmation_navigation_sequence(2), "\x1b[B\r");
+        assert_eq!(confirmation_navigation_sequence(4), "\x1b[B\x1b[B\x1b[B\r");
+        assert!(!confirmation_navigation_sequence(2).contains('2'));
+        assert!(!confirmation_navigation_sequence(4).contains('4'));
+    }
+
     /// Live shape from BoardTask 42b2385e: the streamed `TextOutput::Complete`
     /// content for slot-gemini-ultra truncated at `Autopilot Smoke Test: …`,
     /// while the screen frame still carried the worker's final indented
@@ -2582,5 +2685,25 @@ Some prose.
         assert!(!has_fix_verification_closeout(
             "We need to Fix: something. Verification: ok\n"
         ));
+    }
+
+    #[test]
+    fn codex_command_projects_model_reasoning_search_sandbox_and_approval() {
+        let cmd = build_cli_command(
+            CliEngine::Codex,
+            std::path::Path::new("/tmp/project"),
+            None,
+            false,
+            Some("gpt-5.5"),
+            Some("xhigh"),
+            true,
+            Some("read-only"),
+            Some("never"),
+        );
+        assert!(cmd.contains("codex --model 'gpt-5.5'"));
+        assert!(cmd.contains("-c 'model_reasoning_effort=\"xhigh\"'"));
+        assert!(cmd.contains("--search"));
+        assert!(cmd.contains("--sandbox 'read-only'"));
+        assert!(cmd.contains("--ask-for-approval 'never'"));
     }
 }
