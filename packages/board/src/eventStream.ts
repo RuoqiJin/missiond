@@ -1,4 +1,12 @@
 import { create } from 'zustand';
+import {
+  EVENT_CUSTOM_EVENTS,
+  EVENT_PREFIX_ROUTES,
+  EVENT_ROUTE_TABLE,
+  RESYNC_VERSION_KEYS,
+  type EventRouteConfig,
+  type EventVersionKey,
+} from './generated/board-frontend-config';
 
 const WS_PORT = parseInt(process.env.NEXT_PUBLIC_WS_PORT || '9120', 10);
 
@@ -45,13 +53,31 @@ const bumpTimers: Record<string, ReturnType<typeof setTimeout>> = {};
 
 function debouncedBump(
   set: (fn: (s: EventStreamState) => Partial<EventStreamState>) => void,
-  key: keyof Pick<EventStreamState, 'slotVersion' | 'taskVersion' | 'questionVersion' | 'decisionVersion' | 'memoryVersion' | 'deployVersion' | 'engineVersion' | 'timelineVersion'>,
+  key: EventVersionKey,
   delayMs = 80,
 ) {
   if (bumpTimers[key]) clearTimeout(bumpTimers[key]);
   bumpTimers[key] = setTimeout(() => {
     set((s) => ({ [key]: s[key] + 1 }) as Partial<EventStreamState>);
   }, delayMs);
+}
+
+function bumpKeys(
+  set: (fn: (s: EventStreamState) => Partial<EventStreamState>) => void,
+  keys: readonly EventVersionKey[],
+  delayMs?: number,
+) {
+  for (const key of keys) debouncedBump(set, key, delayMs);
+}
+
+function dispatchConfiguredCustomEvent(event: FrontendEvent) {
+  const config = EVENT_CUSTOM_EVENTS.find((item) => item.event === event.type);
+  if (!config) return false;
+  if (typeof window !== 'undefined' && event.payload) {
+    const detail = Object.fromEntries(config.detail.map((field) => [field, event.payload?.[field]]));
+    window.dispatchEvent(new CustomEvent(config.name, { detail }));
+  }
+  return true;
 }
 
 function handleEvent(
@@ -61,129 +87,28 @@ function handleEvent(
   // Update seq
   set(() => ({ lastSeq: event.seq }));
 
-  switch (event.type) {
-    case 'health_snapshot':
-      set(() => ({ healthSnapshot: event.payload }));
-      debouncedBump(set, 'engineVersion');
-      break;
+  if (event.type === 'resync') {
+    bumpKeys(set, RESYNC_VERSION_KEYS, 0);
+    return;
+  }
 
-    case 'slot_state_changed':
-      debouncedBump(set, 'slotVersion');
-      debouncedBump(set, 'timelineVersion');
-      break;
+  if (dispatchConfiguredCustomEvent(event)) return;
 
-    case 'task_lifecycle':
-      debouncedBump(set, 'taskVersion');
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'question_created':
-    case 'question_resolved':
-      debouncedBump(set, 'questionVersion');
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'decision_made':
-      debouncedBump(set, 'decisionVersion');
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'memory_phase_changed':
-      debouncedBump(set, 'memoryVersion');
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'cli_request_started':
-    case 'cli_request_completed':
-    case 'cli_tool_activity':
-    // Legacy wire types (backward compat with stored timeline data)
-    case 'gemini_request_started':
-    case 'gemini_request_completed':
-    case 'gemini_tool_activity':
-    case 'codex_request_started':
-    case 'codex_request_completed':
-      debouncedBump(set, 'engineVersion');
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'board_task_updated': {
-      debouncedBump(set, 'taskVersion');
-      debouncedBump(set, 'timelineVersion');
-      const cat = event.payload?.category;
-      if (cat === 'deploy') debouncedBump(set, 'deployVersion');
-      break;
+  const route = (EVENT_ROUTE_TABLE as readonly EventRouteConfig[]).find((item) => item.events.includes(event.type));
+  if (route) {
+    if (route.healthSnapshot) set(() => ({ healthSnapshot: event.payload }));
+    bumpKeys(set, route.bump, route.delayMs);
+    if (route.deployCategoryBump && event.payload?.category === 'deploy') {
+      debouncedBump(set, 'deployVersion', route.delayMs);
     }
+    return;
+  }
 
-    case 'insight_generated':
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'slot_task_dispatched':
-      debouncedBump(set, 'slotVersion');
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'briefing_batch_started':
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'briefing_summary_generated':
-      // In-place cache update: dispatch CustomEvent so timeline can update without refetch
-      if (typeof window !== 'undefined' && event.payload) {
-        window.dispatchEvent(new CustomEvent('timeline-summary-update', {
-          detail: { target_seq: event.payload.target_seq, summary: event.payload.summary },
-        }));
-      }
-      break;
-
-    // ── Jarvis async dispatch events ──
-    case 'jarvis_task_completed':
-      if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('jarvis-task-completed', {
-          detail: { conversation_id: event.payload?.conversation_id, task_id: event.payload?.task_id },
-        }));
-      }
-      break;
-
-    // ── Conversation messages — high-frequency, use longer debounce ──
-    case 'user_message':
-    case 'assistant_message':
-    case 'thinking_message':
-    case 'system_message':
-      debouncedBump(set, 'timelineVersion', 500);
-      break;
-
-    // ── Git / Board task lifecycle / Translation / Narration ──
-    case 'git_commit':
-    case 'board_task_created':
-    case 'board_task_status_changed':
-    case 'board_task_note_added':
-    case 'board_task_claimed':
-    case 'board_task_deleted':
-    case 'translation_started':
-    case 'translation_completed':
-    case 'translation_failed':
-      debouncedBump(set, 'timelineVersion');
-      break;
-
-    case 'resync':
-      // Server says we missed events — bump all versions to force refetch
-      debouncedBump(set, 'slotVersion', 0);
-      debouncedBump(set, 'taskVersion', 0);
-      debouncedBump(set, 'questionVersion', 0);
-      debouncedBump(set, 'decisionVersion', 0);
-      debouncedBump(set, 'memoryVersion', 0);
-      debouncedBump(set, 'deployVersion', 0);
-      debouncedBump(set, 'engineVersion', 0);
-      debouncedBump(set, 'timelineVersion', 0);
-      break;
-
-    default:
-      // Catch narration_* and other future event types
-      if (event.type.startsWith('narration_')) {
-        debouncedBump(set, 'timelineVersion', 500);
-      }
-      break;
+  for (const prefixRoute of EVENT_PREFIX_ROUTES) {
+    if (event.type.startsWith(prefixRoute.prefix)) {
+      bumpKeys(set, prefixRoute.bump, prefixRoute.delayMs);
+      return;
+    }
   }
 }
 

@@ -18,6 +18,7 @@
 //   mission_execution-completion-audit, mission_workflow, review-gate,
 //   task-runner-cli, source-hygiene, context-pack, workstation-config,
 //   workstation-pool, autopilot-runtime, workstation-dispatch, mission_board, memory-kb, project-registry,
+//   board-frontend,
 //   conversation-ingestion, skill-runtime, cascade-governance,
 //   router-policy, incident-governance, capability-governance,
 //   compute-primitives, sysinfra-control, ops-infra.
@@ -59,6 +60,7 @@ export const EXPECTED_SURFACES = [
   'mission_board',
   'memory-kb',
   'project-registry',
+  'board-frontend',
   'conversation-ingestion',
   'skill-runtime',
   'cascade-governance',
@@ -109,6 +111,9 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-autopilot-runtime-isomorphism.mjs',
   'scripts/check-v3-workstation-dispatch-isomorphism.mjs',
   'scripts/check-v3-board-isomorphism.mjs',
+  'scripts/check-frontend-board-lisp-schema.mjs',
+  'scripts/check-frontend-board-code-isomorphism.mjs',
+  'scripts/check-frontend-board-runtime-projection.mjs',
   'scripts/check-v3-ops-infra-isomorphism.mjs',
   // Cross-surface request-flow smoke; aggregates the user-facing
   // request -> intent -> plan -> execute-review path declared in
@@ -511,6 +516,10 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface board-frontend
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface conversation-ingestion
       :status "code-aligned"
       :code ["a"]
@@ -651,6 +660,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface project-registry
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface board-frontend
       :status "code-aligned"
       :code ["a"]
       :note "n")

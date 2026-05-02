@@ -825,6 +825,20 @@
        "mission_project import_universe MUST project its default manifest from project-registry-policy; UNIVERSE_MANIFEST is only an explicit override."
        "A real MissionD project with .missiond but no project-registry-policy MUST return V3_BLUEPRINT_CONFIG_ERROR rather than silently using embedded defaults."])
 
+  (project-blueprint-registry
+    :schema "missiond.project-blueprint-registry.v1"
+    :rule "Project-local app blueprints are independent SSOT files registered from V3; backend V3 stays compact and aggregate checkers follow the registry pointer."
+    (project :id board
+      :kind frontend-nextjs
+      :path ".missiond/frontend/board-blueprint.lisp"
+      :package "packages/board/package.json"
+      :status code-aligned
+      :checks ["node scripts/check-frontend-board-lisp-schema.mjs"
+               "node scripts/check-frontend-board-code-isomorphism.mjs"
+               "node scripts/check-frontend-board-runtime-projection.mjs"
+               "node scripts/project-frontend-board-config.mjs --check"]
+      :surface board-frontend))
+
   (capability-governance-policy
     :desc "Lisp-owned capability audit policy; runtime review paths and protected lists are projections, not Rust-only constants."
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
@@ -1152,6 +1166,13 @@
       :v3-function project-registry
       :surface project-registry
       :note "Project root resolution and registry behavior are physically split and pinned under the V3 project-registry surface; project-registry-policy now projects intent-path candidates and default universe manifest into mission_project init/import_universe/survey runtime.")
+    (v2-item board-frontend-project-blueprint
+      :status code-aligned
+      :v2-source ".missiond/v2/architecture-dsl.lisp :: lisp-code-isomorphism"
+      :v3-pillar memory
+      :v3-function board-frontend
+      :surface board-frontend
+      :note "The V2 design philosophy that implementation must mirror Lisp is extended to the Board frontend through a project-local blueprint registered from V3; this keeps backend V3 compact while creating the reusable 20+ project pattern.")
     (v2-item conversation-ingestion
       :status runtime-projected
       :v2-source ".missiond/v2/intent-worker.lisp :: conversation-jsonl-ingest / session organizer"
@@ -1529,7 +1550,15 @@
         :core ((step s1 :logic "resolve registered project root from explicit project_id, cwd, or target_project")
                (step s2 :logic "reject ambiguous or outside-root runtime paths before workstation spawn")
                (step s3 :logic "return project metadata usable by request, plan, context, and workstation surfaces"))
-        :egress [project_root project_id requested_cwd_policy]))
+        :egress [project_root project_id requested_cwd_policy])
+      (function board-frontend
+        :surface board-frontend
+        :entry [project-blueprint-registry board-blueprint.lisp packages/board]
+        :core ((step s1 :logic "register Board's project-local frontend Lisp SSOT without folding it into the backend V3 monolith")
+               (step s2 :logic "require Board frontend pillar-flow, implementation-map, and runtime-projection checkers")
+               (step s3 :logic "pin frontend code surfaces to Lisp so later workstation shards receive disjoint write scopes")
+               (step s4 :logic "project MissionD runtime slot/PTY state into UI code instead of stale static workstation lists"))
+        :egress [frontend-blueprint-checks board-ui-surfaces runtime-projection-contract]))
 
     (pillar communication
       (function conversation-ingestion
@@ -2138,6 +2167,28 @@
              "scripts/check-v3-project-registry-isomorphism.mjs"]
       :note "Code-aligned V3 destination for project registry and root-resolution behavior inherited from V2. project.rs is the thin mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe, lisp file scan enrichment, git remote discovery, project upsert, conversation backfill, registry reload, and universe manifest import; ProjectRegistryRuntimeConfig loads V3 project-registry-policy so init/import_universe/survey project intent-path discovery and default universe manifest are runtime projections, with UNIVERSE_MANIFEST as explicit override only; project/context.rs owns context and memories egress including intent metadata, github normalization, conversation stats, KB stats, memory index, and configured slot status; project/survey.rs owns forge survey invocation, dry/check flags, output truncation, and intent-path refresh; project/vault.rs ow... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
 
+    (surface board-frontend
+      :status "code-aligned"
+      :implements [board-frontend]
+      :code [".missiond/frontend/board-blueprint.lisp"
+             ".missiond/frontend/evidence/board-blueprint-notes.lisp"
+             ".missiond/frontend/evidence/board-frontend-convergence-report.lisp"
+             "packages/board/src/generated/board-frontend-config.ts"
+             "packages/board/src/App.tsx"
+             "packages/board/src/types.ts"
+             "packages/board/src/api.ts"
+             "packages/board/src/store.ts"
+             "packages/board/src/eventStream.ts"
+             "packages/board/src/lib/missiond.ts"
+             "packages/board/src/components/Terminal.tsx"
+             "packages/board/src/components/TaskDialog.tsx"
+             "packages/board/src/app/api/slots/route.ts"
+             "scripts/project-frontend-board-config.mjs"
+             "scripts/check-frontend-board-lisp-schema.mjs"
+             "scripts/check-frontend-board-code-isomorphism.mjs"
+             "scripts/check-frontend-board-runtime-projection.mjs"]
+      :note "Board frontend is now a project-local Lisp SSOT registered from V3: .missiond/frontend/board-blueprint.lisp owns app-shell, MissionD proxy, BoardTask UI, workstation terminal, event stream, timeline/log, knowledge/system, and design-system pillars. The frontend checkers pin the same entry/core/egress/function structure as backend V3 while keeping the backend blueprint compact for the later 20+ project pattern. Runtime workstation/PTY identity must project through mission_slots + mission_pty_status; static frontend slot pools are forbidden.")
+
     (surface conversation-ingestion
       :status "code-aligned"
       :implements [conversation-ingestion timeline retrospective embedding-ops]
@@ -2350,6 +2401,9 @@
 	             "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
              "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
              "node scripts/check-v3-board-isomorphism.mjs"
+             "node scripts/check-frontend-board-lisp-schema.mjs"
+             "node scripts/check-frontend-board-code-isomorphism.mjs"
+             "node scripts/check-frontend-board-runtime-projection.mjs"
              "node scripts/check-v3-ops-infra-isomorphism.mjs"
              "node scripts/check-v3-request-flow-smoke.mjs"
              "node scripts/check-v3-code-isomorphism-complete.mjs"

@@ -19,8 +19,8 @@ import {
 } from '@/components/ui/select';
 import { Trash2, SkipForward } from 'lucide-react';
 import { useTaskCenterStore } from '../store';
-import { CATEGORY_CONFIG, PRIORITY_CONFIG, SERVER_OPTIONS, SLOT_OPTIONS, FLOW_TEMPLATE_OPTIONS } from '../constants';
-import type { TaskFormData, TaskCategory, TaskPriority } from '../types';
+import { CATEGORY_CONFIG, PRIORITY_CONFIG, SERVER_OPTIONS, FLOW_TEMPLATE_OPTIONS } from '../constants';
+import type { TaskFormData, TaskCategory, TaskPriority, SlotDef } from '../types';
 
 const defaultForm: TaskFormData = {
   title: '',
@@ -44,6 +44,7 @@ export function TaskDialog() {
 
   const [form, setForm] = useState<TaskFormData>(defaultForm);
   const [autopilotOpen, setAutopilotOpen] = useState(false);
+  const [availableSlots, setAvailableSlots] = useState<SlotDef[]>([]);
   const isEditing = !!editingTask;
 
   useEffect(() => {
@@ -69,6 +70,20 @@ export function TaskDialog() {
       setAutopilotOpen(false);
     }
   }, [editingTask, isDialogOpen]);
+
+  useEffect(() => {
+    if (!isDialogOpen || !autopilotOpen) return;
+    let cancelled = false;
+    fetch('/api/slots')
+      .then((r) => r.json())
+      .then((data: SlotDef[]) => {
+        if (!cancelled && Array.isArray(data)) setAvailableSlots(data);
+      })
+      .catch(() => {
+        if (!cancelled) setAvailableSlots([]);
+      });
+    return () => { cancelled = true; };
+  }, [isDialogOpen, autopilotOpen]);
 
   const handleSave = () => {
     if (!form.title.trim()) return;
@@ -240,8 +255,10 @@ export function TaskDialog() {
                       </SelectTrigger>
                       <SelectContent className="bg-neutral-800 border-neutral-700">
                         <SelectItem value="_none" className="text-neutral-400 focus:bg-neutral-700 focus:text-white">未分配</SelectItem>
-                        {SLOT_OPTIONS.map((s) => (
-                          <SelectItem key={s} value={s} className="text-white focus:bg-neutral-700 focus:text-white font-mono text-xs">{s}</SelectItem>
+                        {availableSlots.map((s) => (
+                          <SelectItem key={s.id} value={s.id} className="text-white focus:bg-neutral-700 focus:text-white font-mono text-xs">
+                            {s.label || s.id}
+                          </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>

@@ -47,6 +47,13 @@ function TerminalInner({ slotId }: TerminalProps) {
   const [statusText, setStatusText] = useState<string | null>(null);
   const [spawning, setSpawning] = useState(false);
   const [ready, setReady] = useState(false); // xterm initialized
+  const providerLabel = slotId.includes('gemini')
+    ? 'Gemini CLI'
+    : slotId.includes('codex')
+      ? 'Codex CLI'
+      : slotId.includes('claude')
+        ? 'Claude CLI'
+        : 'session';
 
   // --- Init xterm (once) ---
   useEffect(() => {
@@ -163,7 +170,7 @@ function TerminalInner({ slotId }: TerminalProps) {
           connectWs(term, slotId);
         } else {
           setPtyState('not_running');
-          safeWriteln(term, '\x1b[90m● No active session. Press Start to launch Claude Code.\x1b[0m');
+          safeWriteln(term, `\x1b[90m● No active session. Press Start to launch ${providerLabel}.\x1b[0m`);
         }
       })
       .catch(() => {
@@ -319,7 +326,7 @@ function TerminalInner({ slotId }: TerminalProps) {
     setSpawning(true);
     const term = termRef.current;
     try {
-      if (term) safeWriteln(term, '\x1b[33m● Starting Claude Code...\x1b[0m');
+      if (term) safeWriteln(term, `\x1b[33m● Starting session (${providerLabel})...\x1b[0m`);
       let res = await fetch(`/api/pty/spawn?slotId=${slotId}`, { method: 'POST' });
       let data = await res.json();
 

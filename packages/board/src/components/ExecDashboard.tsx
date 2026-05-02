@@ -2,13 +2,7 @@
 
 import { AutopilotMonitor } from './AutopilotMonitor';
 import { DecisionDashboard } from './DecisionDashboard';
-
-interface SlotDef {
-  id: string;
-  label: string;
-  role: string;
-  running?: boolean;
-}
+import type { SlotDef } from '../types';
 
 export function ExecDashboard({ slots }: { slots: SlotDef[] }) {
   return (

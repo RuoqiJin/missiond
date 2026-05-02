@@ -5,23 +5,8 @@ import { Radar, Play, Pause, Clock, CheckCircle2, AlertCircle, Loader2, ChevronD
 import { cn } from '@/lib/utils';
 import { useTaskCenterStore } from '../store';
 import { useEventInvalidation } from '../hooks/useEventStream';
-import type { Task, FlowPhase, TaskNote } from '../types';
-
-// ─── Flow phases in order ───
-const FLOW_PHASES: FlowPhase[] = [
-  'investigate', 'consult_gemini_1', 'plan', 'consult_gemini_2', 'execute', 'finalize', 'done',
-];
-const PHASE_LABELS: Record<FlowPhase, string> = {
-  investigate: 'Inv',
-  consult_gemini_1: 'CG1',
-  plan: 'Plan',
-  consult_gemini_2: 'CG2',
-  execute: 'Exec',
-  finalize: 'Final',
-  done: 'Done',
-};
-
-interface SlotDef { id: string; label: string; role: string; running?: boolean }
+import { FLOW_PHASE_LABELS, FLOW_PHASES } from '../constants';
+import type { Task, FlowPhase, TaskNote, SlotDef } from '../types';
 
 // ─── PTY Screen Hook (polls only for focused slot) ───
 function usePtyScreen(slotId: string | null, enabled: boolean) {
@@ -117,7 +102,7 @@ function FlowStepper({ phase }: { phase?: FlowPhase }) {
                 'text-[8px] mt-0.5',
                 isDone ? 'text-emerald-500' : isCurrent ? 'text-orange-400' : 'text-neutral-600',
               )}>
-                {PHASE_LABELS[p]}
+                {FLOW_PHASE_LABELS[p]}
               </span>
             </div>
             {i < FLOW_PHASES.length - 1 && (

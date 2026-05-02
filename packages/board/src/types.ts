@@ -5,6 +5,29 @@ export type GroupBy = 'none' | 'category' | 'priority' | 'project';
 
 export type FlowPhase = 'investigate' | 'consult_gemini_1' | 'plan' | 'consult_gemini_2' | 'execute' | 'finalize' | 'done';
 
+export interface SlotDef {
+  id: string;
+  label: string;
+  role: string;
+  running?: boolean;
+  state?: string;
+  provider?: string;
+  engine?: string;
+  modelProfile?: string;
+  taskClass?: string;
+  acceptsBoardTask?: boolean;
+  confidence?: number;
+  reason?: string;
+  activeTool?: string;
+  blockedKind?: string;
+  latestConversation?: {
+    id?: string;
+    source?: string;
+    title?: string;
+    updatedAt?: string;
+  } | null;
+}
+
 export interface Task {
   id: string;
   title: string;

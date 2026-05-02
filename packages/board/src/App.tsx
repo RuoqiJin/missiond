@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import type { ElementType } from 'react';
 import { Plus, ClipboardList, Loader2, MonitorUp, Brain, MessageSquareText, Gauge, Crosshair, Sparkles } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Skeleton } from '@/components/ui/skeleton';
@@ -14,10 +15,25 @@ import { KnowledgeConsolidated } from './components/KnowledgeConsolidated';
 import { LogsConsolidated } from './components/LogsConsolidated';
 import { JarvisChat } from './components/JarvisChat';
 import { useEventStream, useConnectionState } from './hooks/useEventStream';
+import { BOARD_TABS, DEFAULT_TAB, TAB_MIGRATION, type BoardTabId } from './generated/board-frontend-config';
+import type { SlotDef } from './types';
 
-type Tab = 'jarvis' | 'board' | 'terminal' | 'exec' | 'system' | 'knowledge' | 'logs';
+type Tab = BoardTabId;
 
-interface SlotDef { id: string; label: string; role: string; running?: boolean }
+const TAB_ICON_MAP: Record<string, ElementType> = {
+  Brain,
+  ClipboardList,
+  Crosshair,
+  Gauge,
+  MessageSquareText,
+  MonitorUp,
+  Sparkles,
+};
+const TAB_MIGRATION_LOOKUP = TAB_MIGRATION as Readonly<Record<string, BoardTabId>>;
+
+function isBoardTabId(value: string): value is BoardTabId {
+  return BOARD_TABS.some((tab) => tab.id === value);
+}
 
 export default function App() {
   useEventStream(); // Global EventBus WS connection
@@ -28,17 +44,10 @@ export default function App() {
   const taskCount = useTaskCenterStore((s) => s.tasks.filter((t) => t.status === 'open' && t.category !== 'research').length);
   const [mounted, setMounted] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
-    if (typeof window === 'undefined') return 'board';
-    // Migrate old tab values to new ones
-    const saved = localStorage.getItem('board:tab') as string || 'jarvis';
-    const migration: Record<string, Tab> = {
-      'autopilot': 'exec', 'decisions': 'exec',
-      'memory': 'system', 'engine': 'system',
-      'conversations': 'logs', 'timeline': 'logs',
-      'architecture': 'knowledge',
-      'deploy': 'board', 'research': 'board',
-    };
-    return (migration[saved] || saved) as Tab;
+    if (typeof window === 'undefined') return DEFAULT_TAB;
+    const saved = localStorage.getItem('board:tab') || DEFAULT_TAB;
+    const migrated = TAB_MIGRATION_LOOKUP[saved] ?? saved;
+    return isBoardTabId(migrated) ? migrated : DEFAULT_TAB;
   });
   const [slots, setSlots] = useState<SlotDef[]>([]);
   const [activeSlot, setActiveSlot] = useState<string>(() => {
@@ -93,16 +102,6 @@ export default function App() {
     );
   }
 
-  const tabs: { id: Tab; label: string; icon: React.ElementType }[] = [
-    { id: 'jarvis', label: 'Jarvis', icon: Sparkles },
-    { id: 'board', label: 'Board', icon: ClipboardList },
-    { id: 'terminal', label: 'Terminal', icon: MonitorUp },
-    { id: 'exec', label: 'Exec', icon: Crosshair },
-    { id: 'system', label: 'System', icon: Gauge },
-    { id: 'knowledge', label: 'Knowledge', icon: Brain },
-    { id: 'logs', label: 'Logs', icon: MessageSquareText },
-  ];
-
   return (
     <div className="h-screen flex flex-col bg-background">
       {/* Top bar with tabs */}
@@ -121,21 +120,24 @@ export default function App() {
             </div>
           </div>
 
-          {/* Tabs — 6 consolidated */}
+          {/* Tabs */}
           <div className="flex items-center gap-1 ml-4 bg-neutral-900 rounded-lg p-0.5 overflow-x-auto overflow-y-hidden">
-            {tabs.map(({ id, label, icon: Icon }) => (
-              <button
-                key={id}
-                onClick={() => setTab(id)}
-                className={cn(
-                  'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
-                  tab === id ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
-                )}
-              >
-                <Icon className="w-3 h-3" />
-                {label}
-              </button>
-            ))}
+            {BOARD_TABS.map(({ id, label, icon }) => {
+              const Icon = TAB_ICON_MAP[icon] ?? ClipboardList;
+              return (
+                <button
+                  key={id}
+                  onClick={() => setTab(id)}
+                  className={cn(
+                    'px-3 py-1.5 text-xs font-medium rounded-md transition-colors flex items-center gap-1.5',
+                    tab === id ? 'bg-neutral-800 text-white' : 'text-neutral-500 hover:text-neutral-300',
+                  )}
+                >
+                  <Icon className="w-3 h-3" />
+                  {label}
+                </button>
+              );
+            })}
           </div>
         </div>
 
