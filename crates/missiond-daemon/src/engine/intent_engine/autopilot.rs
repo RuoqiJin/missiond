@@ -497,7 +497,7 @@ fn is_tui_artifact_line(line: &str) -> bool {
         return true;
     }
     // Hint / status bar rendered at the bottom of the TUI.
-    if t.starts_with("⏵⏵") || t.starts_with("? for shortcuts") {
+    if t.starts_with("⏵⏵") || t.starts_with("? for shortcuts") || is_tui_progress_line(t) {
         return true;
     }
     // Tool-result marker — Claude Code TUI emits `⎿ …` for every tool result
@@ -577,6 +577,26 @@ fn looks_like_tool_call_marker(trimmed: &str) -> bool {
         && prefix
             .chars()
             .all(|c| c.is_alphanumeric() || matches!(c, '_' | '-' | '.' | ':' | '/'))
+}
+
+fn is_probably_active_tui_summary(summary: &str) -> bool {
+    let trimmed = summary.trim();
+    trimmed.is_empty() || looks_like_active_tui_progress(trimmed)
+}
+
+fn looks_like_active_tui_progress(text: &str) -> bool {
+    text.lines()
+        .any(|line| is_tui_progress_line(line.trim_start()))
+}
+
+fn is_tui_progress_line(trimmed: &str) -> bool {
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    matches!(
+        first,
+        '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏'
+    ) && trimmed.contains("esc to cancel")
 }
 
 /// V3 execution-ownership :: delegated-boardtask :: dispatch-guard.
@@ -1661,6 +1681,24 @@ async fn dispatch_board_tasks_with_config(
                 // intentionally bypass this extractor and keep the raw response.
                 let final_summary =
                     extract_worker_final_summary(&res.response, &full_prompt);
+                if is_probably_active_tui_summary(&final_summary) {
+                    warn!(
+                        task_id = %task.id,
+                        slot_id = %slot_id,
+                        duration_ms = res.duration_ms,
+                        "Autopilot: pty.send returned an active/progress frame; preserving running task state"
+                    );
+                    let _ = state
+                        .store
+                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.to_string(),
+                            content: "⚠️ PTY 返回了仍在运行的进度帧，Autopilot 未关闭任务；等待工位稳定后由 watchdog/后续 tick 处理。".to_string(),
+                            note_type: Some("note".to_string()),
+                            author: Some("autopilot".to_string()),
+                        })
+                        .await;
+                    return;
+                }
                 let summary_for_note =
                     truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
                 let note_content = format!(
@@ -3658,6 +3696,22 @@ mod tests {
         );
         assert!(!summary.contains("Board Task Summary"));
         assert!(!summary.contains("任 务 诊 断 摘 要"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_strips_gemini_progress_frames() {
+        let prompt = dispatched_prompt("task-progress-frame");
+        let response = format!(
+            "{prompt}\n\n\
+             ⠋ Thinking... (esc to cancel, 0s)                                                                      ? for shortcuts\n\
+             ⠸ Defining the Scope (esc to cancel, 10s)                                                              ? for shortcuts\n\
+             ⠴ Confirming the Closeout (esc to cancel, 12s)                                                         ? for shortcuts",
+            prompt = prompt
+        );
+
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(summary.is_empty(), "progress frame leaked: {summary:?}");
+        assert!(is_probably_active_tui_summary(&summary));
     }
 
     #[test]

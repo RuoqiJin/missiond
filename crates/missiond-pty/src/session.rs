@@ -1722,11 +1722,19 @@ impl PTYSession {
 
     async fn enrich_completion_from_settled_screen(&self, response: String) -> String {
         if has_fix_verification_closeout(&response) {
-            return response;
+            return focus_fix_verification_closeout(&response)
+                .unwrap_or(response.as_str())
+                .to_string();
         }
 
         let buffer_lines = (self.rows as usize).saturating_mul(2).max(80);
         let started = std::time::Instant::now();
+        let response_was_progress = looks_like_active_tui_progress(&response);
+        let max_wait = if response_was_progress {
+            Duration::from_millis(45_000)
+        } else {
+            Duration::from_millis(2_000)
+        };
         let mut delay_ms = 250;
 
         loop {
@@ -1736,7 +1744,12 @@ impl PTYSession {
             if chosen != response {
                 return chosen;
             }
-            if started.elapsed() >= Duration::from_millis(2_000) {
+            if !looks_like_active_tui_progress(&screen_text)
+                && started.elapsed() >= Duration::from_millis(2_000)
+            {
+                return response;
+            }
+            if started.elapsed() >= max_wait {
                 return response;
             }
             delay_ms = 150;
@@ -2162,7 +2175,7 @@ fn is_tui_chrome_line(line: &str) -> bool {
     if t.contains("gemini-") && t.contains("context left") {
         return true;
     }
-    if t.starts_with("? for shortcuts") {
+    if t.starts_with("? for shortcuts") || is_tui_progress_line(t) {
         return true;
     }
     if t.starts_with("YOLO Ctrl+Y") || (t.contains("GEMINI.md file") && t.contains("skills")) {
@@ -2284,6 +2297,21 @@ fn trim_board_summary_tail(text: &str) -> &str {
 fn is_board_summary_heading(line: &str) -> bool {
     let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
     compact.contains("任务诊断摘要") || compact.to_ascii_lowercase().contains("boardtasksummary")
+}
+
+fn looks_like_active_tui_progress(text: &str) -> bool {
+    text.lines()
+        .any(|line| is_tui_progress_line(line.trim_start()))
+}
+
+fn is_tui_progress_line(trimmed: &str) -> bool {
+    let Some(first) = trimmed.chars().next() else {
+        return false;
+    };
+    matches!(
+        first,
+        '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏'
+    ) && trimmed.contains("esc to cancel")
 }
 
 #[cfg(test)]
@@ -2470,6 +2498,26 @@ Fix: read-only smoke of MissionD Autopilot/PTY completion capture
         );
         assert!(!result.contains("Board Task Summary"));
         assert!(!result.contains("任 务 诊 断 摘 要"));
+    }
+
+    /// Live shape from BoardTask 531f3cd0: a premature completion frame can be
+    /// made entirely of Gemini spinner/status lines while the CLI is still
+    /// producing the real answer. These progress lines must be recognized as
+    /// TUI chrome and as an active frame so callers do not persist them as the
+    /// assistant response.
+    #[test]
+    fn gemini_progress_lines_are_active_tui_chrome() {
+        let progress = "\
+ ⠋ Thinking... (esc to cancel, 0s)                                                                      ? for shortcuts
+ ⠸ Defining the Scope (esc to cancel, 10s)                                                              ? for shortcuts
+ ⠴ Confirming the Closeout (esc to cancel, 12s)                                                         ? for shortcuts
+";
+        assert!(looks_like_active_tui_progress(progress));
+        let cleaned = sanitize_tui_chrome(progress);
+        assert!(
+            cleaned.trim().is_empty(),
+            "Gemini spinner/status lines should be stripped, got: {cleaned:?}"
+        );
     }
 
     /// When neither the event nor the screen carry the closeout pair, the
