@@ -110,10 +110,11 @@ function readConfig(filePath, fileLabel) {
   const props = readKeywordProps(runtime, { start: 1 });
   const tabsNode = child(runtime, 'tabs');
   const taxonomyNode = child(runtime, 'task-taxonomy');
+  const boardTaskApiNode = child(runtime, 'board-task-api-contract');
   const flowNode = child(runtime, 'flow');
   const eventRoutesNode = child(runtime, 'event-routes');
   const timelineVisualsNode = child(runtime, 'timeline-visuals');
-  for (const [name, node] of [['tabs', tabsNode], ['task-taxonomy', taxonomyNode], ['flow', flowNode], ['event-routes', eventRoutesNode], ['timeline-visuals', timelineVisualsNode]]) {
+  for (const [name, node] of [['tabs', tabsNode], ['task-taxonomy', taxonomyNode], ['board-task-api-contract', boardTaskApiNode], ['flow', flowNode], ['event-routes', eventRoutesNode], ['timeline-visuals', timelineVisualsNode]]) {
     if (!node) fail(`${fileLabel}: frontend-runtime-config missing (${name} ...)`);
   }
 
@@ -124,6 +125,7 @@ function readConfig(filePath, fileLabel) {
     output: textProp(props, ':output'),
     tabs: parseTabs(tabsNode),
     taxonomy: parseTaxonomy(taxonomyNode),
+    boardTaskApi: parseBoardTaskApi(boardTaskApiNode),
     flow: parseFlow(flowNode),
     eventRoutes: parseEventRoutes(eventRoutesNode),
     timelineVisuals: parseTimelineVisuals(timelineVisualsNode),
@@ -180,6 +182,41 @@ function parseTaxonomy(node) {
       };
     }),
     serverOptions: children(node, 'server-option').map((option) => requiredText(readKeywordProps(option, { start: 1 }), ':value', 'server-option')),
+  };
+}
+
+function parseBoardTaskApi(node) {
+  const props = readKeywordProps(node, { start: 1 });
+  const defaultsForm = children(node, 'defaults')[0];
+  if (!defaultsForm) fail('board-task-api-contract missing (defaults ...)');
+  const defaults = readKeywordProps(defaultsForm, { start: 1 });
+  return {
+    route: requiredText(props, ':route', 'board-task-api-contract'),
+    frontendFields: requiredList(props, ':frontend-fields', 'board-task-api-contract'),
+    backendFields: requiredList(props, ':backend-fields', 'board-task-api-contract'),
+    fieldMaps: children(node, 'field-map').map((fieldMap) => {
+      const p = readKeywordProps(fieldMap, { start: 1 });
+      return {
+        frontend: requiredText(p, ':frontend', 'field-map'),
+        backend: requiredText(p, ':backend', 'field-map'),
+        defaultValue: optionalLiteral(p, ':default'),
+      };
+    }),
+    defaults: {
+      status: requiredText(defaults, ':status', 'defaults'),
+      priority: requiredText(defaults, ':priority', 'defaults'),
+      category: requiredText(defaults, ':category', 'defaults'),
+      description: requiredText(defaults, ':description', 'defaults'),
+    },
+    actions: children(node, 'action').map((action) => {
+      const p = readKeywordProps(action, { start: 1 });
+      return {
+        name: requiredText(p, ':name', 'action'),
+        method: requiredText(p, ':method', 'action'),
+        tool: requiredText(p, ':tool', 'action'),
+        mode: textProp(p, ':mode'),
+      };
+    }),
   };
 }
 
@@ -300,7 +337,7 @@ function renderConfig(config, { blueprintRel, outputRel }) {
     `// GENERATED_TO: ${outputRel}`,
     '// To refresh: node scripts/project-frontend-board-config.mjs --write',
     '',
-    "import type { FlowPhase, GroupBy, TaskCategory, TaskPriority } from '../types';",
+    "import type { FlowPhase, GroupBy, TaskCategory, TaskPriority, TaskStatus } from '../types';",
     '',
     `export type BoardTabId = ${union(tabIds)};`,
     `export type EventVersionKey = ${union(eventKeys)};`,
@@ -329,6 +366,19 @@ function renderConfig(config, { blueprintRel, outputRel }) {
     '  prefix: string;',
     '  bump: readonly EventVersionKey[];',
     '  delayMs?: number;',
+    '}',
+    '',
+    'export interface BoardTaskFieldMapConfig {',
+    '  frontend: string;',
+    '  backend: string;',
+    '  defaultValue?: string | number | boolean;',
+    '}',
+    '',
+    'export interface BoardTaskActionConfig {',
+    '  name: string;',
+    '  method: string;',
+    '  tool: string;',
+    '  mode?: string;',
     '}',
     '',
     'export interface TimelineEventVisualConfig {',
@@ -361,6 +411,13 @@ function renderConfig(config, { blueprintRel, outputRel }) {
     `export const PRIORITY_CONFIG = ${objectLiteral(config.taxonomy.priorities.map((p) => [p.id, { label: p.label, dotColor: p.dotColor }]), 0)} as const satisfies Record<TaskPriority, { label: string; dotColor: string }>;`,
     `export const GROUP_OPTIONS = ${arrayLiteral(config.taxonomy.groupOptions, (item) => `{ value: ${q(item.value)} as GroupBy, label: ${q(item.label)} }`)} as const satisfies readonly { value: GroupBy; label: string }[];`,
     `export const SERVER_OPTIONS = ${arrayLiteral(config.taxonomy.serverOptions, (value) => q(value))} as const;`,
+    '',
+    `export const BOARD_TASK_API_ROUTE = ${q(config.boardTaskApi.route)};`,
+    `export const BOARD_TASK_FRONTEND_FIELDS = ${arrayLiteral(config.boardTaskApi.frontendFields, q)} as const;`,
+    `export const BOARD_TASK_BACKEND_FIELDS = ${arrayLiteral(config.boardTaskApi.backendFields, q)} as const;`,
+    `export const BOARD_TASK_FIELD_MAP = ${arrayLiteral(config.boardTaskApi.fieldMaps, renderFieldMap)} as const satisfies readonly BoardTaskFieldMapConfig[];`,
+    `export const BOARD_TASK_DEFAULTS = { status: ${q(config.boardTaskApi.defaults.status)} as TaskStatus, priority: ${q(config.boardTaskApi.defaults.priority)} as TaskPriority, category: ${q(config.boardTaskApi.defaults.category)} as TaskCategory, description: ${q(config.boardTaskApi.defaults.description)} } as const;`,
+    `export const BOARD_TASK_ACTIONS = ${arrayLiteral(config.boardTaskApi.actions, renderBoardTaskAction)} as const satisfies readonly BoardTaskActionConfig[];`,
     '',
     `export const FLOW_TEMPLATE_OPTIONS = ${arrayLiteral(config.flow.templates, (item) => `{ value: ${q(item.value)}, label: ${q(item.label)} }`)} as const;`,
     `export const FLOW_PHASES = ${arrayLiteral(phases, (phase) => `${q(phase)} as FlowPhase`)} as const satisfies readonly FlowPhase[];`,
@@ -407,6 +464,25 @@ function renderPrefixRoute(route) {
     `bump: ${arrayLiteral(route.bump, (key) => `${q(key)} as EventVersionKey`)}`,
   ];
   if (route.delayMs != null) parts.push(`delayMs: ${route.delayMs}`);
+  return `{ ${parts.join(', ')} }`;
+}
+
+function renderFieldMap(fieldMap) {
+  const parts = [
+    `frontend: ${q(fieldMap.frontend)}`,
+    `backend: ${q(fieldMap.backend)}`,
+  ];
+  if (fieldMap.defaultValue !== undefined) parts.push(`defaultValue: ${literal(fieldMap.defaultValue)}`);
+  return `{ ${parts.join(', ')} }`;
+}
+
+function renderBoardTaskAction(action) {
+  const parts = [
+    `name: ${q(action.name)}`,
+    `method: ${q(action.method)}`,
+    `tool: ${q(action.tool)}`,
+  ];
+  if (action.mode) parts.push(`mode: ${q(action.mode)}`);
   return `{ ${parts.join(', ')} }`;
 }
 
@@ -490,6 +566,19 @@ function optionalNumber(props, key) {
   const parsed = Number.parseInt(raw, 10);
   if (!Number.isFinite(parsed)) fail(`expected numeric ${key}, got ${JSON.stringify(raw)}`);
   return parsed;
+}
+
+function optionalLiteral(props, key) {
+  const raw = textProp(props, key);
+  if (raw == null) return undefined;
+  if (raw === 'true') return true;
+  if (raw === 'false') return false;
+  if (/^-?\d+(?:\.\d+)?$/.test(raw)) return Number(raw);
+  return raw;
+}
+
+function literal(value) {
+  return typeof value === 'string' ? q(value) : String(value);
 }
 
 function normalizeNewlines(text) {

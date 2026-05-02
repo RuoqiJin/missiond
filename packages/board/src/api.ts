@@ -1,6 +1,7 @@
 import type { Task, TaskFormData, TaskNote, TaskWithNotes } from './types';
+import { BOARD_TASK_API_ROUTE } from './generated/board-frontend-config';
 
-const BASE = '/api/tasks';
+const BASE = BOARD_TASK_API_ROUTE;
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
@@ -24,7 +25,7 @@ export async function createTask(data: TaskFormData & { parentId?: string }): Pr
   });
 }
 
-export async function updateTask(id: string, data: Partial<TaskFormData> & { orderIdx?: number; status?: string }): Promise<Task> {
+export async function updateTask(id: string, data: Partial<TaskFormData> & { order?: number; status?: string }): Promise<Task> {
   return request<Task>(`${BASE}?id=${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: { 'Content-Type': 'application/json' },

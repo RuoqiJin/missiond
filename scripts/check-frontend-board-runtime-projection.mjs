@@ -12,6 +12,9 @@ const FILES = {
   constants: 'packages/board/src/constants.ts',
   generated: 'packages/board/src/generated/board-frontend-config.ts',
   generator: 'scripts/project-frontend-board-config.mjs',
+  api: 'packages/board/src/api.ts',
+  store: 'packages/board/src/store.ts',
+  tasksRoute: 'packages/board/src/app/api/tasks/route.ts',
   slotsRoute: 'packages/board/src/app/api/slots/route.ts',
   taskDialog: 'packages/board/src/components/TaskDialog.tsx',
   terminal: 'packages/board/src/components/Terminal.tsx',
@@ -79,6 +82,7 @@ function checkRepo(repo) {
     ':generator "node scripts/project-frontend-board-config.mjs --write"',
     ':checker "node scripts/project-frontend-board-config.mjs --check"',
     ':output "packages/board/src/generated/board-frontend-config.ts"',
+    '(board-task-api-contract',
     '(event-routes',
     '(timeline-visuals',
   ]);
@@ -115,6 +119,10 @@ function checkRepo(repo) {
     'export const TIMELINE_SLOT_COLORS',
     'export const TIMELINE_SWIMLANES',
     'export const TIMELINE_WINDOW_OPTIONS',
+    'export const BOARD_TASK_API_ROUTE',
+    'export const BOARD_TASK_FIELD_MAP',
+    'export const BOARD_TASK_DEFAULTS',
+    'export const BOARD_TASK_ACTIONS',
   ]);
 
   requireText(diagnostics, FILES.generator, src.generator, [
@@ -123,6 +131,27 @@ function checkRepo(repo) {
     'frontend-runtime-config',
     'EVENT_ROUTE_TABLE',
     'TIMELINE_EVENT_VISUALS',
+    'BOARD_TASK_FIELD_MAP',
+  ]);
+
+  requireText(diagnostics, FILES.api, src.api, [
+    'BOARD_TASK_API_ROUTE',
+    'const BASE = BOARD_TASK_API_ROUTE',
+  ]);
+
+  requireText(diagnostics, FILES.store, src.store, [
+    'BOARD_TASK_DEFAULTS',
+    'BOARD_TASK_DEFAULTS.status',
+    'BOARD_TASK_DEFAULTS.priority',
+    'BOARD_TASK_DEFAULTS.category',
+  ]);
+
+  requireText(diagnostics, FILES.tasksRoute, src.tasksRoute, [
+    'BOARD_TASK_FIELD_MAP',
+    'mapToFrontend',
+    'mapToBackend',
+    "callTool('mission_board_create'",
+    "callTool('mission_board_update'",
   ]);
 
   requireText(diagnostics, FILES.slotsRoute, src.slotsRoute, [
@@ -201,11 +230,14 @@ function buildFixture() {
   (runtime-projection
     (projection workstation-slots :source [mission_slots mission_pty_status workstation-pool] :fields [id label role running state provider engine modelProfile taskClass acceptsBoardTask confidence reason activeTool blockedKind latestConversation] :forbid [SLOT_OPTIONS hardcoded-sonnet-label])
     (projection pty-recognition :rule "Terminal labels must describe the selected provider/session generically"))
-  (frontend-runtime-config :generator "node scripts/project-frontend-board-config.mjs --write" :checker "node scripts/project-frontend-board-config.mjs --check" :output "packages/board/src/generated/board-frontend-config.ts" (event-routes) (timeline-visuals)))`);
+  (frontend-runtime-config :generator "node scripts/project-frontend-board-config.mjs --write" :checker "node scripts/project-frontend-board-config.mjs --check" :output "packages/board/src/generated/board-frontend-config.ts" (board-task-api-contract) (event-routes) (timeline-visuals)))`);
   fs.writeFileSync(path.join(root, FILES.types), 'export interface SlotDef { provider?: string; engine?: string; modelProfile?: string; acceptsBoardTask?: boolean; latestConversation?: { source?: string } }\n');
   fs.writeFileSync(path.join(root, FILES.constants), "export { CATEGORY_CONFIG, FLOW_PHASES, FLOW_TEMPLATE_OPTIONS } from './generated/board-frontend-config';\n");
-  fs.writeFileSync(path.join(root, FILES.generated), 'GENERATED_FROM: .missiond/frontend/board-blueprint.lisp\nexport const BOARD_TABS = []; export const DEFAULT_TAB = "board"; export const TAB_MIGRATION = {}; export const EVENT_ROUTE_TABLE = []; export const EVENT_CUSTOM_EVENTS = []; export const EVENT_PREFIX_ROUTES = []; export const RESYNC_VERSION_KEYS = []; export const TIMELINE_EVENT_VISUALS = {}; export const TIMELINE_SLOT_COLORS = {}; export const TIMELINE_SWIMLANES = []; export const TIMELINE_WINDOW_OPTIONS = [];\n');
-  fs.writeFileSync(path.join(root, FILES.generator), "const BLUEPRINT = '.missiond/frontend/board-blueprint.lisp'; const OUTPUT = 'packages/board/src/generated/board-frontend-config.ts'; frontend-runtime-config; EVENT_ROUTE_TABLE; TIMELINE_EVENT_VISUALS;\n");
+  fs.writeFileSync(path.join(root, FILES.generated), 'GENERATED_FROM: .missiond/frontend/board-blueprint.lisp\nexport const BOARD_TABS = []; export const DEFAULT_TAB = "board"; export const TAB_MIGRATION = {}; export const EVENT_ROUTE_TABLE = []; export const EVENT_CUSTOM_EVENTS = []; export const EVENT_PREFIX_ROUTES = []; export const RESYNC_VERSION_KEYS = []; export const TIMELINE_EVENT_VISUALS = {}; export const TIMELINE_SLOT_COLORS = {}; export const TIMELINE_SWIMLANES = []; export const TIMELINE_WINDOW_OPTIONS = []; export const BOARD_TASK_API_ROUTE = "/api/tasks"; export const BOARD_TASK_FIELD_MAP = []; export const BOARD_TASK_DEFAULTS = {}; export const BOARD_TASK_ACTIONS = [];\n');
+  fs.writeFileSync(path.join(root, FILES.generator), "const BLUEPRINT = '.missiond/frontend/board-blueprint.lisp'; const OUTPUT = 'packages/board/src/generated/board-frontend-config.ts'; frontend-runtime-config; EVENT_ROUTE_TABLE; TIMELINE_EVENT_VISUALS; BOARD_TASK_FIELD_MAP;\n");
+  fs.writeFileSync(path.join(root, FILES.api), 'BOARD_TASK_API_ROUTE; const BASE = BOARD_TASK_API_ROUTE;\n');
+  fs.writeFileSync(path.join(root, FILES.store), 'BOARD_TASK_DEFAULTS; BOARD_TASK_DEFAULTS.status; BOARD_TASK_DEFAULTS.priority; BOARD_TASK_DEFAULTS.category;\n');
+  fs.writeFileSync(path.join(root, FILES.tasksRoute), "BOARD_TASK_FIELD_MAP; mapToFrontend; mapToBackend; callTool('mission_board_create'); callTool('mission_board_update');\n");
   fs.writeFileSync(path.join(root, FILES.slotsRoute), "callTool('mission_slots'); callTool('mission_pty_status'); provider; engine; modelProfile; latestConversation; acceptsBoardTask; confidence;\n");
   fs.writeFileSync(path.join(root, FILES.taskDialog), "import type { SlotDef } from '../types'; fetch('/api/slots'); availableSlots; setAvailableSlots;\n");
   fs.writeFileSync(path.join(root, FILES.terminal), 'providerLabel; Starting session; No active session;\n');

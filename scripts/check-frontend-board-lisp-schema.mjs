@@ -267,10 +267,11 @@ function validateFrontendRuntimeConfig(diagnostics, file, node) {
 
   const tabs = child(node, 'tabs');
   const taxonomy = child(node, 'task-taxonomy');
+  const boardTaskApi = child(node, 'board-task-api-contract');
   const flow = child(node, 'flow');
   const routes = child(node, 'event-routes');
   const timelineVisuals = child(node, 'timeline-visuals');
-  for (const [name, section] of [['tabs', tabs], ['task-taxonomy', taxonomy], ['flow', flow], ['event-routes', routes], ['timeline-visuals', timelineVisuals]]) {
+  for (const [name, section] of [['tabs', tabs], ['task-taxonomy', taxonomy], ['board-task-api-contract', boardTaskApi], ['flow', flow], ['event-routes', routes], ['timeline-visuals', timelineVisuals]]) {
     if (!section) diagnostics.push(diag(file, node.loc, `frontend-runtime-config missing (${name} ...)`));
   }
 
@@ -288,6 +289,30 @@ function validateFrontendRuntimeConfig(diagnostics, file, node) {
     for (const [kind, expected] of [['category', 8], ['priority', 3], ['group-option', 4], ['server-option', 4]]) {
       const count = childrenByHead(taxonomy, kind).length;
       if (count < expected) diagnostics.push(diag(file, taxonomy.loc, `task-taxonomy must declare at least ${expected} ${kind} entries, got ${count}`));
+    }
+  }
+
+  if (boardTaskApi) {
+    const apiProps = readKeywordProps(boardTaskApi, { start: 1 });
+    requireProp(diagnostics, file, apiProps, ':route', '/api/tasks', boardTaskApi.loc);
+    requireListIncludes(diagnostics, file, apiProps, ':frontend-fields', ['id', 'title', 'status', 'order', 'notes'], boardTaskApi.loc);
+    requireListIncludes(diagnostics, file, apiProps, ':backend-fields', ['id', 'title', 'status', 'orderIdx', 'notes'], boardTaskApi.loc);
+    const hasOrderMap = childrenByHead(boardTaskApi, 'field-map').some((map) => {
+      const props = readKeywordProps(map, { start: 1 });
+      return nodeText(props[':frontend']?.value) === 'order' && nodeText(props[':backend']?.value) === 'orderIdx';
+    });
+    if (!hasOrderMap) diagnostics.push(diag(file, boardTaskApi.loc, 'board-task-api-contract missing order -> orderIdx field-map'));
+    const defaults = childrenByHead(boardTaskApi, 'defaults')[0];
+    if (!defaults) diagnostics.push(diag(file, boardTaskApi.loc, 'board-task-api-contract missing defaults'));
+    else {
+      const defaultProps = readKeywordProps(defaults, { start: 1 });
+      requireProp(diagnostics, file, defaultProps, ':status', 'open', defaults.loc);
+      requireProp(diagnostics, file, defaultProps, ':priority', 'medium', defaults.loc);
+      requireProp(diagnostics, file, defaultProps, ':category', 'other', defaults.loc);
+    }
+    const actionTools = childrenByHead(boardTaskApi, 'action').map((action) => nodeText(readKeywordProps(action, { start: 1 })[':tool']?.value));
+    for (const tool of ['mission_board_list', 'mission_board_get', 'mission_board_create', 'mission_board_update', 'mission_board_delete']) {
+      if (!actionTools.includes(tool)) diagnostics.push(diag(file, boardTaskApi.loc, `board-task-api-contract missing action tool ${tool}`));
     }
   }
 
@@ -389,6 +414,17 @@ function buildFixture() {
       (server-option :value "ECS")
       (server-option :value "GCP")
       (server-option :value "Win Agent"))
+    (board-task-api-contract
+      :route "/api/tasks"
+      :frontend-fields [id title status order notes]
+      :backend-fields [id title status orderIdx notes]
+      (field-map :frontend order :backend orderIdx :default 0)
+      (defaults :status open :priority medium :category other :description "")
+      (action :name list :method GET :tool mission_board_list)
+      (action :name get :method GET :tool mission_board_get)
+      (action :name create :method POST :tool mission_board_create)
+      (action :name update :method PATCH :tool mission_board_update)
+      (action :name delete :method DELETE :tool mission_board_delete))
     (flow
       (template :value "" :label "无")
       (phase :id investigate :label "调查")

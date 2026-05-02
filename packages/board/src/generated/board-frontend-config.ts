@@ -3,7 +3,7 @@
 // GENERATED_TO: packages/board/src/generated/board-frontend-config.ts
 // To refresh: node scripts/project-frontend-board-config.mjs --write
 
-import type { FlowPhase, GroupBy, TaskCategory, TaskPriority } from '../types';
+import type { FlowPhase, GroupBy, TaskCategory, TaskPriority, TaskStatus } from '../types';
 
 export type BoardTabId = "jarvis" | "board" | "terminal" | "exec" | "system" | "knowledge" | "logs";
 export type EventVersionKey = "slotVersion" | "taskVersion" | "questionVersion" | "decisionVersion" | "memoryVersion" | "deployVersion" | "engineVersion" | "timelineVersion";
@@ -32,6 +32,19 @@ export interface EventPrefixRouteConfig {
   prefix: string;
   bump: readonly EventVersionKey[];
   delayMs?: number;
+}
+
+export interface BoardTaskFieldMapConfig {
+  frontend: string;
+  backend: string;
+  defaultValue?: string | number | boolean;
+}
+
+export interface BoardTaskActionConfig {
+  name: string;
+  method: string;
+  tool: string;
+  mode?: string;
 }
 
 export interface TimelineEventVisualConfig {
@@ -105,6 +118,82 @@ export const SERVER_OPTIONS = [
   "GCP",
   "Win Agent",
 ] as const;
+
+export const BOARD_TASK_API_ROUTE = "/api/tasks";
+export const BOARD_TASK_FRONTEND_FIELDS = [
+  "id",
+  "title",
+  "description",
+  "status",
+  "priority",
+  "category",
+  "project",
+  "server",
+  "dueDate",
+  "parentId",
+  "hidden",
+  "createdAt",
+  "updatedAt",
+  "order",
+  "claimExecutorId",
+  "claimExecutorType",
+  "claimedAt",
+  "assignee",
+  "autoExecute",
+  "promptTemplate",
+  "flowTemplate",
+  "flowPhase",
+  "dependsOn",
+  "leaseExpiresAt",
+  "timeoutSecs",
+  "contextIntent",
+  "notesCount",
+  "notes",
+] as const;
+export const BOARD_TASK_BACKEND_FIELDS = [
+  "id",
+  "title",
+  "description",
+  "status",
+  "priority",
+  "category",
+  "project",
+  "server",
+  "dueDate",
+  "parentId",
+  "hidden",
+  "createdAt",
+  "updatedAt",
+  "orderIdx",
+  "claimExecutorId",
+  "claimExecutorType",
+  "claimedAt",
+  "assignee",
+  "autoExecute",
+  "promptTemplate",
+  "flowTemplate",
+  "flowPhase",
+  "dependsOn",
+  "leaseExpiresAt",
+  "timeoutSecs",
+  "contextIntent",
+  "notesCount",
+  "notes",
+] as const;
+export const BOARD_TASK_FIELD_MAP = [
+  { frontend: "order", backend: "orderIdx", defaultValue: 0 },
+] as const satisfies readonly BoardTaskFieldMapConfig[];
+export const BOARD_TASK_DEFAULTS = { status: "open" as TaskStatus, priority: "medium" as TaskPriority, category: "other" as TaskCategory, description: "" } as const;
+export const BOARD_TASK_ACTIONS = [
+  { name: "list", method: "GET", tool: "mission_board_list" },
+  { name: "get", method: "GET", tool: "mission_board_get" },
+  { name: "create", method: "POST", tool: "mission_board_create" },
+  { name: "update", method: "PATCH", tool: "mission_board_update" },
+  { name: "delete", method: "DELETE", tool: "mission_board_delete" },
+  { name: "toggle", method: "POST", tool: "mission_board_toggle" },
+  { name: "note-add", method: "POST", tool: "mission_board_note_add" },
+  { name: "clear-done", method: "POST", tool: "mission_board_delete", mode: "client-subtree-filter" },
+] as const satisfies readonly BoardTaskActionConfig[];
 
 export const FLOW_TEMPLATE_OPTIONS = [
   { value: "", label: "无（普通任务）" },

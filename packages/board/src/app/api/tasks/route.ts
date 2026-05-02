@@ -1,15 +1,25 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { callTool } from '@/lib/missiond';
+import { BOARD_TASK_FIELD_MAP } from '@/generated/board-frontend-config';
 
 function mapToFrontend(task: Record<string, unknown>): Record<string, unknown> {
-  const { orderIdx, ...rest } = task;
-  return { ...rest, order: orderIdx ?? 0 };
+  const out = { ...task };
+  for (const { frontend, backend, defaultValue } of BOARD_TASK_FIELD_MAP) {
+    out[frontend] = out[backend] ?? defaultValue;
+    delete out[backend];
+  }
+  return out;
 }
 
 function mapToBackend(data: Record<string, unknown>): Record<string, unknown> {
-  const { order, ...rest } = data;
-  if (order !== undefined) rest.orderIdx = order;
-  return rest;
+  const out = { ...data };
+  for (const { frontend, backend } of BOARD_TASK_FIELD_MAP) {
+    if (out[frontend] !== undefined) {
+      out[backend] = out[frontend];
+      delete out[frontend];
+    }
+  }
+  return out;
 }
 
 export async function GET(req: NextRequest) {

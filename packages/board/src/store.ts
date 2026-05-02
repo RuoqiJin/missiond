@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
 import type { Task, TaskFormData, TaskFiltersState, GroupBy } from './types';
 import * as api from './api';
+import { BOARD_TASK_DEFAULTS } from './generated/board-frontend-config';
 
 function getDescendantIds(tasks: Task[], parentId: string): string[] {
   const ids: string[] = [];
@@ -79,17 +80,17 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       const newTask: Task = {
         id: tempId,
         title,
-        description: '',
-        status: 'open',
-        priority: 'medium',
-        category: 'other',
+        description: BOARD_TASK_DEFAULTS.description,
+        status: BOARD_TASK_DEFAULTS.status,
+        priority: BOARD_TASK_DEFAULTS.priority,
+        category: BOARD_TASK_DEFAULTS.category,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
         order: maxOrder + 1,
       };
       set({ tasks: [newTask, ...tasks] });
 
-      api.createTask({ title, description: '', priority: 'medium', category: 'other' })
+      api.createTask({ title, description: BOARD_TASK_DEFAULTS.description, priority: BOARD_TASK_DEFAULTS.priority, category: BOARD_TASK_DEFAULTS.category })
         .then((saved) => {
           set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)) });
         })
@@ -107,10 +108,10 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       const newTask: Task = {
         id: tempId,
         title,
-        description: '',
-        status: 'open',
-        priority: parent?.priority || 'medium',
-        category: parent?.category || 'other',
+        description: BOARD_TASK_DEFAULTS.description,
+        status: BOARD_TASK_DEFAULTS.status,
+        priority: parent?.priority || BOARD_TASK_DEFAULTS.priority,
+        category: parent?.category || BOARD_TASK_DEFAULTS.category,
         project: parent?.project,
         server: parent?.server,
         parentId,
@@ -123,8 +124,8 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       api.createTask({
         title,
         description: '',
-        priority: parent?.priority || 'medium',
-        category: parent?.category || 'other',
+        priority: parent?.priority || BOARD_TASK_DEFAULTS.priority,
+        category: parent?.category || BOARD_TASK_DEFAULTS.category,
         project: parent?.project,
         server: parent?.server,
         parentId,
@@ -145,8 +146,8 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       const newTask: Task = {
         ...data,
         id: tempId,
-        status: 'open',
-        description: data.description || '',
+        status: BOARD_TASK_DEFAULTS.status,
+        description: data.description || BOARD_TASK_DEFAULTS.description,
         parentId,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -154,7 +155,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       };
       set({ tasks: [...tasks, newTask], isDialogOpen: false, editingTask: null, _addDialogParentId: undefined });
 
-      api.createTask({ ...data, description: data.description || '', parentId })
+      api.createTask({ ...data, description: data.description || BOARD_TASK_DEFAULTS.description, parentId })
         .then((saved) => {
           set({ tasks: get().tasks.map((t) => (t.id === tempId ? saved : t)) });
         })
@@ -194,7 +195,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       set({
         tasks: get().tasks.map((t) =>
           t.id === id
-            ? { ...t, status: t.status === 'open' ? 'done' as const : 'open' as const, updatedAt: new Date().toISOString() }
+            ? { ...t, status: t.status === BOARD_TASK_DEFAULTS.status ? 'done' as const : BOARD_TASK_DEFAULTS.status, updatedAt: new Date().toISOString() }
             : t
         ),
       });
@@ -229,7 +230,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
       // Persist all affected siblings, not just the moved one
       Promise.all(
         Array.from(updatedIds.entries()).map(([id, order]) =>
-          api.updateTask(id, { orderIdx: order } as never)
+          api.updateTask(id, { order })
         )
       ).catch((err) => console.error('[TaskCenter] reorderTask sync failed:', err));
     },
@@ -243,7 +244,7 @@ export const useTaskCenterStore = create<TaskCenterState>()(
     skipTask: (id) => {
       const task = get().tasks.find((t) => t.id === id);
       if (!task) return;
-      const newStatus = task.status === 'skipped' ? 'open' : 'skipped';
+      const newStatus = task.status === 'skipped' ? BOARD_TASK_DEFAULTS.status : 'skipped';
       set({
         tasks: get().tasks.map((t) =>
           t.id === id ? { ...t, status: newStatus as Task['status'], updatedAt: new Date().toISOString() } : t

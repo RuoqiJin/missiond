@@ -88,6 +88,20 @@
       (server-option :value "ECS")
       (server-option :value "GCP")
       (server-option :value "Win Agent"))
+    (board-task-api-contract
+      :route "/api/tasks"
+      :frontend-fields [id title description status priority category project server dueDate parentId hidden createdAt updatedAt order claimExecutorId claimExecutorType claimedAt assignee autoExecute promptTemplate flowTemplate flowPhase dependsOn leaseExpiresAt timeoutSecs contextIntent notesCount notes]
+      :backend-fields [id title description status priority category project server dueDate parentId hidden createdAt updatedAt orderIdx claimExecutorId claimExecutorType claimedAt assignee autoExecute promptTemplate flowTemplate flowPhase dependsOn leaseExpiresAt timeoutSecs contextIntent notesCount notes]
+      (field-map :frontend order :backend orderIdx :default 0)
+      (defaults :status open :priority medium :category other :description "")
+      (action :name list :method GET :tool mission_board_list)
+      (action :name get :method GET :tool mission_board_get)
+      (action :name create :method POST :tool mission_board_create)
+      (action :name update :method PATCH :tool mission_board_update)
+      (action :name delete :method DELETE :tool mission_board_delete)
+      (action :name toggle :method POST :tool mission_board_toggle)
+      (action :name note-add :method POST :tool mission_board_note_add)
+      (action :name clear-done :method POST :tool mission_board_delete :mode client-subtree-filter))
     (flow
       (template :value "" :label "无（普通任务）")
       (template :value engineering :label "Engineering Flow")
