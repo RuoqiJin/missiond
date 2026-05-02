@@ -1,11 +1,28 @@
 'use client';
 
 import { useEffect, useRef, useState, useCallback, Component, type ReactNode } from 'react';
+import type { SlotDef } from '../types';
 
 const WS_PORT = parseInt(process.env.NEXT_PUBLIC_WS_PORT || '9120', 10);
 
+interface TerminalActiveTask {
+  id: string;
+  title: string;
+  status?: string;
+}
+
 interface TerminalProps {
   slotId: string;
+  slot?: SlotDef;
+  activeTask?: TerminalActiveTask | null;
+}
+
+const STATUS_TEXT_MAX = 80;
+function truncateStatusText(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const flat = value.replace(/\s+/g, ' ').trim();
+  if (!flat) return null;
+  return flat.length > STATUS_TEXT_MAX ? `${flat.slice(0, STATUS_TEXT_MAX - 1)}…` : flat;
 }
 
 type PTYState = 'unknown' | 'not_running' | 'starting' | 'idle' | 'slash_menu' | 'thinking' | 'responding' | 'tool_running' | 'confirming' | 'error' | 'exited';
@@ -36,7 +53,7 @@ class TerminalErrorBoundary extends Component<
 }
 
 // --- Terminal Inner ---
-function TerminalInner({ slotId }: TerminalProps) {
+function TerminalInner({ slotId, slot, activeTask }: TerminalProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const termRef = useRef<import('@xterm/xterm').Terminal | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
@@ -257,7 +274,7 @@ function TerminalInner({ slotId }: TerminalProps) {
           setPtyState(newState);
           // Show statusText during processing; clear when idle/stopped
           const processing = ['thinking', 'responding', 'tool_running'].includes(newState);
-          setStatusText(processing ? (msg.statusText || null) : null);
+          setStatusText(processing ? truncateStatusText(msg.statusText) : null);
         } else if (msg.type === 'exit') {
           safeWriteln(term, `\r\n\x1b[31m[exited: code ${msg.code}]\x1b[0m`);
           clearReconnectTimer();
@@ -381,16 +398,32 @@ function TerminalInner({ slotId }: TerminalProps) {
 
   const { text: stateText, color: stateColor } = stateLabel[ptyState] ?? { text: ptyState, color: 'text-neutral-500' };
   const isRunning = ptyState !== 'not_running' && ptyState !== 'unknown' && ptyState !== 'exited';
+  const headerStatus = statusText ?? null;
+  const providerBits = [slot?.provider, slot?.engine, slot?.modelProfile, slot?.taskClass].filter(
+    (v): v is string => !!v && v.length > 0,
+  );
+  const lastActivity = slot?.latestConversation?.updatedAt ?? null;
+  const lastActivityLabel = lastActivity ? new Date(lastActivity).toLocaleTimeString() : null;
+  const showInfoRow = !!(activeTask || providerBits.length > 0 || slot?.activeTool || slot?.blockedKind || lastActivityLabel);
 
   return (
     <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between px-3 py-2 border-b border-neutral-800 bg-neutral-900/50">
-        <div className="flex items-center gap-2">
-          <span className={`w-2 h-2 rounded-full ${wsColor}`} />
-          <span className="text-xs text-neutral-400 font-mono">{slotId}</span>
-          <span className={`text-[10px] font-medium ${stateColor}`}>{statusText || stateText}</span>
+      <div className="flex flex-col gap-0.5 px-3 py-2 border-b border-neutral-800 bg-neutral-900/50">
+        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2 min-w-0 flex-1">
+          <span className={`w-2 h-2 rounded-full shrink-0 ${wsColor}`} />
+          <span className="text-xs text-neutral-400 font-mono truncate shrink-0" title={slotId}>{slotId}</span>
+          {slot?.label && slot.label !== slotId && (
+            <span className="text-[10px] text-neutral-500 truncate min-w-0" title={slot.label}>· {slot.label}</span>
+          )}
+          <span
+            className={`text-[10px] font-medium shrink-0 ${stateColor}`}
+            title={headerStatus ?? stateText}
+          >
+            {headerStatus ?? stateText}
+          </span>
         </div>
-        <div className="flex gap-1.5">
+        <div className="flex gap-1.5 shrink-0">
           {!isRunning && (
             <button onClick={handleSpawn} disabled={spawning}
               className="text-[10px] px-2 py-0.5 rounded bg-green-900/50 text-green-400 hover:bg-green-800/50 hover:text-green-300 transition-colors disabled:opacity-50">
@@ -410,6 +443,31 @@ function TerminalInner({ slotId }: TerminalProps) {
             </button>
           )}
         </div>
+        </div>
+        {showInfoRow && (
+          <div className="flex items-center gap-2 min-w-0 text-[10px] text-neutral-500">
+            {activeTask && (
+              <span className="flex items-center gap-1 min-w-0 shrink truncate" title={`${activeTask.id}\n${activeTask.title}`}>
+                <span className="font-mono text-neutral-600 shrink-0">#{activeTask.id.slice(0, 8)}</span>
+                <span className="truncate text-neutral-400">{activeTask.title}</span>
+              </span>
+            )}
+            {providerBits.length > 0 && (
+              <span className="text-neutral-600 truncate shrink-0" title={providerBits.join(' · ')}>
+                {activeTask ? '· ' : ''}{providerBits.join(' · ')}
+              </span>
+            )}
+            {slot?.activeTool && (
+              <span className="text-neutral-600 shrink-0 truncate" title={slot.activeTool}>· tool: {slot.activeTool}</span>
+            )}
+            {slot?.blockedKind && (
+              <span className="text-amber-400/80 shrink-0 truncate" title={slot.blockedKind}>· blocked: {slot.blockedKind}</span>
+            )}
+            {lastActivityLabel && (
+              <span className="ml-auto text-neutral-700 shrink-0" title={lastActivity ?? ''}>last: {lastActivityLabel}</span>
+            )}
+          </div>
+        )}
       </div>
       <div ref={containerRef} className="flex-1 min-h-0" />
     </div>
@@ -417,7 +475,7 @@ function TerminalInner({ slotId }: TerminalProps) {
 }
 
 // --- Export with SSR guard + error boundary ---
-export function Terminal({ slotId }: TerminalProps) {
+export function Terminal({ slotId, slot, activeTask }: TerminalProps) {
   const [key, setKey] = useState(0);
   const [mounted, setMounted] = useState(false);
   useEffect(() => { setMounted(true); }, []);
@@ -436,7 +494,7 @@ export function Terminal({ slotId }: TerminalProps) {
 
   return (
     <TerminalErrorBoundary onReset={() => setKey((k) => k + 1)}>
-      <TerminalInner key={`${slotId}-${key}`} slotId={slotId} />
+      <TerminalInner key={`${slotId}-${key}`} slotId={slotId} slot={slot} activeTask={activeTask} />
     </TerminalErrorBoundary>
   );
 }

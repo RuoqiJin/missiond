@@ -43,6 +43,14 @@ function slotProviderLabel(slot: SlotDef) {
   return slot.provider || slot.engine || slot.role;
 }
 
+const ACTIVE_PTY_STATES = new Set(['running', 'thinking', 'responding', 'tool_running', 'confirming', 'blocked', 'starting', 'idle', 'slash_menu']);
+function slotActiveRank(slot: SlotDef): number {
+  if (slot.running) return 0;
+  const state = slot.state?.toLowerCase();
+  if (state && ACTIVE_PTY_STATES.has(state)) return 1;
+  return 2;
+}
+
 export default function App() {
   useEventStream(); // Global EventBus WS connection
   const wsState = useConnectionState();
@@ -50,6 +58,20 @@ export default function App() {
   const fetchTasks = useTaskCenterStore((s) => s.fetchTasks);
   const isLoading = useTaskCenterStore((s) => s.isLoading);
   const taskCount = useTaskCenterStore((s) => s.tasks.filter((t) => t.status === 'open' && t.category !== 'research').length);
+  const tasksById = useTaskCenterStore((s) => {
+    const map = new Map<string, (typeof s.tasks)[number]>();
+    for (const t of s.tasks) map.set(t.id, t);
+    return map;
+  });
+  const tasksByExecutor = useTaskCenterStore((s) => {
+    const map = new Map<string, (typeof s.tasks)[number]>();
+    for (const t of s.tasks) {
+      if (t.status !== 'running') continue;
+      const key = t.claimExecutorId || t.assignee;
+      if (key && !map.has(key)) map.set(key, t);
+    }
+    return map;
+  });
   const [mounted, setMounted] = useState(false);
   const [tab, setTab] = useState<Tab>(() => {
     if (typeof window === 'undefined') return DEFAULT_TAB;
@@ -177,25 +199,44 @@ export default function App() {
           <div className="shrink-0 border-b border-neutral-800 bg-neutral-950/70 px-2 py-2">
             {slots.length > 0 ? (
               <div className="flex items-center gap-1 overflow-x-auto overflow-y-hidden whitespace-nowrap">
-                {slots.map((slot) => {
+                {[...slots].sort((a, b) => slotActiveRank(a) - slotActiveRank(b)).map((slot) => {
                   const isActive = activeSlot === slot.id;
                   const stateLabel = slotStateLabel(slot);
                   const providerLabel = slotProviderLabel(slot);
+                  const activeTaskId = slot.activeBoardTaskId ?? slot.currentTaskId;
+                  const slotTask = (activeTaskId && tasksById.get(activeTaskId)) || tasksByExecutor.get(slot.id);
                   return (
                     <button
                       key={slot.id}
                       onClick={() => setActiveSlot(slot.id)}
-                      title={`${slot.label} · ${stateLabel}${providerLabel ? ` · ${providerLabel}` : ''}`}
+                      title={[
+                        slot.label,
+                        `state: ${stateLabel}`,
+                        providerLabel ? `provider: ${providerLabel}` : null,
+                        slotTask ? `task: ${slotTask.id} ${slotTask.title}` : null,
+                        slot.activeTool ? `tool: ${slot.activeTool}` : null,
+                        slot.blockedKind ? `blocked: ${slot.blockedKind}` : null,
+                      ].filter(Boolean).join('\n')}
                       className={cn(
                         'shrink-0 min-w-[160px] max-w-[280px] rounded-md border px-2.5 py-1 text-left font-mono text-[10px] leading-none transition-colors',
                         isActive
                           ? 'border-orange-500/40 bg-orange-500/15 text-orange-300'
-                          : 'border-neutral-800 bg-neutral-900/70 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300',
+                          : slot.running
+                            ? 'border-emerald-500/30 bg-emerald-500/5 text-neutral-300 hover:border-emerald-400/50'
+                            : 'border-neutral-800 bg-neutral-900/70 text-neutral-500 hover:border-neutral-700 hover:text-neutral-300',
                       )}
                     >
                       <span className="flex min-w-0 items-center gap-1.5">
-                        <span className={cn('h-1.5 w-1.5 shrink-0 rounded-full', slot.running ? 'bg-emerald-400' : 'bg-neutral-600')} />
+                        <span className={cn(
+                          'h-1.5 w-1.5 shrink-0 rounded-full',
+                          slot.running ? 'bg-emerald-400 animate-pulse' : slot.state ? 'bg-emerald-400/30' : 'bg-neutral-600',
+                        )} />
                         <span className="min-w-0 flex-1 truncate">{slot.label}</span>
+                        {slotTask ? (
+                          <span className="shrink-0 text-orange-300/80 font-mono" title={slotTask.title}>
+                            #{slotTask.id.slice(0, 6)}
+                          </span>
+                        ) : null}
                         <span className="shrink-0 text-neutral-600">{stateLabel}</span>
                       </span>
                     </button>
@@ -208,7 +249,15 @@ export default function App() {
           </div>
           <div className="min-h-0 flex-1">
             {activeSlot ? (
-              <Terminal key={activeSlot} slotId={activeSlot} />
+              (() => {
+                const slot = slots.find((s) => s.id === activeSlot);
+                const activeTaskId = slot?.activeBoardTaskId ?? slot?.currentTaskId;
+                const slotTask = (activeTaskId && tasksById.get(activeTaskId)) || tasksByExecutor.get(activeSlot);
+                const activeTask = slotTask
+                  ? { id: slotTask.id, title: slotTask.title, status: slotTask.status }
+                  : null;
+                return <Terminal key={activeSlot} slotId={activeSlot} slot={slot} activeTask={activeTask} />;
+              })()
             ) : (
               <div className="flex items-center justify-center h-full text-neutral-500 text-sm">Loading slots...</div>
             )}

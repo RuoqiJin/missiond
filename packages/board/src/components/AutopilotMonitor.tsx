@@ -55,6 +55,13 @@ function slotMetaLine(slot: SlotDef): string {
     .filter((v): v is string => !!v)
     .join(' · ');
 }
+function slotLastActivityLabel(slot: SlotDef): string | null {
+  const ts = slot.latestConversation?.updatedAt;
+  if (!ts) return null;
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) return null;
+  return date.toLocaleTimeString();
+}
 function slotTooltip(slot: SlotDef, task?: Task): string {
   const parts: string[] = [slot.id];
   if (slot.role) parts.push(`role: ${slot.role}`);
@@ -69,6 +76,8 @@ function slotTooltip(slot: SlotDef, task?: Task): string {
   if (slot.activeTool) parts.push(`tool: ${slot.activeTool}`);
   if (slot.blockedKind) parts.push(`blockedKind: ${slot.blockedKind}`);
   if (slot.latestConversation?.title) parts.push(`latest: ${slot.latestConversation.title}`);
+  const lastActivity = slotLastActivityLabel(slot);
+  if (lastActivity) parts.push(`lastActivity: ${lastActivity}`);
   if (task) parts.push(`task: ${task.id} ${task.title}`);
   return parts.join('\n');
 }
@@ -111,7 +120,8 @@ function SlotCard({ slot, task, isSelected, onClick }: {
         </p>
       )}
       {task ? (
-        <p className="text-[10px] text-neutral-500 truncate" title={task.title}>
+        <p className="text-[10px] text-neutral-500 truncate" title={`${task.id}\n${task.title}`}>
+          <span className="font-mono text-neutral-600 mr-1">#{task.id.slice(0, 6)}</span>
           {task.title}
         </p>
       ) : (
@@ -334,16 +344,27 @@ export function AutopilotMonitor({ slots }: { slots: SlotDef[] }) {
   // Active slot for PTY preview
   const [selectedSlot, setSelectedSlot] = useState<string | null>(null);
 
-  // Map slot → running BoardTask (correlate via assignee or claimExecutorId).
+  // Map slot → BoardTask. Prefer runtime-projected activeBoardTaskId/currentTaskId
+  // (covers blocked/confirming states where status != 'running'); fall back to running
+  // BoardTasks correlated via assignee/claimExecutorId.
+  const tasksById = useMemo(() => {
+    const map = new Map<string, Task>();
+    for (const t of tasks) map.set(t.id, t);
+    return map;
+  }, [tasks]);
   const slotTaskMap = useMemo(() => {
     const map = new Map<string, Task>();
+    for (const slot of slots) {
+      const id = slot.activeBoardTaskId ?? slot.currentTaskId;
+      const task = id ? tasksById.get(id) : null;
+      if (task && !['done', 'skipped'].includes(task.status)) map.set(slot.id, task);
+    }
     for (const t of runningTasks) {
-      if (t.assignee || t.claimExecutorId) {
-        map.set(t.assignee || t.claimExecutorId!, t);
-      }
+      const key = t.assignee || t.claimExecutorId;
+      if (key && !map.has(key)) map.set(key, t);
     }
     return map;
-  }, [runningTasks]);
+  }, [slots, tasksById, runningTasks]);
 
   // Auto-select preference: slot-with-running-BoardTask → active non-complete slot → any slot.
   useEffect(() => {
@@ -495,6 +516,9 @@ export function AutopilotMonitor({ slots }: { slots: SlotDef[] }) {
               {selectedSlotData.latestConversation?.title && (
                 <div className="text-[10px] text-neutral-600 truncate" title={selectedSlotData.latestConversation.title}>
                   conv: {selectedSlotData.latestConversation.title}
+                  {slotLastActivityLabel(selectedSlotData) && (
+                    <span className="ml-1.5 text-neutral-700">· {slotLastActivityLabel(selectedSlotData)}</span>
+                  )}
                 </div>
               )}
             </div>
