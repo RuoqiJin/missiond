@@ -132,10 +132,21 @@ function checkFiles(root) {
   ]);
 
   requireAll(diagnostics, FILES.computeSlot, sources.computeSlot, [
-    'let workstation_pool = match WorkstationRuntimeConfig::load_for_current_dir()',
+    'WorkstationRuntimeConfig::load_for_current_dir',
     '"workstation_pool": workstation_pool',
     '"runtime_slot_present": runtime_slot_present',
     '"V3_BLUEPRINT_CONFIG_ERROR"',
+    'fn classify_static_slot',
+    'fn derive_static_status',
+    'StaticSlotClass',
+    '"legacy_static_slots"',
+    '"dispatchable":',
+    '"legacy":',
+    '"v3_authoritative"',
+    'state\n            .pty\n            .get_status(&s.config.id)',
+  ]);
+  forbidAll(diagnostics, FILES.computeSlot, sources.computeSlot, [
+    'if s.session_id.is_some() { "running" } else { "stopped" }',
   ]);
   requireAll(diagnostics, FILES.slotTool, sources.slotTool, [
     'fn projected_mission_slots',
@@ -155,6 +166,8 @@ function checkFiles(root) {
   ]);
   requireAll(diagnostics, FILES.blueprint, sources.blueprint, [
     'Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration',
+    'V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots',
+    'mission_compute_slot list status MUST derive from PTYManager',
   ]);
   requireAll(diagnostics, FILES.supervisor, sources.supervisor, [
     'fn schedule_supervisor_patrol',
@@ -301,6 +314,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden text present: ${needle}` });
+    }
+  }
+}
+
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-workstation-pool-'));
   for (const rel of Object.values(FILES)) {
@@ -338,7 +359,9 @@ function buildFixture() {
       :default-use research-review
       :accepts-boardtask true
       :write-allowed false)
-    :invariants ["Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration"]
+    :invariants ["Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration"
+                 "V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots"
+                 "mission_compute_slot list status MUST derive from PTYManager"]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
   (implementation-map
     (surface workstation-pool
@@ -382,7 +405,18 @@ SessionState::Error;
 let workstation_pool = match WorkstationRuntimeConfig::load_for_current_dir() {};
 "workstation_pool": workstation_pool;
 "runtime_slot_present": runtime_slot_present;
-"V3_BLUEPRINT_CONFIG_ERROR";`);
+"V3_BLUEPRINT_CONFIG_ERROR";
+fn classify_static_slot() {}
+fn derive_static_status() {}
+StaticSlotClass {}
+"legacy_static_slots";
+"dispatchable":;
+"legacy":;
+"v3_authoritative";
+let pty_status = state
+            .pty
+            .get_status(&s.config.id)
+            .await;`);
   write(root, 'slotTool', `
 fn projected_mission_slots() {}
 WorkstationRuntimeConfig::load_for_current_dir();

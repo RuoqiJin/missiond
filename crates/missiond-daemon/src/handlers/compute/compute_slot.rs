@@ -603,6 +603,50 @@ fn dynamic_slot_project_root(slot: &DynamicSlot) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// V3 contract: a static slot is dispatchable iff its id appears in the V3
+/// workstation-pool or startup-slots projection. When `v3_active` is false the
+/// V3 blueprint failed to load, so we fall back to permissive behaviour and
+/// treat every slot as dispatchable.
+pub(crate) fn classify_static_slot(
+    slot_id: &str,
+    v3_slot_ids: &std::collections::HashSet<String>,
+    v3_active: bool,
+) -> StaticSlotClass {
+    if !v3_active {
+        return StaticSlotClass {
+            legacy: false,
+            dispatchable: true,
+        };
+    }
+    let in_v3 = v3_slot_ids.contains(slot_id);
+    StaticSlotClass {
+        legacy: !in_v3,
+        dispatchable: in_v3,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StaticSlotClass {
+    pub(crate) legacy: bool,
+    pub(crate) dispatchable: bool,
+}
+
+/// V3 contract: derive `status` from PTYManager so `mission_compute_slot list`
+/// cannot contradict `mission_pty_status` for V3 pool slots. We only fall back
+/// to the SlotManager session_id heuristic when no PTY status is available
+/// (e.g. PTY never initialised yet), and even then never claim "running" for a
+/// slot whose PTY is missing.
+pub(crate) fn derive_static_status(pty_state: Option<&str>, has_session_id: bool) -> String {
+    if let Some(state) = pty_state {
+        return state.to_ascii_lowercase();
+    }
+    if has_session_id {
+        "running".to_string()
+    } else {
+        "stopped".to_string()
+    }
+}
+
 async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
     let status_filter = args.get("status").and_then(|v| v.as_str());
 
@@ -612,6 +656,20 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
         .list_dynamic_slots(status_filter)
         .await
         .map_err(|e| anyhow!("DB error: {}", e))?;
+
+    // V3 SSOT: dispatchable slot IDs come from workstation-pool + startup-slots.
+    // Anything in slots.yaml that is not present here is legacy/non-dispatchable
+    // and must be flagged accordingly so consumers cannot resurface it.
+    let workstation_config_result = WorkstationRuntimeConfig::load_for_current_dir();
+    let v3_slot_ids: std::collections::HashSet<String> = match &workstation_config_result {
+        Ok(config) => config
+            .startup_slots()
+            .iter()
+            .filter_map(|s| s.slot_id.clone())
+            .chain(config.workstation_pool().iter().map(|w| w.slot_id.clone()))
+            .collect(),
+        Err(_) => std::collections::HashSet::new(),
+    };
 
     // Get static slots
     let static_slots = state.mission.list_slots();
@@ -633,23 +691,46 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
         })
         .collect();
 
-    let static_entries: Vec<Value> = static_slots
-        .iter()
-        .map(|s| {
-            json!({
-                "id": s.config.id,
-                "source": "static",
-                "role": s.config.role,
-                "engine": s.config.engine.to_string(),
-                "model": s.config.model,
-                "project_root": s.config.project_root,
-                "description": s.config.description,
-                "status": if s.session_id.is_some() { "running" } else { "stopped" },
-                "lifecycle": format!("{}", s.config.lifecycle.unwrap_or_default()),
-            })
-        })
-        .collect();
-    let workstation_pool = match WorkstationRuntimeConfig::load_for_current_dir() {
+    // V3 contract: static-slot status MUST be derived from PTYManager so this
+    // surface cannot contradict mission_pty_status for V3 pool slots. Legacy
+    // non-V3 static slots are routed to a separate `legacy_static_slots` array
+    // and tagged dispatchable=false so retired Sonnet workers cannot resurface.
+    let mut static_entries: Vec<Value> = Vec::new();
+    let mut legacy_static_entries: Vec<Value> = Vec::new();
+    let v3_active = workstation_config_result.is_ok();
+    for s in &static_slots {
+        let pty_status = state
+            .pty
+            .get_status(&s.config.id)
+            .await
+            .map(|info| format!("{:?}", info.state).to_ascii_lowercase());
+        let status = derive_static_status(pty_status.as_deref(), s.session_id.is_some());
+        let StaticSlotClass {
+            legacy,
+            dispatchable,
+        } = classify_static_slot(&s.config.id, &v3_slot_ids, v3_active);
+        let entry = json!({
+            "id": s.config.id,
+            "source": if legacy { "static-legacy" } else { "static" },
+            "role": s.config.role,
+            "engine": s.config.engine.to_string(),
+            "model": s.config.model,
+            "project_root": s.config.project_root,
+            "description": s.config.description,
+            "status": status,
+            "pty_status": pty_status,
+            "dispatchable": dispatchable,
+            "legacy": legacy,
+            "lifecycle": format!("{}", s.config.lifecycle.unwrap_or_default()),
+        });
+        if legacy {
+            legacy_static_entries.push(entry);
+        } else {
+            static_entries.push(entry);
+        }
+    }
+
+    let workstation_pool = match &workstation_config_result {
         Ok(config) => {
             let mut entries = Vec::new();
             for worker in config.workstation_pool() {
@@ -675,7 +756,8 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
                     "accepts_boardtask": worker.accepts_boardtask,
                     "write_allowed": worker.write_allowed,
                     "runtime_slot_present": runtime_slot_present,
-                    "status": pty_status.unwrap_or_else(|| {
+                    "pty_status": pty_status,
+                    "status": pty_status.clone().unwrap_or_else(|| {
                         if runtime_slot_present { "stopped".to_string() } else { "missing".to_string() }
                     }),
                 }));
@@ -690,10 +772,12 @@ async fn list_slots(state: &AppState, args: &Value) -> Result<ToolResult> {
 
     Ok(ToolResult::json_pretty(&json!({
         "static_slots": static_entries,
+        "legacy_static_slots": legacy_static_entries,
         "dynamic_slots": dynamic_entries,
         "workstation_pool": workstation_pool,
         "dynamic_active": dynamic_slots.iter().filter(|s| s.status == "active").count(),
         "dynamic_limit": MAX_DYNAMIC_SLOTS,
+        "v3_authoritative": v3_active,
     })))
 }
 
@@ -824,6 +908,56 @@ mod tests {
             dynamic_slot_project_root(&slot),
             Some("/tmp/project".to_string())
         );
+    }
+
+    // ── V3 workstation-pool truthful list_slots projection ──────────────
+    //
+    // Pin the rules that fix `mission_compute_slot list`:
+    //   * dispatchable iff the slot id is in V3 workstation-pool/startup-slots,
+    //     so retired Sonnet entries (autopilot/topology-guardian/etc.) are
+    //     marked legacy/non-dispatchable rather than resurfacing as candidates;
+    //   * status is derived from PTYManager so this surface cannot contradict
+    //     `mission_pty_status` for V3 pool slots.
+
+    fn v3_ids(ids: &[&str]) -> std::collections::HashSet<String> {
+        ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn classify_static_slot_marks_legacy_outside_v3_pool() {
+        let pool = v3_ids(&["slot-claude-code-default", "slot-gemini-ultra"]);
+        let class = classify_static_slot("topology-guardian", &pool, true);
+        assert!(class.legacy);
+        assert!(!class.dispatchable);
+    }
+
+    #[test]
+    fn classify_static_slot_keeps_v3_pool_member_dispatchable() {
+        let pool = v3_ids(&["slot-claude-code-default", "slot-gemini-ultra"]);
+        let class = classify_static_slot("slot-claude-code-default", &pool, true);
+        assert!(!class.legacy);
+        assert!(class.dispatchable);
+    }
+
+    #[test]
+    fn classify_static_slot_falls_back_when_v3_absent() {
+        let pool = v3_ids(&[]);
+        let class = classify_static_slot("legacy-anything", &pool, false);
+        assert!(!class.legacy);
+        assert!(class.dispatchable);
+    }
+
+    #[test]
+    fn derive_static_status_prefers_pty_state_lowercased() {
+        assert_eq!(derive_static_status(Some("Idle"), false), "idle");
+        assert_eq!(derive_static_status(Some("Thinking"), true), "thinking");
+        assert_eq!(derive_static_status(Some("Exited"), true), "exited");
+    }
+
+    #[test]
+    fn derive_static_status_no_pty_falls_back_to_session_flag() {
+        assert_eq!(derive_static_status(None, false), "stopped");
+        assert_eq!(derive_static_status(None, true), "running");
     }
 
     #[test]
