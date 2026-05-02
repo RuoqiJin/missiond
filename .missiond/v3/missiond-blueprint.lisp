@@ -900,6 +900,7 @@
     :invariants
       ["LearningEngineRuntimeConfig MUST load learning-engine-policy from .missiond/v3/missiond-blueprint.lisp and fail with V3_BLUEPRINT_CONFIG_ERROR for real MissionD projects whose V3 blueprint or policy block is missing."
        "Realtime extraction, Tier3 decision escalation, and historical habit scan pty.send budgets MUST project from learning-engine-policy."
+       "Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans so repeated ticks or status refreshes cannot exhaust the Postgres pool."
        "Learning maintenance cadences (timeline analysis, idle exploration, habit scan, KB auto-GC, KB consolidation, KB reflection, decision harvest, co-occurrence refresh) MUST project from learning-engine-policy."
        "Timeline analysis read windows, event limits, and slow-request threshold MUST project from learning-engine-policy."
        "KB reflection low-utility threshold, minimum access count, max entries, and max_tokens MUST project from learning-engine-policy."])
@@ -2148,6 +2149,7 @@
              "crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs"
              "crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs"
              "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs"
+             "crates/missiond-core/src/db/pg/conversation.rs"
              "crates/missiond-daemon/src/handlers/knowledge/insight.rs"
              "crates/missiond-daemon/src/handlers/knowledge/intent.rs"
              "crates/missiond-mcp/src/tools/knowledge/kb.rs"
@@ -2155,7 +2157,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-	      :note "Runtime-projected V3 destination for the legacy memory/KB public tools. context/v3_blueprint_runtime.rs projects memory-kb-policy realtime extraction batch size and preview truncation budgets into mission_memory runtime, and projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns L... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
+	      :note "Runtime-projected V3 destination for the legacy memory/KB public tools. context/v3_blueprint_runtime.rs projects memory-kb-policy realtime extraction batch size and preview truncation budgets into mission_memory runtime, and projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy. Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns L... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
 
     (surface project-registry
       :status "code-aligned"

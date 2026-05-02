@@ -465,10 +465,15 @@ impl ConversationStore for PgMissionStore {
              WHERE status = 'active'
                AND conversation_type = 'user'
                AND analysis_retries < $1
-               AND (SELECT COUNT(*) FROM conversation_messages m
-                    WHERE m.session_id = conversations.id
-                      AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
-                      AND m.role IN ('user', 'assistant')) >= 100
+               AND EXISTS (
+                   SELECT 1 FROM conversation_messages m
+                   WHERE m.session_id = conversations.id
+                     AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                     AND m.role IN ('user', 'assistant')
+                   ORDER BY m.id ASC
+                   OFFSET 99
+                   LIMIT 1
+               )
 
              ORDER BY started_at ASC",
         )
@@ -507,10 +512,15 @@ impl ConversationStore for PgMissionStore {
                 WHERE status = 'active'
                   AND conversation_type = 'user'
                   AND analysis_retries < $1
-                  AND (SELECT COUNT(*) FROM conversation_messages m
-                       WHERE m.session_id = conversations.id
-                         AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
-                         AND m.role IN ('user', 'assistant')) >= 100
+                  AND EXISTS (
+                      SELECT 1 FROM conversation_messages m
+                      WHERE m.session_id = conversations.id
+                        AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                        AND m.role IN ('user', 'assistant')
+                      ORDER BY m.id ASC
+                      OFFSET 99
+                      LIMIT 1
+                  )
             )",
         )
         .bind(max_retries)
@@ -548,10 +558,15 @@ impl ConversationStore for PgMissionStore {
                 WHERE status = 'active'
                   AND conversation_type = 'user'
                   AND analysis_retries < $1
-                  AND (SELECT COUNT(*) FROM conversation_messages m
-                       WHERE m.session_id = conversations.id
-                         AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
-                         AND m.role IN ('user', 'assistant')) >= 100
+                  AND EXISTS (
+                      SELECT 1 FROM conversation_messages m
+                      WHERE m.session_id = conversations.id
+                        AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                        AND m.role IN ('user', 'assistant')
+                      ORDER BY m.id ASC
+                      OFFSET 99
+                      LIMIT 1
+                  )
             ) sub",
         )
         .bind(max_retries)
@@ -563,11 +578,16 @@ impl ConversationStore for PgMissionStore {
 
     async fn count_pending_realtime(&self) -> DbResult<i64> {
         let (count,): (i64,) = sqlx::query_as(
-            "SELECT COUNT(DISTINCT c.id) FROM conversations c
-             JOIN conversation_messages m ON c.id = m.session_id
+            "SELECT COUNT(*) FROM conversations c
              WHERE c.conversation_type = 'user'
-               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
-               AND m.role IN ('user', 'assistant')",
+               AND EXISTS (
+                   SELECT 1
+                   FROM conversation_messages m
+                   WHERE m.session_id = c.id
+                     AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
+                     AND m.role IN ('user', 'assistant')
+                   LIMIT 1
+               )",
         )
         .fetch_one(&self.pool)
         .await?;
@@ -576,13 +596,19 @@ impl ConversationStore for PgMissionStore {
 
     async fn pending_realtime_detail(&self) -> DbResult<Vec<(String, i64, String)>> {
         let rows: Vec<(String, i64, String)> = sqlx::query_as(
-            "SELECT c.id, COUNT(*) as cnt, MIN(m.timestamp) as oldest
-             FROM conversations c
-             JOIN conversation_messages m ON c.id = m.session_id
-             WHERE c.conversation_type = 'user'
-               AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
-               AND m.role IN ('user', 'assistant')
-             GROUP BY c.id
+            "WITH candidate AS MATERIALIZED (
+                 SELECT m.session_id, m.timestamp
+                 FROM conversation_messages m
+                 JOIN conversations c ON c.id = m.session_id
+                 WHERE c.conversation_type = 'user'
+                   AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
+                   AND m.role IN ('user', 'assistant')
+                 ORDER BY m.timestamp ASC
+                 LIMIT 2000
+             )
+             SELECT session_id, COUNT(*)::bigint as cnt, MIN(timestamp)::text as oldest
+             FROM candidate
+             GROUP BY session_id
              ORDER BY cnt DESC
              LIMIT 20",
         )
@@ -610,10 +636,15 @@ impl ConversationStore for PgMissionStore {
              WHERE status = 'active'
                AND conversation_type = 'user'
                AND analysis_retries < $1
-               AND (SELECT COUNT(*) FROM conversation_messages m
-                    WHERE m.session_id = conversations.id
-                      AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
-                      AND m.role IN ('user', 'assistant')) >= 100
+               AND EXISTS (
+                   SELECT 1 FROM conversation_messages m
+                   WHERE m.session_id = conversations.id
+                     AND m.id > COALESCE(conversations.deep_analyzed_message_id, 0)
+                     AND m.role IN ('user', 'assistant')
+                   ORDER BY m.id ASC
+                   OFFSET 99
+                   LIMIT 1
+               )
 
              ORDER BY 2 ASC
              LIMIT 20",
@@ -1297,26 +1328,25 @@ impl ConversationStore for PgMissionStore {
         limit: usize,
     ) -> DbResult<Vec<(String, String, Vec<ConversationMessage>)>> {
         let rows = sqlx::query(
-            "WITH ranked AS (
-                SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid,
-                       m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name,
-                       m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count,
-                       COALESCE(c.project, '') as c_project,
-                       ROW_NUMBER() OVER(PARTITION BY m.session_id ORDER BY m.timestamp ASC, m.id ASC) as rn
-                FROM conversation_messages m
-                JOIN conversations c ON c.id = m.session_id
-                WHERE c.conversation_type = 'user'
-                  AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
-                  AND m.role IN ('user', 'assistant', 'tool_result')
-            )
-            SELECT id, session_id, role, content, raw_content, message_uuid,
-                   parent_uuid, model, timestamp, metadata, tool_name,
-                   raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
-                   c_project
-            FROM ranked
-            WHERE rn <= 15
-            ORDER BY timestamp ASC
-            LIMIT $1"
+            "SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid,
+                    m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name,
+                    m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count,
+                    COALESCE(c.project, '') as c_project
+             FROM conversations c
+             CROSS JOIN LATERAL (
+                 SELECT m.id, m.session_id, m.role, m.content, m.raw_content, m.message_uuid,
+                        m.parent_uuid, m.model, m.timestamp, m.metadata, m.tool_name,
+                        m.raw_role, m.content_types, m.has_image, m.has_tool_use, m.has_tool_result, m.token_count
+                 FROM conversation_messages m
+                 WHERE m.session_id = c.id
+                   AND m.timestamp > COALESCE(c.realtime_forwarded_at, c.started_at)::timestamptz
+                   AND m.role IN ('user', 'assistant', 'tool_result')
+                 ORDER BY m.timestamp ASC, m.id ASC
+                 LIMIT 15
+             ) m
+             WHERE c.conversation_type = 'user'
+             ORDER BY m.timestamp ASC
+             LIMIT $1"
         )
         .bind(limit as i64)
         .fetch_all(&self.pool)

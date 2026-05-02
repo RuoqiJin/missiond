@@ -68,6 +68,50 @@ fn emit_dispatch_event(bus: &Arc<BusServices>, slot_id: &str, purpose: &str, pro
     });
 }
 
+async fn try_claim_extraction_probe(
+    extraction_state: &tokio::sync::RwLock<ExtractionState>,
+    bus: &Arc<BusServices>,
+    slot_id: &str,
+    active_type: &'static str,
+) -> bool {
+    let mut es = extraction_state.write().await;
+    if es.phase != ExtractionPhase::Idle {
+        return false;
+    }
+    let now = chrono::Utc::now().timestamp();
+    set_extraction_phase(
+        &mut es,
+        ExtractionPhase::Sending,
+        Some(active_type),
+        bus,
+        slot_id,
+        None,
+    );
+    es.phase_started_at = now;
+    es.watermark_targets.clear();
+    es.current_task_id = None;
+    es.current_slot_task_id = None;
+    es.pending_served = false;
+    true
+}
+
+async fn release_extraction_probe(
+    extraction_state: &tokio::sync::RwLock<ExtractionState>,
+    bus: &Arc<BusServices>,
+    slot_id: &str,
+    active_type: &'static str,
+) {
+    let mut es = extraction_state.write().await;
+    if es.phase == ExtractionPhase::Sending && es.active_type == Some(active_type) {
+        set_extraction_phase(&mut es, ExtractionPhase::Idle, None, bus, slot_id, None);
+        es.phase_started_at = 0;
+        es.watermark_targets.clear();
+        es.current_task_id = None;
+        es.current_slot_task_id = None;
+        es.pending_served = false;
+    }
+}
+
 // @beacon: memory
 pub(crate) async fn check_realtime_extraction(state: &AppState) {
     if !check_extraction_gate(&state.extraction_state, state, "realtime").await {
@@ -93,14 +137,42 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
         }
     }
 
+    if !try_claim_extraction_probe(
+        &state.extraction_state,
+        &state.bus,
+        MEMORY_SLOT_ID,
+        "realtime",
+    )
+    .await
+    {
+        debug!("realtime: another extraction probe already claimed the lane");
+        return;
+    }
+
     // Watermark-based check (spawn_blocking: complex join + watermark query)
     let raw_pending = match state.store.get_pending_realtime_messages().await {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
             debug!("realtime: no pending messages (watermark)");
+            release_extraction_probe(
+                &state.extraction_state,
+                &state.bus,
+                MEMORY_SLOT_ID,
+                "realtime",
+            )
+            .await;
             return;
         }
-        Err(_) => return,
+        Err(_) => {
+            release_extraction_probe(
+                &state.extraction_state,
+                &state.bus,
+                MEMORY_SLOT_ID,
+                "realtime",
+            )
+            .await;
+            return;
+        }
     };
 
     // Triage: skip sessions with zero user messages, auto-advance their watermarks.
@@ -132,6 +204,13 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     }
     if pending.is_empty() {
         debug!("realtime: all sessions filtered (no user messages)");
+        release_extraction_probe(
+            &state.extraction_state,
+            &state.bus,
+            MEMORY_SLOT_ID,
+            "realtime",
+        )
+        .await;
         return;
     }
 
@@ -150,6 +229,13 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
     // Ensure memory slot is spawned, then check it's idle
     if !request_default_slot(state).await {
         debug!("realtime: memory slot not available");
+        release_extraction_probe(
+            &state.extraction_state,
+            &state.bus,
+            MEMORY_SLOT_ID,
+            "realtime",
+        )
+        .await;
         return;
     }
     let status = state.pty.get_status(MEMORY_SLOT_ID).await;
@@ -157,10 +243,24 @@ pub(crate) async fn check_realtime_extraction(state: &AppState) {
         Some(s) if s.state == SessionState::Idle => {}
         Some(s) => {
             debug!(state = ?s.state, "realtime: slot not idle");
+            release_extraction_probe(
+                &state.extraction_state,
+                &state.bus,
+                MEMORY_SLOT_ID,
+                "realtime",
+            )
+            .await;
             return;
         }
         None => {
             debug!("realtime: slot status unavailable");
+            release_extraction_probe(
+                &state.extraction_state,
+                &state.bus,
+                MEMORY_SLOT_ID,
+                "realtime",
+            )
+            .await;
             return;
         }
     }
@@ -367,6 +467,18 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         }
     }
 
+    if !try_claim_extraction_probe(
+        &state.slow_extraction_state,
+        &state.bus,
+        MEMORY_SLOW_SLOT_ID,
+        "deep_analysis",
+    )
+    .await
+    {
+        debug!("deep_analysis: another extraction probe already claimed the lane");
+        return;
+    }
+
     // spawn_blocking: pending deep analysis query
     let pending_convs = match state
         .store
@@ -374,13 +486,30 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
         .await
     {
         Ok(convs) => convs,
-        Err(_) => return,
+        Err(_) => {
+            release_extraction_probe(
+                &state.slow_extraction_state,
+                &state.bus,
+                MEMORY_SLOW_SLOT_ID,
+                "deep_analysis",
+            )
+            .await;
+            return;
+        }
     };
 
     if pending_convs.is_empty() {
+        release_extraction_probe(
+            &state.slow_extraction_state,
+            &state.bus,
+            MEMORY_SLOW_SLOT_ID,
+            "deep_analysis",
+        )
+        .await;
         return;
     }
 
+    let mut dispatched = false;
     for conv in &pending_convs {
         let is_checkpoint = conv.status == "active";
         let since_id = if is_checkpoint && conv.deep_analyzed_message_id > 0 {
@@ -599,7 +728,17 @@ pub(crate) async fn check_deep_analysis(state: &AppState) {
                 }
             }
         });
+        dispatched = true;
         break;
+    }
+    if !dispatched {
+        release_extraction_probe(
+            &state.slow_extraction_state,
+            &state.bus,
+            MEMORY_SLOW_SLOT_ID,
+            "deep_analysis",
+        )
+        .await;
     }
 }
 

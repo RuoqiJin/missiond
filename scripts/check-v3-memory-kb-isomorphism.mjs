@@ -38,6 +38,7 @@ const DEFAULT_FILES = {
   learningTimeline: 'crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs',
   learningIdle: 'crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs',
   learningHistorical: 'crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs',
+  pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   mcpKb: 'crates/missiond-mcp/src/tools/knowledge/kb.rs',
 };
 
@@ -132,9 +133,13 @@ function checkFiles(root, files) {
 	    'crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs',
 	    'crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs',
 	    'crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs',
+	    'crates/missiond-core/src/db/pg/conversation.rs',
 	    'scripts/check-v3-memory-kb-isomorphism.mjs',
 	    'memory-kb-policy realtime extraction batch size and preview truncation budgets',
-	    'projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy',
+    'projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy',
+    'Realtime extraction MUST claim the extraction lane before running pending-message DB probes',
+    'pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans',
+    'deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans',
     'kb.rs remains the memory-kb facade',
     'kb/args.rs owns unified KB argument ingress',
     'kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting',
@@ -233,11 +238,29 @@ function checkFiles(root, files) {
     'LearningEngineRuntimeConfig',
     'load_learning_engine_config',
     'realtime_extraction_timeout_ms',
+    'try_claim_extraction_probe',
+    'release_extraction_probe',
+    'another extraction probe already claimed the lane',
     'kb_consolidation_interval_secs',
     'kb_auto_gc_interval_secs',
     'kb_reflection_interval_secs',
     'kb_reflection_utility_threshold',
     'kb_reflection_max_tokens',
+  ]);
+
+  requireAll(diagnostics, files.pgConversation, sources.pgConversation, [
+    'EXISTS (',
+    'CROSS JOIN LATERAL',
+    'LIMIT 15',
+    'WITH candidate AS MATERIALIZED',
+    'LIMIT 2000',
+    'OFFSET 99',
+  ]);
+  forbidAll(diagnostics, files.pgConversation, sources.pgConversation, [
+    'COUNT(DISTINCT c.id) FROM conversations c\n             JOIN conversation_messages',
+    'ROW_NUMBER() OVER(PARTITION BY m.session_id',
+    "SELECT COUNT(*) FROM conversation_messages m\n                    WHERE m.session_id = conversations.id",
+    "SELECT COUNT(*) FROM conversation_messages m\n                       WHERE m.session_id = conversations.id",
   ]);
 
   requireAll(diagnostics, files.learningDecision, sources.learningDecision, [
@@ -481,6 +504,14 @@ function requireAll(diagnostics, file, source, needles) {
   }
 }
 
+function forbidAll(diagnostics, file, source, needles) {
+  for (const needle of needles) {
+    if (source.includes(needle)) {
+      diagnostics.push({ file, message: `forbidden contract text present: ${needle}` });
+    }
+  }
+}
+
 function buildFixture() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'missiond-v3-memory-kb-isomorphism-'));
   writeFixture(root, DEFAULT_FILES.blueprint, `
@@ -522,8 +553,9 @@ function buildFixture() {
 	             "crates/missiond-daemon/src/engine/learning_engine/timeline_analyst.rs"
 	             "crates/missiond-daemon/src/engine/learning_engine/idle_explorer.rs"
 	             "crates/missiond-daemon/src/engine/learning_engine/historical_scanner.rs"
+	             "crates/missiond-core/src/db/pg/conversation.rs"
 	             "scripts/check-v3-memory-kb-isomorphism.mjs"]
-	      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
+	      :note "memory-kb-policy realtime extraction batch size and preview truncation budgets; projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy; Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans; kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns LLM analysis, context-budgeting, and consolidation-plan queue projection; kb/mutate.rs owns forget/update/project mutation side effects; kb/import.rs owns servers_yaml import projection; kb/gc.rs owns stats/stale/duplicates cleanup actions; kb/ops.rs owns queue-status and execute-plan operation egress; kb/beacon.rs owns unified mission_beacon action routing plus legacy beacon list/map/tag/annotate; kb/code_search.rs owns AST code-search egress."))
   (compression-contract
     :checks ["node scripts/check-v3-memory-kb-isomorphism.mjs"]))`);
 
@@ -645,7 +677,13 @@ pub(super) async fn handle_code_search() {
 	LearningEngineRuntimeConfig; decision_harvest_interval_secs; cooccurrence_refresh_interval_secs; V3 learning-engine-policy unavailable;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningExtraction, `
-	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
+	LearningEngineRuntimeConfig; load_learning_engine_config; realtime_extraction_timeout_ms; try_claim_extraction_probe; release_extraction_probe; another extraction probe already claimed the lane; kb_consolidation_interval_secs; kb_auto_gc_interval_secs; kb_reflection_interval_secs; kb_reflection_utility_threshold; kb_reflection_max_tokens;
+	`);
+	  writeFixture(root, DEFAULT_FILES.pgConversation, `
+	SELECT COUNT(*) FROM conversations c WHERE EXISTS (SELECT 1 FROM conversation_messages m LIMIT 1);
+	SELECT * FROM conversations c CROSS JOIN LATERAL (SELECT * FROM conversation_messages m LIMIT 15) m;
+	WITH candidate AS MATERIALIZED (SELECT * FROM conversation_messages m LIMIT 2000) SELECT * FROM candidate;
+	SELECT 1 FROM conversation_messages m ORDER BY m.id ASC OFFSET 99 LIMIT 1;
 	`);
 	  writeFixture(root, DEFAULT_FILES.learningDecision, `
 	LearningEngineRuntimeConfig; decision_tier3_timeout_ms;
