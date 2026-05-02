@@ -203,6 +203,14 @@ pub(crate) fn build_task_brief_with_source_and_trace(
     out.push_str(&format!("- policy: {}\n", policy));
     out.push_str("- do not stage or commit outside the owned files declared above\n");
     out.push_str("- code tasks: produce a single scoped commit naming the owned files\n");
+    // Hidden worktree mutations have repeatedly clobbered other workers' in-flight
+    // changes when a delegated worker tried to "reset" before staging. The brief MUST
+    // forbid them on a single visible line unless the task contract explicitly owns
+    // the operation, so a worker that hits a dirty worktree stops and asks rather
+    // than silently rewinding shared state.
+    out.push_str(
+        "- forbidden git state mutations: do NOT run `git stash`, `git reset`, `git checkout`, or `git restore` unless the task contract explicitly owns that operation — if the worktree looks dirty, stop and add a BoardTask note instead of mutating it\n",
+    );
     out.push('\n');
 
     // 7. Completion handoff (scoped commit) — wave-17 / task 07.

@@ -451,6 +451,90 @@ fn build_task_brief_uses_explicit_commit_policy_when_supplied() {
     assert!(!brief.contains(AGENT_TEAM_OBJECTIVE_HINT));
 }
 
+/// The brief MUST carry a single visible bullet that names every git command
+/// we have seen workers reach for to "clean up" before staging — `git stash`,
+/// `git reset`, `git checkout`, `git restore` — and tells the worker to stop
+/// and add a BoardTask note instead unless the task contract explicitly owns
+/// that operation. The phrase "forbidden git state mutations" is the stable
+/// anchor pinned by both the V3 blueprint surface (anchors + :note) and the
+/// `check-v3-workstation-dispatch-isomorphism.mjs` Lisp/code isomorphism
+/// checker, so this test guards the brief text against silent regressions.
+#[test]
+fn brief_forbids_hidden_git_state_mutations_unless_owned() {
+    let plan = fixture_plan("(plan)");
+    // Use a code-task shape (non-empty owned_files) so the worker is the
+    // most tempted to "tidy" the worktree before staging. The forbidden bullet
+    // must appear regardless of task kind, but a code-task makes the test
+    // representative of the highest-risk dispatch path.
+    let code_hints = WorkstationDispatchHints {
+        objective: Some("ship the wave".to_string()),
+        owned_files: vec!["a.rs".to_string()],
+        ..Default::default()
+    };
+    let code_brief = build_task_brief(&plan, &code_hints, "fresh-code-alignment");
+    assert!(
+        code_brief.contains("forbidden git state mutations"),
+        "code brief missing 'forbidden git state mutations' anchor: {code_brief}"
+    );
+    for cmd in [
+        "`git stash`",
+        "`git reset`",
+        "`git checkout`",
+        "`git restore`",
+    ] {
+        assert!(
+            code_brief.contains(cmd),
+            "code brief missing forbidden command {cmd}: {code_brief}"
+        );
+    }
+    assert!(
+        code_brief.contains("explicitly owns"),
+        "code brief missing 'explicitly owns' carve-out: {code_brief}"
+    );
+    assert!(
+        code_brief.contains("BoardTask note"),
+        "code brief missing 'BoardTask note' fallback instruction: {code_brief}"
+    );
+
+    // Read-only briefs (empty owned_files) get the same forbidden bullet —
+    // a read-only worker has even less licence to mutate worktree state.
+    let read_only_hints = WorkstationDispatchHints {
+        objective: Some("audit".to_string()),
+        ..Default::default()
+    };
+    let read_only_brief = build_task_brief(&plan, &read_only_hints, "resident-lisp");
+    assert!(
+        read_only_brief.contains("forbidden git state mutations"),
+        "read-only brief missing 'forbidden git state mutations' anchor: {read_only_brief}"
+    );
+    for cmd in [
+        "`git stash`",
+        "`git reset`",
+        "`git checkout`",
+        "`git restore`",
+    ] {
+        assert!(
+            read_only_brief.contains(cmd),
+            "read-only brief missing forbidden command {cmd}: {read_only_brief}"
+        );
+    }
+
+    // The forbidden bullet must live inside the Commit policy section so a
+    // reader who already accepted the scoped-commit guidance cannot miss it.
+    let commit_idx = code_brief
+        .find("## Commit policy")
+        .expect("Commit policy section missing");
+    let next_section = code_brief[commit_idx + "## Commit policy".len()..]
+        .find("\n## ")
+        .map(|rel| commit_idx + "## Commit policy".len() + rel)
+        .unwrap_or(code_brief.len());
+    let commit_block = &code_brief[commit_idx..next_section];
+    assert!(
+        commit_block.contains("forbidden git state mutations"),
+        "forbidden git state mutations bullet must live inside Commit policy section, got: {commit_block}"
+    );
+}
+
 #[test]
 fn safe_descriptor_status_strings_are_distinct() {
     assert_eq!(
