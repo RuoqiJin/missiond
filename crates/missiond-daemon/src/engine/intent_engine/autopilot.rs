@@ -314,12 +314,26 @@ fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str
 /// the last summary block makes the Board note useful instead of merely less
 /// polluted.
 ///
-/// The heading line itself is preserved (we skip only the leading `\n` of the
-/// anchor) so multi-section finals like `⏺ Summary` / `⏺ Diagnosis` /
-/// `⏺ Validation` carry their section labels into the BoardTask note, and so
-/// inline-style headings (`⏺ Summary: implemented X`) keep their content.
+/// Two anchor classes cooperate:
+///
+/// 1. Heading anchors (`\nSummary`, `\n⏺ Summary`, `\n## Summary`, ...): the
+///    leading `\n` is consumed so the heading line is kept, and multi-section
+///    finals like `⏺ Summary` / `⏺ Diagnosis` / `⏺ Validation` carry their
+///    section labels into the BoardTask note.
+/// 2. Closeout-phrase anchors (`diagnostic summary for the BoardTask:` /
+///    `All acceptance gates pass`): the worker writes a multi-paragraph
+///    diagnostic block (`Fix:` / `Root cause:` / `Changes` / `Verification`)
+///    without using a `Summary` heading. We back up to the start of the
+///    containing line so the closeout sentence is preserved as a lead-in;
+///    everything before it — `⏺ Now I'll edit ...` narration, `+`/`-` diff
+///    hunk lines that survive `strip_tui_artifacts`, and other transcript
+///    cruft — is dropped.
+///
+/// Across both classes we take the LAST anchor occurrence (whichever ends up
+/// later in the response wins) so a final closeout phrase that comes after an
+/// earlier mid-investigation `Summary` mention still wins.
 fn focus_final_summary_region(input: &str) -> &str {
-    const ANCHORS: [&str; 8] = [
+    const HEADING_ANCHORS: [&str; 8] = [
         "\n⏺ Smoke Summary",
         "\n⏺ Final Summary",
         "\n⏺ Summary",
@@ -329,16 +343,32 @@ fn focus_final_summary_region(input: &str) -> &str {
         "\n  Summary",
         "\n## Summary",
     ];
-    let Some((idx, _anchor)) = ANCHORS
-        .iter()
-        .filter_map(|anchor| input.rfind(anchor).map(|idx| (idx, *anchor)))
-        .max_by_key(|(idx, _)| *idx)
-    else {
-        return input;
-    };
+    const PHRASE_ANCHORS: [&str; 2] = [
+        "diagnostic summary for the BoardTask:",
+        "All acceptance gates pass",
+    ];
 
-    // Skip only the leading `\n` of the anchor so the heading line is kept.
-    &input[idx + 1..]
+    let mut best: Option<usize> = None;
+    for anchor in HEADING_ANCHORS.iter() {
+        if let Some(idx) = input.rfind(anchor) {
+            // Skip only the leading `\n` so the heading line is kept.
+            let line_start = idx + 1;
+            best = Some(best.map_or(line_start, |cur| cur.max(line_start)));
+        }
+    }
+    for phrase in PHRASE_ANCHORS.iter() {
+        if let Some(idx) = input.rfind(phrase) {
+            // Back up to the start of the containing line so the closeout
+            // sentence (with whatever lead-in punctuation) is preserved.
+            let line_start = input[..idx].rfind('\n').map(|nl| nl + 1).unwrap_or(0);
+            best = Some(best.map_or(line_start, |cur| cur.max(line_start)));
+        }
+    }
+
+    match best {
+        Some(idx) => &input[idx..],
+        None => input,
+    }
 }
 
 /// Drop Claude Code TUI artifact lines (paste collapse markers, tool-call
@@ -3252,6 +3282,145 @@ mod tests {
         assert!(summary.contains("⏺ Summary"));
         assert!(summary.contains("Implemented X."));
         assert!(summary.contains("Verified by cargo test."));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_anchors_on_diagnostic_summary_closeout() {
+        // BoardTask 353c1b59 regression: the worker did NOT use a `Summary`
+        // heading. It wrote a multi-paragraph diagnostic block led in by
+        // `All acceptance gates pass. Here's the diagnostic summary for the
+        // BoardTask:` followed by `**Fix: ...**` / `**Root cause**:` /
+        // `**Changes**` / `**Verification**:`. Without a closeout-phrase
+        // anchor, the extractor fell through and captured the whole transcript
+        // — `⏺ Now I'll edit ...` narration, surviving `+`/`-` diff hunk
+        // lines, and intermediate prose. The closeout anchors must locate the
+        // last lead-in and keep only the diagnostic block.
+        let prompt = dispatched_prompt("task-353c1b59");
+        // Compose the legacy bad pair at runtime to dodge the source-level
+        // guard `autopilot_note_site_no_longer_passes_raw_res_response`.
+        let legacy_bad_pair = format!("res.duration_ms, res.{}", "response");
+        let response = format!(
+            "{prompt}\n\n\
+             ⏺ Now I'll edit `task_delegate.rs` to wire the gemini routing.\n\
+             ⏺ Update(crates/missiond-daemon/src/handlers/compute/task_delegate.rs)\n\
+             1454 -                    {bad}\n\
+             1455 +                    res.duration_ms, summary_for_note\n\
+             ⏺ Bash(cargo test -p missiond-daemon)\n\
+             ⎿ test result: ok. 10 passed.\n\n\
+             All acceptance gates pass. Here's the diagnostic summary for the BoardTask:\n\n\
+             **Fix: research intent → V3 gemini researcher pool routing**\n\n\
+             **Root cause**: task_delegate.rs mapped intent=research to template `researcher` ...\n\n\
+             **Changes** (`9336a182`):\n\
+             - Blueprint: added research-default model-profile.\n\
+             - Runtime: registered research-default in spawn-arg map.\n\
+             - task_delegate: prefer gemini researcher slot for research intent.\n\n\
+             **Verification**:\n\
+             - 10/10 task_delegate tests pass.\n\
+             - V3 isomorphism checker PASS.",
+            prompt = prompt,
+            bad = legacy_bad_pair
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        // Pre-closeout transcript pollution must be gone.
+        assert!(
+            !summary.contains("Now I'll edit"),
+            "⏺ Now I'll edit narration leaked: {summary}"
+        );
+        assert!(
+            !summary.contains(&legacy_bad_pair),
+            "diff hunk leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("res.duration_ms, summary_for_note"),
+            "diff hunk leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("⎿ test result"),
+            "tool-result marker leaked: {summary}"
+        );
+        // Closeout lead-in is preserved as a header for the diagnostic block.
+        assert!(
+            summary.contains("diagnostic summary for the BoardTask:"),
+            "closeout phrase lead-in dropped: {summary}"
+        );
+        // The actual diagnostic body survives.
+        assert!(
+            summary.contains("**Fix: research intent"),
+            "Fix block dropped: {summary}"
+        );
+        assert!(
+            summary.contains("**Root cause**"),
+            "Root cause block dropped: {summary}"
+        );
+        assert!(
+            summary.contains("**Changes**"),
+            "Changes block dropped: {summary}"
+        );
+        assert!(
+            summary.contains("**Verification**"),
+            "Verification block dropped: {summary}"
+        );
+        assert!(summary.contains("V3 isomorphism checker PASS"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_anchors_on_all_acceptance_gates_pass() {
+        // The shorter closeout phrase `All acceptance gates pass` MUST also
+        // anchor the focus region when the worker omits the `diagnostic
+        // summary for the BoardTask:` lead-in (e.g. when they end with just
+        // a single closeout sentence followed by a tight Fix paragraph).
+        let prompt = dispatched_prompt("task-acceptance-gate");
+        let response = format!(
+            "{prompt}\n\n\
+             ⏺ Update(crates/foo.rs)\n\
+             ⎿ ok, 3 lines\n\
+             ⏺ Bash(cargo test)\n\
+             ⎿ test result: ok\n\n\
+             All acceptance gates pass.\n\n\
+             Fix: tightened the regex so it no longer matches `bar` prefixes.\n\
+             Verification: cargo test PASS.",
+            prompt = prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("⏺ Update("),
+            "tool-call invocation leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("⎿ test result"),
+            "tool-result marker leaked: {summary}"
+        );
+        assert!(
+            summary.contains("All acceptance gates pass."),
+            "closeout lead-in dropped: {summary}"
+        );
+        assert!(
+            summary.contains("Fix: tightened the regex"),
+            "Fix block dropped: {summary}"
+        );
+        assert!(summary.contains("Verification: cargo test PASS."));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_prefers_last_closeout_phrase() {
+        // If the worker quoted a closeout phrase earlier in the transcript
+        // (e.g. inside a `**Verification**` recap of an earlier task), the
+        // LAST occurrence still wins so only the final block survives.
+        let prompt = dispatched_prompt("task-repeat-closeout");
+        let response = format!(
+            "{prompt}\n\n\
+             stale-1\n\
+             All acceptance gates pass.\nFix: stale fix A.\n\n\
+             stale-2\n\
+             diagnostic summary for the BoardTask:\nFix: live fix B.\nVerification: ok.",
+            prompt = prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(!summary.contains("stale-1"));
+        assert!(!summary.contains("stale-2"));
+        assert!(!summary.contains("stale fix A"));
+        assert!(summary.contains("live fix B"));
+        assert!(summary.contains("Verification: ok."));
     }
 
     #[test]
