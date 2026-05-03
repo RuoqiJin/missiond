@@ -217,7 +217,7 @@ async fn run_nightly_evolution_once(
     let recent_commits = read_recent_commits(&root).await.unwrap_or_default();
     let findings = build_findings(&convergence);
     let followup_task_id = if options.apply {
-        create_low_risk_followup_if_needed(state, &findings, &options, &convergence).await?
+        create_requested_followup_if_needed(state, &findings, &options, &convergence).await?
     } else {
         None
     };
@@ -382,16 +382,35 @@ fn build_findings(convergence: &Value) -> Vec<NightlyFinding> {
     findings
 }
 
-async fn create_low_risk_followup_if_needed(
+fn select_requested_followup<'a>(
+    findings: &'a [NightlyFinding],
+    mode: &str,
+) -> Option<&'a NightlyFinding> {
+    if mode == "observe-only" {
+        return None;
+    }
+    findings
+        .iter()
+        .find(|finding| finding.class == mode && followup_allowed_for_mode(finding, mode))
+}
+
+fn followup_allowed_for_mode(finding: &NightlyFinding, mode: &str) -> bool {
+    match mode {
+        "safe-backfill" => finding.risk == "low",
+        "needs-investigation" => true,
+        "architecture-proposal" => true,
+        "requires-user-decision" => true,
+        _ => false,
+    }
+}
+
+async fn create_requested_followup_if_needed(
     state: &AppState,
     findings: &[NightlyFinding],
     options: &NightlyRunOptions,
     convergence: &Value,
 ) -> Result<Option<String>> {
-    let Some(finding) = findings
-        .iter()
-        .find(|finding| finding.class == "safe-backfill" && finding.risk == "low")
-    else {
+    let Some(finding) = select_requested_followup(findings, &options.mode) else {
         return Ok(None);
     };
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
@@ -551,6 +570,23 @@ mod tests {
         let finding = findings.first().expect("first finding");
         assert_eq!(finding.id, "final-convergence-blocker");
         assert_eq!(finding.class, "safe-backfill");
+    }
+
+    #[test]
+    fn followup_selection_respects_requested_mode() {
+        let findings = build_findings(&json!({"ok": true}));
+        let selected = select_requested_followup(&findings, "needs-investigation")
+            .expect("needs-investigation finding");
+        assert_eq!(selected.id, "legacy-direct-worker-dual-track");
+        assert_eq!(selected.class, "needs-investigation");
+    }
+
+    #[test]
+    fn followup_selection_does_not_fall_back_to_safe_backfill() {
+        let findings = build_findings(&json!({"ok": true}));
+        assert!(select_requested_followup(&findings, "observe-only").is_none());
+        assert!(select_requested_followup(&findings, "safe-backfill").is_some());
+        assert!(select_requested_followup(&findings, "unknown-mode").is_none());
     }
 
     #[test]

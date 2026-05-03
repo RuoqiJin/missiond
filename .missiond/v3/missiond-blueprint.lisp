@@ -848,11 +848,11 @@
                :default-mode observe-only
                :budget-secs 7200
                :max-followup-tasks 3
-               :risk-gate "Only observe-only and safe-backfill can create tasks automatically; architecture-proposal and requires-user-decision never auto-edit code.")
+               :risk-gate "apply=true selects only findings whose class matches the requested mode; safe-backfill requires low risk, needs-investigation creates read-only context work, and proposal/user-decision modes create proposal tasks only.")
       :core
         ((step s1 :logic "NightlyEvolutionService reads V3/project Lisp, Board open tasks, recent events, recent commits, worker telemetry, and final convergence snapshot")
          (step s2 :logic "write observe-first .missiond/v3/runtime/nightly-evolution/<date>.report.lisp")
-         (step s3 :logic "materialize visible proposal/backfill BoardTasks only when apply=true and risk gate allows it")
+         (step s3 :logic "materialize visible proposal/backfill BoardTasks only when apply=true, requested mode matches finding class, and risk gate allows it")
          (step s4 :logic "prefer read-only upstream-source audit and context-pack generation")
          (step s5 :logic "checkpoint before and after each batch so daemon restart can resume"))
       :egress [nightly-evolution-report BoardTaskCreated master-control-checkpoint mission_master_status.nightlyEvolution])
@@ -872,7 +872,7 @@
         ((step s1 :logic "collect evidence from V3 blueprint, frontend blueprint, project registry, Board, recent events, recent commits, worker telemetry, and final convergence snapshot")
          (step s2 :logic "detect fixed review topics: commit-Lisp drift, event subscription gaps, text heuristic classifiers, legacy direct workers, PTY-only completion, Board close authority, frontend cockpit visibility, and repeated Lisp prose")
          (step s3 :logic "classify findings as observe-only, safe-backfill, needs-investigation, architecture-proposal, or requires-user-decision")
-         (step s4 :logic "default observe-only writes report; apply=true may create visible low-risk follow-up BoardTasks")
+         (step s4 :logic "default observe-only writes report; apply=true selects a finding by requested mode and may create one visible follow-up BoardTask")
          (step s5 :logic "master supervises anomalies; routine safe backfill can later be delegated directly through workflow trigger"))
       :egress [nightly-evolution-report proposal-boardtask kb-note master-control-checkpoint])
     :mcp-readiness

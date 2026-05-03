@@ -25,9 +25,9 @@
      (step s4 :name write-report
        :logic "Write .missiond/v3/runtime/nightly-evolution/<date>.report.lisp with evidence refs, findings, proposed follow-ups, and no code mutation.")
      (step s5 :name create-followups
-       :logic "Create visible BoardTasks for safe-backfill or investigation findings; high-risk architecture changes become proposal tasks only.")
+       :logic "When apply=true, select only findings whose class matches the requested mode; never fall back from needs-investigation or proposal modes to safe-backfill.")
      (step s6 :name optional-readonly-swarm
-       :logic "When apply=true and a finding is needs-investigation, call mission_swarm_run in read-only mode with exact project, context, timeout, and acceptance.")
+       :logic "When the selected finding is needs-investigation, create a read-only context organizer follow-up or call mission_swarm_run in read-only mode with exact project, context, timeout, and acceptance.")
      (step s7 :name checkpoint
        :logic "Update resident master checkpoint and KB summary so daemon restart can resume the next night."))
   :egress [nightly-evolution-report boardtask kb-note master-control-checkpoint]
