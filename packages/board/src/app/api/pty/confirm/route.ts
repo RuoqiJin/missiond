@@ -9,7 +9,9 @@ export async function POST(req: NextRequest) {
 
     if (!slotId) return NextResponse.json({ error: 'Missing slotId' }, { status: 400 });
 
-    // Map decision/option to mission_pty_confirm response format
+    // Map decision/option to mission_pty_confirm semantic response format.
+    // The runtime PTY layer performs Up/Down + Enter navigation; the frontend
+    // must not write numeric shortcut keys directly into Codex/Claude/Gemini.
     let response: boolean | number | string;
     if (option) {
       // Numeric option selection (1, 2, 3, ...)

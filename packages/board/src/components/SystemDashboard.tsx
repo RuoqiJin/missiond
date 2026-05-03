@@ -1,7 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { ChevronDown, ChevronRight, Activity, Gauge, FolderKanban } from 'lucide-react';
+import { ChevronDown, ChevronRight, Activity, Gauge, Network } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MemoryDashboard } from './MemoryDashboard';
 import { EngineDashboard } from './EngineDashboard';
@@ -94,7 +94,6 @@ function ProjectsPanel() {
         <span className="text-emerald-500">{activeProjects.length} active</span>
         <span className="text-neutral-600">{inactiveProjects.length} inactive</span>
       </div>
-
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
         {projects.map((p) => (
           <div
@@ -167,8 +166,8 @@ export function SystemDashboard() {
   return (
     <div className="flex-1 flex flex-col overflow-auto">
       <CollapsibleSection
-        title="Projects"
-        icon={FolderKanban}
+        title="SSOT Universe"
+        icon={Network}
         iconColor="text-cyan-400"
         expanded={projectsExpanded}
         onToggle={() => setProjectsExpanded((v) => !v)}
@@ -177,7 +176,7 @@ export function SystemDashboard() {
       </CollapsibleSection>
 
       <CollapsibleSection
-        title="Memory Pipeline"
+        title="Memory Review"
         icon={Activity}
         iconColor="text-purple-400"
         expanded={memoryExpanded}
@@ -187,7 +186,7 @@ export function SystemDashboard() {
       </CollapsibleSection>
 
       <CollapsibleSection
-        title="System Metrics"
+        title="Runtime Health"
         icon={Gauge}
         iconColor="text-blue-400"
         expanded={engineExpanded}

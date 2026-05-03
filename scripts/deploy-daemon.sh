@@ -7,6 +7,7 @@
 #   scripts/deploy-daemon.sh --build-only     # build, do not touch running daemon
 #   scripts/deploy-daemon.sh --no-smoke       # skip post-restart smoke check
 #   scripts/deploy-daemon.sh --debug          # use debug profile (faster build)
+#   scripts/deploy-daemon.sh --fast           # dev-only shortcut: debug profile + timing + sccache if enabled
 #   scripts/deploy-daemon.sh --cleanup-only   # dry-run release cleanup only
 #   scripts/deploy-daemon.sh --cleanup-only --apply-cleanup
 #
@@ -23,6 +24,7 @@
 #   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
 #   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
 #   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
+#   MISSIOND_USE_SCCACHE        when 1 and sccache exists, export RUSTC_WRAPPER=sccache
 #
 # Exit codes:
 #   0 success
@@ -40,12 +42,14 @@ DO_DEPLOY=1
 DO_SMOKE=1
 CLEANUP_ONLY=0
 APPLY_CLEANUP=0
+FAST_MODE=0
 
 for arg in "$@"; do
   case "$arg" in
     --build-only) DO_DEPLOY=0; DO_SMOKE=0 ;;
     --no-smoke) DO_SMOKE=0 ;;
     --debug) PROFILE="debug" ;;
+    --fast) PROFILE="debug"; FAST_MODE=1 ;;
     --cleanup-only) CLEANUP_ONLY=1; DO_DEPLOY=0; DO_SMOKE=0 ;;
     --apply-cleanup) APPLY_CLEANUP=1 ;;
     -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
@@ -85,6 +89,27 @@ esac
 
 log() { printf '[deploy-daemon] %s\n' "$*" >&2; }
 fail() { printf '[deploy-daemon] FAIL: %s\n' "$*" >&2; exit "${2:-1}"; }
+
+TIMING_NAMES=()
+TIMING_SECS=()
+
+record_timing() {
+  local name="$1"
+  local start="$2"
+  local elapsed=$(( $(date +%s) - start ))
+  TIMING_NAMES+=("$name")
+  TIMING_SECS+=("$elapsed")
+  log "timing: ${name}=${elapsed}s"
+}
+
+print_timing_summary() {
+  [ "${#TIMING_NAMES[@]}" -gt 0 ] || return 0
+  log "timing-summary: profile=$PROFILE fast=$FAST_MODE"
+  local i
+  for i in "${!TIMING_NAMES[@]}"; do
+    log "timing-summary: ${TIMING_NAMES[$i]}=${TIMING_SECS[$i]}s"
+  done
+}
 
 resolve_link_target() {
   local link="$1"
@@ -286,10 +311,18 @@ if [ "$CLEANUP_ONLY" -eq 1 ]; then
 fi
 
 command -v cargo >/dev/null 2>&1 || fail "cargo not on PATH" 1
+if [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ] && command -v sccache >/dev/null 2>&1; then
+  export RUSTC_WRAPPER="${RUSTC_WRAPPER:-sccache}"
+  log "build: using RUSTC_WRAPPER=$RUSTC_WRAPPER"
+elif [ "${MISSIOND_USE_SCCACHE:-0}" = "1" ]; then
+  log "build: MISSIOND_USE_SCCACHE=1 but sccache is not installed; continuing without wrapper"
+fi
 log "build: cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp"
+BUILD_START="$(date +%s)"
 if ! cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp 2>&1 | tail -30; then
   fail "cargo build failed" 2
 fi
+record_timing "cargo-build" "$BUILD_START"
 [ -x "$ARTIFACT" ] || fail "expected artifact missing: $ARTIFACT" 2
 [ -x "$MCP_ARTIFACT" ] || fail "expected MCP artifact missing: $MCP_ARTIFACT" 2
 
@@ -300,9 +333,11 @@ log "build: MCP sha256=${NEW_MCP_HASH:0:12}..."
 
 if [ "$DO_DEPLOY" -eq 0 ]; then
   log "build-only mode -> done."
+  print_timing_summary
   exit 0
 fi
 
+RELEASE_START="$(date +%s)"
 PREVIOUS_ACTIVE="$(create_legacy_release_if_needed || true)"
 GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
 RELEASE_ID="${MISSIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GIT_SHA}-${PROFILE}}"
@@ -313,10 +348,13 @@ mkdir -p "$CANDIDATE_DIR/bin"
 cp "$ARTIFACT" "$CANDIDATE_DIR/bin/missiond"
 cp "$MCP_ARTIFACT" "$CANDIDATE_DIR/bin/mission-mcp"
 chmod +x "$CANDIDATE_DIR/bin/missiond" "$CANDIDATE_DIR/bin/mission-mcp"
+record_timing "release-copy" "$RELEASE_START"
 
 if command -v codesign >/dev/null 2>&1; then
+  CODESIGN_START="$(date +%s)"
   codesign --force --sign - "$CANDIDATE_DIR/bin/missiond" 2>&1 | tail -5
   codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp" 2>&1 | tail -5
+  record_timing "codesign" "$CODESIGN_START"
 fi
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
 xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || true
@@ -327,23 +365,29 @@ EOF
 log "candidate: $CANDIDATE_DIR"
 
 log "pre-switch smoke: candidate MCP initialize"
+PRE_SWITCH_SMOKE_START="$(date +%s)"
 PRE_RESP="$(run_mcp_initialize_smoke "$CANDIDATE_DIR/bin/mission-mcp" 2>&1 | tail -3 || true)"
 if ! echo "$PRE_RESP" | grep -q '"protocolVersion"'; then
   echo "$PRE_RESP" | sed 's/^/[pre-smoke] /' >&2
   fail "candidate MCP initialize failed before active switch" 3
 fi
+record_timing "pre-switch-mcp-smoke" "$PRE_SWITCH_SMOKE_START"
 
 switch_active_release "$CANDIDATE_DIR"
 
+KICKSTART_START="$(date +%s)"
 if ! kickstart_daemon; then
   rollback_to_previous "$PREVIOUS_ACTIVE" || true
   fail "launchctl kickstart failed; rollback attempted" 4
 fi
+record_timing "launchd-kickstart" "$KICKSTART_START"
 
+SOCKET_WAIT_START="$(date +%s)"
 if ! wait_for_socket; then
   rollback_to_previous "$PREVIOUS_ACTIVE" || true
   fail "socket not ready after ${TIMEOUT}s; rollback attempted" 5
 fi
+record_timing "socket-wait" "$SOCKET_WAIT_START"
 
 RUN_PID="$(lsof -t "$SOCK_PATH" 2>/dev/null | head -1 || true)"
 if [ -n "$RUN_PID" ]; then
@@ -351,10 +395,15 @@ if [ -n "$RUN_PID" ]; then
   log "running: PID=$RUN_PID comm=$RUN_BIN"
 fi
 
+POST_SMOKE_START="$(date +%s)"
 if ! post_switch_smoke; then
   rollback_to_previous "$PREVIOUS_ACTIVE" || true
   fail "smoke check failed; rollback attempted" 6
 fi
+record_timing "post-switch-mcp-smoke" "$POST_SMOKE_START"
 
+CLEANUP_START="$(date +%s)"
 cleanup_old_releases 1
+record_timing "cleanup" "$CLEANUP_START"
+print_timing_summary
 log "deploy: done. active_release=$RELEASE_ID previous=${PREVIOUS_ACTIVE:-none}"

@@ -91,6 +91,8 @@ function checkFiles(root, files) {
     'Release cleanup MUST keep active, previous, and newest retained releases',
     'IPC smoke MUST retry after socket readiness and then rollback on failure',
     'Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT',
+    'Deploy scripts MUST emit timing for cargo-build',
+    'Dev-only fast deploy may select debug profile and sccache',
     'Rust formatting MUST be scoped to Rust files touched in the current diff',
     'missiond-rustfmt-exempt legacy-large-file facades',
     'rustfmt MUST run with skip_children=true',
@@ -102,8 +104,10 @@ function checkFiles(root, files) {
     '--build-only',
     '--no-smoke',
     '--debug',
+    '--fast',
     '--cleanup-only',
     '--apply-cleanup',
+    'MISSIOND_USE_SCCACHE',
     'MISSIOND_INSTALL_ROOT',
     'MISSIOND_RELEASES_DIR',
     'MISSIOND_ACTIVE_LINK',
@@ -117,6 +121,9 @@ function checkFiles(root, files) {
     'MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'set -euo pipefail',
     'cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp',
+    'record_timing "cargo-build"',
+    'print_timing_summary',
+    'RUSTC_WRAPPER',
     'release-manifest.json',
     'atomic_symlink_update',
     'switch_active_release',
@@ -179,6 +186,8 @@ function buildFixture() {
        "Release cleanup MUST keep active, previous, and newest retained releases."
        "IPC smoke MUST retry after socket readiness and then rollback on failure."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
+       "Deploy scripts MUST emit timing for cargo-build."
+       "Dev-only fast deploy may select debug profile and sccache."
        "Rust formatting MUST be scoped to Rust files touched in the current diff."
        "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
        "rustfmt MUST run with skip_children=true."])
@@ -194,11 +203,15 @@ function buildFixture() {
 
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
 scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
---build-only --no-smoke --debug --cleanup-only --apply-cleanup
+--build-only --no-smoke --debug --fast --cleanup-only --apply-cleanup
 MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
 MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
+MISSIOND_USE_SCCACHE
 set -euo pipefail
 cargo build \${BUILD_ARG} -p missiond-daemon -p missiond-mcp
+record_timing "cargo-build"
+print_timing_summary
+RUSTC_WRAPPER
 release-manifest.json
 atomic_symlink_update
 switch_active_release

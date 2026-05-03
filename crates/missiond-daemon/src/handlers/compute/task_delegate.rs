@@ -414,7 +414,10 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 idx + 1,
                 max_claude_workers
             ),
-            intent: "research".to_string(),
+            // Keep Claude context-pack workers on the Claude/coder route.
+            // `intent=research` is intentionally reserved for the Gemini
+            // researcher lane, so using it here would ignore max_gemini_workers=0.
+            intent: "code".to_string(),
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
         });

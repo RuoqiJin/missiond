@@ -17,6 +17,7 @@ const FILES = {
   slotTypes: 'crates/missiond-core/src/types/slot.rs',
   ptyManager: 'crates/missiond-pty/src/manager.rs',
   ptySession: 'crates/missiond-pty/src/session.rs',
+  taskDelegate: 'crates/missiond-daemon/src/handlers/compute/task_delegate.rs',
   aggregate: 'scripts/check-v3-code-isomorphism-complete.mjs',
 };
 
@@ -109,11 +110,22 @@ function check(s, diagnostics) {
     'mission_master_status',
     'mission_convergence_status',
     'mission_nightly_evolution',
+    'mission_swarm_run MUST honor max_gemini_workers exactly',
     'resolve checkpoint root from the V3-projected master slot project_root/cwd',
     'without calling notify or incrementing queued control events',
     'last-control-prompt is nil for heartbeat/startup ticks',
     'node scripts/check-v3-master-control-isomorphism.mjs',
     '(surface resident-master-control',
+  ]);
+  requireAll(diagnostics, FILES.taskDelegate, s.taskDelegate, [
+    'max_gemini_workers',
+    'pool_hint: "gemini-ultra-pro".to_string()',
+    'intent: "research".to_string()',
+    'Survey exact shards for swarm objective',
+    'pool_hint: "claude-code-default".to_string()',
+    'intent=research',
+    'ignore max_gemini_workers=0',
+    'intent: "code".to_string()',
   ]);
   requireAll(diagnostics, FILES.blueprint, s.blueprint, [
     '(worker codex-master-control',

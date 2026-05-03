@@ -22,6 +22,7 @@ use std::time::{Duration, SystemTime};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use tracing::{debug, info, warn};
 
 use crate::state::AppState;
@@ -91,6 +92,8 @@ struct ParsedMessage {
     role: String, // "assistant" or "user"
     content: String,
     timestamp: String,
+    line_no: usize,
+    source_event_hash: String,
 }
 
 // ── Worker ──
@@ -373,8 +376,12 @@ async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize>
                 session_id: thread.id.clone(),
                 role: m.role.clone(),
                 content: sanitize(&m.content),
-                raw_content: None,
-                message_uuid: None,
+                raw_content: Some(serde_json::json!({
+                    "source": "codex_ingestion",
+                    "jsonl_line": m.line_no,
+                    "source_event_hash": m.source_event_hash,
+                }).to_string()),
+                message_uuid: Some(codex_message_uuid(&thread.id, m)),
                 parent_uuid: None,
                 model: thread.model.clone(),
                 timestamp: m.timestamp.clone(),
@@ -447,6 +454,7 @@ fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
         if line.is_empty() {
             continue;
         }
+        let source_event_hash = short_sha256(&line, 16);
 
         let event: CodexJsonlEvent = match serde_json::from_str(&line) {
             Ok(e) => e,
@@ -525,6 +533,8 @@ fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
                                 role: "assistant".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
+                                line_no: line_count,
+                                source_event_hash: source_event_hash.clone(),
                             });
                         }
                     }
@@ -551,6 +561,8 @@ fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
                                 role: "user".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
+                                line_no: line_count,
+                                source_event_hash: source_event_hash.clone(),
                             });
                         }
                     }
@@ -566,6 +578,8 @@ fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
                                 role: "assistant".to_string(),
                                 content: text,
                                 timestamp: event.timestamp,
+                                line_no: line_count,
+                                source_event_hash: source_event_hash.clone(),
                             });
                         }
                     }
@@ -580,6 +594,41 @@ fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
         tool_calls: calls,
         messages,
     })
+}
+
+fn short_sha256(input: &str, chars: usize) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    let digest = format!("{:x}", hasher.finalize());
+    digest.chars().take(chars).collect()
+}
+
+fn codex_message_uuid(thread_id: &str, message: &ParsedMessage) -> String {
+    format!(
+        "codex-cli:{thread_id}:line-{}:{}:{}",
+        message.line_no, message.role, message.source_event_hash
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn codex_message_uuid_is_non_null_and_stable() {
+        let message = ParsedMessage {
+            role: "assistant".to_string(),
+            content: "done".to_string(),
+            timestamp: "2026-05-03T00:00:00Z".to_string(),
+            line_no: 42,
+            source_event_hash: short_sha256(r#"{"type":"response_item"}"#, 16),
+        };
+        let first = codex_message_uuid("thread-123", &message);
+        let second = codex_message_uuid("thread-123", &message);
+        assert_eq!(first, second);
+        assert!(first.starts_with("codex-cli:thread-123:line-42:assistant:"));
+        assert!(!first.ends_with(':'));
+    }
 }
 
 /// Extract text content from a response_item/message payload.

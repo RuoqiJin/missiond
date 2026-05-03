@@ -258,7 +258,8 @@
                (step s5 :logic "connect xterm to the selected PTY websocket only when the slot is running")
                (step s6 :logic "render provider-neutral state, spawn, reconnect, stop, screenshot, MCP readiness, and blocked-status controls")
                (step s7 :logic "show Autopilot slot/task correlation from activeBoardTaskId/currentTaskId or running BoardTask claimExecutorId/assignee without owning dispatch or closure")
-               (step s8 :logic "show latest durable provider conversation, recognition confidence/reason, MCP readiness, active tool, and blocked kind as diagnostics beside the PTY"))
+               (step s8 :logic "show latest durable provider conversation, recognition confidence/reason, MCP readiness, active tool, and blocked kind as diagnostics beside the PTY")
+               (step s9 :logic "ExecDashboard uses the same slot/runtime sources as Terminal and must not keep separate static slot pools"))
         :egress [provider-slot-rail terminal-screen pty-state evidence-diagnostics autopilot-monitor]))
 
     (pillar event-stream-ui
@@ -279,7 +280,8 @@
         :core ((step s1 :logic "fetch events, traces, conversations, transcripts, and system logs through API routes")
                (step s2 :logic "compute timeline lane layout for chat, slot, board, system, and execution events")
                (step s3 :logic "render selection, detail panels, summaries, markdown, JSON, and tool views")
-               (step s4 :logic "react to event-stream version bumps without directly mutating backend state"))
+               (step s4 :logic "react to event-stream version bumps without directly mutating backend state")
+               (step s5 :logic "conversation views must not render duplicate same-session messages with identical uuid or identical role/timestamp/content fallback"))
         :egress [timeline-view logs-view conversation-view selection-state]))
 
     (pillar knowledge-system-ui
@@ -288,8 +290,10 @@
         :entry [KnowledgeConsolidated SystemDashboard ArchitectureView api-routes]
         :core ((step s1 :logic "fetch KB, memory, architecture, system health, deploy, and model-trace projections")
                (step s2 :logic "normalize read-only dashboard state for dense operator scanning")
-               (step s3 :logic "render cards, tables, architecture graph, status badges, and diagnostics")
-               (step s4 :logic "keep operational actions behind explicit buttons and existing route policies"))
+               (step s3 :logic "render SSOT Universe, memory review, runtime health, architecture graph, status badges, and diagnostics")
+               (step s4 :logic "keep operational actions behind explicit buttons and existing route policies")
+               (step s5 :logic "project constants promoted from repeated KB lookup, such as auth service path/ports, into the Universe surface instead of leaving them as loose memory")
+               (step s6 :logic "JarvisChat sends user text/images through master-chat-api to create a visible resident-master-control BoardTask; it polls mission_master_status and never writes directly to a PTY"))
         :egress [knowledge-dashboard system-dashboard architecture-dashboard operational-action]))
 
     (pillar frontend-design-system
@@ -374,7 +378,9 @@
              "packages/board/src/components/JarvisChat.tsx"
              "packages/board/src/app/api/kb/route.ts"
              "packages/board/src/app/api/system/health/route.ts"
-             "packages/board/src/app/api/jarvis/conversations/route.ts"])
+             "packages/board/src/app/api/jarvis/conversations/route.ts"
+             "packages/board/src/app/api/master/chat/route.ts"
+             "packages/board/src/app/api/master/status/route.ts"])
     (surface frontend-design-system
       :status "code-aligned"
       :implements [board-design-system]

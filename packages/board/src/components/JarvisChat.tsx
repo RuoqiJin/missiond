@@ -346,49 +346,24 @@ export function JarvisChat() {
     return () => window.removeEventListener('jarvis-task-completed', handler);
   }, []);
 
-  // Auto-spawn slot-jarvis on mount
+  // Jarvis is now a durable master gateway. It does not auto-spawn a PTY;
+  // the resident Codex master is controlled by MissionD and shown in Terminal/Exec.
   useEffect(() => {
-    let cancelled = false;
-    async function ensureSlot() {
-      try {
-        const res = await fetch('/api/pty/status?slotId=slot-jarvis');
-        const data = await res.json();
-        if (data?.state && data.state !== 'exited') {
-          if (!cancelled) setSlotReady(true);
-          return;
-        }
-      } catch { /* slot not running */ }
-
-      if (!cancelled) setSlotReady(false);
-      try {
-        await fetch('/api/pty/spawn?slotId=slot-jarvis', { method: 'POST' });
-      } catch { /* ignore spawn errors */ }
-
-      for (let i = 0; i < 30 && !cancelled; i++) {
-        await new Promise((r) => setTimeout(r, 1000));
-        try {
-          const res = await fetch('/api/pty/status?slotId=slot-jarvis');
-          const data = await res.json();
-          if (data?.state === 'idle') {
-            if (!cancelled) setSlotReady(true);
-            return;
-          }
-        } catch { /* keep polling */ }
-      }
-      if (!cancelled) setSlotReady(true);
-    }
-    ensureSlot();
-    return () => { cancelled = true; };
+    setSlotReady(true);
   }, []);
 
-  // Slot status polling (3s interval)
+  // Resident master status polling (3s interval)
   useEffect(() => {
     const poll = async () => {
       try {
-        const res = await fetch('/api/pty/status?slotId=slot-jarvis');
+        const res = await fetch('/api/master/status');
         if (res.ok) {
           const data = await res.json();
-          setSlotStatus(data);
+          setSlotStatus({
+            slotId: data?.slotId || data?.slot_id || 'slot-codex-master-control',
+            state: data?.slotState || data?.state || data?.service?.phase || 'unknown',
+            sessionId: data?.sessionId || data?.session_id || data?.providerConversationId,
+          });
         }
       } catch { /* ignore */ }
     };
@@ -618,16 +593,32 @@ export function JarvisChat() {
       for (let attempt = 0; attempt <= maxRetries; attempt++) {
         if (controller.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
-        res = await fetch('/missiond/v1/chat/completions', {
+        res = await fetch('/api/master/chat', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
-            'Authorization': 'Bearer jarvis-ui',
-            'X-Slot-Id': 'slot-jarvis',
           },
           body: JSON.stringify({ messages: apiMessages, conversation_id: activeConvId }),
           signal: controller.signal,
         });
+
+        if (res.ok) {
+          const masterResult = await res.json();
+          const reply = masterResult.message || '已提交给 resident Codex master。';
+          if (masterResult.conversation_id) {
+            streamingConvIdRef.current = masterResult.conversation_id;
+            setActiveConvId(masterResult.conversation_id);
+          }
+          setMessages((prev) => [...prev, {
+            id: `master-${Date.now()}`,
+            role: 'assistant' as const,
+            content: reply,
+            timestamp: Date.now(),
+          }]);
+          setStatusText('');
+          loadConversations();
+          return;
+        }
 
         if (res.status === 503) {
           const errBody = await res.text();
@@ -950,7 +941,7 @@ export function JarvisChat() {
                 <MessageSquare className="w-4 h-4" />
               </button>
             )}
-            <span className="text-sm font-medium text-neutral-300">Jarvis</span>
+            <span className="text-sm font-medium text-neutral-300">Jarvis {'->'} Codex Master</span>
             {/* Slot status dot */}
             {slotStatus && (
               <span className={cn(
@@ -993,11 +984,11 @@ export function JarvisChat() {
               ) : (
                 <>
                   <Brain className="w-10 h-10 mb-3 text-neutral-700" />
-                  <p className="text-sm">Ask Jarvis anything</p>
+                  <p className="text-sm">Send an objective to Codex master</p>
                   <p className="text-xs mt-1 text-neutral-700">
                     {isSlotBusy
-                      ? 'Jarvis is busy with another conversation. Your message will be queued.'
-                      : 'Supports text, images, and multi-turn conversation'
+                      ? 'Master is handling another objective. Your message will still become a durable BoardTask.'
+                      : 'Text and images become a durable master objective; PTY stays diagnostic.'
                     }
                   </p>
                 </>
@@ -1072,7 +1063,7 @@ export function JarvisChat() {
                           onClick={async () => {
                             try {
                               const optNum = typeof opt.key === 'number' ? opt.key : i + 1;
-                              await fetch(`/api/pty/confirm?slotId=slot-jarvis&option=${optNum}`, { method: 'POST' });
+                              await fetch(`/api/pty/confirm?slotId=slot-codex-master-control&option=${optNum}`, { method: 'POST' });
                             } catch { /* ignore */ }
                             setConfirmAction(null);
                           }}
@@ -1098,7 +1089,7 @@ export function JarvisChat() {
                       <button
                         onClick={async () => {
                           try {
-                            await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=allow`, { method: 'POST' });
+                            await fetch(`/api/pty/confirm?slotId=slot-codex-master-control&decision=allow`, { method: 'POST' });
                           } catch { /* ignore */ }
                           setConfirmAction(null);
                         }}
@@ -1109,7 +1100,7 @@ export function JarvisChat() {
                       <button
                         onClick={async () => {
                           try {
-                            await fetch(`/api/pty/confirm?slotId=slot-jarvis&decision=deny`, { method: 'POST' });
+                            await fetch(`/api/pty/confirm?slotId=slot-codex-master-control&decision=deny`, { method: 'POST' });
                           } catch { /* ignore */ }
                           setConfirmAction(null);
                         }}
@@ -1181,10 +1172,10 @@ export function JarvisChat() {
               onPaste={handlePaste}
               placeholder={
                 isSlotBusy
-                  ? 'Jarvis is busy — message will be queued...'
+                  ? 'Master is busy — this will become a BoardTask...'
                   : isThisConvStreaming
-                    ? 'Jarvis is responding...'
-                    : 'Message Jarvis...'
+                    ? 'Master gateway is submitting...'
+                    : 'Message Codex master...'
               }
               rows={1}
               className={cn(
@@ -1216,14 +1207,14 @@ export function JarvisChat() {
                     ? 'bg-blue-600 hover:bg-blue-500 text-white'
                     : 'bg-neutral-800 text-neutral-600 cursor-not-allowed',
                 )}
-                title={isSlotBusy ? 'Jarvis is busy with another conversation' : 'Send (Enter)'}
+                title={isSlotBusy ? 'Master is busy; message will still be queued as BoardTask' : 'Send (Enter)'}
               >
                 <Send className="w-4 h-4" />
               </button>
             )}
           </div>
           <p className="text-[10px] text-neutral-700 mt-1.5 text-center">
-            Shift+Enter for newline · Paste or drag images · Context auto-injected
+            Shift+Enter for newline · Paste or drag images · creates a durable master BoardTask
           </p>
         </div>
       </div>

@@ -28,7 +28,9 @@ const DEFAULT_FILES = {
   geminiParser: 'crates/missiond-core/src/gemini_cli/parser.rs',
   geminiReconcile: 'crates/missiond-daemon/src/workers/local/gemini_reconcile_worker.rs',
   codexIngestion: 'crates/missiond-daemon/src/workers/local/codex_ingestion_worker.rs',
+  pgMessage: 'crates/missiond-core/src/db/pg/message.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
+  duplicateReport: 'scripts/report-codex-conversation-duplicates.mjs',
   sourceMigration: 'crates/missiond-core/migrations/20260501000000_canonical_cli_sources.sql',
   sourceCleanupMigration: 'crates/missiond-core/migrations/20260501001000_clean_stale_cli_slot_sessions.sql',
   conversationTypes: 'crates/missiond-core/src/types/conversation.rs',
@@ -90,6 +92,9 @@ function checkFiles(root, files) {
     'Conversation sources MUST be canonicalized before DB write',
     'mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine',
     'mission_slots MUST fall back to the latest real codex_cli conversation',
+    'Codex CLI message ingestion MUST generate deterministic non-null message_uuid values',
+    'mission_conversation_get MUST defensively coalesce duplicate rows',
+    'Historical duplicate cleanup is dry-run/report-first',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
   ]);
 
@@ -195,6 +200,26 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.codexIngestion, sources.codexIngestion, [
     'source: "codex_cli".to_string()',
     'chat_type: Some("codex_cli".to_string())',
+    'message_uuid: Some(codex_message_uuid(&thread.id, m))',
+    'line_no',
+    'source_event_hash',
+    'Sha256',
+    'codex_message_uuid_is_non_null_and_stable',
+  ]);
+
+  requireAll(diagnostics, files.pgMessage, sources.pgMessage, [
+    'coalesce_duplicate_messages',
+    'fallback:{}\\u{1f}{}\\u{1f}{}\\u{1f}{}\\u{1f}{}',
+    'msg.seq = Some((idx + 1) as i64)',
+    'coalesce_duplicate_messages_prefers_uuid_and_resets_seq',
+    'coalesce_duplicate_messages_falls_back_when_uuid_is_missing',
+  ]);
+
+  requireAll(diagnostics, files.duplicateReport, sources.duplicateReport, [
+    "mode: 'dry-run'",
+    'duplicateIds',
+    'keepId',
+    'mission_conversation_query',
   ]);
 
   requireAll(diagnostics, files.pgConversation, sources.pgConversation, [

@@ -1,5 +1,7 @@
 //! MessageStore — PostgreSQL implementation.
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use crate::db::error::DbResult;
 use crate::db::traits::MessageStore;
@@ -133,7 +135,8 @@ impl MessageStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?
         };
-        Ok(rows.iter().map(Self::row_to_enriched_message).collect())
+        let messages = rows.iter().map(Self::row_to_enriched_message).collect();
+        Ok(coalesce_duplicate_messages(messages))
     }
 
     async fn get_messages_around(&self, message_id: i64, before: i64, after: i64) -> DbResult<Option<(String, Vec<ConversationMessage>)>> {
@@ -705,6 +708,95 @@ impl MessageStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
+    }
+}
+
+fn coalesce_duplicate_messages(messages: Vec<ConversationMessage>) -> Vec<ConversationMessage> {
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let key = if let Some(uuid) = msg.message_uuid.as_deref().filter(|v| !v.is_empty()) {
+            format!("uuid:{uuid}")
+        } else {
+            format!(
+                "fallback:{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+                msg.session_id,
+                msg.role,
+                msg.timestamp,
+                msg.content,
+                msg.metadata.as_deref().unwrap_or("")
+            )
+        };
+        if seen.insert(key) {
+            out.push(msg);
+        }
+    }
+    for (idx, msg) in out.iter_mut().enumerate() {
+        msg.seq = Some((idx + 1) as i64);
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn message(
+        id: i64,
+        role: &str,
+        content: &str,
+        timestamp: &str,
+        message_uuid: Option<&str>,
+    ) -> ConversationMessage {
+        ConversationMessage {
+            id,
+            session_id: "session-a".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            raw_content: None,
+            message_uuid: message_uuid.map(ToString::to_string),
+            parent_uuid: None,
+            model: None,
+            timestamp: timestamp.to_string(),
+            metadata: Some(r#"{"source":"codex_ingestion"}"#.to_string()),
+            tool_name: None,
+            raw_role: None,
+            content_types: Some(r#"["text"]"#.to_string()),
+            has_image: false,
+            has_tool_use: false,
+            has_tool_result: false,
+            token_count: None,
+            seq: None,
+            role_display: None,
+        }
+    }
+
+    #[test]
+    fn coalesce_duplicate_messages_prefers_uuid_and_resets_seq() {
+        let out = coalesce_duplicate_messages(vec![
+            message(10, "assistant", "same", "2026-05-03T00:00:00Z", Some("uuid-1")),
+            message(11, "assistant", "same", "2026-05-03T00:00:01Z", Some("uuid-1")),
+            message(12, "user", "next", "2026-05-03T00:00:02Z", Some("uuid-2")),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, 10);
+        assert_eq!(out[0].seq, Some(1));
+        assert_eq!(out[1].id, 12);
+        assert_eq!(out[1].seq, Some(2));
+    }
+
+    #[test]
+    fn coalesce_duplicate_messages_falls_back_when_uuid_is_missing() {
+        let out = coalesce_duplicate_messages(vec![
+            message(20, "assistant", "same", "2026-05-03T00:00:00Z", None),
+            message(21, "assistant", "same", "2026-05-03T00:00:00Z", None),
+            message(22, "assistant", "same", "2026-05-03T00:00:01Z", None),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].id, 20);
+        assert_eq!(out[1].id, 22);
+        assert_eq!(out[0].seq, Some(1));
+        assert_eq!(out[1].seq, Some(2));
     }
 }
 
