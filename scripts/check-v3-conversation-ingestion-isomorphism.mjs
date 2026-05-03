@@ -28,6 +28,7 @@ const DEFAULT_FILES = {
   contextPipeline: 'crates/missiond-daemon/src/context/context_pipeline.rs',
   visionWorker: 'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
   codexCli: 'crates/missiond-daemon/src/llm/codex_cli.rs',
+  pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   mcpConversation: 'crates/missiond-mcp/src/tools/comm/conversation.rs',
   mcpTimeline: 'crates/missiond-mcp/src/tools/comm/timeline.rs',
 };
@@ -120,6 +121,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/context/context_pipeline.rs',
     'crates/missiond-daemon/src/workers/codex/vision_worker.rs',
     'crates/missiond-daemon/src/llm/codex_cli.rs',
+    'crates/missiond-core/src/db/pg/conversation.rs',
     'crates/missiond-mcp/src/tools/comm/conversation.rs',
     'crates/missiond-mcp/src/tools/comm/timeline.rs',
     'scripts/check-v3-conversation-ingestion-isomorphism.mjs',
@@ -129,6 +131,7 @@ function checkFiles(root, files) {
     'conversation.rs is the thin conversation-ingestion facade',
     'conversation/router.rs owns mission_conversation_query',
     'conversation/query.rs owns read-model query actions',
+    'when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows',
     'conversation/events.rs owns analysis/event egress',
     'conversation/maintenance.rs owns embedding/reconcile work items',
     'timeline.rs owns mission_timeline',
@@ -320,6 +323,13 @@ function checkFiles(root, files) {
     'Duration::from_secs(300)',
   ]);
 
+  requireAll(diagnostics, files.pgConversation, sources.pgConversation, [
+    'task_scoped_type_clause',
+    'None | Some("all") => String::new()',
+    'task_scoped_query_without_type_includes_provider_conversations',
+    'task_scoped_query_keeps_explicit_type_filters',
+  ]);
+
   requireAll(diagnostics, files.mcpConversation, sources.mcpConversation, [
     'ToolDefinition::new',
     '"mission_conversation_query"',
@@ -405,10 +415,11 @@ function buildFixture() {
              "crates/missiond-daemon/src/context/context_pipeline.rs"
              "crates/missiond-daemon/src/workers/codex/vision_worker.rs"
              "crates/missiond-daemon/src/llm/codex_cli.rs"
+             "crates/missiond-core/src/db/pg/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/conversation.rs"
              "crates/missiond-mcp/src/tools/comm/timeline.rs"
              "scripts/check-v3-conversation-ingestion-isomorphism.mjs"]
-      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
+      :note "conversation-ingestion-policy read-model default and max limits; UserPromptSubmit context prefetch intent router model and timeout MUST project from conversation-ingestion-policy; Codex vision worker binary/model/idle timeout and CodexCli absolute timeout MUST project from conversation-ingestion-policy; conversation.rs is the thin conversation-ingestion facade; conversation/router.rs owns mission_conversation_query; conversation/query.rs owns read-model query actions; when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows; conversation/events.rs owns analysis/event egress; conversation/maintenance.rs owns embedding/reconcile work items; timeline.rs owns mission_timeline; retrospective.rs owns retrospective analysis, list, and backfill; vision_worker.rs owns unprocessed image-message extraction through CodexCli."))
   (compression-contract
     :checks ["node scripts/check-v3-conversation-ingestion-isomorphism.mjs"]))`,
   );
@@ -459,6 +470,10 @@ function buildFixture() {
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.codexCli),
     'ConversationIngestionRuntimeConfig absolute_timeout with_conversation_ingestion_config config.vision_codex_absolute_timeout() absolute timeout ({}s)',
+  );
+  fs.writeFileSync(
+    path.join(root, DEFAULT_FILES.pgConversation),
+    'task_scoped_type_clause None | Some("all") => String::new() task_scoped_query_without_type_includes_provider_conversations task_scoped_query_keeps_explicit_type_filters',
   );
   fs.writeFileSync(
     path.join(root, DEFAULT_FILES.mcpConversation),

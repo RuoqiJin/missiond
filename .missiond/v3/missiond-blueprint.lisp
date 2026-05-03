@@ -1976,8 +1976,9 @@
         :entry [mission_conversation_query mission_conversation_analyze mission_conversation_reconcile mission_timeline mission_retrospective_manage mission_embedding_ops]
         :core ((step s1 :logic "load conversation-ingestion-policy for read-model default and max limits")
                (step s2 :logic "ingest or query conversation/session/timeline records by project scope")
-               (step s3 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
-               (step s4 :logic "surface durable facts for context assembly and later memory projection"))
+               (step s3 :logic "when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows for that BoardTask so Claude/Codex/Gemini durable logs are first-class evidence, not FTS fallbacks")
+               (step s4 :logic "derive analysis, reconciliation, retrospective, and embedding work items")
+               (step s5 :logic "surface durable facts for context assembly and later memory projection"))
         :egress [conversation_rows timeline_events retrospective_result embedding_jobs])
       (function router-policy
         :surface router-policy

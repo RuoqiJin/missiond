@@ -17,6 +17,13 @@ use async_trait::async_trait;
 use sqlx::Row;
 use std::collections::HashSet;
 
+fn task_scoped_type_clause(conv_type: Option<&str>, type_clause: &str) -> String {
+    match conv_type {
+        None | Some("all") => String::new(),
+        _ => type_clause.to_string(),
+    }
+}
+
 /// Zero-allocation pgvector literal serializer.
 /// Pre-allocates a single String for 512-dim halfvec (~7KB) instead of 513 heap allocs.
 fn vec_to_pg_literal(v: &[f32]) -> String {
@@ -313,10 +320,10 @@ impl ConversationStore for PgMissionStore {
 
         // Fast path: filter by task_id
         if let Some(tid) = task_id {
+            let task_type_clause = task_scoped_type_clause(conv_type, &type_clause);
             let sql = format!(
                 "SELECT * FROM conversations WHERE task_id = $1{}{}{} ORDER BY started_at ASC LIMIT $2",
-                if matches!(conv_type, Some("all")) { String::new() } else { type_clause.clone() },
-                source_clause, time_clause
+                task_type_clause, source_clause, time_clause
             );
             let rows = sqlx::query(&sql)
                 .bind(tid)
@@ -2572,4 +2579,27 @@ impl ConversationStore for PgMissionStore {
     }
 
     // -- narration.rs removed in v0.4.23 Phase 6 (tables dropped, worker deleted) --
+}
+
+#[cfg(test)]
+mod tests {
+    use super::task_scoped_type_clause;
+
+    #[test]
+    fn task_scoped_query_without_type_includes_provider_conversations() {
+        assert_eq!(
+            task_scoped_type_clause(None, " AND conversation_type IN ('user', 'worker')"),
+            ""
+        );
+        assert_eq!(
+            task_scoped_type_clause(Some("all"), " AND conversation_type = 'user'"),
+            ""
+        );
+    }
+
+    #[test]
+    fn task_scoped_query_keeps_explicit_type_filters() {
+        let clause = " AND conversation_type = 'gemini_chat'";
+        assert_eq!(task_scoped_type_clause(Some("gemini"), clause), clause);
+    }
 }
