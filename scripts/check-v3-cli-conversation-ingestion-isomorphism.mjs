@@ -93,6 +93,7 @@ function checkFiles(root, files) {
     'mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine',
     'mission_slots MUST fall back to the latest real codex_cli conversation',
     'Codex CLI message ingestion MUST generate deterministic non-null message_uuid values',
+    'the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row',
     'mission_conversation_get MUST defensively coalesce duplicate rows',
     'Historical duplicate cleanup is dry-run/report-first',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
@@ -209,6 +210,9 @@ function checkFiles(root, files) {
 
   requireAll(diagnostics, files.pgMessage, sources.pgMessage, [
     'coalesce_duplicate_messages',
+    'adopt_existing_message_uuid',
+    'UPDATE conversation_messages',
+    'AND NOT EXISTS',
     'fallback:{}\\u{1f}{}\\u{1f}{}\\u{1f}{}\\u{1f}{}',
     'msg.seq = Some((idx + 1) as i64)',
     'coalesce_duplicate_messages_prefers_uuid_and_resets_seq',

@@ -12,6 +12,9 @@ use super::PgMissionStore;
 #[async_trait]
 impl MessageStore for PgMissionStore {
     async fn insert_conversation_message(&self, msg: &ConversationMessage) -> DbResult<i64> {
+        if let Some(id) = self.adopt_existing_message_uuid(msg).await? {
+            return Ok(id);
+        }
         let row: (i64,) = sqlx::query_as(
             "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
@@ -46,6 +49,10 @@ impl MessageStore for PgMissionStore {
         }
         let mut inserted_ids = Vec::new();
         for msg in messages {
+            if let Some(id) = self.adopt_existing_message_uuid(msg).await? {
+                inserted_ids.push(id);
+                continue;
+            }
             let row: Option<(i64,)> = sqlx::query_as(
                 "INSERT INTO conversation_messages (session_id, role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata, tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8::timestamptz, $9, $10, $11, $12, $13, $14, $15, $16)
@@ -708,6 +715,48 @@ impl MessageStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?;
         Ok(rows)
+    }
+}
+
+#[cfg(feature = "postgres")]
+impl PgMissionStore {
+    async fn adopt_existing_message_uuid(&self, msg: &ConversationMessage) -> DbResult<Option<i64>> {
+        let Some(uuid) = msg.message_uuid.as_deref().filter(|v| !v.is_empty()) else {
+            return Ok(None);
+        };
+        let row: Option<(i64,)> = sqlx::query_as(
+            "UPDATE conversation_messages
+             SET message_uuid = $5,
+                 raw_content = COALESCE(raw_content, $6),
+                 metadata = COALESCE(metadata, $7),
+                 model = COALESCE(model, $8)
+             WHERE id = (
+                 SELECT id
+                 FROM conversation_messages
+                 WHERE session_id = $1
+                   AND role = $2
+                   AND timestamp = $3::timestamptz
+                   AND content = $4
+                   AND (message_uuid IS NULL OR message_uuid = '')
+                 ORDER BY id ASC
+                 LIMIT 1
+             )
+               AND NOT EXISTS (
+                 SELECT 1 FROM conversation_messages WHERE message_uuid = $5
+             )
+             RETURNING id"
+        )
+        .bind(&msg.session_id)
+        .bind(&msg.role)
+        .bind(&msg.timestamp)
+        .bind(&msg.content)
+        .bind(uuid)
+        .bind(&msg.raw_content)
+        .bind(&msg.metadata)
+        .bind(&msg.model)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(|(id,)| id))
     }
 }
 
