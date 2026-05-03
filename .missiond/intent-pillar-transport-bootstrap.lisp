@@ -76,6 +76,10 @@
       (module message-handler   :target "crates/missiond-daemon/src/infra/message_handler.rs"
         ;; commit e18d0bf: ingest() 内 project_id 从 state.project_registry.read().resolve(cwd) 自动填充
         ;; 取第一条消息的 cwd 字段（fallback 到 project_path），对 ProjectRegistry 做最长前缀匹配
+        ;; role mapping: ingest() delegates to events_sync::normalize_claude_message_role —
+        ;;   raw_role kept verbatim, role column receives canonical taxonomy
+        ;;   (tool_result | thinking | compact_summary | agent_user/agent_assistant | worker_user | passthrough).
+        ;;   semantic_roles label sidecar is populated only when normalized role differs from raw_role.
         )
       (module session-util      :target "crates/missiond-daemon/src/infra/session_util.rs")))
 

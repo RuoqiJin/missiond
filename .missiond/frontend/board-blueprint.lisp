@@ -294,7 +294,8 @@
                (step s2 :logic "compute timeline lane layout for chat, slot, board, system, and execution events")
                (step s3 :logic "render selection, detail panels, summaries, markdown, JSON, and tool views")
                (step s4 :logic "react to event-stream version bumps without directly mutating backend state")
-               (step s5 :logic "conversation views must not render duplicate same-session messages with identical uuid or identical role/timestamp/content fallback"))
+               (step s5 :logic "conversation views must not render duplicate same-session messages with identical uuid or identical role/timestamp/content fallback")
+               (step s6 :logic "render worker_user as a distinct worker input role while preserving rawRole for provider-audit diagnostics"))
         :egress [timeline-view logs-view conversation-view selection-state]))
 
     (pillar knowledge-system-ui

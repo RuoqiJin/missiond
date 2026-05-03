@@ -219,6 +219,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                     .map(|m| {
                         let mut role_display = m.role_display.clone();
                         if (m.role == "system"
+                            || m.role == "worker_user"
                             || m.role == "agent_user"
                             || (m.role == "user" && !is_jarvis))
                             && slot_id_for_display.is_some()
@@ -230,6 +231,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                             "seq": m.seq,
                             "sessionId": m.session_id,
                             "role": m.role,
+                            "rawRole": m.raw_role,
                             "roleDisplay": role_display,
                             "content": m.content,
                             "rawContent": m.raw_content,
@@ -248,6 +250,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                     .map(|m| {
                         let mut role_display = m.role_display.clone();
                         if (m.role == "system"
+                            || m.role == "worker_user"
                             || m.role == "agent_user"
                             || (m.role == "user" && !is_jarvis))
                             && slot_id_for_display.is_some()
@@ -258,6 +261,7 @@ pub(super) async fn handle_query(state: &AppState, name: &str, args: Value) -> R
                             "id": m.id,
                             "seq": m.seq,
                             "role": m.role,
+                            "rawRole": m.raw_role,
                             "roleDisplay": role_display,
                             "content": m.content,
                             "timestamp": m.timestamp,

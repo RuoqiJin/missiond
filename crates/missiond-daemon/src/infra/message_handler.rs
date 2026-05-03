@@ -189,8 +189,6 @@ async fn ingest(
             .unwrap_or_default();
         let is_tool_result =
             !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
-        let is_thinking =
-            !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
 
         // Keep tool_result and thinking messages even if content extraction is empty
         if text_content.is_empty() && !is_tool_result {
@@ -202,31 +200,21 @@ async fn ingest(
             text_content
         };
 
-        // Semantic role mapping (will be stored as label in Layer 2)
-        // In automated slot sessions, "user" role messages are system-injected task prompts,
-        // not human input. Interactive sessions (chat/jarvis/user) keep original roles.
-        let semantic_role = if is_tool_result {
-            Some("tool_result".to_string())
-        } else if is_thinking {
-            Some("thinking".to_string())
-        } else if msg.message.role == "user"
-            && is_slot_session
-            && !is_interactive_conversation(conversation_type)
-        {
-            Some("system".to_string())
-        } else if msg.message.role == "user"
-            && parent_session_id.is_some()
-            && session_id.starts_with("agent-")
-        {
-            Some("agent_user".to_string())
-        } else if msg.message.role == "user" && is_compact_summary(state, session_id, msg).await {
-            Some("compact_summary".to_string())
-        } else {
-            None
-        };
+        let is_agent_sidechain =
+            msg.is_sidechain || (parent_session_id.is_some() && session_id.starts_with("agent-"));
+        let is_compact =
+            msg.message.role == "user" && is_compact_summary(state, session_id, msg).await;
+        let role = events_sync::normalize_claude_message_role(
+            &msg.message.role,
+            &content_types,
+            is_slot_session,
+            is_interactive_conversation(conversation_type),
+            is_agent_sidechain,
+            is_compact,
+        );
 
-        if let Some(sr) = semantic_role {
-            semantic_roles.insert(msg.uuid.clone(), sr);
+        if role != msg.message.role {
+            semantic_roles.insert(msg.uuid.clone(), role.clone());
         }
 
         let raw_content = events_sync::sanitize_raw_content(&msg.message.content);
@@ -257,7 +245,7 @@ async fn ingest(
             id: 0,
             session_id: session_id.to_string(),
             raw_role: Some(msg.message.role.clone()),
-            role: msg.message.role.clone(),
+            role,
             content,
             raw_content,
             message_uuid: Some(msg.uuid.clone()),
@@ -453,8 +441,9 @@ async fn apply_rule_labels(
 }
 
 /// Interactive conversation types where "user" role messages are real human input.
-/// Automated slot sessions (worker, topology, executor, etc.) have their "user" messages
-/// remapped to "system" because those are MissionD's internal task prompts.
+/// Automated slot sessions keep provider `raw_role=user`, but MissionD exposes
+/// them as `worker_user` so Logs can distinguish worker prompts from humans
+/// without burying them under generic system noise.
 fn is_interactive_conversation(conversation_type: &str) -> bool {
     matches!(conversation_type, "chat" | "jarvis" | "user")
 }

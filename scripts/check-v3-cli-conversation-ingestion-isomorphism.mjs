@@ -17,6 +17,10 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   ingestionRouter: 'crates/missiond-daemon/src/infra/ingestion_router.rs',
   messageHandler: 'crates/missiond-daemon/src/infra/message_handler.rs',
+  eventsSync: 'crates/missiond-daemon/src/events_sync.rs',
+  reconcileWorker: 'crates/missiond-daemon/src/workers/local/reconcile_worker.rs',
+  conversationQuery: 'crates/missiond-daemon/src/handlers/comm/conversation/query.rs',
+  taggerChunker: 'crates/missiond-daemon/src/workers/local/tagger_chunker.rs',
   slotHandler: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
   slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
   slotOrchestrator: 'crates/missiond-daemon/src/slot_orchestrator/mod.rs',
@@ -31,6 +35,7 @@ const DEFAULT_FILES = {
   pgMessage: 'crates/missiond-core/src/db/pg/message.rs',
   pgConversation: 'crates/missiond-core/src/db/pg/conversation.rs',
   duplicateReport: 'scripts/report-codex-conversation-duplicates.mjs',
+  claudeRoleAudit: 'scripts/report-claude-role-attribution.mjs',
   sourceMigration: 'crates/missiond-core/migrations/20260501000000_canonical_cli_sources.sql',
   sourceCleanupMigration: 'crates/missiond-core/migrations/20260501001000_clean_stale_cli_slot_sessions.sql',
   conversationTypes: 'crates/missiond-core/src/types/conversation.rs',
@@ -99,6 +104,9 @@ function checkFiles(root, files) {
     'mission_conversation_get MUST retrieve tail messages with the indexed (session_id,id) path',
     'Historical duplicate cleanup is dry-run/report-first',
     'Gemini background reconcile MUST use size/mtime companion watermarks',
+    'top-level raw_role=user inside automated slot sessions normalizes to worker_user',
+    'raw_role is preserved for audit',
+    'scripts/report-claude-role-attribution.mjs',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
   ]);
 
@@ -157,6 +165,8 @@ function checkFiles(root, files) {
     'canonical_source_for_engine(engine).to_string()',
     'chat_type_for_source(&source)',
     'updated.source = source.clone();',
+    'normalize_claude_message_role(',
+    'worker_user',
   ]);
   rejectAll(diagnostics, files.messageHandler, sources.messageHandler, [
     'source: "pty".to_string()',
@@ -178,6 +188,30 @@ function checkFiles(root, files) {
   requireAll(diagnostics, files.claudeWatcher, sources.claudeWatcher, [
     'source: String',
     '"claude_code"',
+  ]);
+
+  requireAll(diagnostics, files.eventsSync, sources.eventsSync, [
+    'pub fn normalize_claude_message_role',
+    '"worker_user".to_string()',
+    'raw_role: Some(msg.message.role.clone())',
+    'role_normalization_tests',
+    'worker_user_only_in_automated_slot_session',
+  ]);
+
+  requireAll(diagnostics, files.reconcileWorker, sources.reconcileWorker, [
+    'normalize_claude_message_role(',
+    'raw_role: Some(msg.message.role.clone())',
+  ]);
+
+  requireAll(diagnostics, files.conversationQuery, sources.conversationQuery, [
+    '"rawRole": m.raw_role',
+    'm.role == "worker_user"',
+    'slot_id_for_display.clone()',
+  ]);
+
+  requireAll(diagnostics, files.taggerChunker, sources.taggerChunker, [
+    'worker_user',
+    '"user" | "worker_user" | "agent_user"',
   ]);
 
   requireAll(diagnostics, files.geminiWatcher, sources.geminiWatcher, [
@@ -245,6 +279,13 @@ function checkFiles(root, files) {
     "mode: 'dry-run'",
     'duplicateIds',
     'keepId',
+    'mission_conversation_query',
+  ]);
+
+  requireAll(diagnostics, files.claudeRoleAudit, sources.claudeRoleAudit, [
+    "mode: 'dry-run'",
+    'worker_user',
+    'systemWorkerPromptSuspects',
     'mission_conversation_query',
   ]);
 

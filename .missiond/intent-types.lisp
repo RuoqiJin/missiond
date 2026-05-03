@@ -245,6 +245,9 @@
     :doc "Single message in a conversation"
     (field id i64)
     (field session_id String)
+    ;; role: canonical MissionD taxonomy emitted by events_sync::normalize_claude_message_role.
+    ;; Possible values: user | assistant | system | tool_result | thinking | compact_summary
+    ;; | agent_user | agent_assistant | worker_user. Provider's original role kept in raw_role.
     (field role String)
     (field content String)
     (field raw_content "Option<String>")

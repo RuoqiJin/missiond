@@ -194,6 +194,40 @@ pub fn extract_text_content(content: &Value) -> String {
     }
 }
 
+/// Canonical role mapping for Claude Code conversation messages.
+///
+/// The provider JSONL role is preserved as `raw_role`; this function decides
+/// MissionD's semantic role. Automated worker prompts are not human messages,
+/// but they also should not be hidden as generic `system` noise in Logs.
+pub fn normalize_claude_message_role(
+    raw_role: &str,
+    content_types: &[&str],
+    is_slot_session: bool,
+    is_interactive_conversation: bool,
+    is_agent_sidechain: bool,
+    is_compact_summary: bool,
+) -> String {
+    let is_tool_result =
+        !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
+    let is_thinking = !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
+
+    if is_tool_result {
+        "tool_result".to_string()
+    } else if is_thinking {
+        "thinking".to_string()
+    } else if is_compact_summary {
+        "compact_summary".to_string()
+    } else if is_agent_sidechain && raw_role == "user" {
+        "agent_user".to_string()
+    } else if is_agent_sidechain && raw_role == "assistant" {
+        "agent_assistant".to_string()
+    } else if raw_role == "user" && is_slot_session && !is_interactive_conversation {
+        "worker_user".to_string()
+    } else {
+        raw_role.to_string()
+    }
+}
+
 /// Store raw content JSON for DB storage.
 /// Full preservation including base64 images — user requires complete data capture.
 pub fn sanitize_raw_content(content: &Value) -> Option<String> {
@@ -493,7 +527,7 @@ pub async fn handle_new_events(state: &AppState, session_id: String, events: Vec
                                         missiond_core::types::ConversationMessage {
                                             id: 0,
                                             session_id: session_id.clone(),
-                                            raw_role: None,
+                                            raw_role: Some(role.to_string()),
                                             role: agent_role,
                                             content: text_content,
                                             raw_content: serde_json::to_string(&content_val).ok(),
@@ -823,8 +857,12 @@ pub async fn backfill_tool_calls(state: &crate::state::AppState) {
                 tool_calls.extend(extract_tool_calls_from_assistant(
                     session_id, timestamp, &content,
                 ));
-            } else if role == "user" || role == "system" || role == "tool_result" {
-                // "system" = slot sessions where user messages are stored as system role
+            } else if role == "user"
+                || role == "worker_user"
+                || role == "system"
+                || role == "tool_result"
+            {
+                // "worker_user" = automated slot prompts; "system" remains for older rows.
                 // "tool_result" = stored as separate role in DB
                 tool_results.extend(extract_tool_results_from_user(&content));
             }
@@ -895,7 +933,11 @@ pub async fn backfill_tool_calls(state: &crate::state::AppState) {
                 Err(_) => continue,
             };
             for (role, raw_content, _ts) in &messages {
-                if role != "user" && role != "system" && role != "tool_result" {
+                if role != "user"
+                    && role != "worker_user"
+                    && role != "system"
+                    && role != "tool_result"
+                {
                     continue;
                 }
                 let content: Value = match serde_json::from_str(raw_content) {
@@ -972,8 +1014,6 @@ pub async fn reconcile_conversation_messages(
             .unwrap_or_default();
         let is_tool_result =
             !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
-        let is_thinking =
-            !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
 
         if text_content.is_empty() && !is_tool_result {
             return;
@@ -983,22 +1023,21 @@ pub async fn reconcile_conversation_messages(
         } else {
             text_content
         };
-        let role = if is_tool_result {
-            "tool_result".to_string()
-        } else if is_thinking {
-            "thinking".to_string()
-        } else if msg.message.role == "user" && is_slot_session {
-            "system".to_string()
-        } else {
-            msg.message.role.clone()
-        };
+        let role = normalize_claude_message_role(
+            &msg.message.role,
+            &content_types,
+            is_slot_session,
+            false,
+            msg.is_sidechain,
+            false,
+        );
         let raw_content = sanitize_raw_content(&msg.message.content);
 
         let tool_name = extract_tool_names_csv(&msg.message.content);
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: sid.clone(),
-            raw_role: None,
+            raw_role: Some(msg.message.role.clone()),
             role,
             content,
             raw_content,
@@ -1039,5 +1078,131 @@ pub async fn reconcile_conversation_messages(
         _ => {
             // All messages already existed — no gap
         }
+    }
+}
+
+#[cfg(test)]
+mod role_normalization_tests {
+    use super::normalize_claude_message_role;
+
+    fn call(
+        raw_role: &str,
+        types: &[&str],
+        is_slot: bool,
+        is_interactive: bool,
+        is_sidechain: bool,
+        is_compact: bool,
+    ) -> String {
+        normalize_claude_message_role(
+            raw_role,
+            types,
+            is_slot,
+            is_interactive,
+            is_sidechain,
+            is_compact,
+        )
+    }
+
+    #[test]
+    fn tool_result_wins_over_everything() {
+        assert_eq!(
+            call("user", &["tool_result"], true, false, true, true),
+            "tool_result"
+        );
+        assert_eq!(
+            call(
+                "assistant",
+                &["tool_result", "tool_result"],
+                false,
+                true,
+                false,
+                false
+            ),
+            "tool_result"
+        );
+    }
+
+    #[test]
+    fn thinking_only_block_maps_to_thinking() {
+        assert_eq!(
+            call("assistant", &["thinking"], false, false, false, false),
+            "thinking"
+        );
+    }
+
+    #[test]
+    fn mixed_blocks_do_not_collapse_to_tool_or_thinking() {
+        assert_eq!(
+            call(
+                "assistant",
+                &["text", "tool_result"],
+                false,
+                false,
+                false,
+                false
+            ),
+            "assistant"
+        );
+        assert_eq!(
+            call(
+                "assistant",
+                &["text", "thinking"],
+                false,
+                false,
+                false,
+                false
+            ),
+            "assistant"
+        );
+    }
+
+    #[test]
+    fn compact_summary_overrides_worker_and_agent() {
+        assert_eq!(
+            call("user", &["text"], true, false, true, true),
+            "compact_summary"
+        );
+    }
+
+    #[test]
+    fn agent_sidechain_user_and_assistant() {
+        assert_eq!(
+            call("user", &["text"], false, false, true, false),
+            "agent_user"
+        );
+        assert_eq!(
+            call("assistant", &["text"], false, false, true, false),
+            "agent_assistant"
+        );
+    }
+
+    #[test]
+    fn worker_user_only_in_automated_slot_session() {
+        // automated slot session, non-interactive → worker_user
+        assert_eq!(
+            call("user", &["text"], true, false, false, false),
+            "worker_user"
+        );
+        // interactive (chat/jarvis/user) → keep raw user even in slot
+        assert_eq!(call("user", &["text"], true, true, false, false), "user");
+        // non-slot → keep raw user
+        assert_eq!(call("user", &["text"], false, false, false, false), "user");
+    }
+
+    #[test]
+    fn empty_content_types_falls_through_to_raw_role() {
+        assert_eq!(
+            call("assistant", &[], false, false, false, false),
+            "assistant"
+        );
+        assert_eq!(call("user", &[], false, false, false, false), "user");
+    }
+
+    #[test]
+    fn raw_role_passthrough_for_unrecognized_roles() {
+        assert_eq!(
+            call("system", &["text"], false, false, false, false),
+            "system"
+        );
     }
 }

@@ -292,7 +292,7 @@ async fn read_recent_commits(root: &Path) -> Result<Vec<String>> {
     let output = tokio::time::timeout(
         Duration::from_secs(10),
         Command::new("git")
-            .args(["log", "-5", "--oneline"])
+            .args(["log", "-5", "--oneline", "--", ".missiond/v3"])
             .current_dir(root)
             .output(),
     )
@@ -311,47 +311,45 @@ async fn read_recent_commits(root: &Path) -> Result<Vec<String>> {
 fn build_findings(convergence: &Value) -> Vec<NightlyFinding> {
     let mut findings = vec![
         NightlyFinding {
-            id: "commit-lisp-drift-loop".to_string(),
-            class: "safe-backfill".to_string(),
-            risk: "low".to_string(),
-            summary: "Confirm commit-Lisp convergence is event-driven and uses committed snapshots, not current worktree diffs.".to_string(),
-            evidence: vec![
-                "SystemEvent::ContextualCommitDetected".to_string(),
-                ".missiond/workflows/commit-lisp-convergence.lisp".to_string(),
-                "git diff-tree --root --no-commit-id -r --name-only <sha>".to_string(),
-            ],
-            next_action: "Observe commit events; create visible backfill BoardTask for code-only commits.".to_string(),
-        },
-        NightlyFinding {
-            id: "legacy-direct-worker-dual-track".to_string(),
+            id: "v3-runtime-projection-review".to_string(),
             class: "needs-investigation".to_string(),
-            risk: "medium".to_string(),
-            summary: "Legacy lisp_survey/arch_maintenance direct workers still exist and should eventually sit behind BoardTask/Autopilot workflow adapters.".to_string(),
-            evidence: vec![
-                "crates/missiond-daemon/src/workers/sonnet/lisp_survey_worker.rs".to_string(),
-                "crates/missiond-daemon/src/workers/sonnet/arch_maintenance_worker.rs".to_string(),
-            ],
-            next_action: "Ask a read-only context organizer to propose a migration shard before code changes.".to_string(),
-        },
-        NightlyFinding {
-            id: "pty-diagnostic-only-audit".to_string(),
-            class: "observe-only".to_string(),
             risk: "low".to_string(),
-            summary: "Completion decisions must remain durable-log/event based; PTY recognition is health telemetry only.".to_string(),
-            evidence: vec![
-                "resident-master-control.evidence-authority".to_string(),
-                "provider JSONL / Codex sqlite / Gemini chat file".to_string(),
-            ],
-            next_action: "Flag any close path that uses PTY idle without durable final evidence.".to_string(),
-        },
-        NightlyFinding {
-            id: "lisp-density-review".to_string(),
-            class: "architecture-proposal".to_string(),
-            risk: "medium".to_string(),
-            summary: "Review V3/project Lisp for repeated prose and move evidence into sidecars while preserving executable entry/core/egress steps.".to_string(),
+            summary: "Review MissionD V3 runtime-projection surfaces for policy/code drift without reading KB, historical conversations, or provider logs.".to_string(),
             evidence: vec![
                 ".missiond/v3/missiond-blueprint.lisp".to_string(),
-                ".missiond/frontend/board-blueprint.lisp".to_string(),
+                "node scripts/check-v3-final-convergence.mjs --json --static-only".to_string(),
+            ],
+            next_action: "Create a read-only V3 SSOT investigation only when mode=needs-investigation and apply=true.".to_string(),
+        },
+        NightlyFinding {
+            id: "v3-surface-checker-drift".to_string(),
+            class: "safe-backfill".to_string(),
+            risk: "low".to_string(),
+            summary: "Check whether V3 implementation-map surfaces still have matching checker pins and file anchors.".to_string(),
+            evidence: vec![
+                ".missiond/v3/missiond-blueprint.lisp".to_string(),
+                "scripts/check-v3-code-isomorphism-complete.mjs".to_string(),
+            ],
+            next_action: "If a checker pin is missing, create an exact Lisp/checker backfill task.".to_string(),
+        },
+        NightlyFinding {
+            id: "v3-logic-consistency-review".to_string(),
+            class: "architecture-proposal".to_string(),
+            risk: "low".to_string(),
+            summary: "Inspect only MissionD V3 Lisp for contradictory loops, duplicated responsibilities, missing entry/core/egress steps, and unclear ownership.".to_string(),
+            evidence: vec![
+                ".missiond/v3/missiond-blueprint.lisp".to_string(),
+                ".missiond/v3/evidence/".to_string(),
+            ],
+            next_action: "Write an architecture proposal only; do not open KB/history/memory tasks in default nightly mode.".to_string(),
+        },
+        NightlyFinding {
+            id: "v3-lisp-density-review".to_string(),
+            class: "architecture-proposal".to_string(),
+            risk: "medium".to_string(),
+            summary: "Review MissionD V3 Lisp for repeated prose and move evidence into sidecars while preserving executable entry/core/egress steps.".to_string(),
+            evidence: vec![
+                ".missiond/v3/missiond-blueprint.lisp".to_string(),
             ],
             next_action: "Generate proposal only; do not auto-compress without checker coverage.".to_string(),
         },
@@ -552,13 +550,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn findings_include_fixed_master_audit_topics() {
+    fn findings_focus_only_on_v3_ssot_topics() {
         let findings = build_findings(&json!({"ok": true}));
         let ids: Vec<_> = findings.iter().map(|finding| finding.id.as_str()).collect();
-        assert!(ids.contains(&"commit-lisp-drift-loop"));
-        assert!(ids.contains(&"legacy-direct-worker-dual-track"));
-        assert!(ids.contains(&"pty-diagnostic-only-audit"));
-        assert!(ids.contains(&"lisp-density-review"));
+        assert!(ids.contains(&"v3-runtime-projection-review"));
+        assert!(ids.contains(&"v3-surface-checker-drift"));
+        assert!(ids.contains(&"v3-logic-consistency-review"));
+        assert!(ids.contains(&"v3-lisp-density-review"));
+        assert!(!ids.contains(&"commit-lisp-drift-loop"));
+        assert!(!ids.contains(&"legacy-direct-worker-dual-track"));
+        assert!(!ids.contains(&"pty-diagnostic-only-audit"));
     }
 
     #[test]
@@ -577,7 +578,7 @@ mod tests {
         let findings = build_findings(&json!({"ok": true}));
         let selected = select_requested_followup(&findings, "needs-investigation")
             .expect("needs-investigation finding");
-        assert_eq!(selected.id, "legacy-direct-worker-dual-track");
+        assert_eq!(selected.id, "v3-runtime-projection-review");
         assert_eq!(selected.class, "needs-investigation");
     }
 
@@ -602,7 +603,7 @@ mod tests {
         };
         let rendered = render_report(&report);
         assert!(rendered.contains("nightly-evolution-report"));
-        assert!(rendered.contains("commit-lisp-drift-loop"));
+        assert!(rendered.contains("v3-runtime-projection-review"));
         assert!(rendered.contains("abc commit"));
     }
 }

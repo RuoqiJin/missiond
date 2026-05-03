@@ -32,7 +32,28 @@
     (component events-sync
       :target "crates/missiond-daemon/src/events_sync.rs"
       (depends event-bus)
-      (writes-to system_timeline))
+      (writes-to system_timeline)
+      ;; Canonical message-role classifier shared by message_handler ingest()
+      ;; and reconcile_worker reconcile_conversation_messages(). Provider JSONL
+      ;; role is preserved in conversation_messages.raw_role; the semantic role
+      ;; written to conversation_messages.role is decided here so Logs/turn
+      ;; chunking/timeline see one consistent taxonomy.
+      (function normalize_claude_message_role
+        :signature "(raw_role: &str, content_types: &[&str], is_slot_session: bool, is_interactive_conversation: bool, is_agent_sidechain: bool, is_compact_summary: bool) -> String"
+        (role-taxonomy
+          (tool_result      "all content blocks are tool_result; highest priority")
+          (thinking         "all content blocks are thinking")
+          (compact_summary  "user message detected as Claude compact-summary recap")
+          (agent_user       "raw_role=user inside agent sidechain (Task/agent-* session)")
+          (agent_assistant  "raw_role=assistant inside agent sidechain")
+          (worker_user      "raw_role=user in automated slot session AND non-interactive conversation_type — internal MissionD prompt, not human input")
+          (passthrough      "otherwise raw_role unchanged (user / assistant / system / etc.)"))
+        (precedence "tool_result > thinking > compact_summary > agent_sidechain > worker_user > raw_role")
+        (consumers
+          (turn-builder    "tagger_chunker turn boundaries: user|worker_user|agent_user|compact_summary start a new Turn")
+          (logs-filter     "handlers/comm/conversation/query.rs human-input filter recognizes worker_user/agent_user")
+          (memory-scrubber "handlers/knowledge/memory.rs treats tool_result specially"))
+        (checker "events_sync::role_normalization_tests — 8 cases covering all branches and precedence")))
 
     (component worker-registry
       :target "crates/missiond-daemon/src/workers/registry.rs"

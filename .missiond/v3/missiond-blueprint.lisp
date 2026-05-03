@@ -853,10 +853,10 @@
                :max-followup-tasks 3
                :risk-gate "apply=true selects only findings whose class matches the requested mode; safe-backfill requires low risk, needs-investigation creates read-only context work, and proposal/user-decision modes create proposal tasks only.")
       :core
-        ((step s1 :logic "NightlyEvolutionService reads V3/project Lisp, Board open tasks, recent events, recent commits, worker telemetry, and final convergence snapshot")
+        ((step s1 :logic "NightlyEvolutionService reads only MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**; default nightly mode excludes KB, historical conversations, provider durable logs, worker telemetry, and Board open tasks")
          (step s2 :logic "write observe-first .missiond/v3/runtime/nightly-evolution/<date>.report.lisp")
          (step s3 :logic "materialize visible proposal/backfill BoardTasks only when apply=true, requested mode matches finding class, and risk gate allows it")
-         (step s4 :logic "prefer read-only upstream-source audit and context-pack generation")
+         (step s4 :logic "prefer read-only MissionD V3 SSOT investigation and context-pack generation")
          (step s5 :logic "checkpoint before and after each batch so daemon restart can resume"))
       :egress [nightly-evolution-report BoardTaskCreated master-control-checkpoint mission_master_status.nightlyEvolution])
     (commit-lisp-convergence-loop
@@ -872,12 +872,12 @@
     (nightly-evolution-loop
       :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
       :core
-        ((step s1 :logic "collect evidence from V3 blueprint, frontend blueprint, project registry, Board, recent events, recent commits, worker telemetry, and final convergence snapshot")
-         (step s2 :logic "detect fixed review topics: commit-Lisp drift, event subscription gaps, text heuristic classifiers, legacy direct workers, PTY-only completion, Board close authority, frontend cockpit visibility, and repeated Lisp prose")
+        ((step s1 :logic "collect evidence only from MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**")
+         (step s2 :logic "detect MissionD V3 SSOT issues: contradictory loops, structure repetition, surface/checker gaps, runtime projection gaps, missing entry/core/egress steps, and repeated Lisp prose")
          (step s3 :logic "classify findings as observe-only, safe-backfill, needs-investigation, architecture-proposal, or requires-user-decision")
          (step s4 :logic "default observe-only writes report; apply=true selects a finding by requested mode and may create one visible follow-up BoardTask")
          (step s5 :logic "master supervises anomalies; routine safe backfill can later be delegated directly through workflow trigger"))
-      :egress [nightly-evolution-report proposal-boardtask kb-note master-control-checkpoint])
+      :egress [nightly-evolution-report proposal-boardtask master-control-checkpoint])
     :mcp-readiness
       (:source "~/.codex/config.toml"
        :probe "codex mcp list"
@@ -1320,7 +1320,9 @@
        "mission_conversation_get MUST retrieve tail messages with the indexed (session_id,id) path and assign display seq after duplicate coalescing; it MUST NOT use a ROW_NUMBER window over an entire large Codex/Gemini session."
        "Historical duplicate cleanup is dry-run/report-first; destructive DB cleanup must keep the earliest row in each duplicate group and require an explicit reviewed apply path."
        "Gemini background reconcile MUST use size/mtime companion watermarks to skip already-reconciled old chat files without reparsing full historical transcripts; manual reconcile may force a full scan."
-       "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."]
+       "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."
+       "ClaudeCode provider role normalization MUST be shared by realtime watcher, per-session reconcile, and daily reconcile paths: top-level raw_role=user inside automated slot sessions normalizes to worker_user, interactive Jarvis/user conversations remain user, sidechain progress remains agent_user/agent_assistant, and raw_role is preserved for audit."
+       "Historical ClaudeCode role repair is dry-run/report-first through scripts/report-claude-role-attribution.mjs; first pass reports suspected system/user/agent_user drift and never mutates DB."]
     :checker "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs")
 
   (upstream-pty-signatures
@@ -1539,7 +1541,7 @@
       :v3-pillar workstation
       :v3-function nightly-evolution
       :surface nightly-evolution-loop
-      :note "V2 architecture maintenance becomes a conservative workflow.lisp muscle memory: nightly evolution reviews V3/project Lisp, Board, event logs, recent commits, worker telemetry, and convergence status, then writes reports and visible follow-up tasks under risk gates.")
+      :note "V2 architecture maintenance becomes a conservative workflow.lisp muscle memory: nightly evolution now defaults to MissionD V3 SSOT only. It reviews the V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**, then writes reports and visible follow-up tasks under risk gates. KB, historical conversations, provider logs, worker telemetry, and Board open-task evidence belong to later explicit memory-audit workflows.")
     (v2-item event-driven-autopilot-runtime
       :status code-aligned
       :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router / BoardTaskCreated / SlotBecameIdle"
@@ -1964,12 +1966,12 @@
       (function nightly-evolution
         :surface nightly-evolution-loop
         :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
-        :core ((step s1 :logic "collect V3/project Lisp, Board, event tail, recent commits, worker telemetry, and final convergence static snapshot")
-               (step s2 :logic "detect master-control and workflow loop smells using fixed review rules")
+        :core ((step s1 :logic "collect only MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**")
+               (step s2 :logic "detect MissionD V3 SSOT loop smells, structure repetition, surface/checker gaps, runtime projection gaps, missing entry/core/egress steps, and repeated Lisp prose")
                (step s3 :logic "classify findings into observe-only, safe-backfill, needs-investigation, architecture-proposal, or requires-user-decision")
                (step s4 :logic "write nightly-evolution report; create visible follow-up tasks only under risk gate")
                (step s5 :logic "surface status through mission_master_status.nightlyEvolution"))
-        :egress [nightly_evolution_report proposal_boardtask kb_note mission_master_status.nightlyEvolution])
+        :egress [nightly_evolution_report proposal_boardtask mission_master_status.nightlyEvolution])
       (function delegated-boardtask-runtime
         :surface autopilot-runtime
         :entry [BoardEvent.TaskCreated BoardEvent.StatusChanged SlotEvent.BecameIdle board_dispatch_notify autopilot.dispatch_board_tasks]
@@ -2514,7 +2516,7 @@
              "crates/missiond-mcp/src/gen_gateway.rs"
              "scripts/check-v3-nightly-evolution-isomorphism.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "nightly-evolution-loop turns resident master self-review into a reusable workflow. NightlyEvolutionService runs observe-first from V3 schedule policy, and mission_nightly_evolution can manually run the same workflow. It collects V3/frontend/project Lisp, Board/event/commit/worker evidence, runs final convergence static snapshot, writes .missiond/v3/runtime/nightly-evolution/<date>.report.lisp, and only creates visible low-risk follow-up BoardTasks when apply=true and risk gates allow it.")
+      :note "nightly-evolution-loop turns resident master self-review into a reusable workflow. NightlyEvolutionService runs observe-first from V3 schedule policy, and mission_nightly_evolution can manually run the same workflow. Its default evidence set is deliberately narrow: MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**. It does not read KB, historical conversations, provider logs, worker telemetry, or Board open tasks unless a later explicit memory-audit workflow asks for them. The report writes .missiond/v3/runtime/nightly-evolution/<date>.report.lisp and only creates visible low-risk follow-up BoardTasks when apply=true and risk gates allow it.")
 
     (surface context-pack
       :status "code-aligned"
@@ -2665,7 +2667,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own realtime extraction budgets, pty send budgets, cadences, bounded SQL probes, and physical split ownership across kb/* modules. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
+	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own realtime extraction budgets, pty send budgets, cadences, bounded SQL probes, and physical split ownership across kb/* modules. Conversation history distillation is intentionally deferred behind .missiond/workflows/conversation-memory-distillation.lisp: default mode produces candidate-memory / infrastructure issue inventory only, rejects facts already superseded by project SSOT Lisp, and does not write or delete KB until log role attribution and project SSOT coverage are stable. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
 
     (surface project-registry
       :status "code-aligned"

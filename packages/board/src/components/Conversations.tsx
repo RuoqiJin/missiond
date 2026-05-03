@@ -60,6 +60,7 @@ interface ConversationMessage {
   id: number;
   sessionId: string;
   role: string;
+  rawRole?: string | null;
   roleDisplay: string | null;
   content: string;
   rawContent: string | null;
@@ -166,6 +167,7 @@ const ROLE_CONFIG: Record<
 > = {
   user: { icon: User, color: "text-blue-400", label: "用户" },
   system: { icon: Terminal, color: "text-orange-400", label: "系统指令" },
+  worker_user: { icon: Terminal, color: "text-cyan-400", label: "工位输入" },
   assistant: { icon: Bot, color: "text-green-400", label: "AI" },
   tool_use: { icon: Wrench, color: "text-amber-400", label: "工具调用" },
   tool_result: { icon: Wrench, color: "text-neutral-500", label: "工具结果" },
@@ -781,6 +783,7 @@ function MessageBubble({
     tool_result: "🔧",
     thinking: "🧠",
     system: "⚙️",
+    worker_user: "⌨",
     agent_user: "👤",
     agent_assistant: "🤖",
     compact_summary: "📋",

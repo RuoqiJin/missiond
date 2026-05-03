@@ -374,8 +374,6 @@ async fn reconcile_file_gap(
             .unwrap_or_default();
         let is_tool_result =
             !content_types.is_empty() && content_types.iter().all(|t| *t == "tool_result");
-        let is_thinking =
-            !content_types.is_empty() && content_types.iter().all(|t| *t == "thinking");
 
         if text_content.is_empty() && !is_tool_result {
             continue;
@@ -387,15 +385,14 @@ async fn reconcile_file_gap(
             text_content
         };
 
-        let role = if is_tool_result {
-            "tool_result".to_string()
-        } else if is_thinking {
-            "thinking".to_string()
-        } else if msg.message.role == "user" && is_slot_session {
-            "system".to_string()
-        } else {
-            msg.message.role.clone()
-        };
+        let role = events_sync::normalize_claude_message_role(
+            &msg.message.role,
+            &content_types,
+            is_slot_session,
+            false,
+            msg.is_sidechain,
+            false,
+        );
 
         let raw_content = events_sync::sanitize_raw_content(&msg.message.content);
         let tool_name = events_sync::extract_tool_names_csv(&msg.message.content);
@@ -403,7 +400,7 @@ async fn reconcile_file_gap(
         batch.push(missiond_core::types::ConversationMessage {
             id: 0,
             session_id: sid.clone(),
-            raw_role: None,
+            raw_role: Some(msg.message.role.clone()),
             role,
             content,
             raw_content,

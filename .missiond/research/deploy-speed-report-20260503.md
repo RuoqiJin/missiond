@@ -2,17 +2,45 @@
 
 ## Current Timing Snapshot
 
-Latest observed debug blue-green deploy timing:
+Latest observed debug blue-green deploy timing with `MISSIOND_USE_SCCACHE=1`:
 
 | Stage | Time |
 | --- | ---: |
-| cargo-build | 30s |
+| cargo-build | 1s |
+| release-copy | 0s |
+| codesign | 1s |
+| pre-switch-mcp-smoke | 0s |
 | launchd | 3s |
 | socket-wait | 2s |
-| post-smoke | 5s |
+| post-switch-mcp-smoke | 8s |
+| cleanup | 0s |
 
-The dominant cost is local Rust compilation. Launchd restart, socket readiness,
-and MCP smoke are already small compared with `cargo build`.
+The full debug blue-green deploy promoted release
+`20260503T133525Z-9d3f67e6aded-debug`. The previous observed slow path was
+`cargo-build=30s`; the newest full deploy was fast because Cargo had already
+warmed its incremental state in two preceding build-only runs.
+
+## SCCache Measurement
+
+Two consecutive build-only runs were measured after `sccache --zero-stats`:
+
+| Run | cargo-build | sccache compile requests | cache hits | cache misses | non-cacheable |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| build-only #1 | 37s | 6 | 0 | 0 | 6 |
+| build-only #2 | 1s | 6 | 0 | 0 | 6 |
+
+`sccache --show-stats` reported non-cacheable reasons:
+
+- `crate-type`: 2
+- `missing input`: 2
+- `-`: 1
+- `incremental`: 1
+
+Conclusion: this local debug deploy path is not currently benefiting from
+sccache. The second run is fast because Cargo incremental compilation is warm,
+not because sccache is producing hits. For this repository's current local
+iteration loop, preserving incremental build state matters more than adding a
+registry/cache layer.
 
 ## Implemented
 
@@ -28,25 +56,34 @@ and MCP smoke are already small compared with `cargo build`.
 
 ## Not Yet Proven
 
-- `sccache` hit rate has not been measured across repeated deploys.
+- `sccache` may still help clean or CI-like builds if incremental is disabled,
+  but it did not help the measured local debug deploy path.
 - No `kellnr` integration is active.
 
 ## Assessment
 
-The next optimization should verify `sccache` first. `kellnr` helps with crate
-registry/download caching, but the current bottleneck is local incremental
-compilation (`cargo-build=30s`), not dependency download. If `sccache` shows a
-low hit rate, the next report should inspect `RUSTC_WRAPPER`, cache directory,
-and whether debug/release flags or env changes are invalidating the cache.
+Keep `MISSIOND_USE_SCCACHE=1` as an opt-in experiment, but do not treat it as
+the default deploy-speed fix yet. `kellnr` helps with crate registry/download
+caching, but the current measured bottleneck is local compilation and smoke
+latency, not dependency download.
+
+The next speed gains should come from:
+
+- Avoiding unnecessary clean builds and preserving Cargo incremental state.
+- Measuring MCP smoke latency separately; the latest post-switch MCP smoke was
+  8s, which is now larger than a warm cargo build.
+- Considering a dev-only restart path that reuses an already built binary when
+  `git rev-parse HEAD` and binary mtime prove no Rust change occurred.
 
 ## Next Measurement
 
-Run two consecutive debug deploys:
+If sccache is revisited, measure clean and incremental separately:
 
 ```bash
-MISSIOND_USE_SCCACHE=1 scripts/deploy-daemon.sh --debug
+sccache --zero-stats
+MISSIOND_USE_SCCACHE=1 scripts/deploy-daemon.sh --debug --build-only
 sccache --show-stats
-MISSIOND_USE_SCCACHE=1 scripts/deploy-daemon.sh --debug
+MISSIOND_USE_SCCACHE=1 CARGO_INCREMENTAL=0 scripts/deploy-daemon.sh --debug --build-only
 sccache --show-stats
 ```
 

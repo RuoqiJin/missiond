@@ -401,7 +401,7 @@ async fn chunk_turns(
 
 /// Extract structured Turns from a flat message stream.
 ///
-/// Turn boundary: `user | agent_user | compact_summary` starts a new Turn.
+/// Turn boundary: `user | worker_user | agent_user | compact_summary` starts a new Turn.
 /// Everything else appends to the current Turn.
 fn extract_turns(messages: &[ConversationMessage]) -> Vec<RawTurn> {
     let mut turns: Vec<RawTurn> = Vec::new();
@@ -418,7 +418,10 @@ fn extract_turns(messages: &[ConversationMessage]) -> Vec<RawTurn> {
             continue;
         }
 
-        let is_turn_start = matches!(msg.role.as_str(), "user" | "agent_user" | "compact_summary");
+        let is_turn_start = matches!(
+            msg.role.as_str(),
+            "user" | "worker_user" | "agent_user" | "compact_summary"
+        );
 
         if is_turn_start {
             // Merge rule: if previous turn has no assistant response (user sent but AI
@@ -507,7 +510,7 @@ struct TurnBuilder {
 
 impl TurnBuilder {
     fn new(msg: &ConversationMessage) -> Self {
-        let is_user = matches!(msg.role.as_str(), "user" | "agent_user");
+        let is_user = matches!(msg.role.as_str(), "user" | "worker_user" | "agent_user");
         let user_content = if is_user {
             truncate_str(&msg.content, USER_CONTENT_MAX_CHARS)
         } else {
@@ -564,7 +567,7 @@ impl TurnBuilder {
         self.ended_at = msg.timestamp.clone();
         self.message_count += 1;
         // Use the latest user message as the canonical intent
-        if matches!(msg.role.as_str(), "user" | "agent_user") {
+        if matches!(msg.role.as_str(), "user" | "worker_user" | "agent_user") {
             let new_content = truncate_str(&msg.content, USER_CONTENT_MAX_CHARS);
             if !new_content.is_empty() {
                 self.user_content = new_content;
