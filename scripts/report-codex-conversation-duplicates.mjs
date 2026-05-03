@@ -9,12 +9,13 @@ const args = process.argv.slice(2);
 const json = args.includes('--json');
 const sessionLimit = numberArg('--session-limit', 20);
 const tail = numberArg('--tail', 1000);
+const timeoutMs = numberArg('--timeout-ms', 30_000);
 
 const sessions = await callTool('mission_conversation_query', {
   action: 'list',
   conversationType: 'all',
   limit: sessionLimit * 3,
-});
+}, timeoutMs);
 
 const codexSessions = (Array.isArray(sessions) ? sessions : [])
   .filter((s) => String(s.source || '').includes('codex'))
@@ -26,7 +27,7 @@ for (const session of codexSessions) {
     action: 'get',
     sessionId: session.id,
     tail,
-  });
+  }, timeoutMs);
   const messages = Array.isArray(detail?.messages) ? detail.messages : [];
   const groups = new Map();
   for (const message of messages) {
@@ -114,13 +115,13 @@ function numberArg(name, fallback) {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-async function callTool(name, toolArgs = {}) {
-  const result = await callMissiond('tools/call', { name, arguments: toolArgs });
+async function callTool(name, toolArgs = {}, callTimeoutMs = timeoutMs) {
+  const result = await callMissiond('tools/call', { name, arguments: toolArgs }, callTimeoutMs);
   const text = result?.content?.[0]?.text;
   return text ? JSON.parse(text) : result;
 }
 
-function callMissiond(method, params) {
+function callMissiond(method, params, callTimeoutMs = timeoutMs) {
   return new Promise((resolve, reject) => {
     const socketPath = resolveSocketPath();
     const socket = net.createConnection(socketPath, () => {
@@ -140,9 +141,9 @@ function callMissiond(method, params) {
       }
     });
     socket.on('error', reject);
-    socket.setTimeout(10_000, () => {
+    socket.setTimeout(callTimeoutMs, () => {
       socket.destroy();
-      reject(new Error('missiond IPC timeout'));
+      reject(new Error(`missiond IPC timeout after ${callTimeoutMs}ms`));
     });
   });
 }
