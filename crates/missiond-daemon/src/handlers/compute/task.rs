@@ -242,6 +242,11 @@ async fn handle_submit(state: &AppState, args: Value) -> Result<ToolResult> {
                     search_enabled: slot.config.search_enabled.unwrap_or(false),
                     sandbox: slot.config.sandbox.clone(),
                     approval_policy: slot.config.approval_policy.clone(),
+                    tool_policy_path: slot
+                        .config
+                        .tool_policy_path
+                        .clone()
+                        .map(std::path::PathBuf::from),
                     extra_env: std::collections::HashMap::new(),
                     initial_prompt: None,
                 },

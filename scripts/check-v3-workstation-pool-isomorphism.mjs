@@ -29,6 +29,7 @@ Checks the V3 workstation-pool Lisp/code isomorphism contract:
 const FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   evidence: '.missiond/v3/evidence/workstation-pool.lisp',
+  geminiPolicy: '.missiond/v3/policies/gemini-readonly-policy.toml',
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   main: 'crates/missiond-daemon/src/main.rs',
   ptySession: 'crates/missiond-pty/src/session.rs',
@@ -99,7 +100,18 @@ function checkFiles(root) {
     'gemini-fast-survey',
     'codex-master-control',
     'read-only',
+    ':tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"',
     'mission_compute_slot action=list exposes workstation_pool',
+  ]);
+  requireAll(diagnostics, FILES.geminiPolicy, sources.geminiPolicy, [
+    'toolName = ["generalist", "codebase_investigator", "invoke_agent", "invoke_subagent"]',
+    'toolName = [',
+    '"replace"',
+    '"write_file"',
+    '"run_shell_command"',
+    '"exit_plan_mode"',
+    'decision = "deny"',
+    'modes = ["plan"]',
   ]);
 
   requireAll(diagnostics, FILES.runtime, sources.runtime, [
@@ -117,6 +129,8 @@ function checkFiles(root) {
     'reasoning_effort',
     'search_enabled',
     'approval_policy',
+    'tool_policy_path',
+    'read-only Gemini workstation-pool workers must declare :tool-policy-path',
   ]);
 
   requireAll(diagnostics, FILES.main, sources.main, [
@@ -129,6 +143,7 @@ function checkFiles(root) {
     'state.pty.init_slot(&pty_slot).await',
     'for worker in workstation_config.workstation_pool()',
     'dangerously_skip_permissions: Some(worker.write_allowed)',
+    'tool_policy_path: worker.tool_policy_path.clone()',
     'skip_permissions: worker.write_allowed',
     'state.mission.register_runtime_slot(slot_config)',
     'SlotManager: workstation pool registered from V3',
@@ -137,7 +152,10 @@ function checkFiles(root) {
   requireAll(diagnostics, FILES.ptySession, sources.ptySession, [
     'CliEngine::Gemini',
     '--approval-mode plan',
+    '--policy',
     '--approval-mode yolo',
+    'tool_policy_path: Option<&std::path::Path>',
+    'Gemini CLI: read-only tool policy enabled',
     'Gemini CLI: plan/read-only approval mode enabled',
     'gemini_command_uses_plan_mode_unless_permissions_are_skipped',
   ]);
@@ -200,7 +218,7 @@ function checkFiles(root) {
     'mission_compute_slot list status MUST derive from PTYManager',
     'mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask',
     'Codex master-control is a resident orchestrator lane',
-    'Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan`',
+    'Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`',
   ]);
   requireAll(diagnostics, FILES.supervisor, sources.supervisor, [
     'fn schedule_supervisor_patrol',
@@ -310,6 +328,13 @@ function validateGeminiWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':model-profile', 'gemini-ultra-pro-preview');
   requirePropText(diagnostics, file, props, ':model', 'nil');
   requirePropText(diagnostics, file, props, ':approval-policy', 'plan');
+  requirePropText(
+    diagnostics,
+    file,
+    props,
+    ':tool-policy-path',
+    '.missiond/v3/policies/gemini-readonly-policy.toml',
+  );
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
   requirePropBool(diagnostics, file, props, ':write-allowed', false);
   requireListItems(diagnostics, file, props, ':task-classes', [
@@ -346,6 +371,13 @@ function validateGeminiFastWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':role', 'survey');
   requirePropText(diagnostics, file, props, ':model', 'gemini-2.5-flash');
   requirePropText(diagnostics, file, props, ':approval-policy', 'plan');
+  requirePropText(
+    diagnostics,
+    file,
+    props,
+    ':tool-policy-path',
+    '.missiond/v3/policies/gemini-readonly-policy.toml',
+  );
   requirePropBool(diagnostics, file, props, ':write-allowed', false);
   requireListItems(diagnostics, file, props, ':task-classes', ['survey', 'mechanical-scan']);
 }
@@ -450,6 +482,7 @@ function buildFixture() {
       :model-profile gemini-ultra-pro-preview
       :model nil
       :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
       :task-classes [research review context-pack lisp-compression general]
       :capabilities [read-only analysis design-review]
       :max-concurrency 1
@@ -465,6 +498,7 @@ function buildFixture() {
       :model-profile nil
       :model "gemini-2.5-flash"
       :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
       :task-classes [survey summary mechanical-scan]
       :capabilities [read-only summary]
       :max-concurrency 1
@@ -493,7 +527,7 @@ function buildFixture() {
                  "mission_compute_slot list status MUST derive from PTYManager"
                  "mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask"
                  "Codex master-control is a resident orchestrator lane"
-                 "Read-only Gemini pool workers MUST project to Gemini CLI \`--approval-mode plan\`"]
+                 "Read-only Gemini pool workers MUST project to Gemini CLI \`--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml\`"]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
   (implementation-map
     (surface workstation-pool
@@ -508,8 +542,18 @@ function buildFixture() {
       :note "n")))`);
   write(root, 'evidence', `
 (workstation-pool-evidence
-  :single-login-phase ((claude-code-default :runtime-rule "x") (claude-code-fast-patch :runtime-rule "x") (gemini-ultra-pro :write-policy read-only :approval-mode plan) (gemini-fast-survey :write-policy read-only :approval-mode plan) (codex-master-control :runtime-rule "x"))
+  :single-login-phase ((claude-code-default :runtime-rule "x") (claude-code-fast-patch :runtime-rule "x") (gemini-ultra-pro :write-policy read-only :approval-mode plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml") (gemini-fast-survey :write-policy read-only :approval-mode plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml") (codex-master-control :runtime-rule "x"))
   :observability ["mission_compute_slot action=list exposes workstation_pool"])`);
+  write(root, 'geminiPolicy', `
+toolName = ["generalist", "codebase_investigator", "invoke_agent", "invoke_subagent"]
+toolName = [
+"replace"
+"write_file"
+"run_shell_command"
+"exit_plan_mode"
+]
+decision = "deny"
+modes = ["plan"]`);
   write(root, 'runtime', `
 pub(crate) struct WorkstationPoolRuntimeConfig;
 pub(crate) workstation_pool: Vec<WorkstationPoolRuntimeConfig>;
@@ -520,7 +564,8 @@ find_form(source, "workstation-pool");
 "workstation-pool must include a read-only Gemini BoardTask worker";
 "workstation-pool must include a non-shard Codex master-control worker";
 "claude-code-default"; "gemini-ultra-pro"; "codex-master-control";
-reasoning_effort; search_enabled; approval_policy;`);
+reasoning_effort; search_enabled; approval_policy; tool_policy_path;
+"read-only Gemini workstation-pool workers must declare :tool-policy-path";`);
   write(root, 'main', `
 fn workstation_pool_model() {}
 fn startup_slot_config() {}
@@ -528,6 +573,7 @@ fn workstation_pool_slot_config() {}
 reasoning_effort: worker.reasoning_effort.clone();
 search_enabled: Some(worker.search_enabled).filter;
 dangerously_skip_permissions: Some(worker.write_allowed);
+tool_policy_path: worker.tool_policy_path.clone();
 skip_permissions: worker.write_allowed;
 async fn register_and_init_runtime_slot() { state.pty.init_slot(&pty_slot).await; state.mission.register_runtime_slot(slot_config); }
 for worker in workstation_config.workstation_pool() {}
@@ -535,7 +581,10 @@ for worker in workstation_config.workstation_pool() {}
   write(root, 'ptySession', `
 CliEngine::Gemini;
 --approval-mode plan;
+--policy;
 --approval-mode yolo;
+tool_policy_path: Option<&std::path::Path>;
+Gemini CLI: read-only tool policy enabled;
 Gemini CLI: plan/read-only approval mode enabled;
 gemini_command_uses_plan_mode_unless_permissions_are_skipped;`);
   write(root, 'autopilot', `

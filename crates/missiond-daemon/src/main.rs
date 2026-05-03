@@ -166,6 +166,7 @@ fn startup_slot_config(
         search_enabled: None,
         sandbox: None,
         approval_policy: None,
+        tool_policy_path: None,
         traits,
         category: Some("worker".to_string()),
         env: None,
@@ -213,6 +214,7 @@ fn workstation_pool_slot_config(
         search_enabled: Some(worker.search_enabled).filter(|enabled| *enabled),
         sandbox: worker.sandbox.clone(),
         approval_policy: worker.approval_policy.clone(),
+        tool_policy_path: worker.tool_policy_path.clone(),
         traits,
         category: Some("worker".to_string()),
         env: None,
@@ -1648,6 +1650,11 @@ async fn main() -> Result<()> {
                                         search_enabled: slot.config.search_enabled.unwrap_or(false),
                                         sandbox: slot.config.sandbox.clone(),
                                         approval_policy: slot.config.approval_policy.clone(),
+                                        tool_policy_path: slot
+                                            .config
+                                            .tool_policy_path
+                                            .clone()
+                                            .map(std::path::PathBuf::from),
                                         extra_env: std::collections::HashMap::new(),
                                         initial_prompt: slot.config.initial_prompt.clone(),
                                     },

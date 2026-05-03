@@ -360,6 +360,11 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
             .or_else(|| args.get("approvalPolicy"))
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
+        tool_policy_path: args
+            .get("tool_policy_path")
+            .or_else(|| args.get("toolPolicyPath"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         traits: vec![],
         category: None,
         env: None,
@@ -450,6 +455,10 @@ async fn create_slot(state: &AppState, args: &Value) -> Result<ToolResult> {
                 search_enabled: slot_config.search_enabled.unwrap_or(false),
                 sandbox: slot_config.sandbox.clone(),
                 approval_policy: slot_config.approval_policy.clone(),
+                tool_policy_path: slot_config
+                    .tool_policy_path
+                    .clone()
+                    .map(std::path::PathBuf::from),
                 extra_env: HashMap::new(),
                 initial_prompt: initial_prompt_for_spawn,
             },
@@ -916,6 +925,7 @@ mod tests {
             search_enabled: None,
             sandbox: None,
             approval_policy: None,
+            tool_policy_path: None,
             traits: vec![],
             category: None,
             env: None,
@@ -1012,6 +1022,7 @@ mod tests {
             search_enabled: None,
             sandbox: None,
             approval_policy: None,
+            tool_policy_path: None,
             traits: vec![],
             category: None,
             env: None,

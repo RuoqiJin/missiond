@@ -692,6 +692,7 @@
       :model-profile gemini-ultra-pro-preview
       :model nil
       :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
       :task-classes [research review context-pack lisp-compression general]
       :capabilities [read-only analysis design-review]
       :max-concurrency 1
@@ -707,6 +708,7 @@
       :model-profile nil
       :model "gemini-2.5-flash"
       :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
       :task-classes [survey summary mechanical-scan]
       :capabilities [read-only summary]
       :max-concurrency 1
@@ -738,7 +740,7 @@
        "Claude fast-patch may use Sonnet only for narrow atomic tasks whose context-pack already identifies exact files/regions; it is not a default coding lane."
        "Gemini Ultra Pro is the high-language read-only investigation lane using gemini-3.1-pro-preview; Gemini fast survey is explicitly low-authority mechanical scan/summary work."
        "Gemini is initially read-only: research, review, context-pack, and Lisp compression advice may route there; scoped write/commit work stays on Claude until a separate Gemini write smoke passes."
-       "Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan`; workstation-pool registration MUST NOT set dangerously_skip_permissions/YOLO for any worker with :write-allowed false."
+       "Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml`; workstation-pool registration MUST NOT set dangerously_skip_permissions/YOLO for any worker with :write-allowed false, and the policy MUST deny subagent delegation and write/shell tools."
        "Autopilot unassigned BoardTasks select from workstation-pool by task class before considering any legacy slot; old slots.yaml Sonnet entries are not generic coding candidates."
        "mission_compute_slot action=list must expose workstation_pool with runtime slot presence and idle/busy/stopped status."
        "Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration; absent a supervisor worker entry the patrol stays inert and MUST NOT call ensure_memory_slot_by_id, so the legacy 'Memory slot not configured in slots.yaml' warning cannot fire."

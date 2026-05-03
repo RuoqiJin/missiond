@@ -185,6 +185,7 @@ impl EngineController for ClaudeCodeController {
                 search_enabled: false,
                 sandbox: None,
                 approval_policy: None,
+                tool_policy_path: None,
                 extra_env: HashMap::new(),
                 initial_prompt: None,
             },

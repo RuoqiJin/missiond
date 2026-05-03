@@ -127,6 +127,13 @@ pub struct SlotConfig {
         alias = "approval_policy"
     )]
     pub approval_policy: Option<String>,
+    /// Provider tool policy file, e.g. Gemini CLI `--policy`.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "tool_policy_path"
+    )]
+    pub tool_policy_path: Option<String>,
     /// Declarative traits controlling pipeline behavior.
     /// If empty/absent, defaults are inferred from role at load time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

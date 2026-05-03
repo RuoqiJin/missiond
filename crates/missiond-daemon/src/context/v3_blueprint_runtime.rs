@@ -215,6 +215,7 @@ pub(crate) struct WorkstationPoolRuntimeConfig {
     pub search_enabled: bool,
     pub sandbox: Option<String>,
     pub approval_policy: Option<String>,
+    pub tool_policy_path: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -608,6 +609,7 @@ impl Default for WorkstationRuntimeConfig {
                 search_enabled: false,
                 sandbox: None,
                 approval_policy: None,
+                tool_policy_path: None,
             },
             WorkstationPoolRuntimeConfig {
                 id: "gemini-ultra-pro".to_string(),
@@ -638,6 +640,9 @@ impl Default for WorkstationRuntimeConfig {
                 search_enabled: false,
                 sandbox: None,
                 approval_policy: Some("plan".to_string()),
+                tool_policy_path: Some(
+                    ".missiond/v3/policies/gemini-readonly-policy.toml".to_string(),
+                ),
             },
             WorkstationPoolRuntimeConfig {
                 id: "claude-code-fast-patch".to_string(),
@@ -669,6 +674,7 @@ impl Default for WorkstationRuntimeConfig {
                 search_enabled: false,
                 sandbox: None,
                 approval_policy: None,
+                tool_policy_path: None,
             },
             WorkstationPoolRuntimeConfig {
                 id: "gemini-fast-survey".to_string(),
@@ -693,6 +699,9 @@ impl Default for WorkstationRuntimeConfig {
                 search_enabled: false,
                 sandbox: None,
                 approval_policy: Some("plan".to_string()),
+                tool_policy_path: Some(
+                    ".missiond/v3/policies/gemini-readonly-policy.toml".to_string(),
+                ),
             },
             WorkstationPoolRuntimeConfig {
                 id: "codex-master-control".to_string(),
@@ -729,6 +738,7 @@ impl Default for WorkstationRuntimeConfig {
                 search_enabled: true,
                 sandbox: Some("danger-full-access".to_string()),
                 approval_policy: Some("never".to_string()),
+                tool_policy_path: None,
             },
         ];
         Self {
@@ -1783,6 +1793,8 @@ pub(crate) fn parse_workstation_config(
                     sandbox: optional_non_nil_keyword(&tokens, ":sandbox"),
                     approval_policy: optional_non_nil_keyword(&tokens, ":approval-policy")
                         .or_else(|| optional_non_nil_keyword(&tokens, ":approval_policy")),
+                    tool_policy_path: optional_non_nil_keyword(&tokens, ":tool-policy-path")
+                        .or_else(|| optional_non_nil_keyword(&tokens, ":tool_policy_path")),
                 });
             }
         }
@@ -1806,6 +1818,16 @@ pub(crate) fn parse_workstation_config(
     }) {
         return Err(BlueprintConfigError::Parse(
             "workstation-pool must include a read-only Gemini BoardTask worker".into(),
+        ));
+    }
+    if config.workstation_pool.iter().any(|worker| {
+        worker.accepts_boardtask
+            && worker.engine == "gemini"
+            && !worker.write_allowed
+            && worker.tool_policy_path.as_deref().unwrap_or("").is_empty()
+    }) {
+        return Err(BlueprintConfigError::Parse(
+            "read-only Gemini workstation-pool workers must declare :tool-policy-path".into(),
         ));
     }
     if !config.workstation_pool.iter().any(|worker| {
@@ -2793,6 +2815,7 @@ mod tests {
       :model-profile gemini-ultra-pro-preview
       :model nil
       :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
       :task-classes [research review context-pack lisp-compression general]
       :capabilities [read-only analysis design-review]
       :max-concurrency 1
@@ -2808,6 +2831,7 @@ mod tests {
       :model-profile nil
       :model "gemini-2.5-flash"
       :approval-policy plan
+      :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
       :task-classes [survey summary mechanical-scan]
       :capabilities [read-only summary]
       :max-concurrency 1
@@ -3016,6 +3040,10 @@ mod tests {
             .expect("gemini worker");
         assert!(!gemini.write_allowed);
         assert_eq!(gemini.approval_policy.as_deref(), Some("plan"));
+        assert_eq!(
+            gemini.tool_policy_path.as_deref(),
+            Some(".missiond/v3/policies/gemini-readonly-policy.toml")
+        );
         assert_eq!(
             cfg.boardtask_pool_candidates("code")
                 .first()
@@ -3264,7 +3292,7 @@ mod tests {
     (cwd-policy dynamic-slot :allowed-prefixes ["/Users/jinchen/Projects"]))
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
-    (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
+    (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))"#,
         )
         .expect_err("missing policy");
@@ -3310,7 +3338,7 @@ mod tests {
       :max_secs 600))
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
-    (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
+    (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :approval-policy plan :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml" :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
     (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");

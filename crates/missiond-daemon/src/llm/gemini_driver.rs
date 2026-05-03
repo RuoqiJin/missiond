@@ -157,6 +157,7 @@ impl GeminiPtyDriver {
                 search_enabled: false,
                 sandbox: None,
                 approval_policy: None,
+                tool_policy_path: None,
                 extra_env,
                 initial_prompt: None,
             },

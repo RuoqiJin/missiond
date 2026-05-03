@@ -16,14 +16,16 @@
        :model "gemini-3.1-pro-preview"
        :write-policy read-only
        :approval-mode plan
-       :runtime-rule "Gemini handles investigation/review/context-pack until scoped-write smoke passes; runtime must spawn it with --approval-mode plan, never --yolo.")
+       :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
+       :runtime-rule "Gemini handles investigation/review/context-pack until scoped-write smoke passes; runtime must spawn it with --approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml, never --yolo, and the policy denies subagents/write/shell tools.")
      (gemini-fast-survey
        :account current-gemini-cli-login
        :model "gemini-2.5-flash"
        :write-policy read-only
        :authority low
        :approval-mode plan
-       :runtime-rule "Only mechanical scan/summary work; never architecture裁决; runtime must spawn it with --approval-mode plan, never --yolo.")
+       :tool-policy-path ".missiond/v3/policies/gemini-readonly-policy.toml"
+       :runtime-rule "Only mechanical scan/summary work; never architecture裁决; runtime must spawn it with --approval-mode plan --policy .missiond/v3/policies/gemini-readonly-policy.toml, never --yolo.")
      (claude-code-fast-patch
        :account current-claude-code-default
        :model "Sonnet only when explicitly selected"

@@ -69,6 +69,8 @@ pub struct PTYSpawnOptions {
     pub sandbox: Option<String>,
     /// Provider approval profile when supported.
     pub approval_policy: Option<String>,
+    /// Provider tool policy file when supported, e.g. Gemini CLI `--policy`.
+    pub tool_policy_path: Option<PathBuf>,
     /// Extra environment variables to inject into the PTY child process
     /// Used for slot tracking (MISSIOND_SLOT_ID, MISSIOND_SESSION_FILE)
     pub extra_env: HashMap<String, String>,
@@ -334,6 +336,7 @@ impl PTYManager {
             search_enabled: options.search_enabled,
             sandbox: options.sandbox.clone(),
             approval_policy: options.approval_policy.clone(),
+            tool_policy_path: options.tool_policy_path.clone(),
         })?;
 
         // Set up permission check
@@ -618,6 +621,7 @@ impl PTYManager {
                             search_enabled: restart_options.search_enabled,
                             sandbox: restart_options.sandbox.clone(),
                             approval_policy: restart_options.approval_policy.clone(),
+                            tool_policy_path: restart_options.tool_policy_path.clone(),
                         }) {
                             // Set up permission check
                             let policy = manager_policy.read().await.clone();

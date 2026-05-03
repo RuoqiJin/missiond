@@ -634,6 +634,11 @@ pub(crate) async fn ensure_autopilot_pty(
             search_enabled: slot.config.search_enabled.unwrap_or(false),
             sandbox: slot.config.sandbox.clone(),
             approval_policy: slot.config.approval_policy.clone(),
+            tool_policy_path: slot
+                .config
+                .tool_policy_path
+                .clone()
+                .map(std::path::PathBuf::from),
             extra_env: HashMap::new(),
             initial_prompt: None,
         },

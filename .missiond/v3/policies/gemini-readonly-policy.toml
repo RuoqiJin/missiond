@@ -1,0 +1,26 @@
+# MissionD V3 Gemini read-only lane policy.
+#
+# This policy is passed with `gemini --approval-mode plan --policy ...` for
+# read-only Gemini workstation-pool slots. It keeps Gemini useful for direct
+# survey/summary work while preventing hidden subagent fanout or code mutation.
+
+[[rule]]
+toolName = ["generalist", "codebase_investigator", "invoke_agent", "invoke_subagent"]
+decision = "deny"
+priority = 900
+modes = ["plan"]
+denyMessage = "MissionD Gemini read-only workers must answer directly and may not delegate to subagents."
+
+[[rule]]
+toolName = [
+  "replace",
+  "write_file",
+  "run_shell_command",
+  "save_memory",
+  "write_todos",
+  "exit_plan_mode"
+]
+decision = "deny"
+priority = 900
+modes = ["plan"]
+denyMessage = "MissionD Gemini read-only workers are observation-only; use built-in read/search tools and return concise findings."

@@ -208,6 +208,8 @@ pub struct PTYSessionOptions {
     pub sandbox: Option<String>,
     /// Provider approval profile when supported.
     pub approval_policy: Option<String>,
+    /// Provider tool policy file when supported, e.g. Gemini CLI `--policy`.
+    pub tool_policy_path: Option<PathBuf>,
 }
 
 impl Default for PTYSessionOptions {
@@ -227,6 +229,7 @@ impl Default for PTYSessionOptions {
             search_enabled: false,
             sandbox: None,
             approval_policy: None,
+            tool_policy_path: None,
         }
     }
 }
@@ -303,6 +306,7 @@ pub struct PTYSession {
     search_enabled: bool,
     sandbox: Option<String>,
     approval_policy: Option<String>,
+    tool_policy_path: Option<PathBuf>,
 
     // Extra environment variables (slot tracking, etc.)
     env: Option<HashMap<String, String>>,
@@ -361,6 +365,7 @@ fn build_cli_command(
     search_enabled: bool,
     sandbox: Option<&str>,
     approval_policy: Option<&str>,
+    tool_policy_path: Option<&std::path::Path>,
 ) -> String {
     use missiond_shared::CliEngine;
 
@@ -387,15 +392,25 @@ fn build_cli_command(
             // if the prompt drifts.
             // Working directory is set via CommandBuilder::cwd(), not CLI flag
             let mut parts = "gemini".to_string();
+            let mut plan_read_only = false;
             if let Some(mode) = approval_policy {
                 parts.push_str(&format!(" --approval-mode {}", shell_quote(mode)));
+                plan_read_only = mode.eq_ignore_ascii_case("plan");
                 info!(approval_policy = %mode, "Gemini CLI: approval mode override");
             } else if dangerously_skip_permissions {
                 parts.push_str(" --approval-mode yolo");
                 info!("Gemini CLI: yolo approval mode enabled");
             } else {
                 parts.push_str(" --approval-mode plan");
+                plan_read_only = true;
                 info!("Gemini CLI: plan/read-only approval mode enabled");
+            }
+            if plan_read_only {
+                if let Some(policy) = tool_policy_path {
+                    let policy = policy.display().to_string();
+                    parts.push_str(&format!(" --policy {}", shell_quote(&policy)));
+                    info!(tool_policy_path = %policy, "Gemini CLI: read-only tool policy enabled");
+                }
             }
             if let Some(m) = model {
                 parts.push_str(&format!(" -m {}", m));
@@ -512,6 +527,7 @@ impl PTYSession {
             search_enabled: options.search_enabled,
             sandbox: options.sandbox,
             approval_policy: options.approval_policy,
+            tool_policy_path: options.tool_policy_path,
             env: options.env,
             log_file: options.log_file,
 
@@ -668,6 +684,7 @@ impl PTYSession {
             self.search_enabled,
             self.sandbox.as_deref(),
             self.approval_policy.as_deref(),
+            self.tool_policy_path.as_deref(),
         );
 
         #[cfg(unix)]
@@ -2710,6 +2727,7 @@ Some prose.
             true,
             Some("danger-full-access"),
             Some("never"),
+            None,
         );
         assert!(cmd.contains("codex --model 'gpt-5.5'"));
         assert!(cmd.contains("-c 'model_reasoning_effort=\"xhigh\"'"));
@@ -2730,8 +2748,12 @@ Some prose.
             false,
             None,
             None,
+            Some(std::path::Path::new(
+                ".missiond/v3/policies/gemini-readonly-policy.toml",
+            )),
         );
         assert!(read_only.contains("gemini --approval-mode plan"));
+        assert!(read_only.contains("--policy '.missiond/v3/policies/gemini-readonly-policy.toml'"));
         assert!(!read_only.contains("--yolo"));
 
         let privileged = build_cli_command(
@@ -2744,6 +2766,9 @@ Some prose.
             false,
             None,
             None,
+            Some(std::path::Path::new(
+                ".missiond/v3/policies/gemini-readonly-policy.toml",
+            )),
         );
         assert_eq!(privileged, "gemini --approval-mode yolo");
 
@@ -2757,7 +2782,13 @@ Some prose.
             false,
             None,
             Some("plan"),
+            Some(std::path::Path::new(
+                ".missiond/v3/policies/gemini-readonly-policy.toml",
+            )),
         );
-        assert_eq!(explicit, "gemini --approval-mode 'plan'");
+        assert_eq!(
+            explicit,
+            "gemini --approval-mode 'plan' --policy '.missiond/v3/policies/gemini-readonly-policy.toml'"
+        );
     }
 }
