@@ -192,6 +192,114 @@ fn has_durable_completion_summary_after_claim(
     })
 }
 
+#[derive(Debug, Clone)]
+struct DurableProviderCompletion {
+    session_id: String,
+    source: String,
+    summary: String,
+}
+
+fn timestamp_is_after_or_unknown(timestamp: &str, threshold: Option<&str>) -> bool {
+    let Some(threshold) = threshold else {
+        return true;
+    };
+    let Ok(threshold) = chrono::DateTime::parse_from_rfc3339(threshold) else {
+        return true;
+    };
+    chrono::DateTime::parse_from_rfc3339(timestamp)
+        .map(|ts| ts >= threshold)
+        .unwrap_or(true)
+}
+
+fn latest_assistant_after_task_prompt(
+    messages: &[missiond_core::types::ConversationMessage],
+    task_id: &str,
+    claimed_at: Option<&str>,
+) -> Option<String> {
+    let mut seen_task_prompt = false;
+    let mut latest: Option<String> = None;
+    for msg in messages {
+        if !timestamp_is_after_or_unknown(&msg.timestamp, claimed_at) {
+            continue;
+        }
+        let content = msg.content.trim();
+        if content.is_empty() {
+            continue;
+        }
+        if msg.role != "assistant" && content.contains(task_id) {
+            seen_task_prompt = true;
+            latest = None;
+            continue;
+        }
+        if seen_task_prompt && msg.role == "assistant" && !is_probably_active_tui_summary(content) {
+            latest = Some(content.to_string());
+        }
+    }
+    latest
+}
+
+async fn durable_provider_completion_for_slot_task(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+) -> Result<Option<DurableProviderCompletion>> {
+    let mut candidates = state
+        .store
+        .get_conversations_by_task_id(task.id.as_str())
+        .await
+        .unwrap_or_default();
+
+    if let Ok(Some(session_id)) = state.store.get_slot_session(slot_id).await {
+        if !candidates.iter().any(|conv| conv.id == session_id) {
+            if let Some(conv) = state.store.get_conversation(&session_id).await? {
+                candidates.push(conv);
+            }
+        }
+    }
+
+    candidates.sort_by(|a, b| b.started_at.cmp(&a.started_at));
+    for conv in candidates {
+        let messages = state
+            .store
+            .get_conversation_messages(&conv.id, None, 80)
+            .await
+            .unwrap_or_default();
+        let summary = if conv.task_id.as_deref() == Some(task.id.as_str()) {
+            messages
+                .iter()
+                .rev()
+                .find(|msg| {
+                    msg.role == "assistant"
+                        && timestamp_is_after_or_unknown(&msg.timestamp, task.claimed_at.as_deref())
+                        && !msg.content.trim().is_empty()
+                        && !is_probably_active_tui_summary(msg.content.trim())
+                })
+                .map(|msg| msg.content.trim().to_string())
+        } else {
+            latest_assistant_after_task_prompt(
+                &messages,
+                task.id.as_str(),
+                task.claimed_at.as_deref(),
+            )
+        };
+        if let Some(summary) = summary {
+            if conv.task_id.as_deref() != Some(task.id.as_str()) {
+                let _ = state
+                    .store
+                    .set_conversation_task_id(&conv.id, task.id.as_str())
+                    .await;
+            }
+            return Ok(Some(DurableProviderCompletion {
+                session_id: conv.id,
+                source: conv.source,
+                summary,
+            }));
+        }
+    }
+
+    Ok(None)
+}
+
 async fn close_idle_running_task_from_durable_summary(
     state: &AppState,
     task_id: &str,
@@ -203,10 +311,32 @@ async fn close_idle_running_task_from_durable_summary(
     if task_with_notes.task.status != missiond_core::types::BoardTaskStatus::Running {
         return Ok(false);
     }
-    if !has_durable_completion_summary_after_claim(
+    let mut has_durable_summary = has_durable_completion_summary_after_claim(
         &task_with_notes.notes,
         task_with_notes.task.claimed_at.as_deref(),
-    ) {
+    );
+    if !has_durable_summary {
+        if let Some(completion) =
+            durable_provider_completion_for_slot_task(state, &task_with_notes.task, slot_id).await?
+        {
+            let summary_for_note =
+                truncate_safe(&completion.summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+            state
+                .store
+                .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                    task_id: task_id.to_string(),
+                    content: format!(
+                        "**Provider durable final observed** ({} / {})\n\n{}",
+                        completion.source, completion.session_id, summary_for_note
+                    ),
+                    note_type: Some("summary".to_string()),
+                    author: Some("autopilot".to_string()),
+                })
+                .await?;
+            has_durable_summary = true;
+        }
+    }
+    if !has_durable_summary {
         return Ok(false);
     }
 
@@ -700,6 +830,14 @@ fn is_tui_progress_line(trimmed: &str) -> bool {
     let Some(first) = trimmed.chars().next() else {
         return false;
     };
+    if trimmed.contains("esc to cancel")
+        && (matches!(first, '✦' | '✧' | '*' | '⏺' | '●')
+            || trimmed.contains("Thinking")
+            || trimmed.contains("Catapulting")
+            || trimmed.contains("Combobulating"))
+    {
+        return true;
+    }
     matches!(
         first,
         '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏'
@@ -3183,6 +3321,35 @@ mod tests {
         }
     }
 
+    fn test_conversation_message(
+        id: i64,
+        role: &str,
+        content: &str,
+        timestamp: &str,
+    ) -> missiond_core::types::ConversationMessage {
+        missiond_core::types::ConversationMessage {
+            id,
+            session_id: "session-1".to_string(),
+            role: role.to_string(),
+            content: content.to_string(),
+            raw_content: None,
+            message_uuid: None,
+            parent_uuid: None,
+            model: None,
+            timestamp: timestamp.to_string(),
+            metadata: None,
+            tool_name: None,
+            raw_role: None,
+            content_types: None,
+            has_image: false,
+            has_tool_use: false,
+            has_tool_result: false,
+            token_count: None,
+            seq: None,
+            role_display: None,
+        }
+    }
+
     #[test]
     fn durable_completion_summary_note_rejects_progress_warning() {
         let note = test_note(
@@ -3198,6 +3365,66 @@ mod tests {
             "2026-05-02T15:19:50Z",
         );
         assert!(is_durable_completion_summary_note(&summary));
+    }
+
+    #[test]
+    fn provider_final_summary_requires_claim_after_task_prompt() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask old-task-id prompt",
+                "2026-05-03T10:14:00Z",
+            ),
+            test_conversation_message(2, "assistant", "old answer", "2026-05-03T10:14:30Z"),
+            test_conversation_message(
+                3,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-03T10:15:00Z",
+            ),
+            test_conversation_message(
+                4,
+                "assistant",
+                "MissionD successfully projected Gemini into Plan Mode.",
+                "2026-05-03T10:15:40Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-03T10:14:50Z"))
+                .as_deref(),
+            Some("MissionD successfully projected Gemini into Plan Mode.")
+        );
+        assert_eq!(
+            latest_assistant_after_task_prompt(
+                &messages,
+                "old-task-id",
+                Some("2026-05-03T10:14:50Z")
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_active_tui_progress_frame() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-03T10:15:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "✦ Thinking... (esc to cancel)",
+                "2026-05-03T10:15:20Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-03T10:14:50Z")),
+            None
+        );
     }
 
     #[test]

@@ -2430,6 +2430,14 @@ fn is_tui_progress_line(trimmed: &str) -> bool {
     let Some(first) = trimmed.chars().next() else {
         return false;
     };
+    if trimmed.contains("esc to cancel")
+        && (matches!(first, '✦' | '✧' | '*' | '⏺' | '●')
+            || trimmed.contains("Thinking")
+            || trimmed.contains("Catapulting")
+            || trimmed.contains("Combobulating"))
+    {
+        return true;
+    }
     matches!(
         first,
         '⠋' | '⠙' | '⠹' | '⠸' | '⠼' | '⠴' | '⠦' | '⠧' | '⠇' | '⠏'

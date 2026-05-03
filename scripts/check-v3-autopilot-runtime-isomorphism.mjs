@@ -100,7 +100,7 @@ function checkFiles(root) {
 	    ':idle-durable-summary-close',
 	    'extract_worker_final_summary(res.response, full_prompt)',
 	    'wait_for_worker_final_settle_window',
-	    'durable summary note + idle slot evidence',
+	    'durable provider-or-note evidence + idle slot diagnosis',
 	    'paste again to expand',
 	  ]);
 
@@ -148,6 +148,12 @@ function checkFiles(root) {
     'wait_for_worker_final_settle_window().await',
     'close_idle_running_task_from_durable_summary',
     'has_durable_completion_summary_after_claim',
+    'durable_provider_completion_for_slot_task',
+    'latest_assistant_after_task_prompt',
+    'get_conversations_by_task_id',
+    'get_slot_session',
+    'set_conversation_task_id',
+    'Provider durable final observed',
     'is_durable_completion_summary_note',
     'get_board_task_with_notes',
     'extract_worker_final_summary(&res.response, &full_prompt)',
@@ -216,7 +222,7 @@ function buildFixture() {
 	    :close-owner
 	      (:summary-note-source "extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, tool logs, and \`paste again to expand\` collapse markers."
 	       :settle-window "wait_for_worker_final_settle_window projects the high-confidence final summary settle policy."
-	       :idle-durable-summary-close "delayed active-frame tasks close from durable summary note + idle slot evidence."))
+	       :idle-durable-summary-close "delayed active-frame tasks close from durable provider-or-note evidence + idle slot diagnosis."))
   (implementation-map
     (surface autopilot-runtime
       :status "code-aligned"
@@ -239,11 +245,13 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
 	const AUTOPILOT_SUMMARY_NOTE_MAX_BYTES: usize = 4000;
 	const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 1200;
 	fn worker_final_settle_window_ms() -> u64 { AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT }
-	fn extract_worker_final_summary(_r: &str, _p: &str) -> String { String::new() }
-	fn is_durable_completion_summary_note() {}
-	fn has_durable_completion_summary_after_claim() {}
-	async fn close_idle_running_task_from_durable_summary() { get_board_task_with_notes(); }
-	async fn dispatch_board_tasks() {
+		fn extract_worker_final_summary(_r: &str, _p: &str) -> String { String::new() }
+		fn is_durable_completion_summary_note() {}
+		fn has_durable_completion_summary_after_claim() {}
+    fn latest_assistant_after_task_prompt() {}
+    async fn durable_provider_completion_for_slot_task() { get_conversations_by_task_id(); get_slot_session(); set_conversation_task_id(); }
+		async fn close_idle_running_task_from_durable_summary() { get_board_task_with_notes(); let _ = "Provider durable final observed"; }
+		async fn dispatch_board_tasks() {
 	    let _g = OwnedSlotDispatchGuard;
 	    state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
 	    wait_for_worker_final_settle_window().await;
