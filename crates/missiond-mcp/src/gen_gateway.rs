@@ -135,7 +135,8 @@ pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value)
         "mission_task_submit"
         | "mission_task_query"
         | "mission_task_cancel"
-        | "mission_task_delegate" => handler.handle_task(name, args).await,
+        | "mission_task_delegate"
+        | "mission_swarm_run" => handler.handle_task(name, args).await,
         "mission_pty_spawn"
         | "mission_pty_send"
         | "mission_pty_read"
@@ -147,7 +148,8 @@ pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value)
         | "mission_slot_history"
         | "mission_compute_slot"
         | "mission_agents"
-        | "mission_master_status" => handler.handle_slot(name, args).await,
+        | "mission_master_status"
+        | "mission_convergence_status" => handler.handle_slot(name, args).await,
         "mission_cc_query" | "mission_cc_swarm" => handler.handle_cc_tasks(name, args).await,
         "mission_worker" => handler.handle_worker(name, args).await,
         "mission_job_poll" => handler.handle_job(name, args).await,

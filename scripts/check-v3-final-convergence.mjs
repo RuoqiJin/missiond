@@ -58,6 +58,27 @@ const LIVE_CHECKS = [
   },
 ];
 
+const RUNTIME_CHECKS = [
+  {
+    id: 'cargo-test-workspace',
+    command: 'cargo',
+    argv: ['test', '--workspace'],
+    timeoutMs: 900_000,
+  },
+  {
+    id: 'board-build',
+    command: 'pnpm',
+    argv: ['--dir', 'packages/board', 'build'],
+    timeoutMs: 300_000,
+  },
+  {
+    id: 'git-diff-check',
+    command: 'git',
+    argv: ['diff', '--check'],
+    timeoutMs: 60_000,
+  },
+];
+
 const BLUEPRINT_NEEDLES = [
   ['v2-convergence-map', '(v2-convergence-map'],
   ['public-surface-map', '(public-surface-map'],
@@ -158,12 +179,11 @@ const REQUIRED_RUNTIME_FILES = [
 
 const usage = `Usage:
   node scripts/check-v3-final-convergence.mjs [--json] [--dry-fixture]
-    [--repo <path>] [--blueprint <path>]
+    [--repo <path>] [--blueprint <path>] [--static-only]
 
 Final V3 convergence closure gate. It composes existing V3/V2/task-contract
-checks and asserts the hard completion invariants that make V3 the engineering
-SSOT: V2/public coverage, surface graduation, physical facade split, runtime
-projection, context-pack runner, and task contract health.
+checks, runtime/build hygiene, and the hard completion invariants that make V3
+the engineering SSOT. Use --static-only for fast daemon/MCP status snapshots.
 `;
 
 function fail(message) {
@@ -175,6 +195,7 @@ function parseArgs(argv) {
   const opts = {
     json: false,
     dryFixture: false,
+    staticOnly: false,
     repo: process.cwd(),
     blueprint: BLUEPRINT_PATH,
   };
@@ -187,6 +208,8 @@ function parseArgs(argv) {
       opts.json = true;
     } else if (arg === '--dry-fixture') {
       opts.dryFixture = true;
+    } else if (arg === '--static-only') {
+      opts.staticOnly = true;
     } else if (arg === '--repo') {
       opts.repo = argv[++i] ?? fail('--repo requires a value');
     } else if (arg.startsWith('--repo=')) {
@@ -210,12 +233,14 @@ function main() {
   }
 
   const repoRoot = path.resolve(opts.repo);
-  const result = runFinalConvergenceCheck(repoRoot, opts.blueprint);
+  const result = runFinalConvergenceCheck(repoRoot, opts.blueprint, {
+    staticOnly: opts.staticOnly,
+  });
   if (opts.json) {
     fs.writeSync(1, `${JSON.stringify(result, null, 2)}\n`);
   } else if (result.ok) {
     console.log(
-      `v3 final convergence OK (${result.summary.surfaces} surfaces, ${result.summary.checkers} V3 checkers, ${result.summary.v2_items} V2 items, ${result.summary.public_tools} public tools, ${result.summary.facades} facades under budget)`,
+      `v3 final convergence OK (${result.summary.surfaces} surfaces, ${result.summary.checkers} V3 checkers, ${result.summary.v2_items} V2 items, ${result.summary.public_tools} public tools, ${result.summary.facades} facades under budget, runtime=${result.runtime_status.mode})`,
     );
   } else {
     for (const d of result.diagnostics) {
@@ -233,7 +258,7 @@ function main() {
   process.exit(result.ok ? 0 : 1);
 }
 
-export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH) {
+export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH, options = {}) {
   const diagnostics = [];
   const blueprintPath = path.resolve(repoRoot, blueprintRel);
   let blueprintSource = '';
@@ -257,6 +282,19 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
   diagnostics.push(...runtimeFiles.diagnostics);
 
   const subchecks = LIVE_CHECKS.map((check) => runCheck(repoRoot, check));
+  const runtimeChecks = options.staticOnly
+    ? RUNTIME_CHECKS.map((check) => ({
+        id: check.id,
+        command: `${check.command} ${check.argv.join(' ')}`,
+        ok: true,
+        skipped: true,
+        exit_code: null,
+        json_data: null,
+        stdout_tail: '',
+        stderr_tail: '',
+        error: null,
+      }))
+    : RUNTIME_CHECKS.map((check) => runCheck(repoRoot, check));
   for (const check of subchecks) {
     if (!check.ok) {
       diagnostics.push({
@@ -264,6 +302,13 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
         message: `subcheck ${check.id} failed`,
       });
     }
+  }
+  for (const check of runtimeChecks) {
+    if (check.ok) continue;
+    diagnostics.push({
+      file: check.command,
+      message: `runtime check ${check.id} failed`,
+    });
   }
 
   const aggregate = subchecks.find((c) => c.id === 'v3-code-isomorphism-complete')?.json_data;
@@ -281,21 +326,34 @@ export function runFinalConvergenceCheck(repoRoot, blueprintRel = BLUEPRINT_PATH
     facades: facades.files.length,
     split_files: splitFiles.files.length,
     runtime_files: runtimeFiles.files.length,
-    external_final_checks: [
-      'cargo test --workspace',
-      'scripts/cargo-fmt-touched.sh --check',
-      'git diff --check',
-    ],
+    external_final_checks: runtimeChecks.map((check) => ({
+      id: check.id,
+      command: check.command,
+      ok: check.ok,
+      skipped: check.skipped === true,
+    })),
   };
+  const runtimeStatus = readRuntimeStatus(repoRoot, {
+    staticOnly: options.staticOnly === true,
+    runtimeChecks,
+  });
+  const failedStage = inferFailedStage(diagnostics, subchecks, runtimeChecks);
+  const blockingItems = buildBlockingItems(diagnostics, subchecks, runtimeChecks);
 
   return {
     ok: diagnostics.length === 0,
+    failed_stage: failedStage,
+    blocking_items: blockingItems,
+    next_action: nextActionForStage(failedStage),
+    runtime_status: runtimeStatus,
+    smoke_task_ids: readSmokeTaskIds(repoRoot),
     summary,
     diagnostics,
     facades: facades.files,
     split_files: splitFiles.files,
     runtime_files: runtimeFiles.files,
     subchecks,
+    runtime_checks: runtimeChecks,
   };
 }
 
@@ -490,7 +548,9 @@ function checkCoverageSummary(coverage) {
 }
 
 function runCheck(repoRoot, check) {
-  const proc = spawnSync(process.execPath, check.argv, {
+  const command = check.command ?? process.execPath;
+  const argv = check.command ? check.argv : check.argv;
+  const proc = spawnSync(command, argv, {
     cwd: repoRoot,
     encoding: 'utf8',
     timeout: check.timeoutMs,
@@ -508,7 +568,7 @@ function runCheck(repoRoot, check) {
   }
   return {
     id: check.id,
-    command: `node ${check.argv.join(' ')}`,
+    command: check.command ? `${check.command} ${check.argv.join(' ')}` : `node ${check.argv.join(' ')}`,
     ok: ok && (!check.json || jsonData != null),
     exit_code: proc.status,
     json_data: jsonData,
@@ -516,6 +576,135 @@ function runCheck(repoRoot, check) {
     stderr_tail: tail(proc.stderr ?? ''),
     error,
   };
+}
+
+function inferFailedStage(diagnostics, subchecks, runtimeChecks) {
+  const failedSubcheck = subchecks.find((check) => !check.ok);
+  if (failedSubcheck) return failedSubcheck.id;
+  const failedRuntime = runtimeChecks.find((check) => !check.ok);
+  if (failedRuntime) return failedRuntime.id;
+  const firstDiagnostic = diagnostics[0];
+  if (firstDiagnostic) return firstDiagnostic.file ?? 'static-closure';
+  return null;
+}
+
+function buildBlockingItems(diagnostics, subchecks, runtimeChecks) {
+  const items = [];
+  for (const diagnostic of diagnostics) {
+    items.push({
+      kind: 'diagnostic',
+      stage: diagnostic.file ?? 'static-closure',
+      message: diagnostic.message,
+    });
+  }
+  for (const check of [...subchecks, ...runtimeChecks]) {
+    if (check.ok) continue;
+    items.push({
+      kind: check.skipped ? 'skipped-check' : 'failed-check',
+      stage: check.id,
+      command: check.command,
+      exit_code: check.exit_code,
+      stdout_tail: check.stdout_tail,
+      stderr_tail: check.stderr_tail,
+      error: check.error,
+    });
+  }
+  return items;
+}
+
+function nextActionForStage(stage) {
+  if (!stage) return 'none';
+  if (stage.includes('cargo')) return 'fix Rust test/build failure, then rerun final convergence gate';
+  if (stage.includes('board-build')) return 'fix Board frontend build failure, then rerun final convergence gate';
+  if (stage.includes('git-diff')) return 'fix whitespace/diff hygiene, then rerun git diff --check';
+  if (stage.includes('v2') || stage.includes('coverage')) return 'map missing public/V2 behavior into V3 and rerun coverage';
+  if (stage.includes('frontend')) return 'repair Board frontend Lisp/code/runtime projection';
+  if (stage.includes('lisp') || stage.includes('blueprint')) return 'repair compact Lisp SSOT or move long evidence to sidecar';
+  return 'inspect blocking_items[0], repair the named stage, and rerun final convergence gate';
+}
+
+function readRuntimeStatus(repoRoot, { staticOnly, runtimeChecks }) {
+  const checkpoint = readCheckpointStatus(repoRoot);
+  const git = readGitStatus(repoRoot);
+  return {
+    schema: 'missiond.final-convergence.runtime-status.v1',
+    mode: staticOnly ? 'static-only' : 'full',
+    checkpoint,
+    git,
+    runtime_checks: runtimeChecks.map((check) => ({
+      id: check.id,
+      ok: check.ok,
+      skipped: check.skipped === true,
+      exit_code: check.exit_code,
+    })),
+  };
+}
+
+function readCheckpointStatus(repoRoot) {
+  const rel = '.missiond/v3/runtime/master-control-checkpoint.lisp';
+  const abs = path.join(repoRoot, rel);
+  try {
+    const stat = fs.statSync(abs);
+    const text = fs.readFileSync(abs, 'utf8');
+    return {
+      path: rel,
+      exists: true,
+      size: stat.size,
+      updated_at_epoch_ms: stat.mtimeMs,
+      worker: matchLispKeyword(text, ':worker'),
+      tick_id: matchLispKeyword(text, ':tick-id'),
+      phase: matchLispKeyword(text, ':phase'),
+      active_objective_id: matchLispKeyword(text, ':active-objective-id'),
+      blocked_reason: matchLispKeyword(text, ':blocked-reason'),
+    };
+  } catch {
+    return { path: rel, exists: false };
+  }
+}
+
+function readGitStatus(repoRoot) {
+  const proc = spawnSync('git', ['status', '--short'], {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    timeout: 30_000,
+    maxBuffer: 1024 * 1024,
+  });
+  if (proc.status !== 0 || proc.error) {
+    return {
+      ok: false,
+      error: proc.error?.message ?? proc.stderr?.trim() ?? 'git status failed',
+    };
+  }
+  const lines = proc.stdout.split('\n').filter((line) => line.trim() !== '');
+  return {
+    ok: true,
+    dirty: lines.length > 0,
+    changed_count: lines.length,
+    preview: lines.slice(0, 20),
+  };
+}
+
+function readSmokeTaskIds(repoRoot) {
+  const checkpoint = path.join(repoRoot, '.missiond/v3/runtime/final-convergence-smoke.json');
+  try {
+    const parsed = JSON.parse(fs.readFileSync(checkpoint, 'utf8'));
+    if (Array.isArray(parsed.smoke_task_ids)) return parsed.smoke_task_ids;
+  } catch {}
+  return [];
+}
+
+function matchLispKeyword(source, keyword) {
+  const re = new RegExp(`${escapeRegExp(keyword)}\\s+("[^"]*"|[^\\s)]+)`);
+  const match = source.match(re);
+  if (!match) return null;
+  const value = match[1];
+  if (value === 'nil') return null;
+  if (value.startsWith('"') && value.endsWith('"')) return value.slice(1, -1);
+  return value;
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function tail(text, lines = 8) {

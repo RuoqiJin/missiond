@@ -758,7 +758,8 @@
     :checkpoint
       (:sources [mission_execution companion-log BoardTask-note master-control-checkpoint]
        :write-on [turn-start delegation-created delegation-complete daemon-restart-before-exit periodic-heartbeat]
-       :resume-from [latest-master-control-checkpoint open-master-control-boardtask latest-execution-log])
+	       :resume-from [latest-master-control-checkpoint open-master-control-boardtask latest-execution-log]
+	       :fields [active_objective_id phase context_pack_path delegated_task_ids blocked_reason last_verified_commit resume_instruction])
     :event-subscriptions
       [BoardTaskCreated BoardTaskStatusChanged SlotEvent QuestionEvent DaemonRestart StaleTask NightSchedule ProjectRegistryChanged]
     :loop
@@ -780,8 +781,8 @@
          (step s2 :logic "record daemon restart/startup context for checkpoint visibility without calling notify or incrementing queued control events")
          (step s3 :logic "resolve checkpoint root from the V3-projected master slot project_root/cwd; never infer it from daemon process current_dir")
          (step s4 :logic "render master-control-checkpoint.lisp under .missiond/v3/runtime; last-control-prompt is nil for heartbeat/startup ticks and present only when a control turn is dispatchable")
-         (step s5 :logic "store resume plan with provider-log-first evidence authority"))
-      :egress [".missiond/v3/runtime/master-control-checkpoint.lisp" "mission_master_status.checkpoint"]
+	         (step s5 :logic "store active_objective_id, phase, context_pack_path, delegated_task_ids, blocked_reason, last_verified_commit, and resume_instruction"))
+	      :egress [".missiond/v3/runtime/master-control-checkpoint.lisp" "mission_master_status.checkpoint" "mission_convergence_status.runtime_status.checkpoint"]
       :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::write_startup_checkpoint_for_slot"
                  "crates/missiond-daemon/src/engine/master_control.rs::render_checkpoint"])
     (master-event-subscriber
@@ -800,14 +801,14 @@
       :entry [master-control-runtime.notify periodic-heartbeat]
       :core
         ((step s1 :logic "probe codex MCP server readiness from codex mcp list and unattended approval readiness from ~/.codex/config.toml tool approval_mode entries")
-	         (step s2 :logic "build short Codex control prompt with event_cursor + event_summary; require MissionD MCP first (mission_intent, mission_board_query, mission_conversation_query, mission_kb_query), query BoardTask by id for Board events, call mission_task_delegate directly for delegation requests with two-stage metadata when available, use mission_board_note_add for progress/summary notes, and forbid broad shell scans unless MCP surfaces are missing")
+		         (step s2 :logic "classify phase as observe_event -> classify_objective -> create_context_pack -> dispatch_investigators -> compile_shards -> dispatch_implementers -> verify -> close_or_backfill, then build short Codex control prompt with event_cursor, event_summary, phase, active_objective_id, and context_pack_path; require MissionD MCP first (mission_intent, mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status), query BoardTask by id for Board events, call mission_task_delegate directly for delegation requests with two-stage metadata when available, use mission_board_note_add for progress/summary notes, and forbid broad shell scans unless MCP surfaces are missing")
          (step s3 :logic "write checkpoint before any durable Board/KB/dispatch action")
          (step s4 :logic "on daemon-startup, ensure slot-codex-master-control is spawned when Exited/Error but do not consume a control turn; startup is for residency, not decision work")
          (step s5 :logic "before sending an event control turn, ensure slot-codex-master-control is spawned when Exited/Error, wait briefly for Idle/SlashMenu, and verify the visible Codex footer still matches gpt-5.5 xhigh; if the slot was downgraded by an interactive model/rate-limit prompt, restart it before dispatch")
          (step s6 :logic "send control turns to slot-codex-master-control only on event-wakeup, with MCP server ready, required MCP tool approvals ready, and rate-limit guard")
          (step s7 :logic "detect code-first diffs and create a deduped backfill BoardTask instead of silently accepting Lisp/code drift")
          (step s8 :logic "defer long work to BoardTask/Autopilot and provider durable logs"))
-      :egress [master-control-checkpoint mission_master_status.service]
+	      :egress [master-control-checkpoint mission_master_status.service mission_convergence_status]
       :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::spawn_master_decision_loop"
                  "crates/missiond-daemon/src/engine/master_control.rs::build_master_tick_prompt"])
     (master-delegation
@@ -815,7 +816,7 @@
       :core
         ((step s1 :logic "create read-only context organizer BoardTasks before code shards")
          (step s2 :logic "compile accepted context-pack into exact file/region write scopes")
-         (step s3 :logic "delegate Claude/Gemini/Codex workers only through BoardTask/Autopilot metadata")
+	         (step s3 :logic "use mission_swarm_run for productized investigate -> integrate -> implement -> verify fanout, or mission_task_delegate for one exact shard")
          (step s4 :logic "require BoardTask ID, context-pack path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs in every prompt"))
       :egress [BoardTaskCreated SlotEvent::TaskDispatched mission_execution])
     (master-recovery
@@ -837,8 +838,8 @@
       (:source "~/.codex/config.toml"
        :probe "codex mcp list"
        :required-server missiond
-       :required-tool-approvals [mission_intent mission_board_query mission_conversation_query mission_kb_query mission_board_create mission_board_update mission_board_note_add mission_kb_remember mission_task_delegate mission_compute_slot mission_master_status mission_slots mission_pty_status]
-       :status-surface [mission_master_status.mcpReady mission_master_status.mcpEnabled mission_master_status.mcpApprovalReady])
+	       :required-tool-approvals [mission_intent mission_board_query mission_conversation_query mission_kb_query mission_board_create mission_board_update mission_board_note_add mission_kb_remember mission_task_delegate mission_compute_slot mission_master_status mission_convergence_status mission_slots mission_pty_status]
+	       :status-surface [mission_master_status.mcpReady mission_master_status.mcpEnabled mission_master_status.mcpApprovalReady mission_convergence_status.ok])
     :checker "node scripts/check-v3-master-control-isomorphism.mjs")
 
   (lisp-code-drift-policy
@@ -1537,7 +1538,7 @@
         :v3-pillar workstation
         :v3-function resident-master-control
         :surface resident-master-control
-        :tools [mission_master_status])
+        :tools [mission_master_status mission_convergence_status mission_swarm_run])
       (tool-group compute-runtime-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: worker path runtime primitives"
@@ -2346,7 +2347,7 @@
              "crates/missiond-core/src/core/slot_manager.rs"
              "scripts/check-v3-workstation-pool-isomorphism.mjs"]
       :evidence ".missiond/v3/evidence/workstation-pool.lisp"
-      :note "workstation-pool is the compact V3 compute-account SSOT for the current single-login phase: claude-code-default maps code/implementation/ops BoardTasks to a persistent Claude Code slot with coding-default-opus-4-7 (no --model override), claude-code-fast-patch maps exact narrow patches to Sonnet only after context-pack atomization, gemini-ultra-pro maps research/review/context-pack/lisp-compression/general BoardTasks to a read-only Gemini 3.1 Pro Preview slot, gemini-fast-survey is a low-authority mechanical scan lane, and codex-master-control is a resident GPT-5.5 xhigh orchestrator lane rather than a normal code shard candidate. WorkstationRuntimeConfig parses worker entries and provider options, main.rs registers startup slots plus pool workers into AgentSlotManager and MissionControl runtime slots, PTYSpawnOptions projects Codex --model/-c model_reasoning_effort/--search/--sandbox/--ask-for-approval, Autopilot selects unassigned BoardTasks from this pool by task class before legacy slots, mission_compute_slot list exposes workstation_pool status for observability, and mission_slots filters stopped legacy Sonnet residual slots that are not V3-projected.")
+      :note "workstation-pool is the compact V3 compute-account SSOT. It declares ClaudeCode Opus/Sonnet lanes, Gemini read-only lanes, and the non-shard Codex master lane; runtime projection feeds SlotManager, PTYSpawnOptions, Autopilot routing, mission_compute_slot list, and mission_slots legacy-Sonnet filtering. [details: .missiond/v3/evidence/workstation-pool.lisp]")
 
     (surface resident-master-control
       :status "code-aligned"
@@ -2359,7 +2360,7 @@
              "crates/missiond-pty/src/session.rs"
              "crates/missiond-core/src/types/slot.rs"
              "scripts/check-v3-master-control-isomorphism.mjs"]
-      :note "resident-master-control promotes Codex to a first-class, non-shard orchestrator worker. V3 declares codex-master-control with GPT-5.5, xhigh reasoning, search enabled, read-only code sandbox, and Board/KB/execution-log/dispatch permissions. Runtime projection carries model/reasoning/search/sandbox/approval through SlotConfig and PTYSpawnOptions into the Codex CLI command. MasterControlService subscribes to BoardEvent/SlotEvent/QuestionEvent, records wakeup metadata, writes master-control-checkpoint.lisp, probes Codex MCP readiness through codex mcp list, and exposes eventCursor/queuedEvents/MCP readiness through mission_master_status. Durable provider logs remain completion authority; PTY recognition is diagnostic only.")
+      :note "resident-master-control promotes Codex to a non-shard orchestrator. Runtime projection starts GPT-5.5 xhigh read-only Codex, writes phaseful checkpoints, exposes mission_master_status and mission_convergence_status, and keeps provider logs as completion authority while PTY remains diagnostic.")
 
     (surface autopilot-runtime
       :status "code-aligned"
@@ -2451,7 +2452,7 @@
              "crates/missiond-mcp/src/tools/knowledge/insight.rs"
              "crates/missiond-mcp/src/tools/knowledge/intent.rs"
              "scripts/check-v3-memory-kb-isomorphism.mjs"]
-	      :note "Runtime-projected V3 destination for the legacy memory/KB public tools. context/v3_blueprint_runtime.rs projects memory-kb-policy realtime extraction batch size and preview truncation budgets into mission_memory runtime, and projects learning-engine-policy into learning_engine pty send budgets, maintenance cadences, timeline read windows, and KB reflection policy. Realtime extraction MUST claim the extraction lane before running pending-message DB probes; pending realtime SQL MUST use EXISTS/LATERAL LIMIT or bounded materialized-candidate shapes instead of global COUNT(DISTINCT)/ROW_NUMBER scans; deep-analysis active-conversation probes MUST use bounded EXISTS/OFFSET checks instead of full message COUNT scans. Physical split is pinned: kb.rs remains the memory-kb facade; kb/args.rs owns unified KB argument ingress; kb/remember.rs owns remember ingestion, graph edge side effects, embedding trigger, mutation event, and conflict downweighting; kb/quality.rs owns content-quality rejection; kb/compact.rs owns rule-based KB compaction; kb/conflicts.rs owns semantic conflict detection; kb/query.rs owns search/get/list retrieval egress; kb/discovery.rs owns SSH probe discovery and infra KB projection; kb/analyze.rs owns L... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
+	      :note "Runtime-projected V3 destination for memory/KB tools. memory-kb-policy and learning-engine-policy own realtime extraction budgets, pty send budgets, cadences, bounded SQL probes, and physical split ownership across kb/* modules. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-015]")
 
     (surface project-registry
       :status "code-aligned"

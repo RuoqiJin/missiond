@@ -4,6 +4,9 @@ use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::time::Duration;
+use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
@@ -29,6 +32,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_master_status" => Ok(ToolResult::json(
             &master_control::mission_master_status(state).await,
         )),
+        "mission_convergence_status" => {
+            Ok(ToolResult::json(&mission_convergence_status(state).await))
+        }
         "mission_inbox" => {
             let InboxArgs { unread_only, limit } =
                 serde_json::from_value(args).unwrap_or(InboxArgs {
@@ -45,6 +51,127 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "mission_slot_history" => handle_slot_history(state, args).await,
         _ => Err(anyhow!("Unknown compute slot tool: {name}")),
     }
+}
+
+async fn mission_convergence_status(state: &AppState) -> Value {
+    let root = convergence_repo_root(state);
+    let output = tokio::time::timeout(
+        Duration::from_secs(45),
+        Command::new("node")
+            .args([
+                "scripts/check-v3-final-convergence.mjs",
+                "--json",
+                "--static-only",
+            ])
+            .current_dir(&root)
+            .output(),
+    )
+    .await;
+
+    match output {
+        Ok(Ok(output)) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            match serde_json::from_str::<Value>(&stdout) {
+                Ok(mut value) => {
+                    value["source"] = json!("mission_convergence_status");
+                    value["repoRoot"] = json!(root.display().to_string());
+                    value
+                }
+                Err(err) => json!({
+                    "schema": "missiond.convergence-status.v1",
+                    "ok": false,
+                    "failed_stage": "parse-final-convergence-json",
+                    "blocking_items": [{
+                        "kind": "runtime-error",
+                        "stage": "parse-final-convergence-json",
+                        "message": err.to_string()
+                    }],
+                    "next_action": "fix final convergence JSON output",
+                    "runtime_status": {
+                        "mode": "static-only",
+                        "repoRoot": root.display().to_string()
+                    },
+                    "smoke_task_ids": []
+                }),
+            }
+        }
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            json!({
+                "schema": "missiond.convergence-status.v1",
+                "ok": false,
+                "failed_stage": "final-convergence-static-gate",
+                "blocking_items": [{
+                    "kind": "failed-check",
+                    "stage": "final-convergence-static-gate",
+                    "exit_code": output.status.code(),
+                    "stdout_tail": tail_text(&stdout, 20),
+                    "stderr_tail": tail_text(&stderr, 20)
+                }],
+                "next_action": "inspect blocking_items[0], repair the named stage, and rerun node scripts/check-v3-final-convergence.mjs --json --static-only",
+                "runtime_status": {
+                    "mode": "static-only",
+                    "repoRoot": root.display().to_string()
+                },
+                "smoke_task_ids": []
+            })
+        }
+        Ok(Err(err)) => json!({
+            "schema": "missiond.convergence-status.v1",
+            "ok": false,
+            "failed_stage": "spawn-final-convergence-gate",
+            "blocking_items": [{
+                "kind": "runtime-error",
+                "stage": "spawn-final-convergence-gate",
+                "message": err.to_string()
+            }],
+            "next_action": "ensure node and final convergence checker are available to the daemon environment",
+            "runtime_status": {
+                "mode": "static-only",
+                "repoRoot": root.display().to_string()
+            },
+            "smoke_task_ids": []
+        }),
+        Err(_) => json!({
+            "schema": "missiond.convergence-status.v1",
+            "ok": false,
+            "failed_stage": "final-convergence-timeout",
+            "blocking_items": [{
+                "kind": "runtime-error",
+                "stage": "final-convergence-timeout",
+                "message": "static final convergence status timed out after 45s"
+            }],
+            "next_action": "profile or split the static final convergence gate",
+            "runtime_status": {
+                "mode": "static-only",
+                "repoRoot": root.display().to_string()
+            },
+            "smoke_task_ids": []
+        }),
+    }
+}
+
+fn convergence_repo_root(state: &AppState) -> PathBuf {
+    state
+        .mission
+        .list_slots()
+        .into_iter()
+        .find(|slot| slot.config.id == master_control::MASTER_SLOT_ID)
+        .and_then(|slot| slot.config.project_root.or(slot.config.cwd))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+}
+
+fn tail_text(text: &str, lines: usize) -> String {
+    text.lines()
+        .rev()
+        .take(lines)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 async fn projected_mission_slots(state: &AppState) -> Vec<Value> {

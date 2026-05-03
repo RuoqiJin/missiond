@@ -36,10 +36,23 @@ const MASTER_MCP_APPROVED_TOOLS: &[&str] = &[
     "mission_board_note_add",
     "mission_kb_remember",
     "mission_task_delegate",
+    "mission_swarm_run",
     "mission_compute_slot",
     "mission_master_status",
+    "mission_convergence_status",
     "mission_slots",
     "mission_pty_status",
+];
+const MASTER_PHASES: &[&str] = &[
+    "observe_event",
+    "classify_objective",
+    "create_context_pack",
+    "dispatch_investigators",
+    "compile_shards",
+    "dispatch_implementers",
+    "verify",
+    "close_or_backfill",
+    "blocked",
 ];
 
 static MASTER_CONTROL_RUNTIME: OnceLock<Arc<MasterControlRuntime>> = OnceLock::new();
@@ -61,6 +74,12 @@ pub(crate) struct MasterControlRuntime {
     last_mcp_ready: RwLock<Option<bool>>,
     last_control_turn_error: RwLock<Option<String>>,
     last_drift_backfill_task_id: RwLock<Option<String>>,
+    active_objective_id: RwLock<Option<String>>,
+    phase: RwLock<String>,
+    context_pack_path: RwLock<Option<String>>,
+    delegated_task_ids: RwLock<Vec<String>>,
+    last_verified_commit: RwLock<Option<String>>,
+    resume_instruction: RwLock<String>,
 }
 
 impl Default for MasterControlRuntime {
@@ -81,6 +100,15 @@ impl Default for MasterControlRuntime {
             last_mcp_ready: RwLock::new(None),
             last_control_turn_error: RwLock::new(None),
             last_drift_backfill_task_id: RwLock::new(None),
+            active_objective_id: RwLock::new(None),
+            phase: RwLock::new("observe_event".to_string()),
+            context_pack_path: RwLock::new(None),
+            delegated_task_ids: RwLock::new(Vec::new()),
+            last_verified_commit: RwLock::new(None),
+            resume_instruction: RwLock::new(
+                "read checkpoint, inspect Board/event/provider evidence, then resume at phase"
+                    .to_string(),
+            ),
         }
     }
 }
@@ -100,7 +128,12 @@ impl MasterControlRuntime {
         *self.last_event_summary.write().await = Some(format!("{domain}.{kind}: {preview}"));
     }
 
-    async fn mark_tick(&self, reason: &str, mcp_ready: bool) -> String {
+    async fn mark_tick(
+        &self,
+        reason: &str,
+        mcp_ready: bool,
+        decision: &MasterDecisionState,
+    ) -> String {
         let tick = self.processed_ticks.fetch_add(1, Ordering::Relaxed) + 1;
         let tick_id = format!("master-tick-{tick:012}");
         *self.last_tick_id.write().await = Some(tick_id.clone());
@@ -110,6 +143,12 @@ impl MasterControlRuntime {
         } else {
             Some("codex missiond MCP not ready".to_string())
         };
+        *self.active_objective_id.write().await = decision.active_objective_id.clone();
+        *self.phase.write().await = decision.phase.clone();
+        *self.context_pack_path.write().await = decision.context_pack_path.clone();
+        *self.delegated_task_ids.write().await = decision.delegated_task_ids.clone();
+        *self.last_verified_commit.write().await = decision.last_verified_commit.clone();
+        *self.resume_instruction.write().await = decision.resume_instruction.clone();
         self.last_checkpoint_at_epoch
             .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
         tracing::debug!(tick_id = %tick_id, reason = reason, "master-control tick recorded");
@@ -146,6 +185,12 @@ impl MasterControlRuntime {
             last_mcp_ready: *self.last_mcp_ready.read().await,
             last_control_turn_error: self.last_control_turn_error.read().await.clone(),
             last_drift_backfill_task_id: self.last_drift_backfill_task_id.read().await.clone(),
+            active_objective_id: self.active_objective_id.read().await.clone(),
+            phase: self.phase.read().await.clone(),
+            context_pack_path: self.context_pack_path.read().await.clone(),
+            delegated_task_ids: self.delegated_task_ids.read().await.clone(),
+            last_verified_commit: self.last_verified_commit.read().await.clone(),
+            resume_instruction: self.resume_instruction.read().await.clone(),
         }
     }
 }
@@ -166,6 +211,12 @@ pub(crate) struct MasterControlRuntimeSnapshot {
     pub(crate) last_mcp_ready: Option<bool>,
     pub(crate) last_control_turn_error: Option<String>,
     pub(crate) last_drift_backfill_task_id: Option<String>,
+    pub(crate) active_objective_id: Option<String>,
+    pub(crate) phase: String,
+    pub(crate) context_pack_path: Option<String>,
+    pub(crate) delegated_task_ids: Vec<String>,
+    pub(crate) last_verified_commit: Option<String>,
+    pub(crate) resume_instruction: String,
 }
 
 pub(crate) fn runtime() -> Arc<MasterControlRuntime> {
@@ -211,6 +262,16 @@ pub(crate) struct MasterControlService {
     runtime: Arc<MasterControlRuntime>,
 }
 
+#[derive(Debug, Clone)]
+struct MasterDecisionState {
+    phase: String,
+    active_objective_id: Option<String>,
+    context_pack_path: Option<String>,
+    delegated_task_ids: Vec<String>,
+    last_verified_commit: Option<String>,
+    resume_instruction: String,
+}
+
 impl MasterControlService {
     pub(crate) fn new(
         bus: Arc<BusServices>,
@@ -244,7 +305,9 @@ impl MasterControlService {
             }
         }
         let mcp_ready = probe_codex_mcp_control_ready().await;
-        let tick_id = self.runtime.mark_tick(reason, mcp_ready).await;
+        let pre_tick_snapshot = self.runtime.snapshot().await;
+        let decision = classify_master_decision_state(reason, &pre_tick_snapshot).await;
+        let tick_id = self.runtime.mark_tick(reason, mcp_ready, &decision).await;
         if let Err(err) = self.write_checkpoint(reason, &tick_id, mcp_ready).await {
             warn!(error = %err, "master-control checkpoint write failed");
         }
@@ -687,7 +750,7 @@ struct MasterCheckpointRender<'a> {
 fn render_checkpoint(input: &MasterCheckpointRender<'_>) -> String {
     let updated_at = chrono::Utc::now().to_rfc3339();
     format!(
-        "(master-control-checkpoint\n  :schema \"missiond.master-control-checkpoint.v2\"\n  :worker codex-master-control\n  :slot-id {}\n  :tick-id {}\n  :reason {}\n  :checkpoint-at {}\n  :event-cursor {}\n  :last-event-seq {}\n  :last-event {}\n  :queued-events {}\n  :processed-ticks {}\n  :drift-backfill-tasks-created {}\n  :last-drift-backfill-task-id {}\n  :control-turns-sent {}\n  :last-control-turn-at-epoch {}\n  :last-control-turn-error {}\n  :mcp-ready {}\n  :blocked-reason {}\n  :objective \"resident master-control watches MissionD events and delegates through BoardTask/Autopilot\"\n  :resume-from [latest-master-control-checkpoint BoardTask mission_execution event-bus provider-log]\n  :resume-plan ((step s1 :logic \"read this checkpoint and open master-control Board objectives\")\n                (step s2 :logic \"inspect durable provider logs before relying on PTY diagnostics\")\n                (step s3 :logic \"delegate via BoardTask with context-pack/write-scope/acceptance metadata\"))\n  :last-control-prompt {}\n  :updated-at {}\n)\n",
+        "(master-control-checkpoint\n  :schema \"missiond.master-control-checkpoint.v3\"\n  :worker codex-master-control\n  :slot-id {}\n  :tick-id {}\n  :reason {}\n  :checkpoint-at {}\n  :event-cursor {}\n  :last-event-seq {}\n  :last-event {}\n  :queued-events {}\n  :processed-ticks {}\n  :active-objective-id {}\n  :phase {}\n  :context-pack-path {}\n  :delegated-task-ids {}\n  :blocked-reason {}\n  :last-verified-commit {}\n  :resume-instruction {}\n  :drift-backfill-tasks-created {}\n  :last-drift-backfill-task-id {}\n  :control-turns-sent {}\n  :last-control-turn-at-epoch {}\n  :last-control-turn-error {}\n  :mcp-ready {}\n  :objective \"resident master-control watches MissionD events and delegates through BoardTask/Autopilot\"\n  :resume-from [latest-master-control-checkpoint BoardTask mission_execution event-bus provider-log]\n  :resume-plan ((step s1 :logic \"observe_event then classify_objective from durable event evidence\")\n                (step s2 :logic \"create_context_pack and dispatch_investigators before compile_shards\")\n                (step s3 :logic \"dispatch_implementers only with exact write_scope/must_not_touch/acceptance\")\n                (step s4 :logic \"verify durable evidence before close_or_backfill\"))\n  :last-control-prompt {}\n  :updated-at {}\n)\n",
         lisp_string(input.slot_id),
         lisp_string(input.tick_id),
         lisp_string(input.reason),
@@ -697,13 +760,19 @@ fn render_checkpoint(input: &MasterCheckpointRender<'_>) -> String {
         lisp_option_string(input.snapshot.last_event_summary.as_deref()),
         input.snapshot.queued_events,
         input.snapshot.processed_ticks,
+        lisp_option_string(input.snapshot.active_objective_id.as_deref()),
+        lisp_string(&input.snapshot.phase),
+        lisp_option_string(input.snapshot.context_pack_path.as_deref()),
+        lisp_string_list(&input.snapshot.delegated_task_ids),
+        lisp_option_string(input.snapshot.blocked_reason.as_deref()),
+        lisp_option_string(input.snapshot.last_verified_commit.as_deref()),
+        lisp_string(&input.snapshot.resume_instruction),
         input.snapshot.drift_backfill_tasks_created,
         lisp_option_string(input.snapshot.last_drift_backfill_task_id.as_deref()),
         input.snapshot.control_turns_sent,
         input.snapshot.last_control_turn_at_epoch,
         lisp_option_string(input.snapshot.last_control_turn_error.as_deref()),
         if input.mcp_ready { "true" } else { "false" },
-        lisp_option_string(input.snapshot.blocked_reason.as_deref()),
         lisp_option_string(input.prompt_preview.as_deref()),
         lisp_string(&updated_at),
     )
@@ -715,7 +784,16 @@ pub(crate) fn build_master_tick_prompt(
     mcp_ready: bool,
 ) -> String {
     format!(
-        "MissionD master-control tick.\nreason: {reason}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nRules:\n1. Use MissionD MCP first: mission_intent(project=\"missiond\", action=\"summary\"), mission_board_query, mission_conversation_query, mission_kb_query as needed.\n2. Do not run broad shell scans such as repo-wide ls/rg/find unless the MCP surfaces are missing; if you must use shell, explain the gap first.\n3. For BoardTaskCreated/Updated, query that BoardTask by id before deciding.\n4. For implementation work, use the two-stage context-pack workflow: first delegate read-only context organizers, then delegate exact file/region shards only after an integration plan provides context_pack_path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, task_class, pool_hint, and engine_hint.\n5. If a task asks for worker delegation, call mission_task_delegate directly with the available two-stage metadata. Use mission_board_note_add for progress/summary notes and mission_board_update only for status/parent/metadata changes.\n6. Return a compact decision: no-op, create/update BoardTask, delegate worker, write KB note, or blocked.\n7. Do not edit code directly.",
+        "MissionD master-control tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nRules:\n1. Use MissionD MCP first: mission_intent(project=\"missiond\", action=\"summary\"), mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status as needed.\n2. Do not run broad shell scans such as repo-wide ls/rg/find unless the MCP surfaces are missing; if you must use shell, explain the gap first.\n3. For BoardTaskCreated/Updated, query that BoardTask by id before deciding.\n4. Follow the state machine: observe_event -> classify_objective -> create_context_pack -> dispatch_investigators -> compile_shards -> dispatch_implementers -> verify -> close_or_backfill.\n5. For implementation work, use mission_swarm_run for productized investigate -> integrate -> implement -> verify fanout, or use mission_task_delegate for one exact shard. Both paths must provide context_pack_path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, task_class, pool_hint, and engine_hint.\n6. Use mission_board_note_add for progress/summary notes and mission_board_update only for status/parent/metadata changes.\n7. Return a compact decision: no-op, create/update BoardTask, delegate worker, write KB note, or blocked.\n8. Do not edit code directly.",
+        snapshot.phase,
+        snapshot
+            .active_objective_id
+            .as_deref()
+            .unwrap_or("none"),
+        snapshot
+            .context_pack_path
+            .as_deref()
+            .unwrap_or("none"),
         snapshot
             .last_event_cursor
             .as_deref()
@@ -820,6 +898,98 @@ pub(crate) fn should_dispatch_control_turn(
         || now.saturating_sub(snapshot.last_control_turn_at_epoch) >= 30
 }
 
+async fn classify_master_decision_state(
+    reason: &str,
+    snapshot: &MasterControlRuntimeSnapshot,
+) -> MasterDecisionState {
+    let summary = snapshot.last_event_summary.as_deref().unwrap_or("");
+    let active_objective_id = extract_task_id(summary);
+    let phase = if reason == "daemon-startup" || reason == "periodic-heartbeat" {
+        "observe_event"
+    } else if summary.contains("QuestionEvent.") {
+        "blocked"
+    } else if summary.contains("SlotEvent.task_dispatched")
+        || summary.contains("TaskDispatched")
+        || summary.contains("task_dispatched")
+    {
+        "dispatch_implementers"
+    } else if summary.contains("context-pack") || summary.contains("context_pack") {
+        "create_context_pack"
+    } else if summary.contains("BoardEvent.") && active_objective_id.is_some() {
+        "classify_objective"
+    } else if snapshot.last_drift_backfill_task_id.is_some() {
+        "close_or_backfill"
+    } else {
+        "observe_event"
+    };
+    let context_pack_path = active_objective_id.as_ref().map(|id| {
+        format!(
+            ".missiond/v3/runtime/master-control/context-packs/{}.lisp",
+            sanitize_lisp_path_component(id)
+        )
+    });
+    let resume_instruction = match phase {
+        "observe_event" => {
+            "observe durable Board/event/provider evidence; do not delegate without a concrete objective"
+        }
+        "classify_objective" => {
+            "query the active BoardTask, classify no-op/context-pack/delegate/blocked/backfill, then write a checkpoint note"
+        }
+        "create_context_pack" => {
+            "create or update the objective context-pack and dispatch read-only investigators only"
+        }
+        "dispatch_investigators" => {
+            "delegate read-only context organizers with context-pack path and no write scope"
+        }
+        "compile_shards" => {
+            "compile accepted context-pack entries into exact file/region shards before coding"
+        }
+        "dispatch_implementers" => {
+            "delegate only accepted shards with write_scope, must_not_touch, acceptance, model_profile, timeout_secs"
+        }
+        "verify" => "run static/runtime acceptance and collect durable completion evidence",
+        "close_or_backfill" => {
+            "close the objective only after durable evidence, or create visible Lisp/checker/evidence backfill"
+        }
+        "blocked" => "surface blocked reason/question and wait for human or tool resolution",
+        _ => "resume from checkpoint using BoardTask, event bus, provider logs, and KB evidence",
+    }
+    .to_string();
+    MasterDecisionState {
+        phase: phase.to_string(),
+        active_objective_id,
+        context_pack_path,
+        delegated_task_ids: Vec::new(),
+        last_verified_commit: None,
+        resume_instruction,
+    }
+}
+
+fn extract_task_id(summary: &str) -> Option<String> {
+    let marker = "task_id=";
+    let start = summary.find(marker)? + marker.len();
+    let rest = &summary[start..];
+    let id = rest
+        .split(|ch: char| ch.is_whitespace() || ch == ',' || ch == ')' || ch == '(')
+        .next()
+        .unwrap_or("")
+        .trim();
+    (!id.is_empty()).then(|| id.to_string())
+}
+
+fn sanitize_lisp_path_component(value: &str) -> String {
+    value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
 fn master_control_turns_enabled() -> bool {
     match std::env::var("MISSIOND_MASTER_CONTROL_TURNS") {
         Ok(value) => {
@@ -890,6 +1060,13 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
         "service": {
             "mode": "hybrid",
             "status": "registered",
+            "phase": runtime_snapshot.phase,
+            "phases": MASTER_PHASES,
+            "activeObjectiveId": runtime_snapshot.active_objective_id,
+            "contextPackPath": runtime_snapshot.context_pack_path,
+            "delegatedTaskIds": runtime_snapshot.delegated_task_ids,
+            "lastVerifiedCommit": runtime_snapshot.last_verified_commit,
+            "resumeInstruction": runtime_snapshot.resume_instruction,
             "surfaces": [
                 "master-checkpoint",
                 "master-event-subscriber",
@@ -1035,6 +1212,20 @@ fn lisp_option_string(value: Option<&str>) -> String {
 fn lisp_string(value: &str) -> String {
     let escaped = value.replace('\\', "\\\\").replace('"', "\\\"");
     format!("\"{escaped}\"")
+}
+
+fn lisp_string_list(values: &[String]) -> String {
+    if values.is_empty() {
+        return "[]".to_string();
+    }
+    format!(
+        "[{}]",
+        values
+            .iter()
+            .map(|value| lisp_string(value))
+            .collect::<Vec<_>>()
+            .join(" ")
+    )
 }
 
 pub(crate) fn board_event_preview(event: &BoardEvent) -> String {
@@ -1226,6 +1417,12 @@ mod tests {
             last_mcp_ready: Some(true),
             last_control_turn_error: None,
             last_drift_backfill_task_id: None,
+            active_objective_id: None,
+            phase: "observe_event".to_string(),
+            context_pack_path: None,
+            delegated_task_ids: Vec::new(),
+            last_verified_commit: None,
+            resume_instruction: "resume".to_string(),
         };
         assert!(should_dispatch_control_turn(
             "event-wakeup",
@@ -1261,13 +1458,25 @@ mod tests {
             last_mcp_ready: Some(true),
             last_control_turn_error: None,
             last_drift_backfill_task_id: None,
+            active_objective_id: Some("abc".to_string()),
+            phase: "classify_objective".to_string(),
+            context_pack_path: Some(
+                ".missiond/v3/runtime/master-control/context-packs/abc.lisp".to_string(),
+            ),
+            delegated_task_ids: Vec::new(),
+            last_verified_commit: None,
+            resume_instruction: "resume".to_string(),
         };
         let prompt = build_master_tick_prompt(&snapshot, "event-wakeup", true);
         assert!(prompt.contains("event_summary: BoardEvent.task_created: task_id=abc"));
+        assert!(prompt.contains("phase: classify_objective"));
+        assert!(prompt.contains("active_objective_id: abc"));
         assert!(prompt.contains("mission_intent(project=\"missiond\", action=\"summary\")"));
+        assert!(prompt.contains("mission_convergence_status"));
         assert!(prompt.contains("Do not run broad shell scans"));
         assert!(prompt.contains("query that BoardTask by id"));
-        assert!(prompt.contains("call mission_task_delegate directly"));
+        assert!(prompt.contains("mission_swarm_run"));
+        assert!(prompt.contains("mission_task_delegate"));
         assert!(prompt.contains("mission_board_note_add"));
     }
 

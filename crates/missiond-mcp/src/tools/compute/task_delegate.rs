@@ -42,5 +42,38 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        // ===== mission_swarm_run =====
+        ToolDefinition::new(
+            "mission_swarm_run",
+            "两阶段并发工位入口：先生成/派发 context-pack 调查任务，再按 accepted shards 派发实现任务",
+            json!({
+                "type": "object",
+                "required": ["objective"],
+                "properties": {
+                    "objective": {"type": "string", "description": "swarm 总目标"},
+                    "project_id": {"type": "string", "description": "项目 ID，如 missiond / jarvis-forge"},
+                    "projectId": {"type": "string", "description": "project_id camelCase alias"},
+                    "context_pack_path": {"type": "string", "description": "可选 context-pack Lisp 路径"},
+                    "contextPackPath": {"type": "string", "description": "context_pack_path alias"},
+                    "max_claude_workers": {"type": "integer", "default": 4},
+                    "maxClaudeWorkers": {"type": "integer"},
+                    "max_gemini_workers": {"type": "integer", "default": 2},
+                    "maxGeminiWorkers": {"type": "integer"},
+                    "write_policy": {"type": "string", "enum": ["read-only", "lisp-first", "code"], "default": "read-only"},
+                    "writePolicy": {"type": "string"},
+                    "dry_run": {"type": "boolean", "default": true},
+                    "dryRun": {"type": "boolean"},
+                    "write_scope": {"type": "array"},
+                    "writeScope": {"type": "array"},
+                    "must_not_touch": {"type": "array"},
+                    "mustNotTouch": {"type": "array"},
+                    "acceptance": {"type": "array"},
+                    "acceptance_commands": {"type": "array"},
+                    "acceptanceCommands": {"type": "array"},
+                    "timeout_secs": {"type": "integer", "default": 1800},
+                    "timeoutSecs": {"type": "integer"}
+                }
+            }),
+        ),
     ]
 }

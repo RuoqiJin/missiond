@@ -41,6 +41,16 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        // ===== mission_convergence_status =====
+        ToolDefinition::new(
+            "mission_convergence_status",
+            "查看 MissionD final convergence 静态总门禁、阻塞项、下一步动作与 runtime snapshot",
+            json!({
+                "type": "object",
+                "properties": {
+                }
+            }),
+        ),
         // ===== mission_inbox =====
         ToolDefinition::new(
             "mission_inbox",

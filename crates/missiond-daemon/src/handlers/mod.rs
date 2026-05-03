@@ -86,7 +86,9 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         "mission_power_control" => power::handle(state, name, args).await,
         "mission_global_instruction" => global_instruction::handle(state, name, args).await,
         "mission_compute_slot" => compute_slot::handle(state, name, args).await,
-        "mission_task_delegate" => task_delegate::handle(state, name, args).await,
+        "mission_task_delegate" | "mission_swarm_run" => {
+            task_delegate::handle(state, name, args).await
+        }
         "mission_job_poll" => job::handle(state, name, args).await,
         "mission_flow_run" => flow_run::handle(state, name, args).await,
         "mission_forge_build" | "mission_forge_lint" => forge::handle(state, name, args).await,
@@ -158,7 +160,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         | "mission_inbox"
         | "mission_slot_history"
         | "mission_pause"
-        | "mission_master_status" => slot::handle(state, name, args).await,
+        | "mission_master_status"
+        | "mission_convergence_status" => slot::handle(state, name, args).await,
 
         // ===== Legacy LLM trace aliases now owned by comm/question =====
         "mission_jarvis_logs"

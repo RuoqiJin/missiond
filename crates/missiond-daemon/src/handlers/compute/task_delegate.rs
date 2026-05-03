@@ -23,7 +23,11 @@ const MAX_ENTRY_CHARS: usize = 500; // Per KB/Skill entry
 const MAX_CONTEXT_CHARS: usize = 2000; // Total context block
 const MAX_DESCRIPTION_CHARS: usize = 16000; // Final description
 
-pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
+pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<ToolResult> {
+    if name == "mission_swarm_run" {
+        return handle_swarm_run(state, args).await;
+    }
+
     let objective = match args.get("objective").and_then(|v| v.as_str()) {
         Some(o) if !o.trim().is_empty() => o.trim(),
         _ => {
@@ -342,6 +346,222 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
     })))
 }
 
+async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
+    let objective = match string_arg(&args, &["objective"]) {
+        Some(value) => value.to_string(),
+        None => {
+            return Ok(ToolResult::structured_error(ToolError::new(
+                error_codes::MISSING_PARAM,
+                "'objective' is required and must be non-empty",
+            )))
+        }
+    };
+    let project_id = string_arg(&args, &["project_id", "projectId"])
+        .unwrap_or("missiond")
+        .to_string();
+    let context_pack_path = string_arg(&args, &["context_pack_path", "contextPackPath"])
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            format!(
+                ".missiond/v3/runtime/swarm/{}-context-pack.lisp",
+                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+            )
+        });
+    let max_claude_workers =
+        clamp_usize_arg(&args, &["max_claude_workers", "maxClaudeWorkers"], 4, 0, 4);
+    let max_gemini_workers =
+        clamp_usize_arg(&args, &["max_gemini_workers", "maxGeminiWorkers"], 2, 0, 2);
+    let write_policy = string_arg(&args, &["write_policy", "writePolicy"])
+        .unwrap_or("read-only")
+        .to_string();
+    let dry_run = bool_arg(&args, &["dry_run", "dryRun"]).unwrap_or(true);
+    let acceptance = string_list_arg(
+        &args,
+        &["acceptance", "acceptance_commands", "acceptanceCommands"],
+    );
+    let timeout_secs = args
+        .get("timeout_secs")
+        .or_else(|| args.get("timeoutSecs"))
+        .and_then(|v| v.as_i64())
+        .unwrap_or(1800)
+        .clamp(60, 7200);
+
+    let mut planned = Vec::new();
+    for idx in 0..max_gemini_workers {
+        planned.push(SwarmPlannedTask {
+            lane: "investigate".to_string(),
+            engine_hint: "gemini".to_string(),
+            pool_hint: "gemini-ultra-pro".to_string(),
+            task_class: "context-pack".to_string(),
+            title: format!(
+                "Investigate context for swarm objective ({}/{})",
+                idx + 1,
+                max_gemini_workers
+            ),
+            intent: "research".to_string(),
+            write_scope: Vec::new(),
+            must_not_touch: vec!["**/*".to_string()],
+        });
+    }
+    for idx in 0..max_claude_workers {
+        planned.push(SwarmPlannedTask {
+            lane: "investigate".to_string(),
+            engine_hint: "claude-code".to_string(),
+            pool_hint: "claude-code-default".to_string(),
+            task_class: "context-pack".to_string(),
+            title: format!(
+                "Survey exact shards for swarm objective ({}/{})",
+                idx + 1,
+                max_claude_workers
+            ),
+            intent: "research".to_string(),
+            write_scope: Vec::new(),
+            must_not_touch: vec!["**/*".to_string()],
+        });
+    }
+
+    if write_policy != "read-only" {
+        planned.push(SwarmPlannedTask {
+            lane: "implement".to_string(),
+            engine_hint: "claude-code".to_string(),
+            pool_hint: "claude-code-default".to_string(),
+            task_class: "code".to_string(),
+            title: "Implement accepted swarm shard after context-pack integration".to_string(),
+            intent: "code".to_string(),
+            write_scope: string_list_arg(&args, &["write_scope", "writeScope"]),
+            must_not_touch: string_list_arg(&args, &["must_not_touch", "mustNotTouch"]),
+        });
+    }
+
+    let mut created_task_ids = Vec::new();
+    if !dry_run {
+        for planned_task in &planned {
+            let description = render_swarm_task_description(
+                &objective,
+                &project_id,
+                &context_pack_path,
+                &write_policy,
+                &acceptance,
+                planned_task,
+            );
+            let input = CreateBoardTaskInput {
+                title: planned_task.title.clone(),
+                description: Some(description),
+                priority: Some("medium".to_string()),
+                category: Some("dev".to_string()),
+                project: Some(project_id.clone()),
+                auto_execute: Some(true),
+                timeout_secs: Some(timeout_secs),
+                context_intent: Some(planned_task.intent.clone()),
+                ..Default::default()
+            };
+            let task = state
+                .store
+                .create_board_task(&input)
+                .await
+                .map_err(|e| anyhow!("DB error: {}", e))?;
+            let task_id = task.id.to_string();
+            let ev = BoardEvent::TaskCreated {
+                task_id: task_id.clone(),
+                title: input.title.clone(),
+                category: input.category.clone().unwrap_or_else(|| "dev".to_string()),
+            };
+            crate::engine::master_control::notify_board_event_direct(&ev);
+            let _ = state.bus.publish_board(ev).await;
+            created_task_ids.push(task_id);
+        }
+        state.board_dispatch_notify.notify_one();
+    }
+
+    Ok(ToolResult::json_pretty(&json!({
+        "schema": "missiond.swarm-run.v1",
+        "ok": true,
+        "dry_run": dry_run,
+        "objective": objective,
+        "project_id": project_id,
+        "context_pack_path": context_pack_path,
+        "write_policy": write_policy,
+        "fanout": {
+            "max_claude_workers": max_claude_workers,
+            "max_gemini_workers": max_gemini_workers
+        },
+        "planned_tasks": planned.iter().map(SwarmPlannedTask::to_json).collect::<Vec<_>>(),
+        "created_task_ids": created_task_ids,
+        "conflicts": [],
+        "next_action": if dry_run {
+            "rerun mission_swarm_run with dry_run=false after reviewing planned_tasks"
+        } else {
+            "watch BoardTask lifecycle and provider durable logs before closing the swarm objective"
+        }
+    })))
+}
+
+#[derive(Debug, Clone)]
+struct SwarmPlannedTask {
+    lane: String,
+    engine_hint: String,
+    pool_hint: String,
+    task_class: String,
+    title: String,
+    intent: String,
+    write_scope: Vec<String>,
+    must_not_touch: Vec<String>,
+}
+
+impl SwarmPlannedTask {
+    fn to_json(&self) -> Value {
+        json!({
+            "lane": self.lane,
+            "engine_hint": self.engine_hint,
+            "pool_hint": self.pool_hint,
+            "task_class": self.task_class,
+            "title": self.title,
+            "intent": self.intent,
+            "write_scope": self.write_scope,
+            "must_not_touch": self.must_not_touch,
+        })
+    }
+}
+
+fn render_swarm_task_description(
+    objective: &str,
+    project_id: &str,
+    context_pack_path: &str,
+    write_policy: &str,
+    acceptance: &[String],
+    planned: &SwarmPlannedTask,
+) -> String {
+    let completion_protocol = if write_policy == "read-only" {
+        "Completion protocol: do not edit files, do not stage, do not commit. Return findings or shard proposals in the final summary / BoardTask note only; the master or integrator compiles the context-pack."
+    } else {
+        "Completion protocol: implementation lanes may only touch declared write_scope, must not touch forbidden paths, and must report acceptance evidence."
+    };
+
+    format!(
+        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        planned.lane,
+        planned.task_class,
+        planned.pool_hint,
+        planned.engine_hint,
+        if planned.write_scope.is_empty() {
+            "[]".to_string()
+        } else {
+            planned.write_scope.join(", ")
+        },
+        if planned.must_not_touch.is_empty() {
+            "[]".to_string()
+        } else {
+            planned.must_not_touch.join(", ")
+        },
+        if acceptance.is_empty() {
+            "[]".to_string()
+        } else {
+            acceptance.join(" && ")
+        },
+        completion_protocol,
+    )
+}
+
 #[derive(Debug, Clone, Default)]
 struct DelegationMetadata {
     task_class: Option<String>,
@@ -497,6 +717,31 @@ fn string_arg<'a>(args: &'a Value, keys: &[&str]) -> Option<&'a str> {
         .find_map(|key| args.get(*key).and_then(|v| v.as_str()))
         .map(str::trim)
         .filter(|s| !s.is_empty())
+}
+
+fn bool_arg(args: &Value, keys: &[&str]) -> Option<bool> {
+    keys.iter().find_map(|key| {
+        let value = args.get(*key)?;
+        if let Some(value) = value.as_bool() {
+            return Some(value);
+        }
+        value
+            .as_str()
+            .and_then(|text| match text.trim().to_ascii_lowercase().as_str() {
+                "true" | "1" | "yes" | "on" => Some(true),
+                "false" | "0" | "no" | "off" => Some(false),
+                _ => None,
+            })
+    })
+}
+
+fn clamp_usize_arg(args: &Value, keys: &[&str], default: usize, min: usize, max: usize) -> usize {
+    keys.iter()
+        .find_map(|key| args.get(*key))
+        .and_then(|value| value.as_u64())
+        .map(|value| value as usize)
+        .unwrap_or(default)
+        .clamp(min, max)
 }
 
 fn string_list_arg(args: &Value, keys: &[&str]) -> Vec<String> {

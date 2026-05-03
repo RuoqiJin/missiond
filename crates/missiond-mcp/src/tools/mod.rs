@@ -354,6 +354,17 @@ mod tests {
             def.description.contains("Codex master-control"),
             "mission_master_status description should identify the resident master surface"
         );
+        let convergence = get_tool("mission_convergence_status")
+            .expect("mission_convergence_status not registered");
+        assert!(
+            convergence.description.contains("final convergence"),
+            "mission_convergence_status description should identify the final convergence gate"
+        );
+        let swarm = get_tool("mission_swarm_run").expect("mission_swarm_run not registered");
+        assert!(
+            swarm.description.contains("两阶段"),
+            "mission_swarm_run description should identify the two-stage worker entry"
+        );
     }
 
     #[test]
