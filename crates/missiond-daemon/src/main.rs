@@ -67,6 +67,17 @@ use ipc_handler::{bind_ipc_listener, handle_ipc_connection};
 use mcp_client::McpProcessClient;
 use state::*;
 
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .map(|value| {
+            matches!(
+                value.as_str(),
+                "1" | "true" | "TRUE" | "yes" | "YES" | "on" | "ON"
+            )
+        })
+        .unwrap_or(false)
+}
+
 fn parse_startup_slot_engine(value: &str) -> Result<missiond_core::types::CliEngine> {
     match value {
         "claude-code" | "claude_code" => Ok(missiond_core::types::CliEngine::ClaudeCode),
@@ -1381,8 +1392,10 @@ async fn main() -> Result<()> {
         shutdown_rx.clone(),
     );
 
-    {
-        // Full sync at startup: trigger for all repos after delay
+    if env_truthy("MISSIOND_AST_FULL_SYNC_ON_STARTUP") {
+        // Full sync at startup is an explicit operator action. It can scan every
+        // slot repository and rewrite module KB summaries, so the default path
+        // stays event-driven to keep blue-green restarts cheap.
         let ast_tx2 = state.ast_sync_tx.clone();
         let slot_cwds2: Vec<String> = state
             .mission
@@ -1409,6 +1422,10 @@ async fn main() -> Result<()> {
                 }
             }
         });
+    } else {
+        tracing::info!(
+            "AST startup full sync skipped; set MISSIOND_AST_FULL_SYNC_ON_STARTUP=1 to run repository-wide backfill"
+        );
     }
 
     // Health snapshot injector (synthetic, not persisted to timeline)

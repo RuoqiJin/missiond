@@ -21,6 +21,8 @@ const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
   deployDaemon: 'scripts/deploy-daemon.sh',
   cargoFmtTouched: 'scripts/cargo-fmt-touched.sh',
+  daemonMain: 'crates/missiond-daemon/src/main.rs',
+  astSyncWorker: 'crates/missiond-daemon/src/workers/local/ast_sync_worker.rs',
 };
 
 function main() {
@@ -93,6 +95,7 @@ function checkFiles(root, files) {
     'Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'Deploy scripts MUST emit timing for cargo-build',
     'Dev-only fast deploy may select debug profile and sccache',
+    'AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP',
     'Rust formatting MUST be scoped to Rust files touched in the current diff',
     'missiond-rustfmt-exempt legacy-large-file facades',
     'rustfmt MUST run with skip_children=true',
@@ -163,6 +166,17 @@ function checkFiles(root, files) {
     'xargs rustfmt --edition "$EDITION" --config skip_children=true',
   ]);
 
+  requireAll(diagnostics, files.daemonMain, sources.daemonMain, [
+    'env_truthy("MISSIOND_AST_FULL_SYNC_ON_STARTUP")',
+    'AST startup full sync skipped',
+    'set MISSIOND_AST_FULL_SYNC_ON_STARTUP=1',
+  ]);
+
+  requireAll(diagnostics, files.astSyncWorker, sources.astSyncWorker, [
+    'topology summary refresh skipped',
+    'crate::topology_map::update_module_summaries(store, repo_name).await',
+  ]);
+
   return diagnostics;
 }
 
@@ -188,6 +202,7 @@ function buildFixture() {
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
        "Deploy scripts MUST emit timing for cargo-build."
        "Dev-only fast deploy may select debug profile and sccache."
+       "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP."
        "Rust formatting MUST be scoped to Rust files touched in the current diff."
        "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
        "rustfmt MUST run with skip_children=true."])
@@ -196,6 +211,8 @@ function buildFixture() {
       :status "code-aligned"
       :code ["scripts/deploy-daemon.sh"
              "scripts/cargo-fmt-touched.sh"
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
              "scripts/check-v3-ops-infra-isomorphism.mjs"]
       :note "fixture"))
   (compression-contract
@@ -249,6 +266,17 @@ skipped rustfmt-exempt legacy file(s)
 command -v rustfmt
 --config skip_children=true --check
 xargs rustfmt --edition "$EDITION" --config skip_children=true
+`);
+
+  writeFixture(root, DEFAULT_FILES.daemonMain, `
+env_truthy("MISSIOND_AST_FULL_SYNC_ON_STARTUP")
+AST startup full sync skipped
+set MISSIOND_AST_FULL_SYNC_ON_STARTUP=1
+`);
+
+  writeFixture(root, DEFAULT_FILES.astSyncWorker, `
+topology summary refresh skipped
+crate::topology_map::update_module_summaries(store, repo_name).await
 `);
 
   return root;

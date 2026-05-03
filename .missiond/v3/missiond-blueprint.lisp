@@ -1286,6 +1286,7 @@
        "When deterministic UUID ingestion meets an older NULL-uuid row with the same session, role, timestamp, and content, the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row."
        "mission_conversation_get MUST defensively coalesce duplicate rows by message_uuid or role/timestamp/content fallback so frontend logs stay readable until historical cleanup is reviewed."
        "Historical duplicate cleanup is dry-run/report-first; destructive DB cleanup must keep the earliest row in each duplicate group and require an explicit reviewed apply path."
+       "Gemini background reconcile MUST use size/mtime companion watermarks to skip already-reconciled old chat files without reparsing full historical transcripts; manual reconcile may force a full scan."
        "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."]
     :checker "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs")
 
@@ -1343,6 +1344,7 @@
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT so local launchd cold-start races do not force code edits."
        "Deploy scripts MUST emit timing for cargo-build, release-copy, codesign, pre-switch smoke, kickstart, socket wait, post-switch smoke, and cleanup so iteration bottlenecks are observable."
        "Dev-only fast deploy may select debug profile and sccache through explicit operator flags/env, but must preserve release manifest, active symlink, smoke, and rollback semantics unless smoke is explicitly disabled."
+       "AST repository-wide startup full sync MUST be opt-in through MISSIOND_AST_FULL_SYNC_ON_STARTUP; routine blue-green restarts stay event-driven and must not rewrite topology KB when no stale code files were synced."
        "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
        "Rust formatting MUST be scoped to Rust files touched in the current diff, including staged, unstaged, and branch-diff modes."
        "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
@@ -2049,7 +2051,8 @@
         :entry [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
         :core ((step s1 :logic "build, backup, codesign, install, kickstart, and smoke daemon as one command")
                (step s2 :logic "retry IPC initialize smoke after socket readiness and rollback on real failure")
-               (step s3 :logic "format only Rust files touched in current diff with rustfmt skip_children"))
+               (step s3 :logic "format only Rust files touched in current diff with rustfmt skip_children")
+               (step s4 :logic "keep restart-time background indexing event-driven unless an operator explicitly opts into repository-wide AST full sync"))
         :egress [deployed-daemon rollback-result scoped-rustfmt-result])))
 
   (implementation-map
@@ -2841,9 +2844,11 @@
       :implements [ops-infra]
       :code ["scripts/deploy-daemon.sh"
              "scripts/cargo-fmt-touched.sh"
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/workers/local/ast_sync_worker.rs"
              "scripts/check-v3-ops-infra-isomorphism.mjs"
              "scripts/check-missiond-blue-green-deploy.mjs"]
-      :note "ops-infra owns deploy-daemon.sh plus scoped Rust formatting. deploy-daemon.sh builds paired missiond/mission-mcp release candidates under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches ~/.xjp-mission/active, keeps stable entrypoints through active, kickstarts launchd, runs MCP smoke, rolls back to previous active on failure, and cleans retained releases. cargo-fmt-touched.sh formats only touched Rust files with skip_children=true and skips only explicit missiond-rustfmt-exempt facades.")
+      :note "ops-infra owns deploy-daemon.sh plus scoped Rust formatting and restart-time background CPU policy. deploy-daemon.sh builds paired missiond/mission-mcp release candidates under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches ~/.xjp-mission/active, keeps stable entrypoints through active, kickstarts launchd, runs MCP smoke, rolls back to previous active on failure, and cleans retained releases. cargo-fmt-touched.sh formats only touched Rust files with skip_children=true and skips only explicit missiond-rustfmt-exempt facades. main.rs keeps repository-wide AST startup full sync opt-in via MISSIOND_AST_FULL_SYNC_ON_STARTUP, and ast_sync_worker skips topology KB rewrites when no stale files were synced.")
 
     (surface missiond-blue-green-self-update
       :status "code-aligned"

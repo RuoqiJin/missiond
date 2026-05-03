@@ -10,6 +10,7 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::UNIX_EPOCH;
 
 use tracing::{debug, info, warn};
 
@@ -24,6 +25,11 @@ use super::{BackgroundWorker, WorkerContext, WorkerKind};
 
 /// Watermark key prefix to distinguish from Claude Code watermarks.
 const WATERMARK_PREFIX: &str = "gemini:";
+/// Companion watermark for file byte size. Lets the background worker skip
+/// already-reconciled old files without reparsing the whole Gemini transcript.
+const SIZE_WATERMARK_PREFIX: &str = "gemini-size:";
+/// Companion watermark for file modified time (unix seconds).
+const MTIME_WATERMARK_PREFIX: &str = "gemini-mtime:";
 /// Initial delay before first run (let system settle after startup).
 const INITIAL_DELAY_SECS: u64 = 60;
 /// Interval between runs.
@@ -53,7 +59,7 @@ impl BackgroundWorker for GeminiReconcileWorker {
         loop {
             interval.tick().await;
             ctx.wait_if_paused().await;
-            run_gemini_reconciliation(&state).await;
+            run_gemini_reconciliation(&state, false).await;
             ctx.record_success();
         }
     }
@@ -61,10 +67,10 @@ impl BackgroundWorker for GeminiReconcileWorker {
 
 /// Run reconciliation immediately (callable from MCP tool).
 pub(crate) async fn run_gemini_reconciliation_now(state: &AppState) {
-    run_gemini_reconciliation(state).await;
+    run_gemini_reconciliation(state, true).await;
 }
 
-async fn run_gemini_reconciliation(state: &AppState) {
+async fn run_gemini_reconciliation(state: &AppState, force_full_scan: bool) {
     let gemini_home = match dirs::home_dir() {
         Some(h) => h.join(".gemini"),
         None => return,
@@ -118,6 +124,44 @@ async fn run_gemini_reconciliation(state: &AppState) {
 
             let file_key = file.to_string_lossy().to_string();
             let watermark_key = format!("{}{}", WATERMARK_PREFIX, file_key);
+            let size_watermark_key = format!("{}{}", SIZE_WATERMARK_PREFIX, file_key);
+            let mtime_watermark_key = format!("{}{}", MTIME_WATERMARK_PREFIX, file_key);
+            let file_stat = read_file_reconcile_stat(file).await;
+
+            if !force_full_scan
+                && can_skip_without_parse(
+                    &all_watermarks,
+                    &watermark_key,
+                    &size_watermark_key,
+                    &mtime_watermark_key,
+                    file_stat,
+                )
+            {
+                files_skipped += 1;
+                continue;
+            }
+
+            // One-time bootstrap for older MissionD installs that only have a
+            // Gemini message-count watermark: if a file is no longer active,
+            // record size/mtime now and avoid a restart-time historical parse.
+            if !force_full_scan
+                && all_watermarks.contains_key(&watermark_key)
+                && !all_watermarks.contains_key(&size_watermark_key)
+                && file_is_quiet(file_stat)
+            {
+                if let Some(stat) = file_stat {
+                    let _ = state
+                        .store
+                        .upsert_reconcile_watermark(&size_watermark_key, stat.size)
+                        .await;
+                    let _ = state
+                        .store
+                        .upsert_reconcile_watermark(&mtime_watermark_key, stat.mtime_secs)
+                        .await;
+                }
+                files_skipped += 1;
+                continue;
+            }
 
             // Parse session to get current message count
             let session = match parse_session(file).await {
@@ -268,6 +312,16 @@ async fn run_gemini_reconciliation(state: &AppState) {
             {
                 warn!(path = %file_key, error = %e, "Gemini reconcile: failed to update watermark");
             }
+            if let Some(stat) = file_stat {
+                let _ = state
+                    .store
+                    .upsert_reconcile_watermark(&size_watermark_key, stat.size)
+                    .await;
+                let _ = state
+                    .store
+                    .upsert_reconcile_watermark(&mtime_watermark_key, stat.mtime_secs)
+                    .await;
+            }
 
             // Refresh message count
             let _ = state
@@ -289,6 +343,53 @@ async fn run_gemini_reconciliation(state: &AppState) {
         completed_at = %ts,
         "Gemini reconcile: scan complete"
     );
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReconcileFileStat {
+    size: i64,
+    mtime_secs: i64,
+    age_secs: u64,
+}
+
+async fn read_file_reconcile_stat(path: &Path) -> Option<ReconcileFileStat> {
+    let metadata = tokio::fs::metadata(path).await.ok()?;
+    let size = i64::try_from(metadata.len()).ok()?;
+    let modified = metadata.modified().ok()?;
+    let mtime_secs = modified
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|d| i64::try_from(d.as_secs()).ok())?;
+    let age_secs = modified
+        .elapsed()
+        .ok()
+        .map(|d| d.as_secs())
+        .unwrap_or(u64::MAX);
+    Some(ReconcileFileStat {
+        size,
+        mtime_secs,
+        age_secs,
+    })
+}
+
+fn file_is_quiet(stat: Option<ReconcileFileStat>) -> bool {
+    stat.map(|s| s.age_secs > ACTIVE_THRESHOLD_SECS)
+        .unwrap_or(false)
+}
+
+fn can_skip_without_parse(
+    watermarks: &std::collections::HashMap<String, i64>,
+    count_key: &str,
+    size_key: &str,
+    mtime_key: &str,
+    stat: Option<ReconcileFileStat>,
+) -> bool {
+    let Some(stat) = stat else {
+        return false;
+    };
+    watermarks.get(count_key).copied().unwrap_or(0) > 0
+        && watermarks.get(size_key).copied() == Some(stat.size)
+        && watermarks.get(mtime_key).copied() == Some(stat.mtime_secs)
 }
 
 /// Ensure a Gemini CLI conversation exists with correct source/chat_type.

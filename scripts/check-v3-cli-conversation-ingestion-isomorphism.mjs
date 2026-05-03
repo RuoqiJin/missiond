@@ -96,6 +96,7 @@ function checkFiles(root, files) {
     'the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row',
     'mission_conversation_get MUST defensively coalesce duplicate rows',
     'Historical duplicate cleanup is dry-run/report-first',
+    'Gemini background reconcile MUST use size/mtime companion watermarks',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
   ]);
 
@@ -196,6 +197,12 @@ function checkFiles(root, files) {
     '*.{json,jsonl}',
     'source: "gemini_cli".to_string()',
     'chat_type: Some("gemini_cli".to_string())',
+    'SIZE_WATERMARK_PREFIX',
+    'MTIME_WATERMARK_PREFIX',
+    'can_skip_without_parse',
+    'force_full_scan',
+    'run_gemini_reconciliation(&state, false)',
+    'run_gemini_reconciliation(state, true)',
   ]);
 
   requireAll(diagnostics, files.codexIngestion, sources.codexIngestion, [

@@ -263,9 +263,13 @@ async fn process_full_sync(
 
     if !node_ids.is_empty() {
         trigger_embedding(embedding_tx, node_ids);
+        crate::topology_map::update_module_summaries(store, repo_name).await;
+    } else {
+        debug!(
+            repo = %repo_name,
+            "AST full sync found no stale files; topology summary refresh skipped"
+        );
     }
-
-    crate::topology_map::update_module_summaries(store, repo_name).await;
 
     info!(
         repo = %repo_name,
