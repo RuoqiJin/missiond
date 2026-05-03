@@ -77,7 +77,7 @@ function check(s, diagnostics) {
     'wait up to 180s for Idle/SlashMenu',
     'periodic-heartbeat MUST run a lightweight control turn at least every 180s',
     'classification MUST preserve the current active_objective_id',
-    'clear active_objective_id so periodic heartbeat stops reprocessing a completed objective',
+    'detect it case-insensitively, clear active_objective_id, consume the queued event without sending a Codex control turn',
     'terminal Board status events must also never create a new active objective',
     'require MissionD MCP first (mission_intent, mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status, mission_slots)',
     'query the active BoardTask by id before deciding',
@@ -298,6 +298,9 @@ function check(s, diagnostics) {
     '"lastTickId"',
     '"lastMcpReady"',
     '"pty_recognition_snapshot"',
+    'should_consume_event_without_control',
+    'to_ascii_lowercase',
+    'task_id=parent-objective Running->done',
     'slot.config.project_root.clone().or(slot.config.cwd.clone())',
   ]);
   requireAll(diagnostics, FILES.mcpProcessTools, s.mcpProcessTools, [

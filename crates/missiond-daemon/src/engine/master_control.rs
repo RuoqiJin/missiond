@@ -245,6 +245,10 @@ impl MasterControlRuntime {
         }
     }
 
+    fn clear_queued_events(&self) {
+        self.queued_events.store(0, Ordering::Relaxed);
+    }
+
     pub(crate) async fn snapshot(&self) -> MasterControlRuntimeSnapshot {
         MasterControlRuntimeSnapshot {
             queued_events: self.queued_events.load(Ordering::Relaxed),
@@ -389,6 +393,9 @@ impl MasterControlService {
         let pre_tick_snapshot = self.runtime.snapshot().await;
         let decision = classify_master_decision_state(reason, &pre_tick_snapshot).await;
         let tick_id = self.runtime.mark_tick(reason, mcp_ready, &decision).await;
+        if should_consume_event_without_control(reason, &pre_tick_snapshot, &decision) {
+            self.runtime.clear_queued_events();
+        }
         if let Err(err) = self
             .ensure_context_pack_materialized(&decision, reason, &tick_id)
             .await
@@ -1066,7 +1073,8 @@ pub(crate) fn should_dispatch_control_turn(
         || now.saturating_sub(snapshot.last_control_turn_at_epoch)
             >= MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS;
     if reason == "event-wakeup" {
-        return outside_rate_limit;
+        return outside_rate_limit
+            && (snapshot.queued_events > 0 || snapshot.active_objective_id.is_some());
     }
     if reason == "periodic-heartbeat" && snapshot.queued_events > 0 {
         return outside_rate_limit;
@@ -1170,12 +1178,26 @@ fn extract_task_id(summary: &str) -> Option<String> {
 }
 
 fn is_terminal_board_status_event(summary: &str) -> bool {
-    summary.contains("BoardEvent.status_changed")
-        && (summary.contains("->Done")
-            || summary.contains("->Completed")
-            || summary.contains("->Closed")
-            || summary.contains("->Failed")
-            || summary.contains("->Blocked"))
+    let lower = summary.to_ascii_lowercase();
+    lower.contains("boardevent.status_changed")
+        && (lower.contains("->done")
+            || lower.contains("->completed")
+            || lower.contains("->closed")
+            || lower.contains("->failed")
+            || lower.contains("->blocked"))
+}
+
+fn should_consume_event_without_control(
+    reason: &str,
+    snapshot: &MasterControlRuntimeSnapshot,
+    decision: &MasterDecisionState,
+) -> bool {
+    reason == "event-wakeup"
+        && decision.active_objective_id.is_none()
+        && snapshot
+            .last_event_summary
+            .as_deref()
+            .is_some_and(is_terminal_board_status_event)
 }
 
 fn sanitize_lisp_path_component(value: &str) -> String {
@@ -1776,6 +1798,15 @@ mod tests {
             &snapshot,
             false
         ));
+
+        let mut quiet_snapshot = snapshot.clone();
+        quiet_snapshot.queued_events = 0;
+        quiet_snapshot.active_objective_id = None;
+        assert!(!should_dispatch_control_turn(
+            "event-wakeup",
+            &quiet_snapshot,
+            true
+        ));
     }
 
     #[test]
@@ -1880,6 +1911,17 @@ mod tests {
             Some("BoardEvent.status_changed: task_id=parent-objective Running->Done".to_string());
         let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
         assert_eq!(decision.active_objective_id, None);
+
+        snapshot.active_objective_id = Some("parent-objective".to_string());
+        snapshot.last_event_summary =
+            Some("BoardEvent.status_changed: task_id=parent-objective Running->done".to_string());
+        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        assert_eq!(decision.active_objective_id, None);
+        assert!(should_consume_event_without_control(
+            "event-wakeup",
+            &snapshot,
+            &decision
+        ));
 
         snapshot.active_objective_id = None;
         let decision = classify_master_decision_state("daemon-startup", &snapshot).await;
