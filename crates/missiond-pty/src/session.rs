@@ -2697,13 +2697,13 @@ Some prose.
             Some("gpt-5.5"),
             Some("xhigh"),
             true,
-            Some("read-only"),
+            Some("danger-full-access"),
             Some("never"),
         );
         assert!(cmd.contains("codex --model 'gpt-5.5'"));
         assert!(cmd.contains("-c 'model_reasoning_effort=\"xhigh\"'"));
         assert!(cmd.contains("--search"));
-        assert!(cmd.contains("--sandbox 'read-only'"));
+        assert!(cmd.contains("--sandbox 'danger-full-access'"));
         assert!(cmd.contains("--ask-for-approval 'never'"));
     }
 }

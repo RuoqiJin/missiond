@@ -713,17 +713,21 @@ impl Default for WorkstationRuntimeConfig {
                     "kb-write".to_string(),
                     "execution-log".to_string(),
                     "dispatch".to_string(),
+                    "code-read".to_string(),
+                    "code-write".to_string(),
+                    "shell-exec".to_string(),
                     "search".to_string(),
                     "mcp".to_string(),
+                    "full-access".to_string(),
                 ],
                 max_concurrency: 1,
                 timeout_secs: 7200,
                 default_use: "resident-master-control".to_string(),
                 accepts_boardtask: false,
-                write_allowed: false,
+                write_allowed: true,
                 reasoning_effort: Some("xhigh".to_string()),
                 search_enabled: true,
-                sandbox: Some("read-only".to_string()),
+                sandbox: Some("danger-full-access".to_string()),
                 approval_policy: Some("never".to_string()),
             },
         ];
@@ -2818,15 +2822,15 @@ mod tests {
       :model nil
       :reasoning-effort xhigh
       :search true
-      :sandbox read-only
+      :sandbox danger-full-access
       :approval-policy never
       :task-classes [master-control orchestration governance night-audit]
-      :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp]
+      :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access]
       :max-concurrency 1
       :timeout-secs 7200
       :default-use resident-master-control
       :accepts-boardtask false
-      :write-allowed false))
+      :write-allowed true))
 	  (flow-runtime-policy
 	    :llm-call-default-max-tokens 65536
 	    :slot-task-default-model "opus"
@@ -3252,7 +3256,7 @@ mod tests {
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
-    (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox read-only :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed false)))"#,
+    (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))"#,
         )
         .expect_err("missing policy");
         assert!(err
@@ -3298,7 +3302,7 @@ mod tests {
   (workstation-pool
     (worker claude-code-default :engine claude-code :role coder :slot-id "slot-claude-code-default" :task-type claude_code_default :model-profile coding-default-opus-4-7 :model nil :task-classes [code] :capabilities [code-write] :max-concurrency 1 :timeout-secs 1800 :default-use code-implementation :accepts-boardtask true :write-allowed true)
     (worker gemini-ultra-pro :engine gemini :role researcher :slot-id "slot-gemini-ultra" :task-type gemini_ultra :model-profile gemini-ultra-pro-preview :model nil :task-classes [research] :capabilities [read-only] :max-concurrency 1 :timeout-secs 900 :default-use research-review :accepts-boardtask true :write-allowed false)
-    (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox read-only :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed false)))
+    (worker codex-master-control :engine codex :role orchestrator :slot-id "slot-codex-master-control" :task-type codex_master_control :model-profile codex-master-gpt-5-5-xhigh :model nil :reasoning-effort xhigh :search true :sandbox danger-full-access :approval-policy never :task-classes [master-control] :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access] :max-concurrency 1 :timeout-secs 7200 :default-use resident-master-control :accepts-boardtask false :write-allowed true)))
 "#;
         let err = parse_workstation_config(source).expect_err("missing ttl policy");
         assert!(err.to_string().contains("ttl-policy dynamic-slot"));

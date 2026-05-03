@@ -32,10 +32,10 @@
        :model "gpt-5.5"
        :reasoning-effort xhigh
        :search true
-       :sandbox read-only
+       :sandbox danger-full-access
        :approval-policy never
-       :write-policy board-kb-execution-log-only
-       :runtime-rule "Resident brain/orchestrator; reads Lisp/Board/KB/events, dispatches workers, and checkpoints decisions."))
+       :write-policy audited-full-access
+       :runtime-rule "Resident brain/orchestrator; has full local sandbox access, reads Lisp/Board/KB/events, dispatches workers, checkpoints decisions, and must leave Board/KB/checkpoint evidence for any direct mutation."))
   :observability
     ["mission_compute_slot action=list exposes workstation_pool."
      "Each pool row reports runtime_slot_present and status."

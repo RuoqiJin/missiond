@@ -503,9 +503,9 @@
       :spawn-model-arg "gpt-5.5"
       :reasoning-effort xhigh
       :search true
-      :sandbox read-only
+      :sandbox danger-full-access
       :approval-policy never
-      :rule "Resident master control uses Codex GPT-5.5 with xhigh reasoning. It is not a normal code shard worker and defaults to read-only code access plus Board/KB/execution-log writes.")
+      :rule "Resident master control uses Codex GPT-5.5 with xhigh reasoning and full local sandbox access. It remains an audited orchestrator: every direct mutation must leave Board/KB/checkpoint evidence, while ordinary implementation still prefers delegated workers.")
     (model-profile daily-sonnet
       :applies-to [ops low-risk-maintenance]
       :spawn-model-arg "sonnet"
@@ -721,18 +721,18 @@
       :model nil
       :reasoning-effort xhigh
       :search true
-      :sandbox read-only
+      :sandbox danger-full-access
       :approval-policy never
       :task-classes [master-control orchestration governance night-audit]
-      :capabilities [board-write kb-write execution-log dispatch read-only-code search mcp]
+      :capabilities [board-write kb-write execution-log dispatch code-read code-write shell-exec search mcp full-access]
       :max-concurrency 1
       :timeout-secs 7200
       :default-use resident-master-control
       :accepts-boardtask false
-      :write-allowed false)
+      :write-allowed true)
     :invariants
       ["Claude coding workers use coding-default-opus-4-7, which means no Claude Code --model override; Sonnet cannot be the coding default."
-       "Codex master-control is a resident orchestrator lane, not a normal BoardTask code shard candidate; it may read code, write Board/KB/execution logs, and dispatch workers, but does not directly compete for ordinary code tasks."
+       "Codex master-control is a resident orchestrator lane with full local sandbox access, not a normal BoardTask code shard candidate; it may directly repair MissionD control-plane issues when necessary, but every direct mutation must leave Board/KB/checkpoint evidence and ordinary implementation still prefers delegated workers."
        "Claude fast-patch may use Sonnet only for narrow atomic tasks whose context-pack already identifies exact files/regions; it is not a default coding lane."
        "Gemini Ultra Pro is the high-language read-only investigation lane using gemini-3.1-pro-preview; Gemini fast survey is explicitly low-authority mechanical scan/summary work."
        "Gemini is initially read-only: research, review, context-pack, and Lisp compression advice may route there; scoped write/commit work stays on Claude until a separate Gemini write smoke passes."

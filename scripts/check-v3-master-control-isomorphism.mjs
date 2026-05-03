@@ -120,10 +120,10 @@ function check(s, diagnostics) {
     ':engine codex',
     ':role orchestrator',
     ':search true',
-    ':sandbox read-only',
+    ':sandbox danger-full-access',
     ':approval-policy never',
     ':accepts-boardtask false',
-    ':write-allowed false',
+    ':write-allowed true',
   ]);
   requireAll(diagnostics, FILES.runtime, s.runtime, [
     'DEFAULT_CODEX_MASTER_PROFILE',

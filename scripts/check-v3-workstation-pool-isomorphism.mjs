@@ -342,11 +342,11 @@ function validateCodexMasterWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':slot-id', 'slot-codex-master-control');
   requirePropText(diagnostics, file, props, ':model-profile', 'codex-master-gpt-5-5-xhigh');
   requirePropText(diagnostics, file, props, ':reasoning-effort', 'xhigh');
-  requirePropText(diagnostics, file, props, ':sandbox', 'read-only');
+  requirePropText(diagnostics, file, props, ':sandbox', 'danger-full-access');
   requirePropText(diagnostics, file, props, ':approval-policy', 'never');
   requirePropBool(diagnostics, file, props, ':search', true);
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', false);
-  requirePropBool(diagnostics, file, props, ':write-allowed', false);
+  requirePropBool(diagnostics, file, props, ':write-allowed', true);
   requireListItems(diagnostics, file, props, ':capabilities', ['board-write', 'kb-write', 'dispatch']);
 }
 
