@@ -93,6 +93,7 @@ function checkFiles(root, files) {
     'mission_slots MUST reject or flag slot_sessions whose conversation source disagrees with the slot engine',
     'mission_slots MUST fall back to the latest real codex_cli conversation',
     'Codex CLI message ingestion MUST generate deterministic non-null message_uuid values',
+    'Codex CLI background ingestion MUST persist rollout size/mtime/line watermarks',
     'the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row',
     'mission_conversation_get MUST defensively coalesce duplicate rows',
     'Historical duplicate cleanup is dry-run/report-first',
@@ -212,6 +213,13 @@ function checkFiles(root, files) {
     'line_no',
     'source_event_hash',
     'Sha256',
+    'CODEX_SIZE_WATERMARK_PREFIX',
+    'CODEX_MTIME_WATERMARK_PREFIX',
+    'CODEX_LINE_WATERMARK_PREFIX',
+    'REPARSE_OVERLAP_LINES',
+    'persisted_codex_watermark_matches',
+    'persist_codex_file_watermarks',
+    'skip_before_line',
     'codex_message_uuid_is_non_null_and_stable',
   ]);
 

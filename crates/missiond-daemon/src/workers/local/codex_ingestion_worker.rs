@@ -8,7 +8,8 @@
 //! Design:
 //! - Uses `conversations.id = codex_thread_id` directly (no ALTER TABLE).
 //! - Real timestamps from JSONL, never NOW().
-//! - Watermark tracking via in-memory HashMap keyed by thread_id → (file mtime, file size).
+//! - Watermark tracking via in-memory + DB watermarks keyed by rollout file →
+//!   (file mtime, file size, parsed line count).
 //!   Codex's `threads.updated_at` only bumps on metadata changes (title, archive,
 //!   first message), NOT on every JSONL append, so it's useless as a freshness signal.
 //!   The rollout JSONL file's mtime+size is the only reliable "this thread changed" check.
@@ -17,7 +18,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -41,8 +42,20 @@ const CODEX_DB_RELATIVE: &str = ".codex/state_5.sqlite";
 /// Max JSONL lines to read per thread per poll cycle (safety valve).
 const MAX_LINES_PER_THREAD: usize = 50_000;
 
+/// Reparse overlap when a Codex rollout changed. Function call/output pairs can
+/// straddle the previous cursor, and DB UUID dedup keeps this overlap safe.
+const REPARSE_OVERLAP_LINES: i64 = 200;
+
+/// Old unchanged files with an existing MissionD conversation are considered
+/// already imported and can be bootstrapped into persistent watermarks.
+const QUIET_FILE_THRESHOLD_SECS: u64 = 3600;
+
 /// Batch size for tool call inserts.
 const TOOL_CALL_BATCH_SIZE: usize = 100;
+
+const CODEX_SIZE_WATERMARK_PREFIX: &str = "codex-size:";
+const CODEX_MTIME_WATERMARK_PREFIX: &str = "codex-mtime:";
+const CODEX_LINE_WATERMARK_PREFIX: &str = "codex-lines:";
 
 // ── JSONL event types ──
 
@@ -57,8 +70,9 @@ struct CodexJsonlEvent {
 /// File-based freshness watermark — what we last saw on disk for a thread's rollout.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileWatermark {
-    mtime: SystemTime,
+    mtime_secs: i64,
     size: u64,
+    age_secs: u64,
 }
 
 /// Minimal thread row from Codex's SQLite.
@@ -127,8 +141,8 @@ impl BackgroundWorker for CodexIngestionWorker {
 
         // Watermark: thread_id → (file mtime, file size) of the rollout JSONL.
         // We deliberately ignore Codex's `threads.updated_at` because it does NOT
-        // bump on every JSONL append. In-memory only — on daemon restart we re-scan
-        // and INSERT OR IGNORE dedup catches anything we already have.
+        // bump on every JSONL append. Persistent watermarks prevent blue-green
+        // restarts from reparsing all historical Codex JSONL.
         let mut watermarks: HashMap<String, FileWatermark> = HashMap::new();
 
         loop {
@@ -171,6 +185,11 @@ async fn poll_and_ingest(
         .context("spawn_blocking join")??;
 
     let mut total_ingested = 0usize;
+    let persisted_watermarks = state
+        .store
+        .get_all_reconcile_watermarks()
+        .await
+        .unwrap_or_default();
 
     for thread in &threads {
         // Read rollout file metadata — this is our authoritative freshness signal.
@@ -182,19 +201,64 @@ async fn poll_and_ingest(
 
         // Skip if file hasn't grown or been touched since last poll.
         if let Some(prev) = watermarks.get(&thread.id).copied() {
-            if current_wm == prev {
+            if same_file_watermark(current_wm, prev) {
                 continue;
             }
         }
+        if persisted_codex_watermark_matches(
+            &persisted_watermarks,
+            &thread.rollout_path,
+            current_wm,
+        ) {
+            watermarks.insert(thread.id.clone(), current_wm);
+            continue;
+        }
 
-        match process_thread(state, thread).await {
-            Ok(count) => {
-                total_ingested += count;
+        if current_wm.age_secs > QUIET_FILE_THRESHOLD_SECS
+            && state
+                .store
+                .get_conversation(&thread.id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+            && !persisted_watermarks.contains_key(&codex_size_watermark_key(&thread.rollout_path))
+        {
+            persist_codex_file_watermarks(
+                state,
+                &thread.rollout_path,
+                current_wm,
+                persisted_watermarks
+                    .get(&codex_line_watermark_key(&thread.rollout_path))
+                    .copied(),
+            )
+            .await;
+            watermarks.insert(thread.id.clone(), current_wm);
+            continue;
+        }
+
+        let skip_before_line = persisted_watermarks
+            .get(&codex_line_watermark_key(&thread.rollout_path))
+            .copied()
+            .unwrap_or(0)
+            .saturating_sub(REPARSE_OVERLAP_LINES)
+            .max(0) as usize;
+
+        match process_thread(state, thread, skip_before_line).await {
+            Ok(outcome) => {
+                total_ingested += outcome.ingested;
                 watermarks.insert(thread.id.clone(), current_wm);
-                if count > 0 {
+                persist_codex_file_watermarks(
+                    state,
+                    &thread.rollout_path,
+                    current_wm,
+                    Some(outcome.total_lines as i64),
+                )
+                .await;
+                if outcome.ingested > 0 {
                     debug!(
                         thread_id = %&thread.id[..8.min(thread.id.len())],
-                        tool_calls = count,
+                        tool_calls = outcome.ingested,
                         size = current_wm.size,
                         "Codex ingestion: thread processed"
                     );
@@ -220,8 +284,16 @@ fn read_file_watermark(path: &Path) -> Option<FileWatermark> {
     let meta = std::fs::metadata(path).ok()?;
     let mtime = meta.modified().ok()?;
     Some(FileWatermark {
-        mtime,
+        mtime_secs: mtime
+            .duration_since(UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_secs()).ok())?,
         size: meta.len(),
+        age_secs: mtime
+            .elapsed()
+            .ok()
+            .map(|d| d.as_secs())
+            .unwrap_or(u64::MAX),
     })
 }
 
@@ -262,7 +334,16 @@ fn read_codex_threads(db_path: &Path) -> Result<Vec<CodexThread>> {
 }
 
 /// Process a single Codex thread: ensure conversation exists, parse JSONL, write tool calls.
-async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize> {
+struct ProcessedThread {
+    ingested: usize,
+    total_lines: usize,
+}
+
+async fn process_thread(
+    state: &AppState,
+    thread: &CodexThread,
+    skip_before_line: usize,
+) -> Result<ProcessedThread> {
     let rollout_path = PathBuf::from(&thread.rollout_path);
     if !rollout_path.exists() {
         debug!(
@@ -270,7 +351,10 @@ async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize>
             path = %rollout_path.display(),
             "Codex ingestion: JSONL file missing, skip"
         );
-        return Ok(0);
+        return Ok(ProcessedThread {
+            ingested: 0,
+            total_lines: 0,
+        });
     }
 
     // Ensure conversation record exists (idempotent via upsert).
@@ -318,7 +402,7 @@ async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize>
     let parsed = tokio::task::spawn_blocking({
         let path = rollout_path.clone();
         let thread_id = thread.id.clone();
-        move || parse_jsonl(&path, &thread_id)
+        move || parse_jsonl(&path, &thread_id, skip_before_line)
     })
     .await
     .context("spawn_blocking join")??;
@@ -376,11 +460,14 @@ async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize>
                 session_id: thread.id.clone(),
                 role: m.role.clone(),
                 content: sanitize(&m.content),
-                raw_content: Some(serde_json::json!({
-                    "source": "codex_ingestion",
-                    "jsonl_line": m.line_no,
-                    "source_event_hash": m.source_event_hash,
-                }).to_string()),
+                raw_content: Some(
+                    serde_json::json!({
+                        "source": "codex_ingestion",
+                        "jsonl_line": m.line_no,
+                        "source_event_hash": m.source_event_hash,
+                    })
+                    .to_string(),
+                ),
                 message_uuid: Some(codex_message_uuid(&thread.id, m)),
                 parent_uuid: None,
                 model: thread.model.clone(),
@@ -419,17 +506,21 @@ async fn process_thread(state: &AppState, thread: &CodexThread) -> Result<usize>
         }
     }
 
-    Ok(total)
+    Ok(ProcessedThread {
+        ingested: total,
+        total_lines: parsed.total_lines,
+    })
 }
 
 /// Parse result: tool calls + text messages.
 struct ParsedThread {
     tool_calls: Vec<ParsedToolCall>,
     messages: Vec<ParsedMessage>,
+    total_lines: usize,
 }
 
 /// Parse JSONL file, extract tool calls + agent/user messages.
-fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
+fn parse_jsonl(path: &Path, _thread_id: &str, skip_before_line: usize) -> Result<ParsedThread> {
     use std::io::{BufRead, BufReader};
 
     let file = std::fs::File::open(path).context("open JSONL")?;
@@ -452,6 +543,9 @@ fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
         };
 
         if line.is_empty() {
+            continue;
+        }
+        if line_count <= skip_before_line {
             continue;
         }
         let source_event_hash = short_sha256(&line, 16);
@@ -593,7 +687,57 @@ fn parse_jsonl(path: &Path, _thread_id: &str) -> Result<ParsedThread> {
     Ok(ParsedThread {
         tool_calls: calls,
         messages,
+        total_lines: line_count,
     })
+}
+
+fn same_file_watermark(a: FileWatermark, b: FileWatermark) -> bool {
+    a.size == b.size && a.mtime_secs == b.mtime_secs
+}
+
+fn codex_size_watermark_key(path: &str) -> String {
+    format!("{CODEX_SIZE_WATERMARK_PREFIX}{path}")
+}
+
+fn codex_mtime_watermark_key(path: &str) -> String {
+    format!("{CODEX_MTIME_WATERMARK_PREFIX}{path}")
+}
+
+fn codex_line_watermark_key(path: &str) -> String {
+    format!("{CODEX_LINE_WATERMARK_PREFIX}{path}")
+}
+
+fn persisted_codex_watermark_matches(
+    watermarks: &HashMap<String, i64>,
+    path: &str,
+    current: FileWatermark,
+) -> bool {
+    watermarks.get(&codex_size_watermark_key(path)).copied() == i64::try_from(current.size).ok()
+        && watermarks.get(&codex_mtime_watermark_key(path)).copied() == Some(current.mtime_secs)
+}
+
+async fn persist_codex_file_watermarks(
+    state: &AppState,
+    path: &str,
+    current: FileWatermark,
+    total_lines: Option<i64>,
+) {
+    if let Ok(size) = i64::try_from(current.size) {
+        let _ = state
+            .store
+            .upsert_reconcile_watermark(&codex_size_watermark_key(path), size)
+            .await;
+    }
+    let _ = state
+        .store
+        .upsert_reconcile_watermark(&codex_mtime_watermark_key(path), current.mtime_secs)
+        .await;
+    if let Some(total_lines) = total_lines {
+        let _ = state
+            .store
+            .upsert_reconcile_watermark(&codex_line_watermark_key(path), total_lines)
+            .await;
+    }
 }
 
 fn short_sha256(input: &str, chars: usize) -> String {
