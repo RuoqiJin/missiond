@@ -17,6 +17,11 @@ use async_trait::async_trait;
 use sqlx::Row;
 use std::collections::HashSet;
 
+const COMPACTION_FRAGMENTS_QUERY: &str =
+    "SELECT id, COALESCE(started_at, '') AS started_at, COALESCE(message_count, 0) AS message_count FROM conversations
+             WHERE parent_session_id = $1 AND conversation_type = 'compaction'
+             ORDER BY started_at ASC NULLS LAST, id ASC";
+
 fn task_scoped_type_clause(conv_type: Option<&str>, type_clause: &str) -> String {
     match conv_type {
         None | Some("all") => String::new(),
@@ -953,14 +958,10 @@ impl ConversationStore for PgMissionStore {
         &self,
         parent_id: &str,
     ) -> DbResult<Vec<(String, String, i64)>> {
-        let rows: Vec<(String, String, i64)> = sqlx::query_as(
-            "SELECT id, started_at, message_count FROM conversations
-             WHERE parent_session_id = $1 AND conversation_type = 'compaction'
-             ORDER BY started_at ASC, id ASC",
-        )
-        .bind(parent_id)
-        .fetch_all(&self.pool)
-        .await?;
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(COMPACTION_FRAGMENTS_QUERY)
+            .bind(parent_id)
+            .fetch_all(&self.pool)
+            .await?;
         Ok(rows)
     }
 
@@ -2583,7 +2584,7 @@ impl ConversationStore for PgMissionStore {
 
 #[cfg(test)]
 mod tests {
-    use super::task_scoped_type_clause;
+    use super::{task_scoped_type_clause, COMPACTION_FRAGMENTS_QUERY};
 
     #[test]
     fn task_scoped_query_without_type_includes_provider_conversations() {
@@ -2601,5 +2602,12 @@ mod tests {
     fn task_scoped_query_keeps_explicit_type_filters() {
         let clause = " AND conversation_type = 'gemini_chat'";
         assert_eq!(task_scoped_type_clause(Some("gemini"), clause), clause);
+    }
+
+    #[test]
+    fn compaction_fragment_query_coalesces_nullable_legacy_fields() {
+        assert!(COMPACTION_FRAGMENTS_QUERY.contains("COALESCE(started_at, '') AS started_at"));
+        assert!(COMPACTION_FRAGMENTS_QUERY.contains("COALESCE(message_count, 0) AS message_count"));
+        assert!(COMPACTION_FRAGMENTS_QUERY.contains("NULLS LAST"));
     }
 }
