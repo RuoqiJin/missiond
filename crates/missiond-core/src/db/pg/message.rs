@@ -2,11 +2,11 @@
 
 use std::collections::HashSet;
 
-use async_trait::async_trait;
+use super::PgMissionStore;
 use crate::db::error::DbResult;
 use crate::db::traits::MessageStore;
 use crate::types::*;
-use super::PgMissionStore;
+use async_trait::async_trait;
 
 #[cfg(feature = "postgres")]
 #[async_trait]
@@ -43,7 +43,10 @@ impl MessageStore for PgMissionStore {
         Ok(row.0)
     }
 
-    async fn insert_conversation_messages_batch(&self, messages: &[ConversationMessage]) -> DbResult<Vec<i64>> {
+    async fn insert_conversation_messages_batch(
+        &self,
+        messages: &[ConversationMessage],
+    ) -> DbResult<Vec<i64>> {
         if messages.is_empty() {
             return Ok(Vec::new());
         }
@@ -84,7 +87,10 @@ impl MessageStore for PgMissionStore {
         Ok(inserted_ids)
     }
 
-    async fn check_message_uuids_exist(&self, uuids: &[&str]) -> DbResult<std::collections::HashSet<String>> {
+    async fn check_message_uuids_exist(
+        &self,
+        uuids: &[&str],
+    ) -> DbResult<std::collections::HashSet<String>> {
         if uuids.is_empty() {
             return Ok(std::collections::HashSet::new());
         }
@@ -102,7 +108,10 @@ impl MessageStore for PgMissionStore {
         Ok(rows.into_iter().collect())
     }
 
-    async fn get_conversation_message_by_id(&self, id: i64) -> DbResult<Option<ConversationMessage>> {
+    async fn get_conversation_message_by_id(
+        &self,
+        id: i64,
+    ) -> DbResult<Option<ConversationMessage>> {
         let row = sqlx::query(
             "SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                     tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count
@@ -114,13 +123,18 @@ impl MessageStore for PgMissionStore {
         Ok(row.as_ref().map(Self::row_to_conversation_message))
     }
 
-    async fn get_conversation_messages(&self, session_id: &str, since_id: Option<i64>, limit: i64) -> DbResult<Vec<ConversationMessage>> {
+    async fn get_conversation_messages(
+        &self,
+        session_id: &str,
+        since_id: Option<i64>,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationMessage>> {
         let rows = if let Some(since) = since_id {
             sqlx::query(
                 "SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                         tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
-                        ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp, id) AS seq
-                 FROM conversation_messages WHERE session_id = $1 AND id > $2 ORDER BY timestamp ASC, id ASC LIMIT $3"
+                        NULL::BIGINT AS seq
+                 FROM conversation_messages WHERE session_id = $1 AND id > $2 ORDER BY id ASC LIMIT $3"
             )
             .bind(session_id)
             .bind(since)
@@ -128,14 +142,16 @@ impl MessageStore for PgMissionStore {
             .fetch_all(&self.pool)
             .await?
         } else {
-            // Return last N messages (subquery to reverse order, preserving seq)
+            // Return last N messages using the existing (session_id, id) index.
+            // Coalescing below assigns the display seq, so a window function here
+            // only makes large Codex/Gemini sessions slower without adding value.
             sqlx::query(
                 "SELECT * FROM (
                     SELECT id, session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = id AND l.label = 'semantic_role'), role) as role, content, raw_content, message_uuid, parent_uuid, model, timestamp, metadata,
                            tool_name, raw_role, content_types, has_image, has_tool_use, has_tool_result, token_count,
-                           ROW_NUMBER() OVER (PARTITION BY session_id ORDER BY timestamp, id) AS seq
-                    FROM conversation_messages WHERE session_id = $1 ORDER BY timestamp DESC, id DESC LIMIT $2
-                ) sub ORDER BY timestamp ASC, id ASC"
+                           NULL::BIGINT AS seq
+                    FROM conversation_messages WHERE session_id = $1 ORDER BY id DESC LIMIT $2
+                ) sub ORDER BY id ASC"
             )
             .bind(session_id)
             .bind(limit)
@@ -146,14 +162,18 @@ impl MessageStore for PgMissionStore {
         Ok(coalesce_duplicate_messages(messages))
     }
 
-    async fn get_messages_around(&self, message_id: i64, before: i64, after: i64) -> DbResult<Option<(String, Vec<ConversationMessage>)>> {
+    async fn get_messages_around(
+        &self,
+        message_id: i64,
+        before: i64,
+        after: i64,
+    ) -> DbResult<Option<(String, Vec<ConversationMessage>)>> {
         // Resolve session_id + timestamp from anchor message
-        let anchor_row: Option<(String, chrono::DateTime<chrono::Utc>)> = sqlx::query_as(
-            "SELECT session_id, timestamp FROM conversation_messages WHERE id = $1"
-        )
-        .bind(message_id)
-        .fetch_optional(&self.pool)
-        .await?;
+        let anchor_row: Option<(String, chrono::DateTime<chrono::Utc>)> =
+            sqlx::query_as("SELECT session_id, timestamp FROM conversation_messages WHERE id = $1")
+                .bind(message_id)
+                .fetch_optional(&self.pool)
+                .await?;
 
         let (session_id, anchor_ts) = match anchor_row {
             Some(r) => r,
@@ -196,11 +216,16 @@ impl MessageStore for PgMissionStore {
         .fetch_all(&self.pool)
         .await?;
 
-        let msgs: Vec<ConversationMessage> = rows.iter().map(Self::row_to_conversation_message).collect();
+        let msgs: Vec<ConversationMessage> =
+            rows.iter().map(Self::row_to_conversation_message).collect();
         Ok(Some((session_id, msgs)))
     }
 
-    async fn search_conversation_messages(&self, query: &str, limit: i64) -> DbResult<Vec<ConversationMessage>> {
+    async fn search_conversation_messages(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationMessage>> {
         // Phase 1: PostgreSQL FTS using plainto_tsquery
         let rows = sqlx::query(
             "SELECT m.id, m.session_id, COALESCE((SELECT value FROM message_labels l WHERE l.message_id = m.id AND l.label = 'semantic_role'), m.role) as role, m.content, m.raw_content, m.message_uuid, m.parent_uuid,
@@ -241,11 +266,17 @@ impl MessageStore for PgMissionStore {
         Ok(rows.iter().map(Self::row_to_conversation_message).collect())
     }
 
-    async fn search_messages_filtered(&self, query: &str, session_id: Option<&str>, role: Option<&str>, tool_name: Option<&str>, time_after: Option<&str>, limit: i64) -> DbResult<Vec<ConversationMessage>> {
+    async fn search_messages_filtered(
+        &self,
+        query: &str,
+        session_id: Option<&str>,
+        role: Option<&str>,
+        tool_name: Option<&str>,
+        time_after: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<ConversationMessage>> {
         // Build dynamic WHERE conditions
-        let mut conditions = vec![
-            "c.conversation_type NOT IN ('meta', 'compaction')".to_string(),
-        ];
+        let mut conditions = vec!["c.conversation_type NOT IN ('meta', 'compaction')".to_string()];
         let mut param_idx = 2u32; // $1 = query, $2 = limit
 
         let mut bind_values: Vec<String> = Vec::new();
@@ -320,7 +351,11 @@ impl MessageStore for PgMissionStore {
         Ok(rows.iter().map(Self::row_to_conversation_message).collect())
     }
 
-    async fn search_conversation_sessions_fts(&self, query: &str, limit: i64) -> DbResult<Vec<(String, f64)>> {
+    async fn search_conversation_sessions_fts(
+        &self,
+        query: &str,
+        limit: i64,
+    ) -> DbResult<Vec<(String, f64)>> {
         // Phase 1: PostgreSQL FTS grouped by session
         let rows: Vec<(String, f64)> = sqlx::query_as(
             "SELECT m.session_id, MAX(ts_rank(m.fts_content, plainto_tsquery('simple', $1)))::float8 as best_score
@@ -351,7 +386,7 @@ impl MessageStore for PgMissionStore {
                AND c.conversation_type NOT IN ('meta', 'compaction')
              GROUP BY m.session_id
              ORDER BY hits DESC
-             LIMIT $2"
+             LIMIT $2",
         )
         .bind(&pattern)
         .bind(limit)
@@ -360,7 +395,12 @@ impl MessageStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn get_session_fts_snippets(&self, session_id: &str, query: &str, limit: usize) -> DbResult<Vec<(String, String)>> {
+    async fn get_session_fts_snippets(
+        &self,
+        session_id: &str,
+        query: &str,
+        limit: usize,
+    ) -> DbResult<Vec<(String, String)>> {
         // PostgreSQL: use ts_headline for snippet extraction
         let rows: Vec<(String, String)> = sqlx::query_as(
             "SELECT m.role,
@@ -369,7 +409,7 @@ impl MessageStore for PgMissionStore {
              FROM conversation_messages m
              WHERE m.fts_content @@ plainto_tsquery('simple', $1) AND m.session_id = $2
              ORDER BY ts_rank(m.fts_content, plainto_tsquery('simple', $1)) DESC
-             LIMIT $3"
+             LIMIT $3",
         )
         .bind(query)
         .bind(session_id)
@@ -388,7 +428,7 @@ impl MessageStore for PgMissionStore {
              FROM conversation_messages
              WHERE content LIKE $1 AND session_id = $2
              ORDER BY timestamp DESC
-             LIMIT $3"
+             LIMIT $3",
         )
         .bind(&pattern)
         .bind(session_id)
@@ -398,7 +438,14 @@ impl MessageStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn search_conversation_sessions_fts_filtered(&self, query: &str, limit: i64, time_after: Option<&str>, project: Option<&str>, conversation_type: Option<&str>) -> DbResult<Vec<(String, f64)>> {
+    async fn search_conversation_sessions_fts_filtered(
+        &self,
+        query: &str,
+        limit: i64,
+        time_after: Option<&str>,
+        project: Option<&str>,
+        conversation_type: Option<&str>,
+    ) -> DbResult<Vec<(String, f64)>> {
         let mut conditions = vec![
             "m.fts_content @@ plainto_tsquery('simple', $1)".to_string(),
             "c.conversation_type NOT IN ('meta', 'compaction')".to_string(),
@@ -425,12 +472,18 @@ impl MessageStore for PgMissionStore {
                 conditions.push(format!("c.conversation_type = ${}", param_idx));
                 extra_vals.push(types[0].to_string());
             } else {
-                let placeholders: Vec<String> = types.iter().map(|t| {
-                    param_idx += 1;
-                    extra_vals.push(t.to_string());
-                    format!("${}", param_idx)
-                }).collect();
-                conditions.push(format!("c.conversation_type IN ({})", placeholders.join(",")));
+                let placeholders: Vec<String> = types
+                    .iter()
+                    .map(|t| {
+                        param_idx += 1;
+                        extra_vals.push(t.to_string());
+                        format!("${}", param_idx)
+                    })
+                    .collect();
+                conditions.push(format!(
+                    "c.conversation_type IN ({})",
+                    placeholders.join(",")
+                ));
             }
         }
 
@@ -483,12 +536,18 @@ impl MessageStore for PgMissionStore {
                 like_conditions.push(format!("c.conversation_type = ${}", like_idx));
                 like_vals.push(types[0].to_string());
             } else {
-                let placeholders: Vec<String> = types.iter().map(|t| {
-                    like_idx += 1;
-                    like_vals.push(t.to_string());
-                    format!("${}", like_idx)
-                }).collect();
-                like_conditions.push(format!("c.conversation_type IN ({})", placeholders.join(",")));
+                let placeholders: Vec<String> = types
+                    .iter()
+                    .map(|t| {
+                        like_idx += 1;
+                        like_vals.push(t.to_string());
+                        format!("${}", like_idx)
+                    })
+                    .collect();
+                like_conditions.push(format!(
+                    "c.conversation_type IN ({})",
+                    placeholders.join(",")
+                ));
             }
         }
 
@@ -512,7 +571,12 @@ impl MessageStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn search_conversations_by_metadata(&self, query: &str, limit: i64, conversation_type: Option<&str>) -> DbResult<Vec<(String, f64)>> {
+    async fn search_conversations_by_metadata(
+        &self,
+        query: &str,
+        limit: i64,
+        conversation_type: Option<&str>,
+    ) -> DbResult<Vec<(String, f64)>> {
         let pattern = format!("%{}%", query);
         let mut extra_vals: Vec<String> = Vec::new();
         let mut param_idx = 2u32; // $1 = pattern, $2 = limit
@@ -523,11 +587,14 @@ impl MessageStore for PgMissionStore {
                 extra_vals.push(types[0].to_string());
                 format!("AND conversation_type = ${}", param_idx)
             } else {
-                let placeholders: Vec<String> = types.iter().map(|t| {
-                    param_idx += 1;
-                    extra_vals.push(t.to_string());
-                    format!("${}", param_idx)
-                }).collect();
+                let placeholders: Vec<String> = types
+                    .iter()
+                    .map(|t| {
+                        param_idx += 1;
+                        extra_vals.push(t.to_string());
+                        format!("${}", param_idx)
+                    })
+                    .collect();
                 format!("AND conversation_type IN ({})", placeholders.join(","))
             }
         } else {
@@ -551,12 +618,15 @@ impl MessageStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn get_user_message_index(&self, session_id: &str) -> DbResult<Vec<(i64, String, String)>> {
+    async fn get_user_message_index(
+        &self,
+        session_id: &str,
+    ) -> DbResult<Vec<(i64, String, String)>> {
         let rows: Vec<(i64, String, String)> = sqlx::query_as(
             "SELECT id, to_char(timestamp, 'HH24:MI:SS') as ts, LEFT(content, 50) as preview
              FROM conversation_messages
              WHERE session_id = $1 AND role = 'user'
-             ORDER BY id ASC"
+             ORDER BY id ASC",
         )
         .bind(session_id)
         .fetch_all(&self.pool)
@@ -568,7 +638,7 @@ impl MessageStore for PgMissionStore {
         let row: Option<(String,)> = sqlx::query_as(
             "SELECT content FROM conversation_messages
              WHERE session_id = $1 AND role = 'user'
-             ORDER BY id ASC LIMIT 1"
+             ORDER BY id ASC LIMIT 1",
         )
         .bind(session_id)
         .fetch_optional(&self.pool)
@@ -578,7 +648,13 @@ impl MessageStore for PgMissionStore {
 
     // -- pgvector hybrid search (P3: message-level embedding) --
 
-    async fn hybrid_message_search(&self, query_vec: &[f32], query_text: &str, session_id: Option<&str>, limit: i64) -> DbResult<Vec<(i64, String, String, String, String, f64)>> {
+    async fn hybrid_message_search(
+        &self,
+        query_vec: &[f32],
+        query_text: &str,
+        session_id: Option<&str>,
+        limit: i64,
+    ) -> DbResult<Vec<(i64, String, String, String, String, f64)>> {
         let vec_lit = vec_to_pg_literal(query_vec);
         let pool_size = limit * 3; // recall pool
 
@@ -669,7 +745,12 @@ impl MessageStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn session_semantic_search(&self, query_vec: &[f32], session_id: &str, limit: i64) -> DbResult<Vec<(i64, String, String, String, f64)>> {
+    async fn session_semantic_search(
+        &self,
+        query_vec: &[f32],
+        session_id: &str,
+        limit: i64,
+    ) -> DbResult<Vec<(i64, String, String, String, f64)>> {
         let vec_lit = vec_to_pg_literal(query_vec);
         // B-Tree filter on session_id → exact cosine distance (no HNSW needed)
         let sql = format!(
@@ -690,7 +771,11 @@ impl MessageStore for PgMissionStore {
         Ok(rows)
     }
 
-    async fn semantic_conversation_search(&self, query_vec: &[f32], limit: i64) -> DbResult<Vec<(String, f64)>> {
+    async fn semantic_conversation_search(
+        &self,
+        query_vec: &[f32],
+        limit: i64,
+    ) -> DbResult<Vec<(String, f64)>> {
         let vec_lit = vec_to_pg_literal(query_vec);
         // HNSW recall Top-N topics → group by session_id (small set, safe to GROUP BY)
         let pool_size = limit * 5;
@@ -708,7 +793,8 @@ impl MessageStore for PgMissionStore {
             GROUP BY session_id
             ORDER BY max_sim DESC
             LIMIT $1",
-            vec = vec_lit, pool = pool_size
+            vec = vec_lit,
+            pool = pool_size
         );
         let rows = sqlx::query_as::<_, (String, f64)>(&sql)
             .bind(limit)
@@ -720,7 +806,10 @@ impl MessageStore for PgMissionStore {
 
 #[cfg(feature = "postgres")]
 impl PgMissionStore {
-    async fn adopt_existing_message_uuid(&self, msg: &ConversationMessage) -> DbResult<Option<i64>> {
+    async fn adopt_existing_message_uuid(
+        &self,
+        msg: &ConversationMessage,
+    ) -> DbResult<Option<i64>> {
         let Some(uuid) = msg.message_uuid.as_deref().filter(|v| !v.is_empty()) else {
             return Ok(None);
         };
@@ -744,7 +833,7 @@ impl PgMissionStore {
                AND NOT EXISTS (
                  SELECT 1 FROM conversation_messages WHERE message_uuid = $5
              )
-             RETURNING id"
+             RETURNING id",
         )
         .bind(&msg.session_id)
         .bind(&msg.role)
@@ -823,8 +912,20 @@ mod tests {
     #[test]
     fn coalesce_duplicate_messages_prefers_uuid_and_resets_seq() {
         let out = coalesce_duplicate_messages(vec![
-            message(10, "assistant", "same", "2026-05-03T00:00:00Z", Some("uuid-1")),
-            message(11, "assistant", "same", "2026-05-03T00:00:01Z", Some("uuid-1")),
+            message(
+                10,
+                "assistant",
+                "same",
+                "2026-05-03T00:00:00Z",
+                Some("uuid-1"),
+            ),
+            message(
+                11,
+                "assistant",
+                "same",
+                "2026-05-03T00:00:01Z",
+                Some("uuid-1"),
+            ),
             message(12, "user", "next", "2026-05-03T00:00:02Z", Some("uuid-2")),
         ]);
         assert_eq!(out.len(), 2);
@@ -855,7 +956,9 @@ fn vec_to_pg_literal(v: &[f32]) -> String {
     let mut buf = String::with_capacity(v.len() * 14 + 2);
     buf.push('[');
     for (i, f) in v.iter().enumerate() {
-        if i > 0 { buf.push(','); }
+        if i > 0 {
+            buf.push(',');
+        }
         let _ = write!(buf, "{}", f);
     }
     buf.push(']');

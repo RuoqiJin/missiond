@@ -96,6 +96,7 @@ function checkFiles(root, files) {
     'Codex CLI background ingestion MUST persist rollout size/mtime/line watermarks',
     'the DB layer MUST adopt that existing row by setting message_uuid instead of inserting a new duplicate row',
     'mission_conversation_get MUST defensively coalesce duplicate rows',
+    'mission_conversation_get MUST retrieve tail messages with the indexed (session_id,id) path',
     'Historical duplicate cleanup is dry-run/report-first',
     'Gemini background reconcile MUST use size/mtime companion watermarks',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
@@ -228,10 +229,16 @@ function checkFiles(root, files) {
     'adopt_existing_message_uuid',
     'UPDATE conversation_messages',
     'AND NOT EXISTS',
+    'ORDER BY id ASC LIMIT $3',
+    'ORDER BY id DESC LIMIT $2',
+    'NULL::BIGINT AS seq',
     'fallback:{}\\u{1f}{}\\u{1f}{}\\u{1f}{}\\u{1f}{}',
     'msg.seq = Some((idx + 1) as i64)',
     'coalesce_duplicate_messages_prefers_uuid_and_resets_seq',
     'coalesce_duplicate_messages_falls_back_when_uuid_is_missing',
+  ]);
+  rejectAll(diagnostics, files.pgMessage, sources.pgMessage, [
+    'ROW_NUMBER() OVER (PARTITION BY session_id',
   ]);
 
   requireAll(diagnostics, files.duplicateReport, sources.duplicateReport, [
