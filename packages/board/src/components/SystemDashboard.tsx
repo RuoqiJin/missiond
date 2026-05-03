@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
-import { ChevronDown, ChevronRight, Activity, Gauge, Network } from 'lucide-react';
+import { ChevronDown, ChevronRight, Activity, Gauge, Network, ServerCog } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { MemoryDashboard } from './MemoryDashboard';
 import { EngineDashboard } from './EngineDashboard';
+import { DecisionDashboard } from './DecisionDashboard';
 
 function CollapsibleSection({
   title,
@@ -53,6 +54,38 @@ interface ProjectInfo {
   githubUrl?: string;
   lispFiles?: string[];
   lispCount?: number;
+  runtimeServices?: RuntimeService[];
+}
+
+interface RuntimeService {
+  id: string;
+  environment?: string;
+  publicBaseUrl?: string;
+  issuer?: string;
+  domains?: string[];
+  dnsProvider?: string;
+  dnsCapability?: string;
+  opsCapability?: string;
+  root?: string;
+  deployment?: {
+    substrate?: string;
+    namespace?: string;
+    deployment?: string;
+    service?: string;
+    replicas?: string;
+    hpaMin?: string;
+    hpaMax?: string;
+    image?: string;
+  };
+  proxy?: {
+    kind?: string;
+    domain?: string;
+    file?: string;
+    sseNoBuffer?: string;
+  };
+  health?: string[];
+  dependencies?: string[];
+  risks?: string[];
 }
 
 function ProjectsPanel() {
@@ -151,6 +184,13 @@ function ProjectsPanel() {
                 </div>
               </div>
             )}
+            {p.runtimeServices?.length ? (
+              <div className="mt-3 space-y-2 border-t border-neutral-800/70 pt-2">
+                {p.runtimeServices.map((svc) => (
+                  <ServiceRuntimeCard key={svc.id} service={svc} />
+                ))}
+              </div>
+            ) : null}
           </div>
         ))}
       </div>
@@ -160,6 +200,7 @@ function ProjectsPanel() {
 
 export function SystemDashboard() {
   const [projectsExpanded, setProjectsExpanded] = useState(true);
+  const [decisionsExpanded, setDecisionsExpanded] = useState(true);
   const [memoryExpanded, setMemoryExpanded] = useState(true);
   const [engineExpanded, setEngineExpanded] = useState(true);
 
@@ -173,6 +214,18 @@ export function SystemDashboard() {
         onToggle={() => setProjectsExpanded((v) => !v)}
       >
         <ProjectsPanel />
+      </CollapsibleSection>
+
+      <CollapsibleSection
+        title="Decision Inbox"
+        icon={ServerCog}
+        iconColor="text-orange-400"
+        expanded={decisionsExpanded}
+        onToggle={() => setDecisionsExpanded((v) => !v)}
+      >
+        <div className="h-[520px] min-h-0 py-4">
+          <DecisionDashboard />
+        </div>
       </CollapsibleSection>
 
       <CollapsibleSection
@@ -194,6 +247,53 @@ export function SystemDashboard() {
       >
         <EngineDashboard />
       </CollapsibleSection>
+    </div>
+  );
+}
+
+function ServiceRuntimeCard({ service }: { service: RuntimeService }) {
+  const deploy = service.deployment;
+  const risks = service.risks ?? [];
+  return (
+    <div className="rounded-md border border-cyan-500/10 bg-cyan-500/[0.03] p-2">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-[11px] font-medium text-cyan-300">{service.id}</span>
+        <span className="rounded border border-cyan-500/20 bg-cyan-500/10 px-1.5 py-0.5 text-[9px] text-cyan-300">
+          {service.environment || 'runtime'}
+        </span>
+      </div>
+      <div className="mt-1 truncate text-[11px] text-neutral-300" title={service.publicBaseUrl || service.domains?.[0]}>
+        {service.publicBaseUrl || service.domains?.[0] || 'no public domain'}
+      </div>
+      <div className="mt-2 grid grid-cols-2 gap-x-2 gap-y-1 text-[10px] text-neutral-500">
+        <RuntimeKV label="deploy" value={[deploy?.substrate, deploy?.namespace, deploy?.deployment].filter(Boolean).join(' / ')} />
+        <RuntimeKV label="service" value={deploy?.service} />
+        <RuntimeKV label="dns" value={[service.dnsProvider, service.opsCapability].filter(Boolean).join(' / ')} />
+        <RuntimeKV label="proxy" value={[service.proxy?.kind, service.proxy?.domain].filter(Boolean).join(' / ')} />
+      </div>
+      {service.health?.length ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {service.health.slice(0, 4).map((h) => (
+            <span key={h} className="rounded bg-neutral-900 px-1.5 py-0.5 text-[9px] text-neutral-500">{h}</span>
+          ))}
+        </div>
+      ) : null}
+      {risks.length ? (
+        <div className="mt-2 flex flex-wrap gap-1">
+          {risks.map((risk) => (
+            <span key={risk} className="rounded border border-amber-500/20 bg-amber-500/5 px-1.5 py-0.5 text-[9px] text-amber-300">{risk}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function RuntimeKV({ label, value }: { label: string; value?: string }) {
+  return (
+    <div className="min-w-0">
+      <span className="mr-1 text-neutral-600">{label}</span>
+      <span className="text-neutral-400" title={value || undefined}>{value || '-'}</span>
     </div>
   );
 }

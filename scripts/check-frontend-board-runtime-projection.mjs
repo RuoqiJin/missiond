@@ -18,6 +18,7 @@ const FILES = {
   slotsRoute: 'packages/board/src/app/api/slots/route.ts',
   taskDialog: 'packages/board/src/components/TaskDialog.tsx',
   terminal: 'packages/board/src/components/Terminal.tsx',
+  systemDashboard: 'packages/board/src/components/SystemDashboard.tsx',
   app: 'packages/board/src/App.tsx',
   eventStream: 'packages/board/src/eventStream.ts',
   autopilotMonitor: 'packages/board/src/components/AutopilotMonitor.tsx',
@@ -90,6 +91,12 @@ function checkRepo(repo) {
     ':checker "node scripts/project-frontend-board-config.mjs --check"',
     ':output "packages/board/src/generated/board-frontend-config.ts"',
     '(board-task-api-contract',
+    '(projection service-runtime-universe',
+    ':source [mission_project.universe service-runtime-universe]',
+    'SystemDashboard must show production service domain/deployment/DNS capability',
+    '(projection decision-inbox',
+    ':source [mission_question DecisionDashboard JarvisChat]',
+    'User-facing decisions live as durable mission_question records',
     '(event-routes',
     '(timeline-visuals',
   ]);
@@ -187,6 +194,15 @@ function checkRepo(repo) {
     'mcpSource',
     'providerConversationId',
     'confidence',
+  ]);
+
+  requireText(diagnostics, 'packages/board/src/components/SystemDashboard.tsx', src.systemDashboard ?? fs.readFileSync(path.join(repo, 'packages/board/src/components/SystemDashboard.tsx'), 'utf8'), [
+    'DecisionDashboard',
+    'runtimeServices',
+    'ServiceRuntimeCard',
+    'publicBaseUrl',
+    'dnsProvider',
+    'opsCapability',
   ]);
 
   requireText(diagnostics, FILES.taskDialog, src.taskDialog, [

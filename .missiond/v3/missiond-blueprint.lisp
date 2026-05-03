@@ -1167,6 +1167,35 @@
 	      :capability deploy-ops
 	      :surface project-registry))
 
+  (service-runtime-universe
+    :schema "missiond.service-runtime-universe.v1"
+    :rule "Production service runtime facts are Lisp-owned Universe data: project/service roots, domains, deployments, health, DNS capability, and ops owner are visible to resident master and workers through mission_project(action=universe). Secrets stay outside Lisp."
+    (service :id auth
+      :project xiaojinpro-backend
+      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/auth-backend-blueprint.lisp"
+      :environment production
+      :public-base-url "https://auth.xiaojinpro.com"
+      :issuer "https://auth.xiaojinpro.com"
+      :domains ["auth.xiaojinpro.com"]
+      :dns-provider cloudflare
+      :dns-capability (:read-inventory true :mutate requires-board-approval :secret-source env)
+      :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center" :service "xjp-auth-center" :replicas 3 :hpa-min 3 :hpa-max 10 :image "xjp-auth-center:latest" :service-account "xjp-auth-center")
+      :proxy (:kind caddy :domain "auth.xiaojinpro.com" :file "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/caddy/Caddyfile" :sse-no-buffer "/auth/login-stream")
+      :ports (:http 8081 :metrics 9090 :service 80)
+      :health ["/health/live" "/health/ready" "/.well-known/openid-configuration" "/.well-known/jwks.json"]
+      :dependencies [postgres redis secret-store wechat-open-platform google-oauth sms-provider email-provider]
+      :ops-capability deploy-ops
+      :source-evidence ["/Users/jinchen/Projects/xiaojinpro-backend/services/auth/k8s/production/configmap.yaml" "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/k8s/production/deployment.yaml" "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/caddy/Caddyfile"]
+      :risks [wechat-callback-prod-drift mysql-artifact-cleanup])
+    (capability :id cloudflare-dns
+      :provider cloudflare
+      :default-mode read-only-inventory
+      :mutating-policy "Cloudflare DNS mutation requires env/secret binding, deploy-ops capability, and explicit Board approval; workers must report unavailable rather than pretend they can operate DNS when credentials are absent."
+      :secrets [CLOUDFLARE_API_TOKEN CLOUDFLARE_ACCOUNT_ID CLOUDFLARE_ZONE_ID]
+      :surface service-runtime-universe))
+
   (capability-governance-policy
     :desc "Lisp-owned capability audit policy; runtime review paths and protected lists are projections, not Rust-only constants."
     :review-sidecar ".missiond/v3/runtime/capability-usage-review.json"
@@ -2638,18 +2667,19 @@
 
     (surface project-registry
       :status "code-aligned"
-      :implements [project-registry project-root-resolution]
+      :implements [project-registry project-root-resolution service-runtime-universe]
       :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/universe.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/vault.rs"
              "crates/missiond-core/src/types/project.rs"
              "crates/missiond-daemon/src/slot_orchestrator/project_root.rs"
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
              "scripts/check-v3-project-registry-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for project registry and root-resolution behavior inherited from V2. project.rs is the thin mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe, lisp file scan enrichment, git remote discovery, project upsert, conversation backfill, registry reload, and universe manifest import; ProjectRegistryRuntimeConfig loads V3 project-registry-policy so init/import_universe/survey project intent-path discovery and default universe manifest are runtime projections, with UNIVERSE_MANIFEST as explicit override only; project/context.rs owns context and memories egress including intent metadata, github normalization, conversation stats, KB stats, memory index, and configured slot status; project/survey.rs owns forge survey invocation, dry/check flags, output truncation, and intent-path refresh; project/vault.rs ow... [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
+      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
 
     (surface board-frontend
       :status "code-aligned"

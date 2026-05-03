@@ -7,6 +7,7 @@ use crate::state::AppState;
 mod context;
 mod registry;
 mod survey;
+mod universe;
 mod vault;
 
 pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result<ToolResult> {
@@ -23,11 +24,12 @@ pub(crate) async fn handle(state: &AppState, _name: &str, args: Value) -> Result
         "init" => registry::handle_init(state, args).await,
         "context" => context::handle_context(state, args).await,
         "memories" => context::handle_memories(state, args).await,
+        "universe" => universe::handle_universe(args).await,
         "survey" => survey::handle_survey(state, args).await,
         "vault_sync" => vault::handle_vault_sync(state, args).await,
         "import_universe" => registry::handle_import_universe(state, args).await,
         _ => Ok(ToolResult::error(format!(
-            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories, vault_sync, import_universe, survey",
+            "Unknown project action: {}. Use: list, get, set_active, sync, init, context, memories, universe, vault_sync, import_universe, survey",
             action
         ))),
     }

@@ -10,6 +10,7 @@ const usage = `Usage:
 
 Checks MissionD multi-project SSOT registry convergence:
   - V3 project-blueprint-registry names MissionD, Forge, XJP services, and PCEA.
+  - V3 service-runtime-universe exposes production service deployment facts.
   - project-ssot-convergence workflow exists.
   - XJP and PCEA local SSOT checkers pass.
 `;
@@ -53,6 +54,40 @@ function main() {
     ':id timeline',
     ':id pcea',
     '/Users/jinchen/Downloads/PCEA develop',
+    '(service-runtime-universe',
+    ':schema "missiond.service-runtime-universe.v1"',
+    '(service :id auth',
+    ':project xiaojinpro-backend',
+    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"',
+    ':public-base-url "https://auth.xiaojinpro.com"',
+    ':issuer "https://auth.xiaojinpro.com"',
+    ':domains ["auth.xiaojinpro.com"]',
+    ':dns-provider cloudflare',
+    ':mutate requires-board-approval',
+    ':deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center" :service "xjp-auth-center"',
+    ':proxy (:kind caddy :domain "auth.xiaojinpro.com"',
+    ':health ["/health/live" "/health/ready" "/.well-known/openid-configuration" "/.well-known/jwks.json"]',
+    ':dependencies [postgres redis secret-store wechat-open-platform google-oauth sms-provider email-provider]',
+    ':ops-capability deploy-ops',
+    '(capability :id cloudflare-dns',
+    ':default-mode read-only-inventory',
+    'explicit Board approval',
+  ]);
+
+  requireExistingText(diagnostics, '/Users/jinchen/Projects/xiaojinpro-backend/services/auth/.missiond/intent.lisp', [
+    ':public-base-url "https://auth.xiaojinpro.com"',
+    ':issuer "https://auth.xiaojinpro.com"',
+    ':status migration-complete-runtime',
+    ':runtime-database postgresql',
+    ':status superseded-by-lisp',
+    ':status token-storage-consumer-boundary',
+    ':risk wechat-callback-prod-drift',
+  ]);
+  requireExistingText(diagnostics, '/Users/jinchen/Projects/xiaojinpro-backend/services/auth/.missiond/backend/auth-backend-blueprint.lisp', [
+    'production-runtime-deployment',
+    'kb-decision-boundary',
+    'k8s/production/deployment.yaml',
+    'caddy/Caddyfile',
   ]);
 
   const workflowPath = '.missiond/workflows/project-ssot-convergence.lisp';
@@ -111,6 +146,15 @@ function requireAll(diagnostics, file, source, needles) {
   for (const needle of needles) {
     if (!source.includes(needle)) diagnostics.push({ file, message: `missing required text: ${needle}` });
   }
+}
+
+function requireExistingText(diagnostics, file, needles) {
+  if (!fs.existsSync(file)) {
+    diagnostics.push({ file, message: 'missing required path' });
+    return;
+  }
+  const source = fs.readFileSync(file, 'utf8');
+  requireAll(diagnostics, file, source, needles);
 }
 
 function tail(text, lines = 6) {

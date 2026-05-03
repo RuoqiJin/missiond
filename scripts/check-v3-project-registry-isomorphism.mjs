@@ -22,6 +22,7 @@ const DEFAULT_FILES = {
   facade: 'crates/missiond-daemon/src/handlers/knowledge/project.rs',
   registry: 'crates/missiond-daemon/src/handlers/knowledge/project/registry.rs',
   context: 'crates/missiond-daemon/src/handlers/knowledge/project/context.rs',
+  universe: 'crates/missiond-daemon/src/handlers/knowledge/project/universe.rs',
   survey: 'crates/missiond-daemon/src/handlers/knowledge/project/survey.rs',
   vault: 'crates/missiond-daemon/src/handlers/knowledge/project/vault.rs',
   coreProject: 'crates/missiond-core/src/types/project.rs',
@@ -135,6 +136,13 @@ function checkFiles(root, files) {
 	    ':id xjp-deploy-center',
 	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"',
 	    ':capability deploy-ops',
+	    '(service-runtime-universe',
+	    ':schema "missiond.service-runtime-universe.v1"',
+	    ':id auth',
+	    ':public-base-url "https://auth.xiaojinpro.com"',
+	    ':deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center"',
+	    ':dns-provider cloudflare',
+	    'mission_project(action=universe)',
 	    'node scripts/check-v3-project-registry-isomorphism.mjs',
 	  ]);
 
@@ -158,6 +166,7 @@ function checkFiles(root, files) {
     'mod context;',
     'mod registry;',
     'mod survey;',
+    'mod universe;',
     'mod vault;',
     '"list" => registry::handle_list(state).await',
     '"get" => registry::handle_get(state, args).await',
@@ -166,6 +175,7 @@ function checkFiles(root, files) {
     '"init" => registry::handle_init(state, args).await',
     '"context" => context::handle_context(state, args).await',
     '"memories" => context::handle_memories(state, args).await',
+    '"universe" => universe::handle_universe(args).await',
     '"survey" => survey::handle_survey(state, args).await',
     '"vault_sync" => vault::handle_vault_sync(state, args).await',
     '"import_universe" => registry::handle_import_universe(state, args).await',
@@ -203,6 +213,18 @@ function checkFiles(root, files) {
     'build_slots_info',
     'project_memory::list_memories',
     'project_memory::read_memory_index',
+  ]);
+
+  requireAll(diagnostics, files.universe, sources.universe, [
+    'handle_universe',
+    'service-runtime-universe',
+    'extract_forms(&block, "(service ")',
+    'extract_forms(&block, "(capability ")',
+    'publicBaseUrl',
+    'dnsProvider',
+    'opsCapability',
+    'sourceEvidence',
+    'locate_v3_blueprint',
   ]);
 
   requireAll(diagnostics, files.survey, sources.survey, [
@@ -262,6 +284,7 @@ function checkFiles(root, files) {
     '"init"',
     '"context"',
     '"memories"',
+    '"universe"',
     '"vault_sync"',
     '"import_universe"',
     '"survey"',
@@ -300,6 +323,11 @@ function buildFixture() {
 	    (project :id timeline :root "/Users/jinchen/Projects/xiaojinpro-backend/services/timeline")
 	    (project :id pcea :root "/Users/jinchen/Downloads/PCEA develop" :backend ".missiond/backend/pcea-backend-blueprint.lisp" :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp")
 	    (project :id xjp-deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops))
+    (service-runtime-universe
+      :schema "missiond.service-runtime-universe.v1"
+      (service :id auth :public-base-url "https://auth.xiaojinpro.com" :dns-provider cloudflare :deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center"))
+      ;; mission_project(action=universe)
+      )
 	  (implementation-map
     (surface project-registry
       :status "code-aligned"
@@ -307,6 +335,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/project.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/registry.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/context.rs"
+             "crates/missiond-daemon/src/handlers/knowledge/project/universe.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/vault.rs"
              "crates/missiond-core/src/types/project.rs"
@@ -328,6 +357,7 @@ env_or_default_universe_manifest nearest_missiond_root UNIVERSE_MANIFEST
 mod context;
 mod registry;
 mod survey;
+mod universe;
 mod vault;
 "list" => registry::handle_list(state).await
 "get" => registry::handle_get(state, args).await
@@ -336,6 +366,7 @@ mod vault;
 "init" => registry::handle_init(state, args).await
 "context" => context::handle_context(state, args).await
 "memories" => context::handle_memories(state, args).await
+"universe" => universe::handle_universe(args).await
 "survey" => survey::handle_survey(state, args).await
 "vault_sync" => vault::handle_vault_sync(state, args).await
 "import_universe" => registry::handle_import_universe(state, args).await
@@ -354,6 +385,13 @@ backfill_project_id ProjectRegistry::new(projects)
 handle_context handle_memories build_intent_summary build_github_info
 conversation_stats_by_project recent_conversations_by_project kb_stats_by_project
 build_slots_info project_memory::list_memories project_memory::read_memory_index
+`);
+
+  writeFixture(root, DEFAULT_FILES.universe, `
+handle_universe service-runtime-universe
+extract_forms(&block, "(service ")
+extract_forms(&block, "(capability ")
+publicBaseUrl dnsProvider opsCapability sourceEvidence locate_v3_blueprint
 `);
 
   writeFixture(root, DEFAULT_FILES.survey, `
@@ -398,7 +436,7 @@ fallback_project_id_used_when_no_explicit
   writeFixture(root, DEFAULT_FILES.mcp, `
 ToolDefinition::new
 "mission_project"
-"list" "get" "set_active" "sync" "init" "context" "memories" "vault_sync" "import_universe" "survey"
+"list" "get" "set_active" "sync" "init" "context" "memories" "universe" "vault_sync" "import_universe" "survey"
 `);
 
   return root;
