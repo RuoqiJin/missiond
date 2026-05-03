@@ -31,6 +31,7 @@ const FILES = {
   evidence: '.missiond/v3/evidence/workstation-pool.lisp',
   runtime: 'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
   main: 'crates/missiond-daemon/src/main.rs',
+  ptySession: 'crates/missiond-pty/src/session.rs',
   autopilot: 'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
   computeSlot: 'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
   slotTool: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
@@ -115,6 +116,7 @@ function checkFiles(root) {
     '"codex-master-control"',
     'reasoning_effort',
     'search_enabled',
+    'approval_policy',
   ]);
 
   requireAll(diagnostics, FILES.main, sources.main, [
@@ -126,8 +128,21 @@ function checkFiles(root) {
     'async fn register_and_init_runtime_slot',
     'state.pty.init_slot(&pty_slot).await',
     'for worker in workstation_config.workstation_pool()',
+    'dangerously_skip_permissions: Some(worker.write_allowed)',
+    'skip_permissions: worker.write_allowed',
     'state.mission.register_runtime_slot(slot_config)',
     'SlotManager: workstation pool registered from V3',
+  ]);
+
+  requireAll(diagnostics, FILES.ptySession, sources.ptySession, [
+    'CliEngine::Gemini',
+    '--approval-mode plan',
+    '--approval-mode yolo',
+    'Gemini CLI: plan/read-only approval mode enabled',
+    'gemini_command_uses_plan_mode_unless_permissions_are_skipped',
+  ]);
+  forbidAll(diagnostics, FILES.ptySession, sources.ptySession, [
+    'parts.push_str(" --yolo")',
   ]);
 
   requireAll(diagnostics, FILES.autopilot, sources.autopilot, [
@@ -185,6 +200,7 @@ function checkFiles(root) {
     'mission_compute_slot list status MUST derive from PTYManager',
     'mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask',
     'Codex master-control is a resident orchestrator lane',
+    'Read-only Gemini pool workers MUST project to Gemini CLI `--approval-mode plan`',
   ]);
   requireAll(diagnostics, FILES.supervisor, sources.supervisor, [
     'fn schedule_supervisor_patrol',
@@ -251,6 +267,7 @@ function validateBlueprint(file, source, diagnostics) {
   for (const required of [
     'crates/missiond-daemon/src/context/v3_blueprint_runtime.rs',
     'crates/missiond-daemon/src/main.rs',
+    'crates/missiond-pty/src/session.rs',
     'crates/missiond-daemon/src/engine/intent_engine/autopilot.rs',
     'crates/missiond-daemon/src/handlers/compute/compute_slot.rs',
     'crates/missiond-daemon/src/handlers/compute/slot.rs',
@@ -292,6 +309,7 @@ function validateGeminiWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':task-type', 'gemini_ultra');
   requirePropText(diagnostics, file, props, ':model-profile', 'gemini-ultra-pro-preview');
   requirePropText(diagnostics, file, props, ':model', 'nil');
+  requirePropText(diagnostics, file, props, ':approval-policy', 'plan');
   requirePropBool(diagnostics, file, props, ':accepts-boardtask', true);
   requirePropBool(diagnostics, file, props, ':write-allowed', false);
   requireListItems(diagnostics, file, props, ':task-classes', [
@@ -327,6 +345,7 @@ function validateGeminiFastWorker(file, worker, diagnostics) {
   requirePropText(diagnostics, file, props, ':engine', 'gemini');
   requirePropText(diagnostics, file, props, ':role', 'survey');
   requirePropText(diagnostics, file, props, ':model', 'gemini-2.5-flash');
+  requirePropText(diagnostics, file, props, ':approval-policy', 'plan');
   requirePropBool(diagnostics, file, props, ':write-allowed', false);
   requireListItems(diagnostics, file, props, ':task-classes', ['survey', 'mechanical-scan']);
 }
@@ -412,13 +431,25 @@ function buildFixture() {
       :default-use code-implementation
       :accepts-boardtask true
       :write-allowed true)
-    (worker gemini-ultra
+    (worker claude-code-fast-patch
+      :engine claude-code
+      :role patcher
+      :model-profile daily-sonnet
+      :task-classes [patch test chore low-risk-fast-path]
+      :capabilities [code-read code-write scoped-commit narrow-patch mcp]
+      :max-concurrency 1
+      :timeout-secs 900
+      :default-use narrow-patch
+      :accepts-boardtask true
+      :write-allowed true)
+    (worker gemini-ultra-pro
       :engine gemini
       :role researcher
       :slot-id "slot-gemini-ultra"
       :task-type gemini_ultra
-      :model-profile nil
+      :model-profile gemini-ultra-pro-preview
       :model nil
+      :approval-policy plan
       :task-classes [research review context-pack lisp-compression general]
       :capabilities [read-only analysis design-review]
       :max-concurrency 1
@@ -426,15 +457,50 @@ function buildFixture() {
       :default-use research-review
       :accepts-boardtask true
       :write-allowed false)
+    (worker gemini-fast-survey
+      :engine gemini
+      :role survey
+      :slot-id "slot-gemini-fast-survey"
+      :task-type gemini_fast_survey
+      :model-profile nil
+      :model "gemini-2.5-flash"
+      :approval-policy plan
+      :task-classes [survey summary mechanical-scan]
+      :capabilities [read-only summary]
+      :max-concurrency 1
+      :timeout-secs 600
+      :default-use low-authority-survey
+      :accepts-boardtask true
+      :write-allowed false)
+    (worker codex-master-control
+      :engine codex
+      :role orchestrator
+      :slot-id "slot-codex-master-control"
+      :model-profile codex-master-gpt-5-5-xhigh
+      :reasoning-effort xhigh
+      :search true
+      :sandbox danger-full-access
+      :approval-policy never
+      :task-classes [master-control]
+      :capabilities [board-write kb-write dispatch]
+      :max-concurrency 1
+      :timeout-secs 7200
+      :default-use resident-master-control
+      :accepts-boardtask false
+      :write-allowed true)
     :invariants ["Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration"
                  "V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots"
-                 "mission_compute_slot list status MUST derive from PTYManager"]
+                 "mission_compute_slot list status MUST derive from PTYManager"
+                 "mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask"
+                 "Codex master-control is a resident orchestrator lane"
+                 "Read-only Gemini pool workers MUST project to Gemini CLI \`--approval-mode plan\`"]
     :checker "node scripts/check-v3-workstation-pool-isomorphism.mjs")
   (implementation-map
     (surface workstation-pool
       :status "code-aligned"
       :code ["crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-pty/src/session.rs"
              "crates/missiond-daemon/src/engine/intent_engine/autopilot.rs"
              "crates/missiond-daemon/src/handlers/compute/compute_slot.rs"
              "crates/missiond-daemon/src/handlers/compute/slot.rs"
@@ -442,7 +508,7 @@ function buildFixture() {
       :note "n")))`);
   write(root, 'evidence', `
 (workstation-pool-evidence
-  :single-login-phase ((claude-code-default :runtime-rule "x") (gemini-ultra :write-policy read-only))
+  :single-login-phase ((claude-code-default :runtime-rule "x") (claude-code-fast-patch :runtime-rule "x") (gemini-ultra-pro :write-policy read-only :approval-mode plan) (gemini-fast-survey :write-policy read-only :approval-mode plan) (codex-master-control :runtime-rule "x"))
   :observability ["mission_compute_slot action=list exposes workstation_pool"])`);
   write(root, 'runtime', `
 pub(crate) struct WorkstationPoolRuntimeConfig;
@@ -452,14 +518,26 @@ pub(crate) fn boardtask_pool_candidates() {}
 find_form(source, "workstation-pool");
 "workstation-pool must include a Claude Code default BoardTask worker";
 "workstation-pool must include a read-only Gemini BoardTask worker";
-"claude-code-default"; "gemini-ultra";`);
+"workstation-pool must include a non-shard Codex master-control worker";
+"claude-code-default"; "gemini-ultra-pro"; "codex-master-control";
+reasoning_effort; search_enabled; approval_policy;`);
   write(root, 'main', `
 fn workstation_pool_model() {}
 fn startup_slot_config() {}
 fn workstation_pool_slot_config() {}
+reasoning_effort: worker.reasoning_effort.clone();
+search_enabled: Some(worker.search_enabled).filter;
+dangerously_skip_permissions: Some(worker.write_allowed);
+skip_permissions: worker.write_allowed;
 async fn register_and_init_runtime_slot() { state.pty.init_slot(&pty_slot).await; state.mission.register_runtime_slot(slot_config); }
 for worker in workstation_config.workstation_pool() {}
 "SlotManager: workstation pool registered from V3";`);
+  write(root, 'ptySession', `
+CliEngine::Gemini;
+--approval-mode plan;
+--approval-mode yolo;
+Gemini CLI: plan/read-only approval mode enabled;
+gemini_command_uses_plan_mode_unless_permissions_are_skipped;`);
   write(root, 'autopilot', `
 fn board_task_workstation_class() {}
 async fn select_workstation_pool_slot() {}
@@ -487,6 +565,10 @@ let pty_status = state
   write(root, 'slotTool', `
 fn projected_mission_slots() {}
 WorkstationRuntimeConfig::load_for_current_dir();
+list_board_tasks(Some("running"), true);
+fn active_board_task_for_slot() {}
+"activeBoardTaskId"; "currentTaskId"; "activeBoardTask";
+get_running_slot_task(&slot.config.id);
 fn is_stopped_legacy_sonnet_residual() {}
 model.contains("sonnet");
 v3_slot_ids.contains(&slot.config.id);`);

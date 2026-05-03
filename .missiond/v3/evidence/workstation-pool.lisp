@@ -15,13 +15,15 @@
        :account current-gemini-cli-login
        :model "gemini-3.1-pro-preview"
        :write-policy read-only
-       :runtime-rule "Gemini handles investigation/review/context-pack until scoped-write smoke passes")
+       :approval-mode plan
+       :runtime-rule "Gemini handles investigation/review/context-pack until scoped-write smoke passes; runtime must spawn it with --approval-mode plan, never --yolo.")
      (gemini-fast-survey
        :account current-gemini-cli-login
        :model "gemini-2.5-flash"
        :write-policy read-only
        :authority low
-       :runtime-rule "Only mechanical scan/summary work; never architecture裁决.")
+       :approval-mode plan
+       :runtime-rule "Only mechanical scan/summary work; never architecture裁决; runtime must spawn it with --approval-mode plan, never --yolo.")
      (claude-code-fast-patch
        :account current-claude-code-default
        :model "Sonnet only when explicitly selected"

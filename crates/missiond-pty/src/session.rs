@@ -382,10 +382,21 @@ fn build_cli_command(
             parts
         }
         CliEngine::Gemini => {
-            // Gemini CLI: interactive mode, --yolo skips tool authorization
+            // Gemini CLI: interactive mode. Read-only lanes use Gemini's
+            // upstream plan approval mode so edit tools are unavailable even
+            // if the prompt drifts.
             // Working directory is set via CommandBuilder::cwd(), not CLI flag
             let mut parts = "gemini".to_string();
-            parts.push_str(" --yolo");
+            if let Some(mode) = approval_policy {
+                parts.push_str(&format!(" --approval-mode {}", shell_quote(mode)));
+                info!(approval_policy = %mode, "Gemini CLI: approval mode override");
+            } else if dangerously_skip_permissions {
+                parts.push_str(" --approval-mode yolo");
+                info!("Gemini CLI: yolo approval mode enabled");
+            } else {
+                parts.push_str(" --approval-mode plan");
+                info!("Gemini CLI: plan/read-only approval mode enabled");
+            }
             if let Some(m) = model {
                 parts.push_str(&format!(" -m {}", m));
                 info!(model = %m, "Gemini CLI: model override");
@@ -2705,5 +2716,48 @@ Some prose.
         assert!(cmd.contains("--search"));
         assert!(cmd.contains("--sandbox 'danger-full-access'"));
         assert!(cmd.contains("--ask-for-approval 'never'"));
+    }
+
+    #[test]
+    fn gemini_command_uses_plan_mode_unless_permissions_are_skipped() {
+        let read_only = build_cli_command(
+            CliEngine::Gemini,
+            std::path::Path::new("/tmp/project"),
+            None,
+            false,
+            Some("gemini-3.1-pro-preview"),
+            None,
+            false,
+            None,
+            None,
+        );
+        assert!(read_only.contains("gemini --approval-mode plan"));
+        assert!(!read_only.contains("--yolo"));
+
+        let privileged = build_cli_command(
+            CliEngine::Gemini,
+            std::path::Path::new("/tmp/project"),
+            None,
+            true,
+            None,
+            None,
+            false,
+            None,
+            None,
+        );
+        assert_eq!(privileged, "gemini --approval-mode yolo");
+
+        let explicit = build_cli_command(
+            CliEngine::Gemini,
+            std::path::Path::new("/tmp/project"),
+            None,
+            true,
+            None,
+            None,
+            false,
+            None,
+            Some("plan"),
+        );
+        assert_eq!(explicit, "gemini --approval-mode 'plan'");
     }
 }
