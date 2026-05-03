@@ -44,7 +44,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
         // ===== mission_convergence_status =====
         ToolDefinition::new(
             "mission_convergence_status",
-            "查看 MissionD final convergence 静态总门禁、阻塞项、下一步动作与 runtime snapshot",
+            "查看 MissionD final convergence 静态总门禁、阻塞项、下一步动作与 runtime snapshot；live 超时时返回最近缓存并附 warning",
             json!({
                 "type": "object",
                 "properties": {

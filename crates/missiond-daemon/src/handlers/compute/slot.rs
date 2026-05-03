@@ -14,6 +14,9 @@ use crate::engine::{master_control, nightly_evolution};
 use crate::lenient;
 use crate::state::AppState;
 
+const CONVERGENCE_STATUS_TIMEOUT_SECS: u64 = 45;
+const CONVERGENCE_STATUS_CACHE_PATH: &str = ".missiond/v3/runtime/convergence-status-cache.json";
+
 #[derive(Deserialize)]
 struct InboxArgs {
     #[serde(
@@ -58,8 +61,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
 
 async fn mission_convergence_status(state: &AppState) -> Value {
     let root = convergence_repo_root(state);
+    let cache_path = root.join(CONVERGENCE_STATUS_CACHE_PATH);
     let output = tokio::time::timeout(
-        Duration::from_secs(45),
+        Duration::from_secs(CONVERGENCE_STATUS_TIMEOUT_SECS),
         Command::new("node")
             .args([
                 "scripts/check-v3-final-convergence.mjs",
@@ -76,8 +80,10 @@ async fn mission_convergence_status(state: &AppState) -> Value {
             let stdout = String::from_utf8_lossy(&output.stdout);
             match serde_json::from_str::<Value>(&stdout) {
                 Ok(mut value) => {
-                    value["source"] = json!("mission_convergence_status");
-                    value["repoRoot"] = json!(root.display().to_string());
+                    stamp_convergence_status_metadata(&mut value, &root, "fresh", &cache_path);
+                    if let Err(err) = write_convergence_status_cache(&cache_path, &value).await {
+                        warn!(error = %err, path = %cache_path.display(), "failed to write convergence status cache");
+                    }
                     value
                 }
                 Err(err) => json!({
@@ -136,23 +142,76 @@ async fn mission_convergence_status(state: &AppState) -> Value {
             },
             "smoke_task_ids": []
         }),
-        Err(_) => json!({
-            "schema": "missiond.convergence-status.v1",
-            "ok": false,
-            "failed_stage": "final-convergence-timeout",
-            "blocking_items": [{
-                "kind": "runtime-error",
-                "stage": "final-convergence-timeout",
-                "message": "static final convergence status timed out after 45s"
-            }],
-            "next_action": "profile or split the static final convergence gate",
-            "runtime_status": {
-                "mode": "static-only",
-                "repoRoot": root.display().to_string()
-            },
-            "smoke_task_ids": []
-        }),
+        Err(_) => {
+            if let Some(mut cached) = read_convergence_status_cache(&cache_path).await {
+                stamp_convergence_status_metadata(
+                    &mut cached,
+                    &root,
+                    "cached_after_timeout",
+                    &cache_path,
+                );
+                cached["live_warning"] = json!({
+                    "kind": "runtime-warning",
+                    "stage": "final-convergence-timeout",
+                    "message": format!(
+                        "live static final convergence status timed out after {}s; returned cached snapshot",
+                        CONVERGENCE_STATUS_TIMEOUT_SECS
+                    ),
+                    "next_action": "profile or split the static final convergence gate, but do not treat a fresh cached OK snapshot as code convergence failure"
+                });
+                cached
+            } else {
+                json!({
+                    "schema": "missiond.convergence-status.v1",
+                    "ok": false,
+                    "failed_stage": "final-convergence-timeout",
+                    "blocking_items": [{
+                        "kind": "runtime-error",
+                        "stage": "final-convergence-timeout",
+                        "message": format!(
+                            "static final convergence status timed out after {}s and no cache was available",
+                            CONVERGENCE_STATUS_TIMEOUT_SECS
+                        )
+                    }],
+                    "next_action": "profile or split the static final convergence gate",
+                    "runtime_status": {
+                        "mode": "static-only",
+                        "repoRoot": root.display().to_string(),
+                        "cachePath": cache_path.display().to_string(),
+                        "statusSource": "timeout_no_cache"
+                    },
+                    "smoke_task_ids": []
+                })
+            }
+        }
     }
+}
+
+fn stamp_convergence_status_metadata(
+    value: &mut Value,
+    root: &std::path::Path,
+    status_source: &str,
+    cache_path: &std::path::Path,
+) {
+    value["source"] = json!("mission_convergence_status");
+    value["repoRoot"] = json!(root.display().to_string());
+    value["statusSource"] = json!(status_source);
+    value["cachePath"] = json!(cache_path.display().to_string());
+    value["liveTimeoutSecs"] = json!(CONVERGENCE_STATUS_TIMEOUT_SECS);
+}
+
+async fn write_convergence_status_cache(path: &std::path::Path, value: &Value) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let bytes = serde_json::to_vec_pretty(value)?;
+    tokio::fs::write(path, bytes).await?;
+    Ok(())
+}
+
+async fn read_convergence_status_cache(path: &std::path::Path) -> Option<Value> {
+    let bytes = tokio::fs::read(path).await.ok()?;
+    serde_json::from_slice(&bytes).ok()
 }
 
 fn convergence_repo_root(state: &AppState) -> PathBuf {
