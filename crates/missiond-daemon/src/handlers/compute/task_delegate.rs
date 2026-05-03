@@ -84,6 +84,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         engine_hint: string_arg(&args, &["engine_hint", "engineHint"]).map(str::to_string),
         context_pack_path: string_arg(&args, &["context_pack_path", "contextPackPath"])
             .map(str::to_string),
+        read_scope: string_list_arg(&args, &["read_scope", "readScope"]),
         write_scope: string_list_arg(&args, &["write_scope", "writeScope"]),
         must_not_touch: string_list_arg(&args, &["must_not_touch", "mustNotTouch"]),
         acceptance: string_list_arg(
@@ -335,6 +336,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "pool_hint": delegation_metadata.pool_hint,
         "engine_hint": delegation_metadata.engine_hint,
         "context_pack_path": delegation_metadata.context_pack_path,
+        "read_scope": delegation_metadata.read_scope,
         "write_scope": delegation_metadata.write_scope,
         "must_not_touch": delegation_metadata.must_not_touch,
         "acceptance": delegation_metadata.acceptance,
@@ -379,6 +381,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         &args,
         &["acceptance", "acceptance_commands", "acceptanceCommands"],
     );
+    let read_scope = string_list_arg(&args, &["read_scope", "readScope"]);
     let timeout_secs = args
         .get("timeout_secs")
         .or_else(|| args.get("timeoutSecs"))
@@ -399,6 +402,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 max_gemini_workers
             ),
             intent: "research".to_string(),
+            read_scope: read_scope.clone(),
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
         });
@@ -418,6 +422,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             // `intent=research` is intentionally reserved for the Gemini
             // researcher lane, so using it here would ignore max_gemini_workers=0.
             intent: "code".to_string(),
+            read_scope: read_scope.clone(),
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
         });
@@ -431,6 +436,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             task_class: "code".to_string(),
             title: "Implement accepted swarm shard after context-pack integration".to_string(),
             intent: "code".to_string(),
+            read_scope: read_scope.clone(),
             write_scope: string_list_arg(&args, &["write_scope", "writeScope"]),
             must_not_touch: string_list_arg(&args, &["must_not_touch", "mustNotTouch"]),
         });
@@ -507,6 +513,7 @@ struct SwarmPlannedTask {
     task_class: String,
     title: String,
     intent: String,
+    read_scope: Vec<String>,
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
 }
@@ -520,6 +527,7 @@ impl SwarmPlannedTask {
             "task_class": self.task_class,
             "title": self.title,
             "intent": self.intent,
+            "read_scope": self.read_scope,
             "write_scope": self.write_scope,
             "must_not_touch": self.must_not_touch,
         })
@@ -535,17 +543,22 @@ fn render_swarm_task_description(
     planned: &SwarmPlannedTask,
 ) -> String {
     let completion_protocol = if write_policy == "read-only" {
-        "Completion protocol: do not edit files, do not stage, do not commit. Return findings or shard proposals in the final summary / BoardTask note only; the master or integrator compiles the context-pack."
+        "Completion protocol: do not edit files, do not stage, do not commit. read_scope lists readable evidence; must_not_touch is a write/stage/commit prohibition, not a read ban by itself. Return a structured artifact with Findings / Evidence / Recommendations / Verification in the final summary or BoardTask note; do not paste raw KB JSON/log blobs. The master or integrator compiles the context-pack."
     } else {
-        "Completion protocol: implementation lanes may only touch declared write_scope, must not touch forbidden paths, and must report acceptance evidence."
+        "Completion protocol: implementation lanes may read declared read_scope, may write only declared write_scope, must not write/stage/commit forbidden paths, and must report acceptance evidence as a structured artifact."
     };
 
     format!(
-        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         planned.lane,
         planned.task_class,
         planned.pool_hint,
         planned.engine_hint,
+        if planned.read_scope.is_empty() {
+            "[]".to_string()
+        } else {
+            planned.read_scope.join(", ")
+        },
         if planned.write_scope.is_empty() {
             "[]".to_string()
         } else {
@@ -571,6 +584,11 @@ struct DelegationMetadata {
     pool_hint: Option<String>,
     engine_hint: Option<String>,
     context_pack_path: Option<String>,
+    /// Paths the worker is explicitly allowed (and expected) to READ. Distinct
+    /// from `write_scope` / `must_not_touch`: review-class tasks ship with a
+    /// non-empty `read_scope` and an empty `write_scope`, making the
+    /// read-only-but-must-investigate contract explicit in the worker prompt.
+    read_scope: Vec<String>,
     write_scope: Vec<String>,
     must_not_touch: Vec<String>,
     acceptance: Vec<String>,
@@ -783,6 +801,9 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     if let Some(value) = &metadata.context_pack_path {
         lines.push(format!("- context_pack_path: {}", value));
     }
+    if !metadata.read_scope.is_empty() {
+        lines.push(format!("- read_scope: {}", metadata.read_scope.join(", ")));
+    }
     if !metadata.write_scope.is_empty() {
         lines.push(format!(
             "- write_scope: {}",
@@ -797,6 +818,24 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     }
     if !metadata.acceptance.is_empty() {
         lines.push(format!("- acceptance: {}", metadata.acceptance.join(" | ")));
+    }
+    if !metadata.read_scope.is_empty()
+        || !metadata.write_scope.is_empty()
+        || !metadata.must_not_touch.is_empty()
+    {
+        lines.push(
+            "- scope_semantics: read_scope is allowed/expected reading; write_scope is the only allowed write set; must_not_touch forbids write/stage/commit and is not a read ban by itself"
+                .to_string(),
+        );
+    }
+    if matches!(
+        metadata.task_class.as_deref(),
+        Some("review") | Some("context-pack") | Some("research")
+    ) {
+        lines.push(
+            "- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification; do not paste raw KB JSON or full logs as the final answer"
+                .to_string(),
+        );
     }
     lines.join("\n")
 }
@@ -966,6 +1005,7 @@ mod tests {
             pool_hint: Some("claude-code-default".to_string()),
             engine_hint: Some("claude-code".to_string()),
             context_pack_path: Some(".missiond/tasks/wave99/context-pack.lisp".to_string()),
+            read_scope: vec!["crates/missiond-core/src/types/board.rs".to_string()],
             write_scope: vec!["crates/a.rs".to_string()],
             must_not_touch: vec!["packages/**".to_string()],
             acceptance: vec!["cargo test -p missiond-daemon autopilot".to_string()],
@@ -976,20 +1016,61 @@ mod tests {
             "- pool_hint: claude-code-default",
             "- engine_hint: claude-code",
             "- context_pack_path: .missiond/tasks/wave99/context-pack.lisp",
+            "- read_scope: crates/missiond-core/src/types/board.rs",
             "- write_scope: crates/a.rs",
             "- must_not_touch: packages/**",
             "- acceptance: cargo test -p missiond-daemon autopilot",
+            "- scope_semantics: read_scope is allowed/expected reading; write_scope is the only allowed write set; must_not_touch forbids write/stage/commit and is not a read ban by itself",
+            "- output_contract: return a structured artifact with Findings / Evidence / Recommendations / Verification; do not paste raw KB JSON or full logs as the final answer",
         ] {
             assert!(block.contains(expected), "missing {expected}: {block}");
         }
     }
 
+    /// Pins read-only review-class semantics: a task with a non-empty
+    /// `read_scope` and an empty `write_scope` renders both fields in the
+    /// metadata block. The dispatch contract is "you may READ these,
+    /// you may NOT write anywhere" — distinct from "no scope declared".
+    #[test]
+    fn delegation_metadata_block_pins_read_only_review_contract() {
+        let metadata = DelegationMetadata {
+            task_class: Some("review".to_string()),
+            engine_hint: Some("claude-code".to_string()),
+            pool_hint: Some("claude-code-default".to_string()),
+            read_scope: vec![
+                "/Users/jinchen/Projects/xiaojinpro-backend".to_string(),
+                "/Users/jinchen/Projects/missiond".to_string(),
+            ],
+            write_scope: Vec::new(),
+            must_not_touch: vec!["**/*".to_string()],
+            acceptance: vec!["git status proves no new edits".to_string()],
+            ..DelegationMetadata::default()
+        };
+        let block = render_delegation_metadata_block(&metadata);
+        assert!(
+            block.contains("- read_scope: /Users/jinchen/Projects/xiaojinpro-backend, /Users/jinchen/Projects/missiond"),
+            "read_scope must list both repos: {block}"
+        );
+        assert!(
+            !block.contains("\n- write_scope:"),
+            "empty write_scope must not render: {block}"
+        );
+        assert!(block.contains("- must_not_touch: **/*"));
+        assert!(block.contains("must_not_touch forbids write/stage/commit"));
+        assert!(block.contains("Findings / Evidence / Recommendations / Verification"));
+    }
+
     #[test]
     fn string_list_arg_accepts_snake_and_camel_metadata_keys() {
         let args = json!({
+            "readScope": ["docs", "src"],
             "writeScope": ["a.rs", " ", "b.rs"],
             "acceptance_commands": ["cargo test"]
         });
+        assert_eq!(
+            string_list_arg(&args, &["read_scope", "readScope"]),
+            vec!["docs", "src"]
+        );
         assert_eq!(
             string_list_arg(&args, &["write_scope", "writeScope"]),
             vec!["a.rs", "b.rs"]

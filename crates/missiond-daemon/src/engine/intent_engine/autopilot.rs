@@ -577,7 +577,7 @@ fn strip_prompt_echo<'a>(response: &'a str, _dispatched_prompt: &str) -> &'a str
 /// (whichever ends up later in the response wins) so a final closeout phrase
 /// that comes after an earlier mid-investigation `Summary` mention still wins.
 fn focus_final_summary_region(input: &str) -> &str {
-    const HEADING_ANCHORS: [&str; 8] = [
+    const HEADING_ANCHORS: [&str; 12] = [
         "\n⏺ Smoke Summary",
         "\n⏺ Final Summary",
         "\n⏺ Summary",
@@ -586,10 +586,23 @@ fn focus_final_summary_region(input: &str) -> &str {
         "\nSummary",
         "\n  Summary",
         "\n## Summary",
+        // Long evaluation tasks (review-class) write a top-level markdown
+        // H1 like `# Auth KB Cleanup — READ-ONLY Evaluation Report` instead
+        // of a `Summary`-style heading. Anchor on the explicit H1 forms so
+        // the final report region wins over earlier progress narration.
+        "\n# Final",
+        "\n# Summary",
+        "\n## Final",
+        "\n# Smoke Summary",
     ];
-    const PHRASE_ANCHORS: [&str; 2] = [
+    const PHRASE_ANCHORS: [&str; 4] = [
         "diagnostic summary for the BoardTask:",
         "All acceptance gates pass",
+        // Common long-form report closeouts (review tasks). `rfind` keeps
+        // them safe when the worker also mentions "Evaluation Report" as a
+        // mid-narration aside — the LAST occurrence wins.
+        "Evaluation Report",
+        "Final Report",
     ];
 
     let mut best: Option<usize> = None;
@@ -898,8 +911,17 @@ impl Drop for OwnedSlotDispatchGuard {
 /// "你必须调用" wording is replaced so a slot without board MCP tools is no
 /// longer asked to call tools it cannot see.
 fn append_board_task_id_suffix(prompt: &str, task_id: &str) -> String {
+    // The advisory block sits BEFORE the Board Task ID close-task block so
+    // the suffix still ends with the TAIL_ANCHOR phrase
+    // `"负责关闭此 BoardTask。"`. `strip_prompt_echo` rfind()'s that anchor to
+    // separate the echoed prompt from the worker's output — moving the
+    // anchor later in the suffix would leak the advisory into final
+    // summaries.
     format!(
-        "{}\n\n---\n📋 **Board Task ID**: `{}`\n\
+        "{}\n\n---\n📐 **多仓库 git status 输出规范**：\
+        若一次回答中需要在多个 git 仓库之间切换，请在每段输出**之前**用一行 `===<repo-name>===` 标记仓库，再执行 `git status --short`；\
+        勿把仓库名放在输出之后（标签会与下一段合并）。`cd` 会重置 shell cwd，请改用 `git -C <path> status --short` 或并行 Bash 调用。\
+        \n\n---\n📋 **Board Task ID**: `{}`\n\
         任务完成时：若当前工位已挂载 `mission_board_update` / `mission_board_note_add`，\
         请调用 `mission_board_update(id=\"{}\", status=\"done\")` 关闭任务，\
         并用 `mission_board_note_add(taskId=\"{}\", content=\"...\", noteType=\"summary\")` 写入诊断摘要。\
@@ -1222,19 +1244,79 @@ pub(crate) async fn dispatch_board_tasks(state: &AppState) -> Result<()> {
     dispatch_board_tasks_with_config(state, &runtime_config).await
 }
 
+/// Parse a `- field: value` line out of a `## Dispatch metadata` or
+/// `## Swarm metadata` block embedded in a BoardTask description. Returns the
+/// trimmed value when the field appears under one of those headings; falls
+/// back to scanning the whole description so externally-built BoardTasks that
+/// only use a `task_class:` line still hit. Empty values are dropped so
+/// `field:` placeholders never override the structured class.
+pub(crate) fn extract_dispatch_metadata_field(description: &str, field: &str) -> Option<String> {
+    let needle = format!("- {}:", field);
+    let mut in_metadata = false;
+    let mut found_outside: Option<String> = None;
+    for line in description.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            let lowered = rest.to_ascii_lowercase();
+            in_metadata =
+                lowered.starts_with("dispatch metadata") || lowered.starts_with("swarm metadata");
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix(needle.as_str()) {
+            let value = value.trim().trim_end_matches(',').trim().to_string();
+            if value.is_empty() {
+                continue;
+            }
+            if in_metadata {
+                return Some(value);
+            }
+            if found_outside.is_none() {
+                found_outside = Some(value);
+            }
+        }
+    }
+    found_outside
+}
+
+/// Recognised structured task classes the workstation pool understands. Used
+/// to gate `extract_dispatch_metadata_field` results so a stray `task_class:`
+/// note never coerces the autopilot into an unknown route.
+const KNOWN_TASK_CLASSES: &[&str] = &[
+    "research",
+    "general",
+    "ops",
+    "code",
+    "review",
+    "context-pack",
+    "lisp-compression",
+];
+
+fn class_from_str(value: &str) -> Option<&'static str> {
+    let lowered = value.trim().to_ascii_lowercase();
+    KNOWN_TASK_CLASSES
+        .iter()
+        .find(|known| **known == lowered.as_str())
+        .copied()
+}
+
 fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'static str {
     if task.category == "ops" {
         return "ops";
     }
     match task.context_intent.as_deref().map(str::trim) {
         Some("research") => "research",
-        Some("general") => "general",
-        Some("ops") => "ops",
-        Some("code") => "code",
-        Some("review") => "review",
-        Some("context-pack") => "context-pack",
-        Some("lisp-compression") => "lisp-compression",
-        _ => {
+        Some("general") | Some("") | None => {
+            // Default/general fall-through: prefer the structured task_class
+            // line embedded in the dispatch/swarm metadata block before
+            // applying title/description keyword heuristics. This lets
+            // externally-created BoardTasks (mission_board_create, scripts,
+            // operator paste-in) route as `review`, `context-pack`, etc.
+            // without round-tripping through `intent`.
+            if let Some(value) = extract_dispatch_metadata_field(&task.description, "task_class") {
+                if let Some(class) = class_from_str(&value) {
+                    return class;
+                }
+            }
             let title = task.title.to_ascii_lowercase();
             let description = task.description.to_ascii_lowercase();
             if title.contains("read-only")
@@ -1249,7 +1331,19 @@ fn board_task_workstation_class(task: &missiond_core::types::BoardTask) -> &'sta
                 "code"
             }
         }
+        Some("ops") => "ops",
+        Some("code") => "code",
+        Some("review") => "review",
+        Some("context-pack") => "context-pack",
+        Some("lisp-compression") => "lisp-compression",
+        _ => "code",
     }
+}
+
+#[derive(Debug, Clone)]
+struct WorkstationSlotSelection {
+    slot_id: String,
+    reroute_reason: Option<String>,
 }
 
 async fn select_workstation_pool_slot(
@@ -1258,9 +1352,43 @@ async fn select_workstation_pool_slot(
     task: &missiond_core::types::BoardTask,
     dispatched_slots: &HashSet<String>,
     excluded_roles: &[&str],
-) -> Option<String> {
+) -> Option<WorkstationSlotSelection> {
     let task_class = board_task_workstation_class(task);
-    for worker in workstation_config.boardtask_pool_candidates(task_class) {
+    let engine_hint = extract_dispatch_metadata_field(&task.description, "engine_hint");
+    let pool_hint = extract_dispatch_metadata_field(&task.description, "pool_hint");
+    let mut candidates: Vec<&_> = workstation_config
+        .boardtask_pool_candidates(task_class)
+        .into_iter()
+        .collect();
+    // Re-rank: workers that match an explicit engine_hint / pool_hint go
+    // first. Workers that mismatch fall to the back so they remain a
+    // fallback, but we emit a `reroute` warn! line whenever the chosen slot
+    // does not satisfy the hint so the regression is visible without
+    // rebuilding lookup tables.
+    if engine_hint.is_some() || pool_hint.is_some() {
+        candidates.sort_by_key(|worker| {
+            let engine_match = engine_hint
+                .as_deref()
+                .map(|hint| worker.engine.eq_ignore_ascii_case(hint))
+                .unwrap_or(true);
+            let pool_match = pool_hint
+                .as_deref()
+                .map(|hint| {
+                    worker.id.eq_ignore_ascii_case(hint)
+                        || worker.role.eq_ignore_ascii_case(hint)
+                        || worker.slot_id.eq_ignore_ascii_case(hint)
+                })
+                .unwrap_or(true);
+            // 0 = both match (best), 1 = pool only, 2 = engine only, 3 = neither.
+            match (engine_match, pool_match) {
+                (true, true) => 0,
+                (true, false) => 2,
+                (false, true) => 1,
+                (false, false) => 3,
+            }
+        });
+    }
+    for worker in candidates {
         if task_class == "code" && !worker.write_allowed {
             continue;
         }
@@ -1273,17 +1401,57 @@ async fn select_workstation_pool_slot(
         if excluded_roles.contains(&slot.config.role.as_str()) {
             continue;
         }
+        let pick = || {
+            let engine_match = engine_hint
+                .as_deref()
+                .map(|hint| worker.engine.eq_ignore_ascii_case(hint))
+                .unwrap_or(true);
+            let pool_match = pool_hint
+                .as_deref()
+                .map(|hint| {
+                    worker.id.eq_ignore_ascii_case(hint)
+                        || worker.role.eq_ignore_ascii_case(hint)
+                        || worker.slot_id.eq_ignore_ascii_case(hint)
+                })
+                .unwrap_or(true);
+            let reroute_reason = if !engine_match || !pool_match {
+                let reason = format!(
+                    "engine_hint/pool_hint not satisfied; requested_engine={}, requested_pool={}, chosen_engine={}, chosen_pool={}, chosen_slot={}",
+                    engine_hint.as_deref().unwrap_or("-"),
+                    pool_hint.as_deref().unwrap_or("-"),
+                    worker.engine,
+                    worker.id,
+                    worker.slot_id,
+                );
+                tracing::warn!(
+                    task_id = %task.id,
+                    task_class,
+                    requested_engine = engine_hint.as_deref().unwrap_or("-"),
+                    requested_pool = pool_hint.as_deref().unwrap_or("-"),
+                    chosen_engine = %worker.engine,
+                    chosen_slot = %worker.slot_id,
+                    "Autopilot: dispatch reroute — engine/pool hint not satisfied by available pool, fell back to nearest candidate"
+                );
+                Some(reason)
+            } else {
+                None
+            };
+            WorkstationSlotSelection {
+                slot_id: worker.slot_id.clone(),
+                reroute_reason,
+            }
+        };
         if let Some(info) = state.pty.get_status(&worker.slot_id).await {
             if matches!(
                 info.state,
                 SessionState::Idle | SessionState::Exited | SessionState::Error
             ) {
-                return Some(worker.slot_id.clone());
+                return Some(pick());
             }
             continue;
         }
         if slot.config.lifecycle == Some(missiond_core::types::Lifecycle::Persistent) {
-            return Some(worker.slot_id.clone());
+            return Some(pick());
         }
     }
     None
@@ -1416,7 +1584,22 @@ async fn dispatch_board_tasks_with_config(
                 )
                 .await
                 {
-                    Some(id) => {
+                    Some(selection) => {
+                        let id = selection.slot_id;
+                        if let Some(reason) = selection.reroute_reason {
+                            let _ = state
+                                .store
+                                .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                                    task_id: task.id.to_string(),
+                                    content: format!(
+                                        "⚠️ Workstation dispatch reroute recorded: {}",
+                                        reason
+                                    ),
+                                    note_type: Some("note".to_string()),
+                                    author: Some("autopilot".to_string()),
+                                })
+                                .await;
+                        }
                         info!(task_id = %task.id, slot_id = %id, "Autopilot: selected V3 workstation-pool slot");
                         // Don't persist assignee yet — avoid Task Pinning Bug.
                         // If claim/pty fails, task stays unassigned for next tick to re-route.
@@ -4297,6 +4480,183 @@ mod tests {
             false,
             false
         ));
+    }
+
+    // ── Dispatch metadata projection (BoardTask 2b685fcf — review routing) ──
+
+    fn make_board_task(
+        title: &str,
+        description: &str,
+        category: &str,
+        context_intent: Option<&str>,
+    ) -> missiond_core::types::BoardTask {
+        missiond_core::types::BoardTask {
+            id: missiond_core::types::TaskId::from_trusted("task-test".to_string()),
+            title: title.to_string(),
+            description: description.to_string(),
+            status: missiond_core::types::BoardTaskStatus::Open,
+            priority: "medium".to_string(),
+            category: category.to_string(),
+            project: None,
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: None,
+            auto_execute: false,
+            prompt_template: None,
+            hidden: false,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx: 0,
+            created_at: String::new(),
+            updated_at: String::new(),
+            claim_executor_id: None,
+            claim_executor_type: None,
+            claimed_at: None,
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: Vec::new(),
+            lease_expires_at: None,
+            dedupe_key: None,
+            timeout_secs: None,
+            context_intent: context_intent.map(str::to_string),
+            trigger_source: None,
+            notes_count: 0,
+        }
+    }
+
+    /// Pins BoardTask 2b685fcf finding (1): externally-created BoardTasks
+    /// that ship a `## Dispatch metadata` block with `task_class: review`
+    /// must route to the `review` workstation pool — not silently fall back
+    /// to `code` because `context_intent` was left at the "general" default.
+    #[test]
+    fn workstation_class_picks_up_review_from_dispatch_metadata() {
+        let description = "Read /Users/jinchen/Projects/...\n\n\
+             ## Dispatch metadata\n\
+             - task_class: review\n\
+             - pool_hint: claude-code-default\n\
+             - engine_hint: claude-code\n\
+             - acceptance: read SSOT | git status proves no edits";
+        let task = make_board_task("Auth KB cleanup eval", description, "dev", Some("general"));
+        assert_eq!(board_task_workstation_class(&task), "review");
+    }
+
+    /// Same projection works when `context_intent` is missing entirely
+    /// (older BoardTasks pre-context-intent migration).
+    #[test]
+    fn workstation_class_picks_up_review_when_context_intent_missing() {
+        let description = "## Dispatch metadata\n- task_class: review\n";
+        let task = make_board_task("Eval", description, "dev", None);
+        assert_eq!(board_task_workstation_class(&task), "review");
+    }
+
+    /// `## Swarm metadata` blocks (mission_swarm_run output) must be honored
+    /// the same way as `## Dispatch metadata`.
+    #[test]
+    fn workstation_class_picks_up_class_from_swarm_metadata_block() {
+        let description = "objective\n\n## Swarm metadata\n- task_class: context-pack\n";
+        let task = make_board_task("Survey", description, "dev", None);
+        assert_eq!(board_task_workstation_class(&task), "context-pack");
+    }
+
+    /// An unknown task_class value must NOT coerce routing — fall back to
+    /// the title/description heuristic instead.
+    #[test]
+    fn workstation_class_ignores_unknown_dispatch_metadata_class() {
+        let description = "## Dispatch metadata\n- task_class: not-a-real-class\n";
+        let task = make_board_task("Investigate something", description, "dev", None);
+        // "investigate" keyword in title → research fallback applies.
+        assert_eq!(board_task_workstation_class(&task), "research");
+    }
+
+    /// Sanity: explicit `context_intent` still wins. The metadata-block scan
+    /// only kicks in when context_intent is the default "general"/missing.
+    #[test]
+    fn workstation_class_explicit_context_intent_overrides_metadata_block() {
+        let description = "## Dispatch metadata\n- task_class: review\n";
+        let task = make_board_task("Eval", description, "dev", Some("code"));
+        assert_eq!(board_task_workstation_class(&task), "code");
+    }
+
+    #[test]
+    fn extract_dispatch_metadata_field_finds_value_under_dispatch_block() {
+        let description =
+            "blah\n## Dispatch metadata\n- task_class: review\n- engine_hint: claude-code\n";
+        assert_eq!(
+            extract_dispatch_metadata_field(description, "task_class"),
+            Some("review".to_string())
+        );
+        assert_eq!(
+            extract_dispatch_metadata_field(description, "engine_hint"),
+            Some("claude-code".to_string())
+        );
+        assert_eq!(
+            extract_dispatch_metadata_field(description, "pool_hint"),
+            None
+        );
+    }
+
+    #[test]
+    fn extract_dispatch_metadata_field_drops_empty_values() {
+        let description = "## Dispatch metadata\n- task_class:\n- engine_hint:   \n";
+        assert!(extract_dispatch_metadata_field(description, "task_class").is_none());
+        assert!(extract_dispatch_metadata_field(description, "engine_hint").is_none());
+    }
+
+    /// Pins BoardTask 2b685fcf finding (4): long evaluation tasks anchor
+    /// their final report on a markdown H1 like
+    /// `# Auth KB Cleanup — READ-ONLY Evaluation Report`. The extractor
+    /// MUST land on that H1 (preserving the heading) and drop earlier
+    /// in-progress narration.
+    #[test]
+    fn extract_worker_final_summary_anchors_on_evaluation_report_h1() {
+        let prompt = dispatched_prompt("task-eval-h1");
+        let response = format!(
+            "{prompt}\n\n\
+             Now let me read the SSOT files...\n\
+             ⏺ Read(intent.lisp)\n\
+             ⎿ ok\n\n\
+             # Auth KB Cleanup — READ-ONLY Evaluation Report\n\n\
+             **SSOT verification**:\n\
+             - Read intent.lisp ✓\n\
+             - Canonical issuer = `https://auth.xiaojinpro.com` ✓\n\n\
+             ## A. Superseded-by-Lisp candidates\n- entry one\n- entry two\n",
+            prompt = prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            summary.contains("Auth KB Cleanup"),
+            "report H1 dropped: {summary}"
+        );
+        assert!(
+            summary.contains("auth.xiaojinpro.com"),
+            "report body dropped: {summary}"
+        );
+        assert!(
+            !summary.contains("Now let me read"),
+            "earlier narration leaked: {summary}"
+        );
+    }
+
+    /// Pins BoardTask 2b685fcf finding (5): the dispatch suffix must
+    /// instruct workers to print a repo label BEFORE multi-repo git output,
+    /// and use `git -C <path>` instead of `cd` between repos.
+    #[test]
+    fn append_board_task_id_suffix_includes_multi_repo_git_advisory() {
+        let suffix = append_board_task_id_suffix("BODY", "task-multi-repo-evidence");
+        assert!(
+            suffix.contains("多仓库 git status 输出规范"),
+            "multi-repo advisory missing: {suffix}"
+        );
+        assert!(
+            suffix.contains("git -C") || suffix.contains("并行 Bash 调用"),
+            "advisory must offer a `cd`-free alternative: {suffix}"
+        );
+        assert!(
+            suffix.contains("===<repo-name>==="),
+            "advisory must show the label-before-output format: {suffix}"
+        );
     }
 }
 
