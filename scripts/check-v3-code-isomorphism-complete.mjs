@@ -17,7 +17,8 @@
 //   mission_execution-log, mission_execution-claim-lease,
 //   mission_execution-completion-audit, mission_workflow, review-gate,
 //   task-runner-cli, source-hygiene, context-pack, workstation-config,
-//   workstation-pool, autopilot-runtime, workstation-dispatch, mission_board, memory-kb, project-registry,
+//   workstation-pool, resident-master-control, commit-lisp-convergence-loop,
+//   nightly-evolution-loop, autopilot-runtime, workstation-dispatch, mission_board, memory-kb, project-registry,
 //   board-frontend,
 //   conversation-ingestion, skill-runtime, cascade-governance,
 //   router-policy, incident-governance, capability-governance,
@@ -53,6 +54,8 @@ export const EXPECTED_SURFACES = [
   'task-runner-cli',
   'source-hygiene',
   'lisp-code-drift-policy',
+  'commit-lisp-convergence-loop',
+  'nightly-evolution-loop',
   'context-pack',
   'workstation-config',
   'workstation-pool',
@@ -96,6 +99,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-task-lifecycle-isomorphism.mjs',
   'scripts/check-v3-memory-kb-isomorphism.mjs',
   'scripts/check-v3-project-registry-isomorphism.mjs',
+  'scripts/check-project-ssot-universe.mjs',
   'scripts/check-v3-conversation-ingestion-isomorphism.mjs',
   'scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
   'scripts/check-v3-skill-runtime-isomorphism.mjs',
@@ -106,6 +110,7 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-compute-primitives-isomorphism.mjs',
   'scripts/check-v3-pty-recognition-isomorphism.mjs',
   'scripts/check-v3-sysinfra-control-isomorphism.mjs',
+  'scripts/check-missiond-blue-green-deploy.mjs',
   'scripts/check-v3-source-hygiene-isomorphism.mjs',
   'scripts/check-v3-direct-code-drift-policy.mjs',
   'scripts/check-v3-context-pack-isomorphism.mjs',
@@ -113,6 +118,8 @@ export const PER_SURFACE_CHECKERS = [
   'scripts/check-v3-workstation-pool-isomorphism.mjs',
   'scripts/check-v3-master-control-isomorphism.mjs',
   'scripts/check-v3-autopilot-runtime-isomorphism.mjs',
+  'scripts/check-v3-commit-convergence-loop.mjs',
+  'scripts/check-v3-nightly-evolution-isomorphism.mjs',
   'scripts/check-v3-workstation-dispatch-isomorphism.mjs',
   'scripts/check-v3-board-isomorphism.mjs',
   'scripts/check-frontend-board-lisp-schema.mjs',
@@ -488,6 +495,18 @@ function runDryFixture(opts) {
       :status "code-aligned"
       :code ["a"]
       :note "n")
+    (surface lisp-code-drift-policy
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface commit-lisp-convergence-loop
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface nightly-evolution-loop
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
     (surface context-pack
       :status "code-aligned"
       :code ["a"]
@@ -497,6 +516,10 @@ function runDryFixture(opts) {
       :code ["a"]
       :note "n")
     (surface workstation-pool
+      :status "code-aligned"
+      :code ["a"]
+      :note "n")
+    (surface resident-master-control
       :status "code-aligned"
       :code ["a"]
       :note "n")

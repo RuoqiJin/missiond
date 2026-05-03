@@ -754,14 +754,14 @@
     :role [orchestrator brain]
     :permissions [read-code read-lisp read-board write-board write-kb write-execution-log dispatch-workers read-event-bus]
     :default-code-write false
-    :surfaces [master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler]
+    :surfaces [master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler commit-lisp-convergence-loop nightly-evolution-loop]
     :checkpoint
       (:sources [mission_execution companion-log BoardTask-note master-control-checkpoint]
        :write-on [turn-start delegation-created delegation-complete daemon-restart-before-exit periodic-heartbeat]
 	       :resume-from [latest-master-control-checkpoint open-master-control-boardtask latest-execution-log]
 	       :fields [active_objective_id phase context_pack_path delegated_task_ids blocked_reason last_verified_commit resume_instruction])
     :event-subscriptions
-      [BoardTaskCreated BoardTaskStatusChanged SlotEvent QuestionEvent DaemonRestart StaleTask NightSchedule ProjectRegistryChanged]
+      [BoardTaskCreated BoardTaskStatusChanged SlotEvent QuestionEvent SystemEvent::ContextualCommitDetected DaemonRestart StaleTask NightSchedule ProjectRegistryChanged]
     :loop
       ((step s1 :logic "load latest checkpoint, active Board objectives, V3/project Lisp registries, and recent event tail")
        (step s2 :logic "classify events into decision-required, dispatchable, blocked, stale, or informational")
@@ -790,11 +790,12 @@
       :core
         ((step s1 :logic "subscribe to BoardEvent, SlotEvent, and QuestionEvent with live-only v2 subscription names, StartFrom::Latest, and PerEvent cursor flush so daemon restart does not replay historical backlog")
          (step s2 :logic "ignore slot-codex-master-control self SlotEvents so the resident brain cannot trigger an infinite self-prompt loop")
-         (step s3 :logic "ignore seq=0 volatile events and ordinary SlotEvent.became_idle noise; PTY idle is diagnostic only, not a master-control wakeup authority")
-         (step s4 :logic "filter low-value Board completion acknowledgements before the model: status_changed->done/completed/closed, claimed, and deleted events do not wake the resident master; created/open/blocked/failed/meaningful-updated events still wake")
-         (step s5 :logic "same-process Board tool handlers also call notify_board_event_direct immediately after durable DB mutation and before/alongside event-log publish, so master wakeup is not blocked behind dispatcher backlog; Board notes authored by codex-master-control MUST NOT direct-notify the master again")
-         (step s6 :logic "record only wakeup metadata and ack immediately")
-         (step s7 :logic "notify master-decision-loop; never run long worker dispatch inline"))
+         (step s3 :logic "ignore seq=0 volatile events, ordinary SlotEvent.became_idle noise, and SlotEvent.task_dispatched worker lifecycle noise; PTY idle/task-dispatched is diagnostic evidence, not a master-control wakeup authority")
+         (step s4 :logic "filter worker creation/running noise before the model while preserving terminal worker edges: swarm worker TaskCreated and dev/running updates do not wake the resident master, but status_changed/updated done/completed/closed/failed/blocked MUST wake it so parent objectives can advance from durable worker completion")
+         (step s5 :logic "filter swarm-created worker BoardTasks such as Investigate context for swarm objective, Survey exact shards for swarm objective, and Implement accepted swarm shard, because those terminal worker units belong to Autopilot/provider evidence rather than recursive master delegation")
+         (step s6 :logic "same-process Board tool handlers also call notify_board_event_direct immediately after durable DB mutation and before/alongside event-log publish, so master wakeup is not blocked behind dispatcher backlog; Board notes authored by codex-master-control MUST NOT direct-notify the master again")
+         (step s7 :logic "record only wakeup metadata and ack immediately")
+         (step s8 :logic "notify master-decision-loop; never run long worker dispatch inline"))
       :egress [master-control-runtime.event-cursor master-control-runtime.queued-events master-control-runtime.notify]
       :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::spawn_master_event_subscriber"])
     (master-decision-loop
@@ -804,10 +805,14 @@
 		         (step s2 :logic "classify phase as observe_event -> classify_objective -> create_context_pack -> dispatch_investigators -> compile_shards -> dispatch_implementers -> verify -> close_or_backfill, then build short Codex control prompt with event_cursor, event_summary, phase, active_objective_id, and context_pack_path; require MissionD MCP first (mission_intent, mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status), query BoardTask by id for Board events, never recursively call mission_task_delegate for BoardTasks that already contain ## Swarm metadata or task_class=context-pack/code from mission_swarm_run, verify any delegated task id with mission_board_query(action=get) before writing a success note, use mission_board_note_add for progress/summary notes, and forbid broad shell scans unless MCP surfaces are missing")
          (step s3 :logic "write checkpoint before any durable Board/KB/dispatch action")
          (step s4 :logic "on daemon-startup, ensure slot-codex-master-control is spawned when Exited/Error but do not consume a control turn; startup is for residency, not decision work")
-         (step s5 :logic "before sending an event control turn, ensure slot-codex-master-control is spawned when Exited/Error, wait briefly for Idle/SlashMenu, and verify the visible Codex footer still matches gpt-5.5 xhigh; if the slot was downgraded by an interactive model/rate-limit prompt, restart it before dispatch")
-         (step s6 :logic "send control turns to slot-codex-master-control only on event-wakeup, with MCP server ready, required MCP tool approvals ready, and rate-limit guard")
-         (step s7 :logic "detect code-first diffs and create a deduped backfill BoardTask instead of silently accepting Lisp/code drift")
-         (step s8 :logic "defer long work to BoardTask/Autopilot and provider durable logs"))
+         (step s5 :logic "before sending an event control turn, ensure slot-codex-master-control is spawned when Exited/Error, wait up to 180s for Idle/SlashMenu because gpt-5.5 xhigh control turns are brain-lane work rather than narrow-patch work, and verify the visible Codex footer still matches gpt-5.5 xhigh; if the slot was downgraded by an interactive model/rate-limit prompt, restart it before dispatch")
+         (step s6 :logic "send control turns to slot-codex-master-control only on event-wakeup or pending periodic-heartbeat retry, with MCP server ready, required MCP tool approvals ready, and rate-limit guard")
+         (step s7 :logic "if a queued objective cannot receive a control turn because Codex master is still starting or the Codex MCP probe is transiently not ready, keep the queued event and retry from periodic-heartbeat once MCP and the slot are ready; successful control turn drains the queued event batch")
+         (step s7b :logic "while an active objective exists, periodic-heartbeat MUST run a lightweight control turn at least every 180s even when no queued event arrived, because some worker close paths may only leave durable Board/provider evidence without publishing a master-visible event")
+         (step s7c :logic "classification MUST preserve the current active_objective_id across worker SlotEvents or child BoardTask status events; an event with no top-level task_id must never clear the parent objective")
+         (step s7d :logic "when the active parent objective itself emits a terminal BoardEvent.status_changed edge such as Running->Done/Failed/Blocked, clear active_objective_id so periodic heartbeat stops reprocessing a completed objective; terminal Board status events must also never create a new active objective during daemon-startup recovery")
+         (step s8 :logic "detect code-first diffs and create a deduped backfill BoardTask instead of silently accepting Lisp/code drift")
+         (step s9 :logic "defer long work to BoardTask/Autopilot and provider durable logs"))
 	      :egress [master-control-checkpoint mission_master_status.service mission_convergence_status]
       :surfaces ["crates/missiond-daemon/src/engine/master_control.rs::spawn_master_decision_loop"
                  "crates/missiond-daemon/src/engine/master_control.rs::build_master_tick_prompt"])
@@ -823,22 +828,50 @@
       :entry [daemon-restart startup-checkpoint stale-task durable-provider-log]
       :core
         ((step s1 :logic "load checkpoint event cursor, delegated task ids, blocked reason, and resume plan")
-         (step s2 :logic "reconcile Board open tasks against provider JSONL/Codex sqlite/Gemini chat files")
-         (step s3 :logic "resume or requeue only from durable evidence; PTY recognition is diagnostic")
-         (step s4 :logic "never auto-hide, skip, delete, or mutate historical Board cleanup candidates; legacy ops cleanup remains user-directed"))
+         (step s2 :logic "on daemon-startup, if no queued event survived, recover the latest open/running MissionD infra BoardTask whose title or description references project SSOT convergence workflow and rehydrate it as the active objective")
+         (step s3 :logic "reconcile Board open tasks against provider JSONL/Codex sqlite/Gemini chat files")
+         (step s4 :logic "resume or requeue only from durable evidence; PTY recognition is diagnostic")
+         (step s5 :logic "never auto-hide, skip, delete, or mutate historical Board cleanup candidates; legacy ops cleanup remains user-directed"))
       :egress [mission_master_status.service BoardTask-note])
     (night-scheduler
-      :entry [schedule-metadata manual-objective]
+      :entry [schedule-metadata manual-objective mission_nightly_evolution]
+      :policy (:workflow ".missiond/workflows/nightly-evolution.lisp"
+               :schedule-window "daily"
+               :default-mode observe-only
+               :budget-secs 7200
+               :max-followup-tasks 3
+               :risk-gate "Only observe-only and safe-backfill can create tasks automatically; architecture-proposal and requires-user-decision never auto-edit code.")
       :core
-        ((step s1 :logic "materialize night tasks as BoardTasks with explicit project and evidence scope")
-         (step s2 :logic "prefer read-only upstream-source audit and context-pack generation")
-         (step s3 :logic "checkpoint before and after each batch so daemon restart can resume"))
-      :egress [BoardTaskCreated master-control-checkpoint])
+        ((step s1 :logic "NightlyEvolutionService reads V3/project Lisp, Board open tasks, recent events, recent commits, worker telemetry, and final convergence snapshot")
+         (step s2 :logic "write observe-first .missiond/v3/runtime/nightly-evolution/<date>.report.lisp")
+         (step s3 :logic "materialize visible proposal/backfill BoardTasks only when apply=true and risk gate allows it")
+         (step s4 :logic "prefer read-only upstream-source audit and context-pack generation")
+         (step s5 :logic "checkpoint before and after each batch so daemon restart can resume"))
+      :egress [nightly-evolution-report BoardTaskCreated master-control-checkpoint mission_master_status.nightlyEvolution])
+    (commit-lisp-convergence-loop
+      :entry [SystemEvent::ContextualCommitDetected mission_execution.complete provider-durable-log]
+      :core
+        ((step s1 :logic "CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected with StartFrom::Latest and PerEvent cursor flush")
+         (step s2 :logic "resolve project from slot project_root/cwd or project registry; unknown project writes a diagnostic report only")
+         (step s3 :logic "read committed snapshot with git diff-tree --root --no-commit-id -r --name-only <sha>, never current worktree diff")
+         (step s4 :logic "classify changed files into code, lisp, checker, evidence, docs, or other")
+         (step s5 :logic "for code-only commits create one visible deduped BoardTask commit-lisp-backfill:<project>:<sha>; lisp/checker/evidence-only commits do not recurse")
+         (step s6 :logic "write .missiond/v3/runtime/commit-lisp-convergence/<sha>.report.lisp and expose commitConvergence status"))
+      :egress [commit-convergence-report backfill-boardtask mission_master_status.commitConvergence])
+    (nightly-evolution-loop
+      :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
+      :core
+        ((step s1 :logic "collect evidence from V3 blueprint, frontend blueprint, project registry, Board, recent events, recent commits, worker telemetry, and final convergence snapshot")
+         (step s2 :logic "detect fixed review topics: commit-Lisp drift, event subscription gaps, text heuristic classifiers, legacy direct workers, PTY-only completion, Board close authority, frontend cockpit visibility, and repeated Lisp prose")
+         (step s3 :logic "classify findings as observe-only, safe-backfill, needs-investigation, architecture-proposal, or requires-user-decision")
+         (step s4 :logic "default observe-only writes report; apply=true may create visible low-risk follow-up BoardTasks")
+         (step s5 :logic "master supervises anomalies; routine safe backfill can later be delegated directly through workflow trigger"))
+      :egress [nightly-evolution-report proposal-boardtask kb-note master-control-checkpoint])
     :mcp-readiness
       (:source "~/.codex/config.toml"
        :probe "codex mcp list"
        :required-server missiond
-	       :required-tool-approvals [mission_intent mission_board_query mission_conversation_query mission_kb_query mission_board_create mission_board_update mission_board_note_add mission_kb_remember mission_task_delegate mission_compute_slot mission_master_status mission_convergence_status mission_slots mission_pty_status]
+	       :required-tool-approvals [mission_intent mission_board_query mission_conversation_query mission_kb_query mission_board_create mission_board_update mission_board_note_add mission_kb_remember mission_task_delegate mission_compute_slot mission_master_status mission_convergence_status mission_nightly_evolution mission_slots mission_pty_status]
 	       :status-surface [mission_master_status.mcpReady mission_master_status.mcpEnabled mission_master_status.mcpApprovalReady mission_convergence_status.ok])
     :checker "node scripts/check-v3-master-control-isomorphism.mjs")
 
@@ -1050,13 +1083,73 @@
       :status project-ssot-owned
       :missiond-role "registered project; Lisp/component reuse engine, not MissionD runtime orchestrator"
       :surface project-registry)
+    (project :id xiaojinpro-backend
+      :kind rust-monorepo
+      :root "/Users/jinchen/Projects/xiaojinpro-backend"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/xiaojinpro-backend-blueprint.lisp"
+      :status ssot-seeded
+      :checks ["node scripts/check-xjp-ssot-complete.mjs"]
+      :surface project-registry)
 	    (project :id deploy-center
 	      :kind ops-service
 	      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center"
 	      :intent ".missiond/intent.lisp"
+	      :backend ".missiond/backend/deploy-center-backend-blueprint.lisp"
 	      :status universe-imported
 	      :capability deploy-ops
 	      :surface project-registry)
+    (project :id deploy-agent
+      :kind ops-agent
+      :root "/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/deploy-agent-backend-blueprint.lisp"
+      :status ssot-seeded
+      :capability deploy-ops
+      :surface project-registry)
+    (project :id auth
+      :kind rust-service
+      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/auth-backend-blueprint.lisp"
+      :status ssot-seeded
+      :surface project-registry)
+    (project :id router
+      :kind rust-service
+      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/router"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/router-backend-blueprint.lisp"
+      :status ssot-seeded
+      :surface project-registry)
+    (project :id payments
+      :kind rust-workspace-service
+      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/payments"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/payments-backend-blueprint.lisp"
+      :status ssot-seeded
+      :surface project-registry)
+    (project :id asr
+      :kind rust-service
+      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/asr"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/asr-backend-blueprint.lisp"
+      :status ssot-seeded
+      :surface project-registry)
+    (project :id timeline
+      :kind rust-service
+      :root "/Users/jinchen/Projects/xiaojinpro-backend/services/timeline"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/timeline-backend-blueprint.lisp"
+      :status ssot-seeded
+      :surface project-registry)
+    (project :id pcea
+      :kind rust-vite-app
+      :root "/Users/jinchen/Downloads/PCEA develop"
+      :intent ".missiond/intent.lisp"
+      :backend ".missiond/backend/pcea-backend-blueprint.lisp"
+      :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"
+      :status ssot-seeded
+      :surface project-registry)
 	    (project :id xjp-deploy-center
 	      :kind ops-service-source
 	      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"
@@ -1229,11 +1322,15 @@
     :desc "Lisp-owned operational scripts for deploy, smoke, and scoped formatting."
     :scripts [scripts/deploy-daemon.sh scripts/cargo-fmt-touched.sh]
     :invariants
-      ["Daemon redeploy MUST stay one command: build -> backup -> codesign -> atomic install -> launchctl kickstart -> socket wait -> IPC smoke."
+      ["Daemon redeploy MUST stay one command: build -> candidate release -> manifest -> active symlink -> launchctl kickstart -> socket wait -> IPC smoke."
+       "Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active."
+       "Blue-green rollback MUST switch active back to the previous release."
+       "Release cleanup MUST keep active, previous, and newest retained releases."
        "IPC smoke MUST retry after socket readiness and then rollback on failure; socket-bound is not enough evidence that the MCP initialize path is ready."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT so local launchd cold-start races do not force code edits."
        "Deploy scripts MUST NOT write git state or delete the launchd-owned socket; rollback may restore only the installed binary and restart the launchd job."
        "Rust formatting MUST be scoped to Rust files touched in the current diff, including staged, unstaged, and branch-diff modes."
+       "missiond-rustfmt-exempt legacy-large-file facades are skipped only during physical V3 split."
        "rustfmt MUST run with skip_children=true so formatting a crate root cannot recursively churn untouched Rust modules."
        "The no-Rust-files path MUST exit 0 under set -euo pipefail; filters must not turn an empty grep match into a script failure."]
     :checks ["bash -n scripts/deploy-daemon.sh"
@@ -1344,6 +1441,13 @@
       :v3-function lisp-code-drift
       :surface lisp-code-drift-policy
       :note "V2 SSOT discipline is made explicit as the V3 direct-code-drift policy: ordinary code changes need a Lisp/checker归宿, while emergency fixes must create a backfill BoardTask.")
+    (v2-item commit-lisp-convergence-after-commit
+      :status runtime-projected
+      :v2-source ".missiond/v2/intent-worker.lisp :: ContextualCommitDetected / lisp_survey backfill"
+      :v3-pillar source-control
+      :v3-function commit-lisp-convergence
+      :surface commit-lisp-convergence-loop
+      :note "V2 commit-triggered Lisp survey is narrowed into a workflow-backed convergence loop: commit events inspect committed snapshots with git diff-tree, classify Lisp/checker/evidence coverage, and create visible backfill BoardTasks for code-only commits.")
     (v2-item context-pack-two-stage-parallel-work
       :status runtime-projected
       :v2-source ".missiond/v2/intent.lisp :: task-runner loop evidence + wave29 context-pack upgrade"
@@ -1379,6 +1483,13 @@
       :v3-function resident-master-control
       :surface resident-master-control
       :note "The event-bus nervous-system philosophy now has a resident Codex master-control lane: GPT-5.5 xhigh reads Board/KB/Lisp/events, checkpoints decisions, and dispatches Claude/Gemini/Codex workers through durable BoardTask/Autopilot events.")
+    (v2-item nightly-evolution-self-review
+      :status runtime-projected
+      :v2-source ".missiond/v2/intent-worker.lisp :: architecture maintenance / resident lisp review"
+      :v3-pillar workstation
+      :v3-function nightly-evolution
+      :surface nightly-evolution-loop
+      :note "V2 architecture maintenance becomes a conservative workflow.lisp muscle memory: nightly evolution reviews V3/project Lisp, Board, event logs, recent commits, worker telemetry, and convergence status, then writes reports and visible follow-up tasks under risk gates.")
     (v2-item event-driven-autopilot-runtime
       :status code-aligned
       :v2-source ".missiond/v2/intent-event-bus.lisp :: event_router / BoardTaskCreated / SlotBecameIdle"
@@ -1538,7 +1649,7 @@
         :v3-pillar workstation
         :v3-function resident-master-control
         :surface resident-master-control
-        :tools [mission_master_status mission_convergence_status mission_swarm_run])
+        :tools [mission_master_status mission_convergence_status mission_nightly_evolution mission_swarm_run])
       (tool-group compute-runtime-tools
         :status code-aligned
         :v2-source ".missiond/v2/intent-worker.lisp :: worker path runtime primitives"
@@ -1746,7 +1857,16 @@
                (step s3 :logic "allow emergency code-first fixes only with waiver metadata")
                (step s4 :logic "create backfill BoardTask for Lisp/checker/evidence convergence")
                (step s5 :logic "block BoardTask close-to-done until drift has a Lisp/checker/evidence backfill"))
-        :egress [drift_result waiver_record backfill_boardtask close_blocked_error]))
+        :egress [drift_result waiver_record backfill_boardtask close_blocked_error])
+      (function commit-lisp-convergence
+        :surface commit-lisp-convergence-loop
+        :entry [SystemEvent::ContextualCommitDetected mission_execution.complete provider-durable-log]
+        :core ((step s1 :logic "resolve project from commit event slot project_root/cwd or registry longest-prefix match")
+               (step s2 :logic "inspect committed snapshot with git diff-tree --root --no-commit-id -r --name-only <sha>")
+               (step s3 :logic "classify files into code/lisp/checker/evidence/docs/other")
+               (step s4 :logic "covered when code changes have same-commit Lisp/checker/evidence coverage; lisp-only commits do not recurse")
+               (step s5 :logic "create one visible deduped backfill BoardTask for code-only commits"))
+        :egress [commit_convergence_report backfill_boardtask mission_master_status.commitConvergence]))
 
     (pillar coordination
       (function context-pack
@@ -1791,6 +1911,15 @@
                (step s4 :logic "delegate ordinary implementation to Claude/Gemini/Codex pool workers through BoardTask/Autopilot")
                (step s5 :logic "write checkpoint and durable final note after each decision boundary"))
         :egress [master_checkpoint delegated_boardtasks governance_notes mission_master_status])
+      (function nightly-evolution
+        :surface nightly-evolution-loop
+        :entry [night-scheduler mission_nightly_evolution final-convergence-snapshot]
+        :core ((step s1 :logic "collect V3/project Lisp, Board, event tail, recent commits, worker telemetry, and final convergence static snapshot")
+               (step s2 :logic "detect master-control and workflow loop smells using fixed review rules")
+               (step s3 :logic "classify findings into observe-only, safe-backfill, needs-investigation, architecture-proposal, or requires-user-decision")
+               (step s4 :logic "write nightly-evolution report; create visible follow-up tasks only under risk gate")
+               (step s5 :logic "surface status through mission_master_status.nightlyEvolution"))
+        :egress [nightly_evolution_report proposal_boardtask kb_note mission_master_status.nightlyEvolution])
       (function delegated-boardtask-runtime
         :surface autopilot-runtime
         :entry [BoardEvent.TaskCreated BoardEvent.StatusChanged SlotEvent.BecameIdle board_dispatch_notify autopilot.dispatch_board_tasks]
@@ -2305,6 +2434,35 @@
              "scripts/check-v3-code-isomorphism-complete.mjs"]
       :note "lisp-code-drift-policy is the governance surface for code-first exceptions. Normal behavior changes must carry a same-task Lisp/checker delta or map to an already pinned surface. Emergency code-first fixes are allowed only with waiver metadata and must immediately create a visible backfill BoardTask that adds the missing blueprint, checker, and evidence. The runtime close gate in mission_board_update/mission_board_batch_update/mission_board_toggle blocks status=done while unresolved code-first drift exists, so code-first work cannot be closed without Lisp/checker/evidence convergence.")
 
+    (surface commit-lisp-convergence-loop
+      :status "code-aligned"
+      :implements [commit-lisp-convergence commit-lisp-convergence-loop]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             ".missiond/workflows/commit-lisp-convergence.lisp"
+             "crates/missiond-daemon/src/engine/commit_convergence.rs"
+             "crates/missiond-daemon/src/engine/mod.rs"
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/engine/master_control.rs"
+             "scripts/check-v3-commit-convergence-loop.mjs"
+             "scripts/check-v3-code-isomorphism-complete.mjs"]
+      :note "commit-lisp-convergence-loop is the event-driven code->Lisp backfill muscle. CommitConvergenceService subscribes to SystemEvent::ContextualCommitDetected, resolves project from the committing slot or registry, inspects committed snapshots with git diff-tree --root --no-commit-id -r --name-only <sha>, classifies code/lisp/checker/evidence/doc files, writes commit convergence reports, and creates one visible deduped BoardTask commit-lisp-backfill:<project>:<sha> for code-only commits. Lisp/checker/evidence-only commits do not recurse.")
+
+    (surface nightly-evolution-loop
+      :status "code-aligned"
+      :implements [nightly-evolution night-scheduler nightly-evolution-loop]
+      :code [".missiond/v3/missiond-blueprint.lisp"
+             ".missiond/workflows/nightly-evolution.lisp"
+             "crates/missiond-daemon/src/engine/nightly_evolution.rs"
+             "crates/missiond-daemon/src/engine/mod.rs"
+             "crates/missiond-daemon/src/main.rs"
+             "crates/missiond-daemon/src/engine/master_control.rs"
+             "crates/missiond-daemon/src/handlers/compute/slot.rs"
+             "crates/missiond-mcp/src/tools/compute/process.rs"
+             "crates/missiond-mcp/src/gen_gateway.rs"
+             "scripts/check-v3-nightly-evolution-isomorphism.mjs"
+             "scripts/check-v3-code-isomorphism-complete.mjs"]
+      :note "nightly-evolution-loop turns resident master self-review into a reusable workflow. NightlyEvolutionService runs observe-first from V3 schedule policy, and mission_nightly_evolution can manually run the same workflow. It collects V3/frontend/project Lisp, Board/event/commit/worker evidence, runs final convergence static snapshot, writes .missiond/v3/runtime/nightly-evolution/<date>.report.lisp, and only creates visible low-risk follow-up BoardTasks when apply=true and risk gates allow it.")
+
     (surface context-pack
       :status "code-aligned"
       :implements [multi-agent-context-pack]
@@ -2347,20 +2505,22 @@
              "crates/missiond-core/src/core/slot_manager.rs"
              "scripts/check-v3-workstation-pool-isomorphism.mjs"]
       :evidence ".missiond/v3/evidence/workstation-pool.lisp"
-      :note "workstation-pool is the compact V3 compute-account SSOT. It declares ClaudeCode Opus/Sonnet lanes, Gemini read-only lanes, and the non-shard Codex master lane; runtime projection feeds SlotManager, PTYSpawnOptions, Autopilot routing, mission_compute_slot list, and mission_slots legacy-Sonnet filtering. [details: .missiond/v3/evidence/workstation-pool.lisp]")
+      :note "workstation-pool is the compact V3 compute-account SSOT. It declares ClaudeCode Opus/Sonnet lanes, Gemini read-only lanes, and the non-shard Codex master lane; runtime projection feeds SlotManager, PTYSpawnOptions, Autopilot routing, mission_compute_slot list, and mission_slots legacy-Sonnet filtering. mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask by joining running BoardTasks on assignee or pty_slot claim so the Board cockpit can show what each visible PTY is actually doing. [details: .missiond/v3/evidence/workstation-pool.lisp]")
 
     (surface resident-master-control
       :status "code-aligned"
-      :implements [resident-master-control master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler]
+      :implements [resident-master-control master-checkpoint master-event-subscriber master-decision-loop master-delegation master-recovery night-scheduler commit-lisp-convergence-loop nightly-evolution-loop]
       :code [".missiond/v3/missiond-blueprint.lisp"
              "crates/missiond-daemon/src/context/v3_blueprint_runtime.rs"
              "crates/missiond-daemon/src/engine/master_control.rs"
+             "crates/missiond-daemon/src/engine/commit_convergence.rs"
+             "crates/missiond-daemon/src/engine/nightly_evolution.rs"
              "crates/missiond-daemon/src/main.rs"
              "crates/missiond-daemon/src/handlers/compute/slot.rs"
              "crates/missiond-pty/src/session.rs"
              "crates/missiond-core/src/types/slot.rs"
              "scripts/check-v3-master-control-isomorphism.mjs"]
-      :note "resident-master-control promotes Codex to a non-shard orchestrator. Runtime projection starts GPT-5.5 xhigh read-only Codex, writes phaseful checkpoints, exposes mission_master_status and mission_convergence_status, and keeps provider logs as completion authority while PTY remains diagnostic.")
+      :note "resident-master-control promotes Codex to a non-shard orchestrator. Runtime projection starts GPT-5.5 xhigh read-only Codex, writes phaseful checkpoints, exposes mission_master_status and mission_convergence_status, supervises commit-lisp-convergence-loop and nightly-evolution-loop status, and keeps provider logs as completion authority while PTY remains diagnostic.")
 
     (surface autopilot-runtime
       :status "code-aligned"
@@ -2657,15 +2817,26 @@
              "crates/missiond-mcp/src/tools/sysinfra/system.rs"
              "crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and reachability probes; permission.rs owns mission_permission_query/mutate including get, learned_list, merged_for_slot, set_role, set_slot, auto_allow, reload, and revoke; power.rs owns mission_power_control status/wake/suspend and removes power from the legacy misc hot path; system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update. mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to stay below MCP tools/call timeout and survive daemon kickstart; skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction read/edit/manual-reload.")
+      :note "Code-aligned V3 destination for sysinfra MCP behavior not covered by ops-infra scripts. infra.rs owns mission_infra_query/ops list/get/health/reachability/diagnose and reachability probes; permission.rs owns mission_permission_query/mutate including get, learned_list, merged_for_slot, set_role, set_slot, auto_allow, reload, and revoke; power.rs owns mission_power_control status/wake/suspend and removes power from the legacy misc hot path; system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update. mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to stay below MCP tools/call timeout and survive daemon kickstart; deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release so newly declared MCP tools are not left behind the daemon release. skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction read/edit/manual-reload.")
 
     (surface ops-infra
       :status "code-aligned"
       :implements [ops-infra]
       :code ["scripts/deploy-daemon.sh"
              "scripts/cargo-fmt-touched.sh"
-             "scripts/check-v3-ops-infra-isomorphism.mjs"]
-      :note "deploy-daemon.sh is the canonical local redeploy path: it builds missiond-daemon, backs up the installed binary, codesigns a same-directory temp binary, atomically installs it, kickstarts launchd, waits for the IPC socket owner, then runs a bounded mission-mcp initialize smoke that supports timeout/gtimeout/perl alarm fallbacks and retries after socket readiness before rolling back on real smoke failure. cargo-fmt-touched.sh is the scoped Rust formatting path: it derives staged/unstaged/branch diff files through git diff --diff-filter=ACMR, filters existing .rs paths without failing on an empty set, skips only explicit missiond-rustfmt-exempt legacy-large-file facades during physical V3 split, and invokes rustfmt only on the remaining touched files with skip_children=true so wave-local formatting cannot churn untouched Rust modules or whole historical facades."))
+             "scripts/check-v3-ops-infra-isomorphism.mjs"
+             "scripts/check-missiond-blue-green-deploy.mjs"]
+      :note "ops-infra owns deploy-daemon.sh plus scoped Rust formatting. deploy-daemon.sh builds paired missiond/mission-mcp release candidates under ~/.xjp-mission/releases/<release-id>, writes release-manifest.json, switches ~/.xjp-mission/active, keeps stable entrypoints through active, kickstarts launchd, runs MCP smoke, rolls back to previous active on failure, and cleans retained releases. cargo-fmt-touched.sh formats only touched Rust files with skip_children=true and skips only explicit missiond-rustfmt-exempt facades.")
+
+    (surface missiond-blue-green-self-update
+      :status "code-aligned"
+      :implements [blue-green-self-update release-manifest release-cleanup rollback]
+      :code ["scripts/deploy-daemon.sh"
+             "scripts/check-missiond-blue-green-deploy.mjs"
+             "scripts/check-v3-ops-infra-isomorphism.mjs"
+             "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
+      :note "MissionD self-update is owned as a blue-green release workflow. Release candidates are immutable directories under ~/.xjp-mission/releases/<release-id>; the active symlink is the only switch; daemon and MCP entrypoints both resolve through active so they share one release-manifest.json. The deploy path supports legacy direct-binary migration, pre-switch MCP smoke, post-switch daemon IPC smoke, previous-release rollback, cleanup-only dry-run/apply, and retention of active/previous/newest releases.")
+    )
 
   (compression-contract
     :v1 "Organized by .missiond/v1/manifest.lisp; root files remain compatibility paths."
@@ -2702,9 +2873,11 @@
 	             "node scripts/check-v3-context-pack-isomorphism.mjs"
 	             "node scripts/check-v3-workstation-config-isomorphism.mjs"
 	             "node scripts/check-v3-workstation-pool-isomorphism.mjs"
-             "node scripts/check-v3-master-control-isomorphism.mjs"
-             "node scripts/check-v3-direct-code-drift-policy.mjs"
-	             "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
+	             "node scripts/check-v3-master-control-isomorphism.mjs"
+	             "node scripts/check-v3-direct-code-drift-policy.mjs"
+	             "node scripts/check-v3-commit-convergence-loop.mjs"
+	             "node scripts/check-v3-nightly-evolution-isomorphism.mjs"
+		             "node scripts/check-v3-autopilot-runtime-isomorphism.mjs"
              "node scripts/check-v3-workstation-dispatch-isomorphism.mjs"
              "node scripts/check-v3-board-isomorphism.mjs"
              "node scripts/check-frontend-board-lisp-schema.mjs"

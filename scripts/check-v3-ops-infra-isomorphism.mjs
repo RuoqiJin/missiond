@@ -9,9 +9,9 @@ const usage = `Usage:
   node scripts/check-v3-ops-infra-isomorphism.mjs [--json] [--dry-fixture]
 
 Checks the V3 ops-infra Lisp/code isomorphism contract:
-  - deploy-daemon is the canonical one-command daemon redeploy path.
-  - deploy-daemon keeps build, backup, codesign, kickstart, socket wait,
-    bounded IPC smoke, and rollback semantics together.
+  - deploy-daemon is the canonical one-command blue-green redeploy path.
+  - deploy-daemon keeps build, candidate release, manifest, active symlink,
+    kickstart, socket wait, bounded IPC smoke, rollback, and cleanup together.
   - cargo-fmt-touched formats only Rust files present in the current diff.
   - cargo-fmt-touched skips only explicit missiond-rustfmt-exempt legacy
     facades while V3 physical split is in progress.
@@ -85,7 +85,10 @@ function checkFiles(root, files) {
     'scripts/cargo-fmt-touched.sh',
     'scripts/check-v3-ops-infra-isomorphism.mjs',
     'Daemon redeploy MUST stay one command',
-    'build -> backup -> codesign -> atomic install -> launchctl kickstart -> socket wait -> IPC smoke',
+    'build -> candidate release -> manifest -> active symlink -> launchctl kickstart -> socket wait -> IPC smoke',
+    'Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active',
+    'Blue-green rollback MUST switch active back to the previous release',
+    'Release cleanup MUST keep active, previous, and newest retained releases',
     'IPC smoke MUST retry after socket readiness and then rollback on failure',
     'Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'Rust formatting MUST be scoped to Rust files touched in the current diff',
@@ -95,31 +98,44 @@ function checkFiles(root, files) {
   ]);
 
   requireAll(diagnostics, files.deployDaemon, sources.deployDaemon, [
-    'scripts/deploy-daemon.sh                  # build + deploy + smoke',
+    'scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke',
     '--build-only',
     '--no-smoke',
     '--debug',
+    '--cleanup-only',
+    '--apply-cleanup',
+    'MISSIOND_INSTALL_ROOT',
+    'MISSIOND_RELEASES_DIR',
+    'MISSIOND_ACTIVE_LINK',
+    'MISSIOND_RELEASE_KEEP',
+    'MISSIOND_BACKUP_RETENTION_DAYS',
     'MISSIOND_BIN_PATH',
+    'MISSIOND_MCP_BIN_PATH',
     'MISSIOND_SOCKET_PATH',
     'MISSIOND_LAUNCHCTL_LABEL',
     'MISSIOND_DEPLOY_TIMEOUT',
     'MISSIOND_DEPLOY_SMOKE_TIMEOUT',
     'set -euo pipefail',
-    'cargo build $BUILD_ARG -p missiond-daemon',
-    'BACKUP_PATH="${BIN_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"',
-    'TMP_BIN="${BIN_PATH}.new.$$"',
-    'codesign --force --sign - "$TMP_BIN"',
+    'cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp',
+    'release-manifest.json',
+    'atomic_symlink_update',
+    'switch_active_release',
+    'rollback_to_previous',
+    'cleanup_old_releases',
+    'create_legacy_release_if_needed',
+    'codesign --force --sign - "$CANDIDATE_DIR/bin/missiond"',
+    'codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp"',
     'launchctl kickstart -k "gui/$(id -u)/$LABEL"',
     'lsof "$SOCK_PATH"',
     'run_mcp_initialize_smoke()',
     'command -v timeout',
     'command -v gtimeout',
     "perl -e 'alarm shift @ARGV; exec @ARGV'",
-    'SMOKE_START_TS=$(date +%s)',
+    'smoke_start="$(date +%s)"',
     'SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"',
     'IPC not ready yet; retrying',
-    'smoke: rolling back to $BACKUP_PATH',
-    'fail "smoke check failed',
+    'active_release=$RELEASE_ID',
+    'rollback attempted',
   ]);
 
   requireAll(diagnostics, files.cargoFmtTouched, sources.cargoFmtTouched, [
@@ -157,7 +173,10 @@ function buildFixture() {
 (missiond-blueprint
   (ops-infra
     :invariants
-      ["Daemon redeploy MUST stay one command: build -> backup -> codesign -> atomic install -> launchctl kickstart -> socket wait -> IPC smoke."
+      ["Daemon redeploy MUST stay one command: build -> candidate release -> manifest -> active symlink -> launchctl kickstart -> socket wait -> IPC smoke."
+       "Active daemon and MCP entrypoints MUST resolve through ~/.xjp-mission/active."
+       "Blue-green rollback MUST switch active back to the previous release."
+       "Release cleanup MUST keep active, previous, and newest retained releases."
        "IPC smoke MUST retry after socket readiness and then rollback on failure."
        "Deploy smoke timeout MUST be configurable through MISSIOND_DEPLOY_SMOKE_TIMEOUT."
        "Rust formatting MUST be scoped to Rust files touched in the current diff."
@@ -174,25 +193,31 @@ function buildFixture() {
     :checks ["node scripts/check-v3-ops-infra-isomorphism.mjs"]))`);
 
   writeFixture(root, DEFAULT_FILES.deployDaemon, `
-scripts/deploy-daemon.sh                  # build + deploy + smoke
---build-only --no-smoke --debug
-MISSIOND_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
+scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
+--build-only --no-smoke --debug --cleanup-only --apply-cleanup
+MISSIOND_INSTALL_ROOT MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK MISSIOND_RELEASE_KEEP MISSIOND_BACKUP_RETENTION_DAYS
+MISSIOND_BIN_PATH MISSIOND_MCP_BIN_PATH MISSIOND_SOCKET_PATH MISSIOND_LAUNCHCTL_LABEL MISSIOND_DEPLOY_TIMEOUT MISSIOND_DEPLOY_SMOKE_TIMEOUT
 set -euo pipefail
-cargo build $BUILD_ARG -p missiond-daemon
-BACKUP_PATH="\${BIN_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-TMP_BIN="\${BIN_PATH}.new.$$"
-codesign --force --sign - "$TMP_BIN"
+cargo build \${BUILD_ARG} -p missiond-daemon -p missiond-mcp
+release-manifest.json
+atomic_symlink_update
+switch_active_release
+rollback_to_previous
+cleanup_old_releases
+create_legacy_release_if_needed
+codesign --force --sign - "$CANDIDATE_DIR/bin/missiond"
+codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp"
 launchctl kickstart -k "gui/$(id -u)/$LABEL"
 lsof "$SOCK_PATH"
 run_mcp_initialize_smoke()
 command -v timeout
 command -v gtimeout
 perl -e 'alarm shift @ARGV; exec @ARGV'
-SMOKE_START_TS=$(date +%s)
+smoke_start="$(date +%s)"
 SMOKE_TIMEOUT="\${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
 IPC not ready yet; retrying
-smoke: rolling back to $BACKUP_PATH
-fail "smoke check failed
+active_release=$RELEASE_ID
+rollback attempted
 `);
 
   writeFixture(root, DEFAULT_FILES.cargoFmtTouched, `

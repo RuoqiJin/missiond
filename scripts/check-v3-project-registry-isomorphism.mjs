@@ -114,6 +114,24 @@ function checkFiles(root, files) {
 	    ':frontend ".missiond/frontend/forge-ui-blueprint.lisp"',
 	    ':id deploy-center',
 	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center"',
+	    ':id xiaojinpro-backend',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend"',
+	    ':id deploy-agent',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli"',
+	    ':id auth',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"',
+	    ':id router',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/router"',
+	    ':id payments',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/payments"',
+	    ':id asr',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/asr"',
+	    ':id timeline',
+	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/timeline"',
+	    ':id pcea',
+	    ':root "/Users/jinchen/Downloads/PCEA develop"',
+	    ':backend ".missiond/backend/pcea-backend-blueprint.lisp"',
+	    ':frontend ".missiond/frontend/pcea-frontend-blueprint.lisp"',
 	    ':id xjp-deploy-center',
 	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center"',
 	    ':capability deploy-ops',
@@ -272,7 +290,15 @@ function buildFixture() {
 	    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
 	  (project-blueprint-registry
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
+	    (project :id xiaojinpro-backend :root "/Users/jinchen/Projects/xiaojinpro-backend")
 	    (project :id deploy-center :root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center" :capability deploy-ops)
+	    (project :id deploy-agent :root "/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli")
+	    (project :id auth :root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth")
+	    (project :id router :root "/Users/jinchen/Projects/xiaojinpro-backend/services/router")
+	    (project :id payments :root "/Users/jinchen/Projects/xiaojinpro-backend/services/payments")
+	    (project :id asr :root "/Users/jinchen/Projects/xiaojinpro-backend/services/asr")
+	    (project :id timeline :root "/Users/jinchen/Projects/xiaojinpro-backend/services/timeline")
+	    (project :id pcea :root "/Users/jinchen/Downloads/PCEA develop" :backend ".missiond/backend/pcea-backend-blueprint.lisp" :frontend ".missiond/frontend/pcea-frontend-blueprint.lisp")
 	    (project :id xjp-deploy-center :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/services/deploy-center" :capability deploy-ops))
 	  (implementation-map
     (surface project-registry

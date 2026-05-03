@@ -22,6 +22,8 @@ pub(crate) const MASTER_WORKER_ID: &str = "codex-master-control";
 pub(crate) const MASTER_SLOT_ID: &str = "slot-codex-master-control";
 pub(crate) const CHECKPOINT_RELATIVE_PATH: &str =
     ".missiond/v3/runtime/master-control-checkpoint.lisp";
+const MASTER_SLOT_READY_TIMEOUT_SECS: u64 = 180;
+const MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS: i64 = 180;
 const MASTER_EVENT_SUBSCRIBER_CONSUMER: &str = "master_event_subscriber";
 const MASTER_BOARD_SUBSCRIPTION: &str = "master_event_subscriber_board_v2_live";
 const MASTER_SLOT_SUBSCRIPTION: &str = "master_event_subscriber_slot_v2_live";
@@ -40,6 +42,7 @@ const MASTER_MCP_APPROVED_TOOLS: &[&str] = &[
     "mission_compute_slot",
     "mission_master_status",
     "mission_convergence_status",
+    "mission_nightly_evolution",
     "mission_slots",
     "mission_pty_status",
 ];
@@ -159,6 +162,7 @@ impl MasterControlRuntime {
         match result {
             Ok(()) => {
                 self.control_turns_sent.fetch_add(1, Ordering::Relaxed);
+                self.queued_events.store(0, Ordering::Relaxed);
                 self.last_control_turn_at_epoch
                     .store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
                 *self.last_control_turn_error.write().await = None;
@@ -304,6 +308,11 @@ impl MasterControlService {
                 Err(err) => warn!(error = %err, "code-drift backfill reconciliation failed"),
             }
         }
+        if reason == "daemon-startup" {
+            if let Err(err) = self.recover_open_master_objective().await {
+                warn!(error = %err, "master-control open objective recovery failed");
+            }
+        }
         let mcp_ready = probe_codex_mcp_control_ready().await;
         let pre_tick_snapshot = self.runtime.snapshot().await;
         let decision = classify_master_decision_state(reason, &pre_tick_snapshot).await;
@@ -326,6 +335,41 @@ impl MasterControlService {
 
     async fn ensure_code_drift_backfill_task(&self) -> anyhow::Result<Option<String>> {
         ensure_code_drift_backfill_task_for_state(&self.state).await
+    }
+
+    async fn recover_open_master_objective(&self) -> anyhow::Result<Option<String>> {
+        let snapshot = self.runtime.snapshot().await;
+        if snapshot.queued_events > 0 || snapshot.active_objective_id.is_some() {
+            return Ok(snapshot.active_objective_id);
+        }
+        let mut tasks = self
+            .state
+            .store
+            .list_board_tasks(Some("running"), false)
+            .await?;
+        tasks.extend(
+            self.state
+                .store
+                .list_board_tasks(Some("open"), false)
+                .await?,
+        );
+        let Some(task) = select_recoverable_master_objective(&tasks) else {
+            return Ok(None);
+        };
+        let task_id = task.id.to_string();
+        self.runtime
+            .record_wakeup(
+                "BoardEvent",
+                "task_created",
+                0,
+                board_event_preview(&BoardEvent::TaskCreated {
+                    task_id: task_id.clone(),
+                    title: task.title.clone(),
+                    category: task.category.clone(),
+                }),
+            )
+            .await;
+        Ok(Some(task_id))
     }
 
     async fn write_checkpoint(
@@ -360,7 +404,7 @@ impl MasterControlService {
 
     async fn dispatch_control_turn(&self, prompt: &str) -> Result<(), String> {
         self.ensure_master_slot_running().await?;
-        self.wait_for_master_slot_ready(Duration::from_secs(20))
+        self.wait_for_master_slot_ready(Duration::from_secs(MASTER_SLOT_READY_TIMEOUT_SECS))
             .await?;
         self.ensure_master_slot_expected_model().await?;
         self.state
@@ -890,12 +934,22 @@ pub(crate) fn should_dispatch_control_turn(
     if !mcp_ready || !master_control_turns_enabled() {
         return false;
     }
-    if reason != "event-wakeup" {
-        return false;
-    }
     let now = chrono::Utc::now().timestamp();
-    snapshot.last_control_turn_at_epoch == 0
-        || now.saturating_sub(snapshot.last_control_turn_at_epoch) >= 30
+    let outside_rate_limit = snapshot.last_control_turn_at_epoch == 0
+        || now.saturating_sub(snapshot.last_control_turn_at_epoch) >= 30;
+    let outside_objective_heartbeat = snapshot.last_control_turn_at_epoch == 0
+        || now.saturating_sub(snapshot.last_control_turn_at_epoch)
+            >= MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS;
+    if reason == "event-wakeup" {
+        return outside_rate_limit;
+    }
+    if reason == "periodic-heartbeat" && snapshot.queued_events > 0 {
+        return outside_rate_limit;
+    }
+    if reason == "periodic-heartbeat" && snapshot.active_objective_id.is_some() {
+        return outside_objective_heartbeat;
+    }
+    false
 }
 
 async fn classify_master_decision_state(
@@ -903,7 +957,20 @@ async fn classify_master_decision_state(
     snapshot: &MasterControlRuntimeSnapshot,
 ) -> MasterDecisionState {
     let summary = snapshot.last_event_summary.as_deref().unwrap_or("");
-    let active_objective_id = extract_task_id(summary);
+    let event_task_id = extract_task_id(summary);
+    let terminal_status_event = is_terminal_board_status_event(summary);
+    let active_objective_id = if terminal_status_event
+        && event_task_id.as_deref() == snapshot.active_objective_id.as_deref()
+    {
+        None
+    } else if terminal_status_event && snapshot.active_objective_id.is_none() {
+        None
+    } else {
+        snapshot
+            .active_objective_id
+            .clone()
+            .or_else(|| event_task_id.clone())
+    };
     let phase = if reason == "daemon-startup" || reason == "periodic-heartbeat" {
         "observe_event"
     } else if summary.contains("QuestionEvent.") {
@@ -915,7 +982,7 @@ async fn classify_master_decision_state(
         "dispatch_implementers"
     } else if summary.contains("context-pack") || summary.contains("context_pack") {
         "create_context_pack"
-    } else if summary.contains("BoardEvent.") && active_objective_id.is_some() {
+    } else if summary.contains("BoardEvent.") && event_task_id.is_some() {
         "classify_objective"
     } else if snapshot.last_drift_backfill_task_id.is_some() {
         "close_or_backfill"
@@ -977,6 +1044,15 @@ fn extract_task_id(summary: &str) -> Option<String> {
     (!id.is_empty()).then(|| id.to_string())
 }
 
+fn is_terminal_board_status_event(summary: &str) -> bool {
+    summary.contains("BoardEvent.status_changed")
+        && (summary.contains("->Done")
+            || summary.contains("->Completed")
+            || summary.contains("->Closed")
+            || summary.contains("->Failed")
+            || summary.contains("->Blocked"))
+}
+
 fn sanitize_lisp_path_component(value: &str) -> String {
     value
         .chars()
@@ -1026,11 +1102,13 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
     let checkpoint_path = checkpoint_path_for_root(&checkpoint_root);
     let checkpoint_text = std::fs::read_to_string(&checkpoint_path).ok();
     let runtime_snapshot = runtime().snapshot().await;
+    let commit_convergence = crate::engine::commit_convergence::status_snapshot().await;
+    let nightly_evolution = crate::engine::nightly_evolution::status_snapshot().await;
     let mcp_enabled = probe_codex_mcp_ready().await;
     let approval = probe_codex_mcp_approval_ready();
     let mcp_ready = mcp_enabled && approval.ready;
 
-    json!({
+    let mut status = json!({
         "schema": "missiond.master-status.v2",
         "worker": MASTER_WORKER_ID,
         "slotId": slot_id,
@@ -1073,7 +1151,9 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
                 "master-decision-loop",
                 "master-delegation",
                 "master-recovery",
-                "night-scheduler"
+                "night-scheduler",
+                "commit-lisp-convergence-loop",
+                "nightly-evolution-loop"
             ],
             "queuedEvents": runtime_snapshot.queued_events,
             "processedTicks": runtime_snapshot.processed_ticks,
@@ -1101,7 +1181,10 @@ pub(crate) async fn mission_master_status(state: &AppState) -> Value {
             "secondary": ["missiond_event_bus", "board_task_lifecycle", "mission_execution"],
             "diagnostic": ["pty_recognition_snapshot"]
         }
-    })
+    });
+    status["service"]["commitConvergence"] = commit_convergence;
+    status["service"]["nightlyEvolution"] = nightly_evolution;
+    status
 }
 
 pub(crate) async fn probe_codex_mcp_ready() -> bool {
@@ -1259,15 +1342,61 @@ pub(crate) fn board_event_preview(event: &BoardEvent) -> String {
 
 fn should_wake_for_board_event(event: &BoardEvent, direct_notify: bool) -> bool {
     match event {
-        BoardEvent::TaskCreated { .. } => true,
-        BoardEvent::Updated { status, .. } => !status.eq_ignore_ascii_case("done"),
+        BoardEvent::TaskCreated { title, .. } => !is_swarm_worker_task_title(title),
+        BoardEvent::Updated {
+            status, category, ..
+        } => {
+            let normalized = status.trim().to_ascii_lowercase();
+            is_terminal_worker_status(&normalized)
+                || !(category == "dev" && normalized == "running")
+        }
         BoardEvent::StatusChanged { new_status, .. } => {
             let status = new_status.trim().to_ascii_lowercase();
-            status != "done" && status != "completed" && status != "closed"
+            is_terminal_worker_status(&status)
+                || (status != "done" && status != "completed" && status != "closed")
         }
         BoardEvent::NoteAdded { .. } => direct_notify,
         BoardEvent::Claimed { .. } | BoardEvent::Deleted { .. } => false,
     }
+}
+
+fn is_terminal_worker_status(status: &str) -> bool {
+    matches!(
+        status,
+        "done" | "completed" | "closed" | "failed" | "blocked"
+    )
+}
+
+fn is_swarm_worker_task_title(title: &str) -> bool {
+    title.starts_with("Investigate context for swarm objective")
+        || title.starts_with("Survey exact shards for swarm objective")
+        || title.starts_with("Implement accepted swarm shard")
+}
+
+fn select_recoverable_master_objective(
+    tasks: &[missiond_core::types::BoardTask],
+) -> Option<&missiond_core::types::BoardTask> {
+    tasks
+        .iter()
+        .filter(|task| is_recoverable_master_objective(task))
+        .max_by_key(|task| task.order_idx)
+}
+
+fn is_recoverable_master_objective(task: &missiond_core::types::BoardTask) -> bool {
+    if task.hidden {
+        return false;
+    }
+    if task.project.as_deref() != Some("missiond") || task.category != "infra" {
+        return false;
+    }
+    let status = task.status.as_str();
+    if status != "open" && status != "running" {
+        return false;
+    }
+    task.title.starts_with("Run project SSOT convergence wave:")
+        || task
+            .description
+            .contains(".missiond/workflows/project-ssot-convergence.lisp")
 }
 
 fn slot_event_preview(event: &SlotEvent) -> String {
@@ -1310,7 +1439,10 @@ fn slot_event_slot_id(event: &SlotEvent) -> &str {
 fn should_wake_for_slot_event(event: &SlotEvent, seq: i64) -> bool {
     seq > 0
         && slot_event_slot_id(event) != MASTER_SLOT_ID
-        && !matches!(event, SlotEvent::BecameIdle { .. })
+        && !matches!(
+            event,
+            SlotEvent::BecameIdle { .. } | SlotEvent::TaskDispatched { .. }
+        )
 }
 
 fn question_event_preview(event: &QuestionEvent) -> String {
@@ -1400,8 +1532,83 @@ mod tests {
         );
     }
 
+    fn test_board_task(
+        id: &str,
+        title: &str,
+        description: &str,
+        project: Option<&str>,
+        category: &str,
+        order_idx: i64,
+    ) -> missiond_core::types::BoardTask {
+        missiond_core::types::BoardTask {
+            id: missiond_core::types::TaskId::from_trusted(id.to_string()),
+            title: title.to_string(),
+            description: description.to_string(),
+            status: missiond_core::types::BoardTaskStatus::Open,
+            priority: "high".to_string(),
+            category: category.to_string(),
+            project: project.map(ToString::to_string),
+            server: None,
+            due_date: None,
+            parent_id: None,
+            assignee: None,
+            auto_execute: false,
+            prompt_template: None,
+            hidden: false,
+            retry_count: 0,
+            max_retries: 2,
+            order_idx,
+            created_at: "2026-05-03T00:00:00Z".to_string(),
+            updated_at: "2026-05-03T00:00:00Z".to_string(),
+            claim_executor_id: None,
+            claim_executor_type: None,
+            claimed_at: None,
+            flow_phase: None,
+            flow_context: None,
+            flow_template: None,
+            depends_on: Vec::new(),
+            lease_expires_at: None,
+            dedupe_key: None,
+            timeout_secs: None,
+            context_intent: None,
+            trigger_source: None,
+            notes_count: 0,
+        }
+    }
+
     #[test]
-    fn control_turn_dispatch_is_mcp_ready_event_wakeup_only() {
+    fn master_startup_recovers_latest_open_ssot_objective() {
+        let old = test_board_task(
+            "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+            "Run project SSOT convergence wave: old",
+            "",
+            Some("missiond"),
+            "infra",
+            1,
+        );
+        let newest = test_board_task(
+            "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
+            "Manual task",
+            "Uses .missiond/workflows/project-ssot-convergence.lisp",
+            Some("missiond"),
+            "infra",
+            2,
+        );
+        let ignored = test_board_task(
+            "cccccccc-cccc-cccc-cccc-cccccccccccc",
+            "Run project SSOT convergence wave: other",
+            "",
+            Some("other"),
+            "infra",
+            3,
+        );
+        let tasks = vec![old, newest, ignored];
+        let selected = select_recoverable_master_objective(&tasks).expect("recover objective");
+        assert_eq!(selected.id.as_str(), "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+    }
+
+    #[test]
+    fn control_turn_dispatch_retries_pending_events_on_heartbeat() {
         let snapshot = MasterControlRuntimeSnapshot {
             queued_events: 1,
             processed_ticks: 1,
@@ -1430,6 +1637,11 @@ mod tests {
             true
         ));
         assert!(!should_dispatch_control_turn(
+            "daemon-startup",
+            &snapshot,
+            true
+        ));
+        assert!(should_dispatch_control_turn(
             "periodic-heartbeat",
             &snapshot,
             true
@@ -1439,6 +1651,114 @@ mod tests {
             &snapshot,
             false
         ));
+    }
+
+    #[test]
+    fn control_turn_retry_allows_periodic_after_slow_master_start() {
+        let mut snapshot = MasterControlRuntimeSnapshot {
+            queued_events: 1,
+            processed_ticks: 2,
+            last_event_seq: 42,
+            last_checkpoint_at_epoch: 0,
+            drift_backfill_tasks_created: 0,
+            control_turns_sent: 0,
+            last_control_turn_at_epoch: 0,
+            last_event_cursor: Some("BoardEvent:42".to_string()),
+            last_event_summary: Some("BoardEvent.task_created: task_id=abc".to_string()),
+            last_tick_id: None,
+            blocked_reason: None,
+            last_mcp_ready: Some(true),
+            last_control_turn_error: Some("master slot did not become idle within 20s".to_string()),
+            last_drift_backfill_task_id: None,
+            active_objective_id: Some("abc".to_string()),
+            phase: "classify_objective".to_string(),
+            context_pack_path: Some(
+                ".missiond/v3/runtime/master-control/context-packs/abc.lisp".to_string(),
+            ),
+            delegated_task_ids: Vec::new(),
+            last_verified_commit: None,
+            resume_instruction: "retry".to_string(),
+        };
+        assert!(should_dispatch_control_turn(
+            "periodic-heartbeat",
+            &snapshot,
+            true
+        ));
+
+        snapshot.queued_events = 0;
+        snapshot.last_control_turn_at_epoch = chrono::Utc::now().timestamp();
+        assert!(!should_dispatch_control_turn(
+            "periodic-heartbeat",
+            &snapshot,
+            true
+        ));
+
+        snapshot.last_control_turn_at_epoch =
+            chrono::Utc::now().timestamp() - MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS;
+        assert!(should_dispatch_control_turn(
+            "periodic-heartbeat",
+            &snapshot,
+            true
+        ));
+    }
+
+    #[tokio::test]
+    async fn classify_preserves_active_objective_across_worker_events() {
+        let mut snapshot = MasterControlRuntimeSnapshot {
+            queued_events: 0,
+            processed_ticks: 4,
+            last_event_seq: 77,
+            last_checkpoint_at_epoch: 0,
+            drift_backfill_tasks_created: 0,
+            control_turns_sent: 1,
+            last_control_turn_at_epoch: 0,
+            last_event_cursor: Some("SlotEvent:77".to_string()),
+            last_event_summary: Some(
+                "SlotEvent.state_changed: slot_id=slot-gemini-ultra Responding->Idle".to_string(),
+            ),
+            last_tick_id: None,
+            blocked_reason: None,
+            last_mcp_ready: Some(true),
+            last_control_turn_error: None,
+            last_drift_backfill_task_id: None,
+            active_objective_id: Some("parent-objective".to_string()),
+            phase: "observe_event".to_string(),
+            context_pack_path: Some(
+                ".missiond/v3/runtime/master-control/context-packs/parent-objective.lisp"
+                    .to_string(),
+            ),
+            delegated_task_ids: Vec::new(),
+            last_verified_commit: None,
+            resume_instruction: "resume".to_string(),
+        };
+
+        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        assert_eq!(
+            decision.active_objective_id.as_deref(),
+            Some("parent-objective")
+        );
+        assert_eq!(
+            decision.context_pack_path.as_deref(),
+            Some(".missiond/v3/runtime/master-control/context-packs/parent-objective.lisp")
+        );
+
+        snapshot.last_event_summary =
+            Some("BoardEvent.status_changed: task_id=worker-child Running->Done".to_string());
+        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        assert_eq!(
+            decision.active_objective_id.as_deref(),
+            Some("parent-objective")
+        );
+        assert_eq!(decision.phase, "classify_objective");
+
+        snapshot.last_event_summary =
+            Some("BoardEvent.status_changed: task_id=parent-objective Running->Done".to_string());
+        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        assert_eq!(decision.active_objective_id, None);
+
+        snapshot.active_objective_id = None;
+        let decision = classify_master_decision_state("daemon-startup", &snapshot).await;
+        assert_eq!(decision.active_objective_id, None);
     }
 
     #[test]
@@ -1526,11 +1846,18 @@ mod tests {
             preview: "read-only".to_string(),
             cited_kb_ids: vec![],
         };
-        assert!(should_wake_for_slot_event(&dispatched, 42));
+        assert!(!should_wake_for_slot_event(&dispatched, 42));
+
+        let stuck = SlotEvent::Stuck {
+            slot_id: "slot-claude-code-default".to_string(),
+            reason: "no durable final".to_string(),
+            last_activity_ms_ago: 120_000,
+        };
+        assert!(should_wake_for_slot_event(&stuck, 42));
     }
 
     #[test]
-    fn board_wakeup_filter_rejects_low_value_done_status_changes() {
+    fn board_wakeup_filter_keeps_worker_completion_edges() {
         let created = BoardEvent::TaskCreated {
             task_id: "t".to_string(),
             title: "new work".to_string(),
@@ -1538,13 +1865,20 @@ mod tests {
         };
         assert!(should_wake_for_board_event(&created, false));
 
+        let swarm_worker = BoardEvent::TaskCreated {
+            task_id: "worker".to_string(),
+            title: "Investigate context for swarm objective (1/2)".to_string(),
+            category: "dev".to_string(),
+        };
+        assert!(!should_wake_for_board_event(&swarm_worker, false));
+
         let done = BoardEvent::StatusChanged {
             task_id: "t".to_string(),
             old_status: "Open".to_string(),
             new_status: "Done".to_string(),
         };
-        assert!(!should_wake_for_board_event(&done, true));
-        assert!(!should_wake_for_board_event(&done, false));
+        assert!(should_wake_for_board_event(&done, true));
+        assert!(should_wake_for_board_event(&done, false));
 
         let blocked = BoardEvent::StatusChanged {
             task_id: "t".to_string(),
@@ -1552,6 +1886,20 @@ mod tests {
             new_status: "Blocked".to_string(),
         };
         assert!(should_wake_for_board_event(&blocked, false));
+
+        let worker_running = BoardEvent::Updated {
+            task_id: "worker".to_string(),
+            status: "Running".to_string(),
+            category: "dev".to_string(),
+        };
+        assert!(!should_wake_for_board_event(&worker_running, false));
+
+        let worker_done = BoardEvent::Updated {
+            task_id: "worker".to_string(),
+            status: "Done".to_string(),
+            category: "dev".to_string(),
+        };
+        assert!(should_wake_for_board_event(&worker_done, false));
     }
 
     #[test]

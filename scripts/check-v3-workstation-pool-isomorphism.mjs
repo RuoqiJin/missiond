@@ -160,6 +160,12 @@ function checkFiles(root) {
   requireAll(diagnostics, FILES.slotTool, sources.slotTool, [
     'fn projected_mission_slots',
     'WorkstationRuntimeConfig::load_for_current_dir',
+    'list_board_tasks(Some("running"), true)',
+    'fn active_board_task_for_slot',
+    '"activeBoardTaskId"',
+    '"currentTaskId"',
+    '"activeBoardTask"',
+    'get_running_slot_task(&slot.config.id)',
     'fn is_stopped_legacy_sonnet_residual',
     'model.contains("sonnet")',
     'v3_slot_ids.contains(&slot.config.id)',
@@ -177,6 +183,7 @@ function checkFiles(root) {
     'Supervisor patrol (slot-supervisor) is gated on V3 workstation-pool / runtime-config registration',
     'V3 workstation-pool (plus startup-slots) is authoritative for dispatchable slots',
     'mission_compute_slot list status MUST derive from PTYManager',
+    'mission_slots MUST project activeBoardTaskId/currentTaskId and activeBoardTask',
     'Codex master-control is a resident orchestrator lane',
   ]);
   requireAll(diagnostics, FILES.supervisor, sources.supervisor, [

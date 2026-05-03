@@ -56,6 +56,18 @@ const LIVE_CHECKS = [
     argv: ['scripts/check-task-contract.mjs', '--all'],
     timeoutMs: 120_000,
   },
+  {
+    id: 'missiond-blue-green-deploy',
+    argv: ['scripts/check-missiond-blue-green-deploy.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
+  {
+    id: 'project-ssot-universe',
+    argv: ['scripts/check-project-ssot-universe.mjs', '--json'],
+    json: true,
+    timeoutMs: 60_000,
+  },
 ];
 
 const RUNTIME_CHECKS = [

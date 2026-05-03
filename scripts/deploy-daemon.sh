@@ -1,236 +1,360 @@
 #!/usr/bin/env bash
-# MissionD daemon redeploy: build → backup → codesign → kickstart → wait → smoke.
-#
-# Why this script exists:
-#   The bare-hand "build/copy/codesign/kickstart" sequence has bitten us repeatedly
-#   (dyld stalls, self-deleted sockets, unsigned binary rejection by spctl,
-#   half-active processes that hold the WS port without the IPC socket).
-#   This script encodes the safe order, verifies each step, and refuses to
-#   proceed if any precondition fails — so we trade ~5 lines of CLI typing
-#   for predictable redeploys.
+# MissionD blue-green redeploy: build daemon+MCP -> candidate release -> smoke
+# -> active symlink switch -> kickstart -> smoke -> rollback/cleanup.
 #
 # Usage:
-#   scripts/deploy-daemon.sh                  # build + deploy + smoke
+#   scripts/deploy-daemon.sh                  # build + blue-green deploy + smoke
 #   scripts/deploy-daemon.sh --build-only     # build, do not touch running daemon
 #   scripts/deploy-daemon.sh --no-smoke       # skip post-restart smoke check
 #   scripts/deploy-daemon.sh --debug          # use debug profile (faster build)
+#   scripts/deploy-daemon.sh --cleanup-only   # dry-run release cleanup only
+#   scripts/deploy-daemon.sh --cleanup-only --apply-cleanup
 #
 # Environment overrides:
-#   MISSIOND_BIN_PATH       installed binary location
-#                           default: ~/.xjp-mission/missiond
-#   MISSIOND_SOCKET_PATH    IPC socket the daemon owns
-#                           default: ~/.missiond/missiond.sock
-#   MISSIOND_LAUNCHCTL_LABEL  launchd label
-#                           default: com.missiond.daemon
-#   MISSIOND_DEPLOY_TIMEOUT   socket-readiness timeout (seconds)
-#                           default: 30
-#   MISSIOND_DEPLOY_SMOKE_TIMEOUT
-#                           IPC smoke retry timeout after socket readiness
-#                           default: 30
+#   MISSIOND_INSTALL_ROOT       release root, default: ~/.xjp-mission
+#   MISSIOND_BIN_PATH           stable daemon entrypoint, default: $root/missiond
+#   MISSIOND_MCP_BIN_PATH       stable MCP entrypoint, default: $root/mission-mcp
+#   MISSIOND_ACTIVE_LINK        active symlink, default: $root/active
+#   MISSIOND_RELEASES_DIR       releases dir, default: $root/releases
+#   MISSIOND_RELEASE_KEEP       number of newest releases to keep, default: 5
+#   MISSIOND_BACKUP_RETENTION_DAYS  old .bak/.new cleanup age, default: 7
+#   MISSIOND_SOCKET_PATH        IPC socket, default: ~/.missiond/missiond.sock
+#   MISSIOND_LAUNCHCTL_LABEL    launchd label, default: com.missiond.daemon
+#   MISSIOND_DEPLOY_TIMEOUT     socket readiness timeout, default: 30
+#   MISSIOND_DEPLOY_SMOKE_TIMEOUT  MCP smoke timeout, default: 30
+#   MISSIOND_APPLY_BACKUP_CLEANUP  delete old .bak/.new files when cleanup applies, default: 0
 #
-# Exits:
-#   0  success
-#   1  precondition failure (cargo missing, paths invalid, etc.)
-#   2  build failure
-#   3  install/codesign failure
-#   4  launchctl failure
-#   5  socket did not become ready in time
-#   6  smoke check failed (binary started but IPC unhealthy) — backup restored
-#
-# Read-only assumptions:
-#   * Only mutates: $MISSIOND_BIN_PATH (atomic-replace) and launchd job state.
-#   * Never writes to git, never touches working tree, never deletes the socket
-#     file (launchd owns it; we wait for the new daemon to recreate it).
+# Exit codes:
+#   0 success
+#   1 precondition failure
+#   2 build failure
+#   3 release install/codesign/pre-switch smoke failure
+#   4 launchctl failure
+#   5 socket did not become ready
+#   6 post-switch smoke failed; rollback attempted
 
 set -euo pipefail
 
-# ─── Configuration ────────────────────────────────────────────────────────
 PROFILE="release"
 DO_DEPLOY=1
 DO_SMOKE=1
+CLEANUP_ONLY=0
+APPLY_CLEANUP=0
+
 for arg in "$@"; do
   case "$arg" in
     --build-only) DO_DEPLOY=0; DO_SMOKE=0 ;;
-    --no-smoke)   DO_SMOKE=0 ;;
-    --debug)      PROFILE="debug" ;;
-    -h|--help)    sed -n '2,30p' "$0"; exit 0 ;;
-    *)            echo "unknown arg: $arg" >&2; exit 1 ;;
+    --no-smoke) DO_SMOKE=0 ;;
+    --debug) PROFILE="debug" ;;
+    --cleanup-only) CLEANUP_ONLY=1; DO_DEPLOY=0; DO_SMOKE=0 ;;
+    --apply-cleanup) APPLY_CLEANUP=1 ;;
+    -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+    *) echo "unknown arg: $arg" >&2; exit 1 ;;
   esac
 done
 
-BIN_PATH="${MISSIOND_BIN_PATH:-${HOME}/.xjp-mission/missiond}"
+INSTALL_ROOT="${MISSIOND_INSTALL_ROOT:-${HOME}/.xjp-mission}"
+RELEASES_DIR="${MISSIOND_RELEASES_DIR:-${INSTALL_ROOT}/releases}"
+ACTIVE_LINK="${MISSIOND_ACTIVE_LINK:-${INSTALL_ROOT}/active}"
+BIN_PATH="${MISSIOND_BIN_PATH:-${INSTALL_ROOT}/missiond}"
+MCP_BIN_PATH="${MISSIOND_MCP_BIN_PATH:-${INSTALL_ROOT}/mission-mcp}"
 SOCK_PATH="${MISSIOND_SOCKET_PATH:-${HOME}/.missiond/missiond.sock}"
 LABEL="${MISSIOND_LAUNCHCTL_LABEL:-com.missiond.daemon}"
 TIMEOUT="${MISSIOND_DEPLOY_TIMEOUT:-30}"
 SMOKE_TIMEOUT="${MISSIOND_DEPLOY_SMOKE_TIMEOUT:-30}"
+RELEASE_KEEP="${MISSIOND_RELEASE_KEEP:-5}"
+BACKUP_RETENTION_DAYS="${MISSIOND_BACKUP_RETENTION_DAYS:-7}"
+APPLY_BACKUP_CLEANUP="${MISSIOND_APPLY_BACKUP_CLEANUP:-0}"
 
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 case "$PROFILE" in
-  release) BUILD_ARG="--release"; ARTIFACT="$REPO_ROOT/target/release/missiond" ;;
-  debug)   BUILD_ARG="";          ARTIFACT="$REPO_ROOT/target/debug/missiond" ;;
+  release)
+    BUILD_ARG="--release"
+    ARTIFACT="$REPO_ROOT/target/release/missiond"
+    MCP_ARTIFACT="$REPO_ROOT/target/release/mission-mcp"
+    ;;
+  debug)
+    BUILD_ARG=""
+    ARTIFACT="$REPO_ROOT/target/debug/missiond"
+    MCP_ARTIFACT="$REPO_ROOT/target/debug/mission-mcp"
+    ;;
+  *) echo "unsupported profile: $PROFILE" >&2; exit 1 ;;
 esac
 
-log()  { printf '[deploy-daemon] %s\n'   "$*" >&2; }
+log() { printf '[deploy-daemon] %s\n' "$*" >&2; }
 fail() { printf '[deploy-daemon] FAIL: %s\n' "$*" >&2; exit "${2:-1}"; }
 
-# ─── Phase 1: Build ───────────────────────────────────────────────────────
-command -v cargo >/dev/null 2>&1 || fail "cargo not on PATH" 1
-log "build: cargo build $BUILD_ARG -p missiond-daemon"
-if ! cargo build $BUILD_ARG -p missiond-daemon 2>&1 | tail -30; then
-  fail "cargo build failed" 2
-fi
-[ -x "$ARTIFACT" ] || fail "expected artifact missing: $ARTIFACT" 2
-NEW_HASH="$(shasum -a 256 "$ARTIFACT" | cut -d' ' -f1)"
-log "build: new binary $ARTIFACT  sha256=${NEW_HASH:0:12}…"
-
-if [ "$DO_DEPLOY" -eq 0 ]; then
-  log "build-only mode → done."
-  exit 0
-fi
-
-# ─── Phase 2: Pre-deploy guards ───────────────────────────────────────────
-[ -d "$(dirname "$BIN_PATH")" ] || fail "install dir missing: $(dirname "$BIN_PATH")" 1
-[ -d "$(dirname "$SOCK_PATH")" ] || fail "socket dir missing: $(dirname "$SOCK_PATH")" 1
-
-if [ -x "$BIN_PATH" ]; then
-  CUR_HASH="$(shasum -a 256 "$BIN_PATH" | cut -d' ' -f1)"
-  if [ "$CUR_HASH" = "$NEW_HASH" ]; then
-    log "installed binary already matches build sha — nothing to do."
-    exit 0
+resolve_link_target() {
+  local link="$1"
+  local target
+  if [ ! -L "$link" ]; then
+    return 1
   fi
-  log "installed: ${CUR_HASH:0:12}…  → upgrading to ${NEW_HASH:0:12}…"
-else
-  log "no binary installed yet at $BIN_PATH — fresh deploy."
-fi
+  target="$(readlink "$link")"
+  case "$target" in
+    /*) printf '%s\n' "$target" ;;
+    *) printf '%s\n' "$(cd "$(dirname "$link")" && cd "$(dirname "$target")" && pwd -P)/$(basename "$target")" ;;
+  esac
+}
 
-# ─── Phase 3: Backup + atomic install ─────────────────────────────────────
-BACKUP_PATH="${BIN_PATH}.bak.$(date -u +%Y%m%dT%H%M%SZ)"
-if [ -x "$BIN_PATH" ]; then
-  cp "$BIN_PATH" "$BACKUP_PATH"
-  log "backup: $BACKUP_PATH"
-fi
-
-# Use a temp file in the same directory then `mv` for atomic replace.
-TMP_BIN="${BIN_PATH}.new.$$"
-trap 'rm -f "$TMP_BIN"' EXIT
-cp "$ARTIFACT" "$TMP_BIN"
-chmod +x "$TMP_BIN"
-
-# Ad-hoc codesign (-s -). LaunchAgent rejects unsigned binaries on macOS.
-if command -v codesign >/dev/null 2>&1; then
-  if ! codesign --force --sign - "$TMP_BIN" 2>&1 | tail -5; then
-    rm -f "$TMP_BIN"; fail "codesign failed" 3
+atomic_symlink_update() {
+  local link="$1"
+  local target="$2"
+  local tmp="${link}.new.$$"
+  rm -f "$tmp"
+  ln -s "$target" "$tmp"
+  if mv -h -f "$tmp" "$link" 2>/dev/null; then
+    return 0
   fi
-fi
-# Strip quarantine attr in case copy inherited one.
-xattr -d com.apple.quarantine "$TMP_BIN" 2>/dev/null || true
+  rm -f "$link"
+  mv -f "$tmp" "$link"
+}
 
-mv "$TMP_BIN" "$BIN_PATH"
-trap - EXIT
-log "installed: $BIN_PATH"
+update_stable_entrypoints() {
+  atomic_symlink_update "$BIN_PATH" "$ACTIVE_LINK/bin/missiond"
+  atomic_symlink_update "$MCP_BIN_PATH" "$ACTIVE_LINK/bin/mission-mcp"
+  log "entrypoints: $BIN_PATH -> $ACTIVE_LINK/bin/missiond"
+  log "entrypoints: $MCP_BIN_PATH -> $ACTIVE_LINK/bin/mission-mcp"
+}
 
-# ─── Phase 4: Restart via launchd ─────────────────────────────────────────
-if ! launchctl list "$LABEL" >/dev/null 2>&1; then
-  log "warn: $LABEL not loaded in launchctl — skipping kickstart."
-  log "       (manual: launchctl bootstrap gui/$(id -u) <plist-path>)"
-else
-  log "kickstart: launchctl kickstart -k gui/$(id -u)/$LABEL"
-  if ! launchctl kickstart -k "gui/$(id -u)/$LABEL" 2>&1 | tail -5; then
-    fail "launchctl kickstart failed" 4
-  fi
-fi
-
-# ─── Phase 5: Wait for socket readiness ───────────────────────────────────
-log "wait: socket $SOCK_PATH (timeout ${TIMEOUT}s)"
-START_TS=$(date +%s)
-while true; do
-  if [ -S "$SOCK_PATH" ]; then
-    # Verify a process actually owns it (lsof returns rows when bound).
-    if lsof "$SOCK_PATH" 2>/dev/null | grep -q missiond; then
-      ELAPSED=$(( $(date +%s) - START_TS ))
-      log "ready: socket bound after ${ELAPSED}s"
-      break
-    fi
-  fi
-  ELAPSED=$(( $(date +%s) - START_TS ))
-  if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-    fail "socket not ready after ${TIMEOUT}s — daemon may have failed to start" 5
-  fi
-  sleep 1
-done
-
-# Confirm the running PID matches the new binary on disk (catches the
-# launchd-still-running-old-image case we hit during wave47).
-RUN_PID=$(lsof -t "$SOCK_PATH" 2>/dev/null | head -1 || true)
-if [ -n "$RUN_PID" ]; then
-  RUN_BIN=$(ps -o comm= -p "$RUN_PID" 2>/dev/null || true)
-  log "running: PID=$RUN_PID  comm=$RUN_BIN"
-fi
-
-# ─── Phase 6: Optional smoke check ────────────────────────────────────────
-if [ "$DO_SMOKE" -eq 0 ]; then
-  log "deploy: done (smoke skipped)."
-  exit 0
-fi
-
-if [ -x "$REPO_ROOT/target/debug/mission-mcp" ] || [ -x "$REPO_ROOT/target/release/mission-mcp" ]; then
-  MCP="${REPO_ROOT}/target/release/mission-mcp"
-  [ -x "$MCP" ] || MCP="${REPO_ROOT}/target/debug/mission-mcp"
-
-  run_mcp_initialize_smoke() {
-    if command -v timeout >/dev/null 2>&1; then
-      timeout 5 "$MCP" <<'EOF'
+run_mcp_initialize_smoke() {
+  local mcp="$1"
+  if command -v timeout >/dev/null 2>&1; then
+    timeout 5 "$mcp" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
 EOF
-    elif command -v gtimeout >/dev/null 2>&1; then
-      gtimeout 5 "$MCP" <<'EOF'
+  elif command -v gtimeout >/dev/null 2>&1; then
+    gtimeout 5 "$mcp" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
 EOF
-    elif command -v perl >/dev/null 2>&1; then
-      perl -e 'alarm shift @ARGV; exec @ARGV' 5 "$MCP" <<'EOF'
+  elif command -v perl >/dev/null 2>&1; then
+    perl -e 'alarm shift @ARGV; exec @ARGV' 5 "$mcp" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
 EOF
-    else
-      "$MCP" <<'EOF'
+  else
+    "$mcp" <<'EOF'
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"deploy-smoke","version":"0"}}}
 EOF
-    fi
-  }
+  fi
+}
 
-  # Send a minimal initialize + tools/call to the IPC. We don't run a full
-  # MCP exchange — we just want to know: does the IPC respond?
-  log "smoke: $MCP < initialize"
-  SMOKE_START_TS=$(date +%s)
-  RESP=""
+wait_for_socket() {
+  log "wait: socket $SOCK_PATH (timeout ${TIMEOUT}s)"
+  local start elapsed
+  start="$(date +%s)"
   while true; do
-    RESP=$(run_mcp_initialize_smoke 2>&1 | tail -3 || true)
-    if echo "$RESP" | grep -q '"protocolVersion"'; then
-      log "smoke: IPC responded OK"
-      break
+    if [ -S "$SOCK_PATH" ] && lsof "$SOCK_PATH" 2>/dev/null | grep -q missiond; then
+      elapsed=$(( $(date +%s) - start ))
+      log "ready: socket bound after ${elapsed}s"
+      return 0
     fi
+    elapsed=$(( $(date +%s) - start ))
+    if [ "$elapsed" -ge "$TIMEOUT" ]; then
+      return 1
+    fi
+    sleep 1
+  done
+}
 
-    ELAPSED=$(( $(date +%s) - SMOKE_START_TS ))
-    if [ "$ELAPSED" -ge "$SMOKE_TIMEOUT" ]; then
-      break
+kickstart_daemon() {
+  if ! launchctl list "$LABEL" >/dev/null 2>&1; then
+    log "warn: $LABEL not loaded in launchctl; skipping kickstart."
+    return 0
+  fi
+  log "kickstart: launchctl kickstart -k gui/$(id -u)/$LABEL"
+  launchctl kickstart -k "gui/$(id -u)/$LABEL" 2>&1 | tail -5
+}
+
+post_switch_smoke() {
+  local smoke_start resp elapsed
+  if [ "$DO_SMOKE" -eq 0 ]; then
+    log "deploy: done (smoke skipped)."
+    return 0
+  fi
+  [ -x "$MCP_BIN_PATH" ] || fail "mission-mcp entrypoint not executable: $MCP_BIN_PATH" 6
+  log "smoke: $MCP_BIN_PATH < initialize"
+  smoke_start="$(date +%s)"
+  resp=""
+  while true; do
+    resp="$(run_mcp_initialize_smoke "$MCP_BIN_PATH" 2>&1 | tail -3 || true)"
+    if echo "$resp" | grep -q '"protocolVersion"'; then
+      log "smoke: IPC responded OK"
+      return 0
     fi
+    elapsed=$(( $(date +%s) - smoke_start ))
+    [ "$elapsed" -lt "$SMOKE_TIMEOUT" ] || break
     log "smoke: IPC not ready yet; retrying..."
     sleep 1
   done
+  log "smoke: IPC did not respond cleanly -- output below"
+  echo "$resp" | sed 's/^/[smoke] /' >&2
+  return 1
+}
 
-  if ! echo "$RESP" | grep -q '"protocolVersion"'; then
-    log "smoke: IPC did not respond cleanly — output below"
-    echo "$RESP" | sed 's/^/[smoke] /' >&2
-    if [ -n "${BACKUP_PATH:-}" ] && [ -f "$BACKUP_PATH" ]; then
-      log "smoke: rolling back to $BACKUP_PATH"
-      cp "$BACKUP_PATH" "$BIN_PATH"
-      [ "${LABEL:-}" ] && launchctl kickstart -k "gui/$(id -u)/$LABEL" >/dev/null 2>&1 || true
-    fi
-    fail "smoke check failed — backup restored" 6
+create_legacy_release_if_needed() {
+  local previous
+  if previous="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null)"; then
+    [ -d "$previous" ] && { printf '%s\n' "$previous"; return 0; }
   fi
-else
-  log "smoke: mission-mcp not built; skipping (build it with cargo build -p missiond-mcp to enable)"
+  if [ -x "$BIN_PATH" ] && [ ! -L "$BIN_PATH" ] && [ -x "$MCP_BIN_PATH" ] && [ ! -L "$MCP_BIN_PATH" ]; then
+    local id dir daemon_hash mcp_hash
+    id="legacy-$(date -u +%Y%m%dT%H%M%SZ)"
+    dir="$RELEASES_DIR/$id"
+    mkdir -p "$dir/bin"
+    cp "$BIN_PATH" "$dir/bin/missiond"
+    cp "$MCP_BIN_PATH" "$dir/bin/mission-mcp"
+    chmod +x "$dir/bin/missiond" "$dir/bin/mission-mcp"
+    daemon_hash="$(shasum -a 256 "$dir/bin/missiond" | cut -d' ' -f1)"
+    mcp_hash="$(shasum -a 256 "$dir/bin/mission-mcp" | cut -d' ' -f1)"
+    cat > "$dir/release-manifest.json" <<EOF
+{"schema":"missiond.release-manifest.v1","release_id":"$id","profile":"legacy","git_sha":"unknown","daemon_sha256":"$daemon_hash","mcp_sha256":"$mcp_hash","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"legacy-installed-binaries"}
+EOF
+    log "legacy release captured: $dir"
+    printf '%s\n' "$dir"
+    return 0
+  fi
+  return 1
+}
+
+switch_active_release() {
+  local dir="$1"
+  atomic_symlink_update "$ACTIVE_LINK" "$dir"
+  update_stable_entrypoints
+  log "active: $ACTIVE_LINK -> $dir"
+}
+
+rollback_to_previous() {
+  local previous="$1"
+  if [ -z "$previous" ] || [ ! -d "$previous" ]; then
+    log "rollback: no previous release available"
+    return 1
+  fi
+  log "rollback: switching active back to $previous"
+  switch_active_release "$previous"
+  kickstart_daemon >/dev/null 2>&1 || true
+  return 0
+}
+
+cleanup_old_releases() {
+  local apply="$1"
+  mkdir -p "$RELEASES_DIR"
+  local active previous newest keep_paths
+  active="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  previous="${PREVIOUS_ACTIVE:-}"
+  newest="$(find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r | head -n "$RELEASE_KEEP" || true)"
+  keep_paths="$active
+$previous
+$newest"
+
+  log "cleanup: mode=$([ "$apply" -eq 1 ] && echo apply || echo dry-run), keep_newest=$RELEASE_KEEP"
+  find "$RELEASES_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | while IFS= read -r dir; do
+    case "
+$keep_paths
+" in
+      *"
+$dir
+"*) log "cleanup: keep release $dir" ;;
+      *)
+        if [ "$apply" -eq 1 ]; then
+          rm -rf "$dir"
+          log "cleanup: removed release $dir"
+        else
+          log "cleanup: would remove release $dir"
+        fi
+        ;;
+    esac
+  done
+
+  find "$INSTALL_ROOT" -maxdepth 1 \( -name '*.new.*' -o -name '*.bak.*' \) -mtime +"$BACKUP_RETENTION_DAYS" -print 2>/dev/null | while IFS= read -r file; do
+    if [ "$apply" -eq 1 ] && [ "$APPLY_BACKUP_CLEANUP" = "1" ]; then
+      rm -rf "$file"
+      log "cleanup: removed old backup/temp $file"
+    else
+      log "cleanup: would remove old backup/temp $file"
+    fi
+  done
+}
+
+mkdir -p "$INSTALL_ROOT" "$RELEASES_DIR" "$(dirname "$SOCK_PATH")"
+
+if [ "$CLEANUP_ONLY" -eq 1 ]; then
+  PREVIOUS_ACTIVE="$(resolve_link_target "$ACTIVE_LINK" 2>/dev/null || true)"
+  cleanup_old_releases "$APPLY_CLEANUP"
+  exit 0
 fi
 
-log "deploy: done. backup retained at $BACKUP_PATH"
+command -v cargo >/dev/null 2>&1 || fail "cargo not on PATH" 1
+log "build: cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp"
+if ! cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp 2>&1 | tail -30; then
+  fail "cargo build failed" 2
+fi
+[ -x "$ARTIFACT" ] || fail "expected artifact missing: $ARTIFACT" 2
+[ -x "$MCP_ARTIFACT" ] || fail "expected MCP artifact missing: $MCP_ARTIFACT" 2
+
+NEW_HASH="$(shasum -a 256 "$ARTIFACT" | cut -d' ' -f1)"
+NEW_MCP_HASH="$(shasum -a 256 "$MCP_ARTIFACT" | cut -d' ' -f1)"
+log "build: daemon sha256=${NEW_HASH:0:12}..."
+log "build: MCP sha256=${NEW_MCP_HASH:0:12}..."
+
+if [ "$DO_DEPLOY" -eq 0 ]; then
+  log "build-only mode -> done."
+  exit 0
+fi
+
+PREVIOUS_ACTIVE="$(create_legacy_release_if_needed || true)"
+GIT_SHA="$(git rev-parse --short=12 HEAD 2>/dev/null || echo unknown)"
+RELEASE_ID="${MISSIOND_RELEASE_ID:-$(date -u +%Y%m%dT%H%M%SZ)-${GIT_SHA}-${PROFILE}}"
+CANDIDATE_DIR="$RELEASES_DIR/$RELEASE_ID"
+
+[ ! -e "$CANDIDATE_DIR" ] || fail "candidate release already exists: $CANDIDATE_DIR" 1
+mkdir -p "$CANDIDATE_DIR/bin"
+cp "$ARTIFACT" "$CANDIDATE_DIR/bin/missiond"
+cp "$MCP_ARTIFACT" "$CANDIDATE_DIR/bin/mission-mcp"
+chmod +x "$CANDIDATE_DIR/bin/missiond" "$CANDIDATE_DIR/bin/mission-mcp"
+
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --sign - "$CANDIDATE_DIR/bin/missiond" 2>&1 | tail -5
+  codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp" 2>&1 | tail -5
+fi
+xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/missiond" 2>/dev/null || true
+xattr -d com.apple.quarantine "$CANDIDATE_DIR/bin/mission-mcp" 2>/dev/null || true
+
+cat > "$CANDIDATE_DIR/release-manifest.json" <<EOF
+{"schema":"missiond.release-manifest.v1","release_id":"$RELEASE_ID","profile":"$PROFILE","git_sha":"$GIT_SHA","daemon_sha256":"$NEW_HASH","mcp_sha256":"$NEW_MCP_HASH","created_at":"$(date -u +%Y-%m-%dT%H:%M:%SZ)","source":"scripts/deploy-daemon.sh"}
+EOF
+log "candidate: $CANDIDATE_DIR"
+
+log "pre-switch smoke: candidate MCP initialize"
+PRE_RESP="$(run_mcp_initialize_smoke "$CANDIDATE_DIR/bin/mission-mcp" 2>&1 | tail -3 || true)"
+if ! echo "$PRE_RESP" | grep -q '"protocolVersion"'; then
+  echo "$PRE_RESP" | sed 's/^/[pre-smoke] /' >&2
+  fail "candidate MCP initialize failed before active switch" 3
+fi
+
+switch_active_release "$CANDIDATE_DIR"
+
+if ! kickstart_daemon; then
+  rollback_to_previous "$PREVIOUS_ACTIVE" || true
+  fail "launchctl kickstart failed; rollback attempted" 4
+fi
+
+if ! wait_for_socket; then
+  rollback_to_previous "$PREVIOUS_ACTIVE" || true
+  fail "socket not ready after ${TIMEOUT}s; rollback attempted" 5
+fi
+
+RUN_PID="$(lsof -t "$SOCK_PATH" 2>/dev/null | head -1 || true)"
+if [ -n "$RUN_PID" ]; then
+  RUN_BIN="$(ps -o comm= -p "$RUN_PID" 2>/dev/null || true)"
+  log "running: PID=$RUN_PID comm=$RUN_BIN"
+fi
+
+if ! post_switch_smoke; then
+  rollback_to_previous "$PREVIOUS_ACTIVE" || true
+  fail "smoke check failed; rollback attempted" 6
+fi
+
+cleanup_old_releases 1
+log "deploy: done. active_release=$RELEASE_ID previous=${PREVIOUS_ACTIVE:-none}"

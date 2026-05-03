@@ -1,5 +1,5 @@
 use anyhow::{anyhow, Result};
-use missiond_core::types::{CliEngine, Conversation, Slot};
+use missiond_core::types::{BoardTask, CliEngine, Conversation, Slot};
 use missiond_mcp::tools::ToolResult;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -10,7 +10,7 @@ use tokio::process::Command;
 use tracing::{info, warn};
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
-use crate::engine::master_control;
+use crate::engine::{master_control, nightly_evolution};
 use crate::lenient;
 use crate::state::AppState;
 
@@ -34,6 +34,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         )),
         "mission_convergence_status" => {
             Ok(ToolResult::json(&mission_convergence_status(state).await))
+        }
+        "mission_nightly_evolution" => {
+            nightly_evolution::mission_nightly_evolution(state, args).await
         }
         "mission_inbox" => {
             let InboxArgs { unread_only, limit } =
@@ -199,9 +202,23 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
         .filter(|slot| !is_stopped_legacy_sonnet_residual(slot, &v3_slot_ids))
         .collect();
 
+    let running_board_tasks = state
+        .store
+        .list_board_tasks(Some("running"), true)
+        .await
+        .unwrap_or_default();
+
     let mut out = Vec::with_capacity(projected.len());
     for slot in projected {
         let mut value = serde_json::to_value(&slot).unwrap_or_else(|_| json!({}));
+        if let Some(task) = active_board_task_for_slot(&running_board_tasks, &slot.config.id) {
+            value["activeBoardTaskId"] = json!(task.id.as_str());
+            value["currentTaskId"] = json!(task.id.as_str());
+            value["activeBoardTask"] = active_board_task_summary_json(task);
+        }
+        if let Ok(Some(slot_task_id)) = state.store.get_running_slot_task(&slot.config.id).await {
+            value["currentSlotTaskId"] = json!(slot_task_id);
+        }
         if let Some(info) = state.pty.get_status(&slot.config.id).await {
             value["ptyState"] = json!(serde_json::to_value(&info.state)
                 .ok()
@@ -253,6 +270,34 @@ async fn projected_mission_slots(state: &AppState) -> Vec<Value> {
     }
 
     out
+}
+
+fn active_board_task_for_slot<'a>(
+    running_board_tasks: &'a [BoardTask],
+    slot_id: &str,
+) -> Option<&'a BoardTask> {
+    running_board_tasks
+        .iter()
+        .filter(|task| {
+            task.assignee.as_deref() == Some(slot_id)
+                || (task.claim_executor_type.as_deref() == Some("pty_slot")
+                    && task.claim_executor_id.as_deref() == Some(slot_id))
+        })
+        .max_by(|a, b| a.updated_at.cmp(&b.updated_at))
+}
+
+fn active_board_task_summary_json(task: &BoardTask) -> Value {
+    json!({
+        "id": task.id.as_str(),
+        "title": task.title.as_str(),
+        "status": task.status.as_str(),
+        "project": task.project.as_deref(),
+        "category": task.category.as_str(),
+        "parentId": task.parent_id.as_ref().map(|id| id.as_str()),
+        "assignee": task.assignee.as_deref(),
+        "claimExecutorId": task.claim_executor_id.as_deref(),
+        "updatedAt": task.updated_at.as_str(),
+    })
 }
 
 fn canonical_source_for_engine(engine: CliEngine) -> &'static str {

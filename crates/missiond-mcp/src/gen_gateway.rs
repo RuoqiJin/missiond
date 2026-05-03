@@ -149,7 +149,8 @@ pub async fn dispatch_tool<H: MissiondMcp>(handler: &H, name: &str, args: Value)
         | "mission_compute_slot"
         | "mission_agents"
         | "mission_master_status"
-        | "mission_convergence_status" => handler.handle_slot(name, args).await,
+        | "mission_convergence_status"
+        | "mission_nightly_evolution" => handler.handle_slot(name, args).await,
         "mission_cc_query" | "mission_cc_swarm" => handler.handle_cc_tasks(name, args).await,
         "mission_worker" => handler.handle_worker(name, args).await,
         "mission_job_poll" => handler.handle_job(name, args).await,

@@ -33,6 +33,9 @@ dist/
 .missiond/v3/runtime/plans/*.evidence.json
 .missiond/v3/runtime/capability-usage-review.json
 .missiond/v3/runtime/master-control-checkpoint.lisp
+.missiond/v3/runtime/master-control/context-packs/*.lisp
+.missiond/v3/runtime/nightly-evolution/*.report.lisp
+.missiond/v3/runtime/commit-lisp-convergence/*.report.lisp
 
 # Claude Code (contains credentials and private config)
 .claude/

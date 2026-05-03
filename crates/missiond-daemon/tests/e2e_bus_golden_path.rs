@@ -58,9 +58,7 @@ use missiond_core::event::blob_store::{BlobStore, PgBlobStore};
 use missiond_core::event::dispatcher::{PgTailSource, TailSource};
 use missiond_core::event::events::BoardEvent;
 use missiond_core::event::log::reader::LoggedEvent;
-use missiond_core::event::log::{
-    AppendAck, AppendOpts, Log, Seq, spawn_log_writer,
-};
+use missiond_core::event::log::{spawn_log_writer, AppendAck, AppendOpts, Log, Seq};
 use missiond_core::event::{Domain, DomainEvent};
 use serde_json::{json, Value};
 
@@ -162,10 +160,7 @@ async fn e2e_golden_path_mcp_board_create_to_ws_frame() {
         producer_id: "daemon/board".into(),
         ..Default::default()
     };
-    let ack = writer
-        .append(ev.clone(), opts)
-        .await
-        .expect("append ok");
+    let ack = writer.append(ev.clone(), opts).await.expect("append ok");
     let seq = match ack {
         AppendAck::Committed { seq, durable } => {
             assert!(durable, "TaskCreated must be durable (non-ephemeral)");
@@ -194,10 +189,7 @@ async fn e2e_golden_path_mcp_board_create_to_ws_frame() {
     let payload = payload_json.expect("payload_inline populated (small event)");
     // Stored as externally-tagged JSON: {"TaskCreated":{...}}
     let inner = payload.get("TaskCreated").expect("TaskCreated variant tag");
-    assert_eq!(
-        inner.get("task_id").and_then(|v| v.as_str()),
-        Some(task_id)
-    );
+    assert_eq!(inner.get("task_id").and_then(|v| v.as_str()), Some(task_id));
     assert_eq!(inner.get("title").and_then(|v| v.as_str()), Some(title));
     assert_eq!(
         inner.get("category").and_then(|v| v.as_str()),
@@ -213,10 +205,7 @@ async fn e2e_golden_path_mcp_board_create_to_ws_frame() {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     let mut maybe_logged: Option<LoggedEvent> = None;
     while std::time::Instant::now() < deadline {
-        let batch = tail
-            .read_all_from(Seq(0), 256)
-            .await
-            .expect("tail read");
+        let batch = tail.read_all_from(Seq(0), 256).await.expect("tail read");
         if let Some(first) = batch.into_iter().find(|ev| ev.seq == seq) {
             maybe_logged = Some(first);
             break;
@@ -240,8 +229,7 @@ async fn e2e_golden_path_mcp_board_create_to_ws_frame() {
     // `bus::ws_bridge::v2_logged_to_v1_wire_format` (which is `pub(crate)`)
     // so this integration test stays a real byte anchor independent of
     // internal visibility.
-    let expected_payload =
-        expected_v1_board_task_created_payload(task_id, title, category);
+    let expected_payload = expected_v1_board_task_created_payload(task_id, title, category);
     let expected_envelope = expected_v1_envelope(&logged, expected_payload);
 
     // Build the same envelope the bridge produces, using only

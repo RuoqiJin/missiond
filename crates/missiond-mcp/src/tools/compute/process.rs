@@ -51,6 +51,19 @@ pub fn definitions() -> Vec<ToolDefinition> {
                 }
             }),
         ),
+        // ===== mission_nightly_evolution =====
+        ToolDefinition::new(
+            "mission_nightly_evolution",
+            "手动触发 MissionD nightly evolution workflow；默认 observe-only，只写报告，不改代码",
+            json!({
+                "type": "object",
+                "properties": {
+                    "mode": {"type": "string", "enum": ["observe-only", "safe-backfill", "needs-investigation", "architecture-proposal", "requires-user-decision"]},
+                    "apply": {"type": "boolean", "description": "true 时允许创建可见 follow-up BoardTask；默认 false"},
+                    "reason": {"type": "string", "description": "本次手动触发原因"}
+                }
+            }),
+        ),
         // ===== mission_inbox =====
         ToolDefinition::new(
             "mission_inbox",

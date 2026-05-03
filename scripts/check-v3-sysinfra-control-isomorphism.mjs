@@ -28,6 +28,7 @@ const DEFAULT_FILES = {
   mcpPower: 'crates/missiond-mcp/src/tools/sysinfra/power.rs',
   mcpSystem: 'crates/missiond-mcp/src/tools/sysinfra/system.rs',
   mcpGlobalInstruction: 'crates/missiond-mcp/src/tools/sysinfra/global_instruction.rs',
+  deployScript: 'scripts/deploy-daemon.sh',
   v2Tools: '.missiond/v2/intent-tools.lisp',
   v2Flow: '.missiond/v2/intent-flow.lisp',
 };
@@ -114,8 +115,10 @@ function checkFiles(root, files) {
     'infra.rs owns mission_infra_query/ops',
     'permission.rs owns mission_permission_query/mutate',
     'power.rs owns mission_power_control',
-    'system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update',
+    'system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update',
     'mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job',
+    'deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release',
+    'missiond-blue-green-self-update',
     'survive daemon kickstart',
     'skip_build remains the synchronous already-built artifact restart path',
     'global_instruction.rs owns mission_global_instruction',
@@ -206,6 +209,20 @@ function checkFiles(root, files) {
     'codesign',
     'launchctl',
     'missiond-update.sh',
+  ]);
+
+  requireAll(diagnostics, files.deployScript, sources.deployScript, [
+    'MISSIOND_MCP_BIN_PATH',
+    'MISSIOND_RELEASES_DIR',
+    'MISSIOND_ACTIVE_LINK',
+    'cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp',
+    'MCP_ARTIFACT',
+    'release-manifest.json',
+    'codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp"',
+    'switch_active_release',
+    'rollback_to_previous',
+    'cleanup_old_releases',
+    '$ACTIVE_LINK/bin/mission-mcp',
   ]);
 
   requireAll(diagnostics, files.globalInstruction, sources.globalInstruction, [
@@ -319,7 +336,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/sysinfra/global_instruction.rs"
              "crates/missiond-mcp/src/tools/sysinfra/permission.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "infra.rs owns mission_infra_query/ops; permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, and mission_daemon_update. mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to survive daemon kickstart; skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction."))
+      :note "infra.rs owns mission_infra_query/ops; permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update. mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to survive daemon kickstart; deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release; skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction."))
   (compression-contract
     :checks ["node scripts/check-v3-sysinfra-control-isomorphism.mjs"]))`;
   ensureFile(root, DEFAULT_FILES.blueprint, blueprint);
@@ -352,6 +369,10 @@ function buildFixture() {
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.system),
     ' ALLOWED_CONFIGS resolve_config_path sys_config_patch find_latest_log daemon_update LAUNCHD_LABEL current_exe scripts/deploy-daemon.sh daemon-update- async deploy job started Stdio::null setsid pre_exec codesign launchctl missiond-update.sh',
+  );
+  fs.appendFileSync(
+    path.join(root, DEFAULT_FILES.deployScript),
+    ' MISSIOND_MCP_BIN_PATH MISSIOND_RELEASES_DIR MISSIOND_ACTIVE_LINK cargo build ${BUILD_ARG} -p missiond-daemon -p missiond-mcp MCP_ARTIFACT release-manifest.json codesign --force --sign - "$CANDIDATE_DIR/bin/mission-mcp" switch_active_release rollback_to_previous cleanup_old_releases $ACTIVE_LINK/bin/mission-mcp',
   );
   fs.appendFileSync(
     path.join(root, DEFAULT_FILES.globalInstruction),

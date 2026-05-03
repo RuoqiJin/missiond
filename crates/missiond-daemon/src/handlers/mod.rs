@@ -161,7 +161,8 @@ pub(crate) async fn dispatch_tool(state: &AppState, name: &str, args: Value) -> 
         | "mission_slot_history"
         | "mission_pause"
         | "mission_master_status"
-        | "mission_convergence_status" => slot::handle(state, name, args).await,
+        | "mission_convergence_status"
+        | "mission_nightly_evolution" => slot::handle(state, name, args).await,
 
         // ===== Legacy LLM trace aliases now owned by comm/question =====
         "mission_jarvis_logs"

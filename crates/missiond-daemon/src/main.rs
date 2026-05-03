@@ -1212,6 +1212,12 @@ async fn main() -> Result<()> {
         &state,
         shutdown_rx.clone(),
     );
+    engine::commit_convergence::start_commit_convergence_service(
+        &bus_services,
+        &state,
+        shutdown_rx.clone(),
+    );
+    engine::nightly_evolution::start_nightly_evolution_service(&state, shutdown_rx.clone());
 
     // Embedding Worker: event-driven actor (KB/Skill/Conv/AST embeddings + backfill)
     workers::spawn_worker(
