@@ -63,15 +63,14 @@ pub fn v2_logged_to_v1_wire_format(logged: &LoggedEvent) -> String {
 ///
 /// Exposed (`pub`) so [`crate::event::projection`] can reuse it in the
 /// catch-up path.
-pub fn v2_payload_to_v1_shape(
-    domain: &str,
-    kind: &str,
-    payload: &Value,
-) -> (&'static str, Value) {
+pub fn v2_payload_to_v1_shape(domain: &str, kind: &str, payload: &Value) -> (&'static str, Value) {
     match (domain, kind) {
         // ── Slot ──
         ("slot", "became_idle") => {
-            let slot_id = payload_of(payload, "BecameIdle").get("slot_id").cloned().unwrap_or(Value::Null);
+            let slot_id = payload_of(payload, "BecameIdle")
+                .get("slot_id")
+                .cloned()
+                .unwrap_or(Value::Null);
             (
                 "slot_state_changed",
                 json!({ "slot_id": slot_id, "new_state": "Idle" }),
@@ -102,10 +101,7 @@ pub fn v2_payload_to_v1_shape(
                 }),
             )
         }
-        ("slot", "stuck") => (
-            "slot_state_changed",
-            payload_of(payload, "Stuck").clone(),
-        ),
+        ("slot", "stuck") => ("slot_state_changed", payload_of(payload, "Stuck").clone()),
 
         // ── Board ──
         ("board", "task_created") => {
@@ -694,6 +690,20 @@ pub fn v2_payload_to_v1_shape(
                     "message_id": p.get("message_id").cloned().unwrap_or(Value::Null),
                     "session_id": p.get("session_id").cloned().unwrap_or(Value::Null),
                     "slot_id": p.get("slot_id").cloned().unwrap_or(Value::Null),
+                }),
+            )
+        }
+        ("system", "external_service_event") => {
+            let p = payload_of(payload, "ExternalServiceEvent");
+            (
+                "external_service_event",
+                json!({
+                    "service_id": p.get("service_id").cloned().unwrap_or(Value::Null),
+                    "event_id": p.get("event_id").cloned().unwrap_or(Value::Null),
+                    "event_kind": p.get("event_kind").cloned().unwrap_or(Value::Null),
+                    "summary": p.get("summary").cloned().unwrap_or(Value::Null),
+                    "trace_id": p.get("trace_id").cloned().unwrap_or(Value::Null),
+                    "payload_json": p.get("payload_json").cloned().unwrap_or(Value::Null),
                 }),
             )
         }

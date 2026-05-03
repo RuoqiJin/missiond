@@ -34,7 +34,8 @@
      (gate g4 :rule "User dirty changes are facts; never revert them.")
      (gate g5 :rule "Code-first changes create backfill BoardTask through commit-lisp-convergence.")
      (gate g6 :rule "If engine_hint/pool_hint cannot be honored, Autopilot records reroute_reason as a durable BoardTask note.")
-     (gate g7 :rule "Evaluation workers produce structured artifacts (Findings/Evidence/Recommendations/Verification), not raw KB JSON dumps."))
+     (gate g7 :rule "Evaluation workers produce structured artifacts (Findings/Evidence/Recommendations/Verification), not raw KB JSON dumps.")
+     (gate g8 :rule "Rust projects must expose a project-local touched-file rustfmt checker; workers must not run cargo fmt -p or cargo fmt --all unless an explicit maintainer task owns repo-wide formatting."))
   :completion
     ((criterion c1 :rule "Lisp has pillar/function/entry/core/egress/surface shape.")
      (criterion c2 :rule "Checker proves root, blueprint, surfaces, and public code anchors.")

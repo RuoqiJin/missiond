@@ -57,6 +57,17 @@ pub enum SystemEvent {
         session_id: String,
         slot_id: Option<String>,
     },
+    /// An external project/service reported a durable domain event into
+    /// MissionD's bus. Payload is stringified JSON so SystemEvent keeps Eq
+    /// semantics while preserving the original service envelope.
+    ExternalServiceEvent {
+        service_id: String,
+        event_id: String,
+        event_kind: String,
+        summary: String,
+        trace_id: Option<String>,
+        payload_json: String,
+    },
 }
 
 impl DomainEvent for SystemEvent {
@@ -71,6 +82,7 @@ impl DomainEvent for SystemEvent {
             Self::InsightGenerated { .. } => "insight_generated",
             Self::JarvisProactivePush { .. } => "jarvis_proactive_push",
             Self::ContextualCommitDetected { .. } => "contextual_commit_detected",
+            Self::ExternalServiceEvent { .. } => "external_service_event",
         }
     }
 
@@ -80,6 +92,8 @@ impl DomainEvent for SystemEvent {
             Self::ToolCompleted { .. } => 4096,
             // Commit summary can hold diff snippets / commit subject+body.
             Self::ContextualCommitDetected { .. } => 4096,
+            // External service envelopes carry compact JSON and summaries.
+            Self::ExternalServiceEvent { .. } => 4096,
             // Proactive push summary is bounded but not tiny.
             Self::JarvisProactivePush { .. } => 2048,
             _ => 256,
@@ -131,6 +145,14 @@ mod tests {
                 session_id: "s".into(),
                 slot_id: None,
             },
+            SystemEvent::ExternalServiceEvent {
+                service_id: "auth".into(),
+                event_id: "evt-1".into(),
+                event_kind: "login_succeeded".into(),
+                summary: "auth login succeeded".into(),
+                trace_id: Some("trace-1".into()),
+                payload_json: "{}".into(),
+            },
         ];
         for c in &cases {
             assert!(!c.kind().is_empty());
@@ -165,5 +187,21 @@ mod tests {
             output_summary: "output".into(),
         };
         assert!(big.payload_size_hint() > 1000);
+    }
+
+    #[test]
+    fn external_service_event_serde_round_trip() {
+        let ev = SystemEvent::ExternalServiceEvent {
+            service_id: "auth".into(),
+            event_id: "evt-auth-1".into(),
+            event_kind: "login_failed".into(),
+            summary: "auth login failed".into(),
+            trace_id: Some("trace-auth-1".into()),
+            payload_json: r#"{"tenant_id":7}"#.into(),
+        };
+        let json = serde_json::to_string(&ev).unwrap();
+        let back: SystemEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(ev, back);
+        assert_eq!(back.kind(), "external_service_event");
     }
 }

@@ -1187,6 +1187,7 @@
       :proxy (:kind caddy :domain "auth.xiaojinpro.com" :file "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/caddy/Caddyfile" :sse-no-buffer "/auth/login-stream")
       :ports (:http 8081 :metrics 9090 :service 80)
       :health ["/health/live" "/health/ready" "/.well-known/openid-configuration" "/.well-known/jwks.json"]
+      :event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent :source auth-audit-events :authority provider-durable-log-first :rule "Auth emits sanitized service events into MissionD EventBus; PTY is diagnostic only and MissionD must not require production probing to observe auth incidents.")
       :dependencies [postgres redis secret-store wechat-open-platform google-oauth sms-provider email-provider]
       :ops-capability deploy-ops
       :source-evidence ["/Users/jinchen/Projects/xiaojinpro-backend/services/auth/k8s/production/configmap.yaml" "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/k8s/production/deployment.yaml" "/Users/jinchen/Projects/xiaojinpro-backend/services/auth/caddy/Caddyfile"]

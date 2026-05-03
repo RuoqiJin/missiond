@@ -142,6 +142,8 @@ function checkFiles(root, files) {
 	    ':public-base-url "https://auth.xiaojinpro.com"',
 	    ':deployment (:substrate kubernetes :namespace production :deployment "xjp-auth-center"',
 	    ':dns-provider cloudflare',
+	    ':event-ingest (:endpoint "/webhooks/auth-event" :domain system :event ExternalServiceEvent',
+	    ':source auth-audit-events',
 	    'mission_project(action=universe)',
 	    'node scripts/check-v3-project-registry-isomorphism.mjs',
 	  ]);

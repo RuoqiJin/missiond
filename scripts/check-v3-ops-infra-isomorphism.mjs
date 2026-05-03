@@ -156,6 +156,7 @@ function checkFiles(root, files) {
     'CHECK_ONLY=0',
     'git diff --name-only --diff-filter=ACMR',
     'git diff --cached --name-only --diff-filter=ACMR',
+    'git ls-files --others --exclude-standard',
     'git diff --name-only --diff-filter=ACMR "${BRANCH}...HEAD"',
     "awk '/\\.rs$/ { print }'",
     'no Rust files in diff',

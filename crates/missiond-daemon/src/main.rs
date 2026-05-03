@@ -520,6 +520,8 @@ async fn main() -> Result<()> {
     // the daemon-side `BusServices` directly).
     let (incident_webhook_tx, mut incident_webhook_rx) =
         tokio::sync::mpsc::channel::<missiond_core::types::MissionIncident>(500);
+    let (system_webhook_tx, mut system_webhook_rx) =
+        tokio::sync::mpsc::channel::<missiond_core::event::events::SystemEvent>(500);
 
     // Embedding worker channel: event-driven, 0 CPU when idle. Kept as an
     // internal worker queue per deviation DC041 (no `EmbeddingEvent` domain
@@ -547,6 +549,7 @@ async fn main() -> Result<()> {
         cc_tasks_watcher: Some(Arc::clone(&cc_tasks)),
         screenshot_broker: Some(Arc::clone(&screenshot_broker)),
         incident_tx: Some(incident_webhook_tx.clone()),
+        system_event_tx: Some(system_webhook_tx.clone()),
         frontend_events_tx: Some(frontend_events_tx.clone()),
         db: Some(Arc::clone(&store)),
         context_enricher: Arc::clone(&context_enricher_slot),
@@ -1492,6 +1495,14 @@ async fn main() -> Result<()> {
                         incident,
                     })
                     .await;
+            }
+        });
+    }
+    {
+        let bus = Arc::clone(&bus_services);
+        tokio::spawn(async move {
+            while let Some(event) = system_webhook_rx.recv().await {
+                let _ = bus.publish_system(event).await;
             }
         });
     }

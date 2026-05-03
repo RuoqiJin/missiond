@@ -1,4 +1,5 @@
 //! WebSocket Server implementation
+// missiond-rustfmt-exempt: legacy PTY/webhook server; keep surgical edits until split.
 //!
 //! Compatible with the Node implementation:
 //! - PTY attach: `ws://host:port/pty/<slotId>`
@@ -14,6 +15,7 @@ use super::jarvis_trace::JarvisTraceStore;
 use crate::cc_tasks::{
     CCSession, CCTask, CCTaskChangeEvent, CCTasksOverview, CCTasksWatcher, WatcherEvent,
 };
+use crate::event::events::SystemEvent;
 use crate::pty::{PTYManager, SessionEvent, SessionState};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -63,6 +65,8 @@ pub struct WSServerOptions {
     pub screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
     /// AIOps incident event bus sender (optional, for webhook endpoints)
     pub incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+    /// External service events to publish into MissionD's SystemEvent bus.
+    pub system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
     /// Frontend event stream (pre-serialized JSON from daemon EventBus)
     pub frontend_events_tx: Option<broadcast::Sender<String>>,
     /// Database store for Jarvis chat + timeline queries (M4: trait-based)
@@ -82,6 +86,7 @@ pub struct PTYWebSocketServer {
     shutdown_tx: Option<broadcast::Sender<()>>,
     jarvis_trace: JarvisTraceStore,
     incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+    system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
     frontend_events_tx: Option<broadcast::Sender<String>>,
     db: Option<Arc<dyn crate::db::traits::MissionStore>>,
     context_enricher: ContextEnricherSlot,
@@ -214,6 +219,59 @@ fn parse_test_webhook(body: &str) -> Option<crate::types::MissionIncident> {
     })
 }
 
+/// Parse an external service domain event into the MissionD system bus.
+///
+/// Minimal envelope expected from project-local reporters:
+/// `{ service_id, event_id, event_kind, summary, trace_id?, payload? }`.
+/// Missing fields are derived conservatively so producers can start with a
+/// low-risk fire-and-forget integration.
+fn parse_external_service_webhook(body: &str, default_service_id: &str) -> Option<SystemEvent> {
+    let v: serde_json::Value = serde_json::from_str(body).ok()?;
+    let service_id = v
+        .get("service_id")
+        .or_else(|| v.get("serviceId"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(default_service_id)
+        .to_string();
+    let event_kind = v
+        .get("event_kind")
+        .or_else(|| v.get("eventKind"))
+        .or_else(|| v.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("external_event")
+        .to_string();
+    let event_id = v
+        .get("event_id")
+        .or_else(|| v.get("eventId"))
+        .or_else(|| v.get("id"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("external-{}", uuid::Uuid::new_v4()));
+    let summary = v
+        .get("summary")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("{} reported {}", service_id, event_kind));
+    let trace_id = v
+        .get("trace_id")
+        .or_else(|| v.get("traceId"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string);
+    let payload = v
+        .get("payload")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({}));
+
+    Some(SystemEvent::ExternalServiceEvent {
+        service_id,
+        event_id,
+        event_kind,
+        summary,
+        trace_id,
+        payload_json: payload.to_string(),
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Route<'a> {
     Pty { slot_id: &'a str },
@@ -341,6 +399,7 @@ impl PTYWebSocketServer {
             shutdown_tx: None,
             jarvis_trace: JarvisTraceStore::new(),
             incident_tx: options.incident_tx,
+            system_event_tx: options.system_event_tx,
             frontend_events_tx: options.frontend_events_tx,
             db: options.db,
             context_enricher: Arc::clone(&options.context_enricher),
@@ -399,6 +458,7 @@ impl PTYWebSocketServer {
         let screenshot_broker = self.screenshot_broker.clone();
         let jarvis_trace = self.jarvis_trace.clone();
         let incident_tx = self.incident_tx.clone();
+        let system_event_tx = self.system_event_tx.clone();
         let frontend_events_tx = self.frontend_events_tx.clone();
         let db = self.db.clone();
         let context_enricher = self.context_enricher.clone();
@@ -416,12 +476,13 @@ impl PTYWebSocketServer {
                                 let screenshot_broker = screenshot_broker.clone();
                                 let jarvis_trace = jarvis_trace.clone();
                                 let incident_tx = incident_tx.clone();
+                                let system_event_tx = system_event_tx.clone();
                                 let frontend_events_tx = frontend_events_tx.clone();
                                 let db = db.clone();
                                 let context_enricher = context_enricher.clone();
                                 let tool_count = tool_count;
                                 tokio::spawn(async move {
-                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, frontend_events_tx, db, context_enricher, tool_count).await {
+                                    if let Err(e) = Self::handle_connection(stream, addr, pty_manager, cc_tasks_watcher, screenshot_broker, jarvis_trace, incident_tx, system_event_tx, frontend_events_tx, db, context_enricher, tool_count).await {
                                         error!(?e, ?addr, "WebSocket connection error");
                                     }
                                 });
@@ -678,7 +739,45 @@ impl PTYWebSocketServer {
         mut stream: TcpStream,
         request_line: &str,
         incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+        system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
     ) -> anyhow::Result<()> {
+        let (_headers, body) = Self::read_http_request(&mut stream).await?;
+
+        // Extract path from request line (e.g. "POST /webhooks/deploy HTTP/1.1")
+        let path = request_line.split_whitespace().nth(1).unwrap_or("");
+
+        if path == "/webhooks/service-event" || path == "/webhooks/auth-event" {
+            let tx = match system_event_tx {
+                Some(tx) => tx,
+                None => {
+                    Self::send_http_error(&mut stream, 503, "Service Unavailable", r#"{"error":"system event bus not configured"}"#).await?;
+                    return Ok(());
+                }
+            };
+            let default_service_id = if path == "/webhooks/auth-event" { "auth" } else { "external" };
+            let Some(event) = parse_external_service_webhook(&body, default_service_id) else {
+                Self::send_http_error(&mut stream, 400, "Bad Request", r#"{"error":"invalid service event envelope"}"#).await?;
+                return Ok(());
+            };
+            let event_id = match &event {
+                SystemEvent::ExternalServiceEvent { event_id, .. } => event_id.clone(),
+                _ => "unknown".to_string(),
+            };
+            if let Err(e) = tx.try_send(event) {
+                warn!("Webhook: system event channel full, dropping: {}", e);
+                Self::send_http_error(&mut stream, 503, "Service Unavailable", r#"{"error":"system event queue full"}"#).await?;
+                return Ok(());
+            }
+            let resp_body = serde_json::json!({"ok": true, "event_id": event_id}).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                resp_body.len(), resp_body
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await?;
+            return Ok(());
+        }
+
         let tx = match incident_tx {
             Some(tx) => tx,
             None => {
@@ -686,11 +785,6 @@ impl PTYWebSocketServer {
                 return Ok(());
             }
         };
-
-        let (_headers, body) = Self::read_http_request(&mut stream).await?;
-
-        // Extract path from request line (e.g. "POST /webhooks/deploy HTTP/1.1")
-        let path = request_line.split_whitespace().nth(1).unwrap_or("");
 
         let incident = match path {
             "/webhooks/deploy" => parse_deploy_webhook(&body),
@@ -1761,6 +1855,7 @@ impl PTYWebSocketServer {
         screenshot_broker: Option<Arc<super::ScreenshotBroker>>,
         jarvis_trace: JarvisTraceStore,
         incident_tx: Option<tokio::sync::mpsc::Sender<crate::types::MissionIncident>>,
+        system_event_tx: Option<tokio::sync::mpsc::Sender<SystemEvent>>,
         frontend_events_tx: Option<broadcast::Sender<String>>,
         db: Option<Arc<dyn crate::db::traits::MissionStore>>,
         context_enricher: ContextEnricherSlot,
@@ -1777,7 +1872,7 @@ impl PTYWebSocketServer {
             }
             // AIOps webhook endpoint
             if request_line.starts_with("POST /webhooks/") {
-                return Self::handle_webhook(stream, &request_line, incident_tx).await;
+                return Self::handle_webhook(stream, &request_line, incident_tx, system_event_tx).await;
             }
             // Chat completions SSE endpoint
             if request_line.starts_with("POST /v1/chat/completions") {

@@ -48,6 +48,7 @@ case "$MODE" in
     # Both staged-for-commit and unstaged work-in-progress.
     FILES=$( { git diff --name-only --diff-filter=ACMR
                git diff --cached --name-only --diff-filter=ACMR
+               git ls-files --others --exclude-standard
              } | sort -u )
     ;;
   staged)
@@ -57,6 +58,7 @@ case "$MODE" in
     [ -n "$BRANCH" ] || { echo "--branch requires a base ref" >&2; exit 1; }
     FILES=$( { git diff --name-only --diff-filter=ACMR "${BRANCH}...HEAD"
                git diff --name-only --diff-filter=ACMR
+               git ls-files --others --exclude-standard
              } | sort -u )
     ;;
 esac
