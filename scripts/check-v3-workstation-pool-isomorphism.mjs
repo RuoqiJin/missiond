@@ -166,7 +166,12 @@ function checkFiles(root) {
   requireAll(diagnostics, FILES.autopilot, sources.autopilot, [
     'fn board_task_workstation_class',
     'async fn select_workstation_pool_slot',
-    'workstation_config.boardtask_pool_candidates(task_class)',
+    '.boardtask_pool_candidates(task_class)',
+    'extract_dispatch_metadata_field(&task.description, "engine_hint")',
+    'extract_dispatch_metadata_field(&task.description, "pool_hint")',
+    'struct WorkstationSlotSelection',
+    'reroute_reason',
+    'Workstation dispatch reroute recorded',
     'task_class == "code" && !worker.write_allowed',
     'SessionState::Exited',
     'SessionState::Error',

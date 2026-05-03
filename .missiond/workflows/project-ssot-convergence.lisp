@@ -23,7 +23,7 @@
      (step s6 :id run-code-isomorphism
        :logic "map every declared public behavior to Lisp surface; mark gaps as designed/backfill, not invisible")
      (step s7 :id dispatch-backfill-workers
-       :logic "create disjoint BoardTasks with context_pack_path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, completion protocol")
+       :logic "create disjoint BoardTasks with context_pack_path, read_scope, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, completion protocol; read_scope is readable evidence, write_scope is the only writable set, and must_not_touch forbids write/stage/commit rather than reads")
      (step s8 :id verify-and-report
        :logic "run project checker, build/test, diff check; write convergence report and observed dispatch-stability issues"))
   :egress [project-blueprint project-checkers boardtasks convergence-report kb-note]
@@ -32,7 +32,9 @@
      (gate g2 :rule "Same file and same surface have one owner.")
      (gate g3 :rule "Gemini remains read-only until scoped write smoke passes.")
      (gate g4 :rule "User dirty changes are facts; never revert them.")
-     (gate g5 :rule "Code-first changes create backfill BoardTask through commit-lisp-convergence."))
+     (gate g5 :rule "Code-first changes create backfill BoardTask through commit-lisp-convergence.")
+     (gate g6 :rule "If engine_hint/pool_hint cannot be honored, Autopilot records reroute_reason as a durable BoardTask note.")
+     (gate g7 :rule "Evaluation workers produce structured artifacts (Findings/Evidence/Recommendations/Verification), not raw KB JSON dumps."))
   :completion
     ((criterion c1 :rule "Lisp has pillar/function/entry/core/egress/surface shape.")
      (criterion c2 :rule "Checker proves root, blueprint, surfaces, and public code anchors.")
