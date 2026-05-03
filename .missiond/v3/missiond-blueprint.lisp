@@ -801,7 +801,7 @@
       :entry [master-control-runtime.notify periodic-heartbeat]
       :core
         ((step s1 :logic "probe codex MCP server readiness from codex mcp list and unattended approval readiness from ~/.codex/config.toml tool approval_mode entries")
-		         (step s2 :logic "classify phase as observe_event -> classify_objective -> create_context_pack -> dispatch_investigators -> compile_shards -> dispatch_implementers -> verify -> close_or_backfill, then build short Codex control prompt with event_cursor, event_summary, phase, active_objective_id, and context_pack_path; require MissionD MCP first (mission_intent, mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status), query BoardTask by id for Board events, call mission_task_delegate directly for delegation requests with two-stage metadata when available, use mission_board_note_add for progress/summary notes, and forbid broad shell scans unless MCP surfaces are missing")
+		         (step s2 :logic "classify phase as observe_event -> classify_objective -> create_context_pack -> dispatch_investigators -> compile_shards -> dispatch_implementers -> verify -> close_or_backfill, then build short Codex control prompt with event_cursor, event_summary, phase, active_objective_id, and context_pack_path; require MissionD MCP first (mission_intent, mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status), query BoardTask by id for Board events, never recursively call mission_task_delegate for BoardTasks that already contain ## Swarm metadata or task_class=context-pack/code from mission_swarm_run, verify any delegated task id with mission_board_query(action=get) before writing a success note, use mission_board_note_add for progress/summary notes, and forbid broad shell scans unless MCP surfaces are missing")
          (step s3 :logic "write checkpoint before any durable Board/KB/dispatch action")
          (step s4 :logic "on daemon-startup, ensure slot-codex-master-control is spawned when Exited/Error but do not consume a control turn; startup is for residency, not decision work")
          (step s5 :logic "before sending an event control turn, ensure slot-codex-master-control is spawned when Exited/Error, wait briefly for Idle/SlashMenu, and verify the visible Codex footer still matches gpt-5.5 xhigh; if the slot was downgraded by an interactive model/rate-limit prompt, restart it before dispatch")
@@ -816,7 +816,7 @@
       :core
         ((step s1 :logic "create read-only context organizer BoardTasks before code shards")
          (step s2 :logic "compile accepted context-pack into exact file/region write scopes")
-	         (step s3 :logic "use mission_swarm_run for productized investigate -> integrate -> implement -> verify fanout, or mission_task_delegate for one exact shard")
+	         (step s3 :logic "use mission_swarm_run for productized investigate -> integrate -> implement -> verify fanout, or mission_task_delegate for one exact shard; swarm-created worker BoardTasks are terminal worker units and must not be recursively delegated again")
          (step s4 :logic "require BoardTask ID, context-pack path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs in every prompt"))
       :egress [BoardTaskCreated SlotEvent::TaskDispatched mission_execution])
     (master-recovery

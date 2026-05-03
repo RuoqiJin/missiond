@@ -784,7 +784,7 @@ pub(crate) fn build_master_tick_prompt(
     mcp_ready: bool,
 ) -> String {
     format!(
-        "MissionD master-control tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nRules:\n1. Use MissionD MCP first: mission_intent(project=\"missiond\", action=\"summary\"), mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status as needed.\n2. Do not run broad shell scans such as repo-wide ls/rg/find unless the MCP surfaces are missing; if you must use shell, explain the gap first.\n3. For BoardTaskCreated/Updated, query that BoardTask by id before deciding.\n4. Follow the state machine: observe_event -> classify_objective -> create_context_pack -> dispatch_investigators -> compile_shards -> dispatch_implementers -> verify -> close_or_backfill.\n5. For implementation work, use mission_swarm_run for productized investigate -> integrate -> implement -> verify fanout, or use mission_task_delegate for one exact shard. Both paths must provide context_pack_path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, task_class, pool_hint, and engine_hint.\n6. Use mission_board_note_add for progress/summary notes and mission_board_update only for status/parent/metadata changes.\n7. Return a compact decision: no-op, create/update BoardTask, delegate worker, write KB note, or blocked.\n8. Do not edit code directly.",
+        "MissionD master-control tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nRules:\n1. Use MissionD MCP first: mission_intent(project=\"missiond\", action=\"summary\"), mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status as needed.\n2. Do not run broad shell scans such as repo-wide ls/rg/find unless the MCP surfaces are missing; if you must use shell, explain the gap first.\n3. For BoardTaskCreated/Updated, query that BoardTask by id before deciding.\n4. If a BoardTask description contains \"## Swarm metadata\" or task_class=context-pack/code from mission_swarm_run, it is already a worker BoardTask; do not recursively call mission_task_delegate for it.\n5. Follow the state machine: observe_event -> classify_objective -> create_context_pack -> dispatch_investigators -> compile_shards -> dispatch_implementers -> verify -> close_or_backfill.\n6. For implementation work, use mission_swarm_run for productized investigate -> integrate -> implement -> verify fanout, or use mission_task_delegate for one exact shard. Both paths must provide context_pack_path, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, task_class, pool_hint, and engine_hint.\n7. Before claiming a delegated task id in a Board note, verify it exists via mission_board_query(action=\"get\"); otherwise write a blocked diagnostic, not a success note.\n8. Use mission_board_note_add for progress/summary notes and mission_board_update only for status/parent/metadata changes.\n9. Return a compact decision: no-op, create/update BoardTask, delegate worker, write KB note, or blocked.\n10. Do not edit code directly.",
         snapshot.phase,
         snapshot
             .active_objective_id
@@ -1475,8 +1475,11 @@ mod tests {
         assert!(prompt.contains("mission_convergence_status"));
         assert!(prompt.contains("Do not run broad shell scans"));
         assert!(prompt.contains("query that BoardTask by id"));
+        assert!(prompt.contains("already a worker BoardTask"));
+        assert!(prompt.contains("do not recursively call mission_task_delegate"));
         assert!(prompt.contains("mission_swarm_run"));
         assert!(prompt.contains("mission_task_delegate"));
+        assert!(prompt.contains("verify it exists via mission_board_query"));
         assert!(prompt.contains("mission_board_note_add"));
     }
 
