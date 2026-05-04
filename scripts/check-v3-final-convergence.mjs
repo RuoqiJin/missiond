@@ -102,6 +102,7 @@ const BLUEPRINT_NEEDLES = [
   ['swarm-run resolves project_root', 'mission_swarm_run MUST resolve project_id to a registered project_root'],
   ['autopilot overrides cwd to BoardTask project_root', 'Autopilot ensure_pty MUST override pty_slot.cwd'],
   ['durable conversation taskId attribution', 'bind conversations.task_id to the active BoardTask via a bounded retry helper'],
+  ['taskId query survives slot reuse', 'message-anchored BoardTask id fallback'],
   ['runtime v3 paths', '.missiond/v3/runtime/'],
   ['V2 historical status', ':v2 "Kept as historical'],
   ['entry/core/egress function shape', ':entry ['],

@@ -946,7 +946,7 @@ fn looks_like_active_tui_progress(text: &str) -> bool {
 
 fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    const INVESTIGATION_VERBS: [&str; 12] = [
+    const INVESTIGATION_VERBS: [&str; 13] = [
         "let me inspect",
         "let me peek",
         "let me check",
@@ -954,19 +954,21 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me look",
         "let me run",
         "let me verify",
+        "let me write",
         "i need to inspect",
         "i need to check",
         "i need to read",
         "i'm going to",
         "i am going to",
     ];
-    const MUTATION_PROGRESS_MARKERS: [&str; 17] = [
+    const MUTATION_PROGRESS_MARKERS: [&str; 20] = [
         "now committing",
         "committing only",
         "now staging",
         "now running",
         "now verifying",
         "now checking",
+        "now writing",
         "now committing only",
         "i'll commit",
         "i will commit",
@@ -974,6 +976,8 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i will run",
         "i'll verify",
         "i will verify",
+        "i'll write",
+        "i will write",
         "i'll insert",
         "i will insert",
         "i'll update",
@@ -3921,6 +3925,35 @@ mod tests {
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-03T10:14:50Z"))
                 .as_deref(),
             Some("M6 closure is already in place.\n\n## Verification Report\n- checker-first mapping passes\n- no edits needed")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_intermediate_write_narration() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T06:14:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "Now I have a complete picture. Let me write the surfaces file.",
+                "2026-05-04T06:15:00Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "JARVIS_S5_SURFACES_DONE\n\nCommit: `7fbdd2a feat(jarvis): add M6 surface map`.",
+                "2026-05-04T06:17:00Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T06:13:50Z"))
+                .as_deref(),
+            Some("JARVIS_S5_SURFACES_DONE\n\nCommit: `7fbdd2a feat(jarvis): add M6 surface map`.")
         );
     }
 

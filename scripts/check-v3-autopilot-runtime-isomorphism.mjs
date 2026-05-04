@@ -159,6 +159,8 @@ function checkFiles(root) {
     'looks_like_intermediate_assistant_narration',
     'MUTATION_PROGRESS_MARKERS',
     'Now committing',
+    'let me write',
+    'provider_final_summary_rejects_intermediate_write_narration',
     'provider_final_summary_rejects_intermediate_investigation_narration',
     'durable_completion',
     'durable final',

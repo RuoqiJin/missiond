@@ -132,6 +132,7 @@ function checkFiles(root, files) {
     'conversation/router.rs owns mission_conversation_query',
     'conversation/query.rs owns read-model query actions',
     'when mission_conversation_query list is scoped by taskId and conversationType is omitted, query all provider conversation rows',
+    'message-anchored BoardTask id fallback',
     'compaction timeline reconstruction tolerates legacy NULL started_at/message_count rows',
     'conversation/events.rs owns analysis/event egress',
     'conversation/maintenance.rs owns embedding/reconcile work items',
@@ -329,6 +330,7 @@ function checkFiles(root, files) {
     'None | Some("all") => String::new()',
     'task_scoped_query_without_type_includes_provider_conversations',
     'task_scoped_query_keeps_explicit_type_filters',
+    "m.content ILIKE ('%' || $1 || '%')",
     "COALESCE(started_at, '') AS started_at",
     'COALESCE(message_count, 0) AS message_count',
   ]);
