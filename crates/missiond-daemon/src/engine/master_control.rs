@@ -1337,7 +1337,9 @@ fn is_terminal_board_status_event(summary: &str) -> bool {
             || lower.contains("->completed")
             || lower.contains("->closed")
             || lower.contains("->failed")
-            || lower.contains("->blocked"))
+            || lower.contains("->blocked")
+            || lower.contains("->skipped")
+            || lower.contains("->terminal"))
 }
 
 fn is_terminal_board_task_status(status: &BoardTaskStatus) -> bool {
@@ -2104,6 +2106,13 @@ mod tests {
             &snapshot,
             &decision
         ));
+
+        snapshot.active_objective_id = Some("parent-objective".to_string());
+        snapshot.last_event_summary =
+            Some("BoardEvent.status_changed: task_id=parent-objective Done->terminal".to_string());
+        let decision = classify_master_decision_state("periodic-heartbeat", &snapshot).await;
+        assert_eq!(decision.active_objective_id, None);
+        assert_eq!(decision.context_pack_path, None);
 
         snapshot.active_objective_id = None;
         let decision = classify_master_decision_state("daemon-startup", &snapshot).await;
