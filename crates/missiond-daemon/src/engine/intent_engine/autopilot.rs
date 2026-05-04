@@ -1103,6 +1103,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "acknowledged:",
         "acknowledged;",
         "now i have all the context",
+        "now i have the full picture",
         "now i have full clarity",
         "now i'll ",
         "now i’ll ",
@@ -1119,6 +1120,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "now verifying",
         "now checking",
         "now writing",
+        "let me make the planned edits",
         "now let me append",
         "now let me update",
         "retrying once",
@@ -4432,6 +4434,70 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "full-clarity explanation progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_full_picture_planned_edits_progress() {
+        let progress =
+            "Working tree is clean. Now I have the full picture. Let me make the planned edits.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T23:10:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T23:11:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(
+                &messages,
+                "task-123",
+                Some("2026-05-04T23:09:50Z")
+            ),
+            None,
+            "observed full-picture/planned-edits progress frame must not be picked up as durable final"
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "full-picture planned-edits progress must classify as active progress"
+        );
+    }
+
+    /// V3 autopilot-runtime regression :: pinned sentence from BoardTask
+    /// `eb536f4c-63e4-4239-a915-f89eb36ce3f4`. The exact frame
+    /// "Working tree is clean. Now I have the full picture. Let me make the
+    /// planned edits." was falsely accepted as durable final by the M6 auth
+    /// shard summary-close path. The string is held verbatim here so the
+    /// V3 autopilot-runtime isomorphism checker can require the test name as
+    /// part of the summary-close contract; renaming or removing this test
+    /// MUST also update `scripts/check-v3-autopilot-runtime-isomorphism.mjs`.
+    #[test]
+    fn provider_final_summary_rejects_working_tree_clean_full_picture_edit_progress() {
+        let progress =
+            "Working tree is clean. Now I have the full picture. Let me make the planned edits.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T23:10:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T23:11:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(
+                &messages,
+                "task-123",
+                Some("2026-05-04T23:09:50Z")
+            ),
+            None,
+            "exact M6-observed working-tree-clean / full-picture / planned-edits frame must not be selected as durable final"
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "exact M6-observed working-tree-clean / full-picture / planned-edits frame must classify as active progress"
         );
     }
 

@@ -169,6 +169,8 @@ function checkFiles(root) {
     'Now committing',
     'let me write',
     'let me create',
+    'now i have the full picture',
+    'let me make the planned edits',
     'writing the',
     'staging and committing',
     'provider_final_summary_rejects_staging_and_committing_narration',
@@ -177,6 +179,8 @@ function checkFiles(root) {
     'provider_final_summary_rejects_intermediate_write_narration',
     'provider_final_summary_rejects_intermediate_investigation_narration',
     'provider_final_summary_rejects_full_clarity_explanation_progress',
+    'provider_final_summary_rejects_full_picture_planned_edits_progress',
+    'provider_final_summary_rejects_working_tree_clean_full_picture_edit_progress',
     'provider_final_summary_rejects_insight_only_no_evidence',
     'provider_final_summary_rejects_begin_by_reading_progress',
     'provider_final_summary_rejects_let_me_examine_progress',
@@ -302,6 +306,8 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn provider_final_summary_rejects_intermediate_write_narration() {}
     fn provider_final_summary_rejects_intermediate_investigation_narration() {}
     fn provider_final_summary_rejects_full_clarity_explanation_progress() {}
+    fn provider_final_summary_rejects_full_picture_planned_edits_progress() {}
+    fn provider_final_summary_rejects_working_tree_clean_full_picture_edit_progress() {}
     fn provider_final_summary_rejects_insight_only_no_evidence() {}
     fn provider_final_summary_rejects_begin_by_reading_progress() {}
     fn provider_final_summary_rejects_let_me_examine_progress() {}
