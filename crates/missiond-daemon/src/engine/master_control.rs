@@ -517,17 +517,24 @@ impl MasterControlService {
         };
         match self.state.store.get_board_task(&active_id).await {
             Ok(Some(task)) if is_terminal_board_task_status(&task.status) => {
-                snapshot.active_objective_id = None;
-                snapshot.phase = "observe_event".to_string();
-                snapshot.context_pack_path = None;
-                snapshot.resume_instruction = format!(
+                let resume_instruction = format!(
                     "active objective {} is terminal ({:?}); observe next durable event",
                     active_id, task.status
                 );
-                snapshot.last_event_summary = Some(format!(
+                let event_summary = format!(
                     "BoardEvent.status_changed: task_id={} {:?}->terminal",
                     active_id, task.status
-                ));
+                );
+                snapshot.active_objective_id = None;
+                snapshot.phase = "observe_event".to_string();
+                snapshot.context_pack_path = None;
+                snapshot.resume_instruction = resume_instruction.clone();
+                snapshot.last_event_summary = Some(event_summary.clone());
+                *self.runtime.active_objective_id.write().await = None;
+                *self.runtime.phase.write().await = "observe_event".to_string();
+                *self.runtime.context_pack_path.write().await = None;
+                *self.runtime.resume_instruction.write().await = resume_instruction;
+                *self.runtime.last_event_summary.write().await = Some(event_summary);
             }
             Ok(Some(_)) | Ok(None) => {}
             Err(err) => {

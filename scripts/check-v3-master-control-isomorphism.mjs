@@ -226,6 +226,8 @@ function check(s, diagnostics) {
     'outside_objective_heartbeat',
     '.or_else(|| event_task_id.clone())',
     'snapshot_with_live_active_objective',
+    '*self.runtime.active_objective_id.write().await = None',
+    '*self.runtime.context_pack_path.write().await = None',
     'is_terminal_board_task_status',
     'BoardTaskStatus::Skipped',
     'terminal_board_task_statuses_clear_active_objectives',
