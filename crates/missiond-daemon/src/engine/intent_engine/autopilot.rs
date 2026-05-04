@@ -1094,6 +1094,9 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "acknowledged;",
         "now i have all the context",
         "now i have full clarity",
+        "now i'll ",
+        "now i’ll ",
+        "now i will ",
     ];
     const MUTATION_PROGRESS_MARKERS: [&str; 29] = [
         "now committing",
@@ -4280,6 +4283,28 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "let-me-examine progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_now_ill_examine_progress() {
+        let progress = "Now I'll examine the users_repo to understand `find_or_create_google_user` and the registration_disabled error path, plus the DB schema for users/identities to know exactly how to seed.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "now-i'll-examine progress must not be treated as durable final"
         );
     }
 
