@@ -1150,6 +1150,9 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
     {
         return true;
     }
+    if trimmed.starts_with("let me ") {
+        return true;
+    }
     (trimmed.starts_with("good —") || trimmed.starts_with("good -"))
         && (trimmed.contains("let me ") || trimmed.contains("i need to "))
 }
@@ -4237,6 +4240,28 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "begin-by-reading progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_let_me_examine_progress() {
+        let progress = "Let me examine the actual table schemas to know what columns to seed.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "let-me-examine progress must not be treated as durable final"
         );
     }
 
