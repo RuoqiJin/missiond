@@ -157,6 +157,7 @@ function checkFiles(root) {
     'is_probably_provider_tool_invocation_message',
     'looks_like_bare_tool_call_marker',
     'looks_like_intermediate_assistant_narration',
+    'looks_like_insight_only_progress',
     'MUTATION_PROGRESS_MARKERS',
     'Now committing',
     'let me write',
@@ -169,6 +170,7 @@ function checkFiles(root) {
     'provider_final_summary_rejects_intermediate_write_narration',
     'provider_final_summary_rejects_intermediate_investigation_narration',
     'provider_final_summary_rejects_full_clarity_explanation_progress',
+    'provider_final_summary_rejects_insight_only_no_evidence',
     'durable_completion',
     'durable final',
     'latest_assistant_after_task_prompt',
@@ -277,12 +279,15 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn is_probably_provider_tool_invocation_message() {}
     fn looks_like_bare_tool_call_marker() {}
     fn looks_like_intermediate_assistant_narration() {}
+    fn looks_like_insight_only_progress() {}
     fn provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session() {}
     fn provider_final_summary_rejects_staging_and_committing_narration() {}
     fn provider_final_summary_rejects_intermediate_create_narration() {}
     fn provider_final_summary_rejects_intermediate_writing_narration() {}
     fn provider_final_summary_rejects_intermediate_write_narration() {}
     fn provider_final_summary_rejects_intermediate_investigation_narration() {}
+    fn provider_final_summary_rejects_full_clarity_explanation_progress() {}
+    fn provider_final_summary_rejects_insight_only_no_evidence() {}
     const MUTATION_PROGRESS_MARKERS: [&str; 2] = ["staging and committing", "writing the"];
     const INVESTIGATION_VERBS: [&str; 3] = ["let me write", "let me create", "Now committing"];
     async fn reconcile_slot_provider_conversation() { reconcile_conversation_messages(); }

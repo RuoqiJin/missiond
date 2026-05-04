@@ -960,6 +960,7 @@ fn is_probably_active_tui_summary(summary: &str) -> bool {
     let trimmed = summary.trim();
     trimmed.is_empty()
         || looks_like_active_tui_progress(trimmed)
+        || looks_like_insight_only_progress(trimmed)
         || looks_like_intermediate_assistant_narration(trimmed)
 }
 
@@ -988,6 +989,43 @@ fn worker_final_close_blocker(summary: &str) -> Option<&'static str> {
 fn looks_like_active_tui_progress(text: &str) -> bool {
     text.lines()
         .any(|line| is_tui_progress_line(line.trim_start()))
+}
+
+fn looks_like_insight_only_progress(text: &str) -> bool {
+    let normalized = text
+        .trim_start_matches(|c: char| {
+            c == '`' || c == '"' || c == '⏺' || c == '●' || c.is_whitespace()
+        })
+        .trim_start();
+    let lower = normalized.to_ascii_lowercase();
+    if !(lower.starts_with("★ insight")
+        || lower.starts_with("insight ")
+        || lower.contains("\n★ insight"))
+    {
+        return false;
+    }
+    const COMPLETION_EVIDENCE_MARKERS: [&str; 17] = [
+        "acceptance",
+        "changed file",
+        "changed files",
+        "commit hash",
+        "commit ",
+        "commit:",
+        "commit_status",
+        "completed",
+        "done",
+        "git diff --check",
+        "passed",
+        "scope",
+        "test result",
+        "tests pass",
+        "verification",
+        "verified",
+        "worktree",
+    ];
+    !COMPLETION_EVIDENCE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
 }
 
 fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
@@ -4221,6 +4259,31 @@ mod tests {
             is_probably_active_tui_summary(progress),
             "full-clarity explanation progress must not be treated as durable final"
         );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_insight_only_no_evidence() {
+        let progress = "★ Insight ─────────────────────────────────────\nThe SSOT establishes a layered closure pattern: g1a (config seam) → g1b (AppState harness) → g1c (handler fixtures) → checker rewrite → success-path runtime. Each addendum narrows the remaining gap rather than rewriting history. This dispatch's job is the final piece: success-path coverage.\n─────────────────────────────────────────────────";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "insight-only explanation blocks must not be treated as durable final evidence"
+        );
+        assert!(!is_probably_active_tui_summary(
+            "★ Insight\nVerification: cargo test passed.\nCommit hash: abc1234."
+        ));
     }
 
     #[test]
