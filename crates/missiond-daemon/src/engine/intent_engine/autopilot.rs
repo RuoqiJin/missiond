@@ -992,7 +992,9 @@ fn looks_like_active_tui_progress(text: &str) -> bool {
 
 fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    const INVESTIGATION_VERBS: [&str; 23] = [
+    const INVESTIGATION_VERBS: [&str; 36] = [
+        "let me start",
+        "let me re-verify",
         "let me inspect",
         "let me peek",
         "let me check",
@@ -1014,8 +1016,19 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i need to read",
         "i need to verify",
         "i need to confirm",
+        "i'll execute",
+        "i’ll execute",
+        "i will execute",
+        "i will redo",
+        "i'll start",
+        "i’ll start",
+        "i will start",
+        "i'll treat",
+        "i’ll treat",
         "i'm going to",
         "i am going to",
+        "acknowledged:",
+        "acknowledged;",
     ];
     const MUTATION_PROGRESS_MARKERS: [&str; 29] = [
         "now committing",
@@ -4115,6 +4128,50 @@ mod tests {
         assert!(
             is_probably_active_tui_summary("Let me corroborate the MySQL classification by greping inside read scope and confirming the live DB driver."),
             "corroboration progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_initial_worker_intent_progress() {
+        let progress = "I'll execute this read-only static analysis task. Let me start by reading the context pack and surveying the auth service structure.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "initial worker intent must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_acknowledged_reverify_progress() {
+        let progress = "Acknowledged: this is a re-dispatch under new BoardTask `b731331d-b6c8-4e49-9f7b-239e2fe36cf9`. I will redo the static analysis fresh and not recall conclusions from that prior task as evidence. Let me re-verify the load-bearing facts directly.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "acknowledged re-verify progress must not be treated as durable final"
         );
     }
 
