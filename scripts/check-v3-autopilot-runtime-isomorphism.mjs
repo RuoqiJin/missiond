@@ -100,6 +100,7 @@ function checkFiles(root) {
 	    ':idle-durable-summary-close',
 	    'await_durable_provider_completion_for_slot_task',
 	    'extract_worker_final_summary(res.response, full_prompt)',
+	    "I'll begin by reading",
 	    'wakeup will fire',
 	    'no space left on device',
 	    'bare Bash(...)-style tool-call lines',
@@ -161,6 +162,7 @@ function checkFiles(root) {
     'looks_like_intermediate_assistant_narration',
     'looks_like_insight_only_progress',
     'looks_like_retry_or_wakeup_progress',
+    "i'll begin",
     'MUTATION_PROGRESS_MARKERS',
     'Now committing',
     'let me write',
@@ -174,6 +176,7 @@ function checkFiles(root) {
     'provider_final_summary_rejects_intermediate_investigation_narration',
     'provider_final_summary_rejects_full_clarity_explanation_progress',
     'provider_final_summary_rejects_insight_only_no_evidence',
+    'provider_final_summary_rejects_begin_by_reading_progress',
     'provider_final_summary_rejects_wakeup_retry_blocker',
     'durable_completion',
     'durable final',
@@ -250,7 +253,7 @@ function buildFixture() {
         :egress [BoardEvent SlotEvent])))
 	  (execution-ownership delegated-boardtask
 	    :close-owner
-	      (:summary-note-source "await_durable_provider_completion_for_slot_task then extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Retry/wakeup blocker narration such as wakeup will fire / no space left on device is not valid final evidence. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, bare Bash(...)-style tool-call lines, tool logs, and \`paste again to expand\` collapse markers."
+	      (:summary-note-source "await_durable_provider_completion_for_slot_task then extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Initial worker narration like I'll begin by reading and retry/wakeup blocker narration such as wakeup will fire / no space left on device is not valid final evidence. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, bare Bash(...)-style tool-call lines, tool logs, and \`paste again to expand\` collapse markers."
 	       :settle-window "wait_for_worker_final_settle_window projects the high-confidence final summary settle policy and durable-final polling."
 	       :idle-durable-summary-close "delayed active-frame tasks close from durable provider-or-note evidence + idle slot diagnosis."))
   (implementation-map
@@ -285,6 +288,7 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn looks_like_intermediate_assistant_narration() {}
     fn looks_like_insight_only_progress() {}
     fn looks_like_retry_or_wakeup_progress() {}
+    const INVESTIGATION_VERBS: [&str; 4] = ["i'll begin", "let me write", "let me create", "Now committing"];
     fn provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session() {}
     fn provider_final_summary_rejects_staging_and_committing_narration() {}
     fn provider_final_summary_rejects_intermediate_create_narration() {}
@@ -293,9 +297,9 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn provider_final_summary_rejects_intermediate_investigation_narration() {}
     fn provider_final_summary_rejects_full_clarity_explanation_progress() {}
     fn provider_final_summary_rejects_insight_only_no_evidence() {}
+    fn provider_final_summary_rejects_begin_by_reading_progress() {}
     fn provider_final_summary_rejects_wakeup_retry_blocker() {}
     const MUTATION_PROGRESS_MARKERS: [&str; 2] = ["staging and committing", "writing the"];
-    const INVESTIGATION_VERBS: [&str; 3] = ["let me write", "let me create", "Now committing"];
     async fn reconcile_slot_provider_conversation() { reconcile_conversation_messages(); }
     async fn durable_provider_completion_for_slot_task() { get_conversations_by_task_id(); get_slot_session(); set_conversation_task_id(); }
     async fn await_durable_provider_completion_for_slot_task() { reconcile_slot_provider_conversation().await; durable_provider_completion_for_slot_task().await; }

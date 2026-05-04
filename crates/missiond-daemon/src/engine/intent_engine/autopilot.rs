@@ -1050,7 +1050,7 @@ fn looks_like_retry_or_wakeup_progress(text: &str) -> bool {
 
 fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    const INVESTIGATION_VERBS: [&str; 40] = [
+    const INVESTIGATION_VERBS: &[&str] = &[
         "let me start",
         "let me re-verify",
         "let me inspect",
@@ -1080,6 +1080,9 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i’ll execute",
         "i will execute",
         "i will redo",
+        "i'll begin",
+        "i’ll begin",
+        "i will begin",
         "i'll start",
         "i’ll start",
         "i will start",
@@ -4212,6 +4215,28 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "initial worker intent must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_begin_by_reading_progress() {
+        let progress = "I'll begin by reading the context pack and the existing test/harness/SSOT files in parallel to map out what's already in place.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "begin-by-reading progress must not be treated as durable final"
         );
     }
 
