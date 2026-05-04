@@ -4728,6 +4728,41 @@ mod tests {
     }
 
     #[test]
+    fn provider_final_summary_rejects_exact_git_diff_clean_then_append_progress() {
+        // Regression guard for the exact worker frame observed in the wild
+        // (BoardTask 8315b1b3): the worker reports a clean `git diff --check`
+        // and, in the same line, announces more report-appending work. The
+        // ellipsis tail and the lack of backticks around `git diff --check`
+        // distinguish this from the earlier `…check passed then append…`
+        // regression — both shapes must continue to be classified as
+        // non-final progress so Autopilot does not close on a frame that
+        // still carries pending mutation intent.
+        let progress = "git diff --check is clean. Now let me append §13...";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T14:20:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T14:21:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(
+                &messages,
+                "task-123",
+                Some("2026-05-04T14:19:50Z")
+            ),
+            None,
+            "exact observed `git diff --check is clean. Now let me append §13...` frame must not be picked up as the durable final"
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "exact observed git-diff-clean-then-append frame must classify as active progress"
+        );
+    }
+
+    #[test]
     fn durable_completion_summary_must_be_after_claim_when_known() {
         let before = test_note(
             missiond_core::types::BoardNoteType::Summary,

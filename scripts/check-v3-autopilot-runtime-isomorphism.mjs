@@ -181,6 +181,8 @@ function checkFiles(root) {
     'provider_final_summary_rejects_begin_by_reading_progress',
     'provider_final_summary_rejects_let_me_examine_progress',
     'provider_final_summary_rejects_wakeup_retry_blocker',
+    'provider_final_summary_rejects_check_passed_then_append_report_progress',
+    'provider_final_summary_rejects_exact_git_diff_clean_then_append_progress',
     'durable_completion',
     'durable final',
     'latest_assistant_after_task_prompt',
