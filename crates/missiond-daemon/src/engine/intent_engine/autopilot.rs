@@ -959,7 +959,7 @@ fn is_probably_active_tui_summary(summary: &str) -> bool {
 
 fn worker_final_close_blocker(summary: &str) -> Option<&'static str> {
     let lower = summary.to_ascii_lowercase();
-    const BLOCKING_MARKERS: [(&str, &str); 9] = [
+    const BLOCKING_MARKERS: [(&str, &str); 13] = [
         ("gpg pinentry", "gpg-pinentry"),
         ("pinentry was cancelled", "gpg-pinentry"),
         ("pinentry was canceled", "gpg-pinentry"),
@@ -969,6 +969,10 @@ fn worker_final_close_blocker(summary: &str) -> Option<&'static str> {
         ("failed to commit", "commit-failed"),
         ("could not commit", "commit-failed"),
         ("commit did not succeed", "commit-failed"),
+        ("plan mode and cannot directly modify", "plan-mode-no-write"),
+        ("plan mode and can't directly modify", "plan-mode-no-write"),
+        ("cannot directly modify", "plan-mode-no-write"),
+        ("cannot write the file", "plan-mode-no-write"),
     ];
     BLOCKING_MARKERS
         .iter()
@@ -1584,18 +1588,24 @@ async fn select_workstation_pool_slot(
         .into_iter()
         .collect();
     if engine_hint.is_some() || pool_hint.is_some() {
-        let matching_candidates: Vec<_> = candidates
+        let matching_candidates: Vec<_> = workstation_config
+            .workstation_pool()
             .iter()
-            .copied()
             .filter(|worker| {
-                workstation_worker_matches_dispatch_hints(
-                    worker,
-                    engine_hint.as_deref(),
-                    pool_hint.as_deref(),
-                )
+                worker.accepts_boardtask
+                    && workstation_worker_matches_dispatch_hints(
+                        worker,
+                        engine_hint.as_deref(),
+                        pool_hint.as_deref(),
+                    )
             })
             .collect();
         if !matching_candidates.is_empty() {
+            // Explicit engine/pool hints are operator intent. Treat a matching
+            // worker declared anywhere in the V3 pool as a hard constraint
+            // even when task_class parsing or class membership would otherwise
+            // narrow it away; if that worker is busy, defer instead of
+            // spending a different provider.
             candidates = matching_candidates;
         }
     }
@@ -4045,6 +4055,22 @@ mod tests {
     }
 
     #[test]
+    fn worker_final_close_blocker_detects_plan_mode_no_write() {
+        assert_eq!(
+            worker_final_close_blocker(
+                "I am operating in Plan Mode and cannot directly modify the requested file."
+            ),
+            Some("plan-mode-no-write")
+        );
+        assert_eq!(
+            worker_final_close_blocker(
+                "The analysis is complete and no file mutation was required."
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn provider_final_summary_rejects_claude_tool_invocation_records() {
         let messages = vec![
             test_conversation_message(
@@ -5282,6 +5308,38 @@ mod tests {
                 .iter()
                 .all(|worker| worker.engine == "claude-code"),
             "explicit Claude hints must not leave Gemini as a fallback candidate"
+        );
+    }
+
+    #[test]
+    fn explicit_dispatch_hints_search_full_pool_before_task_class_fallback() {
+        let cfg = WorkstationRuntimeConfig::default();
+        let class_candidates = cfg.boardtask_pool_candidates("research");
+        assert!(
+            !class_candidates
+                .iter()
+                .any(|worker| worker.id == "claude-code-default"),
+            "research baseline should prefer read-only lanes before explicit hints"
+        );
+        let matching: Vec<_> = cfg
+            .workstation_pool()
+            .iter()
+            .filter(|worker| {
+                worker.accepts_boardtask
+                    && workstation_worker_matches_dispatch_hints(
+                        worker,
+                        Some("claude-code"),
+                        Some("claude-code-default"),
+                    )
+            })
+            .collect();
+        assert_eq!(
+            matching
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-code-default"],
+            "explicit engine/pool hints must be resolved against the full V3 pool"
         );
     }
 
