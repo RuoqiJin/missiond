@@ -334,8 +334,12 @@ function checkFiles(root, files) {
     'settings.local.json',
     'SESSION_REGISTER_HOOK',
     'CONTEXT_INJECT_HOOK',
+    'MISSIOND_CLAUDE_CONTEXT_PREFETCH',
     'SessionStart',
     'UserPromptSubmit',
+    'remove_hook_command',
+    'sync_slot_hooks_removes_user_prompt_context_hook_by_default',
+    'sync_slot_hooks_can_opt_in_user_prompt_context_hook',
     'missiond-session-register.sh',
     'missiond-context-inject-v2.sh',
   ]);
@@ -653,9 +657,12 @@ runtime_config.clamp_slot_ttl_secs(None);
   let a = "startup_slots slot_templates allowed_cwd_prefixes optional_non_nil_keyword model_profile_spawn_args default_spawn_model_for_template parse_spawn_model_arg slot_template available_slot_template_names timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking timeout-policy dynamic-slot-spawn ttl-policy dynamic-slot cwd-policy dynamic-slot string_list_keyword slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms dynamic_slot_spawn_timeout_secs deploy_review_timeout_ms load_blueprint_source locate_orchestrator_blueprint orchestrator blueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
-const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
+const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK MISSIOND_CLAUDE_CONTEXT_PREFETCH SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
 fn build_slot_tracking_env() {}
-fn sync_slot_hooks_to_local_settings() {}`);
+fn sync_slot_hooks_to_local_settings() {}
+fn remove_hook_command() {}
+fn sync_slot_hooks_removes_user_prompt_context_hook_by_default() {}
+fn sync_slot_hooks_can_opt_in_user_prompt_context_hook() {}`);
   writeFixture(root, DEFAULT_FILES.spawner, `
 sync_slot_hooks_to_local_settings(cwd);
 build_slot_tracking_env();

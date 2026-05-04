@@ -54,6 +54,18 @@ pub(crate) async fn build_slot_tracking_env(
 const SESSION_REGISTER_HOOK: &str = "bash ~/.claude/hooks/missiond-session-register.sh";
 const CONTEXT_INJECT_HOOK: &str = "bash ~/.claude/hooks/missiond-context-inject-v2.sh";
 
+fn claude_user_prompt_context_hook_enabled() -> bool {
+    matches!(
+        std::env::var("MISSIOND_CLAUDE_CONTEXT_PREFETCH")
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 /// Keep Claude Code's project-local settings aligned with the slot tracking
 /// contract. This avoids mutating global `~/.claude/settings.json`, while still
 /// making project-bound MissionD workstations load the SessionStart UUID hook
@@ -77,6 +89,10 @@ pub(crate) fn sync_slot_hooks_to_local_settings(cwd: &Path) {
 }
 
 fn sync_slot_hooks_inner(cwd: &Path) -> Result<bool> {
+    sync_slot_hooks_inner_with_context_hook(cwd, claude_user_prompt_context_hook_enabled())
+}
+
+fn sync_slot_hooks_inner_with_context_hook(cwd: &Path, context_hook_enabled: bool) -> Result<bool> {
     let claude_dir = cwd.join(".claude");
     std::fs::create_dir_all(&claude_dir)
         .with_context(|| format!("create_dir_all {}", claude_dir.display()))?;
@@ -117,7 +133,11 @@ fn sync_slot_hooks_inner(cwd: &Path) -> Result<bool> {
         Some("resume"),
         SESSION_REGISTER_HOOK,
     );
-    changed |= ensure_hook_command(&mut root, "UserPromptSubmit", None, CONTEXT_INJECT_HOOK);
+    changed |= if context_hook_enabled {
+        ensure_hook_command(&mut root, "UserPromptSubmit", None, CONTEXT_INJECT_HOOK)
+    } else {
+        remove_hook_command(&mut root, "UserPromptSubmit", None, CONTEXT_INJECT_HOOK)
+    };
 
     if !changed {
         return Ok(false);
@@ -182,6 +202,49 @@ fn ensure_hook_command(
     true
 }
 
+fn remove_hook_command(
+    root: &mut Value,
+    event: &str,
+    matcher: Option<&str>,
+    command: &str,
+) -> bool {
+    let Some(hooks_obj) = root.get_mut("hooks").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let Some(entries) = hooks_obj.get_mut(event).and_then(Value::as_array_mut) else {
+        return false;
+    };
+
+    let mut changed = false;
+    for entry in entries.iter_mut() {
+        if !entry_matches(entry, matcher) {
+            continue;
+        }
+        let Some(hooks) = entry.get_mut("hooks").and_then(Value::as_array_mut) else {
+            continue;
+        };
+        let before = hooks.len();
+        hooks.retain(|hook| {
+            hook.get("command")
+                .and_then(Value::as_str)
+                .map(|existing| !hook_command_matches(existing, command))
+                .unwrap_or(true)
+        });
+        changed |= hooks.len() != before;
+    }
+
+    if changed {
+        entries.retain(|entry| {
+            entry
+                .get("hooks")
+                .and_then(Value::as_array)
+                .map(|hooks| !hooks.is_empty())
+                .unwrap_or(true)
+        });
+    }
+    changed
+}
+
 fn entry_matches(entry: &mut Value, matcher: Option<&str>) -> bool {
     let Some(obj) = entry.as_object() else {
         return false;
@@ -202,16 +265,19 @@ fn hook_entry_has_command(entry: &Value, command: &str) -> bool {
                     || hook
                         .get("command")
                         .and_then(Value::as_str)
-                        .map(|existing| {
-                            existing.contains("missiond-session-register.sh")
-                                && command.contains("missiond-session-register.sh")
-                                || existing.contains("missiond-context-inject")
-                                    && command.contains("missiond-context-inject")
-                        })
+                        .map(|existing| hook_command_matches(existing, command))
                         .unwrap_or(false)
             })
         })
         .unwrap_or(false)
+}
+
+fn hook_command_matches(existing: &str, command: &str) -> bool {
+    existing == command
+        || existing.contains("missiond-session-register.sh")
+            && command.contains("missiond-session-register.sh")
+        || existing.contains("missiond-context-inject")
+            && command.contains("missiond-context-inject")
 }
 
 fn hook_command(command: &str) -> Value {
@@ -437,10 +503,59 @@ mod tests {
         let resume = &v["hooks"]["SessionStart"][1];
         assert_eq!(resume["matcher"], "resume");
         assert_eq!(resume["hooks"][0]["command"], SESSION_REGISTER_HOOK);
+        assert!(v["hooks"].get("UserPromptSubmit").is_none());
+    }
+
+    #[test]
+    fn sync_slot_hooks_can_opt_in_user_prompt_context_hook() {
+        let dir = tempdir().unwrap();
+
+        let changed = sync_slot_hooks_inner_with_context_hook(dir.path(), true).unwrap();
+
+        assert!(changed);
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        let v: Value = serde_json::from_str(&content).unwrap();
         assert_eq!(
             v["hooks"]["UserPromptSubmit"][0]["hooks"][0]["command"],
             CONTEXT_INJECT_HOOK
         );
+    }
+
+    #[test]
+    fn sync_slot_hooks_removes_user_prompt_context_hook_by_default() {
+        let dir = tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        let settings = json!({
+            "hooks": {
+                "UserPromptSubmit": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": CONTEXT_INJECT_HOOK,
+                                "timeout": 5
+                            }
+                        ]
+                    }
+                ]
+            }
+        });
+        std::fs::write(
+            dir.path().join(".claude/settings.local.json"),
+            serde_json::to_string_pretty(&settings).unwrap(),
+        )
+        .unwrap();
+
+        assert!(sync_slot_hooks_inner(dir.path()).unwrap());
+        let content =
+            std::fs::read_to_string(dir.path().join(".claude/settings.local.json")).unwrap();
+        let v: Value = serde_json::from_str(&content).unwrap();
+        assert!(v["hooks"]
+            .get("UserPromptSubmit")
+            .and_then(Value::as_array)
+            .map(|hooks| hooks.is_empty())
+            .unwrap_or(true));
     }
 
     #[test]
