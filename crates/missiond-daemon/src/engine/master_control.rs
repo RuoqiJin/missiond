@@ -1069,7 +1069,7 @@ pub(crate) fn build_master_tick_prompt(
 ) -> String {
     let active_boardtask = render_active_objective_prompt_block(active_objective);
     format!(
-        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\n默认周期自省范围只看 MissionD V3 SSOT Lisp、V3 checker/final-convergence 静态结果，以及最近触碰 .missiond/v3/** 的 commit；只报告这些输入中能直接看出的逻辑不通、surface 缺口或 checker/runtime 投影漂移。当前 KB、Board backlog、事件总线历史、provider durable logs、历史会话都还没整理，默认不要把它们当架构审查输入。For default self-review, prefer mission_intent(project=\"missiond\", action=\"summary\") and mission_convergence_status.\n\nActive objective overrides default self-review: when active_objective_id is present, ignore the default self-review paragraph entirely. The active BoardTask shown above is the only load-bearing objective. First query exactly that BoardTask by id only if the embedded summary is insufficient, then follow its description. Any mission_board_create call while active_boardtask is present MUST set parentId to the active BoardTask id and MUST directly advance that active objective; do not create resident-master/self-maintenance tasks from PTY screen text, convergence-status disagreement, Board backlog, KB, provider logs, or historical conversation unless the active BoardTask explicitly asks for that maintenance. You may read only the project roots / files explicitly named by that BoardTask and its context_pack_path; do not browse Board open backlog. Do not call mission_kb_query, mission_conversation_query, or provider-log tools unless the active BoardTask explicitly requests those sources. PTY recognition is diagnostic only.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe only the active objective state and wait for explicit durable task evidence. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise context-pack diagnosis. If your decision is create/update BoardTask or close_or_backfill, perform the corresponding MissionD MCP mutation (mission_board_note_add / mission_board_update / mission_board_create) before returning; if the mutation is not possible, return blocked with the reason. Do not edit code directly from the resident slot.\n\nReturn one compact decision after any required MCP mutation: no-op, create/update BoardTask, delegate worker, blocked, or close_or_backfill.",
+        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\nNo active objective means no-op: do not perform default self-review from this control turn. Scheduled/nightly self-review is a separate manual-first workflow and only runs through mission_nightly_evolution or MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true. The active BoardTask shown above is the only load-bearing objective. First query exactly that BoardTask by id only if the embedded summary is insufficient, then follow its description. Any mission_board_create call while active_boardtask is present MUST set parentId to the active BoardTask id and MUST directly advance that active objective; do not create resident-master/self-maintenance tasks from PTY screen text, convergence-status disagreement, Board backlog, KB, provider logs, historical conversation, or recent commit drift unless the active BoardTask explicitly asks for that maintenance. You may read only the project roots / files explicitly named by that BoardTask and its context_pack_path; do not browse Board open backlog. Do not call mission_kb_query, mission_conversation_query, provider-log tools, mission_intent, or mission_convergence_status unless the active BoardTask explicitly requests those sources. PTY recognition is diagnostic only.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe only the active objective state and wait for explicit durable task evidence. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise context-pack diagnosis. If your decision is create/update BoardTask or close_or_backfill, perform the corresponding MissionD MCP mutation (mission_board_note_add / mission_board_update / mission_board_create) before returning; if the mutation is not possible, return blocked with the reason. Do not edit code directly from the resident slot.\n\nReturn one compact decision after any required MCP mutation: no-op, create/update BoardTask, delegate worker, blocked, or close_or_backfill.",
         snapshot.phase,
         snapshot
             .active_objective_id
@@ -1229,11 +1229,7 @@ pub(crate) fn should_dispatch_control_turn(
         || now.saturating_sub(snapshot.last_control_turn_at_epoch)
             >= MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS;
     if reason == "event-wakeup" {
-        return outside_rate_limit
-            && (snapshot.queued_events > 0 || snapshot.active_objective_id.is_some());
-    }
-    if reason == "periodic-heartbeat" && snapshot.queued_events > 0 {
-        return outside_rate_limit;
+        return outside_rate_limit && snapshot.active_objective_id.is_some();
     }
     if reason == "periodic-heartbeat" && snapshot.active_objective_id.is_some() {
         return outside_objective_heartbeat;
@@ -1944,8 +1940,8 @@ mod tests {
     }
 
     #[test]
-    fn control_turn_dispatch_retries_pending_events_on_heartbeat() {
-        let snapshot = MasterControlRuntimeSnapshot {
+    fn control_turn_dispatch_requires_active_objective() {
+        let mut snapshot = MasterControlRuntimeSnapshot {
             queued_events: 1,
             processed_ticks: 1,
             last_event_seq: 42,
@@ -1967,7 +1963,7 @@ mod tests {
             last_verified_commit: None,
             resume_instruction: "resume".to_string(),
         };
-        assert!(should_dispatch_control_turn(
+        assert!(!should_dispatch_control_turn(
             "event-wakeup",
             &snapshot,
             true
@@ -1977,7 +1973,7 @@ mod tests {
             &snapshot,
             true
         ));
-        assert!(should_dispatch_control_turn(
+        assert!(!should_dispatch_control_turn(
             "periodic-heartbeat",
             &snapshot,
             true
@@ -1988,12 +1984,10 @@ mod tests {
             false
         ));
 
-        let mut quiet_snapshot = snapshot.clone();
-        quiet_snapshot.queued_events = 0;
-        quiet_snapshot.active_objective_id = None;
-        assert!(!should_dispatch_control_turn(
+        snapshot.active_objective_id = Some("abc".to_string());
+        assert!(should_dispatch_control_turn(
             "event-wakeup",
-            &quiet_snapshot,
+            &snapshot,
             true
         ));
     }
@@ -2158,12 +2152,13 @@ mod tests {
         assert!(prompt.contains("event_summary: BoardEvent.task_created: task_id=abc"));
         assert!(prompt.contains("phase: classify_objective"));
         assert!(prompt.contains("active_objective_id: abc"));
-        assert!(prompt.contains("mission_intent(project=\"missiond\", action=\"summary\")"));
-        assert!(prompt.contains("mission_convergence_status"));
-        assert!(prompt.contains("默认周期自省范围只看 MissionD V3 SSOT Lisp"));
-        assert!(prompt.contains("Active objective overrides default self-review"));
+        assert!(prompt.contains("No active objective means no-op"));
+        assert!(prompt.contains("mission_nightly_evolution"));
+        assert!(prompt.contains("MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true"));
+        assert!(
+            prompt.contains("The active BoardTask shown above is the only load-bearing objective")
+        );
         assert!(prompt.contains("follow its description as the load-bearing objective"));
-        assert!(prompt.contains("逻辑不通"));
         assert!(prompt.contains("Hard workflow contracts are enforced"));
         assert!(prompt.contains("MissionD runtime/workflow.lisp/checkers"));
         assert!(prompt.contains("query exactly that BoardTask by id"));
@@ -2219,7 +2214,7 @@ mod tests {
         assert!(prompt.contains("- id: auth-parent"));
         assert!(prompt.contains("- project: auth"));
         assert!(prompt.contains("Auth must reach M6"));
-        assert!(prompt.contains("ignore the default self-review paragraph entirely"));
+        assert!(prompt.contains("No active objective means no-op"));
         assert!(prompt.contains(
             "mission_board_create call while active_boardtask is present MUST set parentId"
         ));
