@@ -1070,6 +1070,9 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me produce",
         "let me gather",
         "let me add",
+        "let me append",
+        "let me update",
+        "let me modify",
         "let me lay out",
         "let me explain the situation",
         "i need to inspect",
@@ -1105,7 +1108,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "now i’ll ",
         "now i will ",
     ];
-    const MUTATION_PROGRESS_MARKERS: [&str; 29] = [
+    const MUTATION_PROGRESS_MARKERS: &[&str] = &[
         "now committing",
         "committing only",
         "committing the single",
@@ -1116,6 +1119,8 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "now verifying",
         "now checking",
         "now writing",
+        "now let me append",
+        "now let me update",
         "retrying once",
         "file is untracked",
         "now committing only",
@@ -1135,6 +1140,8 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i will insert",
         "i'll update",
         "i will update",
+        "i'll append",
+        "i will append",
     ];
     const SURVEY_PROGRESS_PREFIXES: [&str; 8] = [
         "checking ",
@@ -4687,6 +4694,36 @@ mod tests {
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T06:55:50Z"))
                 .as_deref(),
             Some("JARVIS_S4_FLOWS_DONE\ncommit: `f885362`")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_check_passed_then_append_report_progress() {
+        let progress =
+            "`git diff --check` is clean. Now let me append §13 to the convergence report.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T14:20:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T14:21:00Z"),
+            test_conversation_message(
+                3,
+                "assistant",
+                "AUTH_M6_GOOGLE_BRIDGE_DONE\n\nCommit: `47d76fa feat(auth): bridge google callback to product-access reporter (M6)`.",
+                "2026-05-04T14:24:00Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T14:19:50Z"))
+                .as_deref(),
+            Some("AUTH_M6_GOOGLE_BRIDGE_DONE\n\nCommit: `47d76fa feat(auth): bridge google callback to product-access reporter (M6)`.")
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "report append progress after clean checks must not be treated as durable final"
         );
     }
 
