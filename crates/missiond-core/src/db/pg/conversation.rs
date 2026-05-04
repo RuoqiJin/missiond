@@ -327,11 +327,11 @@ impl ConversationStore for PgMissionStore {
         if let Some(tid) = task_id {
             let task_type_clause = task_scoped_type_clause(conv_type, &type_clause);
             let sql = format!(
-                "SELECT c.* FROM conversations c WHERE (c.task_id = $1 OR EXISTS (
-                    SELECT 1 FROM conversation_messages m
-                    WHERE m.session_id = c.id
-                      AND (m.content ILIKE ('%' || $1 || '%') OR COALESCE(m.raw_content, '') ILIKE ('%' || $1 || '%'))
-                    LIMIT 1
+                "SELECT * FROM conversations WHERE (task_id = $1 OR id IN (
+                    SELECT DISTINCT m.session_id
+                    FROM conversation_messages m
+                    WHERE m.content ILIKE ('%' || $1 || '%')
+                    LIMIT 50
                 )){}{}{} ORDER BY started_at ASC LIMIT $2",
                 task_type_clause, source_clause, time_clause
             );
