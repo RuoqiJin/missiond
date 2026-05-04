@@ -1073,8 +1073,10 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me append",
         "let me update",
         "let me modify",
+        "let me capture",
         "let me lay out",
         "let me explain the situation",
+        "let me explain the architectural",
         "i need to inspect",
         "i need to check",
         "i need to read",
@@ -1102,6 +1104,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i am going to",
         "acknowledged:",
         "acknowledged;",
+        "i have enough context",
         "now i have all the context",
         "now i have the full picture",
         "now i have full clarity",
@@ -1123,6 +1126,8 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me make the planned edits",
         "now let me append",
         "now let me update",
+        "then update ssot",
+        "declare the blocker via ssot",
         "retrying once",
         "file is untracked",
         "now committing only",
@@ -4498,6 +4503,68 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "exact M6-observed working-tree-clean / full-picture / planned-edits frame must classify as active progress"
+        );
+    }
+
+    /// V3 autopilot-runtime regression :: pinned frame from BoardTask
+    /// `57302086-5a70-486c-a69c-6bd703bcaaf2` (M6 auth Google callback
+    /// token-session shard). The worker was still explaining a structural
+    /// blocker and announced more SSOT/report work, but Autopilot closed
+    /// the wrapper before the worker committed and wrote the child summary.
+    /// Keep this exact "I have enough context" blocker-planning shape
+    /// non-final.
+    #[test]
+    fn provider_final_summary_rejects_blocker_planning_progress() {
+        let progress = "I have enough context. The dispatch asks for a Google callback product-token-session migration shard, but my analysis shows it requires changes to files in `must_not_touch`. Let me explain the architectural constraint and then declare the blocker via SSOT updates.\n\nLet me capture current acceptance baseline first, then update SSOT to record the blocker.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T23:35:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T23:42:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T23:34:50Z")),
+            None,
+            "context/blocker/SSOT-update progress frame must not be selected as durable final"
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "context/blocker/SSOT-update progress frame must classify as active progress"
+        );
+    }
+
+    /// V3 autopilot-runtime regression :: exact-text guard pinning the
+    /// stand-alone `Let me capture current acceptance baseline first, then
+    /// update SSOT to record the blocker.` frame observed in note 201f4715
+    /// (wrapper 57302086-5a70-486c-a69c-6bd703bcaaf2). It must classify as
+    /// blocker-planning progress, never as a durable final summary.
+    #[test]
+    fn provider_final_summary_rejects_blocker_planning_progress_capture_baseline() {
+        let progress = "Let me capture current acceptance baseline first, then update SSOT to record the blocker.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T23:35:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T23:42:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(
+                &messages,
+                "task-123",
+                Some("2026-05-04T23:34:50Z")
+            ),
+            None,
+            "capture-baseline-then-update-SSOT progress frame must not be selected as durable final"
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "capture-baseline-then-update-SSOT progress must classify as active progress"
         );
     }
 
