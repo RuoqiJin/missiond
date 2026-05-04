@@ -6,7 +6,7 @@ use std::time::Duration;
 use missiond_core::event::events::{BoardEvent, QuestionEvent, SlotEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
-use missiond_core::types::CreateBoardTaskInput;
+use missiond_core::types::{BoardTaskStatus, CreateBoardTaskInput};
 use missiond_core::{PTYSlot, PTYSpawnOptions, SessionState};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -418,7 +418,9 @@ impl MasterControlService {
             }
         }
         let mcp_ready = probe_codex_mcp_control_ready().await;
-        let pre_tick_snapshot = self.runtime.snapshot().await;
+        let pre_tick_snapshot = self
+            .snapshot_with_live_active_objective(self.runtime.snapshot().await)
+            .await;
         let decision = classify_master_decision_state(reason, &pre_tick_snapshot).await;
         let tick_id = self.runtime.mark_tick(reason, mcp_ready, &decision).await;
         if should_consume_event_without_control(reason, &pre_tick_snapshot, &decision) {
@@ -479,6 +481,39 @@ impl MasterControlService {
             }),
         )
         .await
+    }
+
+    async fn snapshot_with_live_active_objective(
+        &self,
+        mut snapshot: MasterControlRuntimeSnapshot,
+    ) -> MasterControlRuntimeSnapshot {
+        let Some(active_id) = snapshot.active_objective_id.clone() else {
+            return snapshot;
+        };
+        match self.state.store.get_board_task(&active_id).await {
+            Ok(Some(task)) if is_terminal_board_task_status(&task.status) => {
+                snapshot.active_objective_id = None;
+                snapshot.phase = "observe_event".to_string();
+                snapshot.context_pack_path = None;
+                snapshot.resume_instruction = format!(
+                    "active objective {} is terminal ({:?}); observe next durable event",
+                    active_id, task.status
+                );
+                snapshot.last_event_summary = Some(format!(
+                    "BoardEvent.status_changed: task_id={} {:?}->terminal",
+                    active_id, task.status
+                ));
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(err) => {
+                warn!(
+                    task_id = %active_id,
+                    error = %err,
+                    "master-control failed to verify active objective liveness"
+                );
+            }
+        }
+        snapshot
     }
 
     async fn recover_open_master_objective(&self) -> anyhow::Result<Option<String>> {
@@ -1220,6 +1255,16 @@ fn is_terminal_board_status_event(summary: &str) -> bool {
             || lower.contains("->closed")
             || lower.contains("->failed")
             || lower.contains("->blocked"))
+}
+
+fn is_terminal_board_task_status(status: &BoardTaskStatus) -> bool {
+    matches!(
+        status,
+        BoardTaskStatus::Done
+            | BoardTaskStatus::Failed
+            | BoardTaskStatus::Blocked
+            | BoardTaskStatus::Skipped
+    )
 }
 
 fn should_consume_event_without_control(
@@ -1980,6 +2025,17 @@ mod tests {
         snapshot.active_objective_id = None;
         let decision = classify_master_decision_state("daemon-startup", &snapshot).await;
         assert_eq!(decision.active_objective_id, None);
+    }
+
+    #[test]
+    fn terminal_board_task_statuses_clear_active_objectives() {
+        assert!(is_terminal_board_task_status(&BoardTaskStatus::Done));
+        assert!(is_terminal_board_task_status(&BoardTaskStatus::Failed));
+        assert!(is_terminal_board_task_status(&BoardTaskStatus::Blocked));
+        assert!(is_terminal_board_task_status(&BoardTaskStatus::Skipped));
+        assert!(!is_terminal_board_task_status(&BoardTaskStatus::Open));
+        assert!(!is_terminal_board_task_status(&BoardTaskStatus::Running));
+        assert!(!is_terminal_board_task_status(&BoardTaskStatus::Verifying));
     }
 
     #[test]
