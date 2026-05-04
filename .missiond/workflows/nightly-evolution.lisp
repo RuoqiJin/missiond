@@ -8,10 +8,10 @@
 (workflow nightly-evolution
   :schema "missiond.workflow.v1"
   :workflow_id nightly-evolution
-  :status active
+  :status manual-first
   :source_plans [resident-master-control v3-night-scheduler]
   :match_rules
-    ((trigger :kind schedule :name nightly-evolution)
+    ((trigger :kind schedule :name nightly-evolution :default disabled :enable-env MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE)
      (trigger :kind manual :tool mission_nightly_evolution)
      (mode :default observe-only :allowed [observe-only safe-backfill needs-investigation architecture-proposal requires-user-decision]))
   :inputs [missiond-v3-blueprint v3-surface-checkers final-convergence-static-snapshot recent-v3-commits]
@@ -35,4 +35,5 @@
     ((rule :id observe-first :text "Default mode writes report only.")
      (rule :id visible-tasks :text "The workflow may create visible BoardTasks; it must not hide, delete, or bulk-mutate historical tasks.")
      (rule :id no-direct-code :text "Resident master does not edit code directly; code changes require exact write-scope BoardTasks.")
+     (rule :id schedule-opt-in :text "Scheduled nightly evolution is disabled by default during active supervision; manual mission_nightly_evolution remains available, and periodic runs require MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true.")
      (rule :id v3-only-default :text "Default nightly mode is an SSOT Lisp review; PTY, KB, provider logs, and historical conversation evidence belong to explicit follow-up workflows.")))

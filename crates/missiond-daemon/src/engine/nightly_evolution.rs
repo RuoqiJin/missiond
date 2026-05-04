@@ -17,6 +17,7 @@ use crate::state::AppState;
 
 const NIGHTLY_REPORT_DIR: &str = ".missiond/v3/runtime/nightly-evolution";
 const NIGHTLY_DEFAULT_INTERVAL_SECS: u64 = 86_400;
+const NIGHTLY_SCHEDULE_ENABLED_ENV: &str = "MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE";
 
 static NIGHTLY_EVOLUTION_RUNTIME: OnceLock<Arc<NightlyEvolutionRuntime>> = OnceLock::new();
 
@@ -73,6 +74,7 @@ impl NightlyEvolutionRuntime {
     async fn snapshot(&self) -> Value {
         json!({
             "schema": "missiond.nightly-evolution-status.v1",
+            "scheduleEnabled": nightly_evolution_schedule_enabled(),
             "runs": self.runs.load(Ordering::Relaxed),
             "reportsWritten": self.reports_written.load(Ordering::Relaxed),
             "followupTasksCreated": self.followup_tasks_created.load(Ordering::Relaxed),
@@ -100,10 +102,29 @@ pub(crate) fn start_nightly_evolution_service(
     state: &AppState,
     shutdown_rx: watch::Receiver<bool>,
 ) {
+    if !nightly_evolution_schedule_enabled() {
+        info!(
+            env = NIGHTLY_SCHEDULE_ENABLED_ENV,
+            "nightly-evolution schedule disabled by default; use mission_nightly_evolution or set env=true to run periodically"
+        );
+        return;
+    }
     let state = state.clone();
     let runtime = runtime();
     tokio::spawn(async move { run_schedule_loop(state, runtime, shutdown_rx).await });
     info!("nightly-evolution service started (observe-first schedule)");
+}
+
+fn nightly_evolution_schedule_enabled() -> bool {
+    matches!(
+        std::env::var(NIGHTLY_SCHEDULE_ENABLED_ENV)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
 }
 
 async fn run_schedule_loop(

@@ -858,13 +858,16 @@
     (night-scheduler
       :entry [schedule-metadata manual-objective mission_nightly_evolution]
       :policy (:workflow ".missiond/workflows/nightly-evolution.lisp"
-               :schedule-window "daily"
+               :schedule-window "manual-first"
+               :schedule-enabled false
+               :enable-env MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE
                :default-mode observe-only
                :budget-secs 7200
                :max-followup-tasks 3
                :risk-gate "apply=true selects only findings whose class matches the requested mode; safe-backfill requires low risk, needs-investigation creates read-only context work, and proposal/user-decision modes create proposal tasks only.")
       :core
-        ((step s1 :logic "NightlyEvolutionService reads only MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**; default nightly mode excludes KB, historical conversations, provider durable logs, worker telemetry, and Board open tasks")
+        ((step s0 :logic "scheduled nightly evolution is disabled by default during active supervision; operators use manual mission_nightly_evolution or explicitly set MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true before periodic runs")
+         (step s1 :logic "NightlyEvolutionService reads only MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**; default nightly mode excludes KB, historical conversations, provider durable logs, worker telemetry, and Board open tasks")
          (step s2 :logic "write observe-first .missiond/v3/runtime/nightly-evolution/<date>.report.lisp")
          (step s3 :logic "materialize visible proposal/backfill BoardTasks only when apply=true, requested mode matches finding class, and risk gate allows it")
          (step s4 :logic "prefer read-only MissionD V3 SSOT investigation and context-pack generation")
@@ -2598,7 +2601,7 @@
              "crates/missiond-mcp/src/gen_gateway.rs"
              "scripts/check-v3-nightly-evolution-isomorphism.mjs"
              "scripts/check-v3-code-isomorphism-complete.mjs"]
-      :note "nightly-evolution-loop turns resident master self-review into a reusable workflow. NightlyEvolutionService runs observe-first from V3 schedule policy, and mission_nightly_evolution can manually run the same workflow. Its default evidence set is deliberately narrow: MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**. It does not read KB, historical conversations, provider logs, worker telemetry, or Board open tasks unless a later explicit memory-audit workflow asks for them. The report writes .missiond/v3/runtime/nightly-evolution/<date>.report.lisp and only creates visible low-risk follow-up BoardTasks when apply=true and risk gates allow it.")
+      :note "nightly-evolution-loop turns resident master self-review into a reusable workflow. NightlyEvolutionService is manual-first: scheduled periodic runs are disabled by default while active supervision and external worker sessions are running, and require MISSIOND_NIGHTLY_EVOLUTION_SCHEDULE=true. mission_nightly_evolution can manually run the same workflow. Its default evidence set is deliberately narrow: MissionD V3 blueprint, V3 checker output, final convergence static snapshot, and recent commits touching .missiond/v3/**. It does not read KB, historical conversations, provider logs, worker telemetry, or Board open tasks unless a later explicit memory-audit workflow asks for them. The report writes .missiond/v3/runtime/nightly-evolution/<date>.report.lisp and only creates visible low-risk follow-up BoardTasks when apply=true and risk gates allow it.")
 
     (surface context-pack
       :status "code-aligned"
