@@ -965,7 +965,7 @@ fn looks_like_active_tui_progress(text: &str) -> bool {
 
 fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    const INVESTIGATION_VERBS: [&str; 13] = [
+    const INVESTIGATION_VERBS: [&str; 17] = [
         "let me inspect",
         "let me peek",
         "let me check",
@@ -974,6 +974,10 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me run",
         "let me verify",
         "let me write",
+        "let me create",
+        "let me generate",
+        "let me produce",
+        "let me add",
         "i need to inspect",
         "i need to check",
         "i need to read",
@@ -4020,6 +4024,35 @@ mod tests {
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T06:13:50Z"))
                 .as_deref(),
             Some("JARVIS_S5_SURFACES_DONE\n\nCommit: `7fbdd2a feat(jarvis): add M6 surface map`.")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_intermediate_create_narration() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T07:04:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "Now I have enough evidence. Let me create the runtime topology dossier.",
+                "2026-05-04T07:06:00Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "JARVIS_S6_RUNTIME_DONE\n\nCommit: `b4ceff8 feat(jarvis): add M6 runtime topology`.",
+                "2026-05-04T07:09:00Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T07:03:50Z"))
+                .as_deref(),
+            Some("JARVIS_S6_RUNTIME_DONE\n\nCommit: `b4ceff8 feat(jarvis): add M6 runtime topology`.")
         );
     }
 
