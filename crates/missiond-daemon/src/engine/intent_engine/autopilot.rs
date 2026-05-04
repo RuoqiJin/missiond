@@ -992,7 +992,7 @@ fn looks_like_active_tui_progress(text: &str) -> bool {
 
 fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    const INVESTIGATION_VERBS: [&str; 17] = [
+    const INVESTIGATION_VERBS: [&str; 23] = [
         "let me inspect",
         "let me peek",
         "let me check",
@@ -1000,6 +1000,10 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me look",
         "let me run",
         "let me verify",
+        "let me validate",
+        "let me confirm",
+        "let me corroborate",
+        "let me compare",
         "let me write",
         "let me create",
         "let me generate",
@@ -1008,6 +1012,8 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i need to inspect",
         "i need to check",
         "i need to read",
+        "i need to verify",
+        "i need to confirm",
         "i'm going to",
         "i am going to",
     ];
@@ -4083,6 +4089,32 @@ mod tests {
         assert!(
             is_probably_active_tui_summary("Checking jarvis-forge SSOT-convergence evidence..."),
             "survey progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_let_me_corroborate_progress() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "Let me corroborate the MySQL classification by greping inside read scope and confirming the live DB driver.",
+                "2026-05-04T18:01:00Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary("Let me corroborate the MySQL classification by greping inside read scope and confirming the live DB driver."),
+            "corroboration progress must not be treated as durable final"
         );
     }
 

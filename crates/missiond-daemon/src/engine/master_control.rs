@@ -444,7 +444,8 @@ impl MasterControlService {
         let pre_tick_snapshot = self
             .snapshot_with_live_active_objective(self.runtime.snapshot().await)
             .await;
-        let decision = classify_master_decision_state(reason, &pre_tick_snapshot).await;
+        let root = master_project_root(&self.state);
+        let decision = classify_master_decision_state(reason, &pre_tick_snapshot, &root).await;
         let tick_id = self.runtime.mark_tick(reason, mcp_ready, &decision).await;
         if should_consume_event_without_control(reason, &pre_tick_snapshot, &decision) {
             self.runtime.clear_queued_events();
@@ -1240,6 +1241,7 @@ pub(crate) fn should_dispatch_control_turn(
 async fn classify_master_decision_state(
     reason: &str,
     snapshot: &MasterControlRuntimeSnapshot,
+    project_root: &Path,
 ) -> MasterDecisionState {
     let summary = snapshot.last_event_summary.as_deref().unwrap_or("");
     let event_task_id = extract_task_id(summary);
@@ -1276,7 +1278,7 @@ async fn classify_master_decision_state(
     };
     let context_pack_path = active_objective_id
         .as_ref()
-        .map(|id| master_context_pack_path_for_objective(id));
+        .map(|id| master_context_pack_path_for_objective(project_root, id));
     let resume_instruction = match phase {
         "observe_event" => {
             "observe durable Board/event/provider evidence; do not delegate without a concrete objective"
@@ -1374,16 +1376,12 @@ fn sanitize_lisp_path_component(value: &str) -> String {
         .collect()
 }
 
-fn master_context_pack_path_for_objective(id: &str) -> String {
+fn master_context_pack_path_for_objective(project_root: &Path, id: &str) -> String {
     let relative = PathBuf::from(format!(
         ".missiond/v3/runtime/master-control/context-packs/{}.lisp",
         sanitize_lisp_path_component(id)
     ));
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join(relative)
-        .to_string_lossy()
-        .to_string()
+    project_root.join(relative).to_string_lossy().to_string()
 }
 
 fn master_control_turns_enabled() -> bool {
@@ -2011,7 +2009,10 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("abc".to_string()),
             phase: "classify_objective".to_string(),
-            context_pack_path: Some(master_context_pack_path_for_objective("abc")),
+            context_pack_path: Some(master_context_pack_path_for_objective(
+                Path::new("/repo"),
+                "abc",
+            )),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "retry".to_string(),
@@ -2041,6 +2042,7 @@ mod tests {
 
     #[tokio::test]
     async fn classify_preserves_active_objective_across_worker_events() {
+        let root = Path::new("/repo");
         let mut snapshot = MasterControlRuntimeSnapshot {
             queued_events: 0,
             processed_ticks: 4,
@@ -2060,25 +2062,28 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("parent-objective".to_string()),
             phase: "observe_event".to_string(),
-            context_pack_path: Some(master_context_pack_path_for_objective("parent-objective")),
+            context_pack_path: Some(master_context_pack_path_for_objective(
+                root,
+                "parent-objective",
+            )),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "resume".to_string(),
         };
 
-        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        let decision = classify_master_decision_state("event-wakeup", &snapshot, root).await;
         assert_eq!(
             decision.active_objective_id.as_deref(),
             Some("parent-objective")
         );
         assert_eq!(
             decision.context_pack_path.as_deref(),
-            Some(master_context_pack_path_for_objective("parent-objective").as_str())
+            Some(master_context_pack_path_for_objective(root, "parent-objective").as_str())
         );
 
         snapshot.last_event_summary =
             Some("BoardEvent.status_changed: task_id=worker-child Running->Done".to_string());
-        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        let decision = classify_master_decision_state("event-wakeup", &snapshot, root).await;
         assert_eq!(
             decision.active_objective_id.as_deref(),
             Some("parent-objective")
@@ -2087,13 +2092,13 @@ mod tests {
 
         snapshot.last_event_summary =
             Some("BoardEvent.status_changed: task_id=parent-objective Running->Done".to_string());
-        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        let decision = classify_master_decision_state("event-wakeup", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
 
         snapshot.active_objective_id = Some("parent-objective".to_string());
         snapshot.last_event_summary =
             Some("BoardEvent.status_changed: task_id=parent-objective Running->done".to_string());
-        let decision = classify_master_decision_state("event-wakeup", &snapshot).await;
+        let decision = classify_master_decision_state("event-wakeup", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
         assert!(should_consume_event_without_control(
             "event-wakeup",
@@ -2104,12 +2109,12 @@ mod tests {
         snapshot.active_objective_id = Some("parent-objective".to_string());
         snapshot.last_event_summary =
             Some("BoardEvent.status_changed: task_id=parent-objective Done->terminal".to_string());
-        let decision = classify_master_decision_state("periodic-heartbeat", &snapshot).await;
+        let decision = classify_master_decision_state("periodic-heartbeat", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
         assert_eq!(decision.context_pack_path, None);
 
         snapshot.active_objective_id = None;
-        let decision = classify_master_decision_state("daemon-startup", &snapshot).await;
+        let decision = classify_master_decision_state("daemon-startup", &snapshot, root).await;
         assert_eq!(decision.active_objective_id, None);
     }
 
@@ -2143,7 +2148,10 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("abc".to_string()),
             phase: "classify_objective".to_string(),
-            context_pack_path: Some(master_context_pack_path_for_objective("abc")),
+            context_pack_path: Some(master_context_pack_path_for_objective(
+                Path::new("/repo"),
+                "abc",
+            )),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "resume".to_string(),
@@ -2193,7 +2201,10 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("auth-parent".to_string()),
             phase: "classify_objective".to_string(),
-            context_pack_path: Some(master_context_pack_path_for_objective("auth-parent")),
+            context_pack_path: Some(master_context_pack_path_for_objective(
+                Path::new("/repo"),
+                "auth-parent",
+            )),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "resume".to_string(),
@@ -2240,7 +2251,10 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("abc".to_string()),
             phase: "classify_objective".to_string(),
-            context_pack_path: Some(master_context_pack_path_for_objective("abc")),
+            context_pack_path: Some(master_context_pack_path_for_objective(
+                Path::new("/repo"),
+                "abc",
+            )),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "resume from durable evidence".to_string(),
