@@ -157,6 +157,8 @@ function checkFiles(root) {
     'is_probably_provider_tool_invocation_message',
     'looks_like_bare_tool_call_marker',
     'looks_like_intermediate_assistant_narration',
+    'MUTATION_PROGRESS_MARKERS',
+    'Now committing',
     'provider_final_summary_rejects_intermediate_investigation_narration',
     'durable_completion',
     'durable final',

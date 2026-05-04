@@ -960,8 +960,28 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i'm going to",
         "i am going to",
     ];
+    const MUTATION_PROGRESS_MARKERS: [&str; 17] = [
+        "now committing",
+        "committing only",
+        "now staging",
+        "now running",
+        "now verifying",
+        "now checking",
+        "now committing only",
+        "i'll commit",
+        "i will commit",
+        "i'll run",
+        "i will run",
+        "i'll verify",
+        "i will verify",
+        "i'll insert",
+        "i will insert",
+        "i'll update",
+        "i will update",
+    ];
     if INVESTIGATION_VERBS
         .iter()
+        .chain(MUTATION_PROGRESS_MARKERS.iter())
         .any(|marker| lower.contains(marker))
     {
         return true;
@@ -3886,6 +3906,12 @@ mod tests {
             ),
             test_conversation_message(
                 3,
+                "assistant",
+                "Only `.missiond/intent.lisp` is in my modification set. The other dirty files were pre-existing. Now committing only the intent.lisp.",
+                "2026-05-03T10:15:30Z",
+            ),
+            test_conversation_message(
+                4,
                 "assistant",
                 "M6 closure is already in place.\n\n## Verification Report\n- checker-first mapping passes\n- no edits needed",
                 "2026-05-03T10:15:40Z",
