@@ -992,7 +992,7 @@ fn looks_like_active_tui_progress(text: &str) -> bool {
 
 fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    const INVESTIGATION_VERBS: [&str; 38] = [
+    const INVESTIGATION_VERBS: [&str; 40] = [
         "let me start",
         "let me re-verify",
         "let me inspect",
@@ -1012,6 +1012,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me produce",
         "let me add",
         "let me lay out",
+        "let me explain the situation",
         "i need to inspect",
         "i need to check",
         "i need to read",
@@ -1031,6 +1032,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "acknowledged:",
         "acknowledged;",
         "now i have all the context",
+        "now i have full clarity",
     ];
     const MUTATION_PROGRESS_MARKERS: [&str; 29] = [
         "now committing",
@@ -4196,6 +4198,28 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "context-then-plan progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_full_clarity_explanation_progress() {
+        let progress = "Both checkers pass at baseline. Now I have full clarity. Let me explain the situation, then make the changes.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "full-clarity explanation progress must not be treated as durable final"
         );
     }
 

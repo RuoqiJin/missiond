@@ -168,6 +168,7 @@ function checkFiles(root) {
     'provider_final_summary_rejects_intermediate_writing_narration',
     'provider_final_summary_rejects_intermediate_write_narration',
     'provider_final_summary_rejects_intermediate_investigation_narration',
+    'provider_final_summary_rejects_full_clarity_explanation_progress',
     'durable_completion',
     'durable final',
     'latest_assistant_after_task_prompt',
