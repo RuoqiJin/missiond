@@ -1068,6 +1068,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "let me create",
         "let me generate",
         "let me produce",
+        "let me gather",
         "let me add",
         "let me lay out",
         "let me explain the situation",
@@ -1079,10 +1080,16 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i'll execute",
         "i’ll execute",
         "i will execute",
+        "i'll produce",
+        "i’ll produce",
+        "i will produce",
         "i will redo",
         "i'll begin",
         "i’ll begin",
         "i will begin",
+        "i'll gather",
+        "i’ll gather",
+        "i will gather",
         "i'll start",
         "i’ll start",
         "i will start",
@@ -4305,6 +4312,53 @@ mod tests {
         assert!(
             is_probably_active_tui_summary(progress),
             "now-i'll-examine progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_report_prep_progress() {
+        let progress = "I'll produce a read-only report. Let me gather the static evidence by reading the SSOT files, route handlers, and checker scripts in parallel.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "report-prep progress must not be treated as durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_accepts_final_report_after_report_prep() {
+        let final_report = "I have enough static evidence. Composing the report now.\n\n# BoardTask Report\n\ncommit_status: not-required\n\n## Findings\n- Google callback returns an auth code redirect.\n\n## Verification\n- read-only report only.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "I'll produce a read-only report. Let me gather the static evidence.",
+                "2026-05-04T18:01:00Z",
+            ),
+            test_conversation_message(3, "assistant", final_report, "2026-05-04T18:02:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z"))
+                .as_deref(),
+            Some(final_report)
         );
     }
 
