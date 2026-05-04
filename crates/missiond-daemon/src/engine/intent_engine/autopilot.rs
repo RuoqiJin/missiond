@@ -984,7 +984,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i'm going to",
         "i am going to",
     ];
-    const MUTATION_PROGRESS_MARKERS: [&str; 26] = [
+    const MUTATION_PROGRESS_MARKERS: [&str; 28] = [
         "now committing",
         "committing only",
         "committing the single",
@@ -1007,6 +1007,8 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i will verify",
         "i'll write",
         "i will write",
+        "writing the",
+        "writing .",
         "i'll insert",
         "i will insert",
         "i'll update",
@@ -4053,6 +4055,35 @@ mod tests {
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T07:03:50Z"))
                 .as_deref(),
             Some("JARVIS_S6_RUNTIME_DONE\n\nCommit: `b4ceff8 feat(jarvis): add M6 runtime topology`.")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_intermediate_writing_narration() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T07:35:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "I have sufficient evidence. Writing the S9 policy dossier now.",
+                "2026-05-04T07:39:00Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "JARVIS_S9_POLICY_DONE\n\nCommit: `c782034 feat(jarvis): add M6 policy dossier`.",
+                "2026-05-04T07:42:00Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T07:34:50Z"))
+                .as_deref(),
+            Some("JARVIS_S9_POLICY_DONE\n\nCommit: `c782034 feat(jarvis): add M6 policy dossier`.")
         );
     }
 
