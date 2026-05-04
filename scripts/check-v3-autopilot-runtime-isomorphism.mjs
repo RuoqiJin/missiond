@@ -156,6 +156,8 @@ function checkFiles(root) {
     'await_durable_provider_completion_for_slot_task',
     'is_probably_provider_tool_invocation_message',
     'looks_like_bare_tool_call_marker',
+    'looks_like_intermediate_assistant_narration',
+    'provider_final_summary_rejects_intermediate_investigation_narration',
     'durable_completion',
     'durable final',
     'latest_assistant_after_task_prompt',
@@ -260,6 +262,8 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn latest_assistant_after_task_prompt() {}
     fn is_probably_provider_tool_invocation_message() {}
     fn looks_like_bare_tool_call_marker() {}
+    fn looks_like_intermediate_assistant_narration() {}
+    fn provider_final_summary_rejects_intermediate_investigation_narration() {}
     async fn reconcile_slot_provider_conversation() { reconcile_conversation_messages(); }
     async fn durable_provider_completion_for_slot_task() { get_conversations_by_task_id(); get_slot_session(); set_conversation_task_id(); }
     async fn await_durable_provider_completion_for_slot_task() { reconcile_slot_provider_conversation().await; durable_provider_completion_for_slot_task().await; }

@@ -934,12 +934,41 @@ fn looks_like_tool_call_marker(trimmed: &str) -> bool {
 
 fn is_probably_active_tui_summary(summary: &str) -> bool {
     let trimmed = summary.trim();
-    trimmed.is_empty() || looks_like_active_tui_progress(trimmed)
+    trimmed.is_empty()
+        || looks_like_active_tui_progress(trimmed)
+        || looks_like_intermediate_assistant_narration(trimmed)
 }
 
 fn looks_like_active_tui_progress(text: &str) -> bool {
     text.lines()
         .any(|line| is_tui_progress_line(line.trim_start()))
+}
+
+fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    const INVESTIGATION_VERBS: [&str; 12] = [
+        "let me inspect",
+        "let me peek",
+        "let me check",
+        "let me read",
+        "let me look",
+        "let me run",
+        "let me verify",
+        "i need to inspect",
+        "i need to check",
+        "i need to read",
+        "i'm going to",
+        "i am going to",
+    ];
+    if INVESTIGATION_VERBS
+        .iter()
+        .any(|marker| lower.contains(marker))
+    {
+        return true;
+    }
+    let trimmed = lower.trim_start();
+    (trimmed.starts_with("good —") || trimmed.starts_with("good -"))
+        && (trimmed.contains("let me ") || trimmed.contains("i need to "))
 }
 
 fn is_tui_progress_line(trimmed: &str) -> bool {
@@ -3837,6 +3866,35 @@ mod tests {
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-03T10:14:50Z"))
                 .as_deref(),
             Some("## Smoke Result\n\nAutopilot used the provider durable final summary.")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_intermediate_investigation_narration() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-03T10:15:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "The four checks already cover schema and they all pass. Let me peek at L1 intent and the evidence sidecar to confirm M6 maturity claims align with reality.",
+                "2026-05-03T10:15:20Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "M6 closure is already in place.\n\n## Verification Report\n- checker-first mapping passes\n- no edits needed",
+                "2026-05-03T10:15:40Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-03T10:14:50Z"))
+                .as_deref(),
+            Some("M6 closure is already in place.\n\n## Verification Report\n- checker-first mapping passes\n- no edits needed")
         );
     }
 
