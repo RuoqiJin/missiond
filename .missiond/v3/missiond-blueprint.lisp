@@ -1101,6 +1101,46 @@
       :status project-ssot-owned
       :missiond-role "registered project; Lisp/component reuse engine, not MissionD runtime orchestrator"
       :surface project-registry)
+    ;; ── Part1 devtools — sibling devtool repos with M6 SSOT, registered as a group ──
+    (project :id jarvis
+      :kind rust-multi-crate
+      :root "/Users/jinchen/Projects/jarvis"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :missiond-role "registered devtool; clean MissionD rewrite (intent.lisp + 14 intent-*.lisp shards + GAP_ANALYSIS.md)"
+      :surface project-registry)
+    (project :id jarvis-mechanic
+      :kind rust-cli
+      :root "/Users/jinchen/Projects/jarvis-mechanic"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :checks ["node scripts/check-mechanic-ssot.mjs"]
+      :missiond-role "registered devtool; compiler-as-judge auto-repair CLI"
+      :surface project-registry)
+    (project :id xjpcode
+      :kind rust-cli
+      :root "/Users/jinchen/Projects/xjpcode"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :checks ["node scripts/check-xjpcode-ssot-complete.mjs --json"]
+      :missiond-role "registered devtool; ratatui TUI Rust CLI agent"
+      :surface project-registry)
+    (project :id neural-codegen
+      :kind rust-multi-crate
+      :root "/Users/jinchen/Projects/neural-codegen"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh --dry-run"]
+      :missiond-role "registered devtool; deterministic Lisp→IR→Rust codegen pipeline"
+      :surface project-registry)
+    (project :id semantic-terminal
+      :kind rust-napi-cdylib
+      :root "/Users/jinchen/Projects/semantic-terminal"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh --dry-run"]
+      :missiond-role "registered devtool; PTY semantic event parser (Rust core + N-API)"
+      :surface project-registry)
     (project :id xiaojinpro-backend
       :kind rust-monorepo
       :root "/Users/jinchen/Projects/xiaojinpro-backend"

@@ -9,13 +9,24 @@ const usage = `Usage:
   node scripts/check-project-ssot-universe.mjs [--json]
 
 Checks MissionD multi-project SSOT registry convergence:
-  - V3 project-blueprint-registry names MissionD, Forge, XJP services, and PCEA.
+  - V3 project-blueprint-registry names MissionD, Forge, Part1 devtools (jarvis,
+    jarvis-mechanic, xjpcode, neural-codegen, semantic-terminal), XJP services,
+    and PCEA.
   - V3 service-runtime-universe exposes production service deployment facts.
   - project-ssot-convergence workflow exists.
-  - XJP and PCEA local SSOT checkers pass.
+  - XJP and PCEA local SSOT checkers pass; Part1 devtools roots exist and their
+    cheap/static project-local runners (where present) exit 0.
 `;
 
 const PROJECTS = [
+  // Part1 devtools — sibling repos with project-local SSOT (root-existence + cheap/static checker invocation).
+  { id: 'jarvis', root: '/Users/jinchen/Projects/jarvis' },
+  { id: 'jarvis-forge', root: '/Users/jinchen/Projects/jarvis-forge' },
+  { id: 'jarvis-mechanic', root: '/Users/jinchen/Projects/jarvis-mechanic', checker: ['node', ['scripts/check-mechanic-ssot.mjs']] },
+  { id: 'xjpcode', root: '/Users/jinchen/Projects/xjpcode', checker: ['node', ['scripts/check-xjpcode-ssot-complete.mjs', '--json']] },
+  { id: 'neural-codegen', root: '/Users/jinchen/Projects/neural-codegen', checker: ['bash', ['.missiond/check.sh', '--dry-run']] },
+  { id: 'semantic-terminal', root: '/Users/jinchen/Projects/semantic-terminal', checker: ['bash', ['.missiond/check.sh', '--dry-run']] },
+  // XJP services + PCEA.
   { id: 'xiaojinpro-backend', root: '/Users/jinchen/Projects/xiaojinpro-backend', checker: ['node', ['scripts/check-xjp-ssot-complete.mjs', '--json']] },
   { id: 'deploy-center', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center' },
   { id: 'deploy-agent', root: '/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli' },
@@ -44,6 +55,11 @@ function main() {
   requireAll(diagnostics, '.missiond/v3/missiond-blueprint.lisp', blueprint, [
     '(project-blueprint-registry',
     ':id jarvis-forge',
+    ':id jarvis',
+    ':id jarvis-mechanic',
+    ':id xjpcode',
+    ':id neural-codegen',
+    ':id semantic-terminal',
     ':id xiaojinpro-backend',
     ':id deploy-center',
     ':id deploy-agent',
