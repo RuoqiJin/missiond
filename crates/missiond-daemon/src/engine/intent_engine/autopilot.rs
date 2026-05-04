@@ -336,7 +336,12 @@ async fn durable_provider_completion_for_slot_task(
             conv.task_id.as_deref(),
         );
         if let Some(summary) = summary {
-            if conv.task_id.as_deref() != Some(task.id.as_str()) {
+            if conv.task_id.as_deref() != Some(task.id.as_str())
+                && crate::flow_engine::conversation_task_binding_update_allowed(
+                    conv.task_id.as_deref(),
+                    task.id.as_str(),
+                )
+            {
                 let _ = state
                     .store
                     .set_conversation_task_id(&conv.id, task.id.as_str())
@@ -360,15 +365,16 @@ async fn await_durable_provider_completion_for_slot_task(
 ) -> Result<Option<DurableProviderCompletion>> {
     let poll_budget_ms = worker_final_settle_window_ms().clamp(1_000, 30_000);
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(poll_budget_ms);
+    let mut latest: Option<DurableProviderCompletion> = None;
     loop {
         reconcile_slot_provider_conversation(state, slot_id).await;
         if let Some(completion) =
             durable_provider_completion_for_slot_task(state, task, slot_id).await?
         {
-            return Ok(Some(completion));
+            latest = Some(completion);
         }
         if std::time::Instant::now() >= deadline {
-            return Ok(None);
+            return Ok(latest);
         }
         tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
     }
@@ -1036,6 +1042,16 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i'll update",
         "i will update",
     ];
+    const SURVEY_PROGRESS_PREFIXES: [&str; 8] = [
+        "checking ",
+        "surveying ",
+        "reading ",
+        "inspecting ",
+        "reviewing ",
+        "looking at ",
+        "looking through ",
+        "gathering ",
+    ];
     if INVESTIGATION_VERBS
         .iter()
         .chain(MUTATION_PROGRESS_MARKERS.iter())
@@ -1044,6 +1060,12 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         return true;
     }
     let trimmed = lower.trim_start();
+    if SURVEY_PROGRESS_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
+    {
+        return true;
+    }
     (trimmed.starts_with("good —") || trimmed.starts_with("good -"))
         && (trimmed.contains("let me ") || trimmed.contains("i need to "))
 }
@@ -4035,6 +4057,32 @@ mod tests {
                 "GPG pinentry was cancelled — retrying once with the same command."
             ),
             "retry progress must not be treated as a durable final"
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_survey_progress_prefixes() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "Checking jarvis-forge SSOT-convergence evidence...",
+                "2026-05-04T18:00:12Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary("Checking jarvis-forge SSOT-convergence evidence..."),
+            "survey progress must not be treated as durable final"
         );
     }
 

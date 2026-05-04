@@ -34,6 +34,18 @@ pub(crate) async fn bind_conversation_to_task(
 ) -> bool {
     for attempt in 0..5 {
         if let Ok(Some(session_uuid)) = state.store.get_slot_session(slot_id).await {
+            if let Ok(Some(conv)) = state.store.get_conversation(&session_uuid).await {
+                if !conversation_task_binding_update_allowed(conv.task_id.as_deref(), task_id) {
+                    warn!(
+                        slot_id,
+                        task_id,
+                        session_id = %session_uuid,
+                        existing_task_id = %conv.task_id.as_deref().unwrap_or(""),
+                        "bind_conversation_to_task: preserving existing session task binding"
+                    );
+                    return true;
+                }
+            }
             if let Err(err) = state
                 .store
                 .set_conversation_task_id(&session_uuid, task_id)
@@ -59,6 +71,19 @@ pub(crate) async fn bind_conversation_to_task(
         "bind_conversation_to_task: no slot session within retry budget; deferring to durable backfill"
     );
     false
+}
+
+pub(crate) fn conversation_task_binding_update_allowed(
+    existing_task_id: Option<&str>,
+    task_id: &str,
+) -> bool {
+    match existing_task_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(existing) => existing == task_id,
+        None => true,
+    }
 }
 
 // @beacon: orchestration
@@ -1048,4 +1073,23 @@ content: "<commit hash 或提交摘要>"
     }
 
     base
+}
+
+#[cfg(test)]
+mod tests {
+    use super::conversation_task_binding_update_allowed;
+
+    #[test]
+    fn conversation_task_binding_preserves_existing_different_task() {
+        assert!(conversation_task_binding_update_allowed(None, "task-b"));
+        assert!(conversation_task_binding_update_allowed(Some(""), "task-b"));
+        assert!(conversation_task_binding_update_allowed(
+            Some("task-b"),
+            "task-b"
+        ));
+        assert!(
+            !conversation_task_binding_update_allowed(Some("task-a"), "task-b"),
+            "a reused provider session must not overwrite its existing durable task binding"
+        );
+    }
 }
