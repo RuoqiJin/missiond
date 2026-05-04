@@ -160,6 +160,8 @@ function checkFiles(root) {
     'MUTATION_PROGRESS_MARKERS',
     'Now committing',
     'let me write',
+    'staging and committing',
+    'provider_final_summary_rejects_staging_and_committing_narration',
     'provider_final_summary_rejects_intermediate_write_narration',
     'provider_final_summary_rejects_intermediate_investigation_narration',
     'durable_completion',
@@ -271,6 +273,7 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
     fn looks_like_bare_tool_call_marker() {}
     fn looks_like_intermediate_assistant_narration() {}
     fn provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session() {}
+    fn provider_final_summary_rejects_staging_and_committing_narration() {}
     fn provider_final_summary_rejects_intermediate_investigation_narration() {}
     async fn reconcile_slot_provider_conversation() { reconcile_conversation_messages(); }
     async fn durable_provider_completion_for_slot_task() { get_conversations_by_task_id(); get_slot_session(); set_conversation_task_id(); }

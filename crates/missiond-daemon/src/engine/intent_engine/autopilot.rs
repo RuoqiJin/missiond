@@ -980,17 +980,23 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i'm going to",
         "i am going to",
     ];
-    const MUTATION_PROGRESS_MARKERS: [&str; 20] = [
+    const MUTATION_PROGRESS_MARKERS: [&str; 26] = [
         "now committing",
         "committing only",
+        "committing the single",
         "now staging",
+        "staging and committing",
+        "staging the",
         "now running",
         "now verifying",
         "now checking",
         "now writing",
+        "file is untracked",
         "now committing only",
         "i'll commit",
         "i will commit",
+        "i'll stage",
+        "i will stage",
         "i'll run",
         "i will run",
         "i'll verify",
@@ -4014,6 +4020,35 @@ mod tests {
             latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T06:13:50Z"))
                 .as_deref(),
             Some("JARVIS_S5_SURFACES_DONE\n\nCommit: `7fbdd2a feat(jarvis): add M6 surface map`.")
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_staging_and_committing_narration() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T06:56:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "File is untracked (no diff yet — expected). Staging and committing the single shard file.",
+                "2026-05-04T06:58:00Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "JARVIS_S4_FLOWS_DONE\ncommit: `f885362`",
+                "2026-05-04T06:59:00Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T06:55:50Z"))
+                .as_deref(),
+            Some("JARVIS_S4_FLOWS_DONE\ncommit: `f885362`")
         );
     }
 
