@@ -49,6 +49,7 @@ const DEFAULT_FILES = {
   workflowStoreActions: 'crates/missiond-daemon/src/handlers/knowledge/workflow/store_actions.rs',
   workflowTests: 'crates/missiond-daemon/src/handlers/knowledge/workflow/tests.rs',
   mcpWorkflow: 'crates/missiond-mcp/src/tools/knowledge/workflow.rs',
+  projectSsotConvergence: '.missiond/workflows/project-ssot-convergence.lisp',
 };
 
 function main() {
@@ -151,6 +152,20 @@ function checkFiles(root, files) {
     'workflow/review_resolution.rs owns resolve_review',
     'WorkflowSubscriberOutcome',
     'node scripts/check-v3-workflow-isomorphism.mjs',
+  ]);
+
+  requireAll(diagnostics, files.projectSsotConvergence, sources.projectSsotConvergence, [
+    ':inputs [project-id project-root canonical-intent existing-code dirty-baseline context-pack-path? acceptance]',
+    ':id choose-write-strategy',
+    'prefer overlay+manifest mode',
+    'if present and large, add an M6 overlay rather than replacing the whole file',
+    'run scoped diff checks for owned paths',
+    ':id worker-stall-recovery',
+    "stalls after intermediate narration such as 'let me write'",
+    'reduce the shard to an atomic overlay/manifest patch',
+    'Dirty worktree SSOT convergence commits must stage explicit .missiond paths only',
+    'Large existing intent files should use M6 overlay+manifest',
+    'Dirty-baseline handling is explicit',
   ]);
 
   const workflowSurface = `${sources.workflowHandler}\n${sources.workflowArtifacts}\n${sources.workflowAutoChain}\n${sources.workflowAutoChainRecorder}\n${sources.workflowAutoChainRules}\n${sources.workflowAutoSonnet}\n${sources.workflowAutoSonnetPolicy}\n${sources.workflowCompileMethodology}\n${sources.workflowDistill}\n${sources.workflowMethodology}\n${sources.workflowMethodologyExtract}\n${sources.workflowMethodologyIo}\n${sources.workflowMethodologySource}\n${sources.workflowMethodologyTypes}\n${sources.workflowMethodologyYaml}\n${sources.workflowProjectRoot}\n${sources.workflowReviewResolution}\n${sources.workflowRunMethodology}\n${sources.workflowStoreActions}\n${sources.workflowTests}`;
@@ -755,6 +770,23 @@ manager action — see Lisp implemented-surface mission_workflow
 .missiond/v3/runtime/plans/<plan_id>.evidence.json
 "auto_sonnet_policy" &["off", "safe_after_rules", "dry_run"]
 Lisp 源: intent-flow.lisp`);
+  writeFixture(root, DEFAULT_FILES.projectSsotConvergence, `
+(workflow project-ssot-convergence
+  :inputs [project-id project-root canonical-intent existing-code dirty-baseline context-pack-path? acceptance]
+  :core
+    ((step s1b :id choose-write-strategy
+       :logic "prefer overlay+manifest mode")
+     (step s2 :id draft-l1-index
+       :logic "if present and large, add an M6 overlay rather than replacing the whole file")
+     (step s8 :id verify-and-report
+       :logic "run scoped diff checks for owned paths")
+     (step s9 :id worker-stall-recovery
+       :logic "if a ClaudeCode worker stalls after intermediate narration such as 'let me write' without file changes, reduce the shard to an atomic overlay/manifest patch"))
+  :risk-gates
+    ((gate g9 :rule "Dirty worktree SSOT convergence commits must stage explicit .missiond paths only")
+     (gate g10 :rule "Large existing intent files should use M6 overlay+manifest"))
+  :completion
+    ((criterion c5 :rule "Dirty-baseline handling is explicit")))`);
   return root;
 }
 

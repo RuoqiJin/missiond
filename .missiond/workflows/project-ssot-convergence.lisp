@@ -3,7 +3,7 @@
   :purpose "Reusable multi-project SSOT convergence muscle memory: turn an existing code project into compact Lisp SSOT plus checker-backed code mapping."
   :owner resident-master-control
   :authority v3-project-blueprint-registry
-  :inputs [project-id project-root canonical-intent existing-code context-pack-path? acceptance]
+  :inputs [project-id project-root canonical-intent existing-code dirty-baseline context-pack-path? acceptance]
   :workers
     ((codex-master :role integrator :write [board kb checkpoint context-pack] :code-write false)
      (claude-opus :role implementation :write exact-shard-only :code-write true)
@@ -12,8 +12,10 @@
   :core
     ((step s1 :id collect-evidence
        :logic "read current intent Lisp, manifests, public routes/tools/commands, package metadata, tests, runtime docs, and dirty worktree status")
+     (step s1b :id choose-write-strategy
+       :logic "if canonical intent is already large (>500 lines) or the repo has operator-owned dirty code outside write_scope, prefer overlay+manifest mode: preserve existing intent facts, append a compact M6 overlay, and write a bounded intent-manifest instead of full-rewriting the SSOT")
      (step s2 :id draft-l1-index
-       :logic "if missing or verbose, write a compact .missiond/intent.lisp index with identity, constraints, pillars, module links, and gates")
+       :logic "if missing, write a compact .missiond/intent.lisp index with identity, constraints, pillars, module links, and gates; if present and large, add an M6 overlay rather than replacing the whole file")
      (step s3 :id draft-backend-blueprint
        :logic "write .missiond/backend/<project>-backend-blueprint.lisp when Rust/API/service code exists")
      (step s4 :id draft-frontend-blueprint
@@ -25,7 +27,9 @@
      (step s7 :id dispatch-backfill-workers
        :logic "create disjoint BoardTasks with context_pack_path, read_scope, write_scope, must_not_touch, acceptance, model_profile, timeout_secs, completion protocol; read_scope is readable evidence, write_scope is the only writable set, and must_not_touch forbids write/stage/commit rather than reads")
      (step s8 :id verify-and-report
-       :logic "run project checker, build/test, diff check; write convergence report and observed dispatch-stability issues"))
+       :logic "run project checker, build/test, diff check; when dirty-baseline is outside this task's ownership, run scoped diff checks for owned paths and record full diff-check blockers as diagnostics instead of formatting or touching operator code")
+     (step s9 :id worker-stall-recovery
+       :logic "if a ClaudeCode worker stalls after intermediate narration such as 'let me write' without file changes, interrupt once, reduce the shard to an atomic overlay/manifest patch, and record the stall as dispatch telemetry; do not retry the same full-rewrite prompt indefinitely"))
   :egress [project-blueprint project-checkers boardtasks convergence-report kb-note]
   :risk-gates
     ((gate g1 :rule "Do not refactor code before checker pins current facts.")
@@ -35,9 +39,12 @@
      (gate g5 :rule "Code-first changes create backfill BoardTask through commit-lisp-convergence.")
      (gate g6 :rule "If engine_hint/pool_hint cannot be honored, Autopilot records reroute_reason as a durable BoardTask note.")
      (gate g7 :rule "Evaluation workers produce structured artifacts (Findings/Evidence/Recommendations/Verification), not raw KB JSON dumps.")
-     (gate g8 :rule "Rust projects must expose a project-local touched-file rustfmt checker; workers must not run cargo fmt -p or cargo fmt --all unless an explicit maintainer task owns repo-wide formatting."))
+     (gate g8 :rule "Rust projects must expose a project-local touched-file rustfmt checker; workers must not run cargo fmt -p or cargo fmt --all unless an explicit maintainer task owns repo-wide formatting.")
+     (gate g9 :rule "Dirty worktree SSOT convergence commits must stage explicit .missiond paths only; full git diff --check failures in non-owned files are diagnostics, not permission to edit those files.")
+     (gate g10 :rule "Large existing intent files should use M6 overlay+manifest unless the task explicitly owns a full SSOT rewrite."))
   :completion
     ((criterion c1 :rule "Lisp has pillar/function/entry/core/egress/surface shape.")
      (criterion c2 :rule "Checker proves root, blueprint, surfaces, and public code anchors.")
      (criterion c3 :rule "Build/test command is known even when deferred.")
-     (criterion c4 :rule "MissionD project registry can locate the project by id and root.")))
+     (criterion c4 :rule "MissionD project registry can locate the project by id and root.")
+     (criterion c5 :rule "Dirty-baseline handling is explicit: preserved, staged only by owned path, and reported in the manifest or convergence note.")))
