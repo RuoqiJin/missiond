@@ -263,6 +263,38 @@ fn latest_assistant_after_task_prompt(
     latest
 }
 
+fn latest_assistant_after_claim(
+    messages: &[missiond_core::types::ConversationMessage],
+    claimed_at: Option<&str>,
+) -> Option<String> {
+    messages
+        .iter()
+        .rev()
+        .find(|msg| {
+            msg.role == "assistant"
+                && timestamp_is_after_or_unknown(&msg.timestamp, claimed_at)
+                && !msg.content.trim().is_empty()
+                && !is_probably_active_tui_summary(msg.content.trim())
+                && !is_probably_provider_tool_invocation_message(msg.content.trim())
+        })
+        .map(|msg| msg.content.trim().to_string())
+}
+
+fn provider_completion_summary_for_task(
+    messages: &[missiond_core::types::ConversationMessage],
+    task_id: &str,
+    claimed_at: Option<&str>,
+    conversation_task_id: Option<&str>,
+) -> Option<String> {
+    latest_assistant_after_task_prompt(messages, task_id, claimed_at).or_else(|| {
+        if conversation_task_id == Some(task_id) {
+            latest_assistant_after_claim(messages, claimed_at)
+        } else {
+            None
+        }
+    })
+}
+
 fn is_probably_provider_tool_invocation_message(content: &str) -> bool {
     let trimmed = content.trim_start();
     trimmed.starts_with("[Tool:")
@@ -297,25 +329,12 @@ async fn durable_provider_completion_for_slot_task(
             .get_conversation_messages(&conv.id, None, 80)
             .await
             .unwrap_or_default();
-        let summary = if conv.task_id.as_deref() == Some(task.id.as_str()) {
-            messages
-                .iter()
-                .rev()
-                .find(|msg| {
-                    msg.role == "assistant"
-                        && timestamp_is_after_or_unknown(&msg.timestamp, task.claimed_at.as_deref())
-                        && !msg.content.trim().is_empty()
-                        && !is_probably_active_tui_summary(msg.content.trim())
-                        && !is_probably_provider_tool_invocation_message(msg.content.trim())
-                })
-                .map(|msg| msg.content.trim().to_string())
-        } else {
-            latest_assistant_after_task_prompt(
-                &messages,
-                task.id.as_str(),
-                task.claimed_at.as_deref(),
-            )
-        };
+        let summary = provider_completion_summary_for_task(
+            &messages,
+            task.id.as_str(),
+            task.claimed_at.as_deref(),
+            conv.task_id.as_deref(),
+        );
         if let Some(summary) = summary {
             if conv.task_id.as_deref() != Some(task.id.as_str()) {
                 let _ = state
@@ -3839,6 +3858,47 @@ mod tests {
                 Some("2026-05-03T10:14:50Z")
             ),
             None
+        );
+    }
+
+    #[test]
+    fn provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "Execute BoardTask task-s2 from wave jarvis-m6.",
+                "2026-05-04T06:31:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "JARVIS_S2_INVARIANTS_DONE\ncommit: `a1c77a1`",
+                "2026-05-04T06:39:00Z",
+            ),
+            test_conversation_message(
+                3,
+                "system",
+                "Execute BoardTask task-s3 from wave jarvis-m6.",
+                "2026-05-04T06:41:00Z",
+            ),
+            test_conversation_message(
+                4,
+                "assistant",
+                "JARVIS_S3_DATA_DONE\ncommit: `edd5c96`",
+                "2026-05-04T06:42:00Z",
+            ),
+        ];
+
+        assert_eq!(
+            provider_completion_summary_for_task(
+                &messages,
+                "task-s3",
+                Some("2026-05-04T06:30:00Z"),
+                Some("task-s3"),
+            )
+            .as_deref(),
+            Some("JARVIS_S3_DATA_DONE\ncommit: `edd5c96`")
         );
     }
 

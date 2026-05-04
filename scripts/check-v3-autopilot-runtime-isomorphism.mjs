@@ -165,6 +165,8 @@ function checkFiles(root) {
     'durable_completion',
     'durable final',
     'latest_assistant_after_task_prompt',
+    'provider_completion_summary_for_task',
+    'provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session',
     'get_conversations_by_task_id',
     'get_slot_session',
     'set_conversation_task_id',
@@ -264,9 +266,11 @@ async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; no
 		fn is_durable_completion_summary_note() {}
 		fn has_durable_completion_summary_after_claim() {}
     fn latest_assistant_after_task_prompt() {}
+    fn provider_completion_summary_for_task() {}
     fn is_probably_provider_tool_invocation_message() {}
     fn looks_like_bare_tool_call_marker() {}
     fn looks_like_intermediate_assistant_narration() {}
+    fn provider_final_summary_prefers_current_task_prompt_anchor_in_reused_session() {}
     fn provider_final_summary_rejects_intermediate_investigation_narration() {}
     async fn reconcile_slot_provider_conversation() { reconcile_conversation_messages(); }
     async fn durable_provider_completion_for_slot_task() { get_conversations_by_task_id(); get_slot_session(); set_conversation_task_id(); }
