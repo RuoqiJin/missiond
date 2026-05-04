@@ -168,7 +168,10 @@ impl ToolHandler for ProxyHandler {
             }
         }
         error!(tool = %name, retries = MAX_RETRIES, "IPC tool call exhausted retries");
-        ToolResult::error(format!("IPC connection failed after retries: {}", last_error))
+        ToolResult::error(format!(
+            "IPC connection failed after retries: {}",
+            last_error
+        ))
     }
 }
 
@@ -252,10 +255,7 @@ async fn ensure_daemon(endpoint: &str) -> Result<()> {
         sleep(Duration::from_millis(100)).await;
     }
 
-    Err(anyhow!(
-        "Timed out waiting for daemon: {}",
-        endpoint
-    ))
+    Err(anyhow!("Timed out waiting for daemon: {}", endpoint))
 }
 
 #[tokio::main]
@@ -269,15 +269,30 @@ async fn main() -> Result<()> {
     ensure_daemon(&endpoint).await?;
 
     let session_id = get_session_id();
-    let client = IpcClient { endpoint, session_id };
+    let client = IpcClient {
+        endpoint,
+        session_id,
+    };
 
-    // Fetch KB summary from daemon for instructions injection
-    let instructions = match client.call_method("kb/summary", None).await {
-        Ok(val) => val.get("instructions").and_then(|v| v.as_str()).map(String::from),
-        Err(e) => {
-            warn!("Failed to fetch KB summary: {}", e);
-            None
+    // KB/skill instructions are noisy while the project memory stores are being
+    // curated. Keep MCP initialize clean by default; opt in only for explicit
+    // memory-audit sessions.
+    let preload_instructions = std::env::var("MISSIOND_MCP_PRELOAD_INSTRUCTIONS")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "on"))
+        .unwrap_or(false);
+    let instructions = if preload_instructions {
+        match client.call_method("kb/summary", None).await {
+            Ok(val) => val
+                .get("instructions")
+                .and_then(|v| v.as_str())
+                .map(String::from),
+            Err(e) => {
+                warn!("Failed to fetch KB summary: {}", e);
+                None
+            }
         }
+    } else {
+        None
     };
 
     let handler = ProxyHandler { client };

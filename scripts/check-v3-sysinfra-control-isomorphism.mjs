@@ -117,6 +117,7 @@ function checkFiles(root, files) {
     'power.rs owns mission_power_control',
     'system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update',
     'mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job',
+    'require explicit confirm=true',
     'deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release',
     'missiond-blue-green-self-update',
     'survive daemon kickstart',
@@ -336,7 +337,7 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/sysinfra/global_instruction.rs"
              "crates/missiond-mcp/src/tools/sysinfra/permission.rs"
              "scripts/check-v3-sysinfra-control-isomorphism.mjs"]
-      :note "infra.rs owns mission_infra_query/ops; permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update. mission_daemon_update full build MUST start scripts/deploy-daemon.sh as a detached async logged job to survive daemon kickstart; deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release; skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction."))
+      :note "infra.rs owns mission_infra_query/ops; permission.rs owns mission_permission_query/mutate; power.rs owns mission_power_control; system.rs owns mission_sys_logs, mission_sys_config, mission_daemon_update, and missiond-blue-green-self-update. mission_daemon_update must require explicit confirm=true; full build MUST start scripts/deploy-daemon.sh as a detached async logged job to survive daemon kickstart; deploy-daemon.sh MUST co-build missiond and mission-mcp into one blue-green release; skip_build remains the synchronous already-built artifact restart path. global_instruction.rs owns mission_global_instruction."))
   (compression-contract
     :checks ["node scripts/check-v3-sysinfra-control-isomorphism.mjs"]))`;
   ensureFile(root, DEFAULT_FILES.blueprint, blueprint);

@@ -296,6 +296,18 @@ async fn daemon_update(args: Value) -> Result<ToolResult> {
     use std::process::{Command, Stdio};
     use tracing::info;
 
+    let confirmed = args
+        .get("confirm")
+        .or_else(|| args.get("confirmed"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if !confirmed {
+        return Ok(ToolResult::error(
+            "mission_daemon_update requires explicit confirm=true. Use the blue-green deploy script directly for supervised deploys, or create a visible BoardTask with deploy acceptance before calling this tool."
+                .to_string(),
+        ));
+    }
+
     let skip_build = args
         .get("skip_build")
         .and_then(|v| v.as_bool())

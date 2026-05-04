@@ -42,6 +42,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
             json!({
                 "type": "object",
                 "properties": {
+                    "confirm": {"type": "boolean", "description": "必须显式为 true；防止主控或工位误触发 daemon 重建/重启", "default": false},
                     "skip_build": {"type": "boolean", "description": "跳过 cargo build，使用 target/release/missiond 同步替换并重启", "default": false}
                 }
             }),
