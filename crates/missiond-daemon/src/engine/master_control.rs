@@ -6,7 +6,7 @@ use std::time::Duration;
 use missiond_core::event::events::{BoardEvent, QuestionEvent, SlotEvent};
 use missiond_core::event::subscription::{CursorFlush, StartFrom, SubscriptionOpts};
 use missiond_core::event::DomainEvent;
-use missiond_core::types::{BoardTaskStatus, CreateBoardTaskInput};
+use missiond_core::types::{BoardTask, BoardTaskStatus, CreateBoardTaskInput};
 use missiond_core::{PTYSlot, PTYSpawnOptions, SessionState};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -353,6 +353,29 @@ struct MasterDecisionState {
     resume_instruction: String,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct ActiveObjectivePromptContext {
+    id: String,
+    title: String,
+    status: String,
+    project: Option<String>,
+    parent_id: Option<String>,
+    description_excerpt: String,
+}
+
+impl ActiveObjectivePromptContext {
+    fn from_task(task: &BoardTask) -> Self {
+        Self {
+            id: task.id.to_string(),
+            title: task.title.clone(),
+            status: task.status.as_str().to_string(),
+            project: task.project.clone(),
+            parent_id: task.parent_id.as_ref().map(ToString::to_string),
+            description_excerpt: truncate_for_prompt(&task.description, 1200),
+        }
+    }
+}
+
 impl MasterControlService {
     pub(crate) fn new(
         bus: Arc<BusServices>,
@@ -442,7 +465,9 @@ impl MasterControlService {
         }
         if should_dispatch_control_turn(reason, &self.runtime.snapshot().await, mcp_ready) {
             let snapshot = self.runtime.snapshot().await;
-            let prompt = build_master_tick_prompt(&snapshot, reason, mcp_ready);
+            let active_objective = self.active_objective_prompt_context(&snapshot).await;
+            let prompt =
+                build_master_tick_prompt(&snapshot, reason, mcp_ready, active_objective.as_ref());
             let result = self.dispatch_control_turn(&prompt).await;
             self.runtime.record_control_turn(result).await;
         }
@@ -516,6 +541,27 @@ impl MasterControlService {
         snapshot
     }
 
+    async fn active_objective_prompt_context(
+        &self,
+        snapshot: &MasterControlRuntimeSnapshot,
+    ) -> Option<ActiveObjectivePromptContext> {
+        let active_id = snapshot.active_objective_id.as_deref()?;
+        match self.state.store.get_board_task(active_id).await {
+            Ok(Some(task)) if !is_terminal_board_task_status(&task.status) => {
+                Some(ActiveObjectivePromptContext::from_task(&task))
+            }
+            Ok(Some(_)) | Ok(None) => None,
+            Err(err) => {
+                warn!(
+                    task_id = %active_id,
+                    error = %err,
+                    "master-control failed to load active objective prompt context"
+                );
+                None
+            }
+        }
+    }
+
     async fn recover_open_master_objective(&self) -> anyhow::Result<Option<String>> {
         let snapshot = self.runtime.snapshot().await;
         if snapshot.queued_events > 0 || snapshot.active_objective_id.is_some() {
@@ -563,9 +609,10 @@ impl MasterControlService {
             tokio::fs::create_dir_all(parent).await?;
         }
         let snapshot = self.runtime.snapshot().await;
+        let active_objective = self.active_objective_prompt_context(&snapshot).await;
         let prompt_preview =
             should_dispatch_control_turn(reason, &snapshot, mcp_ready).then(|| {
-                build_master_tick_prompt(&snapshot, reason, mcp_ready)
+                build_master_tick_prompt(&snapshot, reason, mcp_ready, active_objective.as_ref())
                     .chars()
                     .take(1200)
                     .collect::<String>()
@@ -1011,9 +1058,11 @@ pub(crate) fn build_master_tick_prompt(
     snapshot: &MasterControlRuntimeSnapshot,
     reason: &str,
     mcp_ready: bool,
+    active_objective: Option<&ActiveObjectivePromptContext>,
 ) -> String {
+    let active_boardtask = render_active_objective_prompt_block(active_objective);
     format!(
-        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\n\n默认周期自省范围只看 MissionD V3 SSOT Lisp、V3 checker/final-convergence 静态结果，以及最近触碰 .missiond/v3/** 的 commit；只报告这些输入中能直接看出的逻辑不通、surface 缺口或 checker/runtime 投影漂移。当前 KB、Board backlog、事件总线历史、provider durable logs、历史会话都还没整理，默认不要把它们当架构审查输入。For default self-review, prefer mission_intent(project=\"missiond\", action=\"summary\") and mission_convergence_status.\n\nActive objective overrides default self-review: when active_objective_id is present, first query exactly that BoardTask by id and follow its description as the load-bearing objective. You may read only the project roots / files explicitly named by that BoardTask and its context_pack_path; do not browse Board open backlog. Do not call mission_kb_query, mission_conversation_query, or provider-log tools unless the active BoardTask explicitly requests those sources. PTY recognition is diagnostic only.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe only the active objective state and wait for explicit durable task evidence. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise context-pack diagnosis. If your decision is create/update BoardTask or close_or_backfill, perform the corresponding MissionD MCP mutation (mission_board_note_add / mission_board_update / mission_board_create) before returning; if the mutation is not possible, return blocked with the reason. Do not edit code directly from the resident slot.\n\nReturn one compact decision after any required MCP mutation: no-op, create/update BoardTask, delegate worker, blocked, or close_or_backfill.",
+        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\nactive_boardtask:\n{}\n\n默认周期自省范围只看 MissionD V3 SSOT Lisp、V3 checker/final-convergence 静态结果，以及最近触碰 .missiond/v3/** 的 commit；只报告这些输入中能直接看出的逻辑不通、surface 缺口或 checker/runtime 投影漂移。当前 KB、Board backlog、事件总线历史、provider durable logs、历史会话都还没整理，默认不要把它们当架构审查输入。For default self-review, prefer mission_intent(project=\"missiond\", action=\"summary\") and mission_convergence_status.\n\nActive objective overrides default self-review: when active_objective_id is present, ignore the default self-review paragraph entirely. The active BoardTask shown above is the only load-bearing objective. First query exactly that BoardTask by id only if the embedded summary is insufficient, then follow its description. Any mission_board_create call while active_boardtask is present MUST set parentId to the active BoardTask id and MUST directly advance that active objective; do not create resident-master/self-maintenance tasks from PTY screen text, convergence-status disagreement, Board backlog, KB, provider logs, or historical conversation unless the active BoardTask explicitly asks for that maintenance. You may read only the project roots / files explicitly named by that BoardTask and its context_pack_path; do not browse Board open backlog. Do not call mission_kb_query, mission_conversation_query, or provider-log tools unless the active BoardTask explicitly requests those sources. PTY recognition is diagnostic only.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe only the active objective state and wait for explicit durable task evidence. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise context-pack diagnosis. If your decision is create/update BoardTask or close_or_backfill, perform the corresponding MissionD MCP mutation (mission_board_note_add / mission_board_update / mission_board_create) before returning; if the mutation is not possible, return blocked with the reason. Do not edit code directly from the resident slot.\n\nReturn one compact decision after any required MCP mutation: no-op, create/update BoardTask, delegate worker, blocked, or close_or_backfill.",
         snapshot.phase,
         snapshot
             .active_objective_id
@@ -1032,8 +1081,35 @@ pub(crate) fn build_master_tick_prompt(
             .as_deref()
             .unwrap_or("none"),
         snapshot.queued_events,
-        mcp_ready
+        mcp_ready,
+        active_boardtask
     )
+}
+
+fn render_active_objective_prompt_block(
+    active_objective: Option<&ActiveObjectivePromptContext>,
+) -> String {
+    let Some(task) = active_objective else {
+        return "none".to_string();
+    };
+    format!(
+        "- id: {}\n- status: {}\n- project: {}\n- parentId: {}\n- title: {}\n- description_excerpt: {}",
+        task.id,
+        task.status,
+        task.project.as_deref().unwrap_or("none"),
+        task.parent_id.as_deref().unwrap_or("none"),
+        task.title,
+        task.description_excerpt
+    )
+}
+
+fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
+    let mut chars = value.chars();
+    let mut out: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        out.push_str("...");
+    }
+    out
 }
 
 struct MasterContextPackRender<'a> {
@@ -2062,7 +2138,7 @@ mod tests {
             last_verified_commit: None,
             resume_instruction: "resume".to_string(),
         };
-        let prompt = build_master_tick_prompt(&snapshot, "event-wakeup", true);
+        let prompt = build_master_tick_prompt(&snapshot, "event-wakeup", true, None);
         assert!(prompt.contains("event_summary: BoardEvent.task_created: task_id=abc"));
         assert!(prompt.contains("phase: classify_objective"));
         assert!(prompt.contains("active_objective_id: abc"));
@@ -2085,6 +2161,53 @@ mod tests {
         assert!(prompt.contains("perform the corresponding MissionD MCP mutation"));
         assert!(prompt.contains("Do not edit code directly from the resident slot"));
         assert!(prompt.contains("close_or_backfill"));
+    }
+
+    #[test]
+    fn master_tick_prompt_embeds_active_boardtask_and_child_creation_rule() {
+        let snapshot = MasterControlRuntimeSnapshot {
+            queued_events: 1,
+            processed_ticks: 1,
+            last_event_seq: 7,
+            last_checkpoint_at_epoch: 0,
+            drift_backfill_tasks_created: 0,
+            control_turns_sent: 0,
+            last_control_turn_at_epoch: 0,
+            last_event_cursor: Some("BoardEvent:7".to_string()),
+            last_event_summary: Some("BoardEvent.task_created: task_id=auth-parent".to_string()),
+            last_tick_id: None,
+            blocked_reason: None,
+            last_mcp_ready: Some(true),
+            last_control_turn_error: None,
+            last_drift_backfill_task_id: None,
+            active_objective_id: Some("auth-parent".to_string()),
+            phase: "classify_objective".to_string(),
+            context_pack_path: Some(master_context_pack_path_for_objective("auth-parent")),
+            delegated_task_ids: Vec::new(),
+            last_verified_commit: None,
+            resume_instruction: "resume".to_string(),
+        };
+        let active = ActiveObjectivePromptContext {
+            id: "auth-parent".to_string(),
+            title: "Run Auth M6 SSOT convergence under resident master".to_string(),
+            status: "open".to_string(),
+            project: Some("auth".to_string()),
+            parent_id: None,
+            description_excerpt:
+                "Auth must reach M6 with tenant/application/product/user-group structure."
+                    .to_string(),
+        };
+        let prompt = build_master_tick_prompt(&snapshot, "event-wakeup", true, Some(&active));
+
+        assert!(prompt.contains("active_boardtask:"));
+        assert!(prompt.contains("- id: auth-parent"));
+        assert!(prompt.contains("- project: auth"));
+        assert!(prompt.contains("Auth must reach M6"));
+        assert!(prompt.contains("ignore the default self-review paragraph entirely"));
+        assert!(prompt.contains(
+            "mission_board_create call while active_boardtask is present MUST set parentId"
+        ));
+        assert!(prompt.contains("do not create resident-master/self-maintenance tasks"));
     }
 
     #[test]
