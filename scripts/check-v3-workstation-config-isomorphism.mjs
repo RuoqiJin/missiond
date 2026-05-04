@@ -128,6 +128,9 @@ function checkFiles(root, files) {
     'mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg',
     'task_delegate must pass model/model_profile through to compute_slot',
     'mission_task_delegate MUST accept structured two-stage delegation metadata',
+    'mission_task_delegate and mission_swarm_run MUST accept parent_id/parentId aliases',
+    'commit-failure-blocker',
+    'Autopilot MUST NOT mark the BoardTask done',
     'read_scope',
     'must_not_touch forbids write/stage/commit',
     'structured artifact with Findings / Evidence / Recommendations / Verification',
@@ -239,6 +242,13 @@ function checkFiles(root, files) {
     'struct DelegationMetadata',
     'fn string_list_arg',
     'fn render_delegation_metadata_block',
+    'parent_task_id',
+    'parentTaskId',
+    'parent_board_task_id',
+    'parentBoardTaskId',
+    'parent_id: parent_id.clone()',
+    'parent_board_task_id',
+    'swarm_task_description_carries_parent_board_task_id_when_supplied',
     'context_pack_path',
     'read_scope',
     'scope_semantics',
@@ -397,6 +407,11 @@ function checkFiles(root, files) {
     'fn decide_close_action',
     'fn extract_delegated_execution_id',
     'fn maybe_complete_delegated_execution_log',
+    'fn worker_final_close_blocker',
+    'Autopilot blocked close',
+    'status: Some("blocked".to_string())',
+    'provider_final_summary_rejects_retrying_once_progress',
+    'worker_final_close_blocker_detects_commit_failures',
     '"agent_name": "autopilot-orchestrator"',
     'agent_execution::handle(state, "mission_execution"',
     'fn is_dynamic_slot_id',
@@ -637,6 +652,7 @@ runtime_config.clamp_slot_ttl_secs(None);
 	struct DelegationMetadata;
 	fn string_list_arg() {}
 	fn render_delegation_metadata_block() {}
+	let _ = "parent_task_id parentTaskId parent_board_task_id parentBoardTaskId parent_id: parent_id.clone() parent_board_task_id Parent linkage swarm_task_description_carries_parent_board_task_id_when_supplied";
 	let _ = "context_pack_path read_scope write_scope must_not_touch acceptance scope_semantics output_contract";
 	// starts idle and Autopilot remains the sole task-prompt owner`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
@@ -702,6 +718,11 @@ fn append_board_task_id_suffix() {}
 fn decide_close_action() {}
 fn extract_delegated_execution_id() {}
 fn maybe_complete_delegated_execution_log() {}
+fn worker_final_close_blocker() {}
+let _ = "Autopilot blocked close";
+let _ = "status: Some(\"blocked\".to_string())";
+provider_final_summary_rejects_retrying_once_progress();
+worker_final_close_blocker_detects_commit_failures();
 "agent_name": "autopilot-orchestrator";
 agent_execution::handle(state, "mission_execution", args).await;
 fn is_dynamic_slot_id() {}

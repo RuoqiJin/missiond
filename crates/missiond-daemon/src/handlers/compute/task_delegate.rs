@@ -56,6 +56,18 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         .and_then(|v| v.as_str())
         .unwrap_or("medium");
     let requested_timeout_secs = args.get("timeout_secs").and_then(|v| v.as_i64());
+    let parent_id = string_arg(
+        &args,
+        &[
+            "parent_id",
+            "parentId",
+            "parent_task_id",
+            "parentTaskId",
+            "parent_board_task_id",
+            "parentBoardTaskId",
+        ],
+    )
+    .map(str::to_string);
 
     let depends_on: Vec<String> = args
         .get("depends_on")
@@ -261,6 +273,12 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             description, metadata_block
         );
     }
+    if let Some(parent) = parent_id.as_deref() {
+        description = format!(
+            "{}\n\n## Parent linkage\n- parent_board_task_id: {}",
+            description, parent
+        );
+    }
 
     // Phase 6.3: Enforce description size limit
     if description.len() > MAX_DESCRIPTION_CHARS {
@@ -300,6 +318,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         },
         timeout_secs: Some(timeout_secs),
         context_intent: Some(intent.to_string()),
+        parent_id: parent_id.clone(),
         ..Default::default()
     };
 
@@ -344,6 +363,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         "acceptance": delegation_metadata.acceptance,
         "provisioned_new_slot": provisioned,
         "timeout_secs": timeout_secs,
+        "parent_id": parent_id,
         "routes_to_gemini_researcher": routes_to_gemini_researcher,
         "gemini_researcher_slot": gemini_researcher_slot_id,
         "hint": "结果将通过 TaskNotification 自动回报。也可用 mission_board_get 查询进度。"
@@ -363,6 +383,18 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
     let project_id = string_arg(&args, &["project_id", "projectId"])
         .unwrap_or("missiond")
         .to_string();
+    let parent_id = string_arg(
+        &args,
+        &[
+            "parent_id",
+            "parentId",
+            "parent_task_id",
+            "parentTaskId",
+            "parent_board_task_id",
+            "parentBoardTaskId",
+        ],
+    )
+    .map(str::to_string);
     let project_root =
         match crate::slot_orchestrator::project_root::resolve_target_project_root(
             Some(&project_id),
@@ -470,6 +502,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 &project_id,
                 &project_root,
                 &context_pack_path,
+                parent_id.as_deref(),
                 &write_policy,
                 &acceptance,
                 planned_task,
@@ -481,6 +514,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 category: Some("dev".to_string()),
                 project: Some(project_id.clone()),
                 auto_execute: Some(true),
+                parent_id: parent_id.clone(),
                 timeout_secs: Some(timeout_secs),
                 context_intent: Some(planned_task.intent.clone()),
                 ..Default::default()
@@ -511,6 +545,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "project_id": project_id,
         "project_root": project_root,
         "context_pack_path": context_pack_path,
+        "parent_id": parent_id,
         "write_policy": write_policy,
         "fanout": {
             "max_claude_workers": max_claude_workers,
@@ -561,6 +596,7 @@ fn render_swarm_task_description(
     project_id: &str,
     project_root: &str,
     context_pack_path: &str,
+    parent_id: Option<&str>,
     write_policy: &str,
     acceptance: &[String],
     planned: &SwarmPlannedTask,
@@ -570,9 +606,12 @@ fn render_swarm_task_description(
     } else {
         "Completion protocol: implementation lanes may read declared read_scope, may write only declared write_scope, must not write/stage/commit forbidden paths, and must report acceptance evidence as a structured artifact."
     };
+    let parent_line = parent_id
+        .map(|id| format!("- parent_board_task_id: {id}\n"))
+        .unwrap_or_default();
 
     format!(
-        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n{parent_line}- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         planned.lane,
         planned.task_class,
         planned.pool_hint,
@@ -1216,6 +1255,7 @@ mod tests {
             "jarvis",
             "/Users/jin/Projects/jarvis",
             ".missiond/v3/runtime/swarm/test.lisp",
+            None,
             "read-only",
             &[],
             &planned,
@@ -1231,6 +1271,35 @@ mod tests {
         assert!(
             description.contains("- read_scope: /Users/jin/Projects/jarvis"),
             "swarm metadata missing target-project read_scope:\n{description}"
+        );
+    }
+
+    #[test]
+    fn swarm_task_description_carries_parent_board_task_id_when_supplied() {
+        let planned = SwarmPlannedTask {
+            lane: "implement".to_string(),
+            engine_hint: "claude-code".to_string(),
+            pool_hint: "claude-code-default".to_string(),
+            task_class: "code".to_string(),
+            title: "Implement shard".to_string(),
+            intent: "code".to_string(),
+            read_scope: vec!["/repo".to_string()],
+            write_scope: vec![".missiond/evidence/m6.md".to_string()],
+            must_not_touch: vec!["src/**".to_string()],
+        };
+        let description = render_swarm_task_description(
+            "M6 closure",
+            "jarvis-forge",
+            "/repo",
+            "/missiond/.missiond/v3/runtime/swarm/context.lisp",
+            Some("parent-task-123"),
+            "scoped-write",
+            &["node scripts/check.js".to_string()],
+            &planned,
+        );
+        assert!(
+            description.contains("- parent_board_task_id: parent-task-123"),
+            "swarm metadata must carry parent id so worker notes and UI hierarchy can close the objective:\n{description}"
         );
     }
 

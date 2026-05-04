@@ -359,8 +359,7 @@ async fn await_durable_provider_completion_for_slot_task(
     slot_id: &str,
 ) -> Result<Option<DurableProviderCompletion>> {
     let poll_budget_ms = worker_final_settle_window_ms().clamp(1_000, 30_000);
-    let deadline =
-        std::time::Instant::now() + std::time::Duration::from_millis(poll_budget_ms);
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(poll_budget_ms);
     loop {
         reconcile_slot_provider_conversation(state, slot_id).await;
         if let Some(completion) =
@@ -958,6 +957,24 @@ fn is_probably_active_tui_summary(summary: &str) -> bool {
         || looks_like_intermediate_assistant_narration(trimmed)
 }
 
+fn worker_final_close_blocker(summary: &str) -> Option<&'static str> {
+    let lower = summary.to_ascii_lowercase();
+    const BLOCKING_MARKERS: [(&str, &str); 9] = [
+        ("gpg pinentry", "gpg-pinentry"),
+        ("pinentry was cancelled", "gpg-pinentry"),
+        ("pinentry was canceled", "gpg-pinentry"),
+        ("pinentry canceled", "gpg-pinentry"),
+        ("pinentry cancelled", "gpg-pinentry"),
+        ("commit failed", "commit-failed"),
+        ("failed to commit", "commit-failed"),
+        ("could not commit", "commit-failed"),
+        ("commit did not succeed", "commit-failed"),
+    ];
+    BLOCKING_MARKERS
+        .iter()
+        .find_map(|(needle, reason)| lower.contains(needle).then_some(*reason))
+}
+
 fn looks_like_active_tui_progress(text: &str) -> bool {
     text.lines()
         .any(|line| is_tui_progress_line(line.trim_start()))
@@ -984,7 +1001,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "i'm going to",
         "i am going to",
     ];
-    const MUTATION_PROGRESS_MARKERS: [&str; 28] = [
+    const MUTATION_PROGRESS_MARKERS: [&str; 29] = [
         "now committing",
         "committing only",
         "committing the single",
@@ -995,6 +1012,7 @@ fn looks_like_intermediate_assistant_narration(text: &str) -> bool {
         "now verifying",
         "now checking",
         "now writing",
+        "retrying once",
         "file is untracked",
         "now committing only",
         "i'll commit",
@@ -2406,6 +2424,52 @@ async fn dispatch_board_tasks_with_config(
                             note_type: Some("note".to_string()),
                             author: Some("autopilot".to_string()),
                         })
+                        .await;
+                    return;
+                }
+                if let Some(blocker) = worker_final_close_blocker(&final_summary) {
+                    warn!(
+                        task_id = %task.id,
+                        slot_id = %slot_id,
+                        duration_ms = res.duration_ms,
+                        blocker,
+                        "Autopilot: worker final reports a blocking commit/tool failure; preserving task for recovery"
+                    );
+                    let note = format!(
+                        "⚠️ **Autopilot blocked close** — worker final indicates `{}`. The BoardTask stays blocked so a supervisor/worker can recover instead of recording a false done state.\n\n{}",
+                        blocker,
+                        truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES),
+                    );
+                    let _ = state
+                        .store
+                        .add_board_task_note(&missiond_core::types::AddBoardTaskNoteInput {
+                            task_id: task.id.to_string(),
+                            content: note,
+                            note_type: Some("note".to_string()),
+                            author: Some("autopilot".to_string()),
+                        })
+                        .await;
+                    let _ = state
+                        .store
+                        .update_board_task(
+                            task.id.as_str(),
+                            &missiond_core::types::UpdateBoardTaskInput {
+                                status: Some("blocked".to_string()),
+                                ..Default::default()
+                            },
+                        )
+                        .await;
+                    let _ = state
+                        .bus
+                        .publish_board(BoardEvent::StatusChanged {
+                            task_id: task.id.to_string(),
+                            old_status: format!("{:?}", task.status),
+                            new_status: "blocked".to_string(),
+                        })
+                        .await;
+                    let _ = state
+                        .store
+                        .update_prompt_snapshot_outcome(task.id.as_str(), "blocked")
                         .await;
                     return;
                 }
@@ -3937,6 +4001,50 @@ mod tests {
     }
 
     #[test]
+    fn provider_final_summary_rejects_retrying_once_progress() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T15:06:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "GPG pinentry was cancelled — retrying once with the same command.",
+                "2026-05-04T15:08:00Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T15:05:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(
+                "GPG pinentry was cancelled — retrying once with the same command."
+            ),
+            "retry progress must not be treated as a durable final"
+        );
+    }
+
+    #[test]
+    fn worker_final_close_blocker_detects_commit_failures() {
+        assert_eq!(
+            worker_final_close_blocker("GPG pinentry was cancelled."),
+            Some("gpg-pinentry")
+        );
+        assert_eq!(
+            worker_final_close_blocker("The scoped commit failed after staging."),
+            Some("commit-failed")
+        );
+        assert_eq!(
+            worker_final_close_blocker("commit_status=not-required; read-only smoke."),
+            None
+        );
+    }
+
+    #[test]
     fn provider_final_summary_rejects_claude_tool_invocation_records() {
         let messages = vec![
             test_conversation_message(
@@ -5160,14 +5268,19 @@ mod tests {
             })
             .collect();
         assert_eq!(
-            matching.iter().map(|worker| worker.id.as_str()).collect::<Vec<_>>(),
+            matching
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
             vec!["claude-code-default"]
         );
         if !matching.is_empty() {
             candidates = matching;
         }
         assert!(
-            candidates.iter().all(|worker| worker.engine == "claude-code"),
+            candidates
+                .iter()
+                .all(|worker| worker.engine == "claude-code"),
             "explicit Claude hints must not leave Gemini as a fallback candidate"
         );
     }
