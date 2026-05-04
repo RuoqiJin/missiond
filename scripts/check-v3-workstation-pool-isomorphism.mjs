@@ -174,6 +174,8 @@ function checkFiles(root) {
     'matching_candidates',
     'explicit_dispatch_hints_are_hard_constraints_when_worker_exists',
     'explicit_dispatch_hints_search_full_pool_before_task_class_fallback',
+    'engine_hint_alone_does_not_widen_code_class_to_fast_patch',
+    'engine_hint=claude-code alone must not pull claude-code-fast-patch into a complex code shard',
     'struct WorkstationSlotSelection',
     'reroute_reason',
     'Workstation dispatch reroute recorded',

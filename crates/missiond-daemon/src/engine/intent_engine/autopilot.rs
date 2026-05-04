@@ -1696,7 +1696,7 @@ async fn select_workstation_pool_slot(
         .boardtask_pool_candidates(task_class)
         .into_iter()
         .collect();
-    if engine_hint.is_some() || pool_hint.is_some() {
+    if pool_hint.is_some() {
         let matching_candidates: Vec<_> = workstation_config
             .workstation_pool()
             .iter()
@@ -1715,6 +1715,24 @@ async fn select_workstation_pool_slot(
             // even when task_class parsing or class membership would otherwise
             // narrow it away; if that worker is busy, defer instead of
             // spending a different provider.
+            candidates = matching_candidates;
+        }
+    } else if engine_hint.is_some() {
+        let matching_candidates: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|worker| {
+                workstation_worker_matches_dispatch_hints(
+                    worker,
+                    engine_hint.as_deref(),
+                    pool_hint.as_deref(),
+                )
+            })
+            .collect();
+        if !matching_candidates.is_empty() {
+            // Engine hints rank/filter the task-class candidates only. They
+            // must not widen a `task_class=code` shard into the Sonnet
+            // fast-patch lane just because both are Claude Code workers.
             candidates = matching_candidates;
         }
     }
@@ -5683,6 +5701,37 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["claude-code-default"],
             "explicit engine/pool hints must be resolved against the full V3 pool"
+        );
+    }
+
+    #[test]
+    fn engine_hint_alone_does_not_widen_code_class_to_fast_patch() {
+        let cfg = WorkstationRuntimeConfig::default();
+        let candidates = cfg.boardtask_pool_candidates("code");
+        assert_eq!(
+            candidates
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-code-default"],
+            "code class must start from the default Opus coding lane only"
+        );
+
+        let matching: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|worker| {
+                workstation_worker_matches_dispatch_hints(worker, Some("claude-code"), None)
+            })
+            .collect();
+
+        assert_eq!(
+            matching
+                .iter()
+                .map(|worker| worker.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["claude-code-default"],
+            "engine_hint=claude-code alone must not pull claude-code-fast-patch into a complex code shard"
         );
     }
 
