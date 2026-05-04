@@ -1099,6 +1099,7 @@
       :backend ".missiond/backend/forge-backend-blueprint.lisp"
       :frontend ".missiond/frontend/forge-ui-blueprint.lisp"
       :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
       :missiond-role "registered project; Lisp/component reuse engine, not MissionD runtime orchestrator"
       :surface project-registry)
     ;; ── Part1 devtools — sibling devtool repos with M6 SSOT, registered as a group ──
@@ -1107,6 +1108,7 @@
       :root "/Users/jinchen/Projects/jarvis"
       :intent ".missiond/intent.lisp"
       :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
       :missiond-role "registered devtool; clean MissionD rewrite (intent.lisp + 14 intent-*.lisp shards + GAP_ANALYSIS.md)"
       :surface project-registry)
     (project :id jarvis-mechanic

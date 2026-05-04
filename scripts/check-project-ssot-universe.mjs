@@ -14,14 +14,17 @@ Checks MissionD multi-project SSOT registry convergence:
     and PCEA.
   - V3 service-runtime-universe exposes production service deployment facts.
   - project-ssot-convergence workflow exists.
-  - XJP and PCEA local SSOT checkers pass; Part1 devtools roots exist and their
-    cheap/static project-local runners (where present) exit 0.
+  - XJP and PCEA local SSOT checkers pass; every Part1 devtools project executes
+    its declared cheap/static project-local runner (jarvis and jarvis-forge run
+    bash .missiond/check.sh in default mode; jarvis-mechanic and xjpcode run
+    their node SSOT checkers; neural-codegen and semantic-terminal run
+    check.sh --dry-run).
 `;
 
 const PROJECTS = [
-  // Part1 devtools — sibling repos with project-local SSOT (root-existence + cheap/static checker invocation).
-  { id: 'jarvis', root: '/Users/jinchen/Projects/jarvis' },
-  { id: 'jarvis-forge', root: '/Users/jinchen/Projects/jarvis-forge' },
+  // Part1 devtools — sibling repos with project-local SSOT (executed via cheap/static project-local runners).
+  { id: 'jarvis', root: '/Users/jinchen/Projects/jarvis', checker: ['bash', ['.missiond/check.sh']] },
+  { id: 'jarvis-forge', root: '/Users/jinchen/Projects/jarvis-forge', checker: ['bash', ['.missiond/check.sh']] },
   { id: 'jarvis-mechanic', root: '/Users/jinchen/Projects/jarvis-mechanic', checker: ['node', ['scripts/check-mechanic-ssot.mjs']] },
   { id: 'xjpcode', root: '/Users/jinchen/Projects/xjpcode', checker: ['node', ['scripts/check-xjpcode-ssot-complete.mjs', '--json']] },
   { id: 'neural-codegen', root: '/Users/jinchen/Projects/neural-codegen', checker: ['bash', ['.missiond/check.sh', '--dry-run']] },
