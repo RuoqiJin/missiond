@@ -961,6 +961,7 @@ fn is_probably_active_tui_summary(summary: &str) -> bool {
     trimmed.is_empty()
         || looks_like_active_tui_progress(trimmed)
         || looks_like_insight_only_progress(trimmed)
+        || looks_like_retry_or_wakeup_progress(trimmed)
         || looks_like_intermediate_assistant_narration(trimmed)
 }
 
@@ -1024,6 +1025,25 @@ fn looks_like_insight_only_progress(text: &str) -> bool {
         "worktree",
     ];
     !COMPLETION_EVIDENCE_MARKERS
+        .iter()
+        .any(|marker| lower.contains(marker))
+}
+
+fn looks_like_retry_or_wakeup_progress(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    const RETRY_PROGRESS_MARKERS: [&str; 10] = [
+        "wakeup will fire",
+        "wakeup is scheduled",
+        "scheduled to retry",
+        "wait for that retry",
+        "retry rather than poll",
+        "retry later",
+        "will retry",
+        "enospc",
+        "no space left on device",
+        "disk to clear",
+    ];
+    RETRY_PROGRESS_MARKERS
         .iter()
         .any(|marker| lower.contains(marker))
 }
@@ -4283,6 +4303,31 @@ mod tests {
         );
         assert!(!is_probably_active_tui_summary(
             "★ Insight\nVerification: cargo test passed.\nCommit hash: abc1234."
+        ));
+    }
+
+    #[test]
+    fn provider_final_summary_rejects_wakeup_retry_blocker() {
+        let progress = "The wakeup will fire in 100s. I'll wait for that retry rather than poll.";
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-04T18:00:00Z",
+            ),
+            test_conversation_message(2, "assistant", progress, "2026-05-04T18:01:00Z"),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-04T17:59:00Z")),
+            None
+        );
+        assert!(
+            is_probably_active_tui_summary(progress),
+            "future wakeup / retry progress must not be treated as durable final evidence"
+        );
+        assert!(is_probably_active_tui_summary(
+            "ENOSPC: no space left on device. A wakeup is scheduled to retry."
         ));
     }
 
