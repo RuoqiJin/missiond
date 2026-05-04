@@ -1216,7 +1216,35 @@
 	      :intent ".missiond/intent.lisp"
 	      :status runtime-registered
 	      :capability deploy-ops
-	      :surface project-registry))
+	      :surface project-registry)
+    ;; ── App + external-infra projects — already-converged with project-local check.sh runners ──
+    (project :id secret-store-rs
+      :kind rust-axum-microservice
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/services/secret-store-rs"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :lifecycle external-infra-runtime
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered external infra runtime; AES-256-GCM credential vault (frozen LTS) consumed by auth/deploy-center/* via xjp-config HybridSecretProvider"
+      :surface project-registry)
+    (project :id xiaojin-blog
+      :kind nextjs-app
+      :root "/Users/jinchen/Projects/xiaojin-blog"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered app; ruoqijin.com personal blog + research portal (Next.js 16 + React 19 + Drizzle/PG; standalone repo xiaojinpro-team/xiaojin-blog)"
+      :surface project-registry)
+    (project :id cuthub
+      :kind nextjs-app
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/cuthub-frontend"
+      :intent ".missiond/intent.lisp"
+      :status project-ssot-owned
+      :lifecycle canonical-temporary-downloads-checkout
+      :note "Supervisor decision 39a2e6e8 — Downloads checkout accepted as temporary canonical M6 SSOT root until repo is cloned to /Users/jinchen/Projects/cuthub-frontend"
+      :checks ["bash .missiond/check.sh"]
+      :missiond-role "registered app; cuthub.ai frontend (Next.js 16 + React 19 + Tailwind 4 + Konva); independent repo rickyjim626/cuthub-frontend"
+      :surface project-registry))
 
   (service-runtime-universe
     :schema "missiond.service-runtime-universe.v1"
