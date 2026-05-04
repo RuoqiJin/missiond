@@ -13,11 +13,53 @@ use tracing::{debug, info, warn};
 use crate::context::v3_blueprint_runtime::RouterRuntimeConfig;
 use crate::decision_harvest::harvest_decisions_for_task;
 use crate::llm_gateway::{call_gemini_for_flow, determine_llm_env};
-use crate::slot_env::{build_slot_tracking_env, capture_slot_session_uuid};
 use crate::state::AppState;
 use crate::supervisor::{is_auth_error, is_quota_exhausted, strip_prompt_echo, truncate_safe};
 use missiond_core::PTYSpawnOptions;
 use missiond_core::SessionState;
+
+/// Bind the BoardTask id onto the slot's active conversation row at dispatch
+/// time, retrying briefly so freshly spawned sessions whose JSONL hook is
+/// still landing get linked before the first prompt fires (rather than only
+/// at completion-time backfill via durable_provider_completion_for_slot_task).
+///
+/// Five attempts at 200 ms each (~1 s total budget). Returns true if the
+/// binding succeeded, false if no slot session was registered within the
+/// budget — callers should treat false as best-effort, not a hard failure.
+/// See `.missiond/v3/missiond-blueprint.lisp :: swarm-dispatch-policy`.
+pub(crate) async fn bind_conversation_to_task(
+    state: &AppState,
+    slot_id: &str,
+    task_id: &str,
+) -> bool {
+    for attempt in 0..5 {
+        if let Ok(Some(session_uuid)) = state.store.get_slot_session(slot_id).await {
+            if let Err(err) = state
+                .store
+                .set_conversation_task_id(&session_uuid, task_id)
+                .await
+            {
+                warn!(
+                    slot_id,
+                    task_id,
+                    error = %err,
+                    "bind_conversation_to_task: set_conversation_task_id failed"
+                );
+                return false;
+            }
+            return true;
+        }
+        if attempt < 4 {
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+    debug!(
+        slot_id,
+        task_id,
+        "bind_conversation_to_task: no slot session within retry budget; deferring to durable backfill"
+    );
+    false
+}
 
 // @beacon: orchestration
 /// Execute a flow-enabled Board task through the Engineering Flow Engine.
@@ -247,13 +289,10 @@ pub(crate) async fn execute_flow_task(
                 return Ok(());
             }
 
-            // Link PTY session to task for audit trail
-            if let Ok(Some(session_uuid)) = state.store.get_slot_session(slot_id).await {
-                let _ = state
-                    .store
-                    .set_conversation_task_id(&session_uuid, task.id.as_str())
-                    .await;
-            }
+            // Link PTY session to task for audit trail (durable, with bounded
+            // retry so JSONL-hook race doesn't strand the linkage until the
+            // completion-time backfill).
+            let _ = bind_conversation_to_task(state, slot_id, task.id.as_str()).await;
 
             // Build phase-specific prompt
             let prompt = build_flow_phase_prompt(task, &p, &ctx, &state.prompts);
@@ -490,6 +529,44 @@ pub(crate) async fn ensure_autopilot_pty(
     slot_id: &str,
     task_env: HashMap<String, String>,
 ) -> bool {
+    if let Some(target_root) = resolve_task_target_project_root(state, task).await {
+        if let Some(slot) = state.mission.get_slot(slot_id) {
+            let current_root = slot
+                .config
+                .project_root
+                .as_deref()
+                .or(slot.config.cwd.as_deref());
+            if current_root != Some(target_root.as_str()) {
+                let config_path_base = current_root.map(PathBuf::from);
+                if let Some(info) = state.pty.get_status(slot_id).await {
+                    if info.state != SessionState::Exited {
+                        info!(
+                            task_id = %task.id,
+                            slot_id,
+                            previous_root = current_root.unwrap_or(""),
+                            target_root = %target_root,
+                            "Autopilot: retargeting persistent workstation slot to task project root"
+                        );
+                        let _ = state.pty.kill(slot_id).await;
+                    }
+                }
+                let mut config = slot.config.clone();
+                config.mcp_config =
+                    absolutize_config_path(config.mcp_config.as_deref(), config_path_base.as_ref())
+                        .map(|p| p.to_string_lossy().to_string());
+                config.tool_policy_path = absolutize_config_path(
+                    config.tool_policy_path.as_deref(),
+                    config_path_base.as_ref(),
+                )
+                .map(|p| p.to_string_lossy().to_string());
+                config.cwd = Some(target_root.clone());
+                config.project_root = Some(target_root);
+                config.requested_cwd = None;
+                state.mission.register_runtime_slot(config);
+            }
+        }
+    }
+
     // Check if session is already running
     if let Some(info) = state.pty.get_status(slot_id).await {
         if info.state != SessionState::Exited {
@@ -603,13 +680,25 @@ pub(crate) async fn ensure_autopilot_pty(
         return false;
     };
 
+    let resolved_cwd = slot.config.cwd.as_deref().map(PathBuf::from);
+    let config_path_base = slot
+        .config
+        .project_root
+        .as_deref()
+        .or(slot.config.cwd.as_deref())
+        .map(PathBuf::from);
     let pty_slot = missiond_core::PTYSlot {
         id: slot.config.id.clone(),
         role: slot.config.role.clone(),
-        cwd: slot.config.cwd.as_deref().map(PathBuf::from),
+        cwd: resolved_cwd,
         engine: slot.config.engine,
     };
-    let mcp_config = slot.config.mcp_config.clone().map(PathBuf::from);
+    let mcp_config =
+        absolutize_config_path(slot.config.mcp_config.as_deref(), config_path_base.as_ref());
+    let tool_policy_path = absolutize_config_path(
+        slot.config.tool_policy_path.as_deref(),
+        config_path_base.as_ref(),
+    );
     let mut final_slot_env = slot.config.env.clone().unwrap_or_default();
     for (k, v) in &task_env {
         info!(task_id = %task.id, slot_id, key = %k, value = %v, "Autopilot: LLM route override");
@@ -634,11 +723,7 @@ pub(crate) async fn ensure_autopilot_pty(
             search_enabled: slot.config.search_enabled.unwrap_or(false),
             sandbox: slot.config.sandbox.clone(),
             approval_policy: slot.config.approval_policy.clone(),
-            tool_policy_path: slot
-                .config
-                .tool_policy_path
-                .clone()
-                .map(std::path::PathBuf::from),
+            tool_policy_path,
             extra_env: HashMap::new(),
             initial_prompt: None,
         },
@@ -704,6 +789,71 @@ pub(crate) async fn ensure_autopilot_pty(
             false
         }
     }
+}
+
+async fn resolve_task_target_project_root(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+) -> Option<String> {
+    if let Some(project_id) = task.project.as_deref() {
+        match crate::slot_orchestrator::project_root::resolve_target_project_root(
+            Some(project_id),
+            None,
+            None,
+            &state.project_registry,
+        )
+        .await
+        {
+            Ok(resolution) => {
+                return Some(resolution.project_root.to_string_lossy().to_string());
+            }
+            Err(err) => {
+                warn!(
+                    task_id = %task.id,
+                    project_id,
+                    error = %err,
+                    "Autopilot: task project could not resolve to project root"
+                );
+            }
+        }
+    }
+    extract_task_metadata_field(&task.description, "project_root")
+}
+
+fn extract_task_metadata_field(description: &str, field: &str) -> Option<String> {
+    let needle = format!("- {}:", field);
+    let mut in_metadata = false;
+    for line in description.lines() {
+        let trimmed = line.trim_start();
+        if let Some(rest) = trimmed.strip_prefix("## ") {
+            let lowered = rest.to_ascii_lowercase();
+            in_metadata =
+                lowered.starts_with("dispatch metadata") || lowered.starts_with("swarm metadata");
+            continue;
+        }
+        if in_metadata {
+            if let Some(value) = trimmed.strip_prefix(needle.as_str()) {
+                let value = value.trim().trim_end_matches(',').trim();
+                if !value.is_empty() {
+                    return Some(value.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn absolutize_config_path(raw: Option<&str>, base: Option<&PathBuf>) -> Option<PathBuf> {
+    raw.map(str::trim).filter(|s| !s.is_empty()).map(|raw| {
+        let path = PathBuf::from(raw);
+        if path.is_absolute() {
+            path
+        } else if let Some(base) = base {
+            base.join(path)
+        } else {
+            path
+        }
+    })
 }
 
 /// Write a flow artifact to a temp file, return the file path.

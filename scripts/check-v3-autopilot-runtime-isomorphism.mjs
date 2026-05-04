@@ -98,7 +98,9 @@ function checkFiles(root) {
 	    ':summary-note-source',
 	    ':settle-window',
 	    ':idle-durable-summary-close',
+	    'await_durable_provider_completion_for_slot_task',
 	    'extract_worker_final_summary(res.response, full_prompt)',
+	    'bare Bash(...)-style tool-call lines',
 	    'wait_for_worker_final_settle_window',
 	    'durable provider-or-note evidence + idle slot diagnosis',
 	    'paste again to expand',
@@ -148,7 +150,14 @@ function checkFiles(root) {
     'wait_for_worker_final_settle_window().await',
     'close_idle_running_task_from_durable_summary',
     'has_durable_completion_summary_after_claim',
+    'reconcile_slot_provider_conversation',
+    'reconcile_conversation_messages',
     'durable_provider_completion_for_slot_task',
+    'await_durable_provider_completion_for_slot_task',
+    'is_probably_provider_tool_invocation_message',
+    'looks_like_bare_tool_call_marker',
+    'durable_completion',
+    'durable final',
     'latest_assistant_after_task_prompt',
     'get_conversations_by_task_id',
     'get_slot_session',
@@ -220,8 +229,8 @@ function buildFixture() {
         :egress [BoardEvent SlotEvent])))
 	  (execution-ownership delegated-boardtask
 	    :close-owner
-	      (:summary-note-source "extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, tool logs, and \`paste again to expand\` collapse markers."
-	       :settle-window "wait_for_worker_final_settle_window projects the high-confidence final summary settle policy."
+	      (:summary-note-source "await_durable_provider_completion_for_slot_task then extract_worker_final_summary(res.response, full_prompt) capped via truncate_safe; raw res.response forbidden in note format string. Auth/quota notes bypass intentionally. The TUI capture includes echoed task contract, bare Bash(...)-style tool-call lines, tool logs, and \`paste again to expand\` collapse markers."
+	       :settle-window "wait_for_worker_final_settle_window projects the high-confidence final summary settle policy and durable-final polling."
 	       :idle-durable-summary-close "delayed active-frame tasks close from durable provider-or-note evidence + idle slot diagnosis."))
   (implementation-map
     (surface autopilot-runtime
@@ -243,19 +252,24 @@ use missiond_core::event::events::BoardEvent;
 async fn x() { let ev = BoardEvent::TaskCreated { task_id, title, category }; notify_board_event_direct(&ev); let _ = state.bus.publish_board(ev).await; state.board_dispatch_notify.notify_one(); /* event-bus cause */ }`);
   write(root, 'autopilot', `
 	const AUTOPILOT_SUMMARY_NOTE_MAX_BYTES: usize = 4000;
-	const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 1200;
+	const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 5000;
 	fn worker_final_settle_window_ms() -> u64 { AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT }
 		fn extract_worker_final_summary(_r: &str, _p: &str) -> String { String::new() }
 		fn is_durable_completion_summary_note() {}
 		fn has_durable_completion_summary_after_claim() {}
     fn latest_assistant_after_task_prompt() {}
+    fn is_probably_provider_tool_invocation_message() {}
+    fn looks_like_bare_tool_call_marker() {}
+    async fn reconcile_slot_provider_conversation() { reconcile_conversation_messages(); }
     async fn durable_provider_completion_for_slot_task() { get_conversations_by_task_id(); get_slot_session(); set_conversation_task_id(); }
+    async fn await_durable_provider_completion_for_slot_task() { reconcile_slot_provider_conversation().await; durable_provider_completion_for_slot_task().await; }
 		async fn close_idle_running_task_from_durable_summary() { get_board_task_with_notes(); let _ = "Provider durable final observed"; }
 		async fn dispatch_board_tasks() {
 	    let _g = OwnedSlotDispatchGuard;
 	    state.pty.send(&slot_id, &full_prompt, timeout_ms).await;
 	    wait_for_worker_final_settle_window().await;
-	    let final_summary = extract_worker_final_summary(&res.response, &full_prompt);
+	    let durable_completion = await_durable_provider_completion_for_slot_task().await; let _ = "durable final";
+	    let final_summary = durable_completion.unwrap_or_else(|| extract_worker_final_summary(&res.response, &full_prompt));
     let _summary = truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
     maybe_complete_delegated_execution_log();
     publish_slot(SlotEvent::TaskDispatched{});

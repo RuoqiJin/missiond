@@ -322,7 +322,9 @@ function checkFiles(root, files) {
 	    'clamp_pty_send_timeout_ms',
 	    'dynamic_slot_spawn_timeout_secs',
 	    'deploy_review_timeout_ms',
-	    'MissingBlueprint',
+	    'load_blueprint_source',
+	    'locate_orchestrator_blueprint',
+	    'orchestrator blueprint',
 	  ]);
 
   requireAll(diagnostics, files.slotEnv, sources.slotEnv, [
@@ -533,6 +535,9 @@ function buildFixture() {
 	       "mission_compute_slot model_profile resolution MUST use workstation-config model-profile spawn-model-arg"
 	       "task_delegate must pass model/model_profile through to compute_slot"
 	       "mission_task_delegate MUST accept structured two-stage delegation metadata"
+	       "read_scope"
+	       "must_not_touch forbids write/stage/commit"
+	       "structured artifact with Findings / Evidence / Recommendations / Verification"
 	       "Project-bound workstation spawn MUST sync MissionD Claude hooks"
        "MISSION_IPC_ENDPOINT"
        "Autopilot pty.send budget MUST project from BoardTask.timeout_secs"
@@ -628,7 +633,7 @@ runtime_config.clamp_slot_ttl_secs(None);
 	struct DelegationMetadata;
 	fn string_list_arg() {}
 	fn render_delegation_metadata_block() {}
-	let _ = "context_pack_path write_scope must_not_touch acceptance";
+	let _ = "context_pack_path read_scope write_scope must_not_touch acceptance scope_semantics output_contract";
 	// starts idle and Autopilot remains the sole task-prompt owner`);
 	  writeFixture(root, DEFAULT_FILES.v3Runtime, `
 	pub(crate) struct WorkstationRuntimeConfig {}
@@ -645,7 +650,7 @@ runtime_config.clamp_slot_ttl_secs(None);
 	fn x() {
   find_form(source, "workstation-config");
   find_form(source, "autopilot-policy");
-  let a = "startup_slots slot_templates allowed_cwd_prefixes optional_non_nil_keyword model_profile_spawn_args default_spawn_model_for_template parse_spawn_model_arg slot_template available_slot_template_names timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking timeout-policy dynamic-slot-spawn ttl-policy dynamic-slot cwd-policy dynamic-slot string_list_keyword slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms dynamic_slot_spawn_timeout_secs deploy_review_timeout_ms MissingBlueprint";
+  let a = "startup_slots slot_templates allowed_cwd_prefixes optional_non_nil_keyword model_profile_spawn_args default_spawn_model_for_template parse_spawn_model_arg slot_template available_slot_template_names timeout-policy boardtask-dispatch timeout-policy claudecode-swarm timeout-policy pty-send-blocking timeout-policy dynamic-slot-spawn ttl-policy dynamic-slot cwd-policy dynamic-slot string_list_keyword slot-template DEFAULT_MODEL_PROFILE DEFAULT_TIMEOUT_SECS MIN_TIMEOUT_SECS MAX_TIMEOUT_SECS WATCHDOG_GRACE_SECS MISSING_SESSION_PROBE_SECS DEFAULT_SLOT_TTL_SECS MIN_SLOT_TTL_SECS MAX_SLOT_TTL_SECS DEFAULT_SLOT_EXTEND_SECS MAX_SLOT_EXTEND_SECS DEFAULT_CC_SWARM_TIMEOUT_SECS MIN_CC_SWARM_TIMEOUT_SECS MAX_CC_SWARM_TIMEOUT_SECS DEFAULT_PTY_SEND_TIMEOUT_SECS MIN_PTY_SEND_TIMEOUT_SECS MAX_PTY_SEND_TIMEOUT_SECS DEFAULT_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MIN_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS MAX_DYNAMIC_SLOT_SPAWN_TIMEOUT_SECS DEFAULT_AUTOPILOT_SLOT_TASK_REAP_STALE_SECS DEFAULT_AUTOPILOT_DEPLOY_REVIEW_TIMEOUT_SECS DEFAULT_AUTOPILOT_RECENT_INTENTS_WINDOW_SECS DEFAULT_AUTOPILOT_DIRECTION_SHIFT_COOLDOWN_SECS default_slot_extend_secs max_slot_extend_secs clamp_cc_swarm_timeout_ms clamp_pty_send_timeout_ms dynamic_slot_spawn_timeout_secs deploy_review_timeout_ms load_blueprint_source locate_orchestrator_blueprint orchestrator blueprint";
 }`);
   writeFixture(root, DEFAULT_FILES.slotEnv, `
 const A = 'MISSION_IPC_ENDPOINT settings.local.json SESSION_REGISTER_HOOK CONTEXT_INJECT_HOOK SessionStart UserPromptSubmit missiond-session-register.sh missiond-context-inject-v2.sh';
@@ -713,9 +718,9 @@ V3_BLUEPRINT_CONFIG_ERROR;
 ToolResult::structured_error;`);
   writeFixture(root, DEFAULT_FILES.mcpComputeSlot, `
 "initial_prompt" "initialPrompt" "objective" "only" "model" "model_profile" "modelProfile" "coding-default-opus-4-7"`);
-  writeFixture(root, DEFAULT_FILES.mcpTaskDelegate, `
+ writeFixture(root, DEFAULT_FILES.mcpTaskDelegate, `
 	"timeout_secs" "default": 1800 "model" "model_profile" "modelProfile" "coding-default-opus-4-7"
-	"task_class" "pool_hint" "engine_hint" "context_pack_path" "write_scope" "must_not_touch" "acceptance"`);
+	"task_class" "pool_hint" "engine_hint" "context_pack_path" "read_scope" "readScope" "write_scope" "must_not_touch" "acceptance"`);
   writeFixture(root, DEFAULT_FILES.mcpCcTasks, `
 "mission_cc_swarm" "timeout-policy claudecode-swarm" "default": 600000`);
   return root;

@@ -54,6 +54,27 @@ fn derive_pty_timeout_ms(config: &AutopilotRuntimeConfig, timeout_secs: Option<i
     (derive_pty_timeout_secs(config, timeout_secs) as u64).saturating_mul(1000)
 }
 
+/// Context prefetch is noisy while KB/history are still being normalized.
+///
+/// Default off keeps delegated worker prompts scoped to explicit BoardTask
+/// contract fields (`read_scope`, `context_pack_path`, `acceptance`) instead of
+/// hidden KB/Skill snippets. Operators can temporarily opt in for a dedicated
+/// memory-audit workflow with `MISSIOND_AUTOPILOT_CONTEXT_PREFETCH=1`.
+fn autopilot_context_prefetch_enabled() -> bool {
+    autopilot_context_prefetch_enabled_from(
+        std::env::var("MISSIOND_AUTOPILOT_CONTEXT_PREFETCH")
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn autopilot_context_prefetch_enabled_from(raw: Option<&str>) -> bool {
+    matches!(
+        raw.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
+        Some("1" | "true" | "yes" | "on")
+    )
+}
+
 /// Default settle window after `pty.send` reports completion before Autopilot
 /// writes the durable BoardTask close state.
 ///
@@ -61,7 +82,7 @@ fn derive_pty_timeout_ms(config: &AutopilotRuntimeConfig, timeout_secs: Option<i
 /// provider log itself. The short window lets Claude/Codex/Gemini JSONL/SSE
 /// final messages and MissionD conversation ingestion land before the
 /// orchestrator writes the BoardTask summary and `mission_execution` synthesis.
-pub(crate) const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 1200;
+pub(crate) const AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT: u64 = 5000;
 
 fn worker_final_settle_window_ms() -> u64 {
     std::env::var("MISSIOND_AUTOPILOT_FINAL_SETTLE_MS")
@@ -231,11 +252,23 @@ fn latest_assistant_after_task_prompt(
             latest = None;
             continue;
         }
-        if seen_task_prompt && msg.role == "assistant" && !is_probably_active_tui_summary(content) {
+        if seen_task_prompt
+            && msg.role == "assistant"
+            && !is_probably_active_tui_summary(content)
+            && !is_probably_provider_tool_invocation_message(content)
+        {
             latest = Some(content.to_string());
         }
     }
     latest
+}
+
+fn is_probably_provider_tool_invocation_message(content: &str) -> bool {
+    let trimmed = content.trim_start();
+    trimmed.starts_with("[Tool:")
+        || trimmed.starts_with("[tool:")
+        || (trimmed.starts_with("Tool:")
+            && (trimmed.contains("command:") || trimmed.contains("description:")))
 }
 
 async fn durable_provider_completion_for_slot_task(
@@ -273,6 +306,7 @@ async fn durable_provider_completion_for_slot_task(
                         && timestamp_is_after_or_unknown(&msg.timestamp, task.claimed_at.as_deref())
                         && !msg.content.trim().is_empty()
                         && !is_probably_active_tui_summary(msg.content.trim())
+                        && !is_probably_provider_tool_invocation_message(msg.content.trim())
                 })
                 .map(|msg| msg.content.trim().to_string())
         } else {
@@ -298,6 +332,41 @@ async fn durable_provider_completion_for_slot_task(
     }
 
     Ok(None)
+}
+
+async fn await_durable_provider_completion_for_slot_task(
+    state: &AppState,
+    task: &missiond_core::types::BoardTask,
+    slot_id: &str,
+) -> Result<Option<DurableProviderCompletion>> {
+    let poll_budget_ms = worker_final_settle_window_ms().clamp(1_000, 30_000);
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_millis(poll_budget_ms);
+    loop {
+        reconcile_slot_provider_conversation(state, slot_id).await;
+        if let Some(completion) =
+            durable_provider_completion_for_slot_task(state, task, slot_id).await?
+        {
+            return Ok(Some(completion));
+        }
+        if std::time::Instant::now() >= deadline {
+            return Ok(None);
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(1_000)).await;
+    }
+}
+
+async fn reconcile_slot_provider_conversation(state: &AppState, slot_id: &str) {
+    let Ok(Some(session_id)) = state.store.get_slot_session(slot_id).await else {
+        return;
+    };
+    let Ok(Some(conv)) = state.store.get_conversation(&session_id).await else {
+        return;
+    };
+    let Some(jsonl_path) = conv.jsonl_path.as_deref() else {
+        return;
+    };
+    crate::events_sync::reconcile_conversation_messages(state, conv.id.as_str(), jsonl_path).await;
 }
 
 async fn close_idle_running_task_from_durable_summary(
@@ -715,11 +784,18 @@ fn is_board_summary_heading(line: &str) -> bool {
 fn strip_tui_artifacts(input: &str) -> String {
     let mut out = String::with_capacity(input.len());
     let mut prev_blank = false;
+    let mut skip_tool_continuation = false;
     for raw in input.lines() {
         let line = raw.trim_end();
+        let indented_continuation = raw.starts_with(' ') || raw.starts_with('\t');
         if is_tui_artifact_line(line) {
+            skip_tool_continuation = looks_like_bare_tool_call_marker(line.trim_start());
             continue;
         }
+        if skip_tool_continuation && indented_continuation {
+            continue;
+        }
+        skip_tool_continuation = false;
         if line.trim().is_empty() {
             if prev_blank {
                 continue;
@@ -767,6 +843,9 @@ fn is_tui_artifact_line(line: &str) -> bool {
     if (t.starts_with('⏺') || t.starts_with('●')) && looks_like_tool_call_marker(t) {
         return true;
     }
+    if looks_like_bare_tool_call_marker(t) {
+        return true;
+    }
     if matches!(
         t.chars().next(),
         Some('✻' | '✽' | '✳' | '✶' | '✢' | '·' | '❯')
@@ -800,6 +879,30 @@ fn is_tui_artifact_line(line: &str) -> bool {
         return true;
     }
     false
+}
+
+fn looks_like_bare_tool_call_marker(trimmed: &str) -> bool {
+    const TOOL_PREFIXES: [&str; 16] = [
+        "Bash(",
+        "Read(",
+        "Edit(",
+        "Write(",
+        "MultiEdit(",
+        "Grep(",
+        "Glob(",
+        "LS(",
+        "TodoWrite(",
+        "WebFetch(",
+        "WebSearch(",
+        "NotebookRead(",
+        "NotebookEdit(",
+        "mcp__",
+        "mission_",
+        "Task(",
+    ];
+    TOOL_PREFIXES
+        .iter()
+        .any(|prefix| trimmed.starts_with(prefix))
 }
 
 /// Heuristic: does this `⏺ …` / `● …` line look like a tool-call signature
@@ -1346,6 +1449,24 @@ struct WorkstationSlotSelection {
     reroute_reason: Option<String>,
 }
 
+fn workstation_worker_matches_dispatch_hints(
+    worker: &crate::context::v3_blueprint_runtime::WorkstationPoolRuntimeConfig,
+    engine_hint: Option<&str>,
+    pool_hint: Option<&str>,
+) -> bool {
+    let engine_match = engine_hint
+        .map(|hint| worker.engine.eq_ignore_ascii_case(hint))
+        .unwrap_or(true);
+    let pool_match = pool_hint
+        .map(|hint| {
+            worker.id.eq_ignore_ascii_case(hint)
+                || worker.role.eq_ignore_ascii_case(hint)
+                || worker.slot_id.eq_ignore_ascii_case(hint)
+        })
+        .unwrap_or(true);
+    engine_match && pool_match
+}
+
 async fn select_workstation_pool_slot(
     state: &AppState,
     workstation_config: &WorkstationRuntimeConfig,
@@ -1360,11 +1481,27 @@ async fn select_workstation_pool_slot(
         .boardtask_pool_candidates(task_class)
         .into_iter()
         .collect();
+    if engine_hint.is_some() || pool_hint.is_some() {
+        let matching_candidates: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|worker| {
+                workstation_worker_matches_dispatch_hints(
+                    worker,
+                    engine_hint.as_deref(),
+                    pool_hint.as_deref(),
+                )
+            })
+            .collect();
+        if !matching_candidates.is_empty() {
+            candidates = matching_candidates;
+        }
+    }
     // Re-rank: workers that match an explicit engine_hint / pool_hint go
-    // first. Workers that mismatch fall to the back so they remain a
-    // fallback, but we emit a `reroute` warn! line whenever the chosen slot
-    // does not satisfy the hint so the regression is visible without
-    // rebuilding lookup tables.
+    // first. If the V3 pool declares at least one exact match, the filter
+    // above makes the hint a hard constraint: a busy ClaudeCode worker should
+    // defer the task, not silently spend a Gemini lane. Fallback reroutes are
+    // only possible when no declared worker satisfies the hint at all.
     if engine_hint.is_some() || pool_hint.is_some() {
         candidates.sort_by_key(|worker| {
             let engine_match = engine_hint
@@ -1697,21 +1834,27 @@ async fn dispatch_board_tasks_with_config(
             build_base_prompt(&task.title, &task.description)
         };
 
-        // Unified context injection via Context Prefetch Pipeline
+        // Unified context injection via Context Prefetch Pipeline. Default is
+        // off until memory stores are cleaned up; worker prompts should be
+        // driven by explicit BoardTask scope rather than hidden KB/Skill noise.
         let (full_prompt, cited_kb_ids) = {
-            let req = crate::context_pipeline::PrefetchRequest {
-                query: task.title.clone(),
-                source: crate::context_pipeline::PrefetchSource::Autopilot {
-                    task_id: task.id.to_string(),
-                },
-                token_budget: 4000,
-            };
-            let result = crate::context_pipeline::execute(state, &req).await;
-            let cited = result.cited_kb_ids.clone();
-            if result.assembled.is_empty() {
-                (prompt, cited)
+            if autopilot_context_prefetch_enabled() {
+                let req = crate::context_pipeline::PrefetchRequest {
+                    query: task.title.clone(),
+                    source: crate::context_pipeline::PrefetchSource::Autopilot {
+                        task_id: task.id.to_string(),
+                    },
+                    token_budget: 4000,
+                };
+                let result = crate::context_pipeline::execute(state, &req).await;
+                let cited = result.cited_kb_ids.clone();
+                if result.assembled.is_empty() {
+                    (prompt, cited)
+                } else {
+                    (format!("{}\n\n{}", result.assembled, prompt), cited)
+                }
             } else {
-                (format!("{}\n\n{}", result.assembled, prompt), cited)
+                (prompt, Vec::new())
             }
         };
 
@@ -1789,13 +1932,11 @@ async fn dispatch_board_tasks_with_config(
             continue;
         }
 
-        // Link PTY session to task for audit trail
-        if let Ok(Some(session_uuid)) = state.store.get_slot_session(&slot_id).await {
-            let _ = state
-                .store
-                .set_conversation_task_id(&session_uuid, task.id.as_str())
-                .await;
-        }
+        // Link PTY session to task for audit trail (durable, with bounded
+        // retry so JSONL-hook race doesn't strand the linkage until the
+        // completion-time backfill in durable_provider_completion_for_slot_task).
+        let _ =
+            crate::flow_engine::bind_conversation_to_task(state, &slot_id, task.id.as_str()).await;
 
         // Inject answered questions as context (Phase 2 linkage)
         let full_prompt = {
@@ -2117,15 +2258,55 @@ async fn dispatch_board_tasks_with_config(
                 // never used as completion authority.
                 wait_for_worker_final_settle_window().await;
 
+                // JSONL/session discovery can race the pre-send binding,
+                // especially for external-project persistent ClaudeCode
+                // sessions whose provider log lands after the first prompt.
+                // Re-bind after the durable-final settle window so
+                // mission_conversation_query(taskId=...) has a stable
+                // BoardTask -> provider conversation join for worker audit.
+                let rebound = crate::flow_engine::bind_conversation_to_task(
+                    state,
+                    &slot_id,
+                    task.id.as_str(),
+                )
+                .await;
+                if rebound {
+                    debug!(
+                        task_id = %task.id,
+                        slot_id = %slot_id,
+                        "Autopilot: rebound provider conversation to BoardTask after settle"
+                    );
+                }
                 // V3 execution-ownership :: delegated-boardtask :: summary-note source.
-                // Extract the worker final summary so the `**Autopilot 执行完成**`
-                // note records only the worker's actual final answer rather than
-                // the echoed prompt + task contract + tool logs + paste-collapse
-                // markers that the Claude Code TUI screen capture surfaces in the
-                // raw `res.response`. Auth/quota diagnostic notes above
-                // intentionally bypass this extractor and keep the raw response.
-                let final_summary =
-                    extract_worker_final_summary(&res.response, &full_prompt);
+                // Prefer the durable provider final after the JSONL/chat-store
+                // settle + single-session reconcile. If the first reconcile
+                // still races the provider final write, poll the durable log
+                // for one more settle budget before falling back to the TUI
+                // screen. The TUI `res.response` screen is only the fallback
+                // because it can lag, clip, or render an intermediate frame
+                // even after the prompt returns. Auth/quota diagnostic notes
+                // above intentionally bypass this path and keep the raw
+                // response.
+                let durable_completion = await_durable_provider_completion_for_slot_task(
+                    state,
+                    task,
+                    &slot_id,
+                )
+                .await
+                .unwrap_or_else(|err| {
+                    warn!(
+                        task_id = %task.id,
+                        slot_id = %slot_id,
+                        error = %err,
+                        "Autopilot: durable provider final lookup failed; falling back to PTY screen summary"
+                    );
+                    None
+                });
+                let final_summary = durable_completion
+                    .as_ref()
+                    .map(|completion| completion.summary.trim().to_string())
+                    .filter(|summary| !summary.is_empty())
+                    .unwrap_or_else(|| extract_worker_final_summary(&res.response, &full_prompt));
                 if is_probably_active_tui_summary(&final_summary) {
                     warn!(
                         task_id = %task.id,
@@ -2146,9 +2327,18 @@ async fn dispatch_board_tasks_with_config(
                 }
                 let summary_for_note =
                     truncate_safe(&final_summary, AUTOPILOT_SUMMARY_NOTE_MAX_BYTES);
+                let durable_source = durable_completion
+                    .as_ref()
+                    .map(|completion| {
+                        format!(
+                            "; durable final {} / {}",
+                            completion.source, completion.session_id
+                        )
+                    })
+                    .unwrap_or_default();
                 let note_content = format!(
-                    "**Autopilot 执行完成** ({}ms)\n\n{}",
-                    res.duration_ms, summary_for_note
+                    "**Autopilot 执行完成** ({}ms{})\n\n{}",
+                    res.duration_ms, durable_source, summary_for_note
                 );
                 let _ = state
                     .store
@@ -3374,6 +3564,17 @@ mod tests {
     }
 
     #[test]
+    fn autopilot_context_prefetch_is_opt_in_only() {
+        assert!(!autopilot_context_prefetch_enabled_from(None));
+        assert!(!autopilot_context_prefetch_enabled_from(Some("")));
+        assert!(!autopilot_context_prefetch_enabled_from(Some("false")));
+        assert!(!autopilot_context_prefetch_enabled_from(Some("0")));
+        assert!(autopilot_context_prefetch_enabled_from(Some("1")));
+        assert!(autopilot_context_prefetch_enabled_from(Some("true")));
+        assert!(autopilot_context_prefetch_enabled_from(Some("ON")));
+    }
+
+    #[test]
     fn build_base_prompt_description_equal_to_title_drops_duplicate() {
         // Worst case from the wave33 brief: title and description carry
         // exactly the same text, so the previous `"{title}\n\n{desc}"` shape
@@ -3611,6 +3812,35 @@ mod tests {
     }
 
     #[test]
+    fn provider_final_summary_rejects_claude_tool_invocation_records() {
+        let messages = vec![
+            test_conversation_message(
+                1,
+                "system",
+                "BoardTask task-123 prompt",
+                "2026-05-03T10:15:00Z",
+            ),
+            test_conversation_message(
+                2,
+                "assistant",
+                "[Tool: Bash] command: \"git status --short\"",
+                "2026-05-03T10:15:20Z",
+            ),
+            test_conversation_message(
+                3,
+                "assistant",
+                "## Smoke Result\n\nAutopilot used the provider durable final summary.",
+                "2026-05-03T10:15:40Z",
+            ),
+        ];
+        assert_eq!(
+            latest_assistant_after_task_prompt(&messages, "task-123", Some("2026-05-03T10:14:50Z"))
+                .as_deref(),
+            Some("## Smoke Result\n\nAutopilot used the provider durable final summary.")
+        );
+    }
+
+    #[test]
     fn durable_completion_summary_must_be_after_claim_when_known() {
         let before = test_note(
             missiond_core::types::BoardNoteType::Summary,
@@ -3639,13 +3869,21 @@ mod tests {
         // returns. Keep a non-zero default and pin the close path to the helper
         // so a future refactor cannot close on PTY idle alone.
         assert!(
-            AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT >= 500,
+            AUTOPILOT_FINAL_SETTLE_WINDOW_MS_DEFAULT >= 5000,
             "default settle window must leave room for provider final evidence"
         );
         let src = include_str!("./autopilot.rs");
         assert!(
             src.contains("wait_for_worker_final_settle_window().await"),
             "Autopilot close path must wait for durable final evidence settle window"
+        );
+        assert!(
+            src.contains("await_durable_provider_completion_for_slot_task("),
+            "Autopilot close path must poll durable provider final evidence after settle"
+        );
+        assert!(
+            src.contains("durable_provider_completion_for_slot_task("),
+            "Autopilot close path must prefer durable provider final evidence"
         );
     }
 
@@ -3773,6 +4011,26 @@ mod tests {
             "tool result marker leaked: {summary}"
         );
         assert!(summary.contains("最终结论：通过。"));
+    }
+
+    #[test]
+    fn extract_worker_final_summary_strips_bare_tool_call_log_lines() {
+        let prompt = dispatched_prompt("task-bare-tool");
+        let response = format!(
+            "{}\n\nBash(git -C /Users/jinchen/Projects/missiond status --short && echo \"---\" && git -C /Users/jinchen/Projects/missiond\n      rev-parse --short HEAD)\n⏺ CLAUDE_DURABLE_FINAL_SMOKE_OK\n  Findings\n  Worktree unchanged.",
+            prompt
+        );
+        let summary = extract_worker_final_summary(&response, &prompt);
+        assert!(
+            !summary.contains("Bash("),
+            "bare tool invocation marker leaked: {summary}"
+        );
+        assert!(
+            !summary.contains("rev-parse --short HEAD)"),
+            "bare tool invocation continuation leaked: {summary}"
+        );
+        assert!(summary.contains("CLAUDE_DURABLE_FINAL_SMOKE_OK"));
+        assert!(summary.contains("Worktree unchanged."));
     }
 
     #[test]
@@ -4345,7 +4603,7 @@ mod tests {
         // pollution path. The needles are composed at runtime so the guard
         // does not trip on its own assertion text.
         let src = include_str!("./autopilot.rs");
-        let banner = "**Autopilot \u{6267}\u{884c}\u{5b8c}\u{6210}** ({}ms)";
+        let banner = "**Autopilot \u{6267}\u{884c}\u{5b8c}\u{6210}** ({}ms{})";
         let raw_pair = format!("res.duration_ms, res.{}", "response");
         assert!(
             src.contains(banner),
@@ -4602,6 +4860,40 @@ mod tests {
         let description = "## Dispatch metadata\n- task_class:\n- engine_hint:   \n";
         assert!(extract_dispatch_metadata_field(description, "task_class").is_none());
         assert!(extract_dispatch_metadata_field(description, "engine_hint").is_none());
+    }
+
+    #[test]
+    fn explicit_dispatch_hints_are_hard_constraints_when_worker_exists() {
+        let cfg = WorkstationRuntimeConfig::default();
+        let mut candidates = cfg.boardtask_pool_candidates("review");
+        assert!(
+            candidates
+                .iter()
+                .any(|worker| worker.id == "gemini-ultra-pro"),
+            "review baseline should include Gemini before hint filtering"
+        );
+        let matching: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|worker| {
+                workstation_worker_matches_dispatch_hints(
+                    worker,
+                    Some("claude-code"),
+                    Some("claude-code-default"),
+                )
+            })
+            .collect();
+        assert_eq!(
+            matching.iter().map(|worker| worker.id.as_str()).collect::<Vec<_>>(),
+            vec!["claude-code-default"]
+        );
+        if !matching.is_empty() {
+            candidates = matching;
+        }
+        assert!(
+            candidates.iter().all(|worker| worker.engine == "claude-code"),
+            "explicit Claude hints must not leave Gemini as a fallback candidate"
+        );
     }
 
     /// Pins BoardTask 2b685fcf finding (4): long evaluation tasks anchor

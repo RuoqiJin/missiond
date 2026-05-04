@@ -16,6 +16,7 @@ use tracing::{info, warn};
 
 use crate::bus::BusServices;
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
+use crate::control_tree::CtlDomain;
 use crate::state::AppState;
 
 pub(crate) const MASTER_WORKER_ID: &str = "codex-master-control";
@@ -23,7 +24,7 @@ pub(crate) const MASTER_SLOT_ID: &str = "slot-codex-master-control";
 pub(crate) const CHECKPOINT_RELATIVE_PATH: &str =
     ".missiond/v3/runtime/master-control-checkpoint.lisp";
 const MASTER_SLOT_READY_TIMEOUT_SECS: u64 = 180;
-const MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS: i64 = 180;
+const MASTER_ACTIVE_OBJECTIVE_HEARTBEAT_SECS: i64 = 900;
 const MASTER_EVENT_SUBSCRIBER_CONSUMER: &str = "master_event_subscriber";
 const MASTER_BOARD_SUBSCRIPTION: &str = "master_event_subscriber_board_v2_live";
 const MASTER_SLOT_SUBSCRIPTION: &str = "master_event_subscriber_slot_v2_live";
@@ -372,6 +373,33 @@ impl MasterControlService {
     }
 
     async fn tick(&self, reason: &str) {
+        if self.master_control_paused() {
+            let snapshot = self.runtime.snapshot().await;
+            let tick_id = self
+                .runtime
+                .mark_tick(
+                    reason,
+                    false,
+                    &MasterDecisionState {
+                        phase: "paused".to_string(),
+                        active_objective_id: snapshot.active_objective_id,
+                        context_pack_path: None,
+                        delegated_task_ids: Vec::new(),
+                        last_verified_commit: None,
+                        resume_instruction:
+                            "master-control paused by operator; do not dispatch self-evolution"
+                                .to_string(),
+                    },
+                )
+                .await;
+            *self.runtime.blocked_reason.write().await = Some(
+                "mission_control paused strategy domain or orchestrator slot_role".to_string(),
+            );
+            if let Err(err) = self.write_checkpoint(reason, &tick_id, false).await {
+                warn!(error = %err, "master-control paused checkpoint write failed");
+            }
+            return;
+        }
         if matches!(reason, "daemon-startup" | "event-wakeup") {
             match self.ensure_code_drift_backfill_task().await {
                 Ok(Some(task_id)) => {
@@ -416,6 +444,11 @@ impl MasterControlService {
             let result = self.dispatch_control_turn(&prompt).await;
             self.runtime.record_control_turn(result).await;
         }
+    }
+
+    fn master_control_paused(&self) -> bool {
+        let tree = self.state.control_manager.current();
+        tree.is_domain_paused(CtlDomain::Strategy) || tree.is_slot_role_paused("orchestrator")
     }
 
     async fn ensure_code_drift_backfill_task(&self) -> anyhow::Result<Option<String>> {
@@ -830,7 +863,12 @@ fn spawn_master_decision_loop(
 ) {
     tokio::spawn(async move {
         service.tick("daemon-startup").await;
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        let heartbeat_secs = std::env::var("MISSIOND_MASTER_HEARTBEAT_INTERVAL_SECS")
+            .ok()
+            .and_then(|raw| raw.parse::<u64>().ok())
+            .filter(|secs| *secs >= 60)
+            .unwrap_or(300);
+        let mut interval = tokio::time::interval(Duration::from_secs(heartbeat_secs));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
@@ -940,7 +978,7 @@ pub(crate) fn build_master_tick_prompt(
     mcp_ready: bool,
 ) -> String {
     format!(
-        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\n\n以现在为例，请从 MissionD 的 SSOT Lisp、Board、KB、事件总线和 provider durable logs 看：当前目标有什么逻辑不通、证据缺口、待优化点，下一步最小正确动作是什么？\n\nUse MissionD MCP first: mission_intent(project=\"missiond\", action=\"summary\"), mission_board_query, mission_conversation_query, mission_kb_query, mission_convergence_status, mission_slots as needed. Query the active BoardTask by id before deciding. PTY recognition is diagnostic only; prefer provider JSONL/Codex sqlite/Gemini chat, Board lifecycle, event bus, and checker results.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe durable evidence and advance the parent if appropriate. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise Board note/context-pack diagnosis. Do not edit code directly from the resident slot.\n\nReturn one compact decision: no-op, create/update BoardTask, delegate worker, write KB note, blocked, or close_or_backfill.",
+        "MissionD resident master tick.\nreason: {reason}\nphase: {}\nactive_objective_id: {}\ncontext_pack_path: {}\nevent_cursor: {}\nevent_summary: {}\nqueued_events: {}\nmcp_ready: {}\n\n默认周期自省范围只看 MissionD V3 SSOT Lisp、V3 checker/final-convergence 静态结果，以及最近触碰 .missiond/v3/** 的 commit；只报告这些输入中能直接看出的逻辑不通、surface 缺口或 checker/runtime 投影漂移。当前 KB、Board backlog、事件总线历史、provider durable logs、历史会话都还没整理，默认不要把它们当架构审查输入。For default self-review, prefer mission_intent(project=\"missiond\", action=\"summary\") and mission_convergence_status.\n\nActive objective overrides default self-review: when active_objective_id is present, first query exactly that BoardTask by id and follow its description as the load-bearing objective. You may read only the project roots / files explicitly named by that BoardTask and its context_pack_path; do not browse Board open backlog. Do not call mission_kb_query, mission_conversation_query, or provider-log tools unless the active BoardTask explicitly requests those sources. PTY recognition is diagnostic only.\n\nHard workflow contracts are enforced by MissionD runtime/workflow.lisp/checkers. Do not restate or solve them manually in prompt text. If this event is already a worker BoardTask (## Swarm metadata or task_class=context-pack/code), do not recursively delegate; observe only the active objective state and wait for explicit durable task evidence. Use mission_swarm_run or mission_task_delegate only when the next shard is already concrete enough; otherwise write a concise context-pack diagnosis. If your decision is create/update BoardTask or close_or_backfill, perform the corresponding MissionD MCP mutation (mission_board_note_add / mission_board_update / mission_board_create) before returning; if the mutation is not possible, return blocked with the reason. Do not edit code directly from the resident slot.\n\nReturn one compact decision after any required MCP mutation: no-op, create/update BoardTask, delegate worker, blocked, or close_or_backfill.",
         snapshot.phase,
         snapshot
             .active_objective_id
@@ -971,7 +1009,7 @@ struct MasterContextPackRender<'a> {
 
 fn render_master_context_pack(input: &MasterContextPackRender<'_>) -> String {
     format!(
-        "(master-control-context-pack\n  :schema \"missiond.master-control-context-pack.v1\"\n  :tick-id {}\n  :reason {}\n  :active-objective-id {}\n  :phase {}\n  :event-cursor {}\n  :event-summary {}\n  :resume-instruction {}\n  :prompt-style architectural-ssot-review\n  :authority [ssot-lisp board-task-lifecycle event-bus provider-durable-log checker-result]\n  :decision-options [no-op create-update-boardtask delegate-worker write-kb-note blocked close-or-backfill]\n  :runtime-rules [mcp-first pty-diagnostic-only no-direct-code-edit no-recursive-worker-delegation]\n  :updated-at {}\n)\n",
+        "(master-control-context-pack\n  :schema \"missiond.master-control-context-pack.v1\"\n  :tick-id {}\n  :reason {}\n  :active-objective-id {}\n  :phase {}\n  :event-cursor {}\n  :event-summary {}\n  :resume-instruction {}\n  :prompt-style missiond-v3-ssot-review\n  :authority [missiond-v3-ssot-lisp checker-result final-convergence-static recent-v3-commit active-boardtask-description]\n  :active-objective-contract [boardtask-description-overrides-default-self-review read-only-declared-project-roots mutation-before-decision-return]\n  :excluded-default-inputs [kb board-backlog event-history provider-durable-log historical-conversation]\n  :decision-options [no-op create-update-boardtask delegate-worker blocked close-or-backfill]\n  :runtime-rules [narrow-mcp-first pty-diagnostic-only no-direct-code-edit no-recursive-worker-delegation board-mcp-mutation-before-final]\n  :updated-at {}\n)\n",
         lisp_string(input.tick_id),
         lisp_string(input.reason),
         lisp_option_string(input.snapshot.active_objective_id.as_deref()),
@@ -1122,12 +1160,9 @@ async fn classify_master_decision_state(
     } else {
         "observe_event"
     };
-    let context_pack_path = active_objective_id.as_ref().map(|id| {
-        format!(
-            ".missiond/v3/runtime/master-control/context-packs/{}.lisp",
-            sanitize_lisp_path_component(id)
-        )
-    });
+    let context_pack_path = active_objective_id
+        .as_ref()
+        .map(|id| master_context_pack_path_for_objective(id));
     let resume_instruction = match phase {
         "observe_event" => {
             "observe durable Board/event/provider evidence; do not delegate without a concrete objective"
@@ -1211,6 +1246,18 @@ fn sanitize_lisp_path_component(value: &str) -> String {
             }
         })
         .collect()
+}
+
+fn master_context_pack_path_for_objective(id: &str) -> String {
+    let relative = PathBuf::from(format!(
+        ".missiond/v3/runtime/master-control/context-packs/{}.lisp",
+        sanitize_lisp_path_component(id)
+    ));
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join(relative)
+        .to_string_lossy()
+        .to_string()
 }
 
 fn master_control_turns_enabled() -> bool {
@@ -1533,7 +1580,7 @@ fn is_recoverable_master_objective(task: &missiond_core::types::BoardTask) -> bo
     if task.hidden {
         return false;
     }
-    if task.project.as_deref() != Some("missiond") || task.category != "infra" {
+    if task.project.as_deref() != Some("missiond") {
         return false;
     }
     let status = task.status.as_str();
@@ -1541,9 +1588,13 @@ fn is_recoverable_master_objective(task: &missiond_core::types::BoardTask) -> bo
         return false;
     }
     task.title.starts_with("Run project SSOT convergence wave:")
+        || task.title.starts_with("Run M6 SSOT convergence")
         || task
             .description
             .contains(".missiond/workflows/project-ssot-convergence.lisp")
+        || task
+            .description
+            .contains("project-ssot-convergence workflow")
 }
 
 fn slot_event_preview(event: &SlotEvent) -> String {
@@ -1749,9 +1800,17 @@ mod tests {
             "infra",
             3,
         );
-        let tasks = vec![old, newest, ignored];
+        let m6 = test_board_task(
+            "dddddddd-dddd-dddd-dddd-dddddddddddd",
+            "Run M6 SSOT convergence controller for Jarvis toolchain projects",
+            "Use project-ssot-convergence workflow only.",
+            Some("missiond"),
+            "dev",
+            4,
+        );
+        let tasks = vec![old, newest, ignored, m6];
         let selected = select_recoverable_master_objective(&tasks).expect("recover objective");
-        assert_eq!(selected.id.as_str(), "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        assert_eq!(selected.id.as_str(), "dddddddd-dddd-dddd-dddd-dddddddddddd");
     }
 
     #[test]
@@ -1828,9 +1887,7 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("abc".to_string()),
             phase: "classify_objective".to_string(),
-            context_pack_path: Some(
-                ".missiond/v3/runtime/master-control/context-packs/abc.lisp".to_string(),
-            ),
+            context_pack_path: Some(master_context_pack_path_for_objective("abc")),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "retry".to_string(),
@@ -1879,10 +1936,7 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("parent-objective".to_string()),
             phase: "observe_event".to_string(),
-            context_pack_path: Some(
-                ".missiond/v3/runtime/master-control/context-packs/parent-objective.lisp"
-                    .to_string(),
-            ),
+            context_pack_path: Some(master_context_pack_path_for_objective("parent-objective")),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "resume".to_string(),
@@ -1895,7 +1949,7 @@ mod tests {
         );
         assert_eq!(
             decision.context_pack_path.as_deref(),
-            Some(".missiond/v3/runtime/master-control/context-packs/parent-objective.lisp")
+            Some(master_context_pack_path_for_objective("parent-objective").as_str())
         );
 
         snapshot.last_event_summary =
@@ -1947,9 +2001,7 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("abc".to_string()),
             phase: "classify_objective".to_string(),
-            context_pack_path: Some(
-                ".missiond/v3/runtime/master-control/context-packs/abc.lisp".to_string(),
-            ),
+            context_pack_path: Some(master_context_pack_path_for_objective("abc")),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "resume".to_string(),
@@ -1960,17 +2012,21 @@ mod tests {
         assert!(prompt.contains("active_objective_id: abc"));
         assert!(prompt.contains("mission_intent(project=\"missiond\", action=\"summary\")"));
         assert!(prompt.contains("mission_convergence_status"));
-        assert!(prompt.contains("以现在为例"));
-        assert!(prompt.contains("有什么逻辑不通"));
+        assert!(prompt.contains("默认周期自省范围只看 MissionD V3 SSOT Lisp"));
+        assert!(prompt.contains("Active objective overrides default self-review"));
+        assert!(prompt.contains("follow its description as the load-bearing objective"));
+        assert!(prompt.contains("逻辑不通"));
         assert!(prompt.contains("Hard workflow contracts are enforced"));
         assert!(prompt.contains("MissionD runtime/workflow.lisp/checkers"));
-        assert!(prompt.contains("Query the active BoardTask by id"));
+        assert!(prompt.contains("query exactly that BoardTask by id"));
+        assert!(prompt.contains("Do not call mission_kb_query"));
         assert!(prompt.contains("PTY recognition is diagnostic only"));
         assert!(prompt.contains("already a worker BoardTask"));
         assert!(prompt.contains("do not recursively delegate"));
         assert!(prompt.contains("mission_swarm_run"));
         assert!(prompt.contains("mission_task_delegate"));
         assert!(prompt.contains("context-pack diagnosis"));
+        assert!(prompt.contains("perform the corresponding MissionD MCP mutation"));
         assert!(prompt.contains("Do not edit code directly from the resident slot"));
         assert!(prompt.contains("close_or_backfill"));
     }
@@ -1994,9 +2050,7 @@ mod tests {
             last_drift_backfill_task_id: None,
             active_objective_id: Some("abc".to_string()),
             phase: "classify_objective".to_string(),
-            context_pack_path: Some(
-                ".missiond/v3/runtime/master-control/context-packs/abc.lisp".to_string(),
-            ),
+            context_pack_path: Some(master_context_pack_path_for_objective("abc")),
             delegated_task_ids: Vec::new(),
             last_verified_commit: None,
             resume_instruction: "resume from durable evidence".to_string(),
@@ -2007,8 +2061,11 @@ mod tests {
             snapshot: &snapshot,
         });
         assert!(rendered.contains("missiond.master-control-context-pack.v1"));
-        assert!(rendered.contains(":prompt-style architectural-ssot-review"));
-        assert!(rendered.contains("provider-durable-log"));
+        assert!(rendered.contains(":prompt-style missiond-v3-ssot-review"));
+        assert!(rendered.contains(":authority [missiond-v3-ssot-lisp checker-result final-convergence-static recent-v3-commit active-boardtask-description]"));
+        assert!(rendered.contains(":active-objective-contract [boardtask-description-overrides-default-self-review read-only-declared-project-roots mutation-before-decision-return]"));
+        assert!(rendered.contains(":excluded-default-inputs [kb board-backlog event-history provider-durable-log historical-conversation]"));
+        assert!(rendered.contains("board-mcp-mutation-before-final"));
         assert!(rendered.contains("pty-diagnostic-only"));
         assert!(rendered.contains("no-direct-code-edit"));
     }

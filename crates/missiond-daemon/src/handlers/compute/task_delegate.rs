@@ -4,6 +4,7 @@ use missiond_core::pty::SessionState;
 use missiond_core::types::CreateBoardTaskInput;
 use missiond_mcp::tools::{error_codes, ToolError, ToolResult};
 use serde_json::{json, Value};
+use std::path::{Path, PathBuf};
 
 use crate::context::v3_blueprint_runtime::WorkstationRuntimeConfig;
 use crate::slot_dispatch::SlotAcquireGuard;
@@ -66,7 +67,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         })
         .unwrap_or_default();
 
-    let context_hints: Vec<String> = args
+    let _context_hints: Vec<String> = args
         .get("context_hints")
         .and_then(|v| v.as_array())
         .map(|arr| {
@@ -100,7 +101,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     // if it does not resolve under a registered project. When cwd is absent,
     // we leave target_project_root as None and the auto-provision branch will
     // surface the issue (compute_slot create requires a registered cwd).
-    let target_project_root = if let Some(cwd_val) = cwd {
+    let target_project_resolution = if let Some(cwd_val) = cwd {
         match crate::slot_orchestrator::project_root::resolve_target_project_root(
             None,
             Some(std::path::Path::new(cwd_val)),
@@ -109,7 +110,7 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         )
         .await
         {
-            Ok(r) => Some(r.project_root.to_string_lossy().to_string()),
+            Ok(r) => Some(r),
             Err(e) => {
                 return Ok(ToolResult::structured_error(
                     ToolError::new(
@@ -125,6 +126,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     } else {
         None
     };
+    let target_project_root = target_project_resolution
+        .as_ref()
+        .map(|r| r.project_root.to_string_lossy().to_string());
 
     let runtime_config = match WorkstationRuntimeConfig::load_for_project_root(
         target_project_root.as_deref(),
@@ -245,7 +249,10 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
     };
     // guard is dropped here (if Some) → auto-releases slot dispatch lock
 
-    // 3. Build context from hints (Phase 6.3: with size limits)
+    // 3. Build description. `context_hints` is accepted for API
+    // compatibility, but default worker prompts must not auto-prefetch KB or
+    // Skill snippets while those stores are still noisy. Explicit context
+    // belongs in read_scope/context-pack paths, not hidden prompt injection.
     let mut description = objective.to_string();
     let metadata_block = render_delegation_metadata_block(&delegation_metadata);
     if !metadata_block.is_empty() {
@@ -253,14 +260,6 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
             "{}\n\n## Dispatch metadata\n{}",
             description, metadata_block
         );
-    }
-    if !context_hints.is_empty() {
-        let keywords = context_hints.join(" ");
-        if let Ok(context) = build_context(state, &keywords).await {
-            if !context.is_empty() {
-                description = format!("{}\n\n## 预加载上下文\n{}", objective, context);
-            }
-        }
     }
 
     // Phase 6.3: Enforce description size limit
@@ -285,6 +284,9 @@ pub(crate) async fn handle(state: &AppState, name: &str, args: Value) -> Result<
         description: Some(description),
         priority: Some(priority.to_string()),
         category: Some("dev".to_string()),
+        project: target_project_resolution
+            .as_ref()
+            .map(|r| r.project_id.clone()),
         assignee: if assignee.is_empty() {
             None
         } else {
@@ -361,14 +363,29 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
     let project_id = string_arg(&args, &["project_id", "projectId"])
         .unwrap_or("missiond")
         .to_string();
+    let project_root =
+        match crate::slot_orchestrator::project_root::resolve_target_project_root(
+            Some(&project_id),
+            None,
+            None,
+            &state.project_registry,
+        )
+        .await
+        {
+            Ok(resolution) => resolution.project_root.to_string_lossy().to_string(),
+            Err(err) => return Ok(ToolResult::structured_error(
+                ToolError::new(
+                    "PROJECT_ROOT_UNRESOLVED",
+                    format!("mission_swarm_run project_id unresolved: {}", err),
+                )
+                .with_suggestion(
+                    "register the target project before spawning external-project swarm workers",
+                ),
+            )),
+        };
     let context_pack_path = string_arg(&args, &["context_pack_path", "contextPackPath"])
-        .map(ToString::to_string)
-        .unwrap_or_else(|| {
-            format!(
-                ".missiond/v3/runtime/swarm/{}-context-pack.lisp",
-                chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
-            )
-        });
+        .map(|value| normalize_context_pack_path_for_worker(value, None))
+        .unwrap_or_else(default_swarm_context_pack_path);
     let max_claude_workers =
         clamp_usize_arg(&args, &["max_claude_workers", "maxClaudeWorkers"], 4, 0, 4);
     let max_gemini_workers =
@@ -381,7 +398,10 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         &args,
         &["acceptance", "acceptance_commands", "acceptanceCommands"],
     );
-    let read_scope = string_list_arg(&args, &["read_scope", "readScope"]);
+    let mut read_scope = string_list_arg(&args, &["read_scope", "readScope"]);
+    if read_scope.is_empty() {
+        read_scope.push(project_root.clone());
+    }
     let timeout_secs = args
         .get("timeout_secs")
         .or_else(|| args.get("timeoutSecs"))
@@ -448,6 +468,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             let description = render_swarm_task_description(
                 &objective,
                 &project_id,
+                &project_root,
                 &context_pack_path,
                 &write_policy,
                 &acceptance,
@@ -488,6 +509,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         "dry_run": dry_run,
         "objective": objective,
         "project_id": project_id,
+        "project_root": project_root,
         "context_pack_path": context_pack_path,
         "write_policy": write_policy,
         "fanout": {
@@ -537,6 +559,7 @@ impl SwarmPlannedTask {
 fn render_swarm_task_description(
     objective: &str,
     project_id: &str,
+    project_root: &str,
     context_pack_path: &str,
     write_policy: &str,
     acceptance: &[String],
@@ -549,7 +572,7 @@ fn render_swarm_task_description(
     };
 
     format!(
-        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
+        "{objective}\n\n## Swarm metadata\n- project_id: {project_id}\n- project_root: {project_root}\n- lane: {}\n- task_class: {}\n- pool_hint: {}\n- engine_hint: {}\n- context_pack_path: {context_pack_path}\n- write_policy: {write_policy}\n- read_scope: {}\n- write_scope: {}\n- must_not_touch: {}\n- acceptance: {}\n\n{}",
         planned.lane,
         planned.task_class,
         planned.pool_hint,
@@ -780,6 +803,34 @@ fn string_list_arg(args: &Value, keys: &[&str]) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// V3 swarm-dispatch-policy :: external-project context-pack projection.
+///
+/// Context packs produced by MissionD live under the MissionD workspace, while
+/// external-project workers run with cwd set to the target project root. A
+/// relative `.missiond/...` path would therefore point at the wrong project.
+/// Render worker-facing context_pack_path as an absolute MissionD path unless
+/// the caller already provided an absolute path.
+fn normalize_context_pack_path_for_worker(path: &str, missiond_root: Option<&Path>) -> String {
+    let trimmed = path.trim();
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        return trimmed.to_string();
+    }
+    let root = missiond_root
+        .map(Path::to_path_buf)
+        .or_else(|| std::env::current_dir().ok())
+        .unwrap_or_else(|| PathBuf::from("."));
+    root.join(candidate).to_string_lossy().to_string()
+}
+
+fn default_swarm_context_pack_path() -> String {
+    let rel = format!(
+        ".missiond/v3/runtime/swarm/{}-context-pack.lisp",
+        chrono::Utc::now().format("%Y%m%dT%H%M%SZ")
+    );
+    normalize_context_pack_path_for_worker(&rel, None)
+}
+
 /// V3 resident-master-control :: master-delegation projection.
 ///
 /// `mission_task_delegate` is the common BoardTask entry used by Codex master,
@@ -840,7 +891,8 @@ fn render_delegation_metadata_block(metadata: &DelegationMetadata) -> String {
     lines.join("\n")
 }
 
-/// Phase 6.3: Build context from KB/Skills with size limits.
+/// Legacy opt-in helper for KB/Skill context assembly.
+#[allow(dead_code)]
 async fn build_context(state: &AppState, keywords: &str) -> Result<String> {
     let mut parts = Vec::new();
     let mut total_len = 0;
@@ -1136,6 +1188,67 @@ mod tests {
         // Daily Sonnet / Haiku stay on Claude.
         assert!(!WorkstationRuntimeConfig::profile_routes_to_gemini_researcher("daily-sonnet"));
         assert!(!WorkstationRuntimeConfig::profile_routes_to_gemini_researcher("quick-haiku"));
+    }
+
+    // ── V3 swarm-dispatch-policy :: external-project context-pack projection ─
+    //
+    // Pins the rule that mission_swarm_run renders the resolved project_root
+    // into Swarm metadata so Autopilot/dispatch can spawn provider PTYs under
+    // the target project root and workers see the correct read-scope anchor.
+    // See `.missiond/v3/missiond-blueprint.lisp ::
+    // "mission_swarm_run MUST resolve project_id to a registered project_root"`.
+
+    #[test]
+    fn swarm_task_description_includes_resolved_project_root() {
+        let planned = SwarmPlannedTask {
+            lane: "investigate".to_string(),
+            engine_hint: "claude-code".to_string(),
+            pool_hint: "claude-code-default".to_string(),
+            task_class: "context-pack".to_string(),
+            title: "Survey shards".to_string(),
+            intent: "code".to_string(),
+            read_scope: vec!["/Users/jin/Projects/jarvis".to_string()],
+            write_scope: Vec::new(),
+            must_not_touch: vec!["**/*".to_string()],
+        };
+        let description = render_swarm_task_description(
+            "M6 wave",
+            "jarvis",
+            "/Users/jin/Projects/jarvis",
+            ".missiond/v3/runtime/swarm/test.lisp",
+            "read-only",
+            &[],
+            &planned,
+        );
+        assert!(
+            description.contains("- project_id: jarvis"),
+            "swarm metadata missing project_id line:\n{description}"
+        );
+        assert!(
+            description.contains("- project_root: /Users/jin/Projects/jarvis"),
+            "swarm metadata missing project_root line — Autopilot/cwd-override depends on it:\n{description}"
+        );
+        assert!(
+            description.contains("- read_scope: /Users/jin/Projects/jarvis"),
+            "swarm metadata missing target-project read_scope:\n{description}"
+        );
+    }
+
+    #[test]
+    fn swarm_context_pack_path_is_absolute_for_external_project_workers() {
+        let root = std::path::Path::new("/Users/jinchen/Projects/missiond");
+        let normalized = normalize_context_pack_path_for_worker(
+            ".missiond/v3/runtime/swarm/test-context-pack.lisp",
+            Some(root),
+        );
+        assert_eq!(
+            normalized,
+            "/Users/jinchen/Projects/missiond/.missiond/v3/runtime/swarm/test-context-pack.lisp"
+        );
+
+        let absolute =
+            normalize_context_pack_path_for_worker("/tmp/missiond/context-pack.lisp", Some(root));
+        assert_eq!(absolute, "/tmp/missiond/context-pack.lisp");
     }
 
     #[test]

@@ -20,7 +20,7 @@ pub fn definitions() -> Vec<ToolDefinition> {
                     "timeout_secs": {"type": "integer", "description": "超时秒数(上限 7200)", "default": 1800},
                     "priority": {"type": "string", "enum": ["high", "medium", "low"], "default": "medium"},
                     "depends_on": {"type": "array", "description": "前置任务 ID 列表(DAG)"},
-                    "context_hints": {"type": "array", "description": "上下文关键词，预加载 KB/Skill"},
+                    "context_hints": {"type": "array", "description": "兼容字段；默认不预加载 KB/Skill。请使用 read_scope/context_pack_path 明确上下文"},
                     "model": {"type": "string", "description": "可选 CLI 模型覆盖；default/claude-code-default 表示不传 --model"},
                     "model_profile": {"type": "string", "description": "可选模型 profile；coding-default-opus-4-7 表示 Claude Code Default(Opus 4.7/1M)"},
                     "modelProfile": {"type": "string", "description": "model_profile camelCase alias"},

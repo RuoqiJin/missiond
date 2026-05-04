@@ -385,7 +385,6 @@ pub(crate) struct LearningEngineRuntimeConfig {
 
 #[derive(Debug)]
 pub(crate) enum BlueprintConfigError {
-    MissingBlueprint(PathBuf),
     Read { path: PathBuf, message: String },
     Parse(String),
 }
@@ -393,9 +392,6 @@ pub(crate) enum BlueprintConfigError {
 impl fmt::Display for BlueprintConfigError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::MissingBlueprint(path) => {
-                write!(f, "V3 blueprint missing at {}", path.display())
-            }
             Self::Read { path, message } => {
                 write!(
                     f,
@@ -960,24 +956,10 @@ impl WorkstationRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_workstation_config(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_workstation_config(&source)
     }
 
     pub(crate) fn default_model_profile_for_template(&self, template: &str) -> Option<&str> {
@@ -1162,24 +1144,10 @@ impl FlowRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_flow_runtime_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_flow_runtime_policy(&source)
     }
 }
 
@@ -1187,24 +1155,10 @@ impl ComputePrimitivesRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_compute_runtime_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_compute_runtime_policy(&source)
     }
 
     pub(crate) fn pty_spawn_timeout_secs(&self) -> u64 {
@@ -1231,24 +1185,10 @@ impl MinimaxRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_minimax_runtime_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_minimax_runtime_policy(&source)
     }
 
     pub(crate) fn direct_http_timeout(&self) -> std::time::Duration {
@@ -1273,24 +1213,10 @@ impl RouterRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_router_runtime_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_router_runtime_policy(&source)
     }
 
     pub(crate) fn direct_http_timeout(&self) -> std::time::Duration {
@@ -1339,24 +1265,10 @@ impl CascadeRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_cascade_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_cascade_policy(&source)
     }
 
     pub(crate) fn env_or_default_manifest_path(&self) -> PathBuf {
@@ -1399,24 +1311,10 @@ impl ProjectRegistryRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_project_registry_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_project_registry_policy(&source)
     }
 
     pub(crate) fn env_or_default_universe_manifest(&self) -> PathBuf {
@@ -1430,24 +1328,10 @@ impl CapabilityGovernanceRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_capability_governance_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_capability_governance_policy(&source)
     }
 
     pub(crate) fn is_protected_tool(&self, name: &str) -> bool {
@@ -1480,24 +1364,10 @@ impl MemoryKbRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_memory_kb_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_memory_kb_policy(&source)
     }
 }
 
@@ -1514,24 +1384,10 @@ impl ConversationIngestionRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_conversation_ingestion_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_conversation_ingestion_policy(&source)
     }
 
     pub(crate) fn timeline_query_limit(&self, requested: Option<i64>) -> i64 {
@@ -1572,24 +1428,10 @@ impl AutopilotRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_autopilot_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_autopilot_policy(&source)
     }
 
     pub(crate) fn deploy_review_timeout_ms(&self) -> u64 {
@@ -1610,24 +1452,10 @@ impl LearningEngineRuntimeConfig {
     pub(crate) fn load_for_project_root(
         project_root: Option<&str>,
     ) -> Result<Self, BlueprintConfigError> {
-        let Some(root) = project_root.map(str::trim).filter(|s| !s.is_empty()) else {
-            return Ok(Self::default());
-        };
-        let root = Path::new(root);
-        let missiond_dir = root.join(".missiond");
-        let blueprint_path = missiond_dir.join("v3").join("missiond-blueprint.lisp");
-        if !blueprint_path.exists() {
-            if missiond_dir.exists() {
-                return Err(BlueprintConfigError::MissingBlueprint(blueprint_path));
-            }
-            return Ok(Self::default());
+        match load_blueprint_source(project_root)? {
+            Some(source) => parse_learning_engine_policy(&source),
+            None => Ok(Self::default()),
         }
-        let source =
-            fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
-                path: blueprint_path.clone(),
-                message: err.to_string(),
-            })?;
-        parse_learning_engine_policy(&source)
     }
 
     pub(crate) fn realtime_extraction_timeout_ms(&self) -> u64 {
@@ -2597,6 +2425,86 @@ fn nearest_missiond_root(start: &Path) -> PathBuf {
         .find(|candidate| candidate.join(".missiond").exists())
         .unwrap_or(start)
         .to_path_buf()
+}
+
+/// Locate the orchestrator's V3 blueprint, used as a fallback when a target
+/// project lacks its own per-project override.
+///
+/// Resolution order:
+/// 1. `MISSIOND_ORCHESTRATOR_ROOT` env -> $ROOT/.missiond/v3/missiond-blueprint.lisp
+/// 2. Walk current cwd ancestors for `.missiond/v3/missiond-blueprint.lisp`
+/// 3. Hardcoded `/Users/jinchen/Projects/missiond/.missiond/v3/missiond-blueprint.lisp`
+///    — matches main.rs startup path and `universe.rs::locate_v3_blueprint`.
+fn locate_orchestrator_blueprint() -> Option<PathBuf> {
+    if let Ok(root) = std::env::var("MISSIOND_ORCHESTRATOR_ROOT") {
+        let candidate = Path::new(&root)
+            .join(".missiond")
+            .join("v3")
+            .join("missiond-blueprint.lisp");
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        for ancestor in cwd.ancestors() {
+            let candidate = ancestor
+                .join(".missiond")
+                .join("v3")
+                .join("missiond-blueprint.lisp");
+            if candidate.exists() {
+                return Some(candidate);
+            }
+        }
+    }
+    let fallback =
+        Path::new("/Users/jinchen/Projects/missiond/.missiond/v3/missiond-blueprint.lisp");
+    if fallback.exists() {
+        return Some(fallback.to_path_buf());
+    }
+    None
+}
+
+/// Resolve and read the V3 blueprint source for a target project.
+///
+/// Resolution:
+/// 1. If `project_root` points at a project that has its own
+///    `.missiond/v3/missiond-blueprint.lisp`, read that (per-project override).
+/// 2. Otherwise (target lacks a v3 file, or `project_root` is absent), fall
+///    back to the orchestrator blueprint via [`locate_orchestrator_blueprint`].
+///    This makes workstation-config / router / cascade / governance behave as a
+///    single inherited SSOT for registered external projects, rather than
+///    failing dispatch (when `.missiond/` exists with no v3 file) or silently
+///    degrading to embedded defaults (when no `.missiond/` exists at all).
+/// 3. If neither target nor orchestrator blueprint can be located, return
+///    `Ok(None)` and let the caller decide on defaults — preserves test/CLI
+///    behavior outside any MissionD installation.
+fn load_blueprint_source(
+    project_root: Option<&str>,
+) -> Result<Option<String>, BlueprintConfigError> {
+    let target_path = project_root
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|root| {
+            Path::new(root)
+                .join(".missiond")
+                .join("v3")
+                .join("missiond-blueprint.lisp")
+        })
+        .filter(|p| p.exists());
+
+    let blueprint_path = match target_path {
+        Some(p) => p,
+        None => match locate_orchestrator_blueprint() {
+            Some(p) => p,
+            None => return Ok(None),
+        },
+    };
+
+    let source = fs::read_to_string(&blueprint_path).map_err(|err| BlueprintConfigError::Read {
+        path: blueprint_path.clone(),
+        message: err.to_string(),
+    })?;
+    Ok(Some(source))
 }
 
 fn find_forms(source: &str, head: &str) -> Vec<String> {
