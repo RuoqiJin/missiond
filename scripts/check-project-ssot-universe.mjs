@@ -34,7 +34,7 @@ const PROJECTS = [
   // XJP services + PCEA.
   { id: 'xiaojinpro-backend', root: '/Users/jinchen/Projects/xiaojinpro-backend', checker: ['node', ['scripts/check-xjp-ssot-complete.mjs', '--json']] },
   { id: 'deploy-center', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center' },
-  { id: 'deploy-agent', root: '/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli' },
+  { id: 'deploy-agent', root: '/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent', checker: ['bash', ['.missiond/check.sh']] },
   { id: 'auth', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/auth' },
   { id: 'router', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/router' },
   { id: 'payments', root: '/Users/jinchen/Projects/xiaojinpro-backend/services/payments' },
@@ -72,6 +72,8 @@ function main() {
     ':id xiaojinpro-backend',
     ':id deploy-center',
     ':id deploy-agent',
+    ':aliases [xjp-deploy-agent]',
+    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent"',
     ':id auth',
     ':id router',
     ':id payments',

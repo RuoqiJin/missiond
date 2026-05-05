@@ -118,7 +118,8 @@ function checkFiles(root, files) {
 	    ':id xiaojinpro-backend',
 	    ':root "/Users/jinchen/Projects/xiaojinpro-backend"',
 	    ':id deploy-agent',
-	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli"',
+	    ':aliases [xjp-deploy-agent]',
+	    ':root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent"',
 	    ':id auth',
 	    ':root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth"',
 	    ':id router',
@@ -317,7 +318,7 @@ function buildFixture() {
 	    (project :id jarvis-forge :root "/Users/jinchen/Projects/jarvis-forge" :backend ".missiond/backend/forge-backend-blueprint.lisp" :frontend ".missiond/frontend/forge-ui-blueprint.lisp")
 	    (project :id xiaojinpro-backend :root "/Users/jinchen/Projects/xiaojinpro-backend")
 	    (project :id deploy-center :root "/Users/jinchen/Projects/xiaojinpro-backend/services/deploy-center" :capability deploy-ops)
-	    (project :id deploy-agent :root "/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli")
+	    (project :id deploy-agent :aliases [xjp-deploy-agent] :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent")
 	    (project :id auth :root "/Users/jinchen/Projects/xiaojinpro-backend/services/auth")
 	    (project :id router :root "/Users/jinchen/Projects/xiaojinpro-backend/services/router")
 	    (project :id payments :root "/Users/jinchen/Projects/xiaojinpro-backend/services/payments")

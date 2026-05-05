@@ -1182,11 +1182,12 @@
 	      :capability deploy-ops
 	      :surface project-registry)
     (project :id deploy-agent
+      :aliases [xjp-deploy-agent]
       :kind ops-agent
-      :root "/Users/jinchen/Projects/xiaojinpro-backend/crates/xjp-cli"
+      :root "/Users/jinchen/Downloads/xiaojinpro-gateway/xiaojinpro-backend/apps/xjp-deploy-agent"
       :intent ".missiond/intent.lisp"
       :backend ".missiond/backend/deploy-agent-backend-blueprint.lisp"
-      :status ssot-seeded
+      :status project-ssot-owned
       :capability deploy-ops
       :surface project-registry)
     (project :id auth
