@@ -254,6 +254,8 @@ function checkFiles(root, files) {
     'target_project_ids',
     'targetProjectIds',
     'resolve_swarm_target_projects',
+    'swarm_read_scope_for_worker',
+    'swarm_read_scope_splits_target_projects_across_workers',
     'context_pack_materialized',
     'SWARM_CONTEXT_PACK_COUNTER',
     'timestamp_subsec_nanos',

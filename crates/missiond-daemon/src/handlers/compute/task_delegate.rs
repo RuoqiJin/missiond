@@ -493,7 +493,8 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
         &args,
         &["acceptance", "acceptance_commands", "acceptanceCommands"],
     );
-    let mut read_scope = string_list_arg(&args, &["read_scope", "readScope"]);
+    let caller_read_scope = string_list_arg(&args, &["read_scope", "readScope"]);
+    let mut read_scope = caller_read_scope.clone();
     let target_roots = target_projects
         .iter()
         .map(|target| target.root.clone())
@@ -512,6 +513,7 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
 
     let mut planned = Vec::new();
     for idx in 0..max_gemini_workers {
+        let worker_count = max_gemini_workers.max(1);
         planned.push(SwarmPlannedTask {
             lane: "investigate".to_string(),
             engine_hint: "gemini".to_string(),
@@ -523,12 +525,19 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
                 max_gemini_workers
             ),
             intent: "research".to_string(),
-            read_scope: read_scope.clone(),
+            read_scope: swarm_read_scope_for_worker(
+                idx,
+                worker_count,
+                &read_scope,
+                &target_projects,
+                !target_project_ids.is_empty(),
+            ),
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
         });
     }
     for idx in 0..max_claude_workers {
+        let worker_count = max_claude_workers.max(1);
         planned.push(SwarmPlannedTask {
             lane: "investigate".to_string(),
             engine_hint: "claude-code".to_string(),
@@ -543,7 +552,13 @@ async fn handle_swarm_run(state: &AppState, args: Value) -> Result<ToolResult> {
             // `intent=research` is intentionally reserved for the Gemini
             // researcher lane, so using it here would ignore max_gemini_workers=0.
             intent: "code".to_string(),
-            read_scope: read_scope.clone(),
+            read_scope: swarm_read_scope_for_worker(
+                idx,
+                worker_count,
+                &read_scope,
+                &target_projects,
+                !target_project_ids.is_empty(),
+            ),
             write_scope: Vec::new(),
             must_not_touch: vec!["**/*".to_string()],
         });
@@ -1072,6 +1087,40 @@ fn append_unique_strings(target: &mut Vec<String>, values: Vec<String>) {
             target.push(value);
         }
     }
+}
+
+fn swarm_read_scope_for_worker(
+    worker_index: usize,
+    worker_count: usize,
+    full_read_scope: &[String],
+    target_projects: &[SwarmTargetProject],
+    split_targets: bool,
+) -> Vec<String> {
+    if !split_targets || target_projects.is_empty() || worker_count <= 1 {
+        return full_read_scope.to_vec();
+    }
+
+    let target_roots = target_projects
+        .iter()
+        .map(|target| target.root.as_str())
+        .collect::<Vec<_>>();
+    let mut read_scope = Vec::new();
+    for (target_index, target) in target_projects.iter().enumerate() {
+        if target_index % worker_count == worker_index {
+            read_scope.push(target.root.clone());
+        }
+    }
+    if read_scope.is_empty() {
+        read_scope.extend(target_projects.iter().map(|target| target.root.clone()));
+    }
+    for path in full_read_scope {
+        if !target_roots.iter().any(|root| root == &path.as_str())
+            && !read_scope.iter().any(|existing| existing == path)
+        {
+            read_scope.push(path.clone());
+        }
+    }
+    read_scope
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1858,6 +1907,55 @@ mod tests {
             description
                 .contains("- read_scope: /Users/jin/Projects/jarvis, /Users/jin/Projects/xjpcode"),
             "multi-project swarm prompt must expose all target roots as read_scope:\n{description}"
+        );
+    }
+
+    #[test]
+    fn swarm_read_scope_splits_target_projects_across_workers() {
+        let targets = vec![
+            SwarmTargetProject {
+                id: "jarvis".to_string(),
+                root: "/repo/jarvis".to_string(),
+            },
+            SwarmTargetProject {
+                id: "forge".to_string(),
+                root: "/repo/forge".to_string(),
+            },
+            SwarmTargetProject {
+                id: "auth".to_string(),
+                root: "/repo/auth".to_string(),
+            },
+            SwarmTargetProject {
+                id: "pcea".to_string(),
+                root: "/repo/pcea".to_string(),
+            },
+        ];
+        let all = vec![
+            "/repo/jarvis".to_string(),
+            "/repo/forge".to_string(),
+            "/repo/auth".to_string(),
+            "/repo/pcea".to_string(),
+            "/Users/jinchen/Projects/missiond".to_string(),
+        ];
+        assert_eq!(
+            swarm_read_scope_for_worker(0, 2, &all, &targets, true),
+            vec![
+                "/repo/jarvis".to_string(),
+                "/repo/auth".to_string(),
+                "/Users/jinchen/Projects/missiond".to_string(),
+            ]
+        );
+        assert_eq!(
+            swarm_read_scope_for_worker(1, 2, &all, &targets, true),
+            vec![
+                "/repo/forge".to_string(),
+                "/repo/pcea".to_string(),
+                "/Users/jinchen/Projects/missiond".to_string(),
+            ]
+        );
+        assert_eq!(
+            swarm_read_scope_for_worker(0, 2, &all, &targets, false),
+            all
         );
     }
 
