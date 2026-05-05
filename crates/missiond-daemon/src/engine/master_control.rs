@@ -20,7 +20,7 @@ use crate::control_tree::CtlDomain;
 use crate::state::AppState;
 
 pub(crate) const MASTER_WORKER_ID: &str = "codex-master-control";
-const MASTER_WORKER_LEGACY_AUTHOR_IDS: &[&str] = &["resident-codex-master"];
+const MASTER_WORKER_LEGACY_AUTHOR_IDS: &[&str] = &["resident-codex-master", "resident-master"];
 pub(crate) const MASTER_SLOT_ID: &str = "slot-codex-master-control";
 pub(crate) const CHECKPOINT_RELATIVE_PATH: &str =
     ".missiond/v3/runtime/master-control-checkpoint.lisp";
@@ -2385,6 +2385,7 @@ mod tests {
     fn master_note_author_aliases_are_self_notifications() {
         assert!(is_master_control_note_author(Some("codex-master-control")));
         assert!(is_master_control_note_author(Some("resident-codex-master")));
+        assert!(is_master_control_note_author(Some("resident-master")));
         assert!(!is_master_control_note_author(Some("autopilot")));
         assert!(!is_master_control_note_author(None));
     }
