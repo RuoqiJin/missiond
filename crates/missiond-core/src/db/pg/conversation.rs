@@ -1082,6 +1082,19 @@ impl ConversationStore for PgMissionStore {
         Ok(())
     }
 
+    async fn set_conversation_type(&self, id: &str, conversation_type: &str) -> DbResult<usize> {
+        let result = sqlx::query(
+            "UPDATE conversations
+             SET conversation_type = $1
+             WHERE id = $2 AND conversation_type <> $1",
+        )
+        .bind(conversation_type)
+        .bind(id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() as usize)
+    }
+
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>> {
         let rows =
             sqlx::query("SELECT * FROM conversations WHERE task_id = $1 ORDER BY started_at ASC")
@@ -1462,6 +1475,14 @@ impl ConversationStore for PgMissionStore {
         });
         qb.push(" ON CONFLICT (session_id, turn_idx) DO NOTHING");
         let result = qb.build().execute(&self.pool).await?;
+        Ok(result.rows_affected() as usize)
+    }
+
+    async fn clear_conversation_turns(&self, session_id: &str) -> DbResult<usize> {
+        let result = sqlx::query("DELETE FROM conversation_turns WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&self.pool)
+            .await?;
         Ok(result.rows_affected() as usize)
     }
 

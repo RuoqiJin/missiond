@@ -19,6 +19,9 @@ pub(super) async fn handle_conversation_query(state: &AppState, args: Value) -> 
         "user_index" => "mission_user_message_index",
         "set_label" => "mission_conversation_set_label",
         "delete_label" => "mission_conversation_delete_label",
+        "audit_classification" => "mission_conversation_classification_audit",
+        "backfill_classification" => "mission_conversation_classification_backfill",
+        "turn_backfill" => "mission_conversation_turn_backfill",
         other => return Err(anyhow!("Unknown conversation action: {other}")),
     };
     // Forward with the same args; action is ignored by leaf handlers.

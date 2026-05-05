@@ -83,6 +83,91 @@ pub struct ClassificationAuditInput<'a> {
     pub raw_role_present: bool,
 }
 
+/// Historical ClaudeCode sessions sometimes predate durable slot/session
+/// binding. Their only reliable evidence is the first provider message:
+/// MissionD worker prompts are highly structured, while real human sessions
+/// are conversational. This input lets the repair path audit those rows
+/// without re-parsing JSONL in the handler.
+#[derive(Debug, Clone)]
+pub struct HistoricalClassificationInput<'a> {
+    pub session_id: &'a str,
+    pub stored_conversation_type: &'a str,
+    pub source: &'a str,
+    pub slot_id: Option<&'a str>,
+    pub slot_category: Option<&'a str>,
+    pub task_id: Option<&'a str>,
+    pub raw_role_present: bool,
+    pub first_message: Option<&'a str>,
+}
+
+/// Provider-aware historical classification verdict. `confidence`
+/// deliberately stays coarse so maintenance surfaces can apply only
+/// high-confidence worker repairs and leave ambiguous sessions for review.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HistoricalClassificationFinding {
+    pub session_id: String,
+    pub stored_conversation_type: String,
+    pub expected_conversation_type: String,
+    pub reason: &'static str,
+    pub confidence: f32,
+    pub raw_role_present: bool,
+}
+
+const WORKER_PROMPT_PREFIXES: &[&str] = &[
+    "Clean retry for parent BoardTask",
+    "Execute MissionD task ",
+    "Fix MissionD-side swarm ",
+    "Implement accepted swarm shard",
+    "Survey exact shards for swarm objective",
+    "Smoke test post-",
+    "Upgrade project ",
+    "Bring XJP monorepo service SSOT",
+    "M10 ladder infra shard",
+    "# Forge Deep Cartographer Protocol",
+    "[realtime-extract]",
+    "[Matched Skills",
+    "你是意图提升器",
+];
+
+const WORKER_PROMPT_NEEDLES: &[&str] = &[
+    "BoardTask",
+    "Board Task ID",
+    "write_scope",
+    "must_not_touch",
+    "completion protocol",
+    "READ ONLY. Do not edit files",
+    "Do not edit files, do not stage, do not commit",
+    "context-pack",
+    "swarm objective",
+    "MissionD maturity gate",
+];
+
+fn looks_like_historical_worker_prompt(content: &str) -> Option<&'static str> {
+    let trimmed = content.trim_start();
+    if trimmed.is_empty() {
+        return None;
+    }
+    for prefix in WORKER_PROMPT_PREFIXES {
+        if trimmed.starts_with(prefix) {
+            return Some("claude_worker_prompt_prefix");
+        }
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    let has_worker_term = WORKER_PROMPT_NEEDLES
+        .iter()
+        .any(|needle| lower.contains(&needle.to_ascii_lowercase()));
+    let has_guardrail = lower.contains("do not edit")
+        || lower.contains("read only")
+        || lower.contains("write scope")
+        || lower.contains("must_not_touch")
+        || lower.contains("boardtask")
+        || lower.contains("swarm");
+    if has_worker_term && has_guardrail {
+        return Some("claude_worker_prompt_signature");
+    }
+    None
+}
+
 /// Pure dry-run check: returns `Some(finding)` when the stored row
 /// disagrees with the provider-aware classifier OR when a Codex row is
 /// missing `raw_role`. Returns `None` for clean rows.
@@ -126,6 +211,53 @@ pub fn audit_classification(
             raw_role_present: false,
         });
     }
+    None
+}
+
+/// Historical-row audit that augments provider/slot classification with
+/// first-message prompt signatures. This is the bridge for sessions created
+/// before dispatch-time `slot_id` / `task_id` rebinding existed.
+pub fn audit_historical_classification(
+    input: &HistoricalClassificationInput<'_>,
+) -> Option<HistoricalClassificationFinding> {
+    if input.source == "claude_code" && input.slot_id.is_none() {
+        if let Some(reason) = input
+            .first_message
+            .and_then(looks_like_historical_worker_prompt)
+        {
+            if input.stored_conversation_type == "worker" {
+                return None;
+            }
+            return Some(HistoricalClassificationFinding {
+                session_id: input.session_id.to_string(),
+                stored_conversation_type: input.stored_conversation_type.to_string(),
+                expected_conversation_type: "worker".to_string(),
+                reason,
+                confidence: if input.task_id.is_some() { 0.98 } else { 0.93 },
+                raw_role_present: input.raw_role_present,
+            });
+        }
+    }
+
+    let direct = audit_classification(&ClassificationAuditInput {
+        session_id: input.session_id,
+        stored_conversation_type: input.stored_conversation_type,
+        source: input.source,
+        slot_id: input.slot_id,
+        slot_category: input.slot_category,
+        raw_role_present: input.raw_role_present,
+    });
+    if let Some(f) = direct {
+        return Some(HistoricalClassificationFinding {
+            session_id: f.session_id,
+            stored_conversation_type: f.stored_conversation_type,
+            expected_conversation_type: f.expected_conversation_type,
+            reason: f.reason,
+            confidence: if input.slot_id.is_some() { 1.0 } else { 0.95 },
+            raw_role_present: f.raw_role_present,
+        });
+    }
+
     None
 }
 
@@ -443,5 +575,57 @@ mod conversation_classification_tests {
         let finding = audit_classification(&input).expect("slot linkage loss must flag");
         assert_eq!(finding.expected_conversation_type, "worker");
         assert_eq!(finding.reason, "worker_loses_slot_linkage");
+    }
+
+    #[test]
+    fn historical_audit_promotes_boardtask_prompt_to_worker() {
+        let input = HistoricalClassificationInput {
+            session_id: "old-worker",
+            stored_conversation_type: "user",
+            source: "claude_code",
+            slot_id: None,
+            slot_category: None,
+            task_id: None,
+            raw_role_present: true,
+            first_message: Some(
+                "Survey exact shards for swarm objective (1/2)\nParent BoardTask abc requires READ ONLY inspection.",
+            ),
+        };
+        let finding = audit_historical_classification(&input).expect("worker prompt must flag");
+        assert_eq!(finding.expected_conversation_type, "worker");
+        assert_eq!(finding.reason, "claude_worker_prompt_prefix");
+        assert!(finding.confidence >= 0.9);
+    }
+
+    #[test]
+    fn historical_audit_accepts_already_backfilled_worker_prompt() {
+        let input = HistoricalClassificationInput {
+            session_id: "old-worker",
+            stored_conversation_type: "worker",
+            source: "claude_code",
+            slot_id: None,
+            slot_category: None,
+            task_id: None,
+            raw_role_present: true,
+            first_message: Some(
+                "Clean retry for parent BoardTask 9f343270: fix mission_task_query visibility.",
+            ),
+        };
+        assert!(audit_historical_classification(&input).is_none());
+    }
+
+    #[test]
+    fn historical_audit_keeps_human_question_as_user() {
+        let input = HistoricalClassificationInput {
+            session_id: "human-session",
+            stored_conversation_type: "user",
+            source: "claude_code",
+            slot_id: None,
+            slot_category: None,
+            task_id: None,
+            raw_role_present: true,
+            first_message: Some("看一下 auth 的架构还有什么问题"),
+        };
+        assert!(audit_historical_classification(&input).is_none());
     }
 }

@@ -263,6 +263,16 @@ async fn process_session(state: &AppState, session_id: &str) -> anyhow::Result<u
     chunk_turns(state, session_id, &messages).await
 }
 
+/// Explicit maintenance surface for historical classification repairs:
+/// clear existing turn rows and rebuild from the canonical message stream.
+pub(crate) async fn rebuild_session_turns(
+    state: &AppState,
+    session_id: &str,
+) -> anyhow::Result<usize> {
+    state.store.clear_conversation_turns(session_id).await?;
+    process_session(state, session_id).await
+}
+
 /// Stage 2: Per-message analysis — noise labels, tool classification, commit detection.
 ///
 /// This pipeline is independent of turn extraction and must always run,

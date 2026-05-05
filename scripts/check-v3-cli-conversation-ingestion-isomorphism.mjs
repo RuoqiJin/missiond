@@ -15,11 +15,15 @@ Checks that V3 and code agree on CLI conversation ingestion sources:
 
 const DEFAULT_FILES = {
   blueprint: '.missiond/v3/missiond-blueprint.lisp',
+  mcpDefs: '.missiond/intent-mcp-defs.lisp',
   ingestionRouter: 'crates/missiond-daemon/src/infra/ingestion_router.rs',
   messageHandler: 'crates/missiond-daemon/src/infra/message_handler.rs',
   eventsSync: 'crates/missiond-daemon/src/events_sync.rs',
   reconcileWorker: 'crates/missiond-daemon/src/workers/local/reconcile_worker.rs',
   conversationQuery: 'crates/missiond-daemon/src/handlers/comm/conversation/query.rs',
+  conversationRouter: 'crates/missiond-daemon/src/handlers/comm/conversation/router.rs',
+  conversationMaintenance: 'crates/missiond-daemon/src/handlers/comm/conversation/maintenance.rs',
+  mcpConversation: 'crates/missiond-mcp/src/tools/comm/conversation.rs',
   // BoardTask e1a5ac1f :: provider-aware classification helper. Lives
   // alongside the existing ConversationQuery filter type so all
   // conversation classification logic stays in one read path.
@@ -116,8 +120,14 @@ function checkFiles(root, files) {
     'classify_conversation_type',
     'background-ingested Codex threads classify as codex_chat',
     'audit_classification',
+    'audit_historical_classification',
+    'mission_conversation_query(action=audit_classification)',
+    'mission_conversation_query(action=backfill_classification, apply=true)',
+    'mission_conversation_query(action=turn_backfill, sessionId=...)',
     'codex_user_without_slot',
     'codex_raw_role_missing',
+    'claude_worker_prompt_signature',
+    'rebuild_session_turns',
   ]);
 
   requireAll(diagnostics, files.ingestionRouter, sources.ingestionRouter, [
@@ -219,6 +229,38 @@ function checkFiles(root, files) {
     'slot_id_for_display.clone()',
   ]);
 
+  requireAll(diagnostics, files.conversationRouter, sources.conversationRouter, [
+    '"audit_classification" => "mission_conversation_classification_audit"',
+    '"backfill_classification" => "mission_conversation_classification_backfill"',
+    '"turn_backfill" => "mission_conversation_turn_backfill"',
+  ]);
+
+  requireAll(diagnostics, files.conversationMaintenance, sources.conversationMaintenance, [
+    'classification_audit_rows',
+    'audit_historical_classification',
+    'set_conversation_type',
+    'rebuild_turns_for_session',
+    'mission_conversation_classification_audit',
+    'mission_conversation_classification_backfill',
+    'mission_conversation_turn_backfill',
+  ]);
+
+  requireAll(diagnostics, files.mcpConversation, sources.mcpConversation, [
+    '"audit_classification"',
+    '"backfill_classification"',
+    '"turn_backfill"',
+    '"minConfidence"',
+    '"rebuildTurns"',
+  ]);
+
+  requireAll(diagnostics, files.mcpDefs, sources.mcpDefs, [
+    'audit_classification',
+    'backfill_classification',
+    'turn_backfill',
+    'minConfidence',
+    'rebuildTurns',
+  ]);
+
   requireAll(diagnostics, files.taggerChunker, sources.taggerChunker, [
     'worker_user',
     '"user" | "worker_user" | "agent_user"',
@@ -296,6 +338,11 @@ function checkFiles(root, files) {
       '"codex_chat".to_string()',
       '"worker".to_string()',
       'pub fn audit_classification',
+      'pub fn audit_historical_classification',
+      'pub struct HistoricalClassificationFinding',
+      'pub struct HistoricalClassificationInput',
+      'claude_worker_prompt_signature',
+      'looks_like_historical_worker_prompt',
       'pub struct ClassificationAuditFinding',
       'pub struct ClassificationAuditInput',
       'codex_user_without_slot',
@@ -309,8 +356,21 @@ function checkFiles(root, files) {
       'codex_worker_with_slot_classifies_as_worker',
       'audit_flags_codex_user_without_slot_as_misclassification',
       'audit_flags_worker_row_that_lost_its_slot_linkage',
+      'historical_audit_promotes_boardtask_prompt_to_worker',
+      'historical_audit_keeps_human_question_as_user',
     ],
   );
+
+  requireAll(diagnostics, files.pgConversation, sources.pgConversation, [
+    'async fn set_conversation_type',
+    'DELETE FROM conversation_turns WHERE session_id = $1',
+    'async fn clear_conversation_turns',
+  ]);
+
+  requireAll(diagnostics, files.taggerChunker, sources.taggerChunker, [
+    'pub(crate) async fn rebuild_session_turns',
+    'clear_conversation_turns(session_id)',
+  ]);
 
   requireAll(diagnostics, files.pgMessage, sources.pgMessage, [
     'coalesce_duplicate_messages',

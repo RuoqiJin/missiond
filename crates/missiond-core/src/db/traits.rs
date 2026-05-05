@@ -89,6 +89,9 @@ pub trait ConversationStore: Send + Sync {
     async fn complete_stale_conversations(&self, cutoff: &str) -> DbResult<usize>;
     async fn mark_conversation_compacted(&self, id: &str) -> DbResult<()>;
     async fn set_conversation_task_id(&self, id: &str, task_id: &str) -> DbResult<()>;
+    /// Historical repair surface: update durable conversation classification after
+    /// provider-aware audit has high-confidence evidence that a row was misfiled.
+    async fn set_conversation_type(&self, id: &str, conversation_type: &str) -> DbResult<usize>;
     async fn get_conversations_by_task_id(&self, task_id: &str) -> DbResult<Vec<Conversation>>;
     async fn reactivate_conversation(&self, id: &str) -> DbResult<usize>;
 
@@ -116,6 +119,8 @@ pub trait ConversationStore: Send + Sync {
     async fn get_max_turn_idx(&self, session_id: &str) -> DbResult<Option<i32>>;
     /// Batch insert conversation turns. Returns number of rows inserted.
     async fn insert_conversation_turns_batch(&self, session_id: &str, base_idx: i32, turns: &[RawTurn]) -> DbResult<usize>;
+    /// Delete existing turns for a session before an explicit rebuild.
+    async fn clear_conversation_turns(&self, session_id: &str) -> DbResult<usize>;
     /// Insert message labels in batch (message_id, label, value). Idempotent via ON CONFLICT DO NOTHING.
     async fn insert_message_labels_batch(&self, labels: &[(i64, &str, &str, &str)]) -> DbResult<usize>;
     /// Get session IDs that have messages but no turns (for backfill).
