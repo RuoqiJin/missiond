@@ -20,6 +20,10 @@ const DEFAULT_FILES = {
   eventsSync: 'crates/missiond-daemon/src/events_sync.rs',
   reconcileWorker: 'crates/missiond-daemon/src/workers/local/reconcile_worker.rs',
   conversationQuery: 'crates/missiond-daemon/src/handlers/comm/conversation/query.rs',
+  // BoardTask e1a5ac1f :: provider-aware classification helper. Lives
+  // alongside the existing ConversationQuery filter type so all
+  // conversation classification logic stays in one read path.
+  conversationClassifier: 'crates/missiond-core/src/db/conversation_query.rs',
   taggerChunker: 'crates/missiond-daemon/src/workers/local/tagger_chunker.rs',
   slotHandler: 'crates/missiond-daemon/src/handlers/compute/slot.rs',
   slotEnv: 'crates/missiond-daemon/src/context/slot_env.rs',
@@ -108,6 +112,12 @@ function checkFiles(root, files) {
     'raw_role is preserved for audit',
     'scripts/report-claude-role-attribution.mjs',
     'node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs',
+    // BoardTask e1a5ac1f :: provider-aware classification authority.
+    'classify_conversation_type',
+    'background-ingested Codex threads classify as codex_chat',
+    'audit_classification',
+    'codex_user_without_slot',
+    'codex_raw_role_missing',
   ]);
 
   requireAll(diagnostics, files.ingestionRouter, sources.ingestionRouter, [
@@ -256,7 +266,51 @@ function checkFiles(root, files) {
     'persist_codex_file_watermarks',
     'skip_before_line',
     'codex_message_uuid_is_non_null_and_stable',
+    // BoardTask e1a5ac1f :: provider-aware classification + raw_role
+    // preservation. Codex ingestion must call the new classifier
+    // (no more hardcoded `conversation_type: "user"`) and forward the
+    // provider role into `raw_role` so downstream audits can reason
+    // about turn segmentation without re-parsing JSONL.
+    'classify_conversation_type',
+    'raw_role: Some(m.role.clone())',
+    'get_running_slot_task',
+    'codex_background_thread_classifies_as_codex_chat_not_user',
+    'codex_slot_thread_classifies_as_worker',
+    'audit_passes_post_fix_codex_background_row',
   ]);
+  rejectAll(diagnostics, files.codexIngestion, sources.codexIngestion, [
+    // Pre-fix patterns that masked Codex worker traffic as anonymous
+    // human user input. A regression here re-routes Codex chats into
+    // the human Logs tab and silently drops provider metadata.
+    'conversation_type: "user".to_string()',
+    'raw_role: None,',
+  ]);
+
+  requireAll(
+    diagnostics,
+    files.conversationClassifier,
+    sources.conversationClassifier,
+    [
+      'pub fn classify_conversation_type',
+      'if source == "codex_cli"',
+      '"codex_chat".to_string()',
+      '"worker".to_string()',
+      'pub fn audit_classification',
+      'pub struct ClassificationAuditFinding',
+      'pub struct ClassificationAuditInput',
+      'codex_user_without_slot',
+      'codex_slot_not_worker',
+      'worker_loses_slot_linkage',
+      'codex_raw_role_missing',
+      // Pin the audit/test contract: the classifier is exercised
+      // through unit tests so a regression cannot land Codex traffic
+      // back in the human Logs tab without breaking CI.
+      'codex_background_session_without_slot_classifies_as_codex_chat',
+      'codex_worker_with_slot_classifies_as_worker',
+      'audit_flags_codex_user_without_slot_as_misclassification',
+      'audit_flags_worker_row_that_lost_its_slot_linkage',
+    ],
+  );
 
   requireAll(diagnostics, files.pgMessage, sources.pgMessage, [
     'coalesce_duplicate_messages',

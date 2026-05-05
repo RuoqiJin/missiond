@@ -1518,7 +1518,10 @@
        "Gemini background reconcile MUST use size/mtime companion watermarks to skip already-reconciled old chat files without reparsing full historical transcripts; manual reconcile may force a full scan."
        "Cursor/watermark advancement MUST happen after durable DB write acknowledgement, never before."
        "ClaudeCode provider role normalization MUST be shared by realtime watcher, per-session reconcile, and daily reconcile paths: top-level raw_role=user inside automated slot sessions normalizes to worker_user, interactive Jarvis/user conversations remain user, sidechain progress remains agent_user/agent_assistant, and raw_role is preserved for audit."
-       "Historical ClaudeCode role repair is dry-run/report-first through scripts/report-claude-role-attribution.mjs; first pass reports suspected system/user/agent_user drift and never mutates DB."]
+       "Historical ClaudeCode role repair is dry-run/report-first through scripts/report-claude-role-attribution.mjs; first pass reports suspected system/user/agent_user drift and never mutates DB."
+       "Provider-aware conversation_type classification MUST live behind crates/missiond-core/src/db/conversation_query.rs::classify_conversation_type so ClaudeCode, Codex CLI, and Gemini CLI workers share one rule set: slot-bound sessions (any provider) classify as worker with durable slotId/taskId linkage; background-ingested Codex threads classify as codex_chat (parallel to gemini_chat), never as the human user fallthrough; real human Jarvis user sessions remain user."
+       "Codex CLI background ingestion MUST call classify_conversation_type AND preserve the provider role into raw_role so the conversation row carries enough metadata for audit_classification and the role-attribution report; the legacy hardcoded conversation_type=\"user\" + raw_role=None pattern is forbidden."
+       "Historical row classification repair is dry-run/report-first through db::conversation_query::audit_classification: it returns ClassificationAuditFinding values for codex_user_without_slot, codex_slot_not_worker, worker_loses_slot_linkage, codex_raw_role_missing without ever mutating the DB; bulk DB rewriting is explicitly out of scope."]
     :checker "node scripts/check-v3-cli-conversation-ingestion-isomorphism.mjs")
 
   (upstream-pty-signatures

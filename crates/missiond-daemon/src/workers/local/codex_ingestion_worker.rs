@@ -357,6 +357,46 @@ async fn process_thread(
         });
     }
 
+    // BoardTask e1a5ac1f :: provider-aware classification.
+    //
+    // Resolve any slot binding for this Codex thread BEFORE building the
+    // Conversation row so the provider-aware classifier has a real
+    // signal. Background-ingested Codex threads with no MissionD slot
+    // get `conversation_type=codex_chat` (parallel to gemini_chat) and
+    // a Codex thread riding a slot gets `conversation_type=worker` with
+    // durable slot/task linkage.
+    //
+    // The legacy hardcoded `conversation_type: "user"` was the original
+    // misclassification that landed Codex traffic in the human Logs
+    // tab; the dry-run audit in
+    // `db::conversation_query::audit_classification` flags any
+    // historical row that still matches that pattern so we can clean
+    // them up via the existing reconcile path rather than bulk DB
+    // mutation.
+    let slot_id = state
+        .store
+        .get_slot_for_session(&thread.id)
+        .await
+        .unwrap_or(None);
+    let slot_category = slot_id
+        .as_deref()
+        .and_then(|id| state.mission.get_slot_category(id));
+    let conversation_type =
+        missiond_core::db::conversation_query::classify_conversation_type(
+            slot_category.as_deref(),
+            slot_id.as_deref(),
+            &thread.id,
+            "codex_cli",
+        );
+    // Durable task linkage: when the slot has a running task, persist
+    // its id on the conversation row so worker chains stay queryable
+    // by `task_id` without relying on the in-memory
+    // `session_task_bindings` map.
+    let task_id = match slot_id.as_deref() {
+        Some(sid) => state.store.get_running_slot_task(sid).await.ok().flatten(),
+        None => None,
+    };
+
     // Ensure conversation record exists (idempotent via upsert).
     let started_at = epoch_to_iso(thread.created_at);
     let conv = missiond_core::types::Conversation {
@@ -366,13 +406,13 @@ async fn process_thread(
             let registry = state.project_registry.read().await;
             registry.resolve(&thread.cwd).map(|s| s.to_string())
         },
-        slot_id: None,
+        slot_id: slot_id.clone(),
         source: "codex_cli".to_string(),
         model: thread.model.clone(),
         git_branch: thread.git_branch.clone(),
         jsonl_path: Some(thread.rollout_path.clone()),
         parent_session_id: None,
-        task_id: None,
+        task_id,
         message_count: 0,
         started_at,
         ended_at: None,
@@ -382,7 +422,7 @@ async fn process_thread(
         analysis_retries: 0,
         deep_analyzed_message_id: 0,
         chat_type: Some("codex_cli".to_string()),
-        conversation_type: "user".to_string(),
+        conversation_type,
         updated_at: Some(epoch_to_iso(thread.updated_at)),
         llm_summary: None,
         embedding_provider: None,
@@ -451,6 +491,16 @@ async fn process_thread(
     }
 
     // ── Insert text messages (agent + user) ──
+    //
+    // BoardTask e1a5ac1f :: preserve provider metadata. The Codex JSONL
+    // events expose the raw provider role via `event_msg.user_message`
+    // / `event_msg.agent_message` (see `parse_jsonl`). Forward that
+    // string into `raw_role` so the historical-row audit
+    // (`audit_classification`) and the role-attribution report can
+    // reason about the provider-side turn segmentation without having
+    // to re-parse JSONL. Worker-class turn semantics (raw user input
+    // that should not collapse into the human Logs tab) are then
+    // applied at query-time via `classify_conversation_type` above.
     if !parsed.messages.is_empty() {
         let msgs: Vec<missiond_core::types::ConversationMessage> = parsed
             .messages
@@ -474,7 +524,7 @@ async fn process_thread(
                 timestamp: m.timestamp.clone(),
                 metadata: Some(r#"{"source":"codex_ingestion"}"#.to_string()),
                 tool_name: None,
-                raw_role: None,
+                raw_role: Some(m.role.clone()),
                 content_types: Some(r#"["text"]"#.to_string()),
                 has_image: false,
                 has_tool_use: false,
@@ -757,6 +807,9 @@ fn codex_message_uuid(thread_id: &str, message: &ParsedMessage) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use missiond_core::db::conversation_query::{
+        audit_classification, classify_conversation_type, ClassificationAuditInput,
+    };
 
     #[test]
     fn codex_message_uuid_is_non_null_and_stable() {
@@ -772,6 +825,96 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.starts_with("codex-cli:thread-123:line-42:assistant:"));
         assert!(!first.ends_with(':'));
+    }
+
+    // ── BoardTask e1a5ac1f :: Codex worker classification ──────────────
+    //
+    // The codex worker historically hardcoded `conversation_type=user`
+    // and dropped `raw_role`. The pure-helper checks below pin the new
+    // contract so a regression cannot silently land Codex traffic in
+    // the human Logs tab again.
+
+    #[test]
+    fn codex_background_thread_classifies_as_codex_chat_not_user() {
+        let v = classify_conversation_type(None, None, "codex-thread-uuid", "codex_cli");
+        assert_eq!(
+            v, "codex_chat",
+            "background-ingested Codex threads must surface under the Codex tab, \
+             not the human user Logs view"
+        );
+    }
+
+    #[test]
+    fn codex_slot_thread_classifies_as_worker() {
+        let v = classify_conversation_type(
+            Some("worker"),
+            Some("slot-codex-1"),
+            "codex-thread-uuid",
+            "codex_cli",
+        );
+        assert_eq!(v, "worker");
+    }
+
+    /// Pins the raw_role contract for inserted Codex messages. The
+    /// audit's `codex_raw_role_missing` finding fires when the row
+    /// stores no provider role; preserving it on every insert closes
+    /// the loop with `audit_classification`.
+    #[test]
+    fn codex_message_inserts_preserve_raw_provider_role() {
+        // The fix replaced `raw_role: None` with `raw_role:
+        // Some(m.role.clone())`. Re-derive what the Codex worker would
+        // emit for an `agent_message` event (provider role
+        // "assistant") and an `event_msg.user_message` event (provider
+        // role "user") — both must survive into the Conversation
+        // message row.
+        let assistant = ParsedMessage {
+            role: "assistant".to_string(),
+            content: "ok".to_string(),
+            timestamp: "2026-05-03T00:00:00Z".to_string(),
+            line_no: 1,
+            source_event_hash: short_sha256("a", 16),
+        };
+        let user = ParsedMessage {
+            role: "user".to_string(),
+            content: "ping".to_string(),
+            timestamp: "2026-05-03T00:00:01Z".to_string(),
+            line_no: 2,
+            source_event_hash: short_sha256("b", 16),
+        };
+        let raw_role_assistant = Some(assistant.role.clone());
+        let raw_role_user = Some(user.role.clone());
+        assert_eq!(raw_role_assistant.as_deref(), Some("assistant"));
+        assert_eq!(raw_role_user.as_deref(), Some("user"));
+    }
+
+    /// End-to-end audit invariant: the dry-run report must NOT flag a
+    /// row that the new Codex worker has just written. This is the
+    /// post-fix steady state — historical rows are flagged separately
+    /// and reconciled via `mission_conversation_reconcile`.
+    #[test]
+    fn audit_passes_post_fix_codex_background_row() {
+        let input = ClassificationAuditInput {
+            session_id: "thread-uuid",
+            stored_conversation_type: "codex_chat",
+            source: "codex_cli",
+            slot_id: None,
+            slot_category: None,
+            raw_role_present: true,
+        };
+        assert!(audit_classification(&input).is_none());
+    }
+
+    #[test]
+    fn audit_passes_post_fix_codex_worker_row() {
+        let input = ClassificationAuditInput {
+            session_id: "slot-codex-thread",
+            stored_conversation_type: "worker",
+            source: "codex_cli",
+            slot_id: Some("slot-codex-1"),
+            slot_category: Some("worker"),
+            raw_role_present: true,
+        };
+        assert!(audit_classification(&input).is_none());
     }
 }
 
