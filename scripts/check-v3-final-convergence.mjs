@@ -68,6 +68,11 @@ const LIVE_CHECKS = [
     json: true,
     timeoutMs: 60_000,
   },
+  {
+    id: 'project-maturity',
+    argv: ['scripts/check-project-maturity.mjs', '--min-level', 'M6'],
+    timeoutMs: 60_000,
+  },
 ];
 
 const RUNTIME_CHECKS = [

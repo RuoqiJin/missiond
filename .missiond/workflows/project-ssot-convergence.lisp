@@ -30,6 +30,8 @@
        :logic "Multi-project objectives MUST pass target_project_ids/targetProjectIds/target_projects/targetProjects to mission_swarm_run as a structured array. Project lists embedded only in the natural-language objective are discarded by the tool because the schema does not parse prose; the swarm then collapses target_projects to project_id only and the universe wave cannot fan out. Repro: BoardTask 31e5449c-e315-4003-ad59-c3eebd5eb837 first call resolved targets to missiond only because the prose project list was not passed structurally. The corrected dispatch passes target_project_ids = [<id>...].")
      (step s8 :id verify-and-report
        :logic "run project checker, build/test, diff check; when dirty-baseline is outside this task's ownership, run scoped diff checks for owned paths and record full diff-check blockers as diagnostics instead of formatting or touching operator code")
+     (step s8b :id maturity-gate
+       :logic "run node scripts/check-project-maturity.mjs --project <project-id> --min-level <target-level> before claiming a maturity upgrade; M7, M8, M9, and M10 are separate gates, so a project cannot jump from M6 to M10 by updating prose alone")
      (step s9 :id worker-stall-recovery
        :logic "if a ClaudeCode worker stalls after intermediate narration such as 'let me write' without file changes, interrupt once, reduce the shard to an atomic overlay/manifest patch, and record the stall as dispatch telemetry; do not retry the same full-rewrite prompt indefinitely"))
   :egress [project-blueprint project-checkers boardtasks convergence-report kb-note]
@@ -45,10 +47,12 @@
      (gate g9 :rule "Dirty worktree SSOT convergence commits must stage explicit .missiond paths only; full git diff --check failures in non-owned files are diagnostics, not permission to edit those files.")
      (gate g10 :rule "Large existing intent files should use M6 overlay+manifest unless the task explicitly owns a full SSOT rewrite.")
      (gate g11 :rule "PTY-only completion of a delegated worker BoardTask MUST NOT close unless the screen carries a structured artifact (Findings / Evidence / Recommendations / Verification / Summary heading) or durable provider final evidence is available; intermediate assistant sentences captured between the prompt return and the JSONL final write are not valid finals.")
-     (gate g12 :rule "A slot may be the running owner of at most ONE BoardTask at a time. Autopilot dispatch unclaims any other BoardTask whose claim_executor still points at the slot before the new dispatch claims it; conversations.task_id is force-rebound to the incoming task so mission_conversation_query(taskId=...) always returns the current dispatch's conversation."))
+     (gate g12 :rule "A slot may be the running owner of at most ONE BoardTask at a time. Autopilot dispatch unclaims any other BoardTask whose claim_executor still points at the slot before the new dispatch claims it; conversations.task_id is force-rebound to the incoming task so mission_conversation_query(taskId=...) always returns the current dispatch's conversation.")
+     (gate g13 :rule "Project maturity claims MUST be backed by check-project-maturity.mjs at the claimed --min-level; M6 universe success is not evidence of M10 parity."))
   :completion
     ((criterion c1 :rule "Lisp has pillar/function/entry/core/egress/surface shape.")
      (criterion c2 :rule "Checker proves root, blueprint, surfaces, and public code anchors.")
      (criterion c3 :rule "Build/test command is known even when deferred.")
      (criterion c4 :rule "MissionD project registry can locate the project by id and root.")
-     (criterion c5 :rule "Dirty-baseline handling is explicit: preserved, staged only by owned path, and reported in the manifest or convergence note.")))
+     (criterion c5 :rule "Dirty-baseline handling is explicit: preserved, staged only by owned path, and reported in the manifest or convergence note.")
+     (criterion c6 :rule "Maturity level is explicit and machine-checkable: M7 runtime projection, M8 event bus, M9 worker operation, M10 final convergence.")))

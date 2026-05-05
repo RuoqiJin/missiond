@@ -6,6 +6,7 @@
   :authority "project-local-lisp-ssot"
   :parent-v3 ".missiond/v3/missiond-blueprint.lisp"
   :status "code-aligned"
+  :maturity M10
   :evidence-root ".missiond/frontend/evidence"
   :context-pack-root ".missiond/frontend/context-packs"
 

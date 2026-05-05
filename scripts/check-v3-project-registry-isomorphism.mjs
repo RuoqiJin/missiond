@@ -105,6 +105,7 @@ function checkFiles(root, files) {
     'crates/missiond-daemon/src/slot_orchestrator/project_root.rs',
     'crates/missiond-mcp/src/tools/knowledge/project.rs',
     'scripts/check-v3-project-registry-isomorphism.mjs',
+    'scripts/check-project-maturity.mjs',
     'project.rs is the thin mission_project facade',
     'ProjectRegistryRuntimeConfig loads V3 project-registry-policy',
 	    'ProjectRegistry::resolve owns longest-prefix project lookup',
@@ -120,6 +121,8 @@ function checkFiles(root, files) {
 	    '(project-maturity-registry',
 	    ':schema "missiond.project-maturity-registry.v1"',
 	    ':common-m6-to-v3-gap [runtime-projection event-bus commit-backfill worker-operational final-convergence]',
+	    'scripts/check-project-maturity.mjs --min-level M6',
+	    'scripts/check-project-maturity.mjs --min-level M10',
 	    '(maturity :id missiond :current M10 :target M10',
 	    '(maturity :id auth :current M6 :target M10',
 	    '(project-blueprint-registry',
@@ -329,6 +332,7 @@ function buildFixture() {
 	    :default-universe-manifest "/Users/jinchen/Projects/universe.intent.lisp")
 	  (project-maturity-model
 	    :schema "missiond.project-maturity-model.v1"
+	    :gate "scripts/check-project-maturity.mjs --min-level M6 and scripts/check-project-maturity.mjs --min-level M10"
 	    :v3-alias M10
 	    :levels ((level M6 :name ssot-closure)
 	             (level M7 :name runtime-projected)
@@ -368,9 +372,10 @@ function buildFixture() {
              "crates/missiond-daemon/src/handlers/knowledge/project/survey.rs"
              "crates/missiond-daemon/src/handlers/knowledge/project/vault.rs"
              "crates/missiond-core/src/types/project.rs"
-             "crates/missiond-daemon/src/slot_orchestrator/project_root.rs"
-             "crates/missiond-mcp/src/tools/knowledge/project.rs"
-             "scripts/check-v3-project-registry-isomorphism.mjs"]
+	             "crates/missiond-daemon/src/slot_orchestrator/project_root.rs"
+	             "crates/missiond-mcp/src/tools/knowledge/project.rs"
+	             "scripts/check-v3-project-registry-isomorphism.mjs"
+	             "scripts/check-project-maturity.mjs"]
       :note "project.rs is the thin mission_project facade. ProjectRegistryRuntimeConfig loads V3 project-registry-policy. ProjectRegistry::resolve owns longest-prefix project lookup. resolve_target_project_root owns project-root spawn cwd policy."))
   (compression-contract
     :checks ["node scripts/check-v3-project-registry-isomorphism.mjs"]))`);

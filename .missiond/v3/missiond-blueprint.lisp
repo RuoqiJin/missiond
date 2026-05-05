@@ -1107,6 +1107,7 @@
   (project-maturity-model
     :schema "missiond.project-maturity-model.v1"
     :rule "M6 is checker-owned current-code SSOT closure; V3 parity is M10. The M6->V3 gap MUST be explicit as M7 runtime projection, M8 event-driven integration, M9 worker operation, and M10 full runtime SSOT."
+    :gate "scripts/check-project-maturity.mjs --min-level M6 is the default universe health gate; project M10 closure MUST run scripts/check-project-maturity.mjs --min-level M10 so M6 baselines cannot be mistaken for V3 parity."
     :v3-alias M10
     :levels
       ((level M0 :name unknown :requires [])
@@ -1123,7 +1124,8 @@
     :invariants
       ["project SSOT reports MUST distinguish M6 closure from M10/V3 parity."
        "Universe status MUST expose current and target maturity for each registered project."
-       "A project marked M6 but not M10 MUST list concrete M7/M8/M9/M10 gaps instead of claiming full V3 parity."])
+       "A project marked M6 but not M10 MUST list concrete M7/M8/M9/M10 gaps instead of claiming full V3 parity."
+       "Resident master and swarm runners MUST treat M7/M8/M9/M10 as separate gates: M7 runtime projection, M8 event bus and commit convergence, M9 worker smoke with durable evidence, and M10 final convergence report."])
 
   (project-maturity-registry
     :schema "missiond.project-maturity-registry.v1"
@@ -2838,8 +2840,9 @@
              "crates/missiond-core/src/types/project.rs"
              "crates/missiond-daemon/src/slot_orchestrator/project_root.rs"
              "crates/missiond-mcp/src/tools/knowledge/project.rs"
-             "scripts/check-v3-project-registry-isomorphism.mjs"]
-      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
+             "scripts/check-v3-project-registry-isomorphism.mjs"
+             "scripts/check-project-maturity.mjs"]
+      :note "Code-aligned destination for project registry/root resolution. project.rs is the mission_project facade; project/registry.rs owns list/get/set_active/sync/init/import_universe; project/universe.rs owns mission_project(action=universe) and projects service-runtime-universe entries such as auth production domain/deployment/DNS capability to master, workers, and Board System. check-project-maturity.mjs is the project-universe maturity gate: default --min-level M6 proves current-code SSOT closure, while --min-level M10 is the explicit closure gate for V3 parity across project-local runtime projection, event bus, worker operation, and final convergence. [details: .missiond/v3/evidence/blueprint-notes.lisp#note-016]")
 
     (surface board-frontend
       :status "code-aligned"
